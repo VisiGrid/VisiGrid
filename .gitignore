@@ -1,0 +1,22 @@
+# Rust
+/target/
+Cargo.lock
+
+# Astro / Node
+visigrid-site/node_modules/
+visigrid-site/dist/
+visigrid-site/.astro/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local

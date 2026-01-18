@@ -1,0 +1,26 @@
+[package]
+name = "visigrid"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight, native spreadsheet inspired by Excel 2003"
+license = "MIT"
+
+[dependencies]
+iced = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"
+dirs = "5"
+rfd = "0.14"
+rusqlite = { version = "0.31", features = ["bundled"] }
+toml = "0.8"
+open = "5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"
+
+[profile.dev]
+opt-level = 1
