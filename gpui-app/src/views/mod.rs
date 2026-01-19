@@ -75,6 +75,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &JumpLeft, _, cx| {
             if this.mode.is_formula() {
                 this.formula_jump_ref(0, -1, cx);
+            } else if this.mode == Mode::Edit {
+                this.move_edit_cursor_word_left(cx);
             } else {
                 this.jump_selection(0, -1, cx);
             }
@@ -82,6 +84,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &JumpRight, _, cx| {
             if this.mode.is_formula() {
                 this.formula_jump_ref(0, 1, cx);
+            } else if this.mode == Mode::Edit {
+                this.move_edit_cursor_word_right(cx);
             } else {
                 this.jump_selection(0, 1, cx);
             }
@@ -122,6 +126,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &ExtendLeft, _, cx| {
             if this.mode.is_formula() {
                 this.formula_extend_ref(0, -1, cx);
+            } else if this.mode == Mode::Edit {
+                this.select_edit_cursor_left(cx);
             } else {
                 this.extend_selection(0, -1, cx);
             }
@@ -129,6 +135,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &ExtendRight, _, cx| {
             if this.mode.is_formula() {
                 this.formula_extend_ref(0, 1, cx);
+            } else if this.mode == Mode::Edit {
+                this.select_edit_cursor_right(cx);
             } else {
                 this.extend_selection(0, 1, cx);
             }
@@ -150,6 +158,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &ExtendJumpLeft, _, cx| {
             if this.mode.is_formula() {
                 this.formula_extend_jump_ref(0, -1, cx);
+            } else if this.mode == Mode::Edit {
+                this.select_edit_cursor_word_left(cx);
             } else {
                 this.extend_jump_selection(0, -1, cx);
             }
@@ -157,12 +167,18 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &ExtendJumpRight, _, cx| {
             if this.mode.is_formula() {
                 this.formula_extend_jump_ref(0, 1, cx);
+            } else if this.mode == Mode::Edit {
+                this.select_edit_cursor_word_right(cx);
             } else {
                 this.extend_jump_selection(0, 1, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-            this.select_all(cx);
+            if this.mode == Mode::Edit {
+                this.select_all_edit(cx);
+            } else {
+                this.select_all(cx);
+            }
         }))
         // File actions
         .on_action(cx.listener(|this, _: &NewFile, _, cx| {

@@ -38,6 +38,17 @@ actions!(editing, [
     EditCursorRight,
     EditCursorHome,
     EditCursorEnd,
+    // Edit mode text selection (Shift+Arrow)
+    EditSelectLeft,
+    EditSelectRight,
+    EditSelectHome,
+    EditSelectEnd,
+    // Edit mode word navigation (Ctrl+Arrow)
+    EditWordLeft,
+    EditWordRight,
+    // Edit mode word selection (Ctrl+Shift+Arrow)
+    EditSelectWordLeft,
+    EditSelectWordRight,
     // F4 reference cycling
     CycleReference,
 ]);

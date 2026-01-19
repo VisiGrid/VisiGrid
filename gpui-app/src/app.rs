@@ -38,6 +38,7 @@ pub struct Spreadsheet {
     pub mode: Mode,
     pub edit_value: String,
     pub edit_cursor: usize,  // Cursor position within edit_value
+    pub edit_selection_anchor: Option<usize>,  // Selection start (None = no selection)
     pub edit_original: String,
     pub goto_input: String,
     pub find_input: String,
@@ -111,6 +112,7 @@ impl Spreadsheet {
             mode: Mode::Navigation,
             edit_value: String::new(),
             edit_cursor: 0,
+            edit_selection_anchor: None,
             edit_original: String::new(),
             goto_input: String::new(),
             find_input: String::new(),
@@ -920,28 +922,61 @@ impl Spreadsheet {
         }
     }
 
-    pub fn backspace(&mut self, cx: &mut Context<Self>) {
-        if self.mode.is_editing() && self.edit_cursor > 0 {
-            // Find byte index for cursor position
-            let byte_idx = self.edit_value.char_indices()
-                .nth(self.edit_cursor - 1)
+    /// Delete selected text and return true if there was a selection
+    fn delete_edit_selection(&mut self) -> bool {
+        if let Some((start, end)) = self.edit_selection_range() {
+            // Convert char positions to byte positions
+            let start_byte = self.edit_value.char_indices()
+                .nth(start)
                 .map(|(i, _)| i)
                 .unwrap_or(0);
-            let next_byte_idx = self.edit_value.char_indices()
-                .nth(self.edit_cursor)
+            let end_byte = self.edit_value.char_indices()
+                .nth(end)
                 .map(|(i, _)| i)
                 .unwrap_or(self.edit_value.len());
-            self.edit_value.replace_range(byte_idx..next_byte_idx, "");
-            self.edit_cursor -= 1;
-            cx.notify();
+            self.edit_value.replace_range(start_byte..end_byte, "");
+            self.edit_cursor = start;
+            self.edit_selection_anchor = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn backspace(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            // If there's a selection, delete it
+            if self.delete_edit_selection() {
+                cx.notify();
+                return;
+            }
+            // Otherwise delete char before cursor
+            if self.edit_cursor > 0 {
+                let byte_idx = self.edit_value.char_indices()
+                    .nth(self.edit_cursor - 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let next_byte_idx = self.edit_value.char_indices()
+                    .nth(self.edit_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.edit_value.len());
+                self.edit_value.replace_range(byte_idx..next_byte_idx, "");
+                self.edit_cursor -= 1;
+                cx.notify();
+            }
         }
     }
 
     pub fn delete_char(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() {
+            // If there's a selection, delete it
+            if self.delete_edit_selection() {
+                cx.notify();
+                return;
+            }
+            // Otherwise delete char at cursor
             let char_count = self.edit_value.chars().count();
             if self.edit_cursor < char_count {
-                // Find byte index for cursor position
                 let byte_idx = self.edit_value.char_indices()
                     .nth(self.edit_cursor)
                     .map(|(i, _)| i)
@@ -964,6 +999,9 @@ impl Spreadsheet {
                     self.finalize_formula_reference();
                 }
             }
+
+            // Delete selection if any (replaces selected text)
+            self.delete_edit_selection();
 
             // Find byte index for cursor position
             let byte_idx = self.edit_value.char_indices()
@@ -1250,6 +1288,7 @@ impl Spreadsheet {
     pub fn move_edit_cursor_left(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() && self.edit_cursor > 0 {
             self.edit_cursor -= 1;
+            self.edit_selection_anchor = None;  // Clear selection
             cx.notify();
         }
     }
@@ -1259,6 +1298,7 @@ impl Spreadsheet {
             let char_count = self.edit_value.chars().count();
             if self.edit_cursor < char_count {
                 self.edit_cursor += 1;
+                self.edit_selection_anchor = None;  // Clear selection
                 cx.notify();
             }
         }
@@ -1267,6 +1307,7 @@ impl Spreadsheet {
     pub fn move_edit_cursor_home(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() && self.edit_cursor > 0 {
             self.edit_cursor = 0;
+            self.edit_selection_anchor = None;  // Clear selection
             cx.notify();
         }
     }
@@ -1276,8 +1317,146 @@ impl Spreadsheet {
             let char_count = self.edit_value.chars().count();
             if self.edit_cursor < char_count {
                 self.edit_cursor = char_count;
+                self.edit_selection_anchor = None;  // Clear selection
                 cx.notify();
             }
+        }
+    }
+
+    // Selection variants (Shift+Arrow)
+    pub fn select_edit_cursor_left(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() && self.edit_cursor > 0 {
+            if self.edit_selection_anchor.is_none() {
+                self.edit_selection_anchor = Some(self.edit_cursor);
+            }
+            self.edit_cursor -= 1;
+            cx.notify();
+        }
+    }
+
+    pub fn select_edit_cursor_right(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            let char_count = self.edit_value.chars().count();
+            if self.edit_cursor < char_count {
+                if self.edit_selection_anchor.is_none() {
+                    self.edit_selection_anchor = Some(self.edit_cursor);
+                }
+                self.edit_cursor += 1;
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn select_edit_cursor_home(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() && self.edit_cursor > 0 {
+            if self.edit_selection_anchor.is_none() {
+                self.edit_selection_anchor = Some(self.edit_cursor);
+            }
+            self.edit_cursor = 0;
+            cx.notify();
+        }
+    }
+
+    pub fn select_edit_cursor_end(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            let char_count = self.edit_value.chars().count();
+            if self.edit_cursor < char_count {
+                if self.edit_selection_anchor.is_none() {
+                    self.edit_selection_anchor = Some(self.edit_cursor);
+                }
+                self.edit_cursor = char_count;
+                cx.notify();
+            }
+        }
+    }
+
+    // Word navigation helpers
+    fn find_word_boundary_left(&self, from: usize) -> usize {
+        if from == 0 {
+            return 0;
+        }
+        let chars: Vec<char> = self.edit_value.chars().collect();
+        let mut pos = from - 1;
+        // Skip whitespace/punctuation
+        while pos > 0 && !chars[pos].is_alphanumeric() {
+            pos -= 1;
+        }
+        // Skip word characters
+        while pos > 0 && chars[pos - 1].is_alphanumeric() {
+            pos -= 1;
+        }
+        pos
+    }
+
+    fn find_word_boundary_right(&self, from: usize) -> usize {
+        let chars: Vec<char> = self.edit_value.chars().collect();
+        let len = chars.len();
+        if from >= len {
+            return len;
+        }
+        let mut pos = from;
+        // Skip current word characters
+        while pos < len && chars[pos].is_alphanumeric() {
+            pos += 1;
+        }
+        // Skip whitespace/punctuation
+        while pos < len && !chars[pos].is_alphanumeric() {
+            pos += 1;
+        }
+        pos
+    }
+
+    // Ctrl+Arrow word navigation
+    pub fn move_edit_cursor_word_left(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            self.edit_cursor = self.find_word_boundary_left(self.edit_cursor);
+            self.edit_selection_anchor = None;
+            cx.notify();
+        }
+    }
+
+    pub fn move_edit_cursor_word_right(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            self.edit_cursor = self.find_word_boundary_right(self.edit_cursor);
+            self.edit_selection_anchor = None;
+            cx.notify();
+        }
+    }
+
+    // Ctrl+Shift+Arrow word selection
+    pub fn select_edit_cursor_word_left(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            if self.edit_selection_anchor.is_none() {
+                self.edit_selection_anchor = Some(self.edit_cursor);
+            }
+            self.edit_cursor = self.find_word_boundary_left(self.edit_cursor);
+            cx.notify();
+        }
+    }
+
+    pub fn select_edit_cursor_word_right(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            if self.edit_selection_anchor.is_none() {
+                self.edit_selection_anchor = Some(self.edit_cursor);
+            }
+            self.edit_cursor = self.find_word_boundary_right(self.edit_cursor);
+            cx.notify();
+        }
+    }
+
+    // Get current selection range (start, end) or None
+    pub fn edit_selection_range(&self) -> Option<(usize, usize)> {
+        self.edit_selection_anchor.map(|anchor| {
+            (anchor.min(self.edit_cursor), anchor.max(self.edit_cursor))
+        })
+    }
+
+    // Select all text in edit mode
+    pub fn select_all_edit(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            self.edit_selection_anchor = Some(0);
+            self.edit_cursor = self.edit_value.chars().count();
+            cx.notify();
         }
     }
 
@@ -1383,12 +1562,16 @@ impl Spreadsheet {
 
     // Clipboard
     pub fn copy(&mut self, cx: &mut Context<Self>) {
-        // If editing, copy the formula/edit text instead of cell values
+        // If editing, copy selected text (or all if no selection)
         if self.mode.is_editing() {
-            let text = self.edit_value.clone();
+            let text = if let Some((start, end)) = self.edit_selection_range() {
+                self.edit_value.chars().skip(start).take(end - start).collect()
+            } else {
+                self.edit_value.clone()
+            };
             self.clipboard = Some(text.clone());
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.status_message = Some("Copied formula to clipboard".to_string());
+            self.status_message = Some("Copied to clipboard".to_string());
             cx.notify();
             return;
         }
