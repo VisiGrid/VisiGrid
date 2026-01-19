@@ -9,13 +9,14 @@ Current status of keyboard shortcuts in the gpui version.
 | Category | Implemented | Target | Coverage |
 |----------|-------------|--------|----------|
 | Navigation | 12 | 20 | 60% |
-| Selection | 5 | 12 | 42% |
-| Editing | 10 | 20 | 50% |
+| Selection | 9 | 12 | 75% |
+| Editing | 12 | 20 | 60% |
 | Clipboard | 3 | 5 | 60% |
 | File | 4 | 6 | 67% |
 | Formatting | 3 | 10 | 30% |
-| View | 0 | 8 | 0% |
-| **Total** | **37** | **81** | **46%** |
+| View | 1 | 8 | 13% |
+| Menu | 7 | 7 | 100% |
+| **Total** | **51** | **88** | **58%** |
 
 ---
 
@@ -43,6 +44,7 @@ Current status of keyboard shortcuts in the gpui version.
 | Shortcut | Action | Status |
 |----------|--------|--------|
 | Shift+Arrow | Extend selection | ✅ |
+| Ctrl+Shift+Arrow | Extend to edge of data | ✅ |
 | Ctrl+A | Select all | ✅ |
 | Shift+Click | Extend to cell | ✅ |
 | Double-click | Edit cell | ✅ |
@@ -55,8 +57,11 @@ Current status of keyboard shortcuts in the gpui version.
 | F2 | Start edit | ✅ |
 | Escape | Cancel edit | ✅ |
 | Enter | Confirm edit | ✅ |
+| Ctrl+Enter | Confirm without moving / Multi-edit | ✅ |
 | Delete | Delete selection | ✅ |
 | Backspace | Backspace in edit | ✅ |
+| Ctrl+D | Fill Down | ✅ |
+| Ctrl+R | Fill Right | ✅ |
 | Ctrl+Z | Undo | ✅ |
 | Ctrl+Y | Redo | ✅ |
 | Ctrl+Shift+Z | Redo (alt) | ✅ |
@@ -87,29 +92,36 @@ Current status of keyboard shortcuts in the gpui version.
 | Ctrl+I | Italic | ✅ |
 | Ctrl+U | Underline | ✅ |
 
+### View
+
+| Shortcut | Action | Status |
+|----------|--------|--------|
+| Ctrl+Shift+P | Command Palette | ✅ |
+
+### Menu (Excel 2003 Style)
+
+| Shortcut | Action | Status |
+|----------|--------|--------|
+| Alt+F | File menu | ✅ |
+| Alt+E | Edit menu | ✅ |
+| Alt+V | View menu | ✅ |
+| Alt+I | Insert menu | ✅ |
+| Alt+O | Format menu | ✅ |
+| Alt+D | Data menu | ✅ |
+| Alt+H | Help menu | ✅ |
+
 ---
 
 ## NOT YET Implemented
-
-### Priority 0 (MVP Blockers)
-
-| Shortcut | Action | Notes |
-|----------|--------|-------|
-| Ctrl+Shift+P | Command Palette | Core differentiator |
-| Ctrl+D | Fill Down | Common workflow |
-| Ctrl+R | Fill Right | Common workflow |
-| Ctrl+Enter | Fill selection | Multi-edit |
 
 ### Priority 1 (Expected)
 
 | Shortcut | Action | Notes |
 |----------|--------|-------|
 | Ctrl+Click | Add to selection | Discontiguous |
-| Alt+F/E/V/O/D/H | Menu accelerators | Excel standard |
 | Ctrl+H | Replace | Find & Replace |
 | Ctrl+1 | Format Cells | Dialog |
 | Ctrl+PageUp/Down | Sheet navigation | Multi-sheet |
-| Ctrl+Shift+Arrow | Extend to edge | Selection |
 
 ### Priority 2 (Power User)
 
@@ -150,7 +162,7 @@ Editor-inspired shortcuts that differentiate from Excel:
 
 | Shortcut | Action | Status |
 |----------|--------|--------|
-| Ctrl+Shift+P | Command Palette | ❌ |
+| Ctrl+Shift+P | Command Palette | ✅ |
 | Ctrl+P | Quick Open | ❌ |
 | Ctrl+Shift+M | Problems Panel | ❌ |
 | Ctrl+Shift+I | Cell Inspector | ❌ |
@@ -166,17 +178,17 @@ Editor-inspired shortcuts that differentiate from Excel:
 
 ## Implementation Order
 
-### Sprint 1: Core Workflow
-1. Ctrl+Shift+P (Command Palette)
-2. Ctrl+D/R (Fill Down/Right)
-3. Ctrl+Enter (Fill selection)
-4. Ctrl+Click (Discontiguous selection)
+### Sprint 1: Core Workflow ✅ COMPLETE
+1. ✅ Ctrl+Shift+P (Command Palette)
+2. ✅ Ctrl+D/R (Fill Down/Right)
+3. ✅ Ctrl+Enter (Multi-edit)
+4. ❌ Ctrl+Click (Discontiguous selection)
 
-### Sprint 2: Excel Compatibility
-1. Alt menu accelerators
-2. Ctrl+H (Replace)
-3. Ctrl+1 (Format Cells)
-4. Number format shortcuts
+### Sprint 2: Excel Compatibility (In Progress)
+1. ✅ Alt menu accelerators (Alt+F/E/V/I/O/D/H)
+2. ❌ Ctrl+H (Replace)
+3. ❌ Ctrl+1 (Format Cells)
+4. ❌ Number format shortcuts
 
 ### Sprint 3: Multi-Sheet
 1. Ctrl+PageUp/Down

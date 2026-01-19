@@ -115,10 +115,8 @@ impl Spreadsheet {
     pub fn toggle_menu(&mut self, menu: crate::mode::Menu, cx: &mut Context<Self>) {
         if self.open_menu == Some(menu) {
             self.open_menu = None;
-            self.status_message = Some("Menu closed".to_string());
         } else {
             self.open_menu = Some(menu);
-            self.status_message = Some(format!("Menu open: {:?}", menu));
         }
         cx.notify();
     }

@@ -167,6 +167,12 @@ fi
 
 sed -e "s/0\.1\.0/$VERSION/g" "$PROJECT_DIR/macos/Info.plist" > "$BUNDLE_DIR/Contents/Info.plist"
 
+# Generate .icns from iconset if needed
+if [[ ! -f "$PROJECT_DIR/assets/AppIcon.icns" && -d "$PROJECT_DIR/assets/AppIcon.iconset" ]]; then
+    echo "Generating AppIcon.icns from iconset..."
+    iconutil -c icns "$PROJECT_DIR/assets/AppIcon.iconset" -o "$PROJECT_DIR/assets/AppIcon.icns"
+fi
+
 # Copy icon if it exists
 if [[ -f "$PROJECT_DIR/assets/AppIcon.icns" ]]; then
     cp "$PROJECT_DIR/assets/AppIcon.icns" "$BUNDLE_DIR/Contents/Resources/"

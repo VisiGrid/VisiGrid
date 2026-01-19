@@ -4,4 +4,5 @@
 
 # macOS
 .DS_Store
-*.iconset/
+# Keep AppIcon.iconset for building .icns on Mac
+# *.iconset/
