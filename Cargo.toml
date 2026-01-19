@@ -35,7 +35,3 @@ opt-level = "z"
 
 [profile.dev]
 opt-level = 1
-
-# Patch to fix macOS core-graphics version conflict in font-kit
-[patch.crates-io]
-core-graphics = { git = "https://github.com/servo/core-foundation-rs", package = "core-graphics", rev = "4d8bd9ce" }

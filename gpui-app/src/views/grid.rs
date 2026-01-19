@@ -108,6 +108,18 @@ fn render_cell(
             if this.resizing_col.is_some() || this.resizing_row.is_some() {
                 return;
             }
+
+            // Formula mode: clicks insert cell references
+            if this.mode.is_formula() {
+                if event.modifiers.shift {
+                    this.formula_shift_click_ref(cell_row, cell_col, cx);
+                } else {
+                    this.formula_click_ref(cell_row, cell_col, cx);
+                }
+                return;
+            }
+
+            // Normal mode handling
             if event.click_count == 2 {
                 // Double-click to edit
                 this.select_cell(cell_row, cell_col, false, cx);
