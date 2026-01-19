@@ -70,6 +70,11 @@ pub struct Spreadsheet {
 
     // Menu bar state (Excel 2003 style dropdown menus)
     pub open_menu: Option<crate::mode::Menu>,
+
+    // Sheet tab state
+    pub renaming_sheet: Option<usize>,     // Index of sheet being renamed
+    pub sheet_rename_input: String,        // Current rename input value
+    pub sheet_context_menu: Option<usize>, // Index of sheet with open context menu
 }
 
 impl Spreadsheet {
@@ -109,6 +114,9 @@ impl Spreadsheet {
             resize_start_pos: 0.0,
             resize_start_size: 0.0,
             open_menu: None,
+            renaming_sheet: None,
+            sheet_rename_input: String::new(),
+            sheet_context_menu: None,
         }
     }
 
@@ -183,6 +191,81 @@ impl Spreadsheet {
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
+    }
+
+    // Sheet rename methods
+    /// Start renaming a sheet (double-click on tab)
+    pub fn start_sheet_rename(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(name) = self.workbook.sheet_names().get(index) {
+            self.renaming_sheet = Some(index);
+            self.sheet_rename_input = name.to_string();
+            self.sheet_context_menu = None;
+            cx.notify();
+        }
+    }
+
+    /// Confirm the sheet rename
+    pub fn confirm_sheet_rename(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self.renaming_sheet {
+            let new_name = self.sheet_rename_input.trim();
+            if !new_name.is_empty() {
+                self.workbook.rename_sheet(index, new_name);
+                self.is_modified = true;
+            }
+            self.renaming_sheet = None;
+            self.sheet_rename_input.clear();
+            cx.notify();
+        }
+    }
+
+    /// Cancel the sheet rename
+    pub fn cancel_sheet_rename(&mut self, cx: &mut Context<Self>) {
+        self.renaming_sheet = None;
+        self.sheet_rename_input.clear();
+        cx.notify();
+    }
+
+    /// Handle input for sheet rename
+    pub fn sheet_rename_input_char(&mut self, c: char, cx: &mut Context<Self>) {
+        if self.renaming_sheet.is_some() {
+            self.sheet_rename_input.push(c);
+            cx.notify();
+        }
+    }
+
+    /// Handle backspace for sheet rename
+    pub fn sheet_rename_backspace(&mut self, cx: &mut Context<Self>) {
+        if self.renaming_sheet.is_some() {
+            self.sheet_rename_input.pop();
+            cx.notify();
+        }
+    }
+
+    // Sheet context menu methods
+    /// Show context menu for a sheet tab
+    pub fn show_sheet_context_menu(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.sheet_context_menu = Some(index);
+        self.renaming_sheet = None;
+        cx.notify();
+    }
+
+    /// Hide sheet context menu
+    pub fn hide_sheet_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.sheet_context_menu = None;
+        cx.notify();
+    }
+
+    /// Delete a sheet
+    pub fn delete_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.workbook.delete_sheet(index) {
+            self.is_modified = true;
+            self.sheet_context_menu = None;
+            cx.notify();
+        } else {
+            self.status_message = Some("Cannot delete the last sheet".to_string());
+            self.sheet_context_menu = None;
+            cx.notify();
+        }
     }
 
     /// Get width for a column (custom or default)

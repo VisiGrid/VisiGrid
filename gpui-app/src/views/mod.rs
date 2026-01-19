@@ -251,6 +251,47 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         }))
         // Character input (handles editing, goto, find, and command modes)
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            // Handle sheet context menu (close on any key)
+            if this.sheet_context_menu.is_some() {
+                this.hide_sheet_context_menu(cx);
+                if event.keystroke.key == "escape" {
+                    return;
+                }
+            }
+
+            // Handle sheet rename mode
+            if this.renaming_sheet.is_some() {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.cancel_sheet_rename(cx);
+                        return;
+                    }
+                    "enter" => {
+                        this.confirm_sheet_rename(cx);
+                        return;
+                    }
+                    "backspace" => {
+                        this.sheet_rename_backspace(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // Handle text input for rename
+                if let Some(key_char) = &event.keystroke.key_char {
+                    if !event.keystroke.modifiers.control
+                        && !event.keystroke.modifiers.alt
+                        && !event.keystroke.modifiers.platform
+                    {
+                        for c in key_char.chars().filter(|c| !c.is_control()) {
+                            this.sheet_rename_input_char(c, cx);
+                        }
+                        return;
+                    }
+                }
+                return;
+            }
+
             // Handle Command Palette mode
             if this.mode == Mode::Command {
                 match event.keystroke.key.as_str() {
