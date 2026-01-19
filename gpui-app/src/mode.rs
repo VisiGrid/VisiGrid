@@ -8,6 +8,7 @@ pub enum Mode {
     GoTo,        // Go to cell dialog
     QuickOpen,   // Quick file open (Ctrl+P)
     Find,        // Find in cells (Ctrl+F)
+    FontPicker,  // Font selection dialog
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -32,6 +33,6 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find)
+        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker)
     }
 }

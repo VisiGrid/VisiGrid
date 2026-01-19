@@ -75,6 +75,11 @@ pub struct Spreadsheet {
     pub renaming_sheet: Option<usize>,     // Index of sheet being renamed
     pub sheet_rename_input: String,        // Current rename input value
     pub sheet_context_menu: Option<usize>, // Index of sheet with open context menu
+
+    // Font picker state
+    pub available_fonts: Vec<String>,      // System fonts
+    pub font_picker_query: String,         // Filter query
+    pub font_picker_selected: usize,       // Selected item index
 }
 
 impl Spreadsheet {
@@ -117,7 +122,40 @@ impl Spreadsheet {
             renaming_sheet: None,
             sheet_rename_input: String::new(),
             sheet_context_menu: None,
+            available_fonts: Self::enumerate_fonts(),
+            font_picker_query: String::new(),
+            font_picker_selected: 0,
         }
+    }
+
+    /// Enumerate available system fonts
+    fn enumerate_fonts() -> Vec<String> {
+        use gpui::FontFeatures;
+        // Provide a curated list of common fonts - gpui doesn't expose font enumeration
+        // These are commonly available on Linux/Mac/Windows
+        vec![
+            "DejaVu Sans".to_string(),
+            "DejaVu Sans Mono".to_string(),
+            "DejaVu Serif".to_string(),
+            "Fira Code".to_string(),
+            "Fira Sans".to_string(),
+            "Hack".to_string(),
+            "IBM Plex Mono".to_string(),
+            "IBM Plex Sans".to_string(),
+            "Inter".to_string(),
+            "JetBrains Mono".to_string(),
+            "Liberation Mono".to_string(),
+            "Liberation Sans".to_string(),
+            "Liberation Serif".to_string(),
+            "Noto Sans".to_string(),
+            "Noto Serif".to_string(),
+            "Roboto".to_string(),
+            "Roboto Mono".to_string(),
+            "Source Code Pro".to_string(),
+            "Source Sans Pro".to_string(),
+            "Ubuntu".to_string(),
+            "Ubuntu Mono".to_string(),
+        ]
     }
 
     // Menu methods

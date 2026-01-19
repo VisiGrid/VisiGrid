@@ -31,43 +31,47 @@ VisiGrid was originally built with iced. This document tracks the gpui rebuild.
 | Cell editing | ✅ Done | F2, typing starts edit |
 | Copy/Cut/Paste | ✅ Done | Ctrl+C/X/V |
 | Undo/Redo | ✅ Done | Ctrl+Z/Y |
-| Multi-cell selection | ✅ Partial | Shift+Arrow only, no Ctrl+Click |
+| Multi-cell selection | ✅ Done | Shift+Arrow, Ctrl+Shift+Arrow |
 | Go To (Ctrl+G) | ✅ Done | |
 | Find (Ctrl+F) | ✅ Done | F3/Shift+F3 for next/prev |
 | Bold/Italic/Underline | ✅ Done | Ctrl+B/I/U |
 | Native format save/load | ✅ Done | SQLite .sheet files |
 | CSV export | ✅ Done | |
-| Toolbar menu bar | ✅ Done | Buttons, not dropdowns |
 | Dynamic grid sizing | ✅ Done | Fills window, resizes |
 | Double-click to edit | ✅ Done | |
 | Mouse wheel scroll | ✅ Done | |
 | Page Up/Down | ✅ Done | |
+| Column/Row resize | ✅ Done | Drag headers to resize |
+| Command Palette | ✅ Done | Ctrl+Shift+P, fuzzy search |
+| Fill Down/Right | ✅ Done | Ctrl+D/R with formula adjustment |
+| Multi-edit | ✅ Done | Ctrl+Enter applies to selection |
+| Excel 2003 Menu Bar | ✅ Done | File/Edit/View/Insert/Format/Data/Help |
+| Alt menu accelerators | ✅ Done | Alt+F, Alt+E, Alt+V, etc. |
+| Multi-sheet support | ✅ Done | Workbook with multiple sheets |
+| Sheet tabs | ✅ Done | Click to switch, + to add |
+| Sheet navigation | ✅ Done | Ctrl+PageUp/Down, Shift+F11 |
+| Sheet context menu | ✅ Done | Right-click: Insert/Delete/Rename |
 
-### Missing from MVP (Priority Order)
+### Remaining Features (Priority Order)
 
 | Feature | Priority | Effort | Notes |
 |---------|----------|--------|-------|
-| Command Palette | P0 | Medium | Core differentiator |
-| Fill Down/Right | P0 | Easy | Ctrl+D/R |
-| Multi-edit | P0 | Medium | Typing replaces ALL selected |
 | Ctrl+Click selection | P1 | Easy | Discontiguous ranges |
-| Dropdown menus | P1 | Medium | Replace toolbar buttons |
-| Alt menu accelerators | P1 | Medium | Alt+F, Alt+E, etc. |
-| Sheet tabs | P1 | Hard | Multi-sheet support |
 | Number format shortcuts | P2 | Easy | Ctrl+Shift+$, %, etc. |
 | Format Cells dialog | P2 | Medium | Ctrl+1 |
 | Replace (Ctrl+H) | P2 | Easy | |
 | CSV import | P2 | Easy | |
 | Zoom | P2 | Easy | Ctrl++/- |
-| Context menu | P3 | Medium | Right-click |
+| Cell context menu | P3 | Medium | Right-click on cells |
 | Zen Mode | P3 | Easy | F11 |
 | Split view | P3 | Hard | |
+| Cross-sheet references | P3 | Medium | =Sheet2!A1 |
 
 ### Editor-Style Features (VS Code Inspired)
 
 | Feature | Priority | Status |
 |---------|----------|--------|
-| Command Palette (Ctrl+Shift+P) | P0 | ❌ |
+| Command Palette (Ctrl+Shift+P) | P0 | ✅ Done |
 | Quick Open (Ctrl+P) | P2 | ❌ |
 | Problems Panel (Ctrl+Shift+M) | P3 | ❌ |
 | Cell Inspector (Ctrl+Shift+I) | P3 | ❌ |
@@ -108,6 +112,7 @@ gpui-app/
 crates/
 ├── engine/    # Core spreadsheet logic
 │   ├── sheet.rs      # Sheet data structure
+│   ├── workbook.rs   # Multi-sheet workbook
 │   ├── cell.rs       # Cell types, formats
 │   ├── parser.rs     # Formula parser
 │   ├── eval.rs       # Formula evaluator
@@ -121,7 +126,7 @@ crates/
 
 ## Implementation Plan
 
-### Phase 1: Core Parity (Current Focus)
+### Phase 1: Core Parity ✅ COMPLETE
 
 1. ✅ Basic grid navigation
 2. ✅ Cell editing
@@ -129,33 +134,38 @@ crates/
 4. ✅ Undo/redo
 5. ✅ Save/load
 6. ✅ Find/GoTo
-7. ⏳ Command Palette
-8. ⏳ Fill Down/Right
-9. ⏳ Multi-edit
+7. ✅ Command Palette
+8. ✅ Fill Down/Right (with formula reference adjustment)
+9. ✅ Multi-edit (Ctrl+Enter)
 
-### Phase 2: Excel Compatibility
+### Phase 2: Excel Compatibility ✅ COMPLETE
 
-1. Dropdown menus
-2. Alt accelerators
-3. Number format shortcuts
-4. Format Cells dialog (Ctrl+1)
-5. Replace (Ctrl+H)
-6. Ctrl+Click selection
+1. ✅ Excel 2003-style dropdown menus
+2. ✅ Alt accelerators (Alt+F, Alt+E, etc.)
+3. ✅ Ctrl+Shift+Arrow selection
+4. ✅ Column/row resize by dragging
+5. ❌ Number format shortcuts
+6. ❌ Format Cells dialog (Ctrl+1)
+7. ❌ Replace (Ctrl+H)
+8. ❌ Ctrl+Click selection
 
-### Phase 3: Multi-Sheet
+### Phase 3: Multi-Sheet ✅ COMPLETE
 
-1. Sheet tabs UI
-2. Ctrl+PageUp/Down navigation
-3. Cross-sheet references
-4. Sheet management (add/delete/rename)
+1. ✅ Workbook engine (multiple sheets)
+2. ✅ Sheet tabs UI
+3. ✅ Ctrl+PageUp/Down navigation
+4. ✅ Shift+F11 to add sheet
+5. ✅ Sheet management (add/delete/rename via context menu)
+6. ❌ Cross-sheet references (=Sheet2!A1)
 
-### Phase 4: Power Features
+### Phase 4: Power Features (Next)
 
 1. Named ranges UI
 2. Array formula visualization (spill borders)
-3. Zoom
+3. Zoom (Ctrl++/-)
 4. Split view
-5. Zen mode
+5. Zen mode (F11)
+6. Cell context menu
 
 ---
 
