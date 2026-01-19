@@ -38,3 +38,31 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
 regex = "1"
+
+[build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# Linux packaging (cargo-deb)
+[package.metadata.deb]
+maintainer = "RegAtlas, LLC <hello@visigrid.com>"
+copyright = "2025, RegAtlas, LLC"
+license-file = ["../LICENSE", "0"]
+extended-description = """
+VisiGrid is a high-performance spreadsheet application built for power users.
+Features vim-style navigation, powerful formulas, and a local-first architecture
+that keeps your data yours.
+"""
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/visigrid", "usr/bin/", "755"],
+    ["../assets/visigrid.desktop", "usr/share/applications/", "644"],
+    ["assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/visigrid.png", "644"],
+    ["assets/icon-128.png", "usr/share/icons/hicolor/128x128/apps/visigrid.png", "644"],
+    ["assets/icon-64.png", "usr/share/icons/hicolor/64x64/apps/visigrid.png", "644"],
+    ["assets/icon-32.png", "usr/share/icons/hicolor/32x32/apps/visigrid.png", "644"],
+    ["assets/icon-16.png", "usr/share/icons/hicolor/16x16/apps/visigrid.png", "644"],
+]

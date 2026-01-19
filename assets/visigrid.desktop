@@ -1,10 +1,12 @@
 [Desktop Entry]
 Name=VisiGrid
-Comment=Open-source desktop spreadsheet
-Exec=visigrid
+Comment=A fast, keyboard-driven spreadsheet
+GenericName=Spreadsheet
+Exec=visigrid %F
 Icon=visigrid
 Terminal=false
 Type=Application
 Categories=Office;Spreadsheet;
-Keywords=spreadsheet;csv;data;
+Keywords=spreadsheet;csv;tsv;data;table;formula;
 StartupWMClass=visigrid
+MimeType=text/csv;application/x-visigrid;text/tab-separated-values;application/json;

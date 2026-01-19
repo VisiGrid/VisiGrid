@@ -2,6 +2,7 @@ use gpui::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use visigrid_engine::sheet::Sheet;
+use visigrid_engine::workbook::Workbook;
 use visigrid_engine::formula::eval::CellLookup;
 
 use crate::history::{History, CellChange};
@@ -21,7 +22,7 @@ pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 
 pub struct Spreadsheet {
     // Core data
-    pub sheet: Sheet,
+    pub workbook: Workbook,
     pub history: History,
 
     // Selection
@@ -73,14 +74,14 @@ pub struct Spreadsheet {
 
 impl Spreadsheet {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let sheet = Sheet::new(NUM_ROWS, NUM_COLS);
+        let workbook = Workbook::new();
 
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         let window_size = window.viewport_size();
 
         Self {
-            sheet,
+            workbook,
             history: History::new(),
             selected: (0, 0),
             selection_end: None,
@@ -126,6 +127,62 @@ impl Spreadsheet {
             self.open_menu = None;
             cx.notify();
         }
+    }
+
+    // Sheet access convenience methods
+    /// Get a reference to the active sheet
+    pub fn sheet(&self) -> &Sheet {
+        self.workbook.active_sheet()
+    }
+
+    /// Get a mutable reference to the active sheet
+    pub fn sheet_mut(&mut self) -> &mut Sheet {
+        self.workbook.active_sheet_mut()
+    }
+
+    // Sheet navigation methods
+    /// Move to the next sheet
+    pub fn next_sheet(&mut self, cx: &mut Context<Self>) {
+        if self.workbook.next_sheet() {
+            self.clear_selection_state();
+            cx.notify();
+        }
+    }
+
+    /// Move to the previous sheet
+    pub fn prev_sheet(&mut self, cx: &mut Context<Self>) {
+        if self.workbook.prev_sheet() {
+            self.clear_selection_state();
+            cx.notify();
+        }
+    }
+
+    /// Switch to a specific sheet by index
+    pub fn goto_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.workbook.set_active_sheet(index) {
+            self.clear_selection_state();
+            cx.notify();
+        }
+    }
+
+    /// Add a new sheet and switch to it
+    pub fn add_sheet(&mut self, cx: &mut Context<Self>) {
+        let new_index = self.workbook.add_sheet();
+        self.workbook.set_active_sheet(new_index);
+        self.clear_selection_state();
+        self.is_modified = true;
+        cx.notify();
+    }
+
+    /// Clear selection state when switching sheets
+    fn clear_selection_state(&mut self) {
+        self.selected = (0, 0);
+        self.selection_end = None;
+        self.scroll_row = 0;
+        self.scroll_col = 0;
+        self.mode = Mode::Navigation;
+        self.edit_value.clear();
+        self.edit_original.clear();
     }
 
     /// Get width for a column (custom or default)
@@ -182,7 +239,7 @@ impl Spreadsheet {
 
         // Check all rows for content in this column
         for row in 0..NUM_ROWS {
-            let text = self.sheet.get_text(row, col);
+            let text = self.sheet().get_text(row, col);
             if !text.is_empty() {
                 // Estimate width: ~7px per character + padding
                 let estimated_width = text.len() as f32 * 7.5 + 16.0;
@@ -285,7 +342,7 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
 
         let (mut row, mut col) = self.selected;
-        let current_empty = self.sheet.get_cell(row, col).value.raw_display().is_empty();
+        let current_empty = self.sheet().get_cell(row, col).value.raw_display().is_empty();
 
         // Check if next cell exists and what it contains
         let peek_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
@@ -293,7 +350,7 @@ impl Spreadsheet {
         let next_empty = if peek_row == row && peek_col == col {
             true // At edge
         } else {
-            self.sheet.get_cell(peek_row, peek_col).value.raw_display().is_empty()
+            self.sheet().get_cell(peek_row, peek_col).value.raw_display().is_empty()
         };
 
         // Determine search mode: looking for non-empty or looking for empty
@@ -308,7 +365,7 @@ impl Spreadsheet {
                 break;
             }
 
-            let cell_empty = self.sheet.get_cell(next_row, next_col).value.raw_display().is_empty();
+            let cell_empty = self.sheet().get_cell(next_row, next_col).value.raw_display().is_empty();
 
             if looking_for_nonempty {
                 // Scanning through empty space: stop at first non-empty or edge
@@ -338,7 +395,7 @@ impl Spreadsheet {
 
         // Start from current selection end (or selected if no selection)
         let (mut row, mut col) = self.selection_end.unwrap_or(self.selected);
-        let current_empty = self.sheet.get_cell(row, col).value.raw_display().is_empty();
+        let current_empty = self.sheet().get_cell(row, col).value.raw_display().is_empty();
 
         // Check if next cell exists and what it contains
         let peek_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
@@ -346,7 +403,7 @@ impl Spreadsheet {
         let next_empty = if peek_row == row && peek_col == col {
             true // At edge
         } else {
-            self.sheet.get_cell(peek_row, peek_col).value.raw_display().is_empty()
+            self.sheet().get_cell(peek_row, peek_col).value.raw_display().is_empty()
         };
 
         // Determine search mode: looking for non-empty or looking for empty
@@ -361,7 +418,7 @@ impl Spreadsheet {
                 break;
             }
 
-            let cell_empty = self.sheet.get_cell(next_row, next_col).value.raw_display().is_empty();
+            let cell_empty = self.sheet().get_cell(next_row, next_col).value.raw_display().is_empty();
 
             if looking_for_nonempty {
                 // Scanning through empty space: stop at first non-empty or edge
@@ -446,7 +503,7 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
 
         let (row, col) = self.selected;
-        self.edit_original = self.sheet.get_raw(row, col);
+        self.edit_original = self.sheet().get_raw(row, col);
         self.edit_value = self.edit_original.clone();
         self.mode = Mode::Edit;
         cx.notify();
@@ -456,7 +513,7 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
 
         let (row, col) = self.selected;
-        self.edit_original = self.sheet.get_raw(row, col);
+        self.edit_original = self.sheet().get_raw(row, col);
         self.edit_value = String::new();
         self.mode = Mode::Edit;
         cx.notify();
@@ -490,7 +547,7 @@ impl Spreadsheet {
         // Apply to all cells in selection
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                let old_value = self.sheet.get_raw(row, col);
+                let old_value = self.sheet().get_raw(row, col);
                 if old_value != new_value {
                     changes.push(CellChange {
                         row,
@@ -499,7 +556,7 @@ impl Spreadsheet {
                         new_value: new_value.clone(),
                     });
                 }
-                self.sheet.set_value(row, col, &new_value);
+                self.sheet_mut().set_value(row, col, &new_value);
             }
         }
 
@@ -527,7 +584,7 @@ impl Spreadsheet {
         let new_value = self.edit_value.clone();
 
         self.history.record_change(row, col, old_value, new_value);
-        self.sheet.set_value(row, col, &self.edit_value);
+        self.sheet_mut().set_value(row, col, &self.edit_value);
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
@@ -566,7 +623,7 @@ impl Spreadsheet {
         } else {
             // Start editing with this character
             let (row, col) = self.selected;
-            self.edit_original = self.sheet.get_raw(row, col);
+            self.edit_original = self.sheet().get_raw(row, col);
             self.edit_value = c.to_string();
             self.mode = Mode::Edit;
             cx.notify();
@@ -584,7 +641,7 @@ impl Spreadsheet {
                 if col > min_col {
                     text.push('\t');
                 }
-                text.push_str(&self.sheet.get_display(row, col));
+                text.push_str(&self.sheet().get_display(row, col));
             }
             if row < max_row {
                 text.push('\n');
@@ -605,13 +662,13 @@ impl Spreadsheet {
         let mut changes = Vec::new();
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                let old_value = self.sheet.get_raw(row, col);
+                let old_value = self.sheet().get_raw(row, col);
                 if !old_value.is_empty() {
                     changes.push(CellChange {
                         row, col, old_value, new_value: String::new(),
                     });
                 }
-                self.sheet.set_value(row, col, "");
+                self.sheet_mut().set_value(row, col, "");
             }
         }
         self.history.record_batch(changes);
@@ -643,14 +700,14 @@ impl Spreadsheet {
                     let row = start_row + row_offset;
                     let col = start_col + col_offset;
                     if row < NUM_ROWS && col < NUM_COLS {
-                        let old_value = self.sheet.get_raw(row, col);
+                        let old_value = self.sheet().get_raw(row, col);
                         let new_value = value.to_string();
                         if old_value != new_value {
                             changes.push(CellChange {
                                 row, col, old_value, new_value,
                             });
                         }
-                        self.sheet.set_value(row, col, value);
+                        self.sheet_mut().set_value(row, col, value);
                     }
                 }
             }
@@ -686,7 +743,7 @@ impl Spreadsheet {
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
         // Only get cells that actually have data (efficient for large selections)
-        let cells_to_delete = self.sheet.cells_in_range(min_row, max_row, min_col, max_col);
+        let cells_to_delete = self.sheet().cells_in_range(min_row, max_row, min_col, max_col);
 
         if cells_to_delete.is_empty() {
             return;
@@ -694,13 +751,13 @@ impl Spreadsheet {
 
         let mut changes = Vec::new();
         for (row, col) in cells_to_delete {
-            let old_value = self.sheet.get_raw(row, col);
+            let old_value = self.sheet().get_raw(row, col);
             if !old_value.is_empty() {
                 changes.push(CellChange {
                     row, col, old_value, new_value: String::new(),
                 });
             }
-            self.sheet.clear_cell(row, col);
+            self.sheet_mut().clear_cell(row, col);
         }
 
         if !changes.is_empty() {
@@ -714,7 +771,7 @@ impl Spreadsheet {
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if let Some(entry) = self.history.undo() {
             for change in entry.changes {
-                self.sheet.set_value(change.row, change.col, &change.old_value);
+                self.sheet_mut().set_value(change.row, change.col, &change.old_value);
             }
             self.is_modified = true;
             self.status_message = Some("Undo".to_string());
@@ -725,7 +782,7 @@ impl Spreadsheet {
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if let Some(entry) = self.history.redo() {
             for change in entry.changes {
-                self.sheet.set_value(change.row, change.col, &change.new_value);
+                self.sheet_mut().set_value(change.row, change.col, &change.new_value);
             }
             self.is_modified = true;
             self.status_message = Some("Redo".to_string());
@@ -754,7 +811,7 @@ impl Spreadsheet {
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                self.sheet.toggle_bold(row, col);
+                self.sheet_mut().toggle_bold(row, col);
             }
         }
         self.is_modified = true;
@@ -765,7 +822,7 @@ impl Spreadsheet {
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                self.sheet.toggle_italic(row, col);
+                self.sheet_mut().toggle_italic(row, col);
             }
         }
         self.is_modified = true;
@@ -776,7 +833,7 @@ impl Spreadsheet {
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                self.sheet.toggle_underline(row, col);
+                self.sheet_mut().toggle_underline(row, col);
             }
         }
         self.is_modified = true;
@@ -896,12 +953,12 @@ impl Spreadsheet {
         let query = self.find_input.to_lowercase();
 
         // Search through all populated cells
-        let cell_positions: Vec<_> = self.sheet.cells_iter()
+        let cell_positions: Vec<_> = self.sheet().cells_iter()
             .map(|(&pos, _)| pos)
             .collect();
 
         for (row, col) in cell_positions {
-            let display = self.sheet.get_display(row, col);
+            let display = self.sheet().get_display(row, col);
             if display.to_lowercase().contains(&query) {
                 self.find_results.push((row, col));
             }
@@ -1035,11 +1092,11 @@ impl Spreadsheet {
         // For each column in selection
         for col in min_col..=max_col {
             // Get the source value/formula from the first row
-            let source = self.sheet.get_raw(min_row, col);
+            let source = self.sheet().get_raw(min_row, col);
 
             // Fill down to all other rows
             for row in (min_row + 1)..=max_row {
-                let old_value = self.sheet.get_raw(row, col);
+                let old_value = self.sheet().get_raw(row, col);
                 let new_value = if source.starts_with('=') {
                     // Adjust relative references for formulas
                     self.adjust_formula_refs(&source, row as i32 - min_row as i32, 0)
@@ -1055,7 +1112,7 @@ impl Spreadsheet {
                         new_value: new_value.clone(),
                     });
                 }
-                self.sheet.set_value(row, col, &new_value);
+                self.sheet_mut().set_value(row, col, &new_value);
             }
         }
 
@@ -1081,11 +1138,11 @@ impl Spreadsheet {
         // For each row in selection
         for row in min_row..=max_row {
             // Get the source value/formula from the first column
-            let source = self.sheet.get_raw(row, min_col);
+            let source = self.sheet().get_raw(row, min_col);
 
             // Fill right to all other columns
             for col in (min_col + 1)..=max_col {
-                let old_value = self.sheet.get_raw(row, col);
+                let old_value = self.sheet().get_raw(row, col);
                 let new_value = if source.starts_with('=') {
                     // Adjust relative references for formulas
                     self.adjust_formula_refs(&source, 0, col as i32 - min_col as i32)
@@ -1101,7 +1158,7 @@ impl Spreadsheet {
                         new_value: new_value.clone(),
                     });
                 }
-                self.sheet.set_value(row, col, &new_value);
+                self.sheet_mut().set_value(row, col, &new_value);
             }
         }
 

@@ -1,0 +1,38 @@
+// Windows resource file for VisiGrid
+// Embeds icon and manifest into the executable
+
+// Application icon (ID 1 is used by Windows as the main app icon)
+1 ICON "windows/visigrid.ico"
+
+// Application manifest
+1 24 "windows/visigrid.manifest"
+
+// Version information
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "RegAtlas, LLC"
+            VALUE "FileDescription", "VisiGrid - A fast, keyboard-driven spreadsheet"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "InternalName", "visigrid"
+            VALUE "LegalCopyright", "Copyright © 2025 RegAtlas, LLC"
+            VALUE "OriginalFilename", "visigrid.exe"
+            VALUE "ProductName", "VisiGrid"
+            VALUE "ProductVersion", "0.1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

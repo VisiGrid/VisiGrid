@@ -1,0 +1,291 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.0)'
+        required: false
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release -p visigrid-gpui
+
+      - name: Get version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist/VisiGrid-${VERSION}-linux-x86_64
+          cp target/release/visigrid dist/VisiGrid-${VERSION}-linux-x86_64/
+          cp assets/visigrid.desktop dist/VisiGrid-${VERSION}-linux-x86_64/
+          cp gpui-app/assets/icon-256.png dist/VisiGrid-${VERSION}-linux-x86_64/visigrid.png
+
+          cd dist
+          tar -czvf VisiGrid-${VERSION}-linux-x86_64.tar.gz VisiGrid-${VERSION}-linux-x86_64
+
+      - name: Create AppImage
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Setup AppDir
+          mkdir -p dist/AppDir/usr/bin
+          mkdir -p dist/AppDir/usr/share/applications
+          mkdir -p dist/AppDir/usr/share/icons/hicolor/256x256/apps
+
+          cp target/release/visigrid dist/AppDir/usr/bin/
+          cp assets/visigrid.desktop dist/AppDir/usr/share/applications/
+          cp assets/visigrid.desktop dist/AppDir/
+          cp gpui-app/assets/icon-256.png dist/AppDir/usr/share/icons/hicolor/256x256/apps/visigrid.png
+          cp gpui-app/assets/icon-256.png dist/AppDir/visigrid.png
+          ln -sf visigrid.png dist/AppDir/.DirIcon
+
+          # AppRun
+          cat > dist/AppDir/AppRun << 'EOF'
+          #!/bin/bash
+          SELF=$(readlink -f "$0")
+          HERE=${SELF%/*}
+          export PATH="${HERE}/usr/bin:${PATH}"
+          exec "${HERE}/usr/bin/visigrid" "$@"
+          EOF
+          chmod +x dist/AppDir/AppRun
+
+          # Download and run appimagetool
+          wget -q -O appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool dist/AppDir dist/VisiGrid-${VERSION}-x86_64.AppImage
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: |
+            dist/*.tar.gz
+            dist/*.AppImage
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release -p visigrid-gpui
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create portable zip
+        shell: pwsh
+        run: |
+          $Version = "${{ steps.version.outputs.version }}"
+          $DistDir = "dist\VisiGrid-${Version}-windows-x64"
+
+          New-Item -ItemType Directory -Path $DistDir -Force
+          Copy-Item "target\release\visigrid.exe" $DistDir
+          Copy-Item "gpui-app\windows\visigrid.ico" $DistDir
+
+          @"
+          VisiGrid $Version
+          ==================
+          Double-click visigrid.exe to run.
+          Visit https://visigrid.com for documentation.
+          "@ | Out-File -FilePath "$DistDir\README.txt" -Encoding UTF8
+
+          Compress-Archive -Path $DistDir -DestinationPath "dist\VisiGrid-${Version}-windows-x64.zip"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: dist/*.zip
+
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build universal binary
+        run: |
+          cargo build --release --target x86_64-apple-darwin -p visigrid-gpui
+          cargo build --release --target aarch64-apple-darwin -p visigrid-gpui
+
+          mkdir -p dist/universal
+          lipo -create \
+            target/x86_64-apple-darwin/release/visigrid \
+            target/aarch64-apple-darwin/release/visigrid \
+            -output dist/universal/visigrid
+
+      - name: Get version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create app bundle
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          APP_DIR="dist/VisiGrid.app"
+
+          mkdir -p "$APP_DIR/Contents/MacOS"
+          mkdir -p "$APP_DIR/Contents/Resources"
+
+          cp dist/universal/visigrid "$APP_DIR/Contents/MacOS/"
+
+          # Update Info.plist with version
+          sed -e "s/0\.1\.0/$VERSION/g" gpui-app/macos/Info.plist > "$APP_DIR/Contents/Info.plist"
+
+          # Generate .icns from iconset
+          iconutil -c icns gpui-app/assets/AppIcon.iconset -o "$APP_DIR/Contents/Resources/AppIcon.icns"
+
+          echo -n "APPLVSGD" > "$APP_DIR/Contents/PkgInfo"
+
+      - name: Create DMG
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          mkdir -p dist/dmg-temp
+          cp -R "dist/VisiGrid.app" "dist/dmg-temp/"
+          ln -s /Applications "dist/dmg-temp/Applications"
+
+          hdiutil create -volname "VisiGrid" \
+            -srcfolder "dist/dmg-temp" \
+            -ov -format UDZO \
+            "dist/VisiGrid-${VERSION}-macOS-universal.dmg"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: dist/*.dmg
+
+  create-release:
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: VisiGrid v${{ steps.version.outputs.version }}
+          draft: true
+          files: |
+            artifacts/linux-release/*
+            artifacts/windows-release/*
+            artifacts/macos-release/*
+          body: |
+            ## VisiGrid v${{ steps.version.outputs.version }}
+
+            ### Downloads
+
+            | Platform | Download |
+            |----------|----------|
+            | **macOS** (Universal) | `VisiGrid-${{ steps.version.outputs.version }}-macOS-universal.dmg` |
+            | **Windows** (x64) | `VisiGrid-${{ steps.version.outputs.version }}-windows-x64.zip` |
+            | **Linux** (x86_64) | `VisiGrid-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz` |
+            | **Linux** (AppImage) | `VisiGrid-${{ steps.version.outputs.version }}-x86_64.AppImage` |
+
+            ### Installation
+
+            **macOS**: Open the DMG and drag VisiGrid to Applications.
+
+            **Windows**: Extract the zip and run `visigrid.exe`.
+
+            **Linux**: Extract the tarball and run `./install.sh`, or use the AppImage directly.
+
+            ### Changes
+
+            <!-- Add changelog here -->
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
