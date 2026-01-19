@@ -193,9 +193,17 @@ crates/
 
 ---
 
+## Known Issues
+
+| Issue | Description | Status |
+|-------|-------------|--------|
+| Per-cell font not rendering | Font picker UI works, data is stored/persisted correctly, but gpui doesn't render the font change. Tried both style inheritance and explicit TextRun approaches. | Investigating |
+
+---
+
 ## Next Steps
 
-1. **Command Palette** - Fuzzy search all commands
-2. **Fill Down/Right** - Ctrl+D/R
-3. **Multi-edit** - Typing affects all selected cells
-4. **Dropdown menus** - Proper File/Edit/View/Format menus
+1. Ctrl+Click discontiguous selection
+2. Format Cells dialog (Ctrl+1)
+3. Replace (Ctrl+H)
+4. Cross-sheet references

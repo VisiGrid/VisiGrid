@@ -180,6 +180,7 @@ fn render_format_menu(cx: &mut Context<Spreadsheet>) -> Div {
         .child(menu_item("Italic", Some("Ctrl+I"), cx, |this, cx| { this.close_menu(cx); this.toggle_italic(cx); }))
         .child(menu_item("Underline", Some("Ctrl+U"), cx, |this, cx| { this.close_menu(cx); this.toggle_underline(cx); }))
         .child(menu_separator())
+        .child(menu_item("Font...", None, cx, |this, cx| { this.close_menu(cx); this.show_font_picker(cx); }))
         .child(menu_item_disabled("Cells..."))
         .child(menu_separator())
         .child(menu_item_disabled("Row Height..."))

@@ -1,5 +1,6 @@
 pub mod command_palette;
 mod find_dialog;
+mod font_picker;
 mod formula_bar;
 mod goto_dialog;
 mod grid;
@@ -18,6 +19,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let show_goto = app.mode == Mode::GoTo;
     let show_find = app.mode == Mode::Find;
     let show_command = app.mode == Mode::Command;
+    let show_font_picker = app.mode == Mode::FontPicker;
 
     div()
         .relative()
@@ -332,6 +334,46 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 }
             }
 
+            // Handle Font Picker mode
+            if this.mode == Mode::FontPicker {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.hide_font_picker(cx);
+                        return;
+                    }
+                    "enter" => {
+                        this.font_picker_execute(cx);
+                        return;
+                    }
+                    "up" => {
+                        this.font_picker_up(cx);
+                        return;
+                    }
+                    "down" => {
+                        this.font_picker_down(cx);
+                        return;
+                    }
+                    "backspace" => {
+                        this.font_picker_backspace(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // Handle text input for font picker
+                if let Some(key_char) = &event.keystroke.key_char {
+                    if !event.keystroke.modifiers.control
+                        && !event.keystroke.modifiers.alt
+                        && !event.keystroke.modifiers.platform
+                    {
+                        for c in key_char.chars() {
+                            this.font_picker_insert_char(c, cx);
+                        }
+                        return;
+                    }
+                }
+            }
+
             // Handle GoTo mode
             if this.mode == Mode::GoTo {
                 if event.keystroke.key == "enter" {
@@ -445,6 +487,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         })
         .when(show_command, |div| {
             div.child(command_palette::render_command_palette(app, cx))
+        })
+        .when(show_font_picker, |div| {
+            div.child(font_picker::render_font_picker(app, cx))
         })
         .when(app.open_menu.is_some(), |div| {
             div.child(menu_bar::render_menu_dropdown(app, cx))

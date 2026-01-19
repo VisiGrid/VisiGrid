@@ -26,8 +26,9 @@ pub struct Spreadsheet {
     pub history: History,
 
     // Selection
-    pub selected: (usize, usize),
-    pub selection_end: Option<(usize, usize)>,  // For range selection
+    pub selected: (usize, usize),                              // Anchor of active selection
+    pub selection_end: Option<(usize, usize)>,                 // End of active range selection
+    pub additional_selections: Vec<((usize, usize), Option<(usize, usize)>)>,  // Ctrl+Click ranges
 
     // Viewport
     pub scroll_row: usize,
@@ -80,6 +81,9 @@ pub struct Spreadsheet {
     pub available_fonts: Vec<String>,      // System fonts
     pub font_picker_query: String,         // Filter query
     pub font_picker_selected: usize,       // Selected item index
+
+    // Drag selection state
+    pub dragging_selection: bool,          // Currently dragging to select cells
 }
 
 impl Spreadsheet {
@@ -95,6 +99,7 @@ impl Spreadsheet {
             history: History::new(),
             selected: (0, 0),
             selection_end: None,
+            additional_selections: Vec::new(),
             scroll_row: 0,
             scroll_col: 0,
             mode: Mode::Navigation,
@@ -125,36 +130,28 @@ impl Spreadsheet {
             available_fonts: Self::enumerate_fonts(),
             font_picker_query: String::new(),
             font_picker_selected: 0,
+            dragging_selection: false,
         }
     }
 
     /// Enumerate available system fonts
     fn enumerate_fonts() -> Vec<String> {
-        use gpui::FontFeatures;
-        // Provide a curated list of common fonts - gpui doesn't expose font enumeration
-        // These are commonly available on Linux/Mac/Windows
+        // Fonts commonly installed on Linux systems
+        // TODO: Could use fontconfig to enumerate dynamically
         vec![
-            "DejaVu Sans".to_string(),
-            "DejaVu Sans Mono".to_string(),
-            "DejaVu Serif".to_string(),
-            "Fira Code".to_string(),
-            "Fira Sans".to_string(),
-            "Hack".to_string(),
-            "IBM Plex Mono".to_string(),
-            "IBM Plex Sans".to_string(),
-            "Inter".to_string(),
-            "JetBrains Mono".to_string(),
+            "Adwaita Mono".to_string(),
+            "Adwaita Sans".to_string(),
+            "CaskaydiaMono Nerd Font".to_string(),
+            "iA Writer Mono S".to_string(),
+            "iA Writer Duo S".to_string(),
+            "iA Writer Quattro S".to_string(),
             "Liberation Mono".to_string(),
             "Liberation Sans".to_string(),
             "Liberation Serif".to_string(),
-            "Noto Sans".to_string(),
-            "Noto Serif".to_string(),
-            "Roboto".to_string(),
-            "Roboto Mono".to_string(),
-            "Source Code Pro".to_string(),
-            "Source Sans Pro".to_string(),
-            "Ubuntu".to_string(),
-            "Ubuntu Mono".to_string(),
+            "Nimbus Mono PS".to_string(),
+            "Nimbus Sans".to_string(),
+            "Nimbus Roman".to_string(),
+            "Noto Sans Mono".to_string(),
         ]
     }
 
@@ -431,6 +428,7 @@ impl Spreadsheet {
         let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
         self.selected = (new_row, new_col);
         self.selection_end = None;  // Clear range selection
+        self.additional_selections.clear();  // Clear discontiguous selections
 
         self.ensure_visible(cx);
     }
@@ -591,13 +589,65 @@ impl Spreadsheet {
         } else {
             self.selected = (row, col);
             self.selection_end = None;
+            self.additional_selections.clear();  // Clear Ctrl+Click selections
         }
         cx.notify();
+    }
+
+    /// Ctrl+Click to add/toggle cell in selection (discontiguous selection)
+    pub fn ctrl_click_cell(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        // Save current selection to additional_selections
+        self.additional_selections.push((self.selected, self.selection_end));
+        // Start new selection at clicked cell
+        self.selected = (row, col);
+        self.selection_end = None;
+        cx.notify();
+    }
+
+    /// Start drag selection - called on mouse_down
+    pub fn start_drag_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        self.dragging_selection = true;
+        self.selected = (row, col);
+        self.selection_end = None;
+        self.additional_selections.clear();  // Clear Ctrl+Click selections on new drag
+        cx.notify();
+    }
+
+    /// Start drag selection with Ctrl held (add to existing selections)
+    pub fn start_ctrl_drag_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        self.dragging_selection = true;
+        // Save current selection to additional_selections
+        self.additional_selections.push((self.selected, self.selection_end));
+        // Start new selection at clicked cell
+        self.selected = (row, col);
+        self.selection_end = None;
+        cx.notify();
+    }
+
+    /// Continue drag selection - called on mouse_move while dragging
+    pub fn continue_drag_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        if !self.dragging_selection {
+            return;
+        }
+        // Only update if the cell changed to avoid unnecessary redraws
+        if self.selection_end != Some((row, col)) {
+            self.selection_end = Some((row, col));
+            cx.notify();
+        }
+    }
+
+    /// End drag selection - called on mouse_up
+    pub fn end_drag_selection(&mut self, cx: &mut Context<Self>) {
+        if self.dragging_selection {
+            self.dragging_selection = false;
+            cx.notify();
+        }
     }
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         self.selected = (0, 0);
         self.selection_end = Some((NUM_ROWS - 1, NUM_COLS - 1));
+        self.additional_selections.clear();  // Clear discontiguous selections
         cx.notify();
     }
 
@@ -861,24 +911,22 @@ impl Spreadsheet {
     }
 
     pub fn delete_selection(&mut self, cx: &mut Context<Self>) {
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-
-        // Only get cells that actually have data (efficient for large selections)
-        let cells_to_delete = self.sheet().cells_in_range(min_row, max_row, min_col, max_col);
-
-        if cells_to_delete.is_empty() {
-            return;
-        }
-
         let mut changes = Vec::new();
-        for (row, col) in cells_to_delete {
-            let old_value = self.sheet().get_raw(row, col);
-            if !old_value.is_empty() {
-                changes.push(CellChange {
-                    row, col, old_value, new_value: String::new(),
-                });
+
+        // Delete from all selection ranges (including discontiguous Ctrl+Click selections)
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            // Only get cells that actually have data (efficient for large selections)
+            let cells_to_delete = self.sheet().cells_in_range(min_row, max_row, min_col, max_col);
+
+            for (row, col) in cells_to_delete {
+                let old_value = self.sheet().get_raw(row, col);
+                if !old_value.is_empty() {
+                    changes.push(CellChange {
+                        row, col, old_value, new_value: String::new(),
+                    });
+                }
+                self.sheet_mut().clear_cell(row, col);
             }
-            self.sheet_mut().clear_cell(row, col);
         }
 
         if !changes.is_empty() {
@@ -923,16 +971,49 @@ impl Spreadsheet {
     }
 
     pub fn is_selected(&self, row: usize, col: usize) -> bool {
+        // Check active selection
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-        row >= min_row && row <= max_row && col >= min_col && col <= max_col
+        if row >= min_row && row <= max_row && col >= min_col && col <= max_col {
+            return true;
+        }
+        // Check additional selections (Ctrl+Click ranges)
+        for (start, end) in &self.additional_selections {
+            let end = end.unwrap_or(*start);
+            let min_row = start.0.min(end.0);
+            let max_row = start.0.max(end.0);
+            let min_col = start.1.min(end.1);
+            let max_col = start.1.max(end.1);
+            if row >= min_row && row <= max_row && col >= min_col && col <= max_col {
+                return true;
+            }
+        }
+        false
     }
 
-    // Formatting
+    /// Get all selection ranges (for operations that apply to all selected cells)
+    pub fn all_selection_ranges(&self) -> Vec<((usize, usize), (usize, usize))> {
+        let mut ranges = Vec::new();
+        // Add active selection
+        ranges.push(self.selection_range());
+        // Add additional selections
+        for (start, end) in &self.additional_selections {
+            let end = end.unwrap_or(*start);
+            let min_row = start.0.min(end.0);
+            let max_row = start.0.max(end.0);
+            let min_col = start.1.min(end.1);
+            let max_col = start.1.max(end.1);
+            ranges.push(((min_row, min_col), (max_row, max_col)));
+        }
+        ranges
+    }
+
+    // Formatting (applies to all discontiguous selection ranges)
     pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                self.sheet_mut().toggle_bold(row, col);
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    self.sheet_mut().toggle_bold(row, col);
+                }
             }
         }
         self.is_modified = true;
@@ -940,10 +1021,11 @@ impl Spreadsheet {
     }
 
     pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                self.sheet_mut().toggle_italic(row, col);
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    self.sheet_mut().toggle_italic(row, col);
+                }
             }
         }
         self.is_modified = true;
@@ -951,10 +1033,11 @@ impl Spreadsheet {
     }
 
     pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                self.sheet_mut().toggle_underline(row, col);
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    self.sheet_mut().toggle_underline(row, col);
+                }
             }
         }
         self.is_modified = true;
@@ -1195,6 +1278,102 @@ impl Spreadsheet {
         } else {
             self.hide_palette(cx);
         }
+    }
+
+    // Font Picker
+    pub fn show_font_picker(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::FontPicker;
+        self.font_picker_query.clear();
+        self.font_picker_selected = 0;
+        cx.notify();
+    }
+
+    pub fn hide_font_picker(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        self.font_picker_query.clear();
+        self.font_picker_selected = 0;
+        cx.notify();
+    }
+
+    pub fn font_picker_up(&mut self, cx: &mut Context<Self>) {
+        if self.font_picker_selected > 0 {
+            self.font_picker_selected -= 1;
+            cx.notify();
+        }
+    }
+
+    pub fn font_picker_down(&mut self, cx: &mut Context<Self>) {
+        let filtered = self.filter_fonts();
+        if self.font_picker_selected + 1 < filtered.len() {
+            self.font_picker_selected += 1;
+            cx.notify();
+        }
+    }
+
+    pub fn font_picker_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        self.font_picker_query.push(c);
+        self.font_picker_selected = 0;
+        cx.notify();
+    }
+
+    pub fn font_picker_backspace(&mut self, cx: &mut Context<Self>) {
+        self.font_picker_query.pop();
+        self.font_picker_selected = 0;
+        cx.notify();
+    }
+
+    pub fn font_picker_execute(&mut self, cx: &mut Context<Self>) {
+        let filtered = self.filter_fonts();
+        if let Some(font_name) = filtered.get(self.font_picker_selected) {
+            let font = font_name.clone();
+            self.apply_font_to_selection(&font, cx);
+        }
+        self.hide_font_picker(cx);
+    }
+
+    /// Filter available fonts by query
+    pub fn filter_fonts(&self) -> Vec<String> {
+        if self.font_picker_query.is_empty() {
+            return self.available_fonts.clone();
+        }
+        let query_lower = self.font_picker_query.to_lowercase();
+        self.available_fonts
+            .iter()
+            .filter(|f| f.to_lowercase().contains(&query_lower))
+            .cloned()
+            .collect()
+    }
+
+    /// Apply font to all cells in current selection
+    pub fn apply_font_to_selection(&mut self, font_name: &str, cx: &mut Context<Self>) {
+        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+        let font = if font_name.is_empty() { None } else { Some(font_name.to_string()) };
+
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                self.sheet_mut().set_font_family(row, col, font.clone());
+            }
+        }
+
+        self.is_modified = true;
+        let cell_count = (max_row - min_row + 1) * (max_col - min_col + 1);
+        self.status_message = Some(format!("Applied font '{}' to {} cell(s)", font_name, cell_count));
+        cx.notify();
+    }
+
+    /// Clear font from selection (reset to default)
+    pub fn clear_font_from_selection(&mut self, cx: &mut Context<Self>) {
+        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                self.sheet_mut().set_font_family(row, col, None);
+            }
+        }
+
+        self.is_modified = true;
+        self.status_message = Some("Cleared font from selection".to_string());
+        cx.notify();
     }
 
     // Fill operations (Phase 0 essentials)

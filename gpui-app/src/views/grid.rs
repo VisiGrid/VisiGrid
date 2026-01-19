@@ -1,4 +1,5 @@
 use gpui::*;
+use gpui::StyledText;
 use crate::app::Spreadsheet;
 use super::headers::render_row_header;
 
@@ -111,10 +112,26 @@ fn render_cell(
                 // Double-click to edit
                 this.select_cell(cell_row, cell_col, false, cx);
                 this.start_edit(cx);
+            } else if event.modifiers.shift {
+                // Shift+click extends selection
+                this.select_cell(cell_row, cell_col, true, cx);
+            } else if event.modifiers.control || event.modifiers.platform {
+                // Ctrl+click (or Cmd on Mac) for discontiguous selection
+                this.start_ctrl_drag_selection(cell_row, cell_col, cx);
             } else {
-                let extend = event.modifiers.shift;
-                this.select_cell(cell_row, cell_col, extend, cx);
+                // Start drag selection
+                this.start_drag_selection(cell_row, cell_col, cx);
             }
+        }))
+        .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
+            // Continue drag selection if active
+            if this.dragging_selection {
+                this.continue_drag_selection(cell_row, cell_col, cx);
+            }
+        }))
+        .on_mouse_up(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            // End drag selection
+            this.end_drag_selection(cx);
         }));
 
     // Apply formatting
@@ -127,12 +144,43 @@ fn render_cell(
     if format.underline {
         cell = cell.underline();
     }
-
-    cell.child(if is_editing {
-        format!("{}|", value)  // Show cursor
+    // Build the text content
+    let text_content: SharedString = if is_editing {
+        format!("{}|", value).into()  // Show cursor
     } else {
-        value
-    })
+        value.into()
+    };
+
+    // Apply per-cell font family using StyledText with explicit runs
+    // BUG: Font rendering not working - gpui may need different approach
+    // See: https://github.com/anthropics/visigrid/issues/XXX
+    if let Some(ref font_family) = format.font_family {
+        let run = TextRun {
+            len: text_content.len(),
+            font: Font {
+                family: font_family.clone().into(),
+                features: FontFeatures::default(),
+                fallbacks: None,
+                weight: if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
+                style: if format.italic { FontStyle::Italic } else { FontStyle::Normal },
+            },
+            color: cell_text_color(is_editing),
+            background_color: None,
+            underline: if format.underline {
+                Some(UnderlineStyle {
+                    thickness: px(1.0),
+                    color: None,
+                    wavy: false,
+                })
+            } else {
+                None
+            },
+            strikethrough: None,
+        };
+        cell.child(StyledText::new(text_content).with_runs(vec![run]))
+    } else {
+        cell.child(text_content)
+    }
 }
 
 fn cell_background(is_editing: bool, is_active: bool, is_selected: bool) -> Hsla {
