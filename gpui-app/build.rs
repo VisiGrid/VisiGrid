@@ -4,7 +4,7 @@ fn main() {
     {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("windows/visigrid.ico");
-        res.set_manifest_file("windows/visigrid.manifest");
+        // Don't set manifest - gpui already provides one
         res.set("FileDescription", "VisiGrid - A fast, keyboard-driven spreadsheet");
         res.set("ProductName", "VisiGrid");
         res.set("CompanyName", "RegAtlas, LLC");

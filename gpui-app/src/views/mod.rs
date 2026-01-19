@@ -25,18 +25,38 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .relative()
         .key_context("Spreadsheet")
         .track_focus(&app.focus_handle)
-        // Navigation actions
+        // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
-            this.move_selection(-1, 0, cx);
+            if this.mode.is_formula() {
+                this.formula_move_ref(-1, 0, cx);
+            } else {
+                this.move_selection(-1, 0, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
-            this.move_selection(1, 0, cx);
+            if this.mode.is_formula() {
+                this.formula_move_ref(1, 0, cx);
+            } else {
+                this.move_selection(1, 0, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
-            this.move_selection(0, -1, cx);
+            if this.mode.is_formula() {
+                this.formula_move_ref(0, -1, cx);
+            } else if this.mode.is_editing() {
+                this.move_edit_cursor_left(cx);
+            } else {
+                this.move_selection(0, -1, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &MoveRight, _, cx| {
-            this.move_selection(0, 1, cx);
+            if this.mode.is_formula() {
+                this.formula_move_ref(0, 1, cx);
+            } else if this.mode.is_editing() {
+                this.move_edit_cursor_right(cx);
+            } else {
+                this.move_selection(0, 1, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &JumpUp, _, cx| {
             this.jump_selection(-1, 0, cx);
@@ -68,18 +88,34 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &PageDown, _, cx| {
             this.page_down(cx);
         }))
-        // Selection extension
+        // Selection extension (formula mode: extend range reference)
         .on_action(cx.listener(|this, _: &ExtendUp, _, cx| {
-            this.extend_selection(-1, 0, cx);
+            if this.mode.is_formula() {
+                this.formula_extend_ref(-1, 0, cx);
+            } else {
+                this.extend_selection(-1, 0, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &ExtendDown, _, cx| {
-            this.extend_selection(1, 0, cx);
+            if this.mode.is_formula() {
+                this.formula_extend_ref(1, 0, cx);
+            } else {
+                this.extend_selection(1, 0, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &ExtendLeft, _, cx| {
-            this.extend_selection(0, -1, cx);
+            if this.mode.is_formula() {
+                this.formula_extend_ref(0, -1, cx);
+            } else {
+                this.extend_selection(0, -1, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &ExtendRight, _, cx| {
-            this.extend_selection(0, 1, cx);
+            if this.mode.is_formula() {
+                this.formula_extend_ref(0, 1, cx);
+            } else {
+                this.extend_selection(0, 1, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpUp, _, cx| {
             this.extend_jump_selection(-1, 0, cx);
@@ -187,6 +223,39 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         }))
         .on_action(cx.listener(|this, _: &FillRight, _, cx| {
             this.fill_right(cx);
+        }))
+        // Edit mode cursor movement
+        .on_action(cx.listener(|this, _: &EditCursorLeft, _, cx| {
+            this.move_edit_cursor_left(cx);
+        }))
+        .on_action(cx.listener(|this, _: &EditCursorRight, _, cx| {
+            this.move_edit_cursor_right(cx);
+        }))
+        .on_action(cx.listener(|this, _: &EditCursorHome, _, cx| {
+            if this.mode.is_editing() {
+                this.move_edit_cursor_home(cx);
+            } else {
+                // Navigation mode: go to first column of current row
+                this.selected.1 = 0;
+                this.selection_end = None;
+                this.scroll_col = 0;
+                cx.notify();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &EditCursorEnd, _, cx| {
+            if this.mode.is_editing() {
+                this.move_edit_cursor_end(cx);
+            } else {
+                // Navigation mode: go to last column of current row
+                this.selected.1 = crate::app::NUM_COLS - 1;
+                this.selection_end = None;
+                this.scroll_col = crate::app::NUM_COLS.saturating_sub(this.visible_cols());
+                cx.notify();
+            }
+        }))
+        // F4 reference cycling
+        .on_action(cx.listener(|this, _: &CycleReference, _, cx| {
+            this.cycle_reference(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEditInPlace, _, cx| {
             this.confirm_edit_in_place(cx);

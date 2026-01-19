@@ -1,6 +1,6 @@
 # Rust
 /target/
-Cargo.lock
+# Keep Cargo.lock for reproducible builds (this is an application, not a library)
 
 # IDE
 .idea/

@@ -37,6 +37,7 @@ pub struct Spreadsheet {
     // Mode & editing
     pub mode: Mode,
     pub edit_value: String,
+    pub edit_cursor: usize,  // Cursor position within edit_value
     pub edit_original: String,
     pub goto_input: String,
     pub find_input: String,
@@ -84,6 +85,11 @@ pub struct Spreadsheet {
 
     // Drag selection state
     pub dragging_selection: bool,          // Currently dragging to select cells
+
+    // Formula reference selection state (for pointing mode)
+    pub formula_ref_cell: Option<(usize, usize)>,      // Current reference cell (or range start)
+    pub formula_ref_end: Option<(usize, usize)>,       // Range end (None = single cell)
+    pub formula_ref_start_cursor: usize,               // Cursor position where reference started
 }
 
 impl Spreadsheet {
@@ -104,6 +110,7 @@ impl Spreadsheet {
             scroll_col: 0,
             mode: Mode::Navigation,
             edit_value: String::new(),
+            edit_cursor: 0,
             edit_original: String::new(),
             goto_input: String::new(),
             find_input: String::new(),
@@ -131,6 +138,9 @@ impl Spreadsheet {
             font_picker_query: String::new(),
             font_picker_selected: 0,
             dragging_selection: false,
+            formula_ref_cell: None,
+            formula_ref_end: None,
+            formula_ref_start_cursor: 0,
         }
     }
 
@@ -374,6 +384,45 @@ impl Spreadsheet {
         // For now, just reset to default since we don't support multi-line
         self.row_heights.remove(&row);
         cx.notify();
+    }
+
+    // ========================================================================
+    // Cell Reference Helpers (for formula mode)
+    // ========================================================================
+
+    /// Convert column index to Excel-style letter(s): 0 -> A, 25 -> Z, 26 -> AA
+    pub fn col_to_letter(col: usize) -> String {
+        let mut result = String::new();
+        let mut n = col;
+        loop {
+            result.insert(0, (b'A' + (n % 26) as u8) as char);
+            if n < 26 {
+                break;
+            }
+            n = n / 26 - 1;
+        }
+        result
+    }
+
+    /// Convert (row, col) to cell reference string: (0, 0) -> "A1"
+    pub fn cell_ref(row: usize, col: usize) -> String {
+        format!("{}{}", Self::col_to_letter(col), row + 1)
+    }
+
+    /// Convert range to reference string: ((0, 0), (2, 3)) -> "A1:D3"
+    pub fn range_ref(start: (usize, usize), end: (usize, usize)) -> String {
+        let (r1, c1) = (start.0.min(end.0), start.1.min(end.1));
+        let (r2, c2) = (start.0.max(end.0), start.1.max(end.1));
+        if r1 == r2 && c1 == c2 {
+            Self::cell_ref(r1, c1)
+        } else {
+            format!("{}:{}", Self::cell_ref(r1, c1), Self::cell_ref(r2, c2))
+        }
+    }
+
+    /// Check if edit_value starts with = or + (formula indicator)
+    pub fn is_formula_content(&self) -> bool {
+        self.edit_value.starts_with('=') || self.edit_value.starts_with('+')
     }
 
     /// Calculate visible rows based on window height
@@ -676,6 +725,7 @@ impl Spreadsheet {
         let (row, col) = self.selected;
         self.edit_original = self.sheet().get_raw(row, col);
         self.edit_value = self.edit_original.clone();
+        self.edit_cursor = self.edit_value.len();  // Cursor at end
         self.mode = Mode::Edit;
         cx.notify();
     }
@@ -686,6 +736,7 @@ impl Spreadsheet {
         let (row, col) = self.selected;
         self.edit_original = self.sheet().get_raw(row, col);
         self.edit_value = String::new();
+        self.edit_cursor = 0;
         self.mode = Mode::Edit;
         cx.notify();
     }
@@ -760,6 +811,10 @@ impl Spreadsheet {
         self.edit_value.clear();
         self.edit_original.clear();
         self.is_modified = true;
+        // Clear formula reference state
+        self.formula_ref_cell = None;
+        self.formula_ref_end = None;
+        self.formula_ref_start_cursor = 0;
 
         // Move after confirming
         self.move_selection(dr, dc, cx);
@@ -769,34 +824,388 @@ impl Spreadsheet {
         if self.mode.is_editing() {
             self.mode = Mode::Navigation;
             self.edit_value.clear();
+            self.edit_cursor = 0;
+            // Clear formula reference state
+            self.formula_ref_cell = None;
+            self.formula_ref_end = None;
+            self.formula_ref_start_cursor = 0;
             cx.notify();
         }
     }
 
     pub fn backspace(&mut self, cx: &mut Context<Self>) {
-        if self.mode.is_editing() {
-            self.edit_value.pop();
+        if self.mode.is_editing() && self.edit_cursor > 0 {
+            // Find byte index for cursor position
+            let byte_idx = self.edit_value.char_indices()
+                .nth(self.edit_cursor - 1)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let next_byte_idx = self.edit_value.char_indices()
+                .nth(self.edit_cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(self.edit_value.len());
+            self.edit_value.replace_range(byte_idx..next_byte_idx, "");
+            self.edit_cursor -= 1;
             cx.notify();
         }
     }
 
     pub fn delete_char(&mut self, cx: &mut Context<Self>) {
-        if self.mode.is_editing() && !self.edit_value.is_empty() {
-            self.edit_value.remove(0);
-            cx.notify();
+        if self.mode.is_editing() {
+            let char_count = self.edit_value.chars().count();
+            if self.edit_cursor < char_count {
+                // Find byte index for cursor position
+                let byte_idx = self.edit_value.char_indices()
+                    .nth(self.edit_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.edit_value.len());
+                let next_byte_idx = self.edit_value.char_indices()
+                    .nth(self.edit_cursor + 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.edit_value.len());
+                self.edit_value.replace_range(byte_idx..next_byte_idx, "");
+                cx.notify();
+            }
         }
     }
 
     pub fn insert_char(&mut self, c: char, cx: &mut Context<Self>) {
         if self.mode.is_editing() {
-            self.edit_value.push(c);
+            // In Formula mode, typing an operator finalizes the current reference
+            if self.mode.is_formula() && self.formula_ref_cell.is_some() {
+                if Self::is_formula_operator(c) {
+                    self.finalize_formula_reference();
+                }
+            }
+
+            // Find byte index for cursor position
+            let byte_idx = self.edit_value.char_indices()
+                .nth(self.edit_cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(self.edit_value.len());
+            self.edit_value.insert(byte_idx, c);
+            self.edit_cursor += 1;
             cx.notify();
         } else {
             // Start editing with this character
             let (row, col) = self.selected;
             self.edit_original = self.sheet().get_raw(row, col);
             self.edit_value = c.to_string();
-            self.mode = Mode::Edit;
+            self.edit_cursor = 1;
+
+            // Enter Formula mode if starting with = or +
+            if c == '=' || c == '+' {
+                self.mode = Mode::Formula;
+                self.formula_ref_cell = None;
+                self.formula_ref_end = None;
+            } else {
+                self.mode = Mode::Edit;
+            }
+            cx.notify();
+        }
+    }
+
+    /// Check if character is a formula operator that finalizes a reference
+    fn is_formula_operator(c: char) -> bool {
+        matches!(c, '+' | '-' | '*' | '/' | '^' | '&' | '=' | '<' | '>' | ',' | '(' | ')' | ':' | ';')
+    }
+
+    /// Finalize the current formula reference (clear the active reference state)
+    fn finalize_formula_reference(&mut self) {
+        self.formula_ref_cell = None;
+        self.formula_ref_end = None;
+    }
+
+    // ========================================================================
+    // Formula Mode Reference Selection
+    // ========================================================================
+
+    /// Move formula reference with arrow keys (inserts or updates reference)
+    pub fn formula_move_ref(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
+        if !self.mode.is_formula() {
+            return;
+        }
+
+        let (new_row, new_col) = if let Some((row, col)) = self.formula_ref_cell {
+            // Move existing reference
+            let new_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
+            let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+            (new_row, new_col)
+        } else {
+            // Start new reference from the selected cell (editing cell)
+            let (sel_row, sel_col) = self.selected;
+            let new_row = (sel_row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
+            let new_col = (sel_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+            (new_row, new_col)
+        };
+
+        // Update the reference
+        let is_new = self.formula_ref_cell.is_none();
+        self.formula_ref_cell = Some((new_row, new_col));
+        self.formula_ref_end = None;  // Reset range when moving without shift
+
+        // Insert or update the reference in the formula
+        self.update_formula_reference(is_new);
+        self.ensure_cell_visible(new_row, new_col);
+        cx.notify();
+    }
+
+    /// Extend formula reference to range with Shift+arrow
+    pub fn formula_extend_ref(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
+        if !self.mode.is_formula() {
+            return;
+        }
+
+        // Need an existing reference to extend
+        let (anchor_row, anchor_col) = match self.formula_ref_cell {
+            Some(cell) => cell,
+            None => {
+                // If no reference yet, start one first
+                self.formula_move_ref(dr, dc, cx);
+                return;
+            }
+        };
+
+        // Get current end or use anchor as start
+        let (end_row, end_col) = self.formula_ref_end.unwrap_or((anchor_row, anchor_col));
+
+        // Extend from the end position
+        let new_row = (end_row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
+        let new_col = (end_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+
+        self.formula_ref_end = Some((new_row, new_col));
+
+        // Update the reference in the formula (not new, updating existing)
+        self.update_formula_reference(false);
+        self.ensure_cell_visible(new_row, new_col);
+        cx.notify();
+    }
+
+    /// Insert formula reference on mouse click
+    pub fn formula_click_ref(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        if !self.mode.is_formula() {
+            return;
+        }
+
+        let is_new = self.formula_ref_cell.is_none();
+        self.formula_ref_cell = Some((row, col));
+        self.formula_ref_end = None;
+
+        self.update_formula_reference(is_new);
+        cx.notify();
+    }
+
+    /// Extend formula reference to range on Shift+click
+    pub fn formula_shift_click_ref(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        if !self.mode.is_formula() {
+            return;
+        }
+
+        // Need an existing reference to extend
+        if self.formula_ref_cell.is_none() {
+            // No reference yet, just insert single cell
+            self.formula_click_ref(row, col, cx);
+            return;
+        }
+
+        self.formula_ref_end = Some((row, col));
+        self.update_formula_reference(false);
+        cx.notify();
+    }
+
+    /// Update the formula string with the current reference
+    fn update_formula_reference(&mut self, is_new: bool) {
+        let Some((ref_row, ref_col)) = self.formula_ref_cell else {
+            return;
+        };
+
+        // Build the reference string
+        let ref_text = if let Some((end_row, end_col)) = self.formula_ref_end {
+            Self::range_ref((ref_row, ref_col), (end_row, end_col))
+        } else {
+            Self::cell_ref(ref_row, ref_col)
+        };
+
+        if is_new {
+            // Insert new reference at cursor
+            let byte_idx = self.edit_value.char_indices()
+                .nth(self.edit_cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(self.edit_value.len());
+
+            self.formula_ref_start_cursor = self.edit_cursor;
+            self.edit_value.insert_str(byte_idx, &ref_text);
+            self.edit_cursor += ref_text.chars().count();
+        } else {
+            // Replace existing reference (from formula_ref_start_cursor to edit_cursor)
+            let start_cursor = self.formula_ref_start_cursor;
+            let end_cursor = self.edit_cursor;
+
+            // Convert cursor positions to byte positions
+            let start_byte = self.edit_value.char_indices()
+                .nth(start_cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let end_byte = self.edit_value.char_indices()
+                .nth(end_cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(self.edit_value.len());
+
+            self.edit_value.replace_range(start_byte..end_byte, &ref_text);
+            self.edit_cursor = start_cursor + ref_text.chars().count();
+        }
+    }
+
+    /// Ensure a cell is visible (scroll if necessary)
+    fn ensure_cell_visible(&mut self, row: usize, col: usize) {
+        let visible_rows = self.visible_rows();
+        let visible_cols = self.visible_cols();
+
+        // Adjust scroll to keep cell visible
+        if row < self.scroll_row {
+            self.scroll_row = row;
+        } else if row >= self.scroll_row + visible_rows {
+            self.scroll_row = row.saturating_sub(visible_rows - 1);
+        }
+
+        if col < self.scroll_col {
+            self.scroll_col = col;
+        } else if col >= self.scroll_col + visible_cols {
+            self.scroll_col = col.saturating_sub(visible_cols - 1);
+        }
+    }
+
+    // Cursor movement in edit mode
+    pub fn move_edit_cursor_left(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() && self.edit_cursor > 0 {
+            self.edit_cursor -= 1;
+            cx.notify();
+        }
+    }
+
+    pub fn move_edit_cursor_right(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            let char_count = self.edit_value.chars().count();
+            if self.edit_cursor < char_count {
+                self.edit_cursor += 1;
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn move_edit_cursor_home(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() && self.edit_cursor > 0 {
+            self.edit_cursor = 0;
+            cx.notify();
+        }
+    }
+
+    pub fn move_edit_cursor_end(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            let char_count = self.edit_value.chars().count();
+            if self.edit_cursor < char_count {
+                self.edit_cursor = char_count;
+                cx.notify();
+            }
+        }
+    }
+
+    /// F4: Cycle cell reference at cursor through A1 → $A$1 → A$1 → $A1 → A1
+    pub fn cycle_reference(&mut self, cx: &mut Context<Self>) {
+        if !self.mode.is_editing() {
+            return;
+        }
+
+        // Cell reference pattern: optional $ + column letters + optional $ + row numbers
+        let re = regex::Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
+
+        // Find cursor byte position
+        let cursor_byte = self.edit_value.char_indices()
+            .nth(self.edit_cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(self.edit_value.len());
+
+        // Find reference at or near cursor
+        let mut best_match: Option<(usize, usize, regex::Captures)> = None;
+
+        for caps in re.captures_iter(&self.edit_value) {
+            let m = caps.get(0).unwrap();
+            let start = m.start();
+            let end = m.end();
+
+            // Check if cursor is within or immediately after this reference
+            if cursor_byte >= start && cursor_byte <= end {
+                best_match = Some((start, end, caps));
+                break;
+            }
+            // Also check if cursor is just before the reference (user may have cursor at start)
+            if cursor_byte == start {
+                best_match = Some((start, end, caps));
+                break;
+            }
+        }
+
+        // If no direct match, find the nearest reference before cursor
+        if best_match.is_none() {
+            for caps in re.captures_iter(&self.edit_value) {
+                let m = caps.get(0).unwrap();
+                let start = m.start();
+                let end = m.end();
+
+                if end <= cursor_byte {
+                    best_match = Some((start, end, caps));
+                }
+            }
+        }
+
+        if let Some((start, end, caps)) = best_match {
+            let col_dollar = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let col_letters = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let row_dollar = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+            let row_numbers = caps.get(4).map(|m| m.as_str()).unwrap_or("");
+
+            // Determine current state and cycle to next
+            // State 0: A1 (relative, relative)
+            // State 1: $A$1 (absolute, absolute)
+            // State 2: A$1 (relative col, absolute row)
+            // State 3: $A1 (absolute col, relative row)
+            let current_state = match (col_dollar.is_empty(), row_dollar.is_empty()) {
+                (true, true) => 0,    // A1
+                (false, false) => 1,  // $A$1
+                (true, false) => 2,   // A$1
+                (false, true) => 3,   // $A1
+            };
+
+            let next_state = (current_state + 1) % 4;
+
+            let new_ref = match next_state {
+                0 => format!("{}{}", col_letters, row_numbers),           // A1
+                1 => format!("${}${}", col_letters, row_numbers),         // $A$1
+                2 => format!("{}${}", col_letters, row_numbers),          // A$1
+                3 => format!("${}{}", col_letters, row_numbers),          // $A1
+                _ => unreachable!(),
+            };
+
+            // Replace the reference in edit_value
+            let old_ref_chars = end - start;  // For ASCII cell refs, byte len == char count
+            self.edit_value.replace_range(start..end, &new_ref);
+            let new_ref_chars = new_ref.chars().count();
+
+            // Adjust cursor if it was after or within the replaced region
+            let start_char = self.edit_value[..start].chars().count();
+
+            if self.edit_cursor > start_char {
+                // Cursor was within or after the reference
+                if self.edit_cursor <= start_char + old_ref_chars {
+                    // Cursor was within reference - move to end of new reference
+                    self.edit_cursor = start_char + new_ref_chars;
+                } else {
+                    // Cursor was after reference - adjust by length difference
+                    let diff = new_ref_chars as i32 - old_ref_chars as i32;
+                    self.edit_cursor = (self.edit_cursor as i32 + diff) as usize;
+                }
+            }
+
             cx.notify();
         }
     }

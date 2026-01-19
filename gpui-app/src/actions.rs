@@ -33,6 +33,13 @@ actions!(editing, [
     DeleteCell,
     FillDown,
     FillRight,
+    // Edit mode cursor movement
+    EditCursorLeft,
+    EditCursorRight,
+    EditCursorHome,
+    EditCursorEnd,
+    // F4 reference cycling
+    CycleReference,
 ]);
 
 // Selection actions

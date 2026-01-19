@@ -3,7 +3,8 @@
 pub enum Mode {
     #[default]
     Navigation,  // Grid focus: keystrokes move selection
-    Edit,        // Cell editor focus: keystrokes edit text
+    Edit,        // Cell editor focus: keystrokes edit text (non-formula)
+    Formula,     // Formula entry: grid navigation inserts references
     Command,     // Command palette open
     GoTo,        // Go to cell dialog
     QuickOpen,   // Quick file open (Ctrl+P)
@@ -24,8 +25,14 @@ pub enum Menu {
 }
 
 impl Mode {
+    /// True if editing cell content (either regular Edit or Formula mode)
     pub fn is_editing(&self) -> bool {
-        matches!(self, Mode::Edit)
+        matches!(self, Mode::Edit | Mode::Formula)
+    }
+
+    /// True if in formula entry mode (grid nav inserts references)
+    pub fn is_formula(&self) -> bool {
+        matches!(self, Mode::Formula)
     }
 
     pub fn is_navigation(&self) -> bool {

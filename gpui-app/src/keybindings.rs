@@ -34,6 +34,11 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("delete", DeleteCell, Some("Spreadsheet")),
         KeyBinding::new("ctrl-d", FillDown, Some("Spreadsheet")),
         KeyBinding::new("ctrl-r", FillRight, Some("Spreadsheet")),
+        // Edit mode cursor (Home/End only - left/right handled in MoveLeft/MoveRight)
+        KeyBinding::new("home", EditCursorHome, Some("Spreadsheet")),
+        KeyBinding::new("end", EditCursorEnd, Some("Spreadsheet")),
+        // F4 reference cycling (Excel behavior)
+        KeyBinding::new("f4", CycleReference, Some("Spreadsheet")),
 
         // Selection
         KeyBinding::new("ctrl-a", SelectAll, Some("Spreadsheet")),

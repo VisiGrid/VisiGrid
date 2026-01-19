@@ -144,9 +144,14 @@ fn render_cell(
     if format.underline {
         cell = cell.underline();
     }
-    // Build the text content
+    // Build the text content with cursor at correct position
     let text_content: SharedString = if is_editing {
-        format!("{}|", value).into()  // Show cursor
+        let cursor_pos = app.edit_cursor;
+        // Insert cursor character at the correct position
+        let chars: Vec<char> = value.chars().collect();
+        let before: String = chars.iter().take(cursor_pos).collect();
+        let after: String = chars.iter().skip(cursor_pos).collect();
+        format!("{}|{}", before, after).into()
     } else {
         value.into()
     };
