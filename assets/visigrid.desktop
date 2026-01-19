@@ -1,8 +1,8 @@
 [Desktop Entry]
 Name=VisiGrid
 Comment=Open-source desktop spreadsheet
-Exec=/home/rdo/Code/excel/target/release/visigrid
-Icon=/home/rdo/Code/excel/assets/visigrid.svg
+Exec=visigrid
+Icon=visigrid
 Terminal=false
 Type=Application
 Categories=Office;Spreadsheet;

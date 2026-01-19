@@ -22,11 +22,11 @@ Design patterns borrowed from VS Code, Sublime Text, Vim, and other modern edito
 Not just commands—search across:
 
 - Formulas by name or description ✓ (`=` prefix)
-- Named ranges (not yet)
+- Named ranges ✓ (autocomplete, F12 go-to, Shift+F12 find refs, Ctrl+Shift+R rename)
 - Sheet tabs (not yet - single sheet only)
 - Cell contents ✓ (`@` prefix or Ctrl+F)
 - Recent files ✓ (Ctrl+P or in palette)
-- Settings (not yet)
+- Settings ✓ (`#` prefix)
 
 Command palette prefixes:
 - No prefix: Commands + recent files
@@ -34,8 +34,9 @@ Command palette prefixes:
 - `@`: Search cells
 - `:`: Go to cell reference
 - `=`: Search formula functions
+- `#`: Search settings
 
-**Status**: Mostly implemented
+**Status**: ✓ Complete (except sheet tabs - single sheet only)
 
 ---
 
@@ -83,17 +84,69 @@ No preferences dialog. JSON files in config directory.
 
 Treat formulas like code. Apply IDE patterns.
 
-| Feature | Description |
-|---------|-------------|
-| Autocomplete | Function names with parameter hints |
-| Hover docs | Function signature + description on hover |
-| Error squiggles | Red underline before execution |
-| Go to definition | Jump to named range definition |
-| Find all references | Show all cells referencing a cell |
-| Rename symbol | Rename named range, update all references |
-| Signature help | Parameter info as you type |
+| Feature | Description | Status |
+|---------|-------------|--------|
+| Autocomplete | Function names with parameter hints | ✓ Done |
+| Signature help | Parameter info as you type | ✓ Done |
+| Error squiggles | Red underline before execution | ✓ Done |
+| Go to definition | Jump to named range definition (F12) | ✓ Done |
+| Named ranges | Define names for cell ranges (Ctrl+Shift+N) | ✓ Done |
+| Context help | Function docs on demand (F1) | ✓ Done |
+| Find all references | Show all cells referencing a cell (Shift+F12) | ✓ Done |
+| Rename symbol | Rename named range, update all references (Ctrl+Shift+R) | ✓ Done |
+| Hover docs | Function signature on mouse hover | Not possible (iced limitation) |
 
-**Status**: In progress - Autocomplete implemented (type function name after `=`)
+### Implemented Features
+
+**Autocomplete** - Type `=` and start typing a function name to see suggestions. Arrow keys to navigate, Tab/Enter to accept. Shows function syntax inline.
+
+**Signature Help** - When typing inside function parentheses, shows:
+- Function signature with all parameters
+- Current parameter highlighted in bold
+- Updates as you type commas between arguments
+
+**Error Validation** - Real-time syntax checking:
+- Red error message appears below formula bar
+- Smart detection avoids false positives during typing
+- Validates parenthesis matching, operators, function syntax
+- Shows specific error messages (e.g., "Unexpected character", "Missing operand")
+
+**Named Ranges** - Give meaningful names to cell ranges:
+- `Ctrl+Shift+N` to define a name for current selection
+- Names appear in formula autocomplete
+- Reference by name in formulas: `=SUM(SalesData)`
+- `F12` (Go to Definition) jumps to named range location when cursor is on a name in formula bar
+
+**Context-Sensitive Help (F1)** - Press F1 while editing a formula to get detailed help:
+- Shows function name, syntax, and description
+- Detects the current function context automatically
+- Press Escape to dismiss
+
+**Find All References (Shift+F12)** - See all cells that reference the current cell:
+- Shows list of cells with formula previews
+- Click or press Enter to navigate to a reference
+- Arrow keys to navigate the list
+
+**Rename Symbol (Ctrl+Shift+R)** - Rename a named range across all formulas:
+- Finds all formulas using the named range
+- Shows preview of affected cells
+- Updates all references automatically
+- Word-boundary aware (won't rename partial matches)
+
+### Quick Reference
+
+| Feature | Trigger | Shortcut |
+|---------|---------|----------|
+| Autocomplete | Type `=` then function name | Tab/Enter to accept |
+| Signature help | Type `(` after function | Auto |
+| Error validation | While typing formula | Auto |
+| Context help | Press F1 in formula | F1 |
+| Define named range | Select cells, press shortcut | Ctrl+Shift+N |
+| Go to definition | Cursor on name in formula | F12 |
+| Find all references | Select cell | Shift+F12 |
+| Rename symbol | Cursor on name in formula | Ctrl+Shift+R |
+
+**Status**: ✓ All core features complete
 
 ---
 
@@ -161,22 +214,41 @@ Bird's-eye view of large sheets.
 
 ## Vim Mode
 
-Optional `hjkl` navigation for vim users.
+Optional `hjkl` navigation for vim users. Enable in settings.json:
 
-| Mode | Behavior |
-|------|----------|
-| Normal | Navigation, commands |
-| Insert | Cell editing |
-| Visual | Selection |
-| Command | `:` commands |
+```json
+{
+  "editor.vimMode": true
+}
+```
 
-Motions:
-- `w` / `b` - Next/prev filled cell
-- `gg` / `G` - Top/bottom of data
-- `0` / `$` - Start/end of row
-- `{` / `}` - Prev/next blank row
+**Status**: ✓ Implemented (lite version)
 
-**Status**: Not started (v2, optional)
+### Available Keys (when vim mode enabled)
+
+| Key | Action |
+|-----|--------|
+| `h` `j` `k` `l` | Move left/down/up/right |
+| `w` | Next filled cell (right) |
+| `b` | Previous filled cell (left) |
+| `0` | Start of row |
+| `$` | End of row (last filled cell) |
+| `gg` | Top-left of sheet |
+| `G` | Bottom of data |
+| `{` | Previous blank row |
+| `}` | Next blank row |
+| `i` | Enter insert/edit mode |
+| `a` | Enter insert mode (append) |
+| `f` | Enter hint mode (jump) |
+| `Shift+hjkl` | Extend selection |
+
+### Behavior Notes
+
+- Vim mode is opt-in (default off)
+- When enabled, letter keys become vim commands instead of starting cell edit
+- Press `i` to enter edit mode (like vim insert)
+- Press `Escape` to return to navigation (normal mode)
+- Visual mode not yet implemented (use Shift+hjkl for selection)
 
 ---
 
@@ -210,11 +282,16 @@ Saved state:
 
 ```
 ~/.config/visigrid/workspaces/
-  project-a.workspace.json
-  project-b.workspace.json
+  <hash>.json  # One per project directory
 ```
 
-**Status**: Not started (v2)
+**How it works**:
+- Auto-detects project by looking for `.visigrid` marker file up the directory tree
+- Falls back to current working directory if no marker found
+- Loads workspace session first, then falls back to global session
+- To create a project: `touch /path/to/project/.visigrid`
+
+**Status**: ✓ Implemented
 
 ---
 
@@ -232,31 +309,68 @@ Git-friendly native format.
    - Line-based format for easy diffs
    - Slower for large files
 
-**Status**: Implemented (SQLite), CLI diff tool planned
+### CLI Diff Tool
+
+```bash
+visigrid diff old.sheet new.sheet
+```
+
+Output format (unified diff style):
+```
+--- old.sheet
++++ new.sheet
+@@ A1 @@
+-100
++150
+@@ B3 @@
++=SUM(A1:A10)
+```
+
+Shows added (`+`), removed (`-`), and changed cells with their cell references.
+
+**Status**: ✓ Implemented (SQLite format + CLI diff tool)
 
 ---
 
 ## Integrated Scripting
 
-Visible REPL console, not hidden macros.
+Visible REPL console, not hidden macros. Uses Lua for scripting.
 
 ```
 ┌─────────────────────────────────┐
-│ > sheet.get("A1")               │
+│ > sheet:get_a1("A1")            │
 │ 42                              │
-│ > for r in 1..100:              │
-│ ...   sheet.set(r, 1, r * 2)    │
-│ Done: 100 cells modified        │
+│ > for r = 1, 100 do             │
+│ ...   sheet:set_value(r, 1, r*2)│
+│ ... end                         │
+│ nil                             │
+│ 100 cells modified              │
 │ >                               │
 └─────────────────────────────────┘
 ```
 
-- `Ctrl+`` to toggle console
-- History, autocomplete
-- Script files in project directory
-- Runs in sandbox (no arbitrary file access)
+- `Ctrl+Shift+L` to toggle REPL panel
+- Command history (up/down arrows)
+- Sandboxed execution (no file/OS access)
+- Instruction limits and wall-clock timeout
+- Typed values (numbers, strings, booleans, errors)
 
-**Status**: Not started (v2)
+### Lua API
+
+| Method | Description |
+|--------|-------------|
+| `sheet:get_value(row, col)` | Get typed value (1-indexed) |
+| `sheet:get_display(row, col)` | Get formatted display string |
+| `sheet:get_formula(row, col)` | Get formula or nil |
+| `sheet:set_value(row, col, val)` | Set cell value |
+| `sheet:set_formula(row, col, formula)` | Set formula |
+| `sheet:get_a1("A1")` | Get value using A1 notation |
+| `sheet:set_a1("A1", val)` | Set value using A1 notation |
+| `sheet:clear(row, col)` | Clear cell |
+| `sheet:rows()` / `sheet:cols()` | Sheet dimensions |
+| `sheet:range("A1:C10")` | Get range object |
+
+**Status**: ✓ Implemented (Ctrl+Shift+L)
 
 ---
 
@@ -282,10 +396,14 @@ Click to navigate. Auto-updates on edit.
 Context bar showing current location.
 
 ```
-[Workbook.sheet] > [Sheet1] > [D5] > [=SUM(B2:B4)]
+[Workbook.sheet] › [D5] › [=SUM(B2:B4)]
 ```
 
-Clickable for navigation.
+- File segment → clickable, opens file dialog
+- Cell reference → clickable, opens Go To dialog
+- Value/formula preview (truncated to 40 chars)
+
+**Status**: ✓ Implemented
 
 ### Zen Mode
 
@@ -296,7 +414,56 @@ Distraction-free editing.
 - Hides all panels (menu, formula bar, format bar, sheet tabs)
 - Full-screen grid view
 
-**Status**: Implemented
+**Status**: ✓ Implemented
+
+### Session Persistence
+
+Auto-save state on quit, restore on launch.
+
+Saved state:
+- Current file
+- Scroll position
+- Active cell/selection
+- Split view configuration
+- UI settings (dark mode, zen mode, panels)
+
+```bash
+visigrid                    # Restore previous session
+visigrid --no-restore       # Start fresh
+visigrid -n                 # Start fresh (short form)
+visigrid file.sheet         # Open specific file (skip session)
+```
+
+Session stored at: `~/.config/visigrid/session.json`
+
+**Status**: ✓ Implemented
+
+### Paste Special
+
+Excel-like paste options (`Ctrl+Shift+V`):
+
+**Paste Types**:
+- All (default)
+- Values only (no formulas)
+- Formulas only
+- Formats only
+
+**Operations**:
+- None (just paste)
+- Add / Subtract / Multiply / Divide (apply to existing values)
+
+**Options**:
+- Transpose (swap rows/columns)
+- Skip blanks
+
+**Keyboard shortcuts in dialog**:
+- `↑/↓` navigate, `Tab` switch sections
+- `T` toggle transpose, `B` toggle skip blanks
+- `A/V/F/O` quick select paste type
+- `+/-/*/` quick select operation
+- `Enter` paste, `Esc` cancel
+
+**Status**: ✓ Implemented
 
 ### Split View
 
@@ -327,30 +494,33 @@ Sorted by how much each feature improves daily productivity.
 
 | Rank | Feature | Why It Matters | Status |
 |------|---------|----------------|--------|
-| 1 | **Formula Language Server** | Transforms formula writing from "guess and pray" to guided editing. Autocomplete alone saves massive time. Error squiggles catch mistakes before they propagate. | In progress (autocomplete done) |
+| 1 | **Formula Language Server** | Transforms formula writing from "guess and pray" to guided editing. Autocomplete alone saves massive time. Error squiggles catch mistakes before they propagate. | ✓ Complete |
 | 2 | **Cell Inspector** | "Why did this change?" is the #1 debugging question. Seeing precedents/dependents instantly is like having a debugger for your data. | ✓ Done |
 | 3 | **Command Palette** | Foundation for everything. Makes features discoverable. Teaches shortcuts. | ✓ Done |
 | 4 | **Multi-selection + Multi-edit** | Core differentiator. Edit 50 cells at once instead of copy-paste loops. | ✓ Done |
 | 5 | **Problems Panel** | See all errors in one place instead of hunting. Click to fix. Essential for large sheets. | ✓ Done |
-| 6 | **Fuzzy Search Everywhere** | Find anything instantly. Cells, formulas, named ranges, sheets. Currently you're blind in large workbooks. | Mostly done |
+| 6 | **Fuzzy Search Everywhere** | Find anything instantly. Cells, formulas, named ranges, settings. Currently you're blind in large workbooks. | ✓ Complete |
 | 7 | **Settings as Files** | Power users expect it. Teams can share configs. Version control friendly. | ✓ Done |
 | 8 | **Quick Open (Ctrl+P)** | Fast file switching. Table stakes for any productivity tool. | ✓ Done |
-| 9 | **Integrated Scripting** | Automate repetitive tasks. Visible REPL beats hidden macros. | Not started |
+| 9 | **Integrated Scripting** | Automate repetitive tasks. Visible REPL beats hidden macros. | ✓ Done |
 | 10 | **Split View** | Compare sheets, reference while editing. Common workflow, painful without it. | ✓ Done (basic) |
-| 11 | **Workspaces** | Project context. Nice for heavy users, not critical for most. | Not started |
+| 11 | **Workspaces** | Project context. Nice for heavy users, not critical for most. | ✓ Done |
 | 12 | **Minimap** | Orientation in large sheets. Helpful but you can live without it. | Not started |
-| 13 | **Vim Mode** | Niche audience, but those users are vocal and loyal. Low effort if designed well. | Not started |
+| 13 | **Vim Mode** | Niche audience, but those users are vocal and loyal. Low effort if designed well. | ✓ Done (lite) |
 | 14 | **Zen Mode** | Polish feature. Nice to have, zero impact on core workflow. | ✓ Done |
+| 15 | **Breadcrumbs** | Context bar for navigation. Shows file, cell, and value. | ✓ Done |
+| 16 | **Session Persistence** | Auto-save/restore on quit/launch. | ✓ Done |
+| 17 | **Paste Special** | Excel-like paste options (values, formulas, transpose, operations). | ✓ Done |
 
 ### The Big Three
 
 If I had to pick three features that would most transform the experience:
 
-1. **Formula Language Server** (in progress) — Makes formulas feel like code, not magic strings
+1. ~~**Formula Language Server**~~ ✓ — Makes formulas feel like code, not magic strings
 2. ~~**Cell Inspector**~~ ✓ — Finally understand your spreadsheet's structure
 3. ~~**Problems Panel**~~ ✓ — Stop playing whack-a-mole with errors
 
-These three turn VisiGrid from "fast Excel clone" into "IDE for tabular data."
+**All three core features are now complete!** VisiGrid has evolved from "fast Excel clone" into "IDE for tabular data."
 
 ---
 

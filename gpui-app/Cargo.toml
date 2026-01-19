@@ -1,0 +1,40 @@
+[package]
+name = "visigrid-gpui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VisiGrid spreadsheet - gpui frontend"
+
+[[bin]]
+name = "visigrid"
+path = "src/main.rs"
+
+[package.metadata.bundle]
+name = "VisiGrid"
+identifier = "com.visigrid.app"
+icon = ["assets/AppIcon.icns"]
+category = "public.app-category.productivity"
+short_description = "A fast, keyboard-driven spreadsheet"
+long_description = """
+VisiGrid is a high-performance spreadsheet application built for power users.
+Features vim-style navigation, powerful formulas, and a local-first architecture
+that keeps your data yours.
+"""
+copyright = "Copyright © 2025 RegAtlas, LLC"
+osx_minimum_system_version = "12.0"
+
+[dependencies]
+# Workspace crates
+visigrid-engine = { workspace = true }
+visigrid-core = { workspace = true }
+visigrid-io = { workspace = true }
+visigrid-config = { workspace = true }
+
+# gpui
+gpui = { git = "https://github.com/zed-industries/zed" }
+
+# External deps
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+regex = "1"

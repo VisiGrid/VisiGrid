@@ -1,0 +1,9 @@
+[package]
+name = "visigrid-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core types - selection, ranges"
+
+[dependencies]
+serde = { workspace = true }

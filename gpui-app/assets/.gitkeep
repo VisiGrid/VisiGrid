@@ -1,0 +1,8 @@
+# Icon files go here
+#
+# Required:
+#   - icon-1024.png (1024x1024 source icon)
+#   - AppIcon.icns (generated from icon-1024.png using scripts/generate-icons.sh)
+#
+# Optional:
+#   - dmg-background.png (for DMG installer background)

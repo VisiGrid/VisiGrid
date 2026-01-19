@@ -1,20 +1,31 @@
-[package]
-name = "visigrid"
+[workspace]
+resolver = "2"
+members = [
+    "crates/engine",
+    "crates/core",
+    "crates/io",
+    "crates/config",
+    "gpui-app",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "A lightweight, native spreadsheet inspired by Excel 2003"
 license = "MIT"
 
-[dependencies]
-iced = "0.13"
+[workspace.dependencies]
+# Shared dependencies
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-csv = "1"
 dirs = "5"
-rfd = "0.14"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
-open = "5"
+
+# Internal crates
+visigrid-engine = { path = "crates/engine" }
+visigrid-core = { path = "crates/core" }
+visigrid-io = { path = "crates/io" }
+visigrid-config = { path = "crates/config" }
 
 [profile.release]
 lto = true

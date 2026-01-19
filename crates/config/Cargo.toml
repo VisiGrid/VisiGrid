@@ -1,0 +1,12 @@
+[package]
+name = "visigrid-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Configuration - settings, keybindings, themes, sessions"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }

@@ -2,6 +2,12 @@
 /target/
 Cargo.lock
 
+# Separate repos (sites, api, etc)
+visigrid-site/
+visihub-api/
+visihub-app/
+visihub-site/
+
 # Astro / Node
 visigrid-site/node_modules/
 visigrid-site/dist/

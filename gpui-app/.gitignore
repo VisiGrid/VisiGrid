@@ -1,0 +1,7 @@
+# Build output
+/build/
+/target/
+
+# macOS
+.DS_Store
+*.iconset/

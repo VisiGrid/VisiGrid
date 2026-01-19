@@ -16,36 +16,40 @@ These patterns validate VisiGrid's direction:
 | Splits | tmux-style panes | Ctrl+\\ split view |
 | Minimal chrome | No window decorations | Zen mode (F11) |
 | Themes | Easy theme switching | JSON themes, Omarchy integration |
+| Keyboard hints | Vimium, EasyMotion | 'g' key shows hints, type to jump |
+| URL detection | iTerm2 semantic history | Ctrl+click opens URLs/emails/paths |
+| Session persistence | tmux-resurrect | Auto-restore, workspaces |
 
 ---
 
 ## Proposed Features
 
-### 1. Keyboard Hints (Vimium-style)
+### 1. Keyboard Hints (Vimium-style) ✓
 
 **Inspiration:** Vimium browser extension, EasyMotion vim plugin
 
-Press a trigger key, letter hints appear on cells/regions, type letter to jump instantly. Faster than arrow keys for distant cells.
+**Status:** ✓ Implemented
+
+Press `g` in navigation mode to show letter hints on all visible cells. Type the hint letters to jump instantly.
 
 ```
 ┌───────┬───────┬───────┬───────┐
-│   A   │   S   │   D   │   F   │  ← hints appear on trigger
+│   A   │   B   │   C   │   D   │  ← hints appear when you press 'g'
 ├───────┼───────┼───────┼───────┤
-│   G   │   H   │   J   │   K   │
+│   E   │   F   │   G   │   H   │
 ├───────┼───────┼───────┼───────┤
-│   L   │   ;   │   Q   │   W   │
+│   I   │   J   │   K   │   L   │
 └───────┴───────┴───────┴───────┘
 
-Press 'H' → cursor jumps to that cell
+Type 'H' → cursor jumps to that cell
 ```
 
-**Implementation notes:**
-- Trigger: Could be `g` followed by letter (vim-style) or dedicated key
-- Show hints only for visible cells
-- Two-letter combos for large grids (like Vimium)
-- Could also hint: named ranges, error cells, formula cells
-
-**Priority:** Medium - Low effort, high impact for power users
+**How it works:**
+- Press `g` to enter hint mode
+- Hints use a-z, then aa-az, ba-bz for large grids
+- Type letters to filter; jumps when unique match found
+- Matching hints highlight in yellow on blue
+- Press `Backspace` to correct, `Escape` to cancel
 
 ---
 
@@ -212,9 +216,11 @@ Auto-detect and treat different regions specially.
 
 ---
 
-### 7. Session Persistence
+### 7. Session Persistence ✓
 
 **Inspiration:** tmux-resurrect, vim sessions
+
+**Status:** ✓ Implemented (see docs/editor-inspiration.md)
 
 Auto-save everything on quit, restore exactly on reopen.
 
@@ -250,30 +256,30 @@ Auto-save everything on quit, restore exactly on reopen.
 
 ---
 
-### 8. URL/Path Detection
+### 8. URL/Path Detection ✓
 
 **Inspiration:** Terminal URL detection, iTerm2 semantic history
 
-Auto-detect and make clickable: URLs, file paths, email addresses.
+**Status:** ✓ Implemented
+
+Auto-detect and open URLs, file paths, and email addresses with Ctrl+Click.
 
 ```
 ┌──────────┬─────────────────────────────────────┐
-│ Invoice  │ https://stripe.com/inv_abc123       │ ← Ctrl+Click opens
+│ Invoice  │ https://stripe.com/inv_abc123       │ ← Ctrl+Click opens browser
 ├──────────┼─────────────────────────────────────┤
-│ Receipt  │ ~/Documents/receipts/jan.pdf        │ ← Opens in viewer
+│ Receipt  │ ~/Documents/receipts/jan.pdf        │ ← Opens in file viewer
 ├──────────┼─────────────────────────────────────┤
 │ Contact  │ billing@example.com                 │ ← Opens mail client
 └──────────┴─────────────────────────────────────┘
 ```
 
-**Implementation:**
-- Regex detection for common patterns
-- Underline on hover
-- `Ctrl+Click` to open
-- Keyboard: `Ctrl+Shift+O` opens link under cursor
-- Context menu: "Open Link", "Copy Link"
+**Supported patterns:**
+- URLs: `http://`, `https://`, `ftp://`
+- Email: `user@domain.com` (opens as `mailto:`)
+- Paths: `/absolute/path` or `~/home/relative` (if file exists)
 
-**Priority:** Low - Nice polish, easy to implement
+**Usage:** `Ctrl+Click` on a cell containing a link to open it with your system's default handler. If no link is detected, falls back to adding cell to selection.
 
 ---
 
@@ -351,18 +357,18 @@ Execute shell commands and use output in cells.
 
 Sorted by impact and feasibility:
 
-| Rank | Feature | Effort | Impact | Notes |
-|------|---------|--------|--------|-------|
-| 1 | Pipe-friendly CLI | Medium | High | Composability, unix philosophy |
-| 2 | Keyboard hints | Low | High | Navigation game-changer |
-| 3 | Inline sparklines | Medium | Medium | Visual differentiation |
-| 4 | Semantic regions | Medium | Medium | Reduces errors, improves UX |
-| 5 | Session persistence | Low | Medium | Already planned (Workspaces) |
-| 6 | URL detection | Low | Low | Easy win, polish |
-| 7 | Background jobs | Medium | Low | Only matters for large files |
-| 8 | Status customization | Low | Low | Power user feature |
-| 9 | Formula ligatures | Low | Low | Pure polish |
-| 10 | Shell commands | High | Low | Security complexity |
+| Rank | Feature | Effort | Impact | Status |
+|------|---------|--------|--------|--------|
+| 1 | Pipe-friendly CLI | Medium | High | Partial (diff done) |
+| 2 | Keyboard hints | Low | High | ✓ Done |
+| 3 | Inline sparklines | Medium | Medium | Not started |
+| 4 | Semantic regions | Medium | Medium | Not started |
+| 5 | Session persistence | Low | Medium | ✓ Done |
+| 6 | URL detection | Low | Low | ✓ Done |
+| 7 | Background jobs | Medium | Low | Not started |
+| 8 | Status customization | Low | Low | Not started |
+| 9 | Formula ligatures | Low | Low | Not started |
+| 10 | Shell commands | High | Low | Not started |
 
 ---
 
