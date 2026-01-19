@@ -153,9 +153,10 @@ impl Workbook {
 
     /// Create a workbook from sheets (for deserialization)
     pub fn from_sheets(sheets: Vec<Sheet>, active: usize) -> Self {
+        let active_sheet = active.min(sheets.len().saturating_sub(1));
         Self {
             sheets,
-            active_sheet: active.min(sheets.len().saturating_sub(1)),
+            active_sheet,
         }
     }
 }

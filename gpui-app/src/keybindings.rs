@@ -81,5 +81,10 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("alt-o", OpenFormatMenu, Some("Spreadsheet")),
         KeyBinding::new("alt-d", OpenDataMenu, Some("Spreadsheet")),
         KeyBinding::new("alt-h", OpenHelpMenu, Some("Spreadsheet")),
+
+        // Sheet navigation
+        KeyBinding::new("ctrl-pagedown", NextSheet, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-pageup", PrevSheet, Some("Spreadsheet")),
+        KeyBinding::new("shift-f11", AddSheet, Some("Spreadsheet")),
     ]);
 }

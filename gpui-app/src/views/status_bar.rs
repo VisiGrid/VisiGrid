@@ -1,8 +1,9 @@
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
 
 /// Render the bottom status bar (Zed-inspired minimal design)
-pub fn render_status_bar(app: &Spreadsheet, editing: bool) -> impl IntoElement {
+pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     // Calculate selection stats if multiple cells selected
     let selection_stats = calculate_selection_stats(app);
 
@@ -14,6 +15,10 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool) -> impl IntoElement {
     } else {
         "Ready"
     };
+
+    // Get sheet information
+    let sheet_names = app.workbook.sheet_names();
+    let active_index = app.workbook.active_sheet_index();
 
     div()
         .flex_shrink_0()
@@ -28,25 +33,43 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool) -> impl IntoElement {
         .text_color(rgb(0x858585))
         .text_xs()
         .child(
-            // Left side: sheet tabs placeholder + mode
+            // Left side: sheet tabs + add button + mode
             div()
                 .flex()
                 .items_center()
-                .gap_3()
-                .child(
-                    // Sheet tab (placeholder for multi-sheet)
-                    div()
-                        .px_2()
-                        .py_px()
-                        .bg(rgb(0x1e1e1e))
-                        .border_1()
-                        .border_color(rgb(0x3d3d3d))
-                        .rounded_sm()
-                        .text_color(rgb(0xcccccc))
-                        .child("Sheet1")
+                .gap_1()
+                // Sheet tabs
+                .children(
+                    sheet_names.iter().enumerate().map(|(idx, name)| {
+                        let is_active = idx == active_index;
+                        sheet_tab(name, idx, is_active, cx)
+                    })
                 )
+                // Add sheet button
                 .child(
-                    // Status message or mode
+                    div()
+                        .id("add-sheet-btn")
+                        .px_1()
+                        .py_px()
+                        .cursor_pointer()
+                        .text_color(rgb(0x858585))
+                        .hover(|s| s.text_color(rgb(0xcccccc)).bg(rgb(0x3d3d3d)))
+                        .rounded_sm()
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.add_sheet(cx);
+                        }))
+                        .child("+")
+                )
+                // Separator
+                .child(
+                    div()
+                        .w(px(1.0))
+                        .h(px(12.0))
+                        .bg(rgb(0x3d3d3d))
+                        .mx_2()
+                )
+                // Status message or mode
+                .child(
                     div()
                         .text_color(rgb(0x858585))
                         .child(
@@ -68,6 +91,32 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool) -> impl IntoElement {
         )
 }
 
+/// Render a single sheet tab
+fn sheet_tab(name: &str, index: usize, is_active: bool, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let name_owned = name.to_string();
+
+    div()
+        .id(ElementId::Name(format!("sheet-tab-{}", index).into()))
+        .px_2()
+        .py_px()
+        .cursor_pointer()
+        .rounded_sm()
+        .when(is_active, |d| {
+            d.bg(rgb(0x1e1e1e))
+                .border_1()
+                .border_color(rgb(0x3d3d3d))
+                .text_color(rgb(0xcccccc))
+        })
+        .when(!is_active, |d| {
+            d.text_color(rgb(0x858585))
+                .hover(|s| s.bg(rgb(0x2d2d2d)).text_color(rgb(0xcccccc)))
+        })
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            this.goto_sheet(index, cx);
+        }))
+        .child(name_owned)
+}
+
 /// Calculate statistics for the current selection
 fn calculate_selection_stats(app: &Spreadsheet) -> Vec<impl IntoElement> {
     let ((min_row, min_col), (max_row, max_col)) = app.selection_range();
@@ -85,7 +134,7 @@ fn calculate_selection_stats(app: &Spreadsheet) -> Vec<impl IntoElement> {
     for row in min_row..=max_row {
         for col in min_col..=max_col {
             count += 1;
-            let display = app.sheet.get_display(row, col);
+            let display = app.sheet().get_display(row, col);
             if let Ok(num) = display.parse::<f64>() {
                 values.push(num);
             }

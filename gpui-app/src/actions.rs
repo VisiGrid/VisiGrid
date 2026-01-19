@@ -104,3 +104,10 @@ actions!(menu, [
     OpenHelpMenu,
     CloseMenu,
 ]);
+
+// Sheet navigation actions
+actions!(sheets, [
+    NextSheet,
+    PrevSheet,
+    AddSheet,
+]);

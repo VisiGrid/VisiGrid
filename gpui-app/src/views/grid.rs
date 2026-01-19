@@ -81,10 +81,10 @@ fn render_cell(
     let value = if is_editing {
         edit_value.to_string()
     } else {
-        app.sheet.get_display(row, col)
+        app.sheet().get_display(row, col)
     };
 
-    let format = app.sheet.get_format(row, col);
+    let format = app.sheet().get_format(row, col);
     let cell_row = row;
     let cell_col = col;
 

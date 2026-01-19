@@ -16,7 +16,8 @@ Current status of keyboard shortcuts in the gpui version.
 | Formatting | 3 | 10 | 30% |
 | View | 1 | 8 | 13% |
 | Menu | 7 | 7 | 100% |
-| **Total** | **51** | **88** | **58%** |
+| Sheets | 3 | 3 | 100% |
+| **Total** | **54** | **91** | **59%** |
 
 ---
 
@@ -110,6 +111,16 @@ Current status of keyboard shortcuts in the gpui version.
 | Alt+D | Data menu | ✅ |
 | Alt+H | Help menu | ✅ |
 
+### Sheet Navigation
+
+| Shortcut | Action | Status |
+|----------|--------|--------|
+| Ctrl+Page Down | Next sheet | ✅ |
+| Ctrl+Page Up | Previous sheet | ✅ |
+| Shift+F11 | Add new sheet | ✅ |
+| Click tab | Switch to sheet | ✅ |
+| Click + | Add new sheet | ✅ |
+
 ---
 
 ## NOT YET Implemented
@@ -121,7 +132,6 @@ Current status of keyboard shortcuts in the gpui version.
 | Ctrl+Click | Add to selection | Discontiguous |
 | Ctrl+H | Replace | Find & Replace |
 | Ctrl+1 | Format Cells | Dialog |
-| Ctrl+PageUp/Down | Sheet navigation | Multi-sheet |
 
 ### Priority 2 (Power User)
 
@@ -190,10 +200,11 @@ Editor-inspired shortcuts that differentiate from Excel:
 3. ❌ Ctrl+1 (Format Cells)
 4. ❌ Number format shortcuts
 
-### Sprint 3: Multi-Sheet
-1. Ctrl+PageUp/Down
-2. Sheet tab clicks
-3. Sheet context menu
+### Sprint 3: Multi-Sheet ✅ COMPLETE
+1. ✅ Ctrl+PageUp/Down
+2. ✅ Sheet tab clicks
+3. ✅ Shift+F11 to add sheet
+4. ❌ Sheet context menu (rename, delete)
 
 ### Sprint 4: Power Features
 1. Zoom shortcuts

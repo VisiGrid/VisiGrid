@@ -10,7 +10,7 @@ pub fn render_formula_bar(app: &Spreadsheet) -> impl IntoElement {
     let display_value = if editing {
         app.edit_value.clone()
     } else {
-        app.sheet.get_raw(app.selected.0, app.selected.1)
+        app.sheet().get_raw(app.selected.0, app.selected.1)
     };
 
     div()

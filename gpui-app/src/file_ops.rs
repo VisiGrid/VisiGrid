@@ -1,19 +1,20 @@
 use gpui::*;
 use std::path::PathBuf;
-use visigrid_engine::sheet::Sheet;
+use visigrid_engine::workbook::Workbook;
 use visigrid_io::{csv, native};
 
-use crate::app::{Spreadsheet, NUM_ROWS, NUM_COLS};
+use crate::app::Spreadsheet;
 
 impl Spreadsheet {
     pub fn new_file(&mut self, cx: &mut Context<Self>) {
-        self.sheet = Sheet::new(NUM_ROWS, NUM_COLS);
+        self.workbook = Workbook::new();
         self.current_file = None;
         self.is_modified = false;
         self.selected = (0, 0);
         self.selection_end = None;
         self.scroll_row = 0;
         self.scroll_col = 0;
+        self.history.clear();
         self.status_message = Some("New workbook created".to_string());
         cx.notify();
     }
@@ -51,13 +52,15 @@ impl Spreadsheet {
 
         match result {
             Ok(sheet) => {
-                self.sheet = sheet;
+                // Create a new workbook with the loaded sheet
+                self.workbook = Workbook::from_sheets(vec![sheet], 0);
                 self.current_file = Some(path.clone());
                 self.is_modified = false;
                 self.selected = (0, 0);
                 self.selection_end = None;
                 self.scroll_row = 0;
                 self.scroll_col = 0;
+                self.history.clear();
                 self.status_message = Some(format!("Opened: {}", path.display()));
             }
             Err(e) => {
@@ -101,8 +104,8 @@ impl Spreadsheet {
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("sheet");
 
         let result = match extension.to_lowercase().as_str() {
-            "csv" => csv::export(&self.sheet, path),
-            _ => native::save(&self.sheet, path),  // Default to .sheet format
+            "csv" => csv::export(self.sheet(), path),
+            _ => native::save(self.sheet(), path),  // Default to .sheet format
         };
 
         match result {
@@ -134,7 +137,7 @@ impl Spreadsheet {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
                 let _ = this.update(cx, |this, cx| {
-                    match csv::export(&this.sheet, &path) {
+                    match csv::export(this.sheet(), &path) {
                         Ok(()) => {
                             this.status_message = Some(format!("Exported: {}", path.display()));
                         }

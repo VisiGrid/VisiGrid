@@ -239,6 +239,16 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &OpenHelpMenu, _, cx| {
             this.toggle_menu(crate::mode::Menu::Help, cx);
         }))
+        // Sheet navigation
+        .on_action(cx.listener(|this, _: &NextSheet, _, cx| {
+            this.next_sheet(cx);
+        }))
+        .on_action(cx.listener(|this, _: &PrevSheet, _, cx| {
+            this.prev_sheet(cx);
+        }))
+        .on_action(cx.listener(|this, _: &AddSheet, _, cx| {
+            this.add_sheet(cx);
+        }))
         // Character input (handles editing, goto, find, and command modes)
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
             // Handle Command Palette mode
@@ -385,7 +395,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .child(formula_bar::render_formula_bar(app))
         .child(headers::render_column_headers(app, cx))
         .child(grid::render_grid(app, cx))
-        .child(status_bar::render_status_bar(app, editing))
+        .child(status_bar::render_status_bar(app, editing, cx))
         .when(show_goto, |div| {
             div.child(goto_dialog::render_goto_dialog(app))
         })

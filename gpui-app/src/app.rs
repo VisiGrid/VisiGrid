@@ -583,8 +583,8 @@ impl Spreadsheet {
         let old_value = self.edit_original.clone();
         let new_value = self.edit_value.clone();
 
-        self.history.record_change(row, col, old_value, new_value);
-        self.sheet_mut().set_value(row, col, &self.edit_value);
+        self.history.record_change(row, col, old_value, new_value.clone());
+        self.sheet_mut().set_value(row, col, &new_value);
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
