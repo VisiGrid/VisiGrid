@@ -18,3 +18,9 @@ Thumbs.db
 
 # Claude Code context (local only)
 CLAUDE.md
+
+# Local sibling repos (not part of this project)
+visigrid-site/
+visihub-api/
+visihub-app/
+visihub-site/
