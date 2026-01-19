@@ -526,6 +526,55 @@ impl Spreadsheet {
         self.move_selection(visible_rows, 0, cx);
     }
 
+    /// Find the data boundary in a direction (used by Ctrl+Arrow and Ctrl+Shift+Arrow)
+    fn find_data_boundary(&self, start_row: usize, start_col: usize, dr: i32, dc: i32) -> (usize, usize) {
+        let mut row = start_row;
+        let mut col = start_col;
+        let current_empty = self.sheet().get_cell(row, col).value.raw_display().is_empty();
+
+        // Check if next cell exists and what it contains
+        let peek_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
+        let peek_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+        let next_empty = if peek_row == row && peek_col == col {
+            true // At edge
+        } else {
+            self.sheet().get_cell(peek_row, peek_col).value.raw_display().is_empty()
+        };
+
+        // Determine search mode: looking for non-empty or looking for empty
+        let looking_for_nonempty = current_empty || next_empty;
+
+        loop {
+            let next_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
+            let next_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+
+            // Stop if we hit the edge
+            if next_row == row && next_col == col {
+                break;
+            }
+
+            let cell_empty = self.sheet().get_cell(next_row, next_col).value.raw_display().is_empty();
+
+            if looking_for_nonempty {
+                // Scanning through empty space: stop at first non-empty or edge
+                row = next_row;
+                col = next_col;
+                if !cell_empty {
+                    break;
+                }
+            } else {
+                // Scanning through data: stop at last non-empty before empty
+                if cell_empty {
+                    break;
+                }
+                row = next_row;
+                col = next_col;
+            }
+        }
+
+        (row, col)
+    }
+
     /// Jump to edge of data region or sheet boundary (Excel-style Ctrl+Arrow)
     pub fn jump_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
@@ -826,11 +875,22 @@ impl Spreadsheet {
         let old_value = self.edit_original.clone();
 
         // Convert leading + to = for formulas (Excel compatibility)
-        let new_value = if self.edit_value.starts_with('+') {
+        let mut new_value = if self.edit_value.starts_with('+') {
             format!("={}", &self.edit_value[1..])
         } else {
             self.edit_value.clone()
         };
+
+        // Auto-close unmatched parentheses (Excel compatibility)
+        if new_value.starts_with('=') {
+            let open_count = new_value.chars().filter(|&c| c == '(').count();
+            let close_count = new_value.chars().filter(|&c| c == ')').count();
+            if open_count > close_count {
+                for _ in 0..(open_count - close_count) {
+                    new_value.push(')');
+                }
+            }
+        }
 
         self.history.record_change(row, col, old_value, new_value.clone());
         self.sheet_mut().set_value(row, col, &new_value);
@@ -1323,6 +1383,16 @@ impl Spreadsheet {
 
     // Clipboard
     pub fn copy(&mut self, cx: &mut Context<Self>) {
+        // If editing, copy the formula/edit text instead of cell values
+        if self.mode.is_editing() {
+            let text = self.edit_value.clone();
+            self.clipboard = Some(text.clone());
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.status_message = Some("Copied formula to clipboard".to_string());
+            cx.notify();
+            return;
+        }
+
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
         // Build tab-separated values for clipboard

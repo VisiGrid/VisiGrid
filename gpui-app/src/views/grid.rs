@@ -110,12 +110,13 @@ fn render_cell(
                 return;
             }
 
-            // Formula mode: clicks insert cell references
+            // Formula mode: clicks insert cell references, drag for range
             if this.mode.is_formula() {
                 if event.modifiers.shift {
                     this.formula_shift_click_ref(cell_row, cell_col, cx);
                 } else {
-                    this.formula_click_ref(cell_row, cell_col, cx);
+                    // Start drag for range selection in formula mode
+                    this.formula_start_drag(cell_row, cell_col, cx);
                 }
                 return;
             }
@@ -139,11 +140,15 @@ fn render_cell(
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
             // Continue drag selection if active
             if this.dragging_selection {
-                this.continue_drag_selection(cell_row, cell_col, cx);
+                if this.mode.is_formula() {
+                    this.formula_continue_drag(cell_row, cell_col, cx);
+                } else {
+                    this.continue_drag_selection(cell_row, cell_col, cx);
+                }
             }
         }))
         .on_mouse_up(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            // End drag selection
+            // End drag selection (works for both normal and formula mode)
             this.end_drag_selection(cx);
         }));
 
