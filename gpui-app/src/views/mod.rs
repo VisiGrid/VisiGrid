@@ -59,16 +59,32 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             }
         }))
         .on_action(cx.listener(|this, _: &JumpUp, _, cx| {
-            this.jump_selection(-1, 0, cx);
+            if this.mode.is_formula() {
+                this.formula_jump_ref(-1, 0, cx);
+            } else {
+                this.jump_selection(-1, 0, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &JumpDown, _, cx| {
-            this.jump_selection(1, 0, cx);
+            if this.mode.is_formula() {
+                this.formula_jump_ref(1, 0, cx);
+            } else {
+                this.jump_selection(1, 0, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &JumpLeft, _, cx| {
-            this.jump_selection(0, -1, cx);
+            if this.mode.is_formula() {
+                this.formula_jump_ref(0, -1, cx);
+            } else {
+                this.jump_selection(0, -1, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &JumpRight, _, cx| {
-            this.jump_selection(0, 1, cx);
+            if this.mode.is_formula() {
+                this.formula_jump_ref(0, 1, cx);
+            } else {
+                this.jump_selection(0, 1, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &MoveToStart, _, cx| {
             this.selected = (0, 0);
@@ -118,16 +134,32 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             }
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpUp, _, cx| {
-            this.extend_jump_selection(-1, 0, cx);
+            if this.mode.is_formula() {
+                this.formula_extend_jump_ref(-1, 0, cx);
+            } else {
+                this.extend_jump_selection(-1, 0, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpDown, _, cx| {
-            this.extend_jump_selection(1, 0, cx);
+            if this.mode.is_formula() {
+                this.formula_extend_jump_ref(1, 0, cx);
+            } else {
+                this.extend_jump_selection(1, 0, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpLeft, _, cx| {
-            this.extend_jump_selection(0, -1, cx);
+            if this.mode.is_formula() {
+                this.formula_extend_jump_ref(0, -1, cx);
+            } else {
+                this.extend_jump_selection(0, -1, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpRight, _, cx| {
-            this.extend_jump_selection(0, 1, cx);
+            if this.mode.is_formula() {
+                this.formula_extend_jump_ref(0, 1, cx);
+            } else {
+                this.extend_jump_selection(0, 1, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
             this.select_all(cx);

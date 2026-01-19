@@ -163,6 +163,8 @@ jobs:
 
   build-macos:
     runs-on: macos-14
+    # Temporarily disabled due to upstream GPUI font-kit dependency conflict
+    if: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -241,7 +243,7 @@ jobs:
           path: dist/*.dmg
 
   create-release:
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-linux, build-windows]  # macOS disabled for now
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:

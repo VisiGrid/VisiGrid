@@ -405,24 +405,45 @@ impl Spreadsheet {
     }
 
     /// Convert (row, col) to cell reference string: (0, 0) -> "A1"
-    pub fn cell_ref(row: usize, col: usize) -> String {
+    pub fn make_cell_ref(row: usize, col: usize) -> String {
         format!("{}{}", Self::col_to_letter(col), row + 1)
     }
 
     /// Convert range to reference string: ((0, 0), (2, 3)) -> "A1:D3"
-    pub fn range_ref(start: (usize, usize), end: (usize, usize)) -> String {
+    pub fn make_range_ref(start: (usize, usize), end: (usize, usize)) -> String {
         let (r1, c1) = (start.0.min(end.0), start.1.min(end.1));
         let (r2, c2) = (start.0.max(end.0), start.1.max(end.1));
         if r1 == r2 && c1 == c2 {
-            Self::cell_ref(r1, c1)
+            Self::make_cell_ref(r1, c1)
         } else {
-            format!("{}:{}", Self::cell_ref(r1, c1), Self::cell_ref(r2, c2))
+            format!("{}:{}", Self::make_cell_ref(r1, c1), Self::make_cell_ref(r2, c2))
         }
     }
 
     /// Check if edit_value starts with = or + (formula indicator)
     pub fn is_formula_content(&self) -> bool {
         self.edit_value.starts_with('=') || self.edit_value.starts_with('+')
+    }
+
+    /// Check if a cell is within the current formula reference (for highlighting)
+    pub fn is_formula_ref(&self, row: usize, col: usize) -> bool {
+        if !self.mode.is_formula() {
+            return false;
+        }
+
+        let Some((ref_row, ref_col)) = self.formula_ref_cell else {
+            return false;
+        };
+
+        if let Some((end_row, end_col)) = self.formula_ref_end {
+            // Range reference - check if cell is within the range
+            let (min_row, max_row) = (ref_row.min(end_row), ref_row.max(end_row));
+            let (min_col, max_col) = (ref_col.min(end_col), ref_col.max(end_col));
+            row >= min_row && row <= max_row && col >= min_col && col <= max_col
+        } else {
+            // Single cell reference
+            row == ref_row && col == ref_col
+        }
     }
 
     /// Calculate visible rows based on window height
@@ -803,7 +824,13 @@ impl Spreadsheet {
 
         let (row, col) = self.selected;
         let old_value = self.edit_original.clone();
-        let new_value = self.edit_value.clone();
+
+        // Convert leading + to = for formulas (Excel compatibility)
+        let new_value = if self.edit_value.starts_with('+') {
+            format!("={}", &self.edit_value[1..])
+        } else {
+            self.edit_value.clone()
+        };
 
         self.history.record_change(row, col, old_value, new_value.clone());
         self.sheet_mut().set_value(row, col, &new_value);
@@ -1013,6 +1040,90 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Extend formula reference to data boundary with Ctrl+Shift+arrow
+    pub fn formula_extend_jump_ref(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
+        if !self.mode.is_formula() {
+            return;
+        }
+
+        // Need an existing reference to extend (or start one)
+        let (anchor_row, anchor_col) = match self.formula_ref_cell {
+            Some(cell) => cell,
+            None => {
+                // If no reference yet, start one first with a jump
+                self.formula_jump_ref(dr, dc, cx);
+                return;
+            }
+        };
+
+        // Get current end or use anchor as start
+        let (end_row, end_col) = self.formula_ref_end.unwrap_or((anchor_row, anchor_col));
+
+        // Jump to data boundary from end position
+        let (new_row, new_col) = self.find_data_boundary(end_row, end_col, dr, dc);
+
+        self.formula_ref_end = Some((new_row, new_col));
+        self.update_formula_reference(false);
+        self.ensure_cell_visible(new_row, new_col);
+        cx.notify();
+    }
+
+    /// Move formula reference by jumping to data boundary (Ctrl+arrow in formula mode)
+    pub fn formula_jump_ref(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
+        if !self.mode.is_formula() {
+            return;
+        }
+
+        let (start_row, start_col) = if let Some((row, col)) = self.formula_ref_cell {
+            (row, col)
+        } else {
+            self.selected
+        };
+
+        let (new_row, new_col) = self.find_data_boundary(start_row, start_col, dr, dc);
+
+        let is_new = self.formula_ref_cell.is_none();
+        self.formula_ref_cell = Some((new_row, new_col));
+        self.formula_ref_end = None;
+
+        self.update_formula_reference(is_new);
+        self.ensure_cell_visible(new_row, new_col);
+        cx.notify();
+    }
+
+    /// Start formula range drag selection
+    pub fn formula_start_drag(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        if !self.mode.is_formula() {
+            return;
+        }
+
+        let is_new = self.formula_ref_cell.is_none();
+        self.formula_ref_cell = Some((row, col));
+        self.formula_ref_end = None;
+        self.dragging_selection = true;  // Reuse the drag flag
+
+        self.update_formula_reference(is_new);
+        cx.notify();
+    }
+
+    /// Continue formula range drag selection
+    pub fn formula_continue_drag(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        if !self.mode.is_formula() || !self.dragging_selection {
+            return;
+        }
+
+        if self.formula_ref_cell.is_none() {
+            return;
+        }
+
+        // Only update if the cell changed
+        if self.formula_ref_end != Some((row, col)) {
+            self.formula_ref_end = Some((row, col));
+            self.update_formula_reference(false);
+            cx.notify();
+        }
+    }
+
     /// Update the formula string with the current reference
     fn update_formula_reference(&mut self, is_new: bool) {
         let Some((ref_row, ref_col)) = self.formula_ref_cell else {
@@ -1021,9 +1132,9 @@ impl Spreadsheet {
 
         // Build the reference string
         let ref_text = if let Some((end_row, end_col)) = self.formula_ref_end {
-            Self::range_ref((ref_row, ref_col), (end_row, end_col))
+            Self::make_range_ref((ref_row, ref_col), (end_row, end_col))
         } else {
-            Self::cell_ref(ref_row, ref_col)
+            Self::make_cell_ref(ref_row, ref_col)
         };
 
         if is_new {

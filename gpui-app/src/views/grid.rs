@@ -78,6 +78,7 @@ fn render_cell(
     let is_selected = app.is_selected(row, col);
     let is_active = selected == (row, col);
     let is_editing = editing && is_active;
+    let is_formula_ref = app.is_formula_ref(row, col);
 
     let value = if is_editing {
         edit_value.to_string()
@@ -98,9 +99,9 @@ fn render_cell(
         .items_center()
         .px_1()
         .overflow_hidden()
-        .bg(cell_background(is_editing, is_active, is_selected))
+        .bg(cell_background(is_editing, is_active, is_selected, is_formula_ref))
         .border_1()
-        .border_color(cell_border(is_editing, is_active, is_selected))
+        .border_color(cell_border(is_editing, is_active, is_selected, is_formula_ref))
         .text_color(cell_text_color(is_editing))
         .text_sm()
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -200,9 +201,11 @@ fn render_cell(
     }
 }
 
-fn cell_background(is_editing: bool, is_active: bool, is_selected: bool) -> Hsla {
+fn cell_background(is_editing: bool, is_active: bool, is_selected: bool, is_formula_ref: bool) -> Hsla {
     if is_editing {
         rgb(0xffffff).into()  // White when editing
+    } else if is_formula_ref {
+        rgba(0x4ec9b060).into()  // Teal/green for formula reference (semi-transparent)
     } else if is_active {
         rgb(0x264f78).into()  // Blue for active cell
     } else if is_selected {
@@ -212,9 +215,11 @@ fn cell_background(is_editing: bool, is_active: bool, is_selected: bool) -> Hsla
     }
 }
 
-fn cell_border(is_editing: bool, is_active: bool, is_selected: bool) -> Hsla {
+fn cell_border(is_editing: bool, is_active: bool, is_selected: bool, is_formula_ref: bool) -> Hsla {
     if is_editing || is_active {
         rgb(0x007acc).into()  // Blue border
+    } else if is_formula_ref {
+        rgb(0x4ec9b0).into()  // Teal/green border for formula reference
     } else if is_selected {
         rgba(0x007acc80).into()  // 50% alpha
     } else {
