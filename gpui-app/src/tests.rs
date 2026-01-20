@@ -576,3 +576,147 @@ fn test_fill_left_ref_error() {
         "Column before A doesn't exist, should be #REF!"
     );
 }
+
+// =========================================================================
+// EXTRACT NAMED RANGE: Replacement correctness tests
+// =========================================================================
+
+/// Test-only version of replace_range_in_formula (mirrors Spreadsheet::replace_range_in_formula)
+fn replace_range_in_formula(formula: &str, range_literal: &str, name: &str) -> String {
+    let range_upper = range_literal.to_uppercase();
+    let mut result = String::new();
+    let chars: Vec<char> = formula.chars().collect();
+    let range_len = range_upper.len();
+
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < chars.len() {
+        // Track string literal state (toggle on each unescaped quote)
+        if chars[i] == '"' {
+            // Check for escaped quote (doubled quote in Excel formulas)
+            if in_string && i + 1 < chars.len() && chars[i + 1] == '"' {
+                result.push(chars[i]);
+                result.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            in_string = !in_string;
+            result.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        // If inside a string, just copy the character
+        if in_string {
+            result.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        // Check for range match (only outside strings)
+        if i + range_len <= chars.len() {
+            let slice: String = chars[i..i + range_len].iter().collect::<String>().to_uppercase();
+            if slice == range_upper {
+                // Verify word boundaries
+                let before_ok = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_' && chars[i - 1] != '$');
+                let after_ok = i + range_len >= chars.len() || (!chars[i + range_len].is_alphanumeric() && chars[i + range_len] != '_');
+                if before_ok && after_ok {
+                    result.push_str(name);
+                    i += range_len;
+                    continue;
+                }
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
+}
+
+#[test]
+fn test_extract_string_literal_not_replaced() {
+    // ="A1:B2" should NOT be modified - it's a string literal
+    let formula = r#"="A1:B2""#;
+    let result = replace_range_in_formula(formula, "A1:B2", "MyRange");
+    assert_eq!(result, r#"="A1:B2""#, "String literal should not be modified");
+}
+
+#[test]
+fn test_extract_simple_range_replaced() {
+    // =SUM(A1:B2) should become =SUM(MyRange)
+    let formula = "=SUM(A1:B2)";
+    let result = replace_range_in_formula(formula, "A1:B2", "MyRange");
+    assert_eq!(result, "=SUM(MyRange)", "Simple range should be replaced");
+}
+
+#[test]
+fn test_extract_absolute_range_replaced() {
+    // =SUM($A$1:$B$2) should become =SUM(MyRange)
+    let formula = "=SUM($A$1:$B$2)";
+    let result = replace_range_in_formula(formula, "$A$1:$B$2", "MyRange");
+    assert_eq!(result, "=SUM(MyRange)", "Absolute range should be replaced exactly");
+}
+
+#[test]
+fn test_extract_similar_range_not_touched() {
+    // Extracting A1:B2 must NOT touch A1:B20 (longer range)
+    let formula = "=SUM(A1:B20)";
+    let result = replace_range_in_formula(formula, "A1:B2", "MyRange");
+    assert_eq!(result, "=SUM(A1:B20)", "Similar but longer range should NOT be replaced");
+}
+
+#[test]
+fn test_extract_boundary_checks() {
+    // Range at different boundaries
+
+    // At start of formula
+    let result1 = replace_range_in_formula("=A1:B2+C1", "A1:B2", "MyRange");
+    assert_eq!(result1, "=MyRange+C1", "Range at start");
+
+    // At end of formula
+    let result2 = replace_range_in_formula("=C1+A1:B2", "A1:B2", "MyRange");
+    assert_eq!(result2, "=C1+MyRange", "Range at end");
+
+    // Multiple occurrences
+    let result3 = replace_range_in_formula("=SUM(A1:B2)+AVERAGE(A1:B2)", "A1:B2", "MyRange");
+    assert_eq!(result3, "=SUM(MyRange)+AVERAGE(MyRange)", "Multiple occurrences replaced");
+}
+
+#[test]
+fn test_extract_case_insensitive() {
+    // Range matching should be case-insensitive
+    let formula = "=SUM(a1:b2)";
+    let result = replace_range_in_formula(formula, "A1:B2", "MyRange");
+    assert_eq!(result, "=SUM(MyRange)", "Case-insensitive matching");
+}
+
+#[test]
+fn test_extract_preserves_mixed_content() {
+    // Formula with string and range
+    let formula = r#"=IF(A1>0,"A1:B2",SUM(A1:B2))"#;
+    let result = replace_range_in_formula(formula, "A1:B2", "MyRange");
+    assert_eq!(result, r#"=IF(A1>0,"A1:B2",SUM(MyRange))"#, "String preserved, range replaced");
+}
+
+#[test]
+fn test_extract_escaped_quote_in_string() {
+    // Excel uses "" for escaped quote inside strings
+    let formula = r#"=CONCAT("Say ""A1:B2""",A1:B2)"#;
+    let result = replace_range_in_formula(formula, "A1:B2", "MyRange");
+    assert_eq!(result, r#"=CONCAT("Say ""A1:B2""",MyRange)"#, "Escaped quotes handled");
+}
+
+#[test]
+fn test_extract_word_boundary_prevents_partial_match() {
+    // Should not match A1:B2 inside A1:B2X or XA1:B2
+    let formula = "=SUM(A1:B2X)";  // Not a valid range, but test boundary
+    let result = replace_range_in_formula(formula, "A1:B2", "MyRange");
+    // A1:B2X has 'X' after, which is alphanumeric, so should NOT match
+    assert_eq!(result, "=SUM(A1:B2X)", "Alphanumeric suffix prevents match");
+
+    // With underscore suffix
+    let formula2 = "=A1:B2_total";
+    let result2 = replace_range_in_formula(formula2, "A1:B2", "MyRange");
+    assert_eq!(result2, "=A1:B2_total", "Underscore suffix prevents match");
+}

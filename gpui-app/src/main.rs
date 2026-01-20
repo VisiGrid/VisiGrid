@@ -14,6 +14,7 @@ mod keybindings;
 mod menus;
 mod mode;
 mod search;
+mod settings;
 mod theme;
 mod views;
 
@@ -22,9 +23,13 @@ mod tests;
 
 use gpui::*;
 use app::Spreadsheet;
+use settings::init_settings_store;
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        // Initialize app-level settings store (must be first)
+        init_settings_store(cx);
+
         keybindings::register(cx);
 
         // Set up native macOS menu bar

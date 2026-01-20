@@ -2,3 +2,4 @@
 
 pub mod csv;
 pub mod native;
+pub mod xlsx;

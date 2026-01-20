@@ -1,8 +1,6 @@
 use gpui::*;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::fs;
 use visigrid_engine::sheet::Sheet;
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::formula::eval::CellLookup;
@@ -11,44 +9,16 @@ use visigrid_engine::named_range::is_valid_name;
 use crate::history::{History, CellChange, UndoAction};
 use crate::mode::Mode;
 use crate::search::{SearchEngine, SearchAction, CommandId, CommandSearchProvider, GoToSearchProvider, SearchItem};
+use crate::settings::{
+    user_settings_path, open_settings_file, user_settings, update_user_settings,
+    observe_settings, Setting, TipId,
+};
 use crate::theme::{Theme, TokenKey, visigrid_theme, builtin_themes, get_theme};
 use crate::views;
 use crate::formula_context::{tokenize_for_highlight, TokenType};
 
 // Re-export from autocomplete module for external access
 pub use crate::autocomplete::{SignatureHelpInfo, FormulaErrorInfo};
-
-// User settings that persist across sessions
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct Settings {
-    theme_id: Option<String>,
-    #[serde(default)]
-    name_tooltip_dismissed: bool,
-    #[serde(default)]
-    rename_f12_hint_shown: bool,
-}
-
-impl Settings {
-    fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|p| p.join("visigrid").join("settings.json"))
-    }
-
-    fn load() -> Self {
-        Self::path()
-            .and_then(|p| fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    }
-
-    fn save(&self) {
-        if let Some(path) = Self::path() {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::write(path, serde_json::to_string_pretty(self).unwrap_or_default());
-        }
-    }
-}
 
 /// Tri-state value for properties across multiple cells
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +112,15 @@ pub const FORMULA_BAR_HEIGHT: f32 = 28.0;
 pub const COLUMN_HEADER_HEIGHT: f32 = 24.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 
+/// Cached layout measurements for hit-testing (updated each render)
+#[derive(Clone, Copy, Default)]
+pub struct GridLayout {
+    /// Grid body origin in window coordinates (top-left of first cell)
+    pub grid_body_origin: (f32, f32),
+    /// Viewport size for the grid body (for limiting iteration)
+    pub viewport_size: (f32, f32),
+}
+
 pub struct Spreadsheet {
     // Core data
     pub workbook: Workbook,
@@ -223,6 +202,15 @@ pub struct Spreadsheet {
     // Drag selection state
     pub dragging_selection: bool,          // Currently dragging to select cells
 
+    // Row/column header drag selection state
+    pub dragging_row_header: bool,         // Currently dragging row headers
+    pub dragging_col_header: bool,         // Currently dragging column headers
+    pub row_header_anchor: Option<usize>,  // Anchor row for drag (stable during drag)
+    pub col_header_anchor: Option<usize>,  // Anchor col for drag (stable during drag)
+
+    // Layout cache for hit-testing
+    pub grid_layout: GridLayout,
+
     // Formula reference selection state (for pointing mode)
     pub formula_ref_cell: Option<(usize, usize)>,      // Current reference cell (or range start)
     pub formula_ref_end: Option<(usize, usize)>,       // Range end (None = single cell)
@@ -240,8 +228,8 @@ pub struct Spreadsheet {
     // Formula hover documentation state
     pub hover_function: Option<&'static crate::formula_context::FunctionInfo>,
 
-    // Formula view toggle (Ctrl+`)
-    pub show_formulas: bool,
+    // Document-level settings (persisted in sidecar file)
+    pub doc_settings: crate::settings::DocumentSettings,
 
     // Inspector panel state
     pub inspector_visible: bool,
@@ -280,8 +268,11 @@ pub struct Spreadsheet {
     // Tour state
     pub tour_step: usize,                        // Current step (0-3)
     pub tour_completed: bool,                    // Has the tour been completed this session?
-    pub name_tooltip_dismissed: bool,            // Has the first-run tooltip been dismissed?
-    pub rename_f12_hint_shown: bool,             // Has the post-rename F12 hint been shown?
+    pub show_f2_tip: bool,                       // Should we show the F2 tip this frame?
+
+    // Settings subscription (for observing global settings changes)
+    #[allow(dead_code)]
+    settings_subscription: gpui::Subscription,
 
     // Impact preview state
     pub impact_preview_action: Option<crate::views::impact_preview::ImpactAction>,
@@ -299,6 +290,16 @@ pub struct Spreadsheet {
     pub extract_validation_error: Option<String>,
     pub extract_select_all: bool,                // Type-to-replace for name field
     pub extract_focus: CreateNameFocus,          // Which field has focus (reusing enum)
+
+    // Import report state (for Excel imports)
+    pub import_result: Option<visigrid_io::xlsx::ImportResult>,
+    pub import_filename: Option<String>,         // Original filename for display
+    pub import_source_dir: Option<PathBuf>,      // Original directory for Save As default
+
+    // Background import state
+    pub import_in_progress: bool,
+    pub import_overlay_visible: bool,
+    pub import_started_at: Option<std::time::Instant>,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -340,12 +341,17 @@ impl Spreadsheet {
         window.focus(&focus_handle, cx);
         let window_size = window.viewport_size();
 
-        // Load saved theme or default
-        let settings = Settings::load();
-        let theme = settings.theme_id
-            .as_ref()
+        // Get theme from global settings store
+        let theme = user_settings(cx).appearance.theme_id
+            .as_value()
             .and_then(|id| get_theme(id))
             .unwrap_or_else(visigrid_theme);
+
+        // Subscribe to global settings changes - trigger re-render when settings change
+        let settings_subscription = observe_settings(cx, |cx| {
+            // Notify all windows to re-render when settings change
+            cx.refresh_windows();
+        });
 
         Self {
             workbook,
@@ -397,6 +403,11 @@ impl Spreadsheet {
             theme_picker_query: String::new(),
             theme_picker_selected: 0,
             dragging_selection: false,
+            dragging_row_header: false,
+            dragging_col_header: false,
+            row_header_anchor: None,
+            col_header_anchor: None,
+            grid_layout: GridLayout::default(),
             formula_ref_cell: None,
             formula_ref_end: None,
             formula_ref_start_cursor: 0,
@@ -405,7 +416,7 @@ impl Spreadsheet {
             autocomplete_selected: 0,
             autocomplete_replace_range: 0..0,
             hover_function: None,
-            show_formulas: false,
+            doc_settings: crate::settings::DocumentSettings::default(),
             inspector_visible: false,
             inspector_tab: crate::mode::InspectorTab::default(),
             inspector_pinned: None,
@@ -432,8 +443,8 @@ impl Spreadsheet {
 
             tour_step: 0,
             tour_completed: false,
-            name_tooltip_dismissed: settings.name_tooltip_dismissed,
-            rename_f12_hint_shown: settings.rename_f12_hint_shown,
+            show_f2_tip: false,
+            settings_subscription,
 
             impact_preview_action: None,
             impact_preview_usages: Vec::new(),
@@ -448,6 +459,14 @@ impl Spreadsheet {
             extract_validation_error: None,
             extract_select_all: false,
             extract_focus: CreateNameFocus::default(),
+
+            import_result: None,
+            import_filename: None,
+            import_source_dir: None,
+
+            import_in_progress: false,
+            import_overlay_visible: false,
+            import_started_at: None,
         }
     }
 
@@ -459,6 +478,54 @@ impl Spreadsheet {
     /// Get a theme token color
     pub fn token(&self, key: TokenKey) -> Hsla {
         self.active_theme().get(key)
+    }
+
+    // ========================================================================
+    // Document settings accessors (resolve Setting<T> to concrete values)
+    // ========================================================================
+
+    /// Whether to show formulas instead of calculated values
+    pub fn show_formulas(&self) -> bool {
+        use crate::settings::Setting;
+        match &self.doc_settings.display.show_formulas {
+            Setting::Value(v) => *v,
+            Setting::Inherit => false, // Default: show values, not formulas
+        }
+    }
+
+    /// Whether to show zero values (vs blank cells)
+    pub fn show_zeros(&self) -> bool {
+        use crate::settings::Setting;
+        match &self.doc_settings.display.show_zeros {
+            Setting::Value(v) => *v,
+            Setting::Inherit => true, // Default: show zeros (like Excel)
+        }
+    }
+
+    /// Toggle the show_formulas document setting
+    pub fn toggle_show_formulas(&mut self, cx: &mut Context<Self>) {
+        use crate::settings::Setting;
+        let current = self.show_formulas();
+        self.doc_settings.display.show_formulas = Setting::Value(!current);
+        self.save_doc_settings_if_needed();
+        cx.notify();
+    }
+
+    /// Toggle the show_zeros document setting
+    pub fn toggle_show_zeros(&mut self, cx: &mut Context<Self>) {
+        use crate::settings::Setting;
+        let current = self.show_zeros();
+        self.doc_settings.display.show_zeros = Setting::Value(!current);
+        self.save_doc_settings_if_needed();
+        cx.notify();
+    }
+
+    /// Save document settings to sidecar if document has a path
+    fn save_doc_settings_if_needed(&self) {
+        if let Some(ref path) = self.current_file {
+            // Best-effort save - don't block on errors
+            let _ = crate::settings::save_doc_settings(path, &self.doc_settings);
+        }
     }
 
     /// Enumerate available system fonts
@@ -570,45 +637,20 @@ impl Spreadsheet {
                 cx.write_to_clipboard(ClipboardItem::new_string(key.clone()));
 
                 // Open settings file in system editor
-                if let Some(path) = Settings::path() {
-                    // Ensure file exists with defaults
-                    if !path.exists() {
-                        Settings::default().save();
+                let filename = user_settings_path()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "settings.json".to_string());
+
+                match open_settings_file() {
+                    Ok(()) => {
+                        self.status_message = Some(format!(
+                            "Copied \"{}\" to clipboard — paste into {}",
+                            key, filename
+                        ));
                     }
-
-                    // Open with system default editor
-                    #[cfg(target_os = "linux")]
-                    let result = std::process::Command::new("xdg-open")
-                        .arg(&path)
-                        .spawn();
-
-                    #[cfg(target_os = "macos")]
-                    let result = std::process::Command::new("open")
-                        .arg(&path)
-                        .spawn();
-
-                    #[cfg(target_os = "windows")]
-                    let result = std::process::Command::new("cmd")
-                        .args(["/C", "start", "", &path.display().to_string()])
-                        .spawn();
-
-                    let filename = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("settings.json");
-
-                    match result {
-                        Ok(_) => {
-                            self.status_message = Some(format!(
-                                "Copied \"{}\" to clipboard — paste into {}",
-                                key, filename
-                            ));
-                        }
-                        Err(e) => {
-                            self.status_message = Some(format!("Failed to open settings: {}", e));
-                        }
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to open settings: {}", e));
                     }
-                } else {
-                    self.status_message = Some("Could not determine settings path".to_string());
                 }
                 cx.notify();
             }
@@ -917,6 +959,53 @@ impl Spreadsheet {
         y
     }
 
+    /// Convert window X position to column index.
+    /// Uses measured grid_layout.grid_body_origin for accuracy.
+    pub fn col_from_window_x(&self, window_x: f32) -> Option<usize> {
+        let x = window_x - self.grid_layout.grid_body_origin.0;
+        if x < 0.0 { return None; }
+
+        let viewport_width = self.grid_layout.viewport_size.0;
+        let mut current_x = 0.0;
+        for col in self.scroll_col..NUM_COLS {
+            if current_x > viewport_width { break; }
+            let width = self.col_width(col);
+            if x < current_x + width {
+                return Some(col);
+            }
+            current_x += width;
+        }
+        Some(NUM_COLS - 1)  // Clamp to last column if beyond viewport
+    }
+
+    /// Convert window Y position to row index.
+    /// O(1) for uniform heights, O(visible rows) for variable heights.
+    pub fn row_from_window_y(&self, window_y: f32) -> Option<usize> {
+        let y = window_y - self.grid_layout.grid_body_origin.1;
+        if y < 0.0 { return None; }
+
+        // O(1) fast path: uniform row heights
+        if self.row_heights.is_empty() {
+            let row = self.scroll_row + (y / CELL_HEIGHT).floor() as usize;
+            return Some(row.min(NUM_ROWS - 1));
+        }
+
+        // O(visible rows) slow path: variable heights, stop at viewport bottom
+        let viewport_height = self.grid_layout.viewport_size.1;
+        let mut current_y = 0.0;
+        let mut last_row = self.scroll_row;
+        for row in self.scroll_row..NUM_ROWS {
+            if current_y > viewport_height { break; }
+            last_row = row;
+            let height = self.row_height(row);
+            if y < current_y + height {
+                return Some(row);
+            }
+            current_y += height;
+        }
+        Some(last_row)
+    }
+
     /// Auto-fit column width to content
     pub fn auto_fit_col_width(&mut self, col: usize, cx: &mut Context<Self>) {
         let mut max_width: f32 = 40.0; // Minimum width
@@ -940,6 +1029,75 @@ impl Spreadsheet {
         // For now, just reset to default since we don't support multi-line
         self.row_heights.remove(&row);
         cx.notify();
+    }
+
+    /// Auto-fit column width - if column is selected and multiple columns are selected,
+    /// auto-fit all selected columns (Excel behavior)
+    pub fn auto_fit_selected_col_widths(&mut self, clicked_col: usize, cx: &mut Context<Self>) {
+        // Check if clicked column is part of selection
+        if self.is_col_header_selected(clicked_col) {
+            // Collect all selected columns
+            let mut cols_to_fit = Vec::new();
+            for ((_, min_col), (_, max_col)) in self.all_selection_ranges() {
+                for col in min_col..=max_col {
+                    if !cols_to_fit.contains(&col) {
+                        cols_to_fit.push(col);
+                    }
+                }
+            }
+            // Auto-fit each selected column
+            for col in cols_to_fit {
+                self.auto_fit_col_width_no_notify(col);
+            }
+            cx.notify();
+        } else {
+            // Not part of selection, just auto-fit the clicked column
+            self.auto_fit_col_width(clicked_col, cx);
+        }
+    }
+
+    /// Auto-fit column width without notifying (for batch operations)
+    fn auto_fit_col_width_no_notify(&mut self, col: usize) {
+        let mut max_width: f32 = 40.0; // Minimum width
+        for row in 0..NUM_ROWS {
+            let text = self.sheet().get_text(row, col);
+            if !text.is_empty() {
+                let estimated_width = text.len() as f32 * 7.5 + 16.0;
+                max_width = max_width.max(estimated_width);
+            }
+        }
+        self.set_col_width(col, max_width);
+    }
+
+    /// Auto-fit row height - if row is selected and multiple rows are selected,
+    /// auto-fit all selected rows (Excel behavior)
+    pub fn auto_fit_selected_row_heights(&mut self, clicked_row: usize, cx: &mut Context<Self>) {
+        // Check if clicked row is part of selection
+        if self.is_row_header_selected(clicked_row) {
+            // Collect all selected rows
+            let mut rows_to_fit = Vec::new();
+            for ((min_row, _), (max_row, _)) in self.all_selection_ranges() {
+                for row in min_row..=max_row {
+                    if !rows_to_fit.contains(&row) {
+                        rows_to_fit.push(row);
+                    }
+                }
+            }
+            // Auto-fit each selected row
+            for row in rows_to_fit {
+                self.auto_fit_row_height_no_notify(row);
+            }
+            cx.notify();
+        } else {
+            // Not part of selection, just auto-fit the clicked row
+            self.auto_fit_row_height(clicked_row, cx);
+        }
+    }
+
+    /// Auto-fit row height without notifying (for batch operations)
+    fn auto_fit_row_height_no_notify(&mut self, row: usize) {
+        // For now, just reset to default since we don't support multi-line
+        self.row_heights.remove(&row);
     }
 
     // ========================================================================
@@ -2719,6 +2877,133 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    // Row/Column header selection helpers
+
+    /// Check if the active selection spans all columns (row selection)
+    pub fn is_row_selection(&self) -> bool {
+        let ((_, min_col), (_, max_col)) = self.selection_range();
+        min_col == 0 && max_col == NUM_COLS - 1
+    }
+
+    /// Check if the active selection spans all rows (column selection)
+    pub fn is_col_selection(&self) -> bool {
+        let ((min_row, _), (max_row, _)) = self.selection_range();
+        min_row == 0 && max_row == NUM_ROWS - 1
+    }
+
+    /// Check if row header should be highlighted (checks all selections)
+    pub fn is_row_header_selected(&self, row: usize) -> bool {
+        for ((min_row, _), (max_row, _)) in self.all_selection_ranges() {
+            if row >= min_row && row <= max_row {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if column header should be highlighted (checks all selections)
+    pub fn is_col_header_selected(&self, col: usize) -> bool {
+        for ((_, min_col), (_, max_col)) in self.all_selection_ranges() {
+            if col >= min_col && col <= max_col {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Select entire row. If extend=true, extends from current anchor row.
+    pub fn select_row(&mut self, row: usize, extend: bool, cx: &mut Context<Self>) {
+        if extend {
+            // Extend from the current anchor (self.selected.0 before this call)
+            let anchor_row = self.selected.0;
+            self.selected = (anchor_row.min(row), 0);
+            self.selection_end = Some((anchor_row.max(row), NUM_COLS - 1));
+        } else {
+            self.selected = (row, 0);
+            self.selection_end = Some((row, NUM_COLS - 1));
+            self.additional_selections.clear();
+        }
+        cx.notify();
+    }
+
+    /// Select entire column. If extend=true, extends from current anchor col.
+    pub fn select_col(&mut self, col: usize, extend: bool, cx: &mut Context<Self>) {
+        if extend {
+            let anchor_col = self.selected.1;
+            self.selected = (0, anchor_col.min(col));
+            self.selection_end = Some((NUM_ROWS - 1, anchor_col.max(col)));
+        } else {
+            self.selected = (0, col);
+            self.selection_end = Some((NUM_ROWS - 1, col));
+            self.additional_selections.clear();
+        }
+        cx.notify();
+    }
+
+    /// Start row header drag - stores stable anchor
+    pub fn start_row_header_drag(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.dragging_row_header = true;
+        self.dragging_col_header = false;
+        self.dragging_selection = false;
+        self.row_header_anchor = Some(row);
+        self.select_row(row, false, cx);
+    }
+
+    /// Continue row header drag - uses stored anchor
+    pub fn continue_row_header_drag(&mut self, row: usize, cx: &mut Context<Self>) {
+        if !self.dragging_row_header { return; }
+        let anchor = self.row_header_anchor.unwrap_or(row);
+        let min_r = anchor.min(row);
+        let max_r = anchor.max(row);
+        self.selected = (min_r, 0);
+        self.selection_end = Some((max_r, NUM_COLS - 1));
+        cx.notify();
+    }
+
+    /// End row header drag
+    pub fn end_row_header_drag(&mut self, _cx: &mut Context<Self>) {
+        self.dragging_row_header = false;
+        self.row_header_anchor = None;
+    }
+
+    /// Start column header drag - stores stable anchor
+    pub fn start_col_header_drag(&mut self, col: usize, cx: &mut Context<Self>) {
+        self.dragging_col_header = true;
+        self.dragging_row_header = false;
+        self.dragging_selection = false;
+        self.col_header_anchor = Some(col);
+        self.select_col(col, false, cx);
+    }
+
+    /// Continue column header drag - uses stored anchor
+    pub fn continue_col_header_drag(&mut self, col: usize, cx: &mut Context<Self>) {
+        if !self.dragging_col_header { return; }
+        let anchor = self.col_header_anchor.unwrap_or(col);
+        let min_c = anchor.min(col);
+        let max_c = anchor.max(col);
+        self.selected = (0, min_c);
+        self.selection_end = Some((NUM_ROWS - 1, max_c));
+        cx.notify();
+    }
+
+    /// End column header drag
+    pub fn end_col_header_drag(&mut self, _cx: &mut Context<Self>) {
+        self.dragging_col_header = false;
+        self.col_header_anchor = None;
+    }
+
+    /// Ctrl+click on row header - add row to additional selections
+    pub fn ctrl_click_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.additional_selections.push((self.selected, self.selection_end));
+        self.select_row(row, false, cx);
+    }
+
+    /// Ctrl+click on column header - add column to additional selections
+    pub fn ctrl_click_col(&mut self, col: usize, cx: &mut Context<Self>) {
+        self.additional_selections.push((self.selected, self.selection_end));
+        self.select_col(col, false, cx);
+    }
+
     // Go To cell dialog
     pub fn show_goto(&mut self, cx: &mut Context<Self>) {
         self.mode = Mode::GoTo;
@@ -3572,6 +3857,20 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    // =========================================================================
+    // Preferences panel
+    // =========================================================================
+
+    pub fn show_preferences(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Preferences;
+        cx.notify();
+    }
+
+    pub fn hide_preferences(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
     pub fn theme_picker_up(&mut self, cx: &mut Context<Self>) {
         if self.theme_picker_selected > 0 {
             self.theme_picker_selected -= 1;
@@ -3608,10 +3907,11 @@ impl Spreadsheet {
         if let Some(theme) = filtered.get(index) {
             self.theme = theme.clone();
             self.status_message = Some(format!("Applied theme: {}", theme.meta.name));
-            // Persist theme selection
-            let mut settings = Settings::load();
-            settings.theme_id = Some(theme.meta.id.to_string());
-            settings.save();
+            // Persist theme selection to global store
+            let theme_id = theme.meta.id.to_string();
+            update_user_settings(cx, |settings| {
+                settings.appearance.theme_id = Setting::Value(theme_id);
+            });
         }
         self.theme_preview = None;
         self.mode = Mode::Navigation;
@@ -3652,6 +3952,26 @@ impl Spreadsheet {
 
     pub fn hide_about(&mut self, cx: &mut Context<Self>) {
         self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
+    // Import report dialog
+    pub fn show_import_report(&mut self, cx: &mut Context<Self>) {
+        if self.import_result.is_some() {
+            self.mode = Mode::ImportReport;
+            cx.notify();
+        }
+    }
+
+    pub fn hide_import_report(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
+    /// Dismiss the import overlay (ESC during background import)
+    /// Does NOT cancel the import - just hides the overlay
+    pub fn dismiss_import_overlay(&mut self, cx: &mut Context<Self>) {
+        self.import_overlay_visible = false;
         cx.notify();
     }
 
@@ -3848,20 +4168,71 @@ impl Spreadsheet {
     }
 
     /// Check if the name tooltip should be shown
-    pub fn should_show_name_tooltip(&self) -> bool {
+    pub fn should_show_name_tooltip(&self, cx: &gpui::App) -> bool {
         // Show if: not dismissed, no named ranges exist, has a range selection
-        !self.name_tooltip_dismissed
+        !user_settings(cx).is_tip_dismissed(TipId::NamedRanges)
             && self.workbook.list_named_ranges().is_empty()
             && self.selection_end.is_some()
     }
 
     /// Dismiss the name tooltip permanently
     pub fn dismiss_name_tooltip(&mut self, cx: &mut Context<Self>) {
-        self.name_tooltip_dismissed = true;
-        // Save to settings
-        let mut settings = Settings::load();
-        settings.name_tooltip_dismissed = true;
-        settings.save();
+        update_user_settings(cx, |settings| {
+            settings.dismiss_tip(TipId::NamedRanges);
+        });
+        cx.notify();
+    }
+
+    // =========================================================================
+    // F2 Function Key Tip (macOS only)
+    // =========================================================================
+
+    /// Check if F2 tip should be shown (macOS only, not dismissed, tip was triggered)
+    #[cfg(target_os = "macos")]
+    pub fn should_show_f2_tip(&self, cx: &gpui::App) -> bool {
+        self.show_f2_tip && !user_settings(cx).is_tip_dismissed(TipId::F2Edit)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn should_show_f2_tip(&self, _cx: &gpui::App) -> bool {
+        false
+    }
+
+    /// Called when user edits via non-F2 path on macOS (double-click, Ctrl+U, menu)
+    /// Shows tip suggesting they enable standard function keys
+    #[cfg(target_os = "macos")]
+    pub fn maybe_show_f2_tip(&mut self, cx: &mut Context<Self>) {
+        if !user_settings(cx).is_tip_dismissed(TipId::F2Edit) {
+            self.show_f2_tip = true;
+            cx.notify();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn maybe_show_f2_tip(&mut self, _cx: &mut Context<Self>) {
+        // No-op on non-macOS
+    }
+
+    /// Dismiss the F2 tip permanently
+    pub fn dismiss_f2_tip(&mut self, cx: &mut Context<Self>) {
+        update_user_settings(cx, |settings| {
+            settings.dismiss_tip(TipId::F2Edit);
+        });
+        self.show_f2_tip = false;
+        cx.notify();
+    }
+
+    /// Hide F2 tip without permanently dismissing
+    pub fn hide_f2_tip(&mut self, cx: &mut Context<Self>) {
+        self.show_f2_tip = false;
+        cx.notify();
+    }
+
+    /// Reset all tips (for Preferences UI)
+    pub fn reset_all_tips(&mut self, cx: &mut Context<Self>) {
+        update_user_settings(cx, |settings| {
+            settings.reset_all_tips();
+        });
         cx.notify();
     }
 
@@ -3965,11 +4336,10 @@ impl Spreadsheet {
                 self.mode = Mode::Navigation;
 
                 // Show one-time F12 hint after first rename
-                if !self.rename_f12_hint_shown {
-                    self.rename_f12_hint_shown = true;
-                    let mut settings = Settings::load();
-                    settings.rename_f12_hint_shown = true;
-                    settings.save();
+                if !user_settings(cx).is_tip_dismissed(TipId::RenameF12) {
+                    update_user_settings(cx, |settings| {
+                        settings.dismiss_tip(TipId::RenameF12);
+                    });
                     self.status_message = Some(format!(
                         "Renamed \"{}\" → \"{}\". Tip: Press F12 to jump to this name's definition.",
                         old_name, new_name
@@ -4068,16 +4438,38 @@ impl Spreadsheet {
         // Find all cells containing this range literal
         let (affected_cells, occurrence_count) = self.find_cells_with_range(&range_literal);
 
+        // Generate a suggested name (Range_1, Range_2, etc.)
+        let suggested_name = self.generate_unique_range_name();
+
         self.extract_range_literal = range_literal;
-        self.extract_name = String::new();
+        self.extract_name = suggested_name;
         self.extract_description = String::new();
         self.extract_affected_cells = affected_cells;
         self.extract_occurrence_count = occurrence_count;
         self.extract_validation_error = None;
-        self.extract_select_all = false;
+        self.extract_select_all = true;  // Type to replace the suggested name
         self.extract_focus = CreateNameFocus::Name;
         self.mode = Mode::ExtractNamedRange;
         cx.notify();
+    }
+
+    /// Generate a unique name like Range_1, Range_2, etc.
+    fn generate_unique_range_name(&self) -> String {
+        let mut i = 1;
+        loop {
+            let name = format!("Range_{}", i);
+            if self.workbook.get_named_range(&name).is_none() {
+                return name;
+            }
+            i += 1;
+            if i > 1000 {
+                // Fallback to avoid infinite loop
+                return format!("ExtractedRange_{}", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0));
+            }
+        }
     }
 
     /// Detect a range literal in a formula (e.g., A1:B10, $A$1:$B$10)
@@ -4465,17 +4857,41 @@ impl Spreadsheet {
         self.hide_extract_named_range(cx);
     }
 
-    /// Replace all occurrences of a range literal with a name in a formula
+    /// Replace all occurrences of a range literal with a name in a formula.
+    /// This is token-aware: it won't replace inside string literals.
     fn replace_range_in_formula(&self, formula: &str, range_literal: &str, name: &str) -> String {
         let range_upper = range_literal.to_uppercase();
         let mut result = String::new();
         let chars: Vec<char> = formula.chars().collect();
-        let range_chars: Vec<char> = range_upper.chars().collect();
-        let range_len = range_chars.len();
+        let range_len = range_upper.len();
 
         let mut i = 0;
+        let mut in_string = false;
+
         while i < chars.len() {
-            // Check for match
+            // Track string literal state (toggle on each unescaped quote)
+            if chars[i] == '"' {
+                // Check for escaped quote (doubled quote in Excel formulas)
+                if in_string && i + 1 < chars.len() && chars[i + 1] == '"' {
+                    result.push(chars[i]);
+                    result.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                in_string = !in_string;
+                result.push(chars[i]);
+                i += 1;
+                continue;
+            }
+
+            // If inside a string, just copy the character
+            if in_string {
+                result.push(chars[i]);
+                i += 1;
+                continue;
+            }
+
+            // Check for range match (only outside strings)
             if i + range_len <= chars.len() {
                 let slice: String = chars[i..i + range_len].iter().collect::<String>().to_uppercase();
                 if slice == range_upper {
@@ -5145,6 +5561,34 @@ impl Render for Spreadsheet {
         if self.window_size != current_size {
             self.window_size = current_size;
         }
+
+        // Update grid layout cache for hit-testing
+        let menu_height = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
+        let formula_bar_height = FORMULA_BAR_HEIGHT;
+        let col_header_height = COLUMN_HEADER_HEIGHT;
+
+        let grid_body_y = menu_height + formula_bar_height + col_header_height;
+        let grid_body_x = HEADER_WIDTH;
+
+        let window_height: f32 = current_size.height.into();
+        let window_width: f32 = current_size.width.into();
+
+        // Account for side panels and status bar
+        let right_panel_width = if self.inspector_visible {
+            crate::views::inspector_panel::PANEL_WIDTH
+        } else {
+            0.0
+        };
+        let bottom_status_height = STATUS_BAR_HEIGHT;
+
+        let grid_viewport_width = (window_width - grid_body_x - right_panel_width).max(0.0);
+        let grid_viewport_height = (window_height - grid_body_y - bottom_status_height).max(0.0);
+
+        self.grid_layout = GridLayout {
+            grid_body_origin: (grid_body_x, grid_body_y),
+            viewport_size: (grid_viewport_width, grid_viewport_height),
+        };
+
         views::render_spreadsheet(self, cx)
     }
 }

@@ -43,6 +43,9 @@ regex = "1"
 [target.'cfg(target_os = "macos")'.dependencies]
 core-text = "=21.0.0"
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 winresource = "0.1"
 

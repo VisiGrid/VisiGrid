@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui::StyledText;
 use crate::app::Spreadsheet;
+use crate::settings::{user_settings, Setting};
 use crate::theme::TokenKey;
 use super::headers::render_row_header;
 
@@ -13,6 +14,12 @@ pub fn render_grid(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl
     let edit_value = app.edit_value.clone();
     let visible_rows = app.visible_rows();
     let visible_cols = app.visible_cols();
+
+    // Read show_gridlines from global settings
+    let show_gridlines = match &user_settings(cx).appearance.show_gridlines {
+        Setting::Value(v) => *v,
+        Setting::Inherit => true, // Default to showing gridlines
+    };
 
     div()
         .flex_1()
@@ -31,6 +38,7 @@ pub fn render_grid(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl
                             selected,
                             editing,
                             &edit_value,
+                            show_gridlines,
                             app,
                             cx,
                         )
@@ -46,6 +54,7 @@ fn render_row(
     selected: (usize, usize),
     editing: bool,
     edit_value: &str,
+    show_gridlines: bool,
     app: &Spreadsheet,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
@@ -60,7 +69,7 @@ fn render_row(
             (0..visible_cols).map(|visible_col| {
                 let col = scroll_col + visible_col;
                 let col_width = app.col_width(col);
-                render_cell(row, col, col_width, row_height, selected, editing, edit_value, app, cx)
+                render_cell(row, col, col_width, row_height, selected, editing, edit_value, show_gridlines, app, cx)
             })
         )
 }
@@ -73,6 +82,7 @@ fn render_cell(
     selected: (usize, usize),
     editing: bool,
     edit_value: &str,
+    show_gridlines: bool,
     app: &Spreadsheet,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
@@ -88,10 +98,16 @@ fn render_cell(
 
     let value = if is_editing {
         edit_value.to_string()
-    } else if app.show_formulas {
+    } else if app.show_formulas() {
         app.sheet().get_raw(row, col)
     } else {
-        app.sheet().get_display(row, col)
+        let display = app.sheet().get_display(row, col);
+        // Hide zero values if show_zeros is false
+        if !app.show_zeros() && display == "0" {
+            String::new()
+        } else {
+            display
+        }
     };
 
     let format = app.sheet().get_format(row, col);
@@ -144,8 +160,12 @@ fn render_cell(
         if bottom { c = c.border_b_1(); }
         if left { c = c.border_l_1(); }
         c
-    } else {
+    } else if show_gridlines {
+        // Normal gridlines (only when enabled in settings)
         cell.border_r_1().border_b_1()
+    } else {
+        // No gridlines - plain cell
+        cell
     };
 
     cell = cell
@@ -180,6 +200,8 @@ fn render_cell(
                 // Double-click to edit
                 this.select_cell(target_row, target_col, false, cx);
                 this.start_edit(cx);
+                // On macOS, show tip about enabling F2 (since they're using fallback)
+                this.maybe_show_f2_tip(cx);
             } else if event.modifiers.shift {
                 // Shift+click extends selection
                 this.select_cell(target_row, target_col, true, cx);

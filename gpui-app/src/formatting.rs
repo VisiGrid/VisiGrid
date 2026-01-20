@@ -273,6 +273,8 @@ impl Spreadsheet {
                 NumberFormat::Currency { .. } => "Currency",
                 NumberFormat::Percent { .. } => "Percent",
                 NumberFormat::Date { .. } => "Date",
+                NumberFormat::Time => "Time",
+                NumberFormat::DateTime => "DateTime",
             };
             let desc = format!("{} format", format_name);
             self.history.record_format(self.sheet_index(), patches, FormatActionKind::NumberFormat, desc.clone());

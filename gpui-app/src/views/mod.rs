@@ -7,7 +7,10 @@ mod goto_dialog;
 mod grid;
 mod headers;
 pub mod impact_preview;
-mod inspector_panel;
+mod import_overlay;
+mod import_report_dialog;
+pub mod inspector_panel;
+mod preferences_panel;
 pub mod refactor_log;
 mod menu_bar;
 mod status_bar;
@@ -36,7 +39,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let show_impact_preview = app.mode == Mode::ImpactPreview;
     let show_refactor_log = app.mode == Mode::RefactorLog;
     let show_extract_named_range = app.mode == Mode::ExtractNamedRange;
-    let show_name_tooltip = app.should_show_name_tooltip() && app.mode == Mode::Navigation;
+    let show_import_report = app.mode == Mode::ImportReport;
+    let show_preferences = app.mode == Mode::Preferences;
+    let show_import_overlay = app.import_overlay_visible;
+    let show_name_tooltip = app.should_show_name_tooltip(cx) && app.mode == Mode::Navigation;
+    let show_f2_tip = app.should_show_f2_tip(cx);  // Show immediately on trigger, not gated on mode
     let show_inspector = app.inspector_visible;
 
     div()
@@ -212,6 +219,18 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 this.select_all(cx);
             }
         }))
+        .on_action(cx.listener(|this, _: &SelectRow, _, cx| {
+            if !this.mode.is_editing() {
+                let row = this.selected.0;
+                this.select_row(row, false, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &SelectColumn, _, cx| {
+            if !this.mode.is_editing() {
+                let col = this.selected.1;
+                this.select_col(col, false, cx);
+            }
+        }))
         // File actions
         .on_action(cx.listener(|this, _: &NewFile, _, cx| {
             this.new_file(cx);
@@ -253,6 +272,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         // Editing actions
         .on_action(cx.listener(|this, _: &StartEdit, _, cx| {
             this.start_edit(cx);
+            // On macOS, show tip about enabling F2 (catches Ctrl+U and menu-driven edit)
+            this.maybe_show_f2_tip(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, _, cx| {
             // If autocomplete is visible, Enter accepts the suggestion
@@ -270,6 +291,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             }
         }))
         .on_action(cx.listener(|this, _: &CancelEdit, _, cx| {
+            // Import overlay takes priority - dismiss it but let import continue
+            if this.import_overlay_visible {
+                this.dismiss_import_overlay(cx);
+                return;
+            }
             if this.open_menu.is_some() {
                 this.close_menu(cx);
             } else if this.mode == Mode::Command {
@@ -298,6 +324,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 this.hide_refactor_log(cx);
             } else if this.mode == Mode::ExtractNamedRange {
                 this.hide_extract_named_range(cx);
+            } else if this.mode == Mode::ImportReport {
+                this.hide_import_report(cx);
+            } else if this.mode == Mode::Preferences {
+                this.hide_preferences(cx);
             } else if this.inspector_visible && this.mode == Mode::Navigation {
                 // Esc closes inspector panel when in navigation mode
                 this.inspector_visible = false;
@@ -349,8 +379,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             this.autosum(cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleFormulaView, _, cx| {
-            this.show_formulas = !this.show_formulas;
-            cx.notify();
+            this.toggle_show_formulas(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ToggleShowZeros, _, cx| {
+            this.toggle_show_zeros(cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
             this.inspector_visible = !this.inspector_visible;
@@ -462,6 +494,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         }))
         .on_action(cx.listener(|this, _: &ShowFontPicker, _, cx| {
             this.show_font_picker(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ShowPreferences, _, cx| {
+            this.show_preferences(cx);
+        }))
+        .on_action(cx.listener(|_this, _: &CloseWindow, window, _cx| {
+            // Close the current window (not quit the app)
+            window.remove_window();
         }))
         // Menu bar (Alt+letter accelerators)
         .on_action(cx.listener(|this, _: &OpenFileMenu, _, cx| {
@@ -1009,7 +1048,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 this.scroll(delta_rows, delta_cols, cx);
             }
         }))
-        // Mouse move for resize dragging
+        // Mouse move for resize and header selection dragging
         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
             // Handle column resize drag
             if let Some(col) = this.resizing_col {
@@ -1027,13 +1066,34 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 this.set_row_height(row, new_height);
                 cx.notify();
             }
+            // Handle column header selection drag
+            if this.dragging_col_header {
+                let x: f32 = event.position.x.into();
+                if let Some(col) = this.col_from_window_x(x) {
+                    this.continue_col_header_drag(col, cx);
+                }
+            }
+            // Handle row header selection drag
+            if this.dragging_row_header {
+                let y: f32 = event.position.y.into();
+                if let Some(row) = this.row_from_window_y(y) {
+                    this.continue_row_header_drag(row, cx);
+                }
+            }
         }))
-        // Mouse up to end resize
+        // Mouse up to end resize and header selection drag
         .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
             if this.resizing_col.is_some() || this.resizing_row.is_some() {
                 this.resizing_col = None;
                 this.resizing_row = None;
                 cx.notify();
+            }
+            // End header selection drag
+            if this.dragging_row_header {
+                this.end_row_header_drag(cx);
+            }
+            if this.dragging_col_header {
+                this.end_col_header_drag(cx);
             }
         }))
         .flex()
@@ -1063,8 +1123,18 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .when(show_theme_picker, |div| {
             div.child(theme_picker::render_theme_picker(app, cx))
         })
+        .when(show_preferences, |div| {
+            div.child(preferences_panel::render_preferences_panel(app, cx))
+        })
         .when(show_about, |div| {
             div.child(about_dialog::render_about_dialog(app, cx))
+        })
+        .when(show_import_report, |div| {
+            div.child(import_report_dialog::render_import_report_dialog(app, cx))
+        })
+        // Import overlay: shows during background Excel imports (after 150ms delay)
+        .when(show_import_overlay, |div| {
+            div.child(import_overlay::render_import_overlay(app, cx))
         })
         .when(show_rename_symbol, |div| {
             div.child(render_rename_symbol_dialog(app))
@@ -1090,6 +1160,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         // Name tooltip (one-time first-run hint)
         .when(show_name_tooltip, |div| {
             div.child(tour::render_name_tooltip(app, cx))
+        })
+        // F2 function key tip (macOS only, shown when editing via non-F2 path)
+        .when(show_f2_tip, |div| {
+            div.child(tour::render_f2_tooltip(app, cx))
         })
         // Menu dropdown (only on non-macOS where we have in-app menu)
         .when(!cfg!(target_os = "macos") && app.open_menu.is_some(), |div| {
@@ -1584,7 +1658,11 @@ fn render_extract_named_range_dialog(app: &Spreadsheet) -> impl IntoElement {
                                 .flex_1()
                                 .px_2()
                                 .py_1()
-                                .bg(hsla(0.0, 0.0, 0.0, 0.2))
+                                .bg(if app.extract_select_all && name_focused {
+                                    accent.opacity(0.3)  // Selection highlight
+                                } else {
+                                    hsla(0.0, 0.0, 0.0, 0.2)
+                                })
                                 .rounded_sm()
                                 .border_1()
                                 .border_color(if name_focused && has_error {

@@ -19,6 +19,8 @@ pub enum Mode {
     ImpactPreview,     // Preview impact of rename/delete before applying
     RefactorLog,       // Show refactoring audit trail
     ExtractNamedRange, // Extract range literal to named range
+    ImportReport,      // Excel import results report
+    Preferences,       // User preferences dialog (Cmd+,)
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -58,6 +60,6 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange)
+        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::Preferences)
     }
 }

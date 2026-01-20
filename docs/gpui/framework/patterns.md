@@ -471,6 +471,135 @@ Deeply nested element trees are slower to diff. Flatten where possible.
 
 ---
 
+## Document Settings with Sidecar Files
+
+For per-document settings that persist with the file:
+
+### Architecture
+
+```
+myfile.sheet           # Data file
+myfile.sheet.settings.json  # Sidecar (doc settings)
+```
+
+### Sidecar Persistence Functions
+
+```rust
+use std::path::{Path, PathBuf};
+use std::fs;
+
+/// Get sidecar path for a document
+pub fn doc_settings_path(doc_path: &Path) -> PathBuf {
+    let mut sidecar = doc_path.as_os_str().to_owned();
+    sidecar.push(".settings.json");
+    PathBuf::from(sidecar)
+}
+
+/// Load doc settings (graceful degradation)
+pub fn load_doc_settings(doc_path: &Path) -> DocumentSettings {
+    let sidecar = doc_settings_path(doc_path);
+    fs::read_to_string(&sidecar)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()  // Missing/invalid = defaults
+}
+
+/// Save doc settings (atomic write)
+pub fn save_doc_settings(doc_path: &Path, settings: &DocumentSettings) -> std::io::Result<()> {
+    let sidecar = doc_settings_path(doc_path);
+    let temp = sidecar.with_extension("json.tmp");
+
+    // Write to temp first
+    let json = serde_json::to_string_pretty(settings)?;
+    fs::write(&temp, json)?;
+
+    // Atomic rename
+    fs::rename(&temp, &sidecar)?;
+    Ok(())
+}
+```
+
+### Document State in App
+
+```rust
+pub struct MyApp {
+    current_file: Option<PathBuf>,
+    doc_settings: DocumentSettings,
+    // ...
+}
+```
+
+### Lifecycle: Load on Open
+
+```rust
+pub fn load_file(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+    match load_data(path) {
+        Ok(data) => {
+            self.data = data;
+            self.current_file = Some(path.clone());
+            self.doc_settings = load_doc_settings(path);  // Load sidecar
+            cx.notify();
+        }
+        Err(e) => { /* handle error */ }
+    }
+}
+```
+
+### Lifecycle: Save with Data
+
+```rust
+fn save_to_path(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+    match save_data(&self.data, path) {
+        Ok(()) => {
+            self.current_file = Some(path.clone());
+
+            // Save sidecar (best-effort)
+            let _ = save_doc_settings(path, &self.doc_settings);
+
+            self.status_message = Some("Saved".to_string());
+        }
+        Err(e) => { /* handle error */ }
+    }
+    cx.notify();
+}
+```
+
+### Lifecycle: Toggle Updates Sidecar Immediately
+
+```rust
+pub fn toggle_show_formulas(&mut self, cx: &mut Context<Self>) {
+    self.doc_settings.show_formulas = !self.doc_settings.show_formulas;
+
+    // Save immediately if doc has a path
+    if let Some(ref path) = self.current_file {
+        let _ = save_doc_settings(path, &self.doc_settings);
+    }
+
+    cx.notify();
+}
+```
+
+### Behavior Summary
+
+| Scenario | Behavior |
+|----------|----------|
+| Open file | Load sidecar if exists, else defaults |
+| Toggle setting | Update memory + save sidecar (if file has path) |
+| Save / Save As | Save sidecar alongside data file |
+| New file | Fresh defaults (no sidecar until first save) |
+| Sidecar missing | Graceful: use defaults, don't error |
+| Sidecar corrupt | Graceful: use defaults, don't error |
+
+### Why Sidecar?
+
+- No file format changes needed
+- Works for any file type (.sheet, .csv, etc.)
+- Tiny JSON, human-readable
+- Atomic writes prevent corruption
+- Easy to delete if unwanted
+
+---
+
 ## Debugging Tips
 
 ### 1. Print State Changes

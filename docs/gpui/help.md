@@ -154,12 +154,23 @@ SQLite-based format with:
 - Cell values and formulas
 - Formatting
 - Sheet metadata
+- Named ranges
+- Column widths
 - Fast random access
 
-### CSV Export
+### Excel Import (xlsx/xls/xlsb/ods)
 
-Export current sheet to CSV:
-- Uses toolbar or Ctrl+Shift+S → choose .csv
+VisiGrid can open Excel files:
+- One-way import (Save As .sheet to keep changes)
+- Background import for large files (UI stays responsive)
+- Import Report shows fidelity info
+- Unsupported functions are tracked and reported
+- Dates, formulas, and formatting are preserved
+
+### CSV Import/Export
+
+- Open CSV files directly
+- Export current sheet to CSV via File → Export CSV
 
 ---
 
@@ -178,6 +189,53 @@ Press Escape to return to Navigation mode.
 
 ---
 
+## Named Ranges
+
+Create named ranges to make formulas more readable:
+
+| Action | Shortcut |
+|--------|----------|
+| Create named range | Ctrl+Shift+N |
+| Rename symbol | Ctrl+Shift+R |
+| Extract to named range | Select range, then Ctrl+Shift+N |
+
+Named ranges appear in:
+- Formula autocomplete
+- Fuzzy finder (Ctrl+P)
+- Inspector panel
+
+---
+
+## Multi-Sheet
+
+| Action | Shortcut |
+|--------|----------|
+| Next sheet | Ctrl+PageDown |
+| Previous sheet | Ctrl+PageUp |
+| New sheet | Shift+F11 |
+| Sheet menu | Right-click tab |
+
+---
+
+## Themes & Preferences
+
+| Action | Shortcut |
+|--------|----------|
+| Theme picker | Ctrl+K Ctrl+T |
+| Preferences | Ctrl+, |
+
+---
+
+## Inspector Panel
+
+Toggle with Ctrl+Shift+I. Shows:
+- Cell address and value
+- Formula (if present)
+- Format information
+- Named range usage
+
+---
+
 ## Tips
 
 1. **Double-click** a cell to edit it
@@ -187,18 +245,18 @@ Press Escape to return to Navigation mode.
 5. **Enter** confirms edit and moves down
 6. **Escape** cancels edit
 7. **Ctrl+Arrow** jumps to edge of data regions
+8. **Ctrl+P** opens fuzzy finder for cells and named ranges
+9. **Ctrl+Shift+P** opens command palette
 
 ---
 
-## Known Limitations (gpui version)
+## Known Limitations
 
-Current limitations being addressed:
+Current limitations:
 
-- No command palette yet (Ctrl+Shift+P)
-- No Fill Down/Right (Ctrl+D/R)
-- No Ctrl+Click for discontiguous selection
-- No dropdown menus (toolbar only)
-- No multi-sheet support yet
-- No zoom
-- No themes toggle
-- No right-click context menu
+- No cross-sheet references (=Sheet2!A1)
+- No zoom (Ctrl++/-)
+- No freeze panes
+- No XLSX export (import only)
+- No Replace dialog (Ctrl+H)
+- No Format Cells dialog (Ctrl+1)

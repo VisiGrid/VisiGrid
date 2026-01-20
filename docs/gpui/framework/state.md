@@ -372,7 +372,9 @@ impl MyApp {
 
 ## Global State
 
-For app-wide state accessible anywhere:
+For app-wide state accessible anywhere, implement the `Global` trait.
+
+### Basic Global State
 
 ```rust
 #[derive(Clone, Default)]
@@ -405,6 +407,108 @@ cx.update_global::<Theme, _>(|theme, cx| {
     theme.background = rgb(0x1e1e1e);
 });
 ```
+
+---
+
+## App-Level Settings Store (Multi-Window)
+
+For settings that must stay synchronized across multiple windows:
+
+### Architecture
+
+```rust
+/// App-level settings store implementing GPUI's Global trait.
+/// One instance per process - all windows share this source of truth.
+pub struct SettingsStore {
+    user_settings: UserSettings,
+}
+
+impl Global for SettingsStore {}
+
+impl SettingsStore {
+    pub fn new() -> Self {
+        Self {
+            user_settings: load_from_disk(),
+        }
+    }
+
+    pub fn user_settings(&self) -> &UserSettings {
+        &self.user_settings
+    }
+
+    pub fn user_settings_mut(&mut self) -> &mut UserSettings {
+        &mut self.user_settings
+    }
+
+    pub fn save(&self) {
+        save_to_disk(&self.user_settings);
+    }
+}
+```
+
+### Initialization (Once at Startup)
+
+```rust
+fn main() {
+    Application::new().run(|cx: &mut App| {
+        // Initialize BEFORE opening any windows
+        cx.set_global(SettingsStore::new());
+
+        cx.open_window(...);
+    });
+}
+```
+
+### Window Subscription (Each Window)
+
+Each window subscribes to global changes to auto-refresh:
+
+```rust
+impl MyApp {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Subscribe to settings changes - refresh when any window changes settings
+        let settings_subscription = cx.observe_global::<SettingsStore>(|cx| {
+            cx.refresh_windows();  // Re-render all windows
+        });
+
+        Self {
+            settings_subscription,  // MUST store or it gets dropped!
+            // ...
+        }
+    }
+}
+```
+
+### Reading Settings
+
+```rust
+// In render or methods
+let settings = SettingsStore::global(cx).user_settings();
+let show_gridlines = settings.appearance.show_gridlines;
+```
+
+### Updating Settings (Any Window)
+
+```rust
+// This automatically notifies all observers (all windows refresh)
+cx.update_global::<SettingsStore, _>(|store, _| {
+    store.user_settings_mut().appearance.show_gridlines = false;
+    store.save();  // Persist to disk
+});
+cx.notify();
+```
+
+### Multi-Window Verification
+
+Test scenario:
+1. Open two windows
+2. Window A: change a setting
+3. Window B should update immediately (no reopen needed)
+
+If Window B doesn't update, check:
+- `observe_global` callback exists and calls `cx.refresh_windows()`
+- Subscription is stored (not dropped)
+- Setting is read fresh each render (not cached in struct field)
 
 ---
 

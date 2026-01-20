@@ -1,4 +1,5 @@
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, CELL_HEIGHT, HEADER_WIDTH};
 use crate::theme::TokenKey;
 
@@ -8,39 +9,55 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
     let visible_cols = app.visible_cols();
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
+    let selection_bg = app.token(TokenKey::SelectionBg);
 
     div()
         .flex()
         .flex_shrink_0()
         .h(px(CELL_HEIGHT))
         .bg(header_bg)
-        // Corner cell (empty) - can be used for select-all
+        // Corner cell - click to select all
         .child(
             div()
+                .id("select-all-corner")
                 .flex_shrink_0()
                 .w(px(HEADER_WIDTH))
                 .h_full()
                 .border_1()
                 .border_color(header_border)
+                .cursor_pointer()
+                .hover(|s| s.bg(selection_bg.opacity(0.3)))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.select_all(cx);
+                }))
         )
         // Column headers with resize handles
         .children(
             (0..visible_cols).map(move |i| {
                 let col = scroll_col + i;
                 let col_width = app.col_width(col);
-                render_column_header(app, col, col_width, cx)
+                let is_selected = app.is_col_header_selected(col);
+                render_column_header(app, col, col_width, is_selected, cx)
             })
         )
 }
 
-/// Render a single column header with resize handle
-fn render_column_header(app: &Spreadsheet, col: usize, width: f32, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+/// Render a single column header with resize handle and selection support
+fn render_column_header(
+    app: &Spreadsheet,
+    col: usize,
+    width: f32,
+    is_selected: bool,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
     let header_text = app.token(TokenKey::HeaderTextMuted);
     let accent = app.token(TokenKey::Accent);
+    let selection_bg = app.token(TokenKey::SelectionBg);
 
     div()
+        .id(ElementId::NamedInteger("col-header".into(), col as u64))
         .flex_shrink_0()
         .w(px(width))
         .h_full()
@@ -50,10 +67,38 @@ fn render_column_header(app: &Spreadsheet, col: usize, width: f32, cx: &mut Cont
         .justify_center()
         .border_1()
         .border_color(header_border)
-        .bg(header_bg)
+        .when(is_selected, |div| div.bg(selection_bg.opacity(0.5)))
+        .when(!is_selected, |div| div.bg(header_bg))
         .text_color(header_text)
         .text_sm()
+        .cursor_pointer()
+        .hover(|s| s.bg(selection_bg.opacity(0.3)))
         .child(Spreadsheet::col_letter(col))
+        // Click handler for column selection
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            // Check if click is in the resize handle area (last 6px of column)
+            // Skip selection handling if so - let the resize handle deal with it
+            let click_x: f32 = event.position.x.into();
+            let col_start_x = HEADER_WIDTH + this.col_x_offset(col);
+            let col_end_x = col_start_x + width;
+            let resize_area_start = col_end_x - 6.0;
+
+            if click_x >= resize_area_start {
+                // Click is on resize handle, don't change selection
+                return;
+            }
+
+            if event.modifiers.shift {
+                // Shift+click: extend selection
+                this.select_col(col, true, cx);
+            } else if event.modifiers.control || event.modifiers.platform {
+                // Ctrl+click: add to selection
+                this.ctrl_click_col(col, cx);
+            } else {
+                // Regular click: start drag selection
+                this.start_col_header_drag(col, cx);
+            }
+        }))
         // Resize handle on the right edge
         .child(
             div()
@@ -69,8 +114,8 @@ fn render_column_header(app: &Spreadsheet, col: usize, width: f32, cx: &mut Cont
                 // Mouse down to start resize, double-click to auto-fit
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     if event.click_count == 2 {
-                        // Double-click to auto-fit
-                        this.auto_fit_col_width(col, cx);
+                        // Double-click to auto-fit (all selected if part of selection)
+                        this.auto_fit_selected_col_widths(col, cx);
                     } else {
                         // Start resize drag
                         this.resizing_col = Some(col);
@@ -83,15 +128,18 @@ fn render_column_header(app: &Spreadsheet, col: usize, width: f32, cx: &mut Cont
         )
 }
 
-/// Render a row header (1, 2, 3, ...) with resize handle
+/// Render a row header (1, 2, 3, ...) with resize handle and selection support
 pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let row_height = app.row_height(row);
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
     let header_text = app.token(TokenKey::HeaderTextMuted);
     let accent = app.token(TokenKey::Accent);
+    let selection_bg = app.token(TokenKey::SelectionBg);
+    let is_selected = app.is_row_header_selected(row);
 
     div()
+        .id(ElementId::NamedInteger("row-header".into(), row as u64))
         .flex_shrink_0()
         .w(px(HEADER_WIDTH))
         .h(px(row_height))
@@ -99,12 +147,40 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
         .flex()
         .items_center()
         .justify_center()
-        .bg(header_bg)
+        .when(is_selected, |div| div.bg(selection_bg.opacity(0.5)))
+        .when(!is_selected, |div| div.bg(header_bg))
         .border_1()
         .border_color(header_border)
         .text_color(header_text)
         .text_sm()
+        .cursor_pointer()
+        .hover(|s| s.bg(selection_bg.opacity(0.3)))
         .child(format!("{}", row + 1))
+        // Click handler for row selection
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            // Check if click is in the resize handle area (bottom 4px of row)
+            // Skip selection handling if so - let the resize handle deal with it
+            let click_y: f32 = event.position.y.into();
+            let row_start_y = this.grid_layout.grid_body_origin.1 + this.row_y_offset(row);
+            let row_end_y = row_start_y + row_height;
+            let resize_area_start = row_end_y - 4.0;
+
+            if click_y >= resize_area_start {
+                // Click is on resize handle, don't change selection
+                return;
+            }
+
+            if event.modifiers.shift {
+                // Shift+click: extend selection
+                this.select_row(row, true, cx);
+            } else if event.modifiers.control || event.modifiers.platform {
+                // Ctrl+click: add to selection
+                this.ctrl_click_row(row, cx);
+            } else {
+                // Regular click: start drag selection
+                this.start_row_header_drag(row, cx);
+            }
+        }))
         // Resize handle on the bottom edge
         .child(
             div()
@@ -118,8 +194,8 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
                 .hover(move |s| s.bg(accent.opacity(0.25)))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     if event.click_count == 2 {
-                        // Double-click to auto-fit
-                        this.auto_fit_row_height(row, cx);
+                        // Double-click to auto-fit (all selected if part of selection)
+                        this.auto_fit_selected_row_heights(row, cx);
                     } else {
                         // Start resize drag
                         this.resizing_row = Some(row);

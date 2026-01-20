@@ -23,16 +23,25 @@
 | Formula evaluation on Enter | Working | `app.rs` |
 | Error display (#DIV/0!, etc.) | Working | cell rendering |
 
+### Implemented Features
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Function autocomplete | ✅ Done | Fuzzy matching, shows signature |
+| Signature help | ✅ Done | Shows current parameter |
+| Syntax highlighting | ✅ Done | Functions, refs, numbers, strings |
+| XLOOKUP | ✅ Done | Exact and wildcard match modes |
+| TEXTJOIN | ✅ Done | With ignore_empty option |
+| SUMIFS/COUNTIFS | ✅ Done | Multi-criteria aggregation |
+| IFNA | ✅ Done | #N/A error handling |
+
 ### What's Missing (This Spec)
 
 | Feature | Priority | Section |
 |---------|----------|---------|
 | Formula context analyzer | P0 | [Context Analyzer](#formula-context-analyzer) |
-| Function autocomplete | P1 | [Autocomplete](#autocomplete-popup) |
-| Signature help | P1 | [Signature Help](#signature-help) |
 | Error banner | P1 | [Error Highlighting](#error-highlighting) |
 | F4 cycle reference type | P1 | [Quick Actions](#quick-actions) |
-| Syntax highlighting | P2 | [Syntax Highlighting](#syntax-highlighting) |
 | Hover docs | P2 | [Hover Documentation](#hover-documentation) |
 | Alt+= AutoSum | P2 | [Quick Actions](#quick-actions) |
 | Spill visualization | P3 | [Array Visualization](#array-visualization) |

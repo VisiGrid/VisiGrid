@@ -6,7 +6,7 @@ use crate::theme::TokenKey;
 use visigrid_engine::formula::parser::{parse, extract_cell_refs};
 use visigrid_engine::cell::{Alignment, VerticalAlignment, TextOverflow, NumberFormat, DateStyle};
 
-const PANEL_WIDTH: f32 = 280.0;
+pub const PANEL_WIDTH: f32 = 280.0;
 
 /// Render the inspector panel (right-side drawer)
 pub fn render_inspector_panel(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -1018,6 +1018,8 @@ fn render_number_format_section(
         TriState::Uniform(NumberFormat::Currency { decimals }) => ("Currency", Some(*decimals), None),
         TriState::Uniform(NumberFormat::Percent { decimals }) => ("Percent", Some(*decimals), None),
         TriState::Uniform(NumberFormat::Date { style }) => ("Date", None, Some(*style)),
+        TriState::Uniform(NumberFormat::Time) => ("Time", None, None),
+        TriState::Uniform(NumberFormat::DateTime) => ("DateTime", None, None),
         TriState::Mixed => ("Mixed", None, None),
         TriState::Empty => ("General", None, None),
     };

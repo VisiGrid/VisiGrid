@@ -722,6 +722,12 @@ struct SettingDef {
 
 impl SettingsSearchProvider {
     const SETTINGS: &'static [SettingDef] = &[
+        // Preferences entry - matches Cmd+, behavior
+        SettingDef {
+            key: "preferences",
+            label: "Preferences",
+            description: "Open preferences (theme selection)",
+        },
         SettingDef {
             key: "theme",
             label: "Theme",
@@ -753,6 +759,16 @@ impl SettingsSearchProvider {
             description: "Enable automatic saving",
         },
     ];
+
+    /// Get the action for a setting key
+    fn action_for_key(key: &str) -> SearchAction {
+        match key {
+            // Preferences and Theme both open the theme picker
+            "preferences" | "theme" => SearchAction::RunCommand(CommandId::SelectTheme),
+            // Other settings open the JSON file
+            _ => SearchAction::OpenSetting { key: key.to_string() },
+        }
+    }
 }
 
 impl SearchProvider for SettingsSearchProvider {
@@ -776,7 +792,7 @@ impl SearchProvider for SettingsSearchProvider {
                     Some(SearchItem::new(
                         SearchKind::Setting,
                         setting.label,
-                        SearchAction::OpenSetting { key: setting.key.to_string() },
+                        Self::action_for_key(setting.key),
                     )
                     .with_subtitle(setting.description)
                     .with_score(score)
@@ -786,7 +802,7 @@ impl SearchProvider for SettingsSearchProvider {
                     Some(SearchItem::new(
                         SearchKind::Setting,
                         setting.label,
-                        SearchAction::OpenSetting { key: setting.key.to_string() },
+                        Self::action_for_key(setting.key),
                     )
                     .with_subtitle(setting.description)
                     .with_score(0.5))

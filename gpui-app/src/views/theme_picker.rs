@@ -64,7 +64,7 @@ pub fn render_theme_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> 
                                 .text_color(text_primary)
                                 .text_size(px(13.0))
                                 .font_weight(FontWeight::MEDIUM)
-                                .child("Select Theme")
+                                .child("Preferences: Theme")
                         )
                         .child(
                             div()

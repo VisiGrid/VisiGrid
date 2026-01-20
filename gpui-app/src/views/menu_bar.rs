@@ -4,7 +4,7 @@ use crate::app::Spreadsheet;
 use crate::mode::Menu;
 use crate::theme::TokenKey;
 
-const MENU_HEIGHT: f32 = 22.0;  // Compact chrome height
+pub const MENU_HEIGHT: f32 = 22.0;  // Compact chrome height
 const DROPDOWN_WIDTH: f32 = 200.0;
 
 /// Render the modern menu bar - compact chrome, not content
@@ -192,11 +192,16 @@ fn render_edit_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, bo
         .child(menu_item("Go To...", Some("Ctrl+G"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.show_goto(cx); }))
 }
 
-fn render_view_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, _border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
+fn render_view_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
     div()
         .flex()
         .flex_col()
         .child(menu_item("Command Palette", Some("Ctrl+Shift+P"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.toggle_palette(cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Inspector", Some("Ctrl+Shift+I"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.inspector_visible = !this.inspector_visible; cx.notify(); }))
+        .child(menu_separator(border))
+        .child(menu_item("Show Formulas", Some("Ctrl+`"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.toggle_show_formulas(cx); }))
+        .child(menu_item("Show Zeros", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.toggle_show_zeros(cx); }))
 }
 
 fn render_insert_menu(text_disabled: Hsla, border: Hsla) -> Div {

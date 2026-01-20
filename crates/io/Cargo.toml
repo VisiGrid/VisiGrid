@@ -3,7 +3,7 @@ name = "visigrid-io"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "File I/O - native format, CSV"
+description = "File I/O - native format, CSV, Excel"
 
 [dependencies]
 serde = { workspace = true }
@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 rusqlite = { workspace = true }
 visigrid-engine = { workspace = true }
 csv = "1"
+calamine = "0.26"
 
 [dev-dependencies]
 tempfile = "3"

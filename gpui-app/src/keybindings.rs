@@ -49,6 +49,8 @@ pub fn register(cx: &mut App) {
 
         // Selection
         KeyBinding::new("ctrl-a", SelectAll, Some("Spreadsheet")),
+        KeyBinding::new("shift-space", SelectRow, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-space", SelectColumn, Some("Spreadsheet")),
         KeyBinding::new("shift-up", ExtendUp, Some("Spreadsheet")),
         KeyBinding::new("shift-down", ExtendDown, Some("Spreadsheet")),
         KeyBinding::new("shift-left", ExtendLeft, Some("Spreadsheet")),
@@ -80,7 +82,12 @@ pub fn register(cx: &mut App) {
         // Format
         KeyBinding::new("ctrl-b", ToggleBold, Some("Spreadsheet")),
         KeyBinding::new("ctrl-i", ToggleItalic, Some("Spreadsheet")),
+        // On macOS, Ctrl+U starts edit (since F2 is often mapped to brightness)
+        // Users can still use Cmd+U for underline on Mac
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-u", ToggleUnderline, Some("Spreadsheet")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-u", StartEdit, Some("Spreadsheet")),
 
         // History
         KeyBinding::new("ctrl-z", Undo, Some("Spreadsheet")),
@@ -100,6 +107,18 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("ctrl-pagedown", NextSheet, Some("Spreadsheet")),
         KeyBinding::new("ctrl-pageup", PrevSheet, Some("Spreadsheet")),
         KeyBinding::new("shift-f11", AddSheet, Some("Spreadsheet")),
+
+        // macOS-specific shortcuts (Cmd key)
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-,", ShowPreferences, Some("Spreadsheet")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-w", CloseWindow, Some("Spreadsheet")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-q", Quit, Some("Spreadsheet")),
+
+        // Linux/Windows-specific shortcuts
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-,", ShowPreferences, Some("Spreadsheet")),
 
         // Command palette (in CommandPalette context)
         KeyBinding::new("up", PaletteUp, Some("CommandPalette")),

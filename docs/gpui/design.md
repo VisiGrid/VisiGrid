@@ -52,15 +52,30 @@ VisiGrid was originally built with iced. This document tracks the gpui rebuild.
 | Sheet navigation | ✅ Done | Ctrl+PageUp/Down, Shift+F11 |
 | Sheet context menu | ✅ Done | Right-click: Insert/Delete/Rename |
 
+### Recently Completed Features
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Excel import (xlsx/xls/ods) | ✅ Done | Background import, Import Report dialog |
+| Named ranges | ✅ Done | Create, rename, delete, extract from formula |
+| Inspector panel | ✅ Done | Cell info, format tab |
+| Theme picker | ✅ Done | 10+ themes, Ctrl+K Ctrl+T |
+| Preferences panel | ✅ Done | Ctrl+, settings UI |
+| Settings architecture | ✅ Done | User + Doc settings, sidecar persistence |
+| Multi-window settings | ✅ Done | App-level store, auto-sync across windows |
+| Autocomplete | ✅ Done | Function suggestions, signature help |
+| Syntax highlighting | ✅ Done | Formula bar highlighting |
+| CSV import | ✅ Done | |
+| Ctrl+Click selection | ✅ Done | Discontiguous ranges |
+| Fuzzy finder | ✅ Done | Ctrl+P for cells, named ranges |
+
 ### Remaining Features (Priority Order)
 
 | Feature | Priority | Effort | Notes |
 |---------|----------|--------|-------|
-| Ctrl+Click selection | P1 | Easy | Discontiguous ranges |
 | Number format shortcuts | P2 | Easy | Ctrl+Shift+$, %, etc. |
 | Format Cells dialog | P2 | Medium | Ctrl+1 |
 | Replace (Ctrl+H) | P2 | Easy | |
-| CSV import | P2 | Easy | |
 | Zoom | P2 | Easy | Ctrl++/- |
 | Cell context menu | P3 | Medium | Right-click on cells |
 | Zen Mode | P3 | Easy | F11 |
@@ -72,9 +87,9 @@ VisiGrid was originally built with iced. This document tracks the gpui rebuild.
 | Feature | Priority | Status |
 |---------|----------|--------|
 | Command Palette (Ctrl+Shift+P) | P0 | ✅ Done |
-| Quick Open (Ctrl+P) | P2 | ❌ |
+| Quick Open (Ctrl+P) | P2 | ✅ Done |
+| Cell Inspector (Ctrl+Shift+I) | P3 | ✅ Done |
 | Problems Panel (Ctrl+Shift+M) | P3 | ❌ |
-| Cell Inspector (Ctrl+Shift+I) | P3 | ❌ |
 | Context Help (F1) | P2 | ❌ |
 | Go to Definition (F12) | P3 | ❌ |
 | Find All References (Shift+F12) | P3 | ❌ |
@@ -95,6 +110,14 @@ gpui-app/
 │   ├── mode.rs           # Navigation/Edit/GoTo/Find modes
 │   ├── history.rs        # Undo/redo
 │   ├── file_ops.rs       # File operations
+│   ├── settings/         # Settings architecture
+│   │   ├── mod.rs        # Module exports
+│   │   ├── types.rs      # Setting<T>, EnterBehavior, etc.
+│   │   ├── user.rs       # UserSettings (global preferences)
+│   │   ├── document.rs   # DocumentSettings (per-file)
+│   │   ├── resolved.rs   # ResolvedSettings (merged at runtime)
+│   │   ├── persistence.rs # Load/save (user + sidecar)
+│   │   └── store.rs      # App-level SettingsStore (Global)
 │   └── views/
 │       ├── mod.rs        # Main render + action handlers
 │       ├── grid.rs       # Cell grid rendering
@@ -102,6 +125,7 @@ gpui-app/
 │       ├── formula_bar.rs
 │       ├── status_bar.rs
 │       ├── menu_bar.rs   # Toolbar
+│       ├── preferences_panel.rs  # Ctrl+,
 │       ├── goto_dialog.rs
 │       └── find_dialog.rs
 ```
@@ -144,10 +168,10 @@ crates/
 2. ✅ Alt accelerators (Alt+F, Alt+E, etc.)
 3. ✅ Ctrl+Shift+Arrow selection
 4. ✅ Column/row resize by dragging
-5. ❌ Number format shortcuts
-6. ❌ Format Cells dialog (Ctrl+1)
-7. ❌ Replace (Ctrl+H)
-8. ❌ Ctrl+Click selection
+5. ✅ Ctrl+Click selection (discontiguous ranges)
+6. ❌ Number format shortcuts
+7. ❌ Format Cells dialog (Ctrl+1)
+8. ❌ Replace (Ctrl+H)
 
 ### Phase 3: Multi-Sheet ✅ COMPLETE
 
@@ -158,14 +182,25 @@ crates/
 5. ✅ Sheet management (add/delete/rename via context menu)
 6. ❌ Cross-sheet references (=Sheet2!A1)
 
-### Phase 4: Power Features (Next)
+### Phase 4: Power Features ✅ COMPLETE
 
-1. Named ranges UI
-2. Array formula visualization (spill borders)
-3. Zoom (Ctrl++/-)
-4. Split view
-5. Zen mode (F11)
-6. Cell context menu
+1. ✅ Named ranges UI (create, rename, delete, extract)
+2. ✅ Excel import (xlsx/xls/xlsb/ods) with background import
+3. ✅ Import Report dialog
+4. ✅ Inspector panel
+5. ✅ Theme picker (10+ themes)
+6. ✅ Preferences panel
+7. ✅ Formula autocomplete & signature help
+8. ✅ Syntax highlighting
+
+### Phase 5: Polish (Next)
+
+1. Array formula visualization (spill borders)
+2. Zoom (Ctrl++/-)
+3. Split view
+4. Zen mode (F11)
+5. Cell context menu
+6. More formula functions (as discovered via import telemetry)
 
 ---
 
@@ -203,7 +238,8 @@ crates/
 
 ## Next Steps
 
-1. Ctrl+Click discontiguous selection
+1. Cross-sheet references (=Sheet2!A1)
 2. Format Cells dialog (Ctrl+1)
 3. Replace (Ctrl+H)
-4. Cross-sheet references
+4. Zoom (Ctrl++/-)
+5. Export XLSX (lower priority than more function coverage)

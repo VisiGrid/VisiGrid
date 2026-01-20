@@ -17,6 +17,9 @@ pub fn set_app_menus(cx: &mut App) {
             items: vec![
                 MenuItem::action("About VisiGrid", ShowAbout),
                 MenuItem::separator(),
+                MenuItem::action("Preferences...", ShowPreferences),
+                MenuItem::separator(),
+                // Note: Hide/Show items would go here if GPUI supports them
                 MenuItem::action("Quit VisiGrid", Quit),
             ],
         },
@@ -31,6 +34,8 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Save As...", SaveAs),
                 MenuItem::separator(),
                 MenuItem::action("Export as CSV...", ExportCsv),
+                MenuItem::separator(),
+                MenuItem::action("Close", CloseWindow),
             ],
         },
         // Edit menu
@@ -45,6 +50,9 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Paste", Paste),
                 MenuItem::separator(),
                 MenuItem::action("Delete", DeleteCell),
+                MenuItem::action("Select All", SelectAll),
+                MenuItem::separator(),
+                MenuItem::action("Edit Cell", StartEdit),
                 MenuItem::separator(),
                 MenuItem::action("Find...", FindInCells),
                 MenuItem::action("Go To...", GoToCell),
@@ -57,6 +65,9 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Command Palette", ToggleCommandPalette),
                 MenuItem::separator(),
                 MenuItem::action("Inspector", ToggleInspector),
+                MenuItem::separator(),
+                MenuItem::action("Show Formulas", ToggleFormulaView),
+                MenuItem::action("Show Zeros", ToggleShowZeros),
             ],
         },
         // Format menu

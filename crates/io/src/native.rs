@@ -119,6 +119,7 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
 
                 // Convert number format to integer + decimals
                 // Date uses decimals field to store style (0=Short, 1=Long, 2=Iso)
+                // Time = 5, DateTime = 6
                 let (number_type, decimals) = match format.number_format {
                     NumberFormat::General => (0, 2),
                     NumberFormat::Number { decimals } => (1, decimals as i32),
@@ -129,6 +130,8 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
                         DateStyle::Long => 1,
                         DateStyle::Iso => 2,
                     }),
+                    NumberFormat::Time => (5, 0),
+                    NumberFormat::DateTime => (6, 0),
                 };
 
                 stmt.execute(params![
@@ -254,6 +257,8 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
                 2 => DateStyle::Iso,
                 _ => DateStyle::Short,
             }},
+            5 => NumberFormat::Time,
+            6 => NumberFormat::DateTime,
             _ => NumberFormat::General,
         };
         let format = CellFormat {
@@ -352,6 +357,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                 };
 
                 // Convert number format to integer + decimals
+                // Time = 5, DateTime = 6
                 let (number_type, decimals) = match format.number_format {
                     NumberFormat::General => (0, 2),
                     NumberFormat::Number { decimals } => (1, decimals as i32),
@@ -362,6 +368,8 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                         DateStyle::Long => 1,
                         DateStyle::Iso => 2,
                     }),
+                    NumberFormat::Time => (5, 0),
+                    NumberFormat::DateTime => (6, 0),
                 };
 
                 stmt.execute(params![

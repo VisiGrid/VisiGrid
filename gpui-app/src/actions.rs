@@ -65,6 +65,8 @@ actions!(editing, [
 // Selection actions
 actions!(selection, [
     SelectAll,
+    SelectRow,      // Shift+Space - select entire row
+    SelectColumn,   // Ctrl+Space - select entire column
     ExtendUp,
     ExtendDown,
     ExtendLeft,
@@ -89,6 +91,7 @@ actions!(file, [
     Save,
     SaveAs,
     ExportCsv,
+    CloseWindow,
     Quit,
 ]);
 
@@ -97,9 +100,11 @@ actions!(view, [
     ToggleCommandPalette,
     ToggleInspector,
     ShowFormatPanel,  // Ctrl+1 - opens inspector with Format tab
+    ShowPreferences,  // Cmd+, on macOS - currently routes to theme picker
     ToggleProblems,
     ToggleZenMode,
     ToggleFormulaView,
+    ToggleShowZeros,
     ZoomIn,
     ZoomOut,
     ZoomReset,

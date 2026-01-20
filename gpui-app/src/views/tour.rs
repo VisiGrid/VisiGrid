@@ -279,3 +279,142 @@ pub fn render_name_tooltip(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> 
                 )
         )
 }
+
+/// Render the F2 function key tip (macOS only)
+/// Suggests enabling standard function keys so F2 works for edit
+pub fn render_f2_tooltip(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
+
+    // Position near top-center
+    div()
+        .absolute()
+        .top(px(60.0))
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .px_4()
+                .py_3()
+                .bg(panel_bg)
+                .border_1()
+                .border_color(accent.opacity(0.5))
+                .rounded_lg()
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .gap_2()
+                // Header row with icon and dismiss
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_base()
+                                        .child("⌨️")
+                                )
+                                .child(
+                                    div()
+                                        .text_color(text_primary)
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("Tip: Enable F2 for faster editing")
+                                )
+                        )
+                        // Dismiss X
+                        .child(
+                            div()
+                                .id("dismiss-f2-tip-x")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_color(text_muted)
+                                .text_xs()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(panel_border.opacity(0.5)))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.hide_f2_tip(cx);
+                                }))
+                                .child("×")
+                        )
+                )
+                // Explanation
+                .child(
+                    div()
+                        .text_color(text_muted)
+                        .text_xs()
+                        .line_height(rems(1.4))
+                        .child("To use F2 like other spreadsheets, enable standard function keys:")
+                )
+                // Steps
+                .child(
+                    div()
+                        .text_color(text_muted)
+                        .text_xs()
+                        .line_height(rems(1.4))
+                        .child("System Settings → Keyboard → \"Use F1, F2, etc. keys as standard function keys\"")
+                )
+                // Alternative hint
+                .child(
+                    div()
+                        .text_color(text_muted.opacity(0.8))
+                        .text_xs()
+                        .italic()
+                        .child("Or hold Fn while pressing F2.")
+                )
+                // Action buttons
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap_2()
+                        .mt_1()
+                        // "Got it" button (hides tip for now)
+                        .child(
+                            div()
+                                .id("f2-tip-got-it")
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(text_muted)
+                                .hover(|s| s.bg(panel_border.opacity(0.5)))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.hide_f2_tip(cx);
+                                }))
+                                .child("Got it")
+                        )
+                        // "Don't show again" button
+                        .child(
+                            div()
+                                .id("f2-tip-dismiss")
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .bg(accent.opacity(0.15))
+                                .text_color(accent)
+                                .hover(|s| s.bg(accent.opacity(0.25)))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.dismiss_f2_tip(cx);
+                                }))
+                                .child("Don't show again")
+                        )
+                )
+        )
+}

@@ -20,29 +20,35 @@ VisiGrid is NOT building:
 
 ## Post-MVP Roadmap
 
-### Phase 1: Feature Parity (Current)
+### Phase 1: Feature Parity ✅ COMPLETE
 
 Get gpui version to match what iced had:
-- Command Palette
-- Multi-sheet support
-- Full keyboard shortcuts
-- Dropdown menus
+- ✅ Command Palette
+- ✅ Multi-sheet support
+- ✅ Full keyboard shortcuts
+- ✅ Dropdown menus
 
-### Phase 2: Polish
+### Phase 2: Polish ✅ MOSTLY COMPLETE
 
-- Themes (dark/light toggle)
-- Configurable keybindings
-- Column/row resize
-- Freeze panes
-- Print to PDF
+- ✅ Themes (10+ themes, dark/light)
+- ✅ Column/row resize
+- ❌ Configurable keybindings
+- ❌ Freeze panes
+- ❌ Print to PDF
 
-### Phase 3: Power Features
+### Phase 3: Power Features ✅ COMPLETE
 
-- Named ranges UI
-- Data validation
-- Conditional formatting (basic)
-- Comments/notes
-- Charts (basic)
+- ✅ Named ranges UI (create, rename, delete, extract)
+- ✅ Excel import (xlsx/xls/xlsb/ods)
+- ✅ Background import with progress overlay
+- ✅ Import Report dialog (fidelity tracking)
+- ✅ Inspector panel
+- ✅ Formula autocomplete & signature help
+- ✅ Syntax highlighting
+- ❌ Data validation
+- ❌ Conditional formatting (basic)
+- ❌ Comments/notes
+- ❌ Charts (basic)
 
 ### Phase 4: Systems of Record
 
@@ -93,23 +99,23 @@ AI cannot:
 
 ## Technical Debt to Address
 
-### Before Phase 2
+### Before Phase 2 ✅ COMPLETE
 
-| Issue | Priority |
-|-------|----------|
-| Proper dropdown menus | High |
-| Alt accelerators | High |
-| Context menus (right-click) | Medium |
-| Window title (filename) | Low |
+| Issue | Priority | Status |
+|-------|----------|--------|
+| Proper dropdown menus | High | ✅ Done |
+| Alt accelerators | High | ✅ Done |
+| Context menus (right-click) | Medium | ✅ Done (sheets) |
+| Window title (filename) | Low | ✅ Done |
 
-### Before Phase 3
+### Before Phase 3 ✅ COMPLETE
 
-| Issue | Priority |
-|-------|----------|
-| Multi-sheet persistence | High |
-| Named range persistence | High |
-| Format persistence (fonts, colors) | Medium |
-| Column width persistence | Medium |
+| Issue | Priority | Status |
+|-------|----------|--------|
+| Multi-sheet persistence | High | ✅ Done |
+| Named range persistence | High | ✅ Done |
+| Format persistence (fonts, colors) | Medium | ✅ Done |
+| Column width persistence | Medium | ✅ Done |
 
 ### Before Phase 4
 
@@ -130,10 +136,12 @@ These remain rejected:
 | VBA/macro compatibility | Lua scripting instead |
 | Perfect Excel formatting | Diminishing returns |
 | Real-time collaboration | Complexity; local-first |
-| XLSX read/write (v1) | Massive spec |
+| XLSX write/export | One-way import only; save as .sheet |
 | Charts (v1) | Separate concern |
 | Pivot tables (v1) | Too complex |
 | Mobile/tablet | Desktop-first |
+
+**Note:** XLSX *read* is now implemented (one-way import). Excel files open with background import, Import Report shows fidelity info, and unsupported functions are tracked for prioritization.
 
 ---
 

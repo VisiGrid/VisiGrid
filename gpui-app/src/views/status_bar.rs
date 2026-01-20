@@ -87,17 +87,7 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                         .mx_2()
                 )
                 // Status message or mode
-                .child(
-                    div()
-                        .text_color(text_muted)
-                        .child(
-                            if let Some(msg) = &app.status_message {
-                                msg.clone()
-                            } else {
-                                mode_text.to_string()
-                            }
-                        )
-                )
+                .child(render_status_message(app, mode_text, text_muted, cx))
         )
         .child(
             // Right side: selection stats
@@ -258,6 +248,37 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
                 }))
                 .child("Rename")
         )
+}
+
+/// Render the status message, making it clickable if an import report is available
+fn render_status_message(app: &Spreadsheet, mode_text: &str, text_muted: Hsla, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let has_import_result = app.import_result.is_some();
+    let accent = app.token(TokenKey::Accent);
+
+    let message = if let Some(msg) = &app.status_message {
+        msg.clone()
+    } else {
+        mode_text.to_string()
+    };
+
+    // If there's an import result, make the message clickable
+    if has_import_result && app.status_message.is_some() {
+        div()
+            .id("status-message")
+            .text_color(accent)
+            .cursor_pointer()
+            .hover(|s| s.underline())
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.show_import_report(cx);
+            }))
+            .child(message)
+            .into_any_element()
+    } else {
+        div()
+            .text_color(text_muted)
+            .child(message)
+            .into_any_element()
+    }
 }
 
 /// Calculate statistics for the current selection

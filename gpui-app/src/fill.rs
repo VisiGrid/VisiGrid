@@ -186,7 +186,7 @@ impl Spreadsheet {
             return None;
         }
 
-        let mut end_row = row - 1;
+        let end_row = row - 1;
         let mut start_row = end_row;
 
         // Check if the cell above is numeric
@@ -215,7 +215,7 @@ impl Spreadsheet {
             return None;
         }
 
-        let mut end_col = col - 1;
+        let end_col = col - 1;
         let mut start_col = end_col;
 
         // Check if the cell to the left is numeric

@@ -796,6 +796,47 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
             }
             EvalResult::Text(result)
         }
+        "TEXTJOIN" => {
+            // TEXTJOIN(delimiter, ignore_empty, text1, [text2], ...)
+            if args.len() < 3 {
+                return EvalResult::Error("TEXTJOIN requires at least 3 arguments".to_string());
+            }
+            let delimiter = evaluate(&args[0], lookup).to_text();
+            let ignore_empty = match evaluate(&args[1], lookup).to_bool() {
+                Ok(b) => b,
+                Err(_) => true, // default to TRUE
+            };
+
+            let mut parts: Vec<String> = Vec::new();
+
+            for arg in &args[2..] {
+                match arg {
+                    Expr::Range { start_col, start_row, end_col, end_row } => {
+                        // Collect all values from range
+                        let (min_row, min_col, max_row, max_col) = (
+                            (*start_row).min(*end_row), (*start_col).min(*end_col),
+                            (*start_row).max(*end_row), (*start_col).max(*end_col)
+                        );
+                        for r in min_row..=max_row {
+                            for c in min_col..=max_col {
+                                let text = lookup.get_text(r, c);
+                                if !ignore_empty || !text.is_empty() {
+                                    parts.push(text);
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        let text = evaluate(arg, lookup).to_text();
+                        if !ignore_empty || !text.is_empty() {
+                            parts.push(text);
+                        }
+                    }
+                }
+            }
+
+            EvalResult::Text(parts.join(&delimiter))
+        }
         "LEFT" => {
             if args.is_empty() || args.len() > 2 {
                 return EvalResult::Error("LEFT requires 1 or 2 arguments".to_string());
@@ -1084,6 +1125,168 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
             }
             EvalResult::Number(count as f64)
         }
+        "SUMIFS" => {
+            // SUMIFS(sum_range, criteria_range1, criteria1, [criteria_range2, criteria2], ...)
+            if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+                return EvalResult::Error("SUMIFS requires sum_range and pairs of criteria_range and criteria".to_string());
+            }
+
+            let sum_range = match &args[0] {
+                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                _ => return EvalResult::Error("SUMIFS sum_range must be a range".to_string()),
+            };
+
+            let (sr_min_row, sr_min_col, sr_max_row, sr_max_col) = (
+                sum_range.0.min(sum_range.2), sum_range.1.min(sum_range.3),
+                sum_range.0.max(sum_range.2), sum_range.1.max(sum_range.3)
+            );
+            let num_rows = sr_max_row - sr_min_row + 1;
+            let num_cols = sr_max_col - sr_min_col + 1;
+
+            // Parse criteria pairs
+            let num_criteria = (args.len() - 1) / 2;
+            let mut criteria_ranges = Vec::with_capacity(num_criteria);
+            let mut criteria_values = Vec::with_capacity(num_criteria);
+
+            for i in 0..num_criteria {
+                let range_arg = &args[1 + i * 2];
+                let criteria_arg = &args[2 + i * 2];
+
+                let crit_range = match range_arg {
+                    Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                    _ => return EvalResult::Error("SUMIFS criteria_range must be a range".to_string()),
+                };
+
+                // Verify dimensions match sum_range
+                let (cr_min_row, cr_min_col, cr_max_row, cr_max_col) = (
+                    crit_range.0.min(crit_range.2), crit_range.1.min(crit_range.3),
+                    crit_range.0.max(crit_range.2), crit_range.1.max(crit_range.3)
+                );
+                if (cr_max_row - cr_min_row + 1) != num_rows || (cr_max_col - cr_min_col + 1) != num_cols {
+                    return EvalResult::Error("SUMIFS criteria ranges must have same dimensions as sum_range".to_string());
+                }
+
+                criteria_ranges.push((cr_min_row, cr_min_col));
+                criteria_values.push(evaluate(criteria_arg, lookup));
+            }
+
+            let mut sum = 0.0;
+            for row_offset in 0..num_rows {
+                for col_offset in 0..num_cols {
+                    // Check all criteria
+                    let mut all_match = true;
+                    for (idx, &(cr_row, cr_col)) in criteria_ranges.iter().enumerate() {
+                        let r = cr_row + row_offset;
+                        let c = cr_col + col_offset;
+                        let cell_text = lookup.get_text(r, c);
+                        let cell_value = if cell_text.is_empty() {
+                            EvalResult::Number(0.0)
+                        } else if let Ok(n) = cell_text.parse::<f64>() {
+                            EvalResult::Number(n)
+                        } else {
+                            EvalResult::Text(cell_text)
+                        };
+
+                        if !matches_criteria(&cell_value, &criteria_values[idx]) {
+                            all_match = false;
+                            break;
+                        }
+                    }
+
+                    if all_match {
+                        sum += lookup.get_value(sr_min_row + row_offset, sr_min_col + col_offset);
+                    }
+                }
+            }
+            EvalResult::Number(sum)
+        }
+        "COUNTIFS" => {
+            // COUNTIFS(criteria_range1, criteria1, [criteria_range2, criteria2], ...)
+            if args.len() < 2 || args.len() % 2 != 0 {
+                return EvalResult::Error("COUNTIFS requires pairs of criteria_range and criteria".to_string());
+            }
+
+            // Use first range to determine dimensions
+            let first_range = match &args[0] {
+                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                _ => return EvalResult::Error("COUNTIFS criteria_range must be a range".to_string()),
+            };
+
+            let (fr_min_row, fr_min_col, fr_max_row, fr_max_col) = (
+                first_range.0.min(first_range.2), first_range.1.min(first_range.3),
+                first_range.0.max(first_range.2), first_range.1.max(first_range.3)
+            );
+            let num_rows = fr_max_row - fr_min_row + 1;
+            let num_cols = fr_max_col - fr_min_col + 1;
+
+            // Parse criteria pairs
+            let num_criteria = args.len() / 2;
+            let mut criteria_ranges = Vec::with_capacity(num_criteria);
+            let mut criteria_values = Vec::with_capacity(num_criteria);
+
+            for i in 0..num_criteria {
+                let range_arg = &args[i * 2];
+                let criteria_arg = &args[i * 2 + 1];
+
+                let crit_range = match range_arg {
+                    Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                    _ => return EvalResult::Error("COUNTIFS criteria_range must be a range".to_string()),
+                };
+
+                // Verify dimensions match first range
+                let (cr_min_row, cr_min_col, cr_max_row, cr_max_col) = (
+                    crit_range.0.min(crit_range.2), crit_range.1.min(crit_range.3),
+                    crit_range.0.max(crit_range.2), crit_range.1.max(crit_range.3)
+                );
+                if (cr_max_row - cr_min_row + 1) != num_rows || (cr_max_col - cr_min_col + 1) != num_cols {
+                    return EvalResult::Error("COUNTIFS ranges must have same dimensions".to_string());
+                }
+
+                criteria_ranges.push((cr_min_row, cr_min_col));
+                criteria_values.push(evaluate(criteria_arg, lookup));
+            }
+
+            let mut count = 0;
+            for row_offset in 0..num_rows {
+                for col_offset in 0..num_cols {
+                    // Check all criteria
+                    let mut all_match = true;
+                    for (idx, &(cr_row, cr_col)) in criteria_ranges.iter().enumerate() {
+                        let r = cr_row + row_offset;
+                        let c = cr_col + col_offset;
+                        let cell_text = lookup.get_text(r, c);
+                        let cell_value = if cell_text.is_empty() {
+                            EvalResult::Text(String::new())
+                        } else if let Ok(n) = cell_text.parse::<f64>() {
+                            EvalResult::Number(n)
+                        } else {
+                            EvalResult::Text(cell_text)
+                        };
+
+                        if !matches_criteria(&cell_value, &criteria_values[idx]) {
+                            all_match = false;
+                            break;
+                        }
+                    }
+
+                    if all_match {
+                        count += 1;
+                    }
+                }
+            }
+            EvalResult::Number(count as f64)
+        }
+        "IFNA" => {
+            // IFNA(value, value_if_na)
+            if args.len() != 2 {
+                return EvalResult::Error("IFNA requires exactly 2 arguments".to_string());
+            }
+            let value = evaluate(&args[0], lookup);
+            match value {
+                EvalResult::Error(ref e) if e == "#N/A" => evaluate(&args[1], lookup),
+                _ => value,
+            }
+        }
 
         // =====================
         // LOOKUP FUNCTIONS
@@ -1173,6 +1376,172 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
                     }
                 }
                 None => EvalResult::Error("#N/A".to_string()),
+            }
+        }
+        "XLOOKUP" => {
+            // XLOOKUP(lookup_value, lookup_array, return_array, [if_not_found], [match_mode], [search_mode])
+            // match_mode: 0 = exact (default), -1 = exact or next smaller, 1 = exact or next larger, 2 = wildcard
+            // search_mode: 1 = first to last (default), -1 = last to first, 2 = binary ascending, -2 = binary descending
+            if args.len() < 3 || args.len() > 6 {
+                return EvalResult::Error("XLOOKUP requires 3 to 6 arguments".to_string());
+            }
+
+            let lookup_value = evaluate(&args[0], lookup);
+
+            // Parse lookup array (must be 1D - single row or column)
+            let lookup_array = match &args[1] {
+                Expr::Range { start_col, start_row, end_col, end_row } => {
+                    let (min_row, min_col, max_row, max_col) = (
+                        (*start_row).min(*end_row), (*start_col).min(*end_col),
+                        (*start_row).max(*end_row), (*start_col).max(*end_col)
+                    );
+                    // Determine orientation
+                    let is_row = min_row == max_row;
+                    let is_col = min_col == max_col;
+                    if !is_row && !is_col {
+                        return EvalResult::Error("XLOOKUP lookup_array must be a single row or column".to_string());
+                    }
+                    (min_row, min_col, max_row, max_col, is_row)
+                }
+                _ => return EvalResult::Error("XLOOKUP lookup_array must be a range".to_string()),
+            };
+
+            // Parse return array (must have same dimensions)
+            let return_array = match &args[2] {
+                Expr::Range { start_col, start_row, end_col, end_row } => {
+                    let (min_row, min_col, max_row, max_col) = (
+                        (*start_row).min(*end_row), (*start_col).min(*end_col),
+                        (*start_row).max(*end_row), (*start_col).max(*end_col)
+                    );
+                    (min_row, min_col, max_row, max_col)
+                }
+                _ => return EvalResult::Error("XLOOKUP return_array must be a range".to_string()),
+            };
+
+            // Verify lookup and return arrays have compatible dimensions
+            let lookup_size = if lookup_array.4 {
+                lookup_array.3 - lookup_array.1 + 1  // columns for row array
+            } else {
+                lookup_array.2 - lookup_array.0 + 1  // rows for column array
+            };
+
+            let return_size = if lookup_array.4 {
+                return_array.3 - return_array.1 + 1  // columns
+            } else {
+                return_array.2 - return_array.0 + 1  // rows
+            };
+
+            if lookup_size != return_size {
+                return EvalResult::Error("XLOOKUP lookup and return arrays must have same size".to_string());
+            }
+
+            // Optional: if_not_found
+            let if_not_found = if args.len() >= 4 {
+                Some(&args[3])
+            } else {
+                None
+            };
+
+            // Optional: match_mode (0 = exact match, default)
+            let match_mode = if args.len() >= 5 {
+                match evaluate(&args[4], lookup).to_number() {
+                    Ok(n) => n as i32,
+                    Err(_) => 0,
+                }
+            } else {
+                0
+            };
+
+            // Search for match
+            let mut found_idx: Option<usize> = None;
+
+            for idx in 0..lookup_size {
+                let (r, c) = if lookup_array.4 {
+                    (lookup_array.0, lookup_array.1 + idx)
+                } else {
+                    (lookup_array.0 + idx, lookup_array.1)
+                };
+
+                let cell_text = lookup.get_text(r, c);
+                let cell_value = if cell_text.is_empty() {
+                    EvalResult::Text(String::new())
+                } else if let Ok(n) = cell_text.parse::<f64>() {
+                    EvalResult::Number(n)
+                } else {
+                    EvalResult::Text(cell_text)
+                };
+
+                let is_match = match match_mode {
+                    0 => {
+                        // Exact match
+                        match (&lookup_value, &cell_value) {
+                            (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
+                            (EvalResult::Text(a), EvalResult::Text(b)) => a.eq_ignore_ascii_case(b),
+                            _ => false,
+                        }
+                    }
+                    2 => {
+                        // Wildcard match (simplified: just exact for now)
+                        match (&lookup_value, &cell_value) {
+                            (EvalResult::Text(pattern), EvalResult::Text(text)) => {
+                                // Simple wildcard: * matches any chars, ? matches single char
+                                let pattern_lower = pattern.to_lowercase();
+                                let text_lower = text.to_lowercase();
+                                if pattern_lower.contains('*') || pattern_lower.contains('?') {
+                                    // Simple wildcard matching: * matches any sequence, ? matches single char
+                                    // For now, just check prefix match for patterns like "abc*"
+                                    let prefix = pattern_lower.split('*').next().unwrap_or("");
+                                    text_lower.starts_with(prefix) || text_lower == pattern_lower
+                                } else {
+                                    pattern_lower == text_lower
+                                }
+                            }
+                            (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
+                            _ => false,
+                        }
+                    }
+                    _ => {
+                        // For -1 (next smaller) and 1 (next larger), fall back to exact for simplicity
+                        match (&lookup_value, &cell_value) {
+                            (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
+                            (EvalResult::Text(a), EvalResult::Text(b)) => a.eq_ignore_ascii_case(b),
+                            _ => false,
+                        }
+                    }
+                };
+
+                if is_match {
+                    found_idx = Some(idx);
+                    break;
+                }
+            }
+
+            match found_idx {
+                Some(idx) => {
+                    // Return value from return_array at same position
+                    let (r, c) = if lookup_array.4 {
+                        (return_array.0, return_array.1 + idx)
+                    } else {
+                        (return_array.0 + idx, return_array.1)
+                    };
+
+                    let result_text = lookup.get_text(r, c);
+                    if result_text.is_empty() {
+                        EvalResult::Text(String::new())
+                    } else if let Ok(n) = result_text.parse::<f64>() {
+                        EvalResult::Number(n)
+                    } else {
+                        EvalResult::Text(result_text)
+                    }
+                }
+                None => {
+                    // Not found - return if_not_found or #N/A
+                    if let Some(if_not_found_expr) = if_not_found {
+                        evaluate(if_not_found_expr, lookup)
+                    } else {
+                        EvalResult::Error("#N/A".to_string())
+                    }
+                }
             }
         }
         "HLOOKUP" => {
@@ -2832,5 +3201,225 @@ mod tests {
         let expr = parse("=Price-Discount").unwrap();
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(25.0));
+    }
+
+    // =========================================================================
+    // Compat tests for newly implemented functions (SUMIFS, COUNTIFS, IFNA, TEXTJOIN, XLOOKUP)
+    // These ensure Excel-compatible behavior for common import scenarios
+    // =========================================================================
+
+    #[test]
+    fn test_sumifs_single_criteria() {
+        let mut lookup = TestLookup::new();
+        // Sum range: A1:A5 = [100, 200, 150, 300, 50]
+        lookup.set(0, 0, "100");
+        lookup.set(1, 0, "200");
+        lookup.set(2, 0, "150");
+        lookup.set(3, 0, "300");
+        lookup.set(4, 0, "50");
+        // Criteria range: B1:B5 = ["East", "West", "East", "East", "West"]
+        lookup.set(0, 1, "East");
+        lookup.set(1, 1, "West");
+        lookup.set(2, 1, "East");
+        lookup.set(3, 1, "East");
+        lookup.set(4, 1, "West");
+
+        // SUMIFS(A1:A5, B1:B5, "East") should sum 100+150+300 = 550
+        let expr = parse(r#"=SUMIFS(A1:A5, B1:B5, "East")"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(550.0));
+    }
+
+    #[test]
+    fn test_sumifs_multiple_criteria() {
+        let mut lookup = TestLookup::new();
+        // Sum range: A1:A4 = [100, 200, 150, 300]
+        lookup.set(0, 0, "100");
+        lookup.set(1, 0, "200");
+        lookup.set(2, 0, "150");
+        lookup.set(3, 0, "300");
+        // Region: B1:B4 = ["East", "West", "East", "East"]
+        lookup.set(0, 1, "East");
+        lookup.set(1, 1, "West");
+        lookup.set(2, 1, "East");
+        lookup.set(3, 1, "East");
+        // Status: C1:C4 = ["Active", "Active", "Inactive", "Active"]
+        lookup.set(0, 2, "Active");
+        lookup.set(1, 2, "Active");
+        lookup.set(2, 2, "Inactive");
+        lookup.set(3, 2, "Active");
+
+        // SUMIFS(A1:A4, B1:B4, "East", C1:C4, "Active") = 100 + 300 = 400
+        let expr = parse(r#"=SUMIFS(A1:A4, B1:B4, "East", C1:C4, "Active")"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(400.0));
+    }
+
+    #[test]
+    fn test_countifs_single_criteria() {
+        let mut lookup = TestLookup::new();
+        // A1:A5 = ["Apple", "Banana", "Apple", "Cherry", "Apple"]
+        lookup.set(0, 0, "Apple");
+        lookup.set(1, 0, "Banana");
+        lookup.set(2, 0, "Apple");
+        lookup.set(3, 0, "Cherry");
+        lookup.set(4, 0, "Apple");
+
+        // COUNTIFS(A1:A5, "Apple") = 3
+        let expr = parse(r#"=COUNTIFS(A1:A5, "Apple")"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(3.0));
+    }
+
+    #[test]
+    fn test_countifs_multiple_criteria() {
+        let mut lookup = TestLookup::new();
+        // Product: A1:A4 = ["Widget", "Gadget", "Widget", "Widget"]
+        lookup.set(0, 0, "Widget");
+        lookup.set(1, 0, "Gadget");
+        lookup.set(2, 0, "Widget");
+        lookup.set(3, 0, "Widget");
+        // Region: B1:B4 = ["North", "North", "South", "North"]
+        lookup.set(0, 1, "North");
+        lookup.set(1, 1, "North");
+        lookup.set(2, 1, "South");
+        lookup.set(3, 1, "North");
+
+        // COUNTIFS(A1:A4, "Widget", B1:B4, "North") = 2
+        let expr = parse(r#"=COUNTIFS(A1:A4, "Widget", B1:B4, "North")"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(2.0));
+    }
+
+    #[test]
+    fn test_ifna_with_na_error() {
+        let mut lookup = TestLookup::new();
+        // VLOOKUP that won't find match returns #N/A
+        lookup.set(0, 0, "NotFound");
+        lookup.set(0, 1, "100");
+
+        // IFNA(VLOOKUP("X", A1:B1, 2, FALSE), "Not Available")
+        let expr = parse(r#"=IFNA(VLOOKUP("X", A1:B1, 2, FALSE), "Not Available")"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Text("Not Available".to_string()));
+    }
+
+    #[test]
+    fn test_ifna_without_error() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "Found");
+        lookup.set(0, 1, "100");
+
+        // IFNA(VLOOKUP("Found", A1:B1, 2, FALSE), "Not Available")
+        let expr = parse(r#"=IFNA(VLOOKUP("Found", A1:B1, 2, FALSE), "Not Available")"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(100.0));
+    }
+
+    #[test]
+    fn test_textjoin_basic() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "Hello");
+        lookup.set(1, 0, "World");
+        lookup.set(2, 0, "!");
+
+        // TEXTJOIN(", ", TRUE, A1:A3) = "Hello, World, !"
+        let expr = parse(r#"=TEXTJOIN(", ", TRUE, A1:A3)"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Text("Hello, World, !".to_string()));
+    }
+
+    #[test]
+    fn test_textjoin_ignore_empty() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "A");
+        lookup.set(1, 0, "");  // Empty
+        lookup.set(2, 0, "B");
+        lookup.set(3, 0, "");  // Empty
+        lookup.set(4, 0, "C");
+
+        // TEXTJOIN("-", TRUE, A1:A5) = "A-B-C" (empties ignored)
+        let expr = parse(r#"=TEXTJOIN("-", TRUE, A1:A5)"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Text("A-B-C".to_string()));
+
+        // TEXTJOIN("-", FALSE, A1:A5) = "A--B--C" (empties included)
+        let expr = parse(r#"=TEXTJOIN("-", FALSE, A1:A5)"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Text("A--B--C".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_basic() {
+        let mut lookup = TestLookup::new();
+        // Lookup column A1:A4 = ["Apple", "Banana", "Cherry", "Date"]
+        lookup.set(0, 0, "Apple");
+        lookup.set(1, 0, "Banana");
+        lookup.set(2, 0, "Cherry");
+        lookup.set(3, 0, "Date");
+        // Return column B1:B4 = [1.99, 0.99, 2.49, 3.99]
+        lookup.set(0, 1, "1.99");
+        lookup.set(1, 1, "0.99");
+        lookup.set(2, 1, "2.49");
+        lookup.set(3, 1, "3.99");
+
+        // XLOOKUP("Cherry", A1:A4, B1:B4) = 2.49
+        let expr = parse(r#"=XLOOKUP("Cherry", A1:A4, B1:B4)"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(2.49));
+    }
+
+    #[test]
+    fn test_xlookup_not_found_with_default() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "Apple");
+        lookup.set(0, 1, "1.99");
+
+        // XLOOKUP("Orange", A1:A1, B1:B1, "Not found") = "Not found"
+        let expr = parse(r#"=XLOOKUP("Orange", A1:A1, B1:B1, "Not found")"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Text("Not found".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_not_found_returns_na() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "Apple");
+        lookup.set(0, 1, "1.99");
+
+        // XLOOKUP("Orange", A1:A1, B1:B1) with no default = #N/A
+        let expr = parse(r#"=XLOOKUP("Orange", A1:A1, B1:B1)"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Error("#N/A".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_case_insensitive() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "APPLE");
+        lookup.set(0, 1, "1.99");
+
+        // XLOOKUP("apple", ...) should match "APPLE"
+        let expr = parse(r#"=XLOOKUP("apple", A1:A1, B1:B1)"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(1.99));
+    }
+
+    #[test]
+    fn test_xlookup_numeric() {
+        let mut lookup = TestLookup::new();
+        // Lookup by ID: A1:A3 = [101, 102, 103]
+        lookup.set(0, 0, "101");
+        lookup.set(1, 0, "102");
+        lookup.set(2, 0, "103");
+        // Names: B1:B3 = ["Alice", "Bob", "Charlie"]
+        lookup.set(0, 1, "Alice");
+        lookup.set(1, 1, "Bob");
+        lookup.set(2, 1, "Charlie");
+
+        // XLOOKUP(102, A1:A3, B1:B3) = "Bob"
+        let expr = parse("=XLOOKUP(102, A1:A3, B1:B3)").unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Text("Bob".to_string()));
     }
 }
