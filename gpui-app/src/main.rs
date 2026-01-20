@@ -4,6 +4,7 @@
 mod actions;
 mod app;
 mod file_ops;
+mod formula_context;
 mod history;
 mod keybindings;
 mod mode;

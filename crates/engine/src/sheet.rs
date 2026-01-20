@@ -296,6 +296,13 @@ impl Sheet {
             .unwrap_or(false)
     }
 
+    /// Get the spill parent for a cell (if it's a spill receiver)
+    pub fn get_spill_parent(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        self.cells
+            .get(&(row, col))
+            .and_then(|c| c.spill_parent)
+    }
+
     /// Get spill info for a cell (if it's a spill parent)
     pub fn get_spill_info(&self, row: usize, col: usize) -> Option<SpillInfo> {
         self.cells

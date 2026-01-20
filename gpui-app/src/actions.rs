@@ -51,6 +51,8 @@ actions!(editing, [
     EditSelectWordRight,
     // F4 reference cycling
     CycleReference,
+    // Alt+= AutoSum
+    AutoSum,
 ]);
 
 // Selection actions
@@ -86,8 +88,10 @@ actions!(file, [
 actions!(view, [
     ToggleCommandPalette,
     ToggleInspector,
+    ShowFormatPanel,  // Ctrl+1 - opens inspector with Format tab
     ToggleProblems,
     ToggleZenMode,
+    ToggleFormulaView,
     ZoomIn,
     ZoomOut,
     ZoomReset,

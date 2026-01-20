@@ -85,8 +85,20 @@ pub enum TokenKey {
     RefHighlight1,
     RefHighlight2,
     RefHighlight3,
-    SpillBorder,
+    SpillBorder,           // Spill parent border (blue)
+    SpillReceiverBorder,   // Spill receiver border (light blue)
+    SpillBlockedBorder,    // Blocked spill / #SPILL! error (red)
     CommentIndicator,
+
+    // Formula syntax highlighting
+    FormulaFunction,
+    FormulaCellRef,
+    FormulaNumber,
+    FormulaString,
+    FormulaBoolean,
+    FormulaOperator,
+    FormulaParens,
+    FormulaError,
 }
 
 impl TokenKey {
@@ -152,7 +164,18 @@ impl TokenKey {
         TokenKey::RefHighlight2,
         TokenKey::RefHighlight3,
         TokenKey::SpillBorder,
+        TokenKey::SpillReceiverBorder,
+        TokenKey::SpillBlockedBorder,
         TokenKey::CommentIndicator,
+        // Formula syntax highlighting
+        TokenKey::FormulaFunction,
+        TokenKey::FormulaCellRef,
+        TokenKey::FormulaNumber,
+        TokenKey::FormulaString,
+        TokenKey::FormulaBoolean,
+        TokenKey::FormulaOperator,
+        TokenKey::FormulaParens,
+        TokenKey::FormulaError,
     ];
 }
 
@@ -313,8 +336,20 @@ pub fn visigrid_theme() -> Theme {
     tokens.insert(TokenKey::RefHighlight1, rgb(0x22c55e)); // Green
     tokens.insert(TokenKey::RefHighlight2, rgb(0xfbbf24)); // Amber
     tokens.insert(TokenKey::RefHighlight3, rgb(0xa855f7)); // Purple
-    tokens.insert(TokenKey::SpillBorder, rgb(0x60a5fa));   // Light blue
+    tokens.insert(TokenKey::SpillBorder, rgb(0x3b82f6));         // Blue - spill parent
+    tokens.insert(TokenKey::SpillReceiverBorder, rgb(0x93c5fd)); // Light blue - spill receiver
+    tokens.insert(TokenKey::SpillBlockedBorder, rgb(0xef4444));  // Red - #SPILL! error
     tokens.insert(TokenKey::CommentIndicator, rgb(0xef4444));
+
+    // Formula syntax highlighting
+    tokens.insert(TokenKey::FormulaFunction, rgb(0xc084fc));  // Purple - functions
+    tokens.insert(TokenKey::FormulaCellRef, rgb(0x22c55e));   // Green - cell references
+    tokens.insert(TokenKey::FormulaNumber, rgb(0xfbbf24));    // Amber - numbers
+    tokens.insert(TokenKey::FormulaString, rgb(0xf97316));    // Orange - strings
+    tokens.insert(TokenKey::FormulaBoolean, rgb(0x06b6d4));   // Cyan - booleans
+    tokens.insert(TokenKey::FormulaOperator, rgb(0x94a3b8));  // Gray - operators
+    tokens.insert(TokenKey::FormulaParens, rgb(0x94a3b8));    // Gray - parentheses
+    tokens.insert(TokenKey::FormulaError, rgb(0xef4444));     // Red - errors
 
     Theme {
         meta: ThemeMeta {
@@ -399,8 +434,20 @@ pub fn classic_theme() -> Theme {
     tokens.insert(TokenKey::RefHighlight1, rgb(0x0000ff));
     tokens.insert(TokenKey::RefHighlight2, rgb(0xff0000));
     tokens.insert(TokenKey::RefHighlight3, rgb(0x800080));
-    tokens.insert(TokenKey::SpillBorder, rgb(0x0066cc));
+    tokens.insert(TokenKey::SpillBorder, rgb(0x0066cc));         // Blue - spill parent
+    tokens.insert(TokenKey::SpillReceiverBorder, rgb(0x99ccff)); // Light blue - spill receiver
+    tokens.insert(TokenKey::SpillBlockedBorder, rgb(0xff0000));  // Red - #SPILL! error
     tokens.insert(TokenKey::CommentIndicator, rgb(0xff0000));
+
+    // Formula syntax highlighting (Excel-like colors for light theme)
+    tokens.insert(TokenKey::FormulaFunction, rgb(0x0000ff));  // Blue - functions
+    tokens.insert(TokenKey::FormulaCellRef, rgb(0x008000));   // Green - cell references
+    tokens.insert(TokenKey::FormulaNumber, rgb(0x000000));    // Black - numbers
+    tokens.insert(TokenKey::FormulaString, rgb(0xa31515));    // Dark red - strings
+    tokens.insert(TokenKey::FormulaBoolean, rgb(0x0000ff));   // Blue - booleans
+    tokens.insert(TokenKey::FormulaOperator, rgb(0x000000));  // Black - operators
+    tokens.insert(TokenKey::FormulaParens, rgb(0x000000));    // Black - parentheses
+    tokens.insert(TokenKey::FormulaError, rgb(0xff0000));     // Red - errors
 
     Theme {
         meta: ThemeMeta {
@@ -491,8 +538,20 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::RefHighlight1, green_bright);
     tokens.insert(TokenKey::RefHighlight2, rgb(0xffff00));
     tokens.insert(TokenKey::RefHighlight3, rgb(0x00ffff));
-    tokens.insert(TokenKey::SpillBorder, green_bright);
+    tokens.insert(TokenKey::SpillBorder, green_bright);           // Green - spill parent
+    tokens.insert(TokenKey::SpillReceiverBorder, rgb(0x55aa55));  // Dim green - spill receiver
+    tokens.insert(TokenKey::SpillBlockedBorder, rgb(0xff5555));   // Red - #SPILL! error
     tokens.insert(TokenKey::CommentIndicator, rgb(0xff5555));
+
+    // Formula syntax highlighting (retro green monochrome style)
+    tokens.insert(TokenKey::FormulaFunction, rgb(0x55ff55));  // Bright green - functions
+    tokens.insert(TokenKey::FormulaCellRef, rgb(0x00ff00));   // Green - cell references
+    tokens.insert(TokenKey::FormulaNumber, rgb(0x55ff55));    // Bright green - numbers
+    tokens.insert(TokenKey::FormulaString, rgb(0x00ff00));    // Green - strings
+    tokens.insert(TokenKey::FormulaBoolean, rgb(0x55ff55));   // Bright green - booleans
+    tokens.insert(TokenKey::FormulaOperator, rgb(0x00ff00));  // Green - operators
+    tokens.insert(TokenKey::FormulaParens, rgb(0x00ff00));    // Green - parentheses
+    tokens.insert(TokenKey::FormulaError, rgb(0xff5555));     // Red - errors
 
     Theme {
         meta: ThemeMeta {
@@ -510,6 +569,127 @@ pub fn visicalc_theme() -> Theme {
     }
 }
 
+/// Catppuccin Latte theme - warm pastel light theme
+pub fn catppuccin_theme() -> Theme {
+    let mut tokens = HashMap::new();
+
+    // Catppuccin Latte palette (light variant)
+    let base = rgb(0xeff1f5);      // Background
+    let mantle = rgb(0xe6e9ef);    // Slightly darker
+    let crust = rgb(0xdce0e8);     // Darkest background
+    let surface0 = rgb(0xccd0da);  // Surface
+    let surface1 = rgb(0xbcc0cc);  // Surface highlight
+    let overlay0 = rgb(0x9ca0b0);  // Muted
+    let text = rgb(0x4c4f69);      // Primary text
+    let subtext0 = rgb(0x6c6f85);  // Secondary text
+    let subtext1 = rgb(0x5c5f77);  // Tertiary text
+
+    // Accent colors (Latte variants - slightly more saturated for light bg)
+    let blue = rgb(0x1e66f5);
+    let lavender = rgb(0x7287fd);
+    let sapphire = rgb(0x209fb5);
+    let teal = rgb(0x179299);
+    let green = rgb(0x40a02b);
+    let yellow = rgb(0xdf8e1d);
+    let peach = rgb(0xfe640b);
+    let maroon = rgb(0xe64553);
+    let red = rgb(0xd20f39);
+    let mauve = rgb(0x8839ef);
+
+    // App surfaces
+    tokens.insert(TokenKey::AppBg, base);
+    tokens.insert(TokenKey::PanelBg, mantle);
+    tokens.insert(TokenKey::PanelBorder, surface0);
+    tokens.insert(TokenKey::TextPrimary, text);
+    tokens.insert(TokenKey::TextMuted, subtext0);
+    tokens.insert(TokenKey::TextDisabled, overlay0);
+    tokens.insert(TokenKey::TextInverse, base);
+
+    // Grid surfaces
+    tokens.insert(TokenKey::GridBg, rgb(0xffffff));  // Pure white cells
+    tokens.insert(TokenKey::GridLines, rgba(0xccd0da40));  // Subtle gridlines
+    tokens.insert(TokenKey::GridLinesBold, surface0);
+
+    // Headers
+    tokens.insert(TokenKey::HeaderBg, mantle);
+    tokens.insert(TokenKey::HeaderText, text);
+    tokens.insert(TokenKey::HeaderTextMuted, subtext0);
+    tokens.insert(TokenKey::HeaderBorder, surface0);
+    tokens.insert(TokenKey::HeaderHoverBg, crust);
+    tokens.insert(TokenKey::HeaderActiveBg, surface1);
+
+    // Cells
+    tokens.insert(TokenKey::CellBg, rgb(0xffffff));
+    tokens.insert(TokenKey::CellBgAlt, base);
+    tokens.insert(TokenKey::CellText, text);
+    tokens.insert(TokenKey::CellTextMuted, subtext0);
+    tokens.insert(TokenKey::CellBorderFocus, lavender);
+    tokens.insert(TokenKey::CellHoverBg, base);
+
+    // Selection + cursor
+    tokens.insert(TokenKey::SelectionBg, rgba(0x7287fd30));  // Lavender with alpha
+    tokens.insert(TokenKey::SelectionBorder, rgba(0x7287fd80));
+    tokens.insert(TokenKey::SelectionHandle, lavender);
+    tokens.insert(TokenKey::CursorBg, text);
+    tokens.insert(TokenKey::CursorText, base);
+
+    // Formula bar + editor
+    tokens.insert(TokenKey::EditorBg, rgb(0xffffff));
+    tokens.insert(TokenKey::EditorBorder, lavender);
+    tokens.insert(TokenKey::EditorText, text);
+    tokens.insert(TokenKey::EditorPlaceholder, overlay0);
+    tokens.insert(TokenKey::EditorSelectionBg, rgba(0x7287fd40));
+    tokens.insert(TokenKey::EditorSelectionText, text);
+
+    // Status + chrome
+    tokens.insert(TokenKey::StatusBg, mantle);
+    tokens.insert(TokenKey::StatusText, text);
+    tokens.insert(TokenKey::StatusTextMuted, subtext0);
+    tokens.insert(TokenKey::ToolbarBg, mantle);
+    tokens.insert(TokenKey::ToolbarBorder, surface0);
+    tokens.insert(TokenKey::ToolbarButtonHoverBg, crust);
+    tokens.insert(TokenKey::ToolbarButtonActiveBg, surface1);
+
+    // Semantic feedback
+    tokens.insert(TokenKey::Accent, lavender);
+    tokens.insert(TokenKey::Ok, green);
+    tokens.insert(TokenKey::Warn, yellow);
+    tokens.insert(TokenKey::Error, red);
+    tokens.insert(TokenKey::ErrorBg, rgba(0xd20f3920));
+    tokens.insert(TokenKey::Link, sapphire);
+
+    // Spreadsheet semantics
+    tokens.insert(TokenKey::FormulaText, blue);
+    tokens.insert(TokenKey::RefHighlight1, green);
+    tokens.insert(TokenKey::RefHighlight2, peach);
+    tokens.insert(TokenKey::RefHighlight3, mauve);
+    tokens.insert(TokenKey::SpillBorder, sapphire);        // Blue - spill parent
+    tokens.insert(TokenKey::SpillReceiverBorder, lavender); // Light blue - spill receiver
+    tokens.insert(TokenKey::SpillBlockedBorder, red);       // Red - #SPILL! error
+    tokens.insert(TokenKey::CommentIndicator, maroon);
+
+    // Formula syntax highlighting (Catppuccin Latte colors)
+    tokens.insert(TokenKey::FormulaFunction, mauve);      // Purple - functions
+    tokens.insert(TokenKey::FormulaCellRef, green);       // Green - cell references
+    tokens.insert(TokenKey::FormulaNumber, peach);        // Peach - numbers
+    tokens.insert(TokenKey::FormulaString, green);        // Green - strings
+    tokens.insert(TokenKey::FormulaBoolean, sapphire);    // Sapphire - booleans
+    tokens.insert(TokenKey::FormulaOperator, text);       // Text - operators
+    tokens.insert(TokenKey::FormulaParens, text);         // Text - parentheses
+    tokens.insert(TokenKey::FormulaError, red);           // Red - errors
+
+    Theme {
+        meta: ThemeMeta {
+            id: "catppuccin",
+            name: "Catppuccin",
+            author: "Catppuccin",
+            appearance: Appearance::Light,
+        },
+        tokens,
+        typography: ThemeTypography::default(),
+    }
+}
+
 // ============================================================================
 // Theme Registry
 // ============================================================================
@@ -518,6 +698,7 @@ pub fn visicalc_theme() -> Theme {
 pub fn builtin_themes() -> Vec<Theme> {
     vec![
         visigrid_theme(),
+        catppuccin_theme(),
         classic_theme(),
         visicalc_theme(),
     ]
@@ -527,6 +708,7 @@ pub fn builtin_themes() -> Vec<Theme> {
 pub fn get_theme(id: &str) -> Option<Theme> {
     match id {
         "visigrid" => Some(visigrid_theme()),
+        "catppuccin" => Some(catppuccin_theme()),
         "classic" => Some(classic_theme()),
         "visicalc" => Some(visicalc_theme()),
         _ => None,

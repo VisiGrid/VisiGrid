@@ -11,6 +11,7 @@ use crate::history::{History, CellChange};
 use crate::mode::Mode;
 use crate::theme::{Theme, TokenKey, visigrid_theme, builtin_themes, get_theme};
 use crate::views;
+use crate::formula_context::{tokenize_for_highlight, TokenType};
 
 // User settings that persist across sessions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -127,6 +128,26 @@ pub struct Spreadsheet {
     pub formula_ref_end: Option<(usize, usize)>,       // Range end (None = single cell)
     pub formula_ref_start_cursor: usize,               // Cursor position where reference started
 
+    // Highlighted formula references (for existing formulas when editing)
+    // Each entry is (start_cell, optional_end_cell_for_ranges)
+    pub formula_highlighted_refs: Vec<((usize, usize), Option<(usize, usize)>)>,
+
+    // Formula autocomplete state
+    pub autocomplete_visible: bool,
+    pub autocomplete_selected: usize,
+    pub autocomplete_replace_range: std::ops::Range<usize>,
+
+    // Formula hover documentation state
+    pub hover_function: Option<&'static crate::formula_context::FunctionInfo>,
+
+    // Formula view toggle (Ctrl+`)
+    pub show_formulas: bool,
+
+    // Inspector panel state
+    pub inspector_visible: bool,
+    pub inspector_tab: crate::mode::InspectorTab,
+    pub inspector_pinned: Option<(usize, usize)>,  // Pinned cell (None = follows selection)
+
     // Theme
     pub theme: Theme,
     pub theme_preview: Option<Theme>,  // For live preview in picker
@@ -191,6 +212,15 @@ impl Spreadsheet {
             formula_ref_cell: None,
             formula_ref_end: None,
             formula_ref_start_cursor: 0,
+            formula_highlighted_refs: Vec::new(),
+            autocomplete_visible: false,
+            autocomplete_selected: 0,
+            autocomplete_replace_range: 0..0,
+            hover_function: None,
+            show_formulas: false,
+            inspector_visible: false,
+            inspector_tab: crate::mode::InspectorTab::default(),
+            inspector_pinned: None,
             theme,
             theme_preview: None,
         }
@@ -487,25 +517,109 @@ impl Spreadsheet {
         self.edit_value.starts_with('=') || self.edit_value.starts_with('+')
     }
 
-    /// Check if a cell is within the current formula reference (for highlighting)
+    /// Check if a cell is within any formula reference (for highlighting)
+    /// This includes both the live pointing reference AND parsed refs from existing formulas
     pub fn is_formula_ref(&self, row: usize, col: usize) -> bool {
-        if !self.mode.is_formula() {
+        // Must be in formula mode or editing a formula
+        let is_formula_editing = self.mode.is_formula() ||
+            (self.mode.is_editing() && self.is_formula_content());
+
+        if !is_formula_editing {
             return false;
         }
 
-        let Some((ref_row, ref_col)) = self.formula_ref_cell else {
-            return false;
-        };
-
-        if let Some((end_row, end_col)) = self.formula_ref_end {
-            // Range reference - check if cell is within the range
-            let (min_row, max_row) = (ref_row.min(end_row), ref_row.max(end_row));
-            let (min_col, max_col) = (ref_col.min(end_col), ref_col.max(end_col));
-            row >= min_row && row <= max_row && col >= min_col && col <= max_col
-        } else {
-            // Single cell reference
-            row == ref_row && col == ref_col
+        // Check the live pointing reference first
+        if let Some((ref_row, ref_col)) = self.formula_ref_cell {
+            if let Some((end_row, end_col)) = self.formula_ref_end {
+                // Range reference - check if cell is within the range
+                let (min_row, max_row) = (ref_row.min(end_row), ref_row.max(end_row));
+                let (min_col, max_col) = (ref_col.min(end_col), ref_col.max(end_col));
+                if row >= min_row && row <= max_row && col >= min_col && col <= max_col {
+                    return true;
+                }
+            } else {
+                // Single cell reference
+                if row == ref_row && col == ref_col {
+                    return true;
+                }
+            }
         }
+
+        // Check the highlighted refs from parsed formula
+        for (start_cell, end_cell) in &self.formula_highlighted_refs {
+            if let Some((end_row, end_col)) = end_cell {
+                // Range - check if cell is within
+                let (min_row, max_row) = (start_cell.0.min(*end_row), start_cell.0.max(*end_row));
+                let (min_col, max_col) = (start_cell.1.min(*end_col), start_cell.1.max(*end_col));
+                if row >= min_row && row <= max_row && col >= min_col && col <= max_col {
+                    return true;
+                }
+            } else {
+                // Single cell
+                if row == start_cell.0 && col == start_cell.1 {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Get which borders should be drawn for a formula ref cell
+    /// Returns (top, right, bottom, left) - true means draw that border
+    pub fn formula_ref_borders(&self, row: usize, col: usize) -> (bool, bool, bool, bool) {
+        // Must be in formula mode or editing a formula
+        let is_formula_editing = self.mode.is_formula() ||
+            (self.mode.is_editing() && self.is_formula_content());
+
+        if !is_formula_editing {
+            return (false, false, false, false);
+        }
+
+        let mut top = false;
+        let mut right = false;
+        let mut bottom = false;
+        let mut left = false;
+
+        // Check the live pointing reference
+        if let Some((ref_row, ref_col)) = self.formula_ref_cell {
+            if let Some((end_row, end_col)) = self.formula_ref_end {
+                let (min_row, max_row) = (ref_row.min(end_row), ref_row.max(end_row));
+                let (min_col, max_col) = (ref_col.min(end_col), ref_col.max(end_col));
+                if row >= min_row && row <= max_row && col >= min_col && col <= max_col {
+                    if row == min_row { top = true; }
+                    if row == max_row { bottom = true; }
+                    if col == min_col { left = true; }
+                    if col == max_col { right = true; }
+                }
+            } else {
+                // Single cell - all borders
+                if row == ref_row && col == ref_col {
+                    top = true; right = true; bottom = true; left = true;
+                }
+            }
+        }
+
+        // Check the highlighted refs from parsed formula
+        for (start_cell, end_cell) in &self.formula_highlighted_refs {
+            if let Some((end_row, end_col)) = end_cell {
+                let (min_row, max_row) = (start_cell.0.min(*end_row), start_cell.0.max(*end_row));
+                let (min_col, max_col) = (start_cell.1.min(*end_col), start_cell.1.max(*end_col));
+                if row >= min_row && row <= max_row && col >= min_col && col <= max_col {
+                    if row == min_row { top = true; }
+                    if row == max_row { bottom = true; }
+                    if col == min_col { left = true; }
+                    if col == max_col { right = true; }
+                }
+            } else {
+                // Single cell - all borders
+                if row == start_cell.0 && col == start_cell.1 {
+                    top = true; right = true; bottom = true; left = true;
+                }
+            }
+        }
+
+        (top, right, bottom, left)
     }
 
     /// Calculate visible rows based on window height
@@ -742,7 +856,7 @@ impl Spreadsheet {
         self.ensure_visible(cx);
     }
 
-    fn ensure_visible(&mut self, cx: &mut Context<Self>) {
+    pub fn ensure_visible(&mut self, cx: &mut Context<Self>) {
         let (row, col) = self.selection_end.unwrap_or(self.selected);
         let visible_rows = self.visible_rows();
         let visible_cols = self.visible_cols();
@@ -855,9 +969,26 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
 
         let (row, col) = self.selected;
+
+        // Block editing spill receivers - show message and redirect to parent
+        if let Some((parent_row, parent_col)) = self.sheet().get_spill_parent(row, col) {
+            let parent_ref = self.cell_ref_at(parent_row, parent_col);
+            self.status_message = Some(format!("Cannot edit spill range. Edit {} instead.", parent_ref));
+            cx.notify();
+            return;
+        }
+
         self.edit_original = self.sheet().get_raw(row, col);
         self.edit_value = self.edit_original.clone();
         self.edit_cursor = self.edit_value.len();  // Cursor at end
+
+        // Parse and highlight formula references if editing a formula
+        if self.edit_value.starts_with('=') || self.edit_value.starts_with('+') {
+            self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+        } else {
+            self.formula_highlighted_refs.clear();
+        }
+
         self.mode = Mode::Edit;
         cx.notify();
     }
@@ -866,9 +997,19 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
 
         let (row, col) = self.selected;
+
+        // Block editing spill receivers - show message and redirect to parent
+        if let Some((parent_row, parent_col)) = self.sheet().get_spill_parent(row, col) {
+            let parent_ref = self.cell_ref_at(parent_row, parent_col);
+            self.status_message = Some(format!("Cannot edit spill range. Edit {} instead.", parent_ref));
+            cx.notify();
+            return;
+        }
+
         self.edit_original = self.sheet().get_raw(row, col);
         self.edit_value = String::new();
         self.edit_cursor = 0;
+        self.formula_highlighted_refs.clear();  // No formula to highlight
         self.mode = Mode::Edit;
         cx.notify();
     }
@@ -919,6 +1060,8 @@ impl Spreadsheet {
         self.edit_value.clear();
         self.edit_original.clear();
         self.is_modified = true;
+        // Clear formula highlighting state
+        self.formula_highlighted_refs.clear();
 
         let cell_count = (max_row - min_row + 1) * (max_col - min_col + 1);
         if cell_count > 1 {
@@ -964,6 +1107,8 @@ impl Spreadsheet {
         self.formula_ref_cell = None;
         self.formula_ref_end = None;
         self.formula_ref_start_cursor = 0;
+        // Clear formula highlighting state
+        self.formula_highlighted_refs.clear();
 
         // Move after confirming
         self.move_selection(dr, dc, cx);
@@ -978,6 +1123,11 @@ impl Spreadsheet {
             self.formula_ref_cell = None;
             self.formula_ref_end = None;
             self.formula_ref_start_cursor = 0;
+            // Clear formula highlighting state
+            self.formula_highlighted_refs.clear();
+            // Clear autocomplete state
+            self.autocomplete_visible = false;
+            self.autocomplete_selected = 0;
             cx.notify();
         }
     }
@@ -1007,7 +1157,11 @@ impl Spreadsheet {
         if self.mode.is_editing() {
             // If there's a selection, delete it
             if self.delete_edit_selection() {
-                cx.notify();
+                // Update highlighted refs for formulas
+                if self.is_formula_content() {
+                    self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+                }
+                self.update_autocomplete(cx);
                 return;
             }
             // Otherwise delete char before cursor
@@ -1022,7 +1176,11 @@ impl Spreadsheet {
                     .unwrap_or(self.edit_value.len());
                 self.edit_value.replace_range(byte_idx..next_byte_idx, "");
                 self.edit_cursor -= 1;
-                cx.notify();
+                // Update highlighted refs for formulas
+                if self.is_formula_content() {
+                    self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+                }
+                self.update_autocomplete(cx);
             }
         }
     }
@@ -1031,6 +1189,10 @@ impl Spreadsheet {
         if self.mode.is_editing() {
             // If there's a selection, delete it
             if self.delete_edit_selection() {
+                // Update highlighted refs for formulas
+                if self.is_formula_content() {
+                    self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+                }
                 cx.notify();
                 return;
             }
@@ -1046,6 +1208,10 @@ impl Spreadsheet {
                     .map(|(i, _)| i)
                     .unwrap_or(self.edit_value.len());
                 self.edit_value.replace_range(byte_idx..next_byte_idx, "");
+                // Update highlighted refs for formulas
+                if self.is_formula_content() {
+                    self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+                }
                 cx.notify();
             }
         }
@@ -1070,10 +1236,26 @@ impl Spreadsheet {
                 .unwrap_or(self.edit_value.len());
             self.edit_value.insert(byte_idx, c);
             self.edit_cursor += 1;
-            cx.notify();
+
+            // Update highlighted refs for formulas
+            if self.is_formula_content() {
+                self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+            }
+
+            // Update autocomplete for formulas
+            self.update_autocomplete(cx);
         } else {
             // Start editing with this character
             let (row, col) = self.selected;
+
+            // Block editing spill receivers
+            if let Some((parent_row, parent_col)) = self.sheet().get_spill_parent(row, col) {
+                let parent_ref = self.cell_ref_at(parent_row, parent_col);
+                self.status_message = Some(format!("Cannot edit spill range. Edit {} instead.", parent_ref));
+                cx.notify();
+                return;
+            }
+
             self.edit_original = self.sheet().get_raw(row, col);
             self.edit_value = c.to_string();
             self.edit_cursor = 1;
@@ -1086,8 +1268,11 @@ impl Spreadsheet {
             } else {
                 self.mode = Mode::Edit;
             }
-            cx.notify();
+
+            // Update autocomplete for formulas
+            self.update_autocomplete(cx);
         }
+        cx.notify();
     }
 
     /// Check if character is a formula operator that finalizes a reference
@@ -1745,6 +1930,7 @@ impl Spreadsheet {
 
     pub fn delete_selection(&mut self, cx: &mut Context<Self>) {
         let mut changes = Vec::new();
+        let mut skipped_spill_receivers = false;
 
         // Delete from all selection ranges (including discontiguous Ctrl+Click selections)
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
@@ -1752,6 +1938,12 @@ impl Spreadsheet {
             let cells_to_delete = self.sheet().cells_in_range(min_row, max_row, min_col, max_col);
 
             for (row, col) in cells_to_delete {
+                // Skip spill receivers - only the parent formula can be deleted
+                if self.sheet().is_spill_receiver(row, col) {
+                    skipped_spill_receivers = true;
+                    continue;
+                }
+
                 let old_value = self.sheet().get_raw(row, col);
                 if !old_value.is_empty() {
                     changes.push(CellChange {
@@ -1762,10 +1954,16 @@ impl Spreadsheet {
             }
         }
 
-        if !changes.is_empty() {
+        let had_changes = !changes.is_empty();
+        if had_changes {
             self.history.record_batch(changes);
             self.is_modified = true;
         }
+
+        if skipped_spill_receivers && !had_changes {
+            self.status_message = Some("Cannot delete spill range. Delete the parent formula instead.".to_string());
+        }
+
         cx.notify();
     }
 
@@ -1947,6 +2145,52 @@ impl Spreadsheet {
         let row = numbers.parse::<usize>().ok()?.checked_sub(1)?;
 
         Some((row, col))
+    }
+
+    /// Parse all cell references from a formula and return as (start, optional_end) tuples
+    /// Handles both single cells (A1) and ranges (A1:B5)
+    fn parse_formula_refs(formula: &str) -> Vec<((usize, usize), Option<(usize, usize)>)> {
+        if !formula.starts_with('=') {
+            return Vec::new();
+        }
+
+        let tokens = tokenize_for_highlight(formula);
+        let mut refs = Vec::new();
+        let mut i = 0;
+
+        while i < tokens.len() {
+            let (range, token_type) = &tokens[i];
+
+            if *token_type == TokenType::CellRef {
+                let cell_text = &formula[range.clone()];
+                // Strip any $ signs for absolute references
+                let cell_text_clean: String = cell_text.chars().filter(|c| *c != '$').collect();
+
+                if let Some(start_cell) = Self::parse_cell_ref(&cell_text_clean) {
+                    // Check if next tokens form a range (: followed by CellRef)
+                    if i + 2 < tokens.len() {
+                        let (_, next_type) = &tokens[i + 1];
+                        let (range2, next_next_type) = &tokens[i + 2];
+
+                        if *next_type == TokenType::Colon && *next_next_type == TokenType::CellRef {
+                            let end_text = &formula[range2.clone()];
+                            let end_text_clean: String = end_text.chars().filter(|c| *c != '$').collect();
+
+                            if let Some(end_cell) = Self::parse_cell_ref(&end_text_clean) {
+                                refs.push((start_cell, Some(end_cell)));
+                                i += 3;  // Skip the whole range
+                                continue;
+                            }
+                        }
+                    }
+                    // Single cell reference
+                    refs.push((start_cell, None));
+                }
+            }
+            i += 1;
+        }
+
+        refs
     }
 
     // Find in cells
@@ -2315,6 +2559,18 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    // Inspector panel methods
+    pub fn toggle_inspector_pin(&mut self, cx: &mut Context<Self>) {
+        if self.inspector_pinned.is_some() {
+            // Unpin: follow selection again
+            self.inspector_pinned = None;
+        } else {
+            // Pin: lock to current selection
+            self.inspector_pinned = Some(self.selected);
+        }
+        cx.notify();
+    }
+
     // Fill operations (Phase 0 essentials)
     pub fn fill_down(&mut self, cx: &mut Context<Self>) {
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
@@ -2407,6 +2663,160 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// AutoSum: Insert =SUM() with detected range (Alt+=)
+    /// Looks above and left for contiguous numeric cells, prefers above if longer
+    pub fn autosum(&mut self, cx: &mut Context<Self>) {
+        // Don't trigger if already editing
+        if self.mode.is_editing() {
+            return;
+        }
+
+        let (row, col) = self.selected;
+
+        // Find contiguous numeric cells above
+        let above_range = self.find_numeric_range_above(row, col);
+
+        // Find contiguous numeric cells to the left
+        let left_range = self.find_numeric_range_left(row, col);
+
+        // Choose the longer range, preferring above if equal
+        // Also track the detected range for highlighting
+        let (formula, detected_range) = match (above_range, left_range) {
+            (Some((start_row, end_row)), Some((start_col, end_col))) => {
+                let above_len = end_row - start_row + 1;
+                let left_len = end_col - start_col + 1;
+                if above_len >= left_len {
+                    // Use above range
+                    let start_ref = self.cell_ref_at(start_row, col);
+                    let end_ref = self.cell_ref_at(end_row, col);
+                    (format!("=SUM({}:{})", start_ref, end_ref),
+                     Some(((start_row, col), Some((end_row, col)))))
+                } else {
+                    // Use left range
+                    let start_ref = self.cell_ref_at(row, start_col);
+                    let end_ref = self.cell_ref_at(row, end_col);
+                    (format!("=SUM({}:{})", start_ref, end_ref),
+                     Some(((row, start_col), Some((row, end_col)))))
+                }
+            }
+            (Some((start_row, end_row)), None) => {
+                // Only above range
+                let start_ref = self.cell_ref_at(start_row, col);
+                let end_ref = self.cell_ref_at(end_row, col);
+                (format!("=SUM({}:{})", start_ref, end_ref),
+                 Some(((start_row, col), Some((end_row, col)))))
+            }
+            (None, Some((start_col, end_col))) => {
+                // Only left range
+                let start_ref = self.cell_ref_at(row, start_col);
+                let end_ref = self.cell_ref_at(row, end_col);
+                (format!("=SUM({}:{})", start_ref, end_ref),
+                 Some(((row, start_col), Some((row, end_col)))))
+            }
+            (None, None) => {
+                // No range found, just insert empty SUM
+                ("=SUM()".to_string(), None)
+            }
+        };
+
+        // Set highlighted refs for the detected range
+        if let Some(range) = detected_range {
+            self.formula_highlighted_refs = vec![range];
+        } else {
+            self.formula_highlighted_refs.clear();
+        }
+
+        // Enter edit mode with the formula
+        self.edit_original = self.sheet().get_raw(row, col);
+        self.edit_value = formula;
+        self.edit_cursor = self.edit_value.chars().count(); // Cursor at end
+        self.mode = Mode::Formula;
+        self.update_autocomplete(cx);
+        cx.notify();
+    }
+
+    /// Find contiguous numeric cells above the given cell
+    /// Returns (start_row, end_row) if at least 2 cells found, None otherwise
+    fn find_numeric_range_above(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        if row == 0 {
+            return None;
+        }
+
+        let mut end_row = row - 1;
+        let mut start_row = end_row;
+
+        // Check if the cell above is numeric
+        if !self.is_cell_numeric(end_row, col) {
+            return None;
+        }
+
+        // Walk upward finding contiguous numeric cells
+        while start_row > 0 && self.is_cell_numeric(start_row - 1, col) {
+            start_row -= 1;
+        }
+
+        // Need at least 2 cells
+        if end_row - start_row + 1 >= 2 {
+            Some((start_row, end_row))
+        } else {
+            // Single cell - still include it
+            Some((start_row, end_row))
+        }
+    }
+
+    /// Find contiguous numeric cells to the left of the given cell
+    /// Returns (start_col, end_col) if at least 2 cells found, None otherwise
+    fn find_numeric_range_left(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        if col == 0 {
+            return None;
+        }
+
+        let mut end_col = col - 1;
+        let mut start_col = end_col;
+
+        // Check if the cell to the left is numeric
+        if !self.is_cell_numeric(row, end_col) {
+            return None;
+        }
+
+        // Walk leftward finding contiguous numeric cells
+        while start_col > 0 && self.is_cell_numeric(row, start_col - 1) {
+            start_col -= 1;
+        }
+
+        // Need at least 2 cells
+        if end_col - start_col + 1 >= 2 {
+            Some((start_col, end_col))
+        } else {
+            // Single cell - still include it
+            Some((start_col, end_col))
+        }
+    }
+
+    /// Check if a cell contains a numeric value (not empty, not text, not error)
+    fn is_cell_numeric(&self, row: usize, col: usize) -> bool {
+        let raw = self.sheet().get_raw(row, col);
+        if raw.is_empty() {
+            return false;
+        }
+
+        // If it's a formula, check the result
+        if raw.starts_with('=') {
+            let display = self.sheet().get_display(row, col);
+            // Check if display is a number
+            display.parse::<f64>().is_ok()
+        } else {
+            // Check if raw value is a number
+            raw.parse::<f64>().is_ok()
+        }
+    }
+
+    /// Get cell reference string at given row, col (e.g., "A1", "B5")
+    pub fn cell_ref_at(&self, row: usize, col: usize) -> String {
+        let col_letter = Self::col_to_letter(col);
+        format!("{}{}", col_letter, row + 1)
+    }
+
     /// Adjust cell references in a formula by delta rows and cols
     /// Handles relative (A1), absolute ($A$1), and mixed ($A1, A$1) references
     fn adjust_formula_refs(&self, formula: &str, delta_row: i32, delta_col: i32) -> String {
@@ -2447,6 +2857,222 @@ impl Spreadsheet {
             )
         })
         .to_string()
+    }
+
+    // ========================================================================
+    // Formula Autocomplete
+    // ========================================================================
+
+    /// Get filtered autocomplete suggestions based on current edit value
+    pub fn autocomplete_suggestions(&self) -> Vec<&'static crate::formula_context::FunctionInfo> {
+        use crate::formula_context;
+
+        // Only show autocomplete for formula mode
+        if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
+            return Vec::new();
+        }
+
+        let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
+
+        // Check mode and identifier length
+        match ctx.mode {
+            formula_context::FormulaEditMode::Start
+            | formula_context::FormulaEditMode::Operator
+            | formula_context::FormulaEditMode::ArgList => {
+                // Show all functions at these positions
+                formula_context::get_functions_by_prefix("")
+            }
+            formula_context::FormulaEditMode::Identifier => {
+                // Only show if identifier >= 2 chars (spec: avoid A1 vs AVERAGE ambiguity)
+                if let Some(ref id_text) = ctx.identifier_text {
+                    if id_text.len() >= 2 {
+                        formula_context::get_functions_by_prefix(id_text)
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Update autocomplete state based on current context
+    pub fn update_autocomplete(&mut self, cx: &mut Context<Self>) {
+        use crate::formula_context;
+
+        // Only in formula mode
+        if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
+            self.autocomplete_visible = false;
+            return;
+        }
+
+        let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
+        let suggestions = self.autocomplete_suggestions();
+
+        if suggestions.is_empty() {
+            self.autocomplete_visible = false;
+            self.autocomplete_selected = 0;
+        } else {
+            self.autocomplete_visible = true;
+            self.autocomplete_replace_range = ctx.replace_range.clone();
+            // Clamp selected index
+            if self.autocomplete_selected >= suggestions.len() {
+                self.autocomplete_selected = 0;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Move autocomplete selection up
+    pub fn autocomplete_up(&mut self, cx: &mut Context<Self>) {
+        if !self.autocomplete_visible {
+            return;
+        }
+        let suggestions = self.autocomplete_suggestions();
+        if suggestions.is_empty() {
+            return;
+        }
+        if self.autocomplete_selected == 0 {
+            self.autocomplete_selected = suggestions.len().saturating_sub(1);
+        } else {
+            self.autocomplete_selected -= 1;
+        }
+        cx.notify();
+    }
+
+    /// Move autocomplete selection down
+    pub fn autocomplete_down(&mut self, cx: &mut Context<Self>) {
+        if !self.autocomplete_visible {
+            return;
+        }
+        let suggestions = self.autocomplete_suggestions();
+        if suggestions.is_empty() {
+            return;
+        }
+        self.autocomplete_selected = (self.autocomplete_selected + 1) % suggestions.len();
+        cx.notify();
+    }
+
+    /// Accept the selected autocomplete suggestion
+    pub fn autocomplete_accept(&mut self, cx: &mut Context<Self>) {
+        if !self.autocomplete_visible {
+            return;
+        }
+
+        let suggestions = self.autocomplete_suggestions();
+        if suggestions.is_empty() || self.autocomplete_selected >= suggestions.len() {
+            self.autocomplete_visible = false;
+            return;
+        }
+
+        let func = suggestions[self.autocomplete_selected];
+        let func_name = func.name;
+
+        // Build replacement text: function name + opening paren
+        let replacement = format!("{}(", func_name);
+
+        // Replace the identifier at replace_range
+        let range = self.autocomplete_replace_range.clone();
+
+        // Convert char positions to byte positions
+        let start_byte = self.edit_value.char_indices()
+            .nth(range.start)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let end_byte = self.edit_value.char_indices()
+            .nth(range.end)
+            .map(|(i, _)| i)
+            .unwrap_or(self.edit_value.len());
+
+        self.edit_value.replace_range(start_byte..end_byte, &replacement);
+        self.edit_cursor = range.start + replacement.chars().count();
+
+        // Close autocomplete
+        self.autocomplete_visible = false;
+        self.autocomplete_selected = 0;
+
+        // Enter formula mode if not already
+        if !self.mode.is_formula() {
+            self.mode = Mode::Formula;
+        }
+
+        cx.notify();
+    }
+
+    /// Dismiss autocomplete without accepting
+    pub fn autocomplete_dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.autocomplete_visible {
+            self.autocomplete_visible = false;
+            self.autocomplete_selected = 0;
+            cx.notify();
+        }
+    }
+
+    // ========================================================================
+    // Formula Signature Help
+    // ========================================================================
+
+    /// Get signature help info if cursor is inside a function call
+    pub fn signature_help(&self) -> Option<SignatureHelpInfo> {
+        use crate::formula_context;
+
+        // Only show for formula mode
+        if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
+            return None;
+        }
+
+        // Don't show signature help when autocomplete is visible
+        if self.autocomplete_visible {
+            return None;
+        }
+
+        let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
+
+        // Only show in ArgList mode
+        if !matches!(ctx.mode, formula_context::FormulaEditMode::ArgList) {
+            return None;
+        }
+
+        // Get the current function
+        ctx.current_function.map(|func| {
+            SignatureHelpInfo {
+                function: func,
+                current_arg: ctx.current_arg_index.unwrap_or(0),
+            }
+        })
+    }
+}
+
+/// Signature help context for rendering
+pub struct SignatureHelpInfo {
+    pub function: &'static crate::formula_context::FunctionInfo,
+    pub current_arg: usize,
+}
+
+/// Error info for the error banner
+pub struct FormulaErrorInfo {
+    pub message: String,
+}
+
+impl Spreadsheet {
+    /// Get formula error to display (only Hard errors)
+    pub fn formula_error(&self) -> Option<FormulaErrorInfo> {
+        use crate::formula_context::{check_errors, DiagnosticKind};
+
+        // Only check for formula mode
+        if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
+            return None;
+        }
+
+        // While editing, only show Hard errors (unknown function, invalid token)
+        // Transient errors (missing paren, trailing operator) are hidden - we'll auto-fix on confirm
+        check_errors(&self.edit_value, self.edit_cursor)
+            .filter(|diag| matches!(diag.kind, DiagnosticKind::Hard))
+            .map(|diag| FormulaErrorInfo {
+                message: diag.message,
+            })
     }
 }
 

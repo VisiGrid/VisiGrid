@@ -26,6 +26,14 @@ pub enum Menu {
     Help,
 }
 
+/// Inspector panel tab selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InspectorTab {
+    #[default]
+    Inspector,  // Cell info, precedents, dependents
+    Format,     // Formatting options (Ctrl+1)
+}
+
 impl Mode {
     /// True if editing cell content (either regular Edit or Formula mode)
     pub fn is_editing(&self) -> bool {

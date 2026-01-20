@@ -81,8 +81,15 @@ fn render_cell(
     let is_editing = editing && is_active;
     let is_formula_ref = app.is_formula_ref(row, col);
 
+    // Spill state detection
+    let is_spill_parent = app.sheet().is_spill_parent(row, col);
+    let is_spill_receiver = app.sheet().is_spill_receiver(row, col);
+    let has_spill_error = app.sheet().has_spill_error(row, col);
+
     let value = if is_editing {
         edit_value.to_string()
+    } else if app.show_formulas {
+        app.sheet().get_raw(row, col)
     } else {
         app.sheet().get_display(row, col)
     };
@@ -91,8 +98,18 @@ fn render_cell(
     let cell_row = row;
     let cell_col = col;
 
-    let border_color = cell_border(app, is_editing, is_active, is_selected, is_formula_ref);
-    let needs_full_border = is_editing || is_active || is_selected || is_formula_ref;
+    // Determine border color based on cell state (spill states take precedence over normal states)
+    let border_color = if has_spill_error {
+        app.token(TokenKey::SpillBlockedBorder)
+    } else if is_spill_parent {
+        app.token(TokenKey::SpillBorder)
+    } else if is_spill_receiver {
+        app.token(TokenKey::SpillReceiverBorder)
+    } else {
+        cell_border(app, is_editing, is_active, is_selected, is_formula_ref)
+    };
+
+    let needs_full_border = is_editing || is_active || is_selected;
 
     let mut cell = div()
         .id(ElementId::Name(format!("cell-{}-{}", row, col).into()))
@@ -108,8 +125,25 @@ fn render_cell(
 
     // Only right+bottom borders for normal cells (thinner gridlines)
     // Full border for selected/editing cells
+    // For formula refs, only draw outer edges of the range (not interior borders)
+    // Spill parent/blocked get 2px border, receiver gets 1px
     cell = if needs_full_border {
         cell.border_1()
+    } else if has_spill_error || is_spill_parent {
+        // 2px solid border for spill parent and blocked cells
+        cell.border_2()
+    } else if is_spill_receiver {
+        // 1px border for spill receivers (ideally dashed, but gpui doesn't support that)
+        cell.border_1()
+    } else if is_formula_ref {
+        // Get which borders to draw for this formula ref cell
+        let (top, right, bottom, left) = app.formula_ref_borders(row, col);
+        let mut c = cell;
+        if top { c = c.border_t_1(); }
+        if right { c = c.border_r_1(); }
+        if bottom { c = c.border_b_1(); }
+        if left { c = c.border_l_1(); }
+        c
     } else {
         cell.border_r_1().border_b_1()
     };
@@ -123,13 +157,20 @@ fn render_cell(
                 return;
             }
 
+            // If clicking a spill receiver, redirect to the spill parent
+            let (target_row, target_col) = if let Some((parent_row, parent_col)) = this.sheet().get_spill_parent(cell_row, cell_col) {
+                (parent_row, parent_col)
+            } else {
+                (cell_row, cell_col)
+            };
+
             // Formula mode: clicks insert cell references, drag for range
             if this.mode.is_formula() {
                 if event.modifiers.shift {
-                    this.formula_shift_click_ref(cell_row, cell_col, cx);
+                    this.formula_shift_click_ref(target_row, target_col, cx);
                 } else {
                     // Start drag for range selection in formula mode
-                    this.formula_start_drag(cell_row, cell_col, cx);
+                    this.formula_start_drag(target_row, target_col, cx);
                 }
                 return;
             }
@@ -137,17 +178,17 @@ fn render_cell(
             // Normal mode handling
             if event.click_count == 2 {
                 // Double-click to edit
-                this.select_cell(cell_row, cell_col, false, cx);
+                this.select_cell(target_row, target_col, false, cx);
                 this.start_edit(cx);
             } else if event.modifiers.shift {
                 // Shift+click extends selection
-                this.select_cell(cell_row, cell_col, true, cx);
+                this.select_cell(target_row, target_col, true, cx);
             } else if event.modifiers.control || event.modifiers.platform {
                 // Ctrl+click (or Cmd on Mac) for discontiguous selection
-                this.start_ctrl_drag_selection(cell_row, cell_col, cx);
+                this.start_ctrl_drag_selection(target_row, target_col, cx);
             } else {
                 // Start drag selection
-                this.start_drag_selection(cell_row, cell_col, cx);
+                this.start_drag_selection(target_row, target_col, cx);
             }
         }))
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
@@ -292,7 +333,8 @@ fn cell_background(app: &Spreadsheet, is_editing: bool, is_active: bool, is_sele
     if is_editing {
         app.token(TokenKey::EditorBg)
     } else if is_formula_ref {
-        app.token(TokenKey::RefHighlight1)
+        // Apply opacity so cell content remains visible through the highlight
+        app.token(TokenKey::RefHighlight1).opacity(0.25)
     } else if is_active {
         app.token(TokenKey::SelectionBg)
     } else if is_selected {

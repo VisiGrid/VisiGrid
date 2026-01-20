@@ -6,15 +6,16 @@ mod formula_bar;
 mod goto_dialog;
 mod grid;
 mod headers;
+mod inspector_panel;
 mod menu_bar;
 mod status_bar;
 mod theme_picker;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, CELL_HEIGHT};
+use crate::app::{Spreadsheet, CELL_HEIGHT, HEADER_WIDTH};
 use crate::actions::*;
-use crate::mode::Mode;
+use crate::mode::{Mode, InspectorTab};
 use crate::theme::TokenKey;
 
 pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -25,6 +26,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let show_font_picker = app.mode == Mode::FontPicker;
     let show_theme_picker = app.mode == Mode::ThemePicker;
     let show_about = app.mode == Mode::About;
+    let show_inspector = app.inspector_visible;
 
     div()
         .relative()
@@ -32,6 +34,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .track_focus(&app.focus_handle)
         // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
+            // Autocomplete navigation takes priority
+            if this.autocomplete_visible {
+                this.autocomplete_up(cx);
+                return;
+            }
             match this.mode {
                 Mode::Command => this.palette_up(cx),
                 Mode::FontPicker => this.font_picker_up(cx),
@@ -41,6 +48,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             }
         }))
         .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
+            // Autocomplete navigation takes priority
+            if this.autocomplete_visible {
+                this.autocomplete_down(cx);
+                return;
+            }
             match this.mode {
                 Mode::Command => this.palette_down(cx),
                 Mode::FontPicker => this.font_picker_down(cx),
@@ -232,6 +244,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             this.start_edit(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, _, cx| {
+            // If autocomplete is visible, Enter accepts the suggestion
+            if this.autocomplete_visible {
+                this.autocomplete_accept(cx);
+                return;
+            }
             // Handle Enter key based on current mode
             match this.mode {
                 Mode::ThemePicker => this.theme_picker_execute(cx),
@@ -261,6 +278,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             }
         }))
         .on_action(cx.listener(|this, _: &TabNext, _, cx| {
+            // If autocomplete is visible, Tab accepts the suggestion
+            if this.autocomplete_visible {
+                this.autocomplete_accept(cx);
+                return;
+            }
             if this.mode.is_editing() {
                 this.confirm_edit_and_move_right(cx);
             } else {
@@ -293,6 +315,22 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         }))
         .on_action(cx.listener(|this, _: &FillRight, _, cx| {
             this.fill_right(cx);
+        }))
+        .on_action(cx.listener(|this, _: &AutoSum, _, cx| {
+            this.autosum(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ToggleFormulaView, _, cx| {
+            this.show_formulas = !this.show_formulas;
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
+            this.inspector_visible = !this.inspector_visible;
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &ShowFormatPanel, _, cx| {
+            this.inspector_visible = true;
+            this.inspector_tab = InspectorTab::Format;
+            cx.notify();
         }))
         // Edit mode cursor movement
         .on_action(cx.listener(|this, _: &EditCursorLeft, _, cx| {
@@ -431,6 +469,37 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                     }
                 }
                 return;
+            }
+
+            // Handle Formula Autocomplete (highest priority when visible)
+            if this.autocomplete_visible {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.autocomplete_dismiss(cx);
+                        return;
+                    }
+                    "enter" | "tab" => {
+                        this.autocomplete_accept(cx);
+                        return;
+                    }
+                    "up" => {
+                        this.autocomplete_up(cx);
+                        return;
+                    }
+                    "down" => {
+                        this.autocomplete_down(cx);
+                        return;
+                    }
+                    "shift-tab" => {
+                        // Dismiss autocomplete on Shift+Tab (spec: no accept)
+                        this.autocomplete_dismiss(cx);
+                        return;
+                    }
+                    _ => {
+                        // Other keys: let them pass through to normal handling
+                        // but the input will update autocomplete
+                    }
+                }
             }
 
             // Handle Command Palette mode
@@ -654,7 +723,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .size_full()
         .bg(app.token(TokenKey::AppBg))
         .child(menu_bar::render_menu_bar(app, cx))
-        .child(formula_bar::render_formula_bar(app))
+        .child(formula_bar::render_formula_bar(app, cx))
         .child(headers::render_column_headers(app, cx))
         .child(grid::render_grid(app, cx))
         .child(status_bar::render_status_bar(app, editing, cx))
@@ -678,5 +747,74 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         })
         .when(app.open_menu.is_some(), |div| {
             div.child(menu_bar::render_menu_dropdown(app, cx))
+        })
+        // Inspector panel (right-side drawer)
+        .when(show_inspector, |div| {
+            div.child(inspector_panel::render_inspector_panel(app, cx))
+        })
+        // Formula autocomplete popup (rendered at top level to avoid clipping)
+        .when(app.autocomplete_visible, |div| {
+            let suggestions = app.autocomplete_suggestions();
+            let selected = app.autocomplete_selected;
+            // Calculate popup position below the active cell
+            let popup_x = HEADER_WIDTH + app.col_x_offset(app.selected.1);
+            let popup_y = CELL_HEIGHT * 3.0 + app.row_y_offset(app.selected.0) + app.row_height(app.selected.0);
+            let panel_bg = app.token(TokenKey::PanelBg);
+            let panel_border = app.token(TokenKey::PanelBorder);
+            let text_primary = app.token(TokenKey::TextPrimary);
+            let text_muted = app.token(TokenKey::TextMuted);
+            let selection_bg = app.token(TokenKey::SelectionBg);
+            div.child(formula_bar::render_autocomplete_popup(
+                &suggestions,
+                selected,
+                popup_x,
+                popup_y,
+                panel_bg,
+                panel_border,
+                text_primary,
+                text_muted,
+                selection_bg,
+                cx,
+            ))
+        })
+        // Formula signature help (rendered at top level)
+        .when_some(app.signature_help(), |div, sig_info| {
+            // Calculate popup position below the active cell
+            let popup_x = HEADER_WIDTH + app.col_x_offset(app.selected.1);
+            let popup_y = CELL_HEIGHT * 3.0 + app.row_y_offset(app.selected.0) + app.row_height(app.selected.0);
+            let panel_bg = app.token(TokenKey::PanelBg);
+            let panel_border = app.token(TokenKey::PanelBorder);
+            let text_primary = app.token(TokenKey::TextPrimary);
+            let text_muted = app.token(TokenKey::TextMuted);
+            let accent = app.token(TokenKey::Accent);
+            div.child(formula_bar::render_signature_help(
+                &sig_info,
+                popup_x,
+                popup_y,
+                panel_bg,
+                panel_border,
+                text_primary,
+                text_muted,
+                accent,
+            ))
+        })
+        // Formula error banner (rendered at top level)
+        .when_some(app.formula_error(), |div, error_info| {
+            // Calculate popup position below the active cell
+            let popup_x = HEADER_WIDTH + app.col_x_offset(app.selected.1);
+            let popup_y = CELL_HEIGHT * 3.0 + app.row_y_offset(app.selected.0) + app.row_height(app.selected.0);
+            let error_bg = app.token(TokenKey::ErrorBg);
+            let error_color = app.token(TokenKey::Error);
+            let panel_border = app.token(TokenKey::PanelBorder);
+            div.child(formula_bar::render_error_banner(&error_info, popup_x, popup_y, error_bg, error_color, panel_border))
+        })
+        // Hover documentation popup (when not editing and hovering over formula bar)
+        .when_some(app.hover_function.filter(|_| !app.mode.is_editing() && !app.autocomplete_visible), |div, func| {
+            let panel_bg = app.token(TokenKey::PanelBg);
+            let panel_border = app.token(TokenKey::PanelBorder);
+            let text_primary = app.token(TokenKey::TextPrimary);
+            let text_muted = app.token(TokenKey::TextMuted);
+            let accent = app.token(TokenKey::Accent);
+            div.child(formula_bar::render_hover_docs(func, panel_bg, panel_border, text_primary, text_muted, accent))
         })
 }

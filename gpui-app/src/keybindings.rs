@@ -39,6 +39,8 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("end", EditCursorEnd, Some("Spreadsheet")),
         // F4 reference cycling (Excel behavior)
         KeyBinding::new("f4", CycleReference, Some("Spreadsheet")),
+        // Alt+= AutoSum (Excel behavior)
+        KeyBinding::new("alt-=", AutoSum, Some("Spreadsheet")),
 
         // Selection
         KeyBinding::new("ctrl-a", SelectAll, Some("Spreadsheet")),
@@ -65,8 +67,10 @@ pub fn register(cx: &mut App) {
         // View
         KeyBinding::new("ctrl-shift-p", ToggleCommandPalette, Some("Spreadsheet")),
         KeyBinding::new("ctrl-shift-i", ToggleInspector, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-1", ShowFormatPanel, Some("Spreadsheet")),
         KeyBinding::new("ctrl-shift-m", ToggleProblems, Some("Spreadsheet")),
         KeyBinding::new("f11", ToggleZenMode, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-`", ToggleFormulaView, Some("Spreadsheet")),
 
         // Format
         KeyBinding::new("ctrl-b", ToggleBold, Some("Spreadsheet")),
