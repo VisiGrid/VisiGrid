@@ -8,11 +8,14 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
     // Calculate selection stats if multiple cells selected
     let selection_stats = calculate_selection_stats(app);
 
-    // Mode indicator
+    // Mode indicator - show contextual tip when user has named ranges (post-activation)
+    let has_named_ranges = !app.workbook.list_named_ranges().is_empty();
     let mode_text = if editing {
         "Edit"
     } else if app.status_message.is_some() {
         ""
+    } else if has_named_ranges {
+        "Tip: Named ranges let you refactor spreadsheets safely."
     } else {
         "Ready"
     };

@@ -24,6 +24,8 @@ struct Settings {
     theme_id: Option<String>,
     #[serde(default)]
     name_tooltip_dismissed: bool,
+    #[serde(default)]
+    rename_f12_hint_shown: bool,
 }
 
 impl Settings {
@@ -259,6 +261,7 @@ pub struct Spreadsheet {
     // Rename symbol state (Ctrl+Shift+R)
     pub rename_original_name: String,      // The named range being renamed
     pub rename_new_name: String,           // User's typed new name
+    pub rename_select_all: bool,           // True = typing replaces entire name
     pub rename_affected_cells: Vec<(usize, usize)>,  // Cells with formulas referencing this name
     pub rename_validation_error: Option<String>,     // Current validation error (if any)
 
@@ -278,6 +281,24 @@ pub struct Spreadsheet {
     pub tour_step: usize,                        // Current step (0-3)
     pub tour_completed: bool,                    // Has the tour been completed this session?
     pub name_tooltip_dismissed: bool,            // Has the first-run tooltip been dismissed?
+    pub rename_f12_hint_shown: bool,             // Has the post-rename F12 hint been shown?
+
+    // Impact preview state
+    pub impact_preview_action: Option<crate::views::impact_preview::ImpactAction>,
+    pub impact_preview_usages: Vec<crate::views::impact_preview::ImpactedFormula>,
+
+    // Refactor log
+    pub refactor_log: Vec<crate::views::refactor_log::RefactorLogEntry>,
+
+    // Extract Named Range state
+    pub extract_range_literal: String,           // The detected range literal (e.g., "A1:A100")
+    pub extract_name: String,                    // User-entered name
+    pub extract_description: String,             // User-entered description (optional)
+    pub extract_affected_cells: Vec<(usize, usize)>,  // Cells containing this range
+    pub extract_occurrence_count: usize,         // Total occurrences across all cells
+    pub extract_validation_error: Option<String>,
+    pub extract_select_all: bool,                // Type-to-replace for name field
+    pub extract_focus: CreateNameFocus,          // Which field has focus (reusing enum)
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -396,6 +417,7 @@ impl Spreadsheet {
             named_range_usage_cache: NamedRangeUsageCache::default(),
             rename_original_name: String::new(),
             rename_new_name: String::new(),
+            rename_select_all: false,
             rename_affected_cells: Vec::new(),
             rename_validation_error: None,
             create_name_name: String::new(),
@@ -411,6 +433,21 @@ impl Spreadsheet {
             tour_step: 0,
             tour_completed: false,
             name_tooltip_dismissed: settings.name_tooltip_dismissed,
+            rename_f12_hint_shown: settings.rename_f12_hint_shown,
+
+            impact_preview_action: None,
+            impact_preview_usages: Vec::new(),
+
+            refactor_log: Vec::new(),
+
+            extract_range_literal: String::new(),
+            extract_name: String::new(),
+            extract_description: String::new(),
+            extract_affected_cells: Vec::new(),
+            extract_occurrence_count: 0,
+            extract_validation_error: None,
+            extract_select_all: false,
+            extract_focus: CreateNameFocus::default(),
         }
     }
 
@@ -664,6 +701,12 @@ impl Spreadsheet {
             }
             CommandId::TourNamedRanges => {
                 self.show_tour(cx);
+            }
+            CommandId::ShowRefactorLog => {
+                self.show_refactor_log(cx);
+            }
+            CommandId::ExtractNamedRange => {
+                self.show_extract_named_range(cx);
             }
 
             // Sheets
@@ -2438,9 +2481,100 @@ impl Spreadsheet {
                     let _ = self.workbook.named_ranges_mut().set_description(&name, old_description.clone());
                     self.status_message = Some(format!("Undo: description of '{}'", name));
                 }
+                UndoAction::Group { actions, description } => {
+                    // Undo all actions in reverse order
+                    for action in actions.into_iter().rev() {
+                        self.apply_undo_action(action);
+                    }
+                    self.status_message = Some(format!("Undo: {}", description));
+                }
             }
             self.is_modified = true;
             cx.notify();
+        }
+    }
+
+    /// Apply a single undo action (helper for Group handling)
+    fn apply_undo_action(&mut self, action: UndoAction) {
+        match action {
+            UndoAction::Values { sheet_index, changes } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    for change in changes {
+                        sheet.set_value(change.row, change.col, &change.old_value);
+                    }
+                }
+                self.bump_cells_rev();
+            }
+            UndoAction::Format { sheet_index, patches, .. } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    for patch in patches {
+                        sheet.set_format(patch.row, patch.col, patch.before);
+                    }
+                }
+            }
+            UndoAction::NamedRangeDeleted { named_range } => {
+                let _ = self.workbook.named_ranges_mut().set(named_range);
+                self.bump_cells_rev();
+            }
+            UndoAction::NamedRangeCreated { name } => {
+                self.workbook.delete_named_range(&name);
+                self.bump_cells_rev();
+            }
+            UndoAction::NamedRangeRenamed { old_name, new_name } => {
+                let _ = self.workbook.rename_named_range(&new_name, &old_name);
+                self.bump_cells_rev();
+            }
+            UndoAction::NamedRangeDescriptionChanged { name, old_description, .. } => {
+                let _ = self.workbook.named_ranges_mut().set_description(&name, old_description.clone());
+            }
+            UndoAction::Group { actions, .. } => {
+                // Recursively undo nested groups
+                for sub_action in actions.into_iter().rev() {
+                    self.apply_undo_action(sub_action);
+                }
+            }
+        }
+    }
+
+    /// Apply a single redo action (helper for Group handling)
+    fn apply_redo_action(&mut self, action: UndoAction) {
+        match action {
+            UndoAction::Values { sheet_index, changes } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    for change in changes {
+                        sheet.set_value(change.row, change.col, &change.new_value);
+                    }
+                }
+                self.bump_cells_rev();
+            }
+            UndoAction::Format { sheet_index, patches, .. } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    for patch in patches {
+                        sheet.set_format(patch.row, patch.col, patch.after);
+                    }
+                }
+            }
+            UndoAction::NamedRangeDeleted { named_range } => {
+                let name = named_range.name.clone();
+                self.workbook.delete_named_range(&name);
+                self.bump_cells_rev();
+            }
+            UndoAction::NamedRangeCreated { .. } => {
+                // Re-create is not possible without original data
+            }
+            UndoAction::NamedRangeRenamed { old_name, new_name } => {
+                let _ = self.workbook.rename_named_range(&old_name, &new_name);
+                self.bump_cells_rev();
+            }
+            UndoAction::NamedRangeDescriptionChanged { name, new_description, .. } => {
+                let _ = self.workbook.named_ranges_mut().set_description(&name, new_description.clone());
+            }
+            UndoAction::Group { actions, .. } => {
+                // Recursively redo nested groups
+                for sub_action in actions {
+                    self.apply_redo_action(sub_action);
+                }
+            }
         }
     }
 
@@ -2486,6 +2620,13 @@ impl Spreadsheet {
                     // Apply the new description
                     let _ = self.workbook.named_ranges_mut().set_description(&name, new_description.clone());
                     self.status_message = Some(format!("Redo: description of '{}'", name));
+                }
+                UndoAction::Group { actions, description } => {
+                    // Redo all actions in order
+                    for action in actions {
+                        self.apply_redo_action(action);
+                    }
+                    self.status_message = Some(format!("Redo: {}", description));
                 }
             }
             self.is_modified = true;
@@ -3570,6 +3711,7 @@ impl Spreadsheet {
         self.mode = Mode::RenameSymbol;
         self.rename_original_name = original.clone();
         self.rename_new_name = original;
+        self.rename_select_all = true;  // First keystroke replaces entire name
         self.rename_validation_error = None;
         self.update_rename_affected_cells();
         cx.notify();
@@ -3588,6 +3730,7 @@ impl Spreadsheet {
         self.mode = Mode::Navigation;
         self.rename_original_name.clear();
         self.rename_new_name.clear();
+        self.rename_select_all = false;
         self.rename_affected_cells.clear();
         self.rename_validation_error = None;
         cx.notify();
@@ -3646,10 +3789,18 @@ impl Spreadsheet {
             self.history.record_named_range_action(UndoAction::NamedRangeDescriptionChanged {
                 name: name.clone(),
                 old_description,
-                new_description,
+                new_description: new_description.clone(),
             });
 
             self.is_modified = true;
+
+            // Log the edit
+            let detail = match &new_description {
+                Some(desc) => format!("{}: \"{}\"", name, desc),
+                None => format!("{}: (cleared)", name),
+            };
+            self.log_refactor("Edited description", &detail, None);
+
             self.status_message = Some(format!("Updated description for '{}'", name));
         }
 
@@ -3714,8 +3865,643 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    // =========================================================================
+    // Impact Preview methods
+    // =========================================================================
+
+    /// Find all cells that reference a named range
+    fn find_named_range_usages(&self, name: &str) -> Vec<crate::views::impact_preview::ImpactedFormula> {
+        use crate::views::impact_preview::ImpactedFormula;
+
+        let name_upper = name.to_uppercase();
+        let mut usages = Vec::new();
+
+        // Scan all cells for formulas containing the name
+        for ((row, col), cell) in self.sheet().cells_iter() {
+            let raw = cell.value.raw_display();
+            if !raw.starts_with('=') {
+                continue;
+            }
+
+            let formula_upper = raw.to_uppercase();
+
+            // Check if name appears as a standalone identifier
+            let contains_name = formula_upper
+                .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+                .any(|word| word == name_upper);
+
+            if contains_name {
+                // Format cell reference
+                let cell_ref = {
+                    let mut col_name = String::new();
+                    let mut c = *col;
+                    loop {
+                        col_name.insert(0, (b'A' + (c % 26) as u8) as char);
+                        if c < 26 { break; }
+                        c = c / 26 - 1;
+                    }
+                    format!("{}{}", col_name, *row + 1)
+                };
+
+                usages.push(ImpactedFormula {
+                    cell_ref,
+                    formula: raw.to_string(),
+                });
+            }
+        }
+
+        // Sort by cell reference for consistent display
+        usages.sort_by(|a, b| a.cell_ref.cmp(&b.cell_ref));
+        usages
+    }
+
+    /// Show impact preview for a rename operation
+    pub fn show_impact_preview_for_rename(&mut self, old_name: &str, new_name: &str, cx: &mut Context<Self>) {
+        use crate::views::impact_preview::ImpactAction;
+
+        let usages = self.find_named_range_usages(old_name);
+        self.impact_preview_action = Some(ImpactAction::Rename {
+            old_name: old_name.to_string(),
+            new_name: new_name.to_string(),
+        });
+        self.impact_preview_usages = usages;
+        self.mode = Mode::ImpactPreview;
+        cx.notify();
+    }
+
+    /// Show impact preview for a delete operation
+    pub fn show_impact_preview_for_delete(&mut self, name: &str, cx: &mut Context<Self>) {
+        use crate::views::impact_preview::ImpactAction;
+
+        let usages = self.find_named_range_usages(name);
+        self.impact_preview_action = Some(ImpactAction::Delete {
+            name: name.to_string(),
+        });
+        self.impact_preview_usages = usages;
+        self.mode = Mode::ImpactPreview;
+        cx.notify();
+    }
+
+    /// Hide the impact preview modal
+    pub fn hide_impact_preview(&mut self, cx: &mut Context<Self>) {
+        self.impact_preview_action = None;
+        self.impact_preview_usages.clear();
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
+    /// Apply the previewed action (rename or delete)
+    pub fn apply_impact_preview(&mut self, cx: &mut Context<Self>) {
+        use crate::views::impact_preview::ImpactAction;
+
+        let action = self.impact_preview_action.take();
+        let usage_count = self.impact_preview_usages.len();
+        self.impact_preview_usages.clear();
+
+        match action {
+            Some(ImpactAction::Rename { old_name, new_name }) => {
+                // Perform the rename
+                self.apply_rename_internal(&old_name, &new_name, cx);
+                self.mode = Mode::Navigation;
+
+                // Show one-time F12 hint after first rename
+                if !self.rename_f12_hint_shown {
+                    self.rename_f12_hint_shown = true;
+                    let mut settings = Settings::load();
+                    settings.rename_f12_hint_shown = true;
+                    settings.save();
+                    self.status_message = Some(format!(
+                        "Renamed \"{}\" → \"{}\". Tip: Press F12 to jump to this name's definition.",
+                        old_name, new_name
+                    ));
+                } else {
+                    self.status_message = Some(if usage_count > 0 {
+                        format!("Renamed \"{}\" → \"{}\", updated {} formula{}",
+                            old_name, new_name, usage_count, if usage_count == 1 { "" } else { "s" })
+                    } else {
+                        format!("Renamed \"{}\" → \"{}\"", old_name, new_name)
+                    });
+                }
+            }
+            Some(ImpactAction::Delete { name }) => {
+                // Perform the delete
+                self.delete_named_range_internal(&name, usage_count, cx);
+                self.mode = Mode::Navigation;
+                self.status_message = Some(if usage_count > 0 {
+                    format!("Deleted \"{}\", {} formula{} affected",
+                        name, usage_count, if usage_count == 1 { "" } else { "s" })
+                } else {
+                    format!("Deleted \"{}\"", name)
+                });
+            }
+            None => {
+                self.mode = Mode::Navigation;
+            }
+        }
+        cx.notify();
+    }
+
+    // =========================================================================
+    // Refactor Log methods
+    // =========================================================================
+
+    /// Show the refactor log modal
+    pub fn show_refactor_log(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::RefactorLog;
+        cx.notify();
+    }
+
+    /// Hide the refactor log modal
+    pub fn hide_refactor_log(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
+    /// Log a refactor action
+    pub fn log_refactor(&mut self, action: &str, details: &str, impact: Option<&str>) {
+        use crate::views::refactor_log::RefactorLogEntry;
+
+        let mut entry = RefactorLogEntry::new(action, details);
+        if let Some(imp) = impact {
+            entry = entry.with_impact(imp);
+        }
+        self.refactor_log.push(entry);
+    }
+
+    // =========================================================================
+    // Extract Named Range methods
+    // =========================================================================
+
+    /// Show the extract named range modal
+    pub fn show_extract_named_range(&mut self, cx: &mut Context<Self>) {
+        // Get the current cell's formula
+        let (row, col) = self.selected;
+        let cell = self.sheet().get_cell(row, col);
+        let formula_opt = self.get_formula_source(&cell.value);
+
+        let formula = match formula_opt {
+            Some(f) => f,
+            None => {
+                self.status_message = Some("Place the cursor inside a formula containing a range.".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        // Detect range literals in the formula
+        let range_literal = match self.detect_range_literal(&formula) {
+            Some(r) => r,
+            None => {
+                self.status_message = Some("No range literal found in formula.".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        // Check if this range is already a named range
+        if self.workbook.get_named_range(&range_literal).is_some() {
+            self.status_message = Some(format!("'{}' is already a named range.", range_literal));
+            cx.notify();
+            return;
+        }
+
+        // Find all cells containing this range literal
+        let (affected_cells, occurrence_count) = self.find_cells_with_range(&range_literal);
+
+        self.extract_range_literal = range_literal;
+        self.extract_name = String::new();
+        self.extract_description = String::new();
+        self.extract_affected_cells = affected_cells;
+        self.extract_occurrence_count = occurrence_count;
+        self.extract_validation_error = None;
+        self.extract_select_all = false;
+        self.extract_focus = CreateNameFocus::Name;
+        self.mode = Mode::ExtractNamedRange;
+        cx.notify();
+    }
+
+    /// Detect a range literal in a formula (e.g., A1:B10, $A$1:$B$10)
+    fn detect_range_literal(&self, formula: &str) -> Option<String> {
+        // Simple regex-like pattern matching for range literals
+        // Matches: A1:B10, $A$1:$B$10, A1, $A$1, etc.
+        let chars: Vec<char> = formula.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            // Look for start of a cell reference
+            if let Some(range) = self.try_parse_range_at(&chars, i) {
+                // Skip named ranges (already defined)
+                if self.workbook.get_named_range(&range).is_none() {
+                    // Make sure it's actually a range (contains :) or a single cell
+                    return Some(range);
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Try to parse a range starting at position i
+    fn try_parse_range_at(&self, chars: &[char], start: usize) -> Option<String> {
+        let mut i = start;
+
+        // Skip $ if present
+        if i < chars.len() && chars[i] == '$' {
+            i += 1;
+        }
+
+        // Need at least one letter
+        if i >= chars.len() || !chars[i].is_ascii_alphabetic() {
+            return None;
+        }
+
+        // Collect column letters
+        while i < chars.len() && chars[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+
+        // Skip $ if present before row
+        if i < chars.len() && chars[i] == '$' {
+            i += 1;
+        }
+
+        // Need at least one digit
+        if i >= chars.len() || !chars[i].is_ascii_digit() {
+            return None;
+        }
+
+        // Collect row digits
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+
+        // Check for range separator (:)
+        if i < chars.len() && chars[i] == ':' {
+            i += 1;
+
+            // Parse second cell reference
+            // Skip $ if present
+            if i < chars.len() && chars[i] == '$' {
+                i += 1;
+            }
+
+            // Need at least one letter
+            if i >= chars.len() || !chars[i].is_ascii_alphabetic() {
+                return None;
+            }
+
+            // Collect column letters
+            while i < chars.len() && chars[i].is_ascii_alphabetic() {
+                i += 1;
+            }
+
+            // Skip $ if present before row
+            if i < chars.len() && chars[i] == '$' {
+                i += 1;
+            }
+
+            // Need at least one digit
+            if i >= chars.len() || !chars[i].is_ascii_digit() {
+                return None;
+            }
+
+            // Collect row digits
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+
+        // Make sure next char is not alphanumeric (word boundary)
+        if i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+            return None;
+        }
+
+        // Make sure previous char is not alphanumeric (word boundary)
+        if start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+            return None;
+        }
+
+        Some(chars[start..i].iter().collect())
+    }
+
+    /// Find all cells containing a specific range literal and count occurrences
+    fn find_cells_with_range(&self, range_literal: &str) -> (Vec<(usize, usize)>, usize) {
+        let range_upper = range_literal.to_uppercase();
+        let mut cells = Vec::new();
+        let mut total_count = 0;
+
+        for ((row, col), cell) in self.sheet().cells_iter() {
+            let raw = cell.value.raw_display();
+            if !raw.starts_with('=') {
+                continue;
+            }
+
+            let formula_upper = raw.to_uppercase();
+            let count = self.count_range_occurrences(&formula_upper, &range_upper);
+            if count > 0 {
+                cells.push((*row, *col));
+                total_count += count;
+            }
+        }
+
+        (cells, total_count)
+    }
+
+    /// Count how many times a range appears in a formula
+    fn count_range_occurrences(&self, formula: &str, range: &str) -> usize {
+        let mut count = 0;
+        let chars: Vec<char> = formula.chars().collect();
+        let range_chars: Vec<char> = range.chars().collect();
+        let range_len = range_chars.len();
+
+        let mut i = 0;
+        while i + range_len <= chars.len() {
+            // Check for match
+            let slice: String = chars[i..i + range_len].iter().collect();
+            if slice == range {
+                // Verify word boundaries
+                let before_ok = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_' && chars[i - 1] != '$');
+                let after_ok = i + range_len >= chars.len() || (!chars[i + range_len].is_alphanumeric() && chars[i + range_len] != '_');
+                if before_ok && after_ok {
+                    count += 1;
+                    i += range_len;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        count
+    }
+
+    /// Hide the extract named range modal
+    pub fn hide_extract_named_range(&mut self, cx: &mut Context<Self>) {
+        self.extract_range_literal.clear();
+        self.extract_name.clear();
+        self.extract_description.clear();
+        self.extract_affected_cells.clear();
+        self.extract_occurrence_count = 0;
+        self.extract_validation_error = None;
+        self.extract_select_all = false;
+        self.extract_focus = CreateNameFocus::default();
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
+    /// Tab between fields in extract dialog
+    pub fn extract_tab(&mut self, cx: &mut Context<Self>) {
+        self.extract_focus = match self.extract_focus {
+            CreateNameFocus::Name => CreateNameFocus::Description,
+            CreateNameFocus::Description => CreateNameFocus::Name,
+        };
+        cx.notify();
+    }
+
+    /// Validate the extract name
+    fn validate_extract_name(&mut self) {
+        if self.extract_name.is_empty() {
+            self.extract_validation_error = Some("Name cannot be empty".to_string());
+            return;
+        }
+
+        // Check first character is letter or underscore
+        let first_char = self.extract_name.chars().next().unwrap();
+        if !first_char.is_ascii_alphabetic() && first_char != '_' {
+            self.extract_validation_error = Some("Name must start with a letter or underscore".to_string());
+            return;
+        }
+
+        // Check all characters are valid
+        for c in self.extract_name.chars() {
+            if !c.is_alphanumeric() && c != '_' && c != '.' {
+                self.extract_validation_error = Some("Name can only contain letters, numbers, underscore, and dot".to_string());
+                return;
+            }
+        }
+
+        // Check for reserved names/cell references
+        let name_upper = self.extract_name.to_uppercase();
+        if self.is_reserved_name(&name_upper) {
+            self.extract_validation_error = Some("This name is reserved or looks like a cell reference".to_string());
+            return;
+        }
+
+        // Check for existing named range
+        if self.workbook.get_named_range(&self.extract_name).is_some() {
+            self.extract_validation_error = Some("A named range with this name already exists".to_string());
+            return;
+        }
+
+        self.extract_validation_error = None;
+    }
+
+    /// Check if a name is reserved (cell reference, function name, etc.)
+    fn is_reserved_name(&self, name: &str) -> bool {
+        // Check if it looks like a cell reference
+        let chars: Vec<char> = name.chars().collect();
+        if !chars.is_empty() && chars[0].is_ascii_alphabetic() {
+            let mut i = 0;
+            // Skip letters
+            while i < chars.len() && chars[i].is_ascii_alphabetic() {
+                i += 1;
+            }
+            // If remaining are all digits, it looks like a cell ref
+            if i < chars.len() && chars[i..].iter().all(|c| c.is_ascii_digit()) {
+                return true;
+            }
+        }
+
+        // Check against known function names (simplified list)
+        let reserved = ["SUM", "AVERAGE", "COUNT", "MAX", "MIN", "IF", "AND", "OR", "NOT",
+                       "TRUE", "FALSE", "PI", "E", "ABS", "SQRT", "ROUND", "INT", "MOD",
+                       "POWER", "LOG", "LN", "EXP", "SIN", "COS", "TAN"];
+        reserved.contains(&name)
+    }
+
+    /// Insert a character into the extract name
+    pub fn extract_name_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        if self.extract_select_all {
+            self.extract_name.clear();
+            self.extract_select_all = false;
+        }
+        self.extract_name.push(c);
+        self.validate_extract_name();
+        cx.notify();
+    }
+
+    /// Backspace in extract name
+    pub fn extract_name_backspace(&mut self, cx: &mut Context<Self>) {
+        self.extract_select_all = false;
+        self.extract_name.pop();
+        self.validate_extract_name();
+        cx.notify();
+    }
+
+    /// Insert a character into the extract description
+    pub fn extract_description_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        self.extract_description.push(c);
+        cx.notify();
+    }
+
+    /// Backspace in extract description
+    pub fn extract_description_backspace(&mut self, cx: &mut Context<Self>) {
+        self.extract_description.pop();
+        cx.notify();
+    }
+
+    /// Confirm extraction - create named range and replace in formulas
+    pub fn confirm_extract_named_range(&mut self, cx: &mut Context<Self>) {
+        // Validate
+        if self.extract_name.is_empty() {
+            self.extract_validation_error = Some("Name cannot be empty".to_string());
+            cx.notify();
+            return;
+        }
+        self.validate_extract_name();
+        if self.extract_validation_error.is_some() {
+            cx.notify();
+            return;
+        }
+
+        let range_literal = self.extract_range_literal.clone();
+        let name = self.extract_name.clone();
+        let description = if self.extract_description.is_empty() {
+            None
+        } else {
+            Some(self.extract_description.clone())
+        };
+        let affected_cells = std::mem::take(&mut self.extract_affected_cells);
+        let occurrence_count = self.extract_occurrence_count;
+
+        // 1. Parse the range literal and create the named range
+        // Handle absolute references by removing $ signs
+        let clean_range = range_literal.replace('$', "");
+        let parts: Vec<&str> = clean_range.split(':').collect();
+
+        let sheet = self.workbook.active_sheet_index();
+        let result: Result<(), String> = if parts.len() == 2 {
+            // Range reference like A1:B10
+            if let (Some(start), Some(end)) = (
+                Self::parse_cell_ref(parts[0]),
+                Self::parse_cell_ref(parts[1]),
+            ) {
+                self.workbook.define_name_for_range(&name, sheet, start.0, start.1, end.0, end.1)
+            } else {
+                Err("Invalid cell reference".to_string())
+            }
+        } else {
+            // Single cell reference like A1
+            if let Some((row, col)) = Self::parse_cell_ref(&clean_range) {
+                self.workbook.define_name_for_cell(&name, sheet, row, col)
+            } else {
+                Err("Invalid cell reference".to_string())
+            }
+        };
+
+        if let Err(e) = result {
+            self.extract_validation_error = Some(format!("Failed to create named range: {:?}", e));
+            cx.notify();
+            return;
+        }
+
+        // Add description if provided
+        if let Some(desc) = description {
+            if let Some(nr) = self.workbook.named_ranges_mut().get(&name).cloned() {
+                let mut updated = nr;
+                updated.description = Some(desc);
+                let _ = self.workbook.named_ranges_mut().set(updated);
+            }
+        }
+
+        // 2. Replace range literal with name in all affected cells
+        let mut cell_changes = Vec::new();
+        for (row, col) in &affected_cells {
+            let cell = self.sheet().get_cell(*row, *col);
+            let old_value = cell.value.raw_display();
+            if old_value.starts_with('=') {
+                let new_value = self.replace_range_in_formula(&old_value, &range_literal, &name);
+                if new_value != old_value {
+                    // Apply the change
+                    self.sheet_mut().set_value(*row, *col, &new_value);
+                    cell_changes.push(crate::history::CellChange {
+                        row: *row,
+                        col: *col,
+                        old_value,
+                        new_value,
+                    });
+                }
+            }
+        }
+
+        // 3. Record undo action (group)
+        let mut actions = vec![
+            UndoAction::NamedRangeCreated { name: name.clone() },
+        ];
+        if !cell_changes.is_empty() {
+            actions.push(UndoAction::Values {
+                sheet_index: 0,
+                changes: cell_changes,
+            });
+        }
+        self.history.record_named_range_action(UndoAction::Group {
+            actions,
+            description: format!("Extract '{}'", name),
+        });
+
+        // 4. Add to refactor log
+        let impact_msg = format!("Replaced {} occurrences in {} cells", occurrence_count, affected_cells.len());
+        self.refactor_log.push(
+            crate::views::refactor_log::RefactorLogEntry::new(
+                "Extracted to Named Range",
+                format!("{} = {}", name, range_literal),
+            ).with_impact(impact_msg)
+        );
+
+        // 5. Invalidate caches and show status
+        self.bump_cells_rev();
+        self.is_modified = true;
+        self.status_message = Some(format!("Extracted '{}' (Ctrl+Shift+R to rename)", name));
+
+        // 6. Hide modal
+        self.hide_extract_named_range(cx);
+    }
+
+    /// Replace all occurrences of a range literal with a name in a formula
+    fn replace_range_in_formula(&self, formula: &str, range_literal: &str, name: &str) -> String {
+        let range_upper = range_literal.to_uppercase();
+        let mut result = String::new();
+        let chars: Vec<char> = formula.chars().collect();
+        let range_chars: Vec<char> = range_upper.chars().collect();
+        let range_len = range_chars.len();
+
+        let mut i = 0;
+        while i < chars.len() {
+            // Check for match
+            if i + range_len <= chars.len() {
+                let slice: String = chars[i..i + range_len].iter().collect::<String>().to_uppercase();
+                if slice == range_upper {
+                    // Verify word boundaries
+                    let before_ok = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_' && chars[i - 1] != '$');
+                    let after_ok = i + range_len >= chars.len() || (!chars[i + range_len].is_alphanumeric() && chars[i + range_len] != '_');
+                    if before_ok && after_ok {
+                        result.push_str(name);
+                        i += range_len;
+                        continue;
+                    }
+                }
+            }
+            result.push(chars[i]);
+            i += 1;
+        }
+        result
+    }
+
     /// Insert a character into the new name
     pub fn rename_symbol_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        // If select_all is active, clear and start fresh
+        if self.rename_select_all {
+            self.rename_new_name.clear();
+            self.rename_select_all = false;
+        }
         self.rename_new_name.push(c);
         self.validate_rename_name();
         cx.notify();
@@ -3723,6 +4509,8 @@ impl Spreadsheet {
 
     /// Delete the last character from the new name
     pub fn rename_symbol_backspace(&mut self, cx: &mut Context<Self>) {
+        // Backspace also clears select_all mode but keeps existing text
+        self.rename_select_all = false;
         self.rename_new_name.pop();
         self.validate_rename_name();
         cx.notify();
@@ -3829,18 +4617,42 @@ impl Spreadsheet {
             return;
         }
 
+        // Hide rename dialog and show impact preview
+        self.mode = Mode::Navigation;  // Temporarily exit rename mode
+        self.show_impact_preview_for_rename(&old_name, &new_name, cx);
+    }
+
+    /// Internal method to apply a rename (called from impact preview)
+    fn apply_rename_internal(&mut self, old_name: &str, new_name: &str, cx: &mut Context<Self>) {
         // Collect all formula changes for undo
         let mut changes: Vec<CellChange> = Vec::new();
         let sheet_index = self.workbook.active_sheet_index();
         let old_name_upper = old_name.to_uppercase();
 
+        // Find affected cells
+        let affected_cells: Vec<(usize, usize)> = self.sheet().cells_iter()
+            .filter_map(|((row, col), cell)| {
+                let raw = cell.value.raw_display();
+                if raw.starts_with('=') {
+                    let formula_upper = raw.to_uppercase();
+                    let contains_name = formula_upper
+                        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+                        .any(|word| word == old_name_upper);
+                    if contains_name {
+                        return Some((*row, *col));
+                    }
+                }
+                None
+            })
+            .collect();
+
         // Update formulas in all affected cells
         {
             let sheet = self.workbook.active_sheet();
-            for &(row, col) in &self.rename_affected_cells {
+            for &(row, col) in &affected_cells {
                 let cell = sheet.get_cell(row, col);
                 if let Some(formula) = self.get_formula_source(&cell.value) {
-                    let new_formula = self.replace_name_in_formula(&formula, &old_name_upper, &new_name);
+                    let new_formula = self.replace_name_in_formula(&formula, &old_name_upper, new_name);
 
                     changes.push(CellChange {
                         row,
@@ -3861,29 +4673,38 @@ impl Spreadsheet {
         }
 
         // Rename the named range itself
-        if let Err(e) = self.workbook.rename_named_range(&old_name, &new_name) {
+        if let Err(e) = self.workbook.rename_named_range(old_name, new_name) {
             self.status_message = Some(format!("Failed to rename: {}", e));
-            // TODO: Roll back formula changes
             cx.notify();
             return;
         }
 
         // Record undo action
         if !changes.is_empty() {
-            self.history.record_batch(sheet_index, changes);
+            self.history.record_batch(sheet_index, changes.clone());
         }
 
         self.is_modified = true;
         self.bump_cells_rev();
-        self.status_message = Some(format!(
-            "Renamed '{}' to '{}' ({} formula{} updated)",
-            old_name,
-            new_name,
-            self.rename_affected_cells.len(),
-            if self.rename_affected_cells.len() == 1 { "" } else { "s" }
-        ));
 
-        self.hide_rename_symbol(cx);
+        // Log the rename
+        let formula_count = changes.len();
+        let impact = if formula_count > 0 {
+            Some(format!("{} formula{} updated", formula_count, if formula_count == 1 { "" } else { "s" }))
+        } else {
+            None
+        };
+        self.log_refactor(
+            "Renamed named range",
+            &format!("{} → {}", old_name, new_name),
+            impact.as_deref(),
+        );
+
+        // Clear rename state
+        self.rename_original_name.clear();
+        self.rename_new_name.clear();
+        self.rename_affected_cells.clear();
+        cx.notify();
     }
 
     /// Replace a named range in a formula with a new name
@@ -4056,6 +4877,15 @@ impl Spreadsheet {
                 }
 
                 self.is_modified = true;
+
+                // Log the creation
+                let target = self.create_name_target.clone();
+                self.log_refactor(
+                    "Created named range",
+                    &format!("{} → {}", name, target),
+                    None,
+                );
+
                 self.status_message = Some(format!(
                     "Created named range '{}' → {}",
                     name,
@@ -4094,15 +4924,25 @@ impl Spreadsheet {
     // Named Ranges Panel Actions
     // ========================================================================
 
-    /// Delete a named range by name (with undo support and reference warning)
+    /// Delete a named range by name (shows impact preview first)
     pub fn delete_named_range(&mut self, name: &str, cx: &mut Context<Self>) {
+        // Check if named range exists
+        if self.workbook.get_named_range(name).is_none() {
+            self.status_message = Some(format!("Named range '{}' not found", name));
+            cx.notify();
+            return;
+        }
+
+        // Show impact preview instead of deleting directly
+        self.show_impact_preview_for_delete(name, cx);
+    }
+
+    /// Internal method to delete a named range (called from impact preview)
+    fn delete_named_range_internal(&mut self, name: &str, usage_count: usize, cx: &mut Context<Self>) {
         // Get the named range first (need to clone for undo)
         let named_range = self.workbook.get_named_range(name).cloned();
 
         if let Some(nr) = named_range {
-            // Count references to this named range in formulas
-            let ref_count = self.count_named_range_references(&nr.name);
-
             // Record undo action BEFORE deleting
             self.history.record_named_range_action(UndoAction::NamedRangeDeleted {
                 named_range: nr.clone(),
@@ -4113,20 +4953,18 @@ impl Spreadsheet {
             self.is_modified = true;
             self.bump_cells_rev();
 
-            // Status message with reference warning
-            if ref_count > 0 {
-                self.status_message = Some(format!(
-                    "Deleted '{}' (used in {} formula{}—will show #NAME? errors)",
-                    name,
-                    ref_count,
-                    if ref_count == 1 { "" } else { "s" }
-                ));
+            // Log the deletion
+            let impact = if usage_count > 0 {
+                Some(format!("{} formula{} will show #NAME? error", usage_count, if usage_count == 1 { "" } else { "s" }))
             } else {
-                self.status_message = Some(format!("Deleted named range '{}'", name));
-            }
-            cx.notify();
-        } else {
-            self.status_message = Some(format!("Named range '{}' not found", name));
+                None
+            };
+            self.log_refactor(
+                "Deleted named range",
+                name,
+                impact.as_deref(),
+            );
+
             cx.notify();
         }
     }

@@ -69,6 +69,11 @@ pub enum UndoAction {
         old_description: Option<String>,
         new_description: Option<String>,
     },
+    /// Grouped actions that should be undone/redone together
+    Group {
+        actions: Vec<UndoAction>,
+        description: String,
+    },
 }
 
 #[derive(Clone, Debug)]

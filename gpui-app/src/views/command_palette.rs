@@ -152,6 +152,14 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                 .child(
                                     div().flex().gap_4()
                                         .child(div().child("#  settings"))
+                                        .child(div().child("$  named ranges"))
+                                )
+                                .child(
+                                    div()
+                                        .mt_2()
+                                        .text_color(text_muted.opacity(0.7))
+                                        .italic()
+                                        .child("Refactor spreadsheets like code.")
                                 )
                         );
                     }

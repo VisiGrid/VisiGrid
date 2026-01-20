@@ -457,13 +457,13 @@ fn render_names_tab(
                 div()
                     .text_size(px(11.0))
                     .text_color(text_muted)
-                    .child("No named ranges yet")
+                    .child("Names let you refactor formulas safely.")
             )
             .child(
                 div()
                     .text_size(px(10.0))
                     .text_color(text_muted.opacity(0.7))
-                    .child("Press Ctrl+Shift+N to create one")
+                    .child("Press Ctrl+Shift+N to create one.")
             )
     } else if !has_filtered_results {
         // No matches state

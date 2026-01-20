@@ -89,6 +89,7 @@ actions!(file, [
     Save,
     SaveAs,
     ExportCsv,
+    Quit,
 ]);
 
 // View actions
@@ -102,6 +103,8 @@ actions!(view, [
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    ShowAbout,
+    ShowFontPicker,
 ]);
 
 // Format actions

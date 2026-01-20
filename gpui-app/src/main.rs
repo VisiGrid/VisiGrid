@@ -10,6 +10,8 @@ mod formatting;
 mod formula_context;
 mod history;
 mod keybindings;
+#[cfg(target_os = "macos")]
+mod menus;
 mod mode;
 mod search;
 mod theme;
@@ -24,6 +26,13 @@ use app::Spreadsheet;
 fn main() {
     Application::new().run(|cx: &mut App| {
         keybindings::register(cx);
+
+        // Set up native macOS menu bar
+        #[cfg(target_os = "macos")]
+        {
+            cx.on_action(|_: &actions::Quit, cx| cx.quit());
+            menus::set_app_menus(cx);
+        }
 
         let bounds = Bounds {
             origin: Point::new(px(100.0), px(100.0)),

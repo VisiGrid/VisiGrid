@@ -56,10 +56,14 @@ pub enum CommandId {
     // View
     ToggleInspector,
 
+    // Refactoring
+    ExtractNamedRange,
+
     // Help
     ShowShortcuts,
     ShowAbout,
     TourNamedRanges,
+    ShowRefactorLog,
 
     // Sheets
     NextSheet,
@@ -96,9 +100,11 @@ impl CommandId {
             Self::SelectTheme => "Select Theme...",
             Self::SelectFont => "Select Font...",
             Self::ToggleInspector => "Toggle Inspector",
+            Self::ExtractNamedRange => "Extract to Named Range...",
             Self::ShowShortcuts => "Show Keyboard Shortcuts",
             Self::ShowAbout => "About VisiGrid",
             Self::TourNamedRanges => "Tour: Named Ranges & Refactoring",
+            Self::ShowRefactorLog => "Show Refactor Log",
             Self::NextSheet => "Next Sheet",
             Self::PrevSheet => "Previous Sheet",
             Self::AddSheet => "Add Sheet",
@@ -162,9 +168,11 @@ impl CommandId {
             Self::SelectTheme => "appearance color scheme dark light",
             Self::SelectFont => "appearance typography",
             Self::ToggleInspector => "panel sidebar",
+            Self::ExtractNamedRange => "extract refactor variable name range",
             Self::ShowShortcuts => "help keys bindings hotkeys",
             Self::ShowAbout => "version info",
             Self::TourNamedRanges => "tour guide walkthrough refactor learn onboarding",
+            Self::ShowRefactorLog => "audit history changes log refactor",
             Self::NextSheet => "tab worksheet",
             Self::PrevSheet => "tab worksheet",
             Self::AddSheet => "new tab worksheet",
@@ -199,9 +207,11 @@ impl CommandId {
             Self::SelectTheme,
             Self::SelectFont,
             Self::ToggleInspector,
+            Self::ExtractNamedRange,
             Self::ShowShortcuts,
             Self::ShowAbout,
             Self::TourNamedRanges,
+            Self::ShowRefactorLog,
             Self::NextSheet,
             Self::PrevSheet,
             Self::AddSheet,

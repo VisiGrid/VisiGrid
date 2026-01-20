@@ -16,6 +16,9 @@ pub enum Mode {
     CreateNamedRange,  // Create named range from selection (Ctrl+Shift+N)
     EditDescription,   // Edit named range description
     Tour,              // Named ranges tour/walkthrough
+    ImpactPreview,     // Preview impact of rename/delete before applying
+    RefactorLog,       // Show refactoring audit trail
+    ExtractNamedRange, // Extract range literal to named range
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -55,6 +58,6 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour)
+        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange)
     }
 }
