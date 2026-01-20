@@ -59,6 +59,7 @@ pub enum CommandId {
     // Help
     ShowShortcuts,
     ShowAbout,
+    TourNamedRanges,
 
     // Sheets
     NextSheet,
@@ -97,6 +98,7 @@ impl CommandId {
             Self::ToggleInspector => "Toggle Inspector",
             Self::ShowShortcuts => "Show Keyboard Shortcuts",
             Self::ShowAbout => "About VisiGrid",
+            Self::TourNamedRanges => "Tour: Named Ranges & Refactoring",
             Self::NextSheet => "Next Sheet",
             Self::PrevSheet => "Previous Sheet",
             Self::AddSheet => "Add Sheet",
@@ -162,6 +164,7 @@ impl CommandId {
             Self::ToggleInspector => "panel sidebar",
             Self::ShowShortcuts => "help keys bindings hotkeys",
             Self::ShowAbout => "version info",
+            Self::TourNamedRanges => "tour guide walkthrough refactor learn onboarding",
             Self::NextSheet => "tab worksheet",
             Self::PrevSheet => "tab worksheet",
             Self::AddSheet => "new tab worksheet",
@@ -198,6 +201,7 @@ impl CommandId {
             Self::ToggleInspector,
             Self::ShowShortcuts,
             Self::ShowAbout,
+            Self::TourNamedRanges,
             Self::NextSheet,
             Self::PrevSheet,
             Self::AddSheet,

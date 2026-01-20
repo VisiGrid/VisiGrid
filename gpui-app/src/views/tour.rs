@@ -1,6 +1,7 @@
 //! Tour modal for Named Ranges & Refactoring walkthrough
 
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
 

@@ -662,6 +662,9 @@ impl Spreadsheet {
                 self.status_message = Some("VisiGrid - A spreadsheet for power users".into());
                 cx.notify();
             }
+            CommandId::TourNamedRanges => {
+                self.show_tour(cx);
+            }
 
             // Sheets
             CommandId::NextSheet => self.next_sheet(cx),
@@ -3465,7 +3468,8 @@ impl Spreadsheet {
             self.theme = theme.clone();
             self.status_message = Some(format!("Applied theme: {}", theme.meta.name));
             // Persist theme selection
-            let settings = Settings { theme_id: Some(theme.meta.id.to_string()) };
+            let mut settings = Settings::load();
+            settings.theme_id = Some(theme.meta.id.to_string());
             settings.save();
         }
         self.theme_preview = None;

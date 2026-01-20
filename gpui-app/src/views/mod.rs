@@ -772,6 +772,30 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 }
             }
 
+            // Handle Tour mode
+            if this.mode == Mode::Tour {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.hide_tour(cx);
+                        return;
+                    }
+                    "enter" | "right" => {
+                        if this.tour_step < 3 {
+                            this.tour_next(cx);
+                        } else {
+                            this.tour_done(cx);
+                        }
+                        return;
+                    }
+                    "left" => {
+                        this.tour_back(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+                return; // Consume all keystrokes in tour mode
+            }
+
             // Handle Names tab filter input (when inspector visible + Names tab + Navigation mode)
             if this.inspector_visible
                 && this.inspector_tab == InspectorTab::Names
