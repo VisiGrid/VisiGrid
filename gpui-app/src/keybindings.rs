@@ -21,6 +21,11 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("ctrl-f", FindInCells, Some("Spreadsheet")),
         KeyBinding::new("f3", FindNext, Some("Spreadsheet")),
         KeyBinding::new("shift-f3", FindPrev, Some("Spreadsheet")),
+        // IDE-style navigation
+        KeyBinding::new("shift-f12", FindReferences, Some("Spreadsheet")),
+        KeyBinding::new("f12", GoToPrecedents, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-shift-r", RenameSymbol, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-shift-n", CreateNamedRange, Some("Spreadsheet")),
 
         // Editing
         KeyBinding::new("f2", StartEdit, Some("Spreadsheet")),
@@ -95,5 +100,12 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("ctrl-pagedown", NextSheet, Some("Spreadsheet")),
         KeyBinding::new("ctrl-pageup", PrevSheet, Some("Spreadsheet")),
         KeyBinding::new("shift-f11", AddSheet, Some("Spreadsheet")),
+
+        // Command palette (in CommandPalette context)
+        KeyBinding::new("up", PaletteUp, Some("CommandPalette")),
+        KeyBinding::new("down", PaletteDown, Some("CommandPalette")),
+        KeyBinding::new("enter", PaletteExecute, Some("CommandPalette")),
+        KeyBinding::new("shift-enter", PalettePreview, Some("CommandPalette")),
+        KeyBinding::new("escape", PaletteCancel, Some("CommandPalette")),
     ]);
 }

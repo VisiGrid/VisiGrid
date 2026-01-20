@@ -1,0 +1,326 @@
+//! Cell formatting methods for Spreadsheet
+//!
+//! This module contains all format setters (bold, italic, alignment, etc.)
+
+use gpui::*;
+use visigrid_engine::cell::{Alignment, NumberFormat, TextOverflow, VerticalAlignment};
+
+use crate::app::{Spreadsheet, TriState, SelectionFormatState};
+use crate::history::{CellFormatPatch, FormatActionKind};
+
+impl Spreadsheet {
+    /// Compute format state for the current selection (tri-state resolution)
+    pub fn selection_format_state(&self) -> SelectionFormatState {
+        let mut state = SelectionFormatState::default();
+        let mut first = true;
+        let mut last_display: Option<String> = None;
+
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    state.cell_count += 1;
+                    let raw = self.sheet().get_raw(row, col);
+                    let display = self.sheet().get_display(row, col);
+                    let format = self.sheet().get_format(row, col);
+
+                    if first {
+                        state.raw_value = TriState::Uniform(raw.clone());
+                        state.bold = TriState::Uniform(format.bold);
+                        state.italic = TriState::Uniform(format.italic);
+                        state.underline = TriState::Uniform(format.underline);
+                        state.font_family = TriState::Uniform(format.font_family.clone());
+                        state.alignment = TriState::Uniform(format.alignment);
+                        state.vertical_alignment = TriState::Uniform(format.vertical_alignment);
+                        state.text_overflow = TriState::Uniform(format.text_overflow);
+                        state.number_format = TriState::Uniform(format.number_format);
+                        last_display = Some(display);
+                        first = false;
+                    } else {
+                        state.raw_value = state.raw_value.combine(&raw);
+                        state.bold = state.bold.combine(&format.bold);
+                        state.italic = state.italic.combine(&format.italic);
+                        state.underline = state.underline.combine(&format.underline);
+                        state.font_family = state.font_family.combine(&format.font_family);
+                        state.alignment = state.alignment.combine(&format.alignment);
+                        state.vertical_alignment = state.vertical_alignment.combine(&format.vertical_alignment);
+                        state.text_overflow = state.text_overflow.combine(&format.text_overflow);
+                        state.number_format = state.number_format.combine(&format.number_format);
+                        last_display = Some(display);
+                    }
+                }
+            }
+        }
+
+        // For single cell, show display value
+        if matches!(state.raw_value, TriState::Uniform(_)) {
+            state.display_value = last_display;
+        }
+
+        state
+    }
+
+    /// Set bold on all selected cells (explicit value, not toggle)
+    pub fn set_bold(&mut self, value: bool, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet().get_format(row, col);
+                    self.sheet_mut().set_bold(row, col, value);
+                    let after = self.sheet().get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let desc = format!("Bold {}", if value { "on" } else { "off" });
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Bold, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Set italic on all selected cells (explicit value, not toggle)
+    pub fn set_italic(&mut self, value: bool, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet().get_format(row, col);
+                    self.sheet_mut().set_italic(row, col, value);
+                    let after = self.sheet().get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let desc = format!("Italic {}", if value { "on" } else { "off" });
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Italic, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Set underline on all selected cells (explicit value, not toggle)
+    pub fn set_underline(&mut self, value: bool, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet().get_format(row, col);
+                    self.sheet_mut().set_underline(row, col, value);
+                    let after = self.sheet().get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let desc = format!("Underline {}", if value { "on" } else { "off" });
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Underline, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Set font family on all selected cells
+    pub fn set_font_family_selection(&mut self, font: Option<String>, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet().get_format(row, col);
+                    self.sheet_mut().set_font_family(row, col, font.clone());
+                    let after = self.sheet().get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let font_name = font.as_deref().unwrap_or("default");
+            let desc = format!("Font '{}'", font_name);
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Font, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Set horizontal alignment on all selected cells
+    pub fn set_alignment_selection(&mut self, alignment: Alignment, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet().get_format(row, col);
+                    self.sheet_mut().set_alignment(row, col, alignment);
+                    let after = self.sheet().get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let align_name = match alignment {
+                Alignment::Left => "Left",
+                Alignment::Center => "Center",
+                Alignment::Right => "Right",
+            };
+            let desc = format!("Align {}", align_name);
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Alignment, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Set vertical alignment on all selected cells
+    pub fn set_vertical_alignment_selection(&mut self, valign: VerticalAlignment, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet().get_format(row, col);
+                    self.sheet_mut().set_vertical_alignment(row, col, valign);
+                    let after = self.sheet().get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let valign_name = match valign {
+                VerticalAlignment::Top => "Top",
+                VerticalAlignment::Middle => "Middle",
+                VerticalAlignment::Bottom => "Bottom",
+            };
+            let desc = format!("V-Align {}", valign_name);
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::VerticalAlignment, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Set text overflow on all selected cells
+    pub fn set_text_overflow_selection(&mut self, overflow: TextOverflow, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet().get_format(row, col);
+                    self.sheet_mut().set_text_overflow(row, col, overflow);
+                    let after = self.sheet().get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let overflow_name = match overflow {
+                TextOverflow::Clip => "Clip",
+                TextOverflow::Wrap => "Wrap",
+                TextOverflow::Overflow => "Overflow",
+            };
+            let desc = overflow_name.to_string();
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::TextOverflow, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Set number format on all selected cells
+    pub fn set_number_format_selection(&mut self, format: NumberFormat, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet().get_format(row, col);
+                    self.sheet_mut().set_number_format(row, col, format);
+                    let after = self.sheet().get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let format_name = match format {
+                NumberFormat::General => "General",
+                NumberFormat::Number { .. } => "Number",
+                NumberFormat::Currency { .. } => "Currency",
+                NumberFormat::Percent { .. } => "Percent",
+                NumberFormat::Date { .. } => "Date",
+            };
+            let desc = format!("{} format", format_name);
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::NumberFormat, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Adjust decimal places on selected cells - uses DecimalPlaces kind for coalescing
+    pub fn adjust_decimals_selection(&mut self, delta: i8, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet().get_format(row, col);
+                    let new_format = match before.number_format {
+                        NumberFormat::Number { decimals } => {
+                            let new_dec = (decimals as i8 + delta).clamp(0, 10) as u8;
+                            Some(NumberFormat::Number { decimals: new_dec })
+                        }
+                        NumberFormat::Currency { decimals } => {
+                            let new_dec = (decimals as i8 + delta).clamp(0, 10) as u8;
+                            Some(NumberFormat::Currency { decimals: new_dec })
+                        }
+                        NumberFormat::Percent { decimals } => {
+                            let new_dec = (decimals as i8 + delta).clamp(0, 10) as u8;
+                            Some(NumberFormat::Percent { decimals: new_dec })
+                        }
+                        _ => None,
+                    };
+                    if let Some(fmt) = new_format {
+                        self.sheet_mut().set_number_format(row, col, fmt);
+                        let after = self.sheet().get_format(row, col);
+                        if before != after {
+                            patches.push(CellFormatPatch { row, col, before, after });
+                        }
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let desc = format!("Decimal {}", if delta > 0 { "+" } else { "-" });
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::DecimalPlaces, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+}

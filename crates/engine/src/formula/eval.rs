@@ -2,9 +2,48 @@
 
 use super::parser::{Expr, Op};
 
+/// Result of resolving a named range
+#[derive(Debug, Clone)]
+pub enum NamedRangeResolution {
+    Cell { row: usize, col: usize },
+    Range { start_row: usize, start_col: usize, end_row: usize, end_col: usize },
+}
+
 pub trait CellLookup {
     fn get_value(&self, row: usize, col: usize) -> f64;
     fn get_text(&self, row: usize, col: usize) -> String;
+
+    /// Resolve a named range to its target. Returns None if name not defined.
+    /// Default implementation returns None (named ranges not supported).
+    fn resolve_named_range(&self, _name: &str) -> Option<NamedRangeResolution> {
+        None
+    }
+}
+
+/// A lookup that wraps another CellLookup and adds named range resolution
+pub struct LookupWithNamedRanges<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> {
+    inner: &'a L,
+    resolver: F,
+}
+
+impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> LookupWithNamedRanges<'a, L, F> {
+    pub fn new(inner: &'a L, resolver: F) -> Self {
+        Self { inner, resolver }
+    }
+}
+
+impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup for LookupWithNamedRanges<'a, L, F> {
+    fn get_value(&self, row: usize, col: usize) -> f64 {
+        self.inner.get_value(row, col)
+    }
+
+    fn get_text(&self, row: usize, col: usize) -> String {
+        self.inner.get_text(row, col)
+    }
+
+    fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
+        (self.resolver)(name)
+    }
 }
 
 // =============================================================================
@@ -159,7 +198,7 @@ impl Array2D {
 // EvalResult: The result of formula evaluation (scalar or array)
 // =============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EvalResult {
     Number(f64),
     Text(String),
@@ -310,6 +349,33 @@ pub fn evaluate<L: CellLookup>(expr: &Expr, lookup: &L) -> EvalResult {
         Expr::Range { .. } => {
             // Ranges can't be evaluated directly, only within functions
             EvalResult::Error("Range must be used in a function".to_string())
+        }
+        Expr::NamedRange(name) => {
+            // Resolve the named range and evaluate
+            match lookup.resolve_named_range(name) {
+                None => EvalResult::Error(format!("#NAME? '{}'", name)),
+                Some(NamedRangeResolution::Cell { row, col }) => {
+                    // Evaluate like a cell reference
+                    let text = lookup.get_text(row, col);
+                    if text.is_empty() {
+                        EvalResult::Number(0.0)
+                    } else if text.starts_with('#') {
+                        EvalResult::Error(text)
+                    } else if let Ok(n) = text.parse::<f64>() {
+                        EvalResult::Number(n)
+                    } else if text.to_uppercase() == "TRUE" {
+                        EvalResult::Boolean(true)
+                    } else if text.to_uppercase() == "FALSE" {
+                        EvalResult::Boolean(false)
+                    } else {
+                        EvalResult::Text(text)
+                    }
+                }
+                Some(NamedRangeResolution::Range { .. }) => {
+                    // Ranges can't be evaluated directly, only within functions
+                    EvalResult::Error("Range must be used in a function".to_string())
+                }
+            }
         }
         Expr::Function { name, args } => evaluate_function(name, args, lookup),
         Expr::BinaryOp { op, left, right } => {
@@ -2536,21 +2602,20 @@ fn collect_numbers<L: CellLookup>(args: &[Expr], lookup: &L) -> Result<Vec<f64>,
     for arg in args {
         match arg {
             Expr::Range { start_col, start_row, end_col, end_row } => {
-                let min_row = (*start_row).min(*end_row);
-                let max_row = (*start_row).max(*end_row);
-                let min_col = (*start_col).min(*end_col);
-                let max_col = (*start_col).max(*end_col);
-
-                for r in min_row..=max_row {
-                    for c in min_col..=max_col {
-                        let text = lookup.get_text(r, c);
-                        // Only include numeric values, skip text/empty
+                collect_numbers_from_range(*start_row, *start_col, *end_row, *end_col, lookup, &mut values);
+            }
+            Expr::NamedRange(name) => {
+                // Resolve named range and collect numbers from it
+                match lookup.resolve_named_range(name) {
+                    None => return Err(format!("#NAME? '{}'", name)),
+                    Some(NamedRangeResolution::Cell { row, col }) => {
+                        let text = lookup.get_text(row, col);
                         if let Ok(n) = text.parse::<f64>() {
                             values.push(n);
-                        } else if !text.is_empty() {
-                            // Non-empty non-numeric - still include as 0 for COUNT purposes
-                            // but for SUM/AVERAGE we skip
                         }
+                    }
+                    Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
+                        collect_numbers_from_range(start_row, start_col, end_row, end_col, lookup, &mut values);
                     }
                 }
             }
@@ -2567,20 +2632,44 @@ fn collect_numbers<L: CellLookup>(args: &[Expr], lookup: &L) -> Result<Vec<f64>,
     Ok(values)
 }
 
+fn collect_numbers_from_range<L: CellLookup>(
+    start_row: usize,
+    start_col: usize,
+    end_row: usize,
+    end_col: usize,
+    lookup: &L,
+    values: &mut Vec<f64>,
+) {
+    let min_row = start_row.min(end_row);
+    let max_row = start_row.max(end_row);
+    let min_col = start_col.min(end_col);
+    let max_col = start_col.max(end_col);
+
+    for r in min_row..=max_row {
+        for c in min_col..=max_col {
+            let text = lookup.get_text(r, c);
+            // Only include numeric values, skip text/empty
+            if let Ok(n) = text.parse::<f64>() {
+                values.push(n);
+            }
+        }
+    }
+}
+
 fn collect_all_values<L: CellLookup>(args: &[Expr], lookup: &L) -> Vec<EvalResult> {
     let mut values = Vec::new();
 
     for arg in args {
         match arg {
             Expr::Range { start_col, start_row, end_col, end_row } => {
-                let min_row = (*start_row).min(*end_row);
-                let max_row = (*start_row).max(*end_row);
-                let min_col = (*start_col).min(*end_col);
-                let max_col = (*start_col).max(*end_col);
-
-                for r in min_row..=max_row {
-                    for c in min_col..=max_col {
-                        let text = lookup.get_text(r, c);
+                collect_all_values_from_range(*start_row, *start_col, *end_row, *end_col, lookup, &mut values);
+            }
+            Expr::NamedRange(name) => {
+                // Resolve named range and collect all values from it
+                match lookup.resolve_named_range(name) {
+                    None => values.push(EvalResult::Error(format!("#NAME? '{}'", name))),
+                    Some(NamedRangeResolution::Cell { row, col }) => {
+                        let text = lookup.get_text(row, col);
                         if text.is_empty() {
                             values.push(EvalResult::Text(String::new()));
                         } else if let Ok(n) = text.parse::<f64>() {
@@ -2588,6 +2677,9 @@ fn collect_all_values<L: CellLookup>(args: &[Expr], lookup: &L) -> Vec<EvalResul
                         } else {
                             values.push(EvalResult::Text(text));
                         }
+                    }
+                    Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
+                        collect_all_values_from_range(start_row, start_col, end_row, end_col, lookup, &mut values);
                     }
                 }
             }
@@ -2598,4 +2690,147 @@ fn collect_all_values<L: CellLookup>(args: &[Expr], lookup: &L) -> Vec<EvalResul
     }
 
     values
+}
+
+fn collect_all_values_from_range<L: CellLookup>(
+    start_row: usize,
+    start_col: usize,
+    end_row: usize,
+    end_col: usize,
+    lookup: &L,
+    values: &mut Vec<EvalResult>,
+) {
+    let min_row = start_row.min(end_row);
+    let max_row = start_row.max(end_row);
+    let min_col = start_col.min(end_col);
+    let max_col = start_col.max(end_col);
+
+    for r in min_row..=max_row {
+        for c in min_col..=max_col {
+            let text = lookup.get_text(r, c);
+            if text.is_empty() {
+                values.push(EvalResult::Text(String::new()));
+            } else if let Ok(n) = text.parse::<f64>() {
+                values.push(EvalResult::Number(n));
+            } else {
+                values.push(EvalResult::Text(text));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::formula::parser::parse;
+
+    /// Simple lookup for testing: stores values in a 10x10 grid
+    struct TestLookup {
+        cells: [[String; 10]; 10],
+        named_ranges: std::collections::HashMap<String, NamedRangeResolution>,
+    }
+
+    impl TestLookup {
+        fn new() -> Self {
+            Self {
+                cells: Default::default(),
+                named_ranges: std::collections::HashMap::new(),
+            }
+        }
+
+        fn set(&mut self, row: usize, col: usize, value: &str) {
+            self.cells[row][col] = value.to_string();
+        }
+
+        fn define_cell(&mut self, name: &str, row: usize, col: usize) {
+            self.named_ranges.insert(
+                name.to_lowercase(),
+                NamedRangeResolution::Cell { row, col },
+            );
+        }
+
+        fn define_range(&mut self, name: &str, start_row: usize, start_col: usize, end_row: usize, end_col: usize) {
+            self.named_ranges.insert(
+                name.to_lowercase(),
+                NamedRangeResolution::Range { start_row, start_col, end_row, end_col },
+            );
+        }
+    }
+
+    impl CellLookup for TestLookup {
+        fn get_value(&self, row: usize, col: usize) -> f64 {
+            self.cells[row][col].parse().unwrap_or(0.0)
+        }
+
+        fn get_text(&self, row: usize, col: usize) -> String {
+            self.cells[row][col].clone()
+        }
+
+        fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
+            self.named_ranges.get(&name.to_lowercase()).cloned()
+        }
+    }
+
+    #[test]
+    fn test_named_range_cell_reference() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "42");
+        lookup.define_cell("Revenue", 0, 0);
+
+        let expr = parse("=Revenue").unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(42.0));
+    }
+
+    #[test]
+    fn test_named_range_undefined() {
+        let lookup = TestLookup::new();
+        let expr = parse("=UndefinedName").unwrap();
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Error(e) => assert!(e.contains("#NAME?")),
+            _ => panic!("Expected error for undefined name"),
+        }
+    }
+
+    #[test]
+    fn test_named_range_in_function() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "10");
+        lookup.set(1, 0, "20");
+        lookup.set(2, 0, "30");
+        lookup.define_range("Sales", 0, 0, 2, 0);
+
+        let expr = parse("=SUM(Sales)").unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(60.0));
+    }
+
+    #[test]
+    fn test_named_range_case_insensitive() {
+        let mut lookup = TestLookup::new();
+        lookup.set(5, 5, "100");
+        lookup.define_cell("MyValue", 5, 5);
+
+        // All of these should resolve to the same cell
+        let exprs = ["=MyValue", "=myvalue", "=MYVALUE", "=myVALUE"];
+        for formula in exprs {
+            let expr = parse(formula).unwrap();
+            let result = evaluate(&expr, &lookup);
+            assert_eq!(result, EvalResult::Number(100.0), "Failed for {}", formula);
+        }
+    }
+
+    #[test]
+    fn test_named_range_in_arithmetic() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "50");
+        lookup.set(1, 1, "25");
+        lookup.define_cell("Price", 0, 0);
+        lookup.define_cell("Discount", 1, 1);
+
+        let expr = parse("=Price-Discount").unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(25.0));
+    }
 }

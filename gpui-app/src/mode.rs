@@ -2,16 +2,20 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     #[default]
-    Navigation,  // Grid focus: keystrokes move selection
-    Edit,        // Cell editor focus: keystrokes edit text (non-formula)
-    Formula,     // Formula entry: grid navigation inserts references
-    Command,     // Command palette open
-    GoTo,        // Go to cell dialog
-    QuickOpen,   // Quick file open (Ctrl+P)
-    Find,        // Find in cells (Ctrl+F)
-    FontPicker,  // Font selection dialog
-    ThemePicker, // Theme selection dialog
-    About,       // About VisiGrid dialog
+    Navigation,    // Grid focus: keystrokes move selection
+    Edit,          // Cell editor focus: keystrokes edit text (non-formula)
+    Formula,       // Formula entry: grid navigation inserts references
+    Command,       // Command palette open
+    GoTo,          // Go to cell dialog
+    QuickOpen,     // Quick file open (Ctrl+P)
+    Find,          // Find in cells (Ctrl+F)
+    FontPicker,    // Font selection dialog
+    ThemePicker,   // Theme selection dialog
+    About,         // About VisiGrid dialog
+    RenameSymbol,  // Rename named range (Ctrl+Shift+R)
+    CreateNamedRange,  // Create named range from selection (Ctrl+Shift+N)
+    EditDescription,   // Edit named range description
+    Tour,              // Named ranges tour/walkthrough
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -32,6 +36,7 @@ pub enum InspectorTab {
     #[default]
     Inspector,  // Cell info, precedents, dependents
     Format,     // Formatting options (Ctrl+1)
+    Names,      // Named ranges management
 }
 
 impl Mode {
@@ -50,6 +55,6 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About)
+        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour)
     }
 }

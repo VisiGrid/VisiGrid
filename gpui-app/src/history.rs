@@ -1,5 +1,9 @@
 /// Undo/Redo history system for spreadsheet operations
 
+use visigrid_engine::cell::CellFormat;
+use visigrid_engine::named_range::NamedRange;
+use std::time::Instant;
+
 #[derive(Clone, Debug)]
 pub struct CellChange {
     pub row: usize,
@@ -8,9 +12,69 @@ pub struct CellChange {
     pub new_value: String,
 }
 
+/// A patch for a single cell's format (before/after snapshot)
+#[derive(Clone, Debug)]
+pub struct CellFormatPatch {
+    pub row: usize,
+    pub col: usize,
+    pub before: CellFormat,
+    pub after: CellFormat,
+}
+
+/// Kind of format action (for coalescing)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FormatActionKind {
+    Bold,
+    Italic,
+    Underline,
+    Font,
+    Alignment,
+    VerticalAlignment,
+    TextOverflow,
+    NumberFormat,
+    DecimalPlaces,  // Special: coalesces rapidly
+}
+
+/// An undoable action
+#[derive(Clone, Debug)]
+pub enum UndoAction {
+    /// Cell value changes
+    Values {
+        sheet_index: usize,
+        changes: Vec<CellChange>,
+    },
+    /// Cell format changes
+    Format {
+        sheet_index: usize,
+        patches: Vec<CellFormatPatch>,
+        kind: FormatActionKind,
+        description: String,
+    },
+    /// Named range deleted (for undo)
+    NamedRangeDeleted {
+        named_range: NamedRange,
+    },
+    /// Named range created (for undo - delete it)
+    NamedRangeCreated {
+        name: String,
+    },
+    /// Named range renamed (for undo)
+    NamedRangeRenamed {
+        old_name: String,
+        new_name: String,
+    },
+    /// Named range description changed (for undo)
+    NamedRangeDescriptionChanged {
+        name: String,
+        old_description: Option<String>,
+        new_description: Option<String>,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct HistoryEntry {
-    pub changes: Vec<CellChange>,
+    pub action: UndoAction,
+    pub timestamp: Instant,
 }
 
 pub struct History {
@@ -18,6 +82,9 @@ pub struct History {
     redo_stack: Vec<HistoryEntry>,
     max_entries: usize,
 }
+
+/// Coalescing window for rapid format changes (e.g., decimal +/-)
+const COALESCE_WINDOW_MS: u128 = 500;
 
 impl History {
     pub fn new() -> Self {
@@ -28,26 +95,90 @@ impl History {
         }
     }
 
-    /// Record a single cell change
-    pub fn record_change(&mut self, row: usize, col: usize, old_value: String, new_value: String) {
+    /// Record a single cell value change
+    pub fn record_change(&mut self, sheet_index: usize, row: usize, col: usize, old_value: String, new_value: String) {
         if old_value == new_value {
             return;
         }
 
         let entry = HistoryEntry {
-            changes: vec![CellChange { row, col, old_value, new_value }],
+            action: UndoAction::Values {
+                sheet_index,
+                changes: vec![CellChange { row, col, old_value, new_value }],
+            },
+            timestamp: Instant::now(),
         };
         self.push_entry(entry);
     }
 
-    /// Record multiple cell changes as a single undoable operation
-    pub fn record_batch(&mut self, changes: Vec<CellChange>) {
+    /// Record multiple cell value changes as a single undoable operation
+    pub fn record_batch(&mut self, sheet_index: usize, changes: Vec<CellChange>) {
         if changes.is_empty() {
             return;
         }
 
-        let entry = HistoryEntry { changes };
+        let entry = HistoryEntry {
+            action: UndoAction::Values { sheet_index, changes },
+            timestamp: Instant::now(),
+        };
         self.push_entry(entry);
+    }
+
+    /// Record format changes with coalescing support
+    pub fn record_format(&mut self, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String) {
+        if patches.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+
+        // Try to coalesce with previous entry if:
+        // 1. Same sheet
+        // 2. Same kind (especially DecimalPlaces)
+        // 3. Within time window
+        // 4. Same cell positions
+        if let Some(last) = self.undo_stack.last_mut() {
+            if let UndoAction::Format { sheet_index: last_sheet, patches: last_patches, kind: last_kind, description: _ } = &mut last.action {
+                if *last_sheet == sheet_index && *last_kind == kind && last.timestamp.elapsed().as_millis() < COALESCE_WINDOW_MS {
+                    // Check if same cells
+                    if Self::same_cell_positions(last_patches, &patches) {
+                        // Coalesce: keep original 'before', update to new 'after'
+                        for (old_patch, new_patch) in last_patches.iter_mut().zip(patches.iter()) {
+                            old_patch.after = new_patch.after.clone();
+                        }
+                        last.timestamp = now;
+                        // Clear redo stack since we modified history
+                        self.redo_stack.clear();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // No coalescing, create new entry
+        let entry = HistoryEntry {
+            action: UndoAction::Format { sheet_index, patches, kind, description },
+            timestamp: now,
+        };
+        self.push_entry(entry);
+    }
+
+    /// Record a named range action (create, delete, rename)
+    pub fn record_named_range_action(&mut self, action: UndoAction) {
+        let entry = HistoryEntry {
+            action,
+            timestamp: Instant::now(),
+        };
+        self.push_entry(entry);
+    }
+
+    /// Check if two patch lists affect the same cells
+    fn same_cell_positions(a: &[CellFormatPatch], b: &[CellFormatPatch]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        // Patches are in same order if from same selection iteration
+        a.iter().zip(b.iter()).all(|(pa, pb)| pa.row == pb.row && pa.col == pb.col)
     }
 
     fn push_entry(&mut self, entry: HistoryEntry) {
@@ -60,7 +191,7 @@ impl History {
         }
     }
 
-    /// Pop the last entry for undo, returns the changes to apply
+    /// Pop the last entry for undo
     pub fn undo(&mut self) -> Option<HistoryEntry> {
         if let Some(entry) = self.undo_stack.pop() {
             self.redo_stack.push(entry.clone());
@@ -70,7 +201,7 @@ impl History {
         }
     }
 
-    /// Pop from redo stack, returns the changes to apply
+    /// Pop from redo stack
     pub fn redo(&mut self) -> Option<HistoryEntry> {
         if let Some(entry) = self.redo_stack.pop() {
             self.undo_stack.push(entry.clone());

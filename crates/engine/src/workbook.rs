@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
 use crate::sheet::Sheet;
+use crate::named_range::{NamedRange, NamedRangeStore};
 
 /// A workbook containing multiple sheets
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workbook {
     sheets: Vec<Sheet>,
     active_sheet: usize,
+    #[serde(default)]
+    named_ranges: NamedRangeStore,
 }
 
 impl Default for Workbook {
@@ -22,6 +25,7 @@ impl Workbook {
         Self {
             sheets: vec![sheet],
             active_sheet: 0,
+            named_ranges: NamedRangeStore::new(),
         }
     }
 
@@ -157,7 +161,73 @@ impl Workbook {
         Self {
             sheets,
             active_sheet,
+            named_ranges: NamedRangeStore::new(),
         }
+    }
+
+    // =========================================================================
+    // Named Range Management
+    // =========================================================================
+
+    /// Get a reference to the named range store
+    pub fn named_ranges(&self) -> &NamedRangeStore {
+        &self.named_ranges
+    }
+
+    /// Get a mutable reference to the named range store
+    pub fn named_ranges_mut(&mut self) -> &mut NamedRangeStore {
+        &mut self.named_ranges
+    }
+
+    /// Define a named range for a single cell (convenience method)
+    pub fn define_name_for_cell(
+        &mut self,
+        name: &str,
+        sheet: usize,
+        row: usize,
+        col: usize,
+    ) -> Result<(), String> {
+        let range = NamedRange::cell(name, sheet, row, col);
+        self.named_ranges.set(range)
+    }
+
+    /// Define a named range for a cell range (convenience method)
+    pub fn define_name_for_range(
+        &mut self,
+        name: &str,
+        sheet: usize,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    ) -> Result<(), String> {
+        let range = NamedRange::range(name, sheet, start_row, start_col, end_row, end_col);
+        self.named_ranges.set(range)
+    }
+
+    /// Get a named range by name (case-insensitive)
+    pub fn get_named_range(&self, name: &str) -> Option<&NamedRange> {
+        self.named_ranges.get(name)
+    }
+
+    /// Rename a named range
+    pub fn rename_named_range(&mut self, old_name: &str, new_name: &str) -> Result<(), String> {
+        self.named_ranges.rename(old_name, new_name)
+    }
+
+    /// Delete a named range
+    pub fn delete_named_range(&mut self, name: &str) -> bool {
+        self.named_ranges.remove(name).is_some()
+    }
+
+    /// Find all named ranges that reference a specific cell
+    pub fn named_ranges_for_cell(&self, sheet: usize, row: usize, col: usize) -> Vec<&NamedRange> {
+        self.named_ranges.find_by_cell(sheet, row, col)
+    }
+
+    /// List all named ranges
+    pub fn list_named_ranges(&self) -> Vec<&NamedRange> {
+        self.named_ranges.list()
     }
 }
 

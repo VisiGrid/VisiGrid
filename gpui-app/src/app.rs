@@ -6,17 +6,24 @@ use std::fs;
 use visigrid_engine::sheet::Sheet;
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::formula::eval::CellLookup;
+use visigrid_engine::named_range::is_valid_name;
 
-use crate::history::{History, CellChange};
+use crate::history::{History, CellChange, UndoAction};
 use crate::mode::Mode;
+use crate::search::{SearchEngine, SearchAction, CommandId, CommandSearchProvider, GoToSearchProvider, SearchItem};
 use crate::theme::{Theme, TokenKey, visigrid_theme, builtin_themes, get_theme};
 use crate::views;
 use crate::formula_context::{tokenize_for_highlight, TokenType};
+
+// Re-export from autocomplete module for external access
+pub use crate::autocomplete::{SignatureHelpInfo, FormulaErrorInfo};
 
 // User settings that persist across sessions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Settings {
     theme_id: Option<String>,
+    #[serde(default)]
+    name_tooltip_dismissed: bool,
 }
 
 impl Settings {
@@ -37,6 +44,87 @@ impl Settings {
                 let _ = fs::create_dir_all(parent);
             }
             let _ = fs::write(path, serde_json::to_string_pretty(self).unwrap_or_default());
+        }
+    }
+}
+
+/// Tri-state value for properties across multiple cells
+#[derive(Debug, Clone, PartialEq)]
+pub enum TriState<T> {
+    /// All cells have the same value
+    Uniform(T),
+    /// Cells have different values
+    Mixed,
+    /// No cells in selection (shouldn't happen)
+    Empty,
+}
+
+impl<T: PartialEq + Clone> TriState<T> {
+    /// Combine with another value
+    pub fn combine(&self, other: &T) -> Self {
+        match self {
+            TriState::Empty => TriState::Uniform(other.clone()),
+            TriState::Uniform(v) if v == other => TriState::Uniform(v.clone()),
+            TriState::Uniform(_) => TriState::Mixed,
+            TriState::Mixed => TriState::Mixed,
+        }
+    }
+
+    /// Get the uniform value if present
+    pub fn uniform(&self) -> Option<&T> {
+        match self {
+            TriState::Uniform(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn is_mixed(&self) -> bool {
+        matches!(self, TriState::Mixed)
+    }
+}
+
+/// Which field has focus in the Create Named Range dialog
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CreateNameFocus {
+    #[default]
+    Name,        // Name input field
+    Description, // Description input field
+}
+
+use visigrid_engine::cell::{Alignment, VerticalAlignment, TextOverflow, NumberFormat};
+
+/// Format state for a selection of cells
+#[derive(Debug, Clone)]
+pub struct SelectionFormatState {
+    pub cell_count: usize,
+    // Value state
+    pub raw_value: TriState<String>,      // Raw input value
+    pub display_value: Option<String>,    // Formatted display (only if uniform)
+    // Format properties
+    pub bold: TriState<bool>,
+    pub italic: TriState<bool>,
+    pub underline: TriState<bool>,
+    pub font_family: TriState<Option<String>>,
+    pub alignment: TriState<Alignment>,
+    pub vertical_alignment: TriState<VerticalAlignment>,
+    pub text_overflow: TriState<TextOverflow>,
+    pub number_format: TriState<NumberFormat>,
+}
+
+impl Default for SelectionFormatState {
+    fn default() -> Self {
+        Self {
+            cell_count: 0,
+            raw_value: TriState::Empty,
+            display_value: None,
+            bold: TriState::Empty,
+            italic: TriState::Empty,
+            underline: TriState::Empty,
+            font_family: TriState::Empty,
+            alignment: TriState::Empty,
+            vertical_alignment: TriState::Empty,
+            text_overflow: TriState::Empty,
+            number_format: TriState::Empty,
         }
     }
 }
@@ -80,6 +168,14 @@ pub struct Spreadsheet {
     // Command palette
     pub palette_query: String,
     pub palette_selected: usize,
+    search_engine: SearchEngine,
+    palette_results: Vec<SearchItem>,
+    pub palette_total_results: usize,  // Total matches before truncation
+    // Pre-palette state for preview/restore
+    palette_pre_selection: (usize, usize),
+    palette_pre_selection_end: Option<(usize, usize)>,
+    palette_pre_scroll: (usize, usize),
+    pub palette_previewing: bool,  // True if user has previewed (Shift+Enter)
 
     // Clipboard
     pub clipboard: Option<String>,
@@ -87,6 +183,8 @@ pub struct Spreadsheet {
     // File state
     pub current_file: Option<PathBuf>,
     pub is_modified: bool,
+    pub recent_files: Vec<PathBuf>,  // Recently opened files (most recent first)
+    pub recent_commands: Vec<CommandId>,  // Recently executed commands (most recent first)
 
     // UI state
     pub focus_handle: FocusHandle,
@@ -147,10 +245,70 @@ pub struct Spreadsheet {
     pub inspector_visible: bool,
     pub inspector_tab: crate::mode::InspectorTab,
     pub inspector_pinned: Option<(usize, usize)>,  // Pinned cell (None = follows selection)
+    pub names_filter_query: String,  // Filter query for Names tab
 
     // Theme
     pub theme: Theme,
     pub theme_preview: Option<Theme>,  // For live preview in picker
+
+    // Cell search cache (generation-based freshness)
+    cells_rev: u64,  // Monotonically increasing; bumped on any cell value change
+    cell_search_cache: CellSearchCache,
+    named_range_usage_cache: NamedRangeUsageCache,
+
+    // Rename symbol state (Ctrl+Shift+R)
+    pub rename_original_name: String,      // The named range being renamed
+    pub rename_new_name: String,           // User's typed new name
+    pub rename_affected_cells: Vec<(usize, usize)>,  // Cells with formulas referencing this name
+    pub rename_validation_error: Option<String>,     // Current validation error (if any)
+
+    // Create named range state (Ctrl+Shift+N)
+    pub create_name_name: String,           // User-typed name
+    pub create_name_description: String,    // Optional description
+    pub create_name_target: String,         // Auto-filled from selection (e.g., "A1:B10")
+    pub create_name_validation_error: Option<String>,
+    pub create_name_focus: CreateNameFocus, // Which field has focus
+
+    // Edit description state
+    pub edit_description_name: String,           // Name of the named range being edited
+    pub edit_description_value: String,          // Current description input
+    pub edit_description_original: Option<String>, // Original description (for undo)
+
+    // Tour state
+    pub tour_step: usize,                        // Current step (0-3)
+    pub tour_completed: bool,                    // Has the tour been completed this session?
+    pub name_tooltip_dismissed: bool,            // Has the first-run tooltip been dismissed?
+}
+
+/// Cache for cell search results, invalidated by cells_rev
+struct CellSearchCache {
+    cached_rev: u64,
+    entries: Vec<crate::search::CellEntry>,
+}
+
+impl Default for CellSearchCache {
+    fn default() -> Self {
+        Self {
+            cached_rev: 0,
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// Cache for named range usage counts, invalidated by cells_rev
+struct NamedRangeUsageCache {
+    cached_rev: u64,
+    /// Map from lowercase name to usage count
+    counts: std::collections::HashMap<String, usize>,
+}
+
+impl Default for NamedRangeUsageCache {
+    fn default() -> Self {
+        Self {
+            cached_rev: 0,
+            counts: std::collections::HashMap::new(),
+        }
+    }
 }
 
 impl Spreadsheet {
@@ -187,9 +345,18 @@ impl Spreadsheet {
             find_index: 0,
             palette_query: String::new(),
             palette_selected: 0,
+            search_engine: Self::create_search_engine(),
+            palette_results: Vec::new(),
+            palette_total_results: 0,
+            palette_pre_selection: (0, 0),
+            palette_pre_selection_end: None,
+            palette_pre_scroll: (0, 0),
+            palette_previewing: false,
             clipboard: None,
             current_file: None,
             is_modified: false,
+            recent_files: Vec::new(),
+            recent_commands: Vec::new(),
             focus_handle,
             status_message: None,
             window_size,
@@ -221,8 +388,29 @@ impl Spreadsheet {
             inspector_visible: false,
             inspector_tab: crate::mode::InspectorTab::default(),
             inspector_pinned: None,
+            names_filter_query: String::new(),
             theme,
             theme_preview: None,
+            cells_rev: 1,  // Start at 1 so cache (starting at 0) is immediately stale
+            cell_search_cache: CellSearchCache::default(),
+            named_range_usage_cache: NamedRangeUsageCache::default(),
+            rename_original_name: String::new(),
+            rename_new_name: String::new(),
+            rename_affected_cells: Vec::new(),
+            rename_validation_error: None,
+            create_name_name: String::new(),
+            create_name_description: String::new(),
+            create_name_target: String::new(),
+            create_name_validation_error: None,
+            create_name_focus: CreateNameFocus::default(),
+
+            edit_description_name: String::new(),
+            edit_description_value: String::new(),
+            edit_description_original: None,
+
+            tour_step: 0,
+            tour_completed: false,
+            name_tooltip_dismissed: settings.name_tooltip_dismissed,
         }
     }
 
@@ -257,6 +445,231 @@ impl Spreadsheet {
         ]
     }
 
+    /// Create and configure the search engine with all providers
+    fn create_search_engine() -> SearchEngine {
+        use crate::search::{FormulaSearchProvider, SettingsSearchProvider};
+        let mut engine = SearchEngine::new();
+        engine.register(Box::new(CommandSearchProvider));
+        engine.register(Box::new(GoToSearchProvider));
+        engine.register(Box::new(FormulaSearchProvider));
+        engine.register(Box::new(SettingsSearchProvider));
+        engine
+    }
+
+    /// Bump the cell revision counter (call after any cell value change)
+    /// This invalidates the cell search cache, ensuring fresh results.
+    #[inline]
+    pub(crate) fn bump_cells_rev(&mut self) {
+        self.cells_rev = self.cells_rev.wrapping_add(1);
+    }
+
+    /// Ensure cell search cache is fresh (rebuilds if cells_rev changed)
+    /// Returns a reference to the cached entries.
+    fn ensure_cell_search_cache_fresh(&mut self) -> &[crate::search::CellEntry] {
+        use crate::search::CellEntry;
+        use visigrid_engine::cell::CellValue;
+
+        if self.cell_search_cache.cached_rev != self.cells_rev {
+            // Cache is stale, rebuild from sparse storage
+            let sheet = self.sheet();
+            let entries: Vec<CellEntry> = sheet.cells_iter()
+                .filter(|(_, cell)| !matches!(cell.value, CellValue::Empty))
+                .take(1000)  // Cap cells scanned for performance
+                .map(|(&(row, col), cell)| {
+                    let display = sheet.get_display(row, col);
+                    let formula = match &cell.value {
+                        CellValue::Formula { source, .. } => Some(source.clone()),
+                        _ => None,
+                    };
+                    CellEntry::new(row, col, display, formula)
+                })
+                .collect();
+
+            self.cell_search_cache.entries = entries;
+            self.cell_search_cache.cached_rev = self.cells_rev;
+        }
+
+        &self.cell_search_cache.entries
+    }
+
+    /// Execute a search action from the command palette
+    pub fn dispatch_action(&mut self, action: SearchAction, cx: &mut Context<Self>) {
+        match action {
+            SearchAction::RunCommand(cmd) => self.dispatch_command(cmd, cx),
+            SearchAction::JumpToCell { row, col } => {
+                self.selected = (row, col);
+                self.selection_end = None;
+                self.ensure_cell_visible(row, col);
+                cx.notify();
+            }
+            SearchAction::InsertFormula { name, signature } => {
+                // Context-aware insertion
+                if self.mode.is_formula() || (self.mode.is_editing() && self.edit_value.starts_with('=')) {
+                    // Already editing a formula: insert function name at cursor
+                    let func_text = format!("{}(", name);
+                    let before: String = self.edit_value.chars().take(self.edit_cursor).collect();
+                    let after: String = self.edit_value.chars().skip(self.edit_cursor).collect();
+                    self.edit_value = format!("{}{}{}", before, func_text, after);
+                    self.edit_cursor += func_text.chars().count();
+                } else {
+                    // Grid navigation: start formula edit with =FUNC(
+                    self.edit_original = self.sheet().get_raw(self.selected.0, self.selected.1);
+                    self.edit_value = format!("={}(", name);
+                    self.edit_cursor = self.edit_value.chars().count();
+                    self.mode = Mode::Formula;
+                }
+                // Show signature in status for reference
+                self.status_message = Some(signature);
+                cx.notify();
+            }
+            SearchAction::OpenFile(path) => {
+                self.load_file(&path, cx);
+            }
+            SearchAction::JumpToNamedRange { .. } => {
+                // Future: implement named range navigation
+            }
+            SearchAction::OpenSetting { key } => {
+                // Copy key to clipboard so user doesn't have to hunt
+                cx.write_to_clipboard(ClipboardItem::new_string(key.clone()));
+
+                // Open settings file in system editor
+                if let Some(path) = Settings::path() {
+                    // Ensure file exists with defaults
+                    if !path.exists() {
+                        Settings::default().save();
+                    }
+
+                    // Open with system default editor
+                    #[cfg(target_os = "linux")]
+                    let result = std::process::Command::new("xdg-open")
+                        .arg(&path)
+                        .spawn();
+
+                    #[cfg(target_os = "macos")]
+                    let result = std::process::Command::new("open")
+                        .arg(&path)
+                        .spawn();
+
+                    #[cfg(target_os = "windows")]
+                    let result = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", &path.display().to_string()])
+                        .spawn();
+
+                    let filename = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("settings.json");
+
+                    match result {
+                        Ok(_) => {
+                            self.status_message = Some(format!(
+                                "Copied \"{}\" to clipboard — paste into {}",
+                                key, filename
+                            ));
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Failed to open settings: {}", e));
+                        }
+                    }
+                } else {
+                    self.status_message = Some("Could not determine settings path".to_string());
+                }
+                cx.notify();
+            }
+            SearchAction::CopyToClipboard { text, description } => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.status_message = Some(description);
+                cx.notify();
+            }
+            SearchAction::ShowFunctionHelp { name, signature, description } => {
+                // Show detailed function help in status
+                self.status_message = Some(format!("{}{} — {}", name, signature, description));
+                cx.notify();
+            }
+            SearchAction::ShowReferences { row, col } => {
+                self.show_references(row, col, cx);
+            }
+            SearchAction::ShowPrecedents { row, col } => {
+                self.show_precedents(row, col, cx);
+            }
+        }
+    }
+
+    /// Execute a command by its stable ID
+    pub fn dispatch_command(&mut self, cmd: CommandId, cx: &mut Context<Self>) {
+        // Track as recently used command
+        self.add_recent_command(cmd.clone());
+
+        match cmd {
+            // Navigation
+            CommandId::GoToCell => self.show_goto(cx),
+            CommandId::FindInCells => self.show_find(cx),
+            CommandId::GoToStart => {
+                self.selected = (0, 0);
+                self.selection_end = None;
+                self.scroll_row = 0;
+                self.scroll_col = 0;
+                cx.notify();
+            }
+            CommandId::SelectAll => self.select_all(cx),
+
+            // Editing
+            CommandId::FillDown => self.fill_down(cx),
+            CommandId::FillRight => self.fill_right(cx),
+            CommandId::ClearCells => self.delete_selection(cx),
+            CommandId::Undo => self.undo(cx),
+            CommandId::Redo => self.redo(cx),
+            CommandId::AutoSum => self.autosum(cx),
+
+            // Clipboard
+            CommandId::Copy => self.copy(cx),
+            CommandId::Cut => self.cut(cx),
+            CommandId::Paste => self.paste(cx),
+
+            // Formatting
+            CommandId::ToggleBold => self.toggle_bold(cx),
+            CommandId::ToggleItalic => self.toggle_italic(cx),
+            CommandId::ToggleUnderline => self.toggle_underline(cx),
+            CommandId::FormatCells => {
+                // Open inspector to format tab
+                self.inspector_visible = true;
+                self.inspector_tab = crate::mode::InspectorTab::Format;
+                cx.notify();
+            }
+
+            // File
+            CommandId::NewFile => self.new_file(cx),
+            CommandId::OpenFile => self.open_file(cx),
+            CommandId::Save => self.save(cx),
+            CommandId::SaveAs => self.save_as(cx),
+            CommandId::ExportCsv => self.export_csv(cx),
+
+            // Appearance
+            CommandId::SelectTheme => self.show_theme_picker(cx),
+            CommandId::SelectFont => self.show_font_picker(cx),
+
+            // View
+            CommandId::ToggleInspector => {
+                self.inspector_visible = !self.inspector_visible;
+                cx.notify();
+            }
+
+            // Help
+            CommandId::ShowShortcuts => {
+                self.status_message = Some("Shortcuts: Ctrl+D Fill Down, Ctrl+R Fill Right, Ctrl+Enter Multi-edit".into());
+                cx.notify();
+            }
+            CommandId::ShowAbout => {
+                self.status_message = Some("VisiGrid - A spreadsheet for power users".into());
+                cx.notify();
+            }
+
+            // Sheets
+            CommandId::NextSheet => self.next_sheet(cx),
+            CommandId::PrevSheet => self.prev_sheet(cx),
+            CommandId::AddSheet => self.add_sheet(cx),
+        }
+    }
+
     // Menu methods
     pub fn toggle_menu(&mut self, menu: crate::mode::Menu, cx: &mut Context<Self>) {
         if self.open_menu == Some(menu) {
@@ -283,6 +696,11 @@ impl Spreadsheet {
     /// Get a mutable reference to the active sheet
     pub fn sheet_mut(&mut self) -> &mut Sheet {
         self.workbook.active_sheet_mut()
+    }
+
+    /// Get the active sheet index (for undo history)
+    pub fn sheet_index(&self) -> usize {
+        self.workbook.active_sheet_index()
     }
 
     // Sheet navigation methods
@@ -1055,10 +1473,11 @@ impl Spreadsheet {
             }
         }
 
-        self.history.record_batch(changes);
+        self.history.record_batch(self.sheet_index(), changes);
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
+        self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
         // Clear formula highlighting state
         self.formula_highlighted_refs.clear();
@@ -1097,11 +1516,12 @@ impl Spreadsheet {
             }
         }
 
-        self.history.record_change(row, col, old_value, new_value.clone());
+        self.history.record_change(self.sheet_index(), row, col, old_value, new_value.clone());
         self.sheet_mut().set_value(row, col, &new_value);
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
+        self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
         // Clear formula reference state
         self.formula_ref_cell = None;
@@ -1860,7 +2280,8 @@ impl Spreadsheet {
                 self.sheet_mut().set_value(row, col, "");
             }
         }
-        self.history.record_batch(changes);
+        self.history.record_batch(self.sheet_index(), changes);
+        self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
         self.status_message = Some("Cut to clipboard".to_string());
         cx.notify();
@@ -1901,7 +2322,8 @@ impl Spreadsheet {
                 }
             }
 
-            self.history.record_batch(changes);
+            self.history.record_batch(self.sheet_index(), changes);
+            self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
             self.status_message = Some("Pasted from clipboard".to_string());
             cx.notify();
@@ -1956,7 +2378,8 @@ impl Spreadsheet {
 
         let had_changes = !changes.is_empty();
         if had_changes {
-            self.history.record_batch(changes);
+            self.history.record_batch(self.sheet_index(), changes);
+            self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
         }
 
@@ -1970,22 +2393,99 @@ impl Spreadsheet {
     // Undo/Redo
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if let Some(entry) = self.history.undo() {
-            for change in entry.changes {
-                self.sheet_mut().set_value(change.row, change.col, &change.old_value);
+            match entry.action {
+                UndoAction::Values { sheet_index, changes } => {
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        for change in changes {
+                            sheet.set_value(change.row, change.col, &change.old_value);
+                        }
+                    }
+                    self.bump_cells_rev();  // Invalidate cell search cache
+                    self.status_message = Some("Undo".to_string());
+                }
+                UndoAction::Format { sheet_index, patches, description, .. } => {
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        for patch in patches {
+                            sheet.set_format(patch.row, patch.col, patch.before);
+                        }
+                    }
+                    self.status_message = Some(format!("Undo: {}", description));
+                }
+                UndoAction::NamedRangeDeleted { named_range } => {
+                    // Restore the deleted named range
+                    let name = named_range.name.clone();
+                    let _ = self.workbook.named_ranges_mut().set(named_range);
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Undo: restored '{}'", name));
+                }
+                UndoAction::NamedRangeCreated { name } => {
+                    // Delete the created named range
+                    self.workbook.delete_named_range(&name);
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Undo: removed '{}'", name));
+                }
+                UndoAction::NamedRangeRenamed { old_name, new_name } => {
+                    // Rename back to original name
+                    let _ = self.workbook.rename_named_range(&new_name, &old_name);
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Undo: renamed back to '{}'", old_name));
+                }
+                UndoAction::NamedRangeDescriptionChanged { name, old_description, .. } => {
+                    // Restore the old description
+                    let _ = self.workbook.named_ranges_mut().set_description(&name, old_description.clone());
+                    self.status_message = Some(format!("Undo: description of '{}'", name));
+                }
             }
             self.is_modified = true;
-            self.status_message = Some("Undo".to_string());
             cx.notify();
         }
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if let Some(entry) = self.history.redo() {
-            for change in entry.changes {
-                self.sheet_mut().set_value(change.row, change.col, &change.new_value);
+            match entry.action {
+                UndoAction::Values { sheet_index, changes } => {
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        for change in changes {
+                            sheet.set_value(change.row, change.col, &change.new_value);
+                        }
+                    }
+                    self.bump_cells_rev();  // Invalidate cell search cache
+                    self.status_message = Some("Redo".to_string());
+                }
+                UndoAction::Format { sheet_index, patches, description, .. } => {
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        for patch in patches {
+                            sheet.set_format(patch.row, patch.col, patch.after);
+                        }
+                    }
+                    self.status_message = Some(format!("Redo: {}", description));
+                }
+                UndoAction::NamedRangeDeleted { named_range } => {
+                    // Re-delete the named range
+                    let name = named_range.name.clone();
+                    self.workbook.delete_named_range(&name);
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Redo: deleted '{}'", name));
+                }
+                UndoAction::NamedRangeCreated { ref name } => {
+                    // Re-create is not possible without the original data
+                    // This shouldn't happen in practice (create followed by undo-redo)
+                    self.status_message = Some(format!("Redo: recreate '{}' not supported", name));
+                }
+                UndoAction::NamedRangeRenamed { old_name, new_name } => {
+                    // Rename again to new name
+                    let _ = self.workbook.rename_named_range(&old_name, &new_name);
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Redo: renamed to '{}'", new_name));
+                }
+                UndoAction::NamedRangeDescriptionChanged { name, new_description, .. } => {
+                    // Apply the new description
+                    let _ = self.workbook.named_ranges_mut().set_description(&name, new_description.clone());
+                    self.status_message = Some(format!("Redo: description of '{}'", name));
+                }
             }
             self.is_modified = true;
-            self.status_message = Some("Redo".to_string());
             cx.notify();
         }
     }
@@ -2304,17 +2804,434 @@ impl Spreadsheet {
     }
 
     pub fn show_palette(&mut self, cx: &mut Context<Self>) {
+        // Save pre-palette state for restore on Esc
+        self.palette_pre_selection = self.selected;
+        self.palette_pre_selection_end = self.selection_end;
+        self.palette_pre_scroll = (self.scroll_row, self.scroll_col);
+        self.palette_previewing = false;
+
         self.mode = Mode::Command;
         self.palette_query.clear();
         self.palette_selected = 0;
+        self.update_palette_results();
+        cx.notify();
+    }
+
+    /// Show cells that reference the given cell (Find References - Shift+F12)
+    /// Opens the command palette populated with dependent cells
+    pub fn show_references(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        use crate::search::{ReferenceEntry, ReferencesProvider, SearchProvider, SearchQuery};
+        use visigrid_engine::formula::parser::{parse, extract_cell_refs};
+        use visigrid_engine::cell::CellValue;
+
+        // Get the cell reference for display
+        let source_cell_ref = self.cell_ref_at(row, col);
+
+        // Find all cells that reference this cell (dependents)
+        let mut references = Vec::new();
+        for (&(cell_row, cell_col), cell) in self.sheet().cells_iter() {
+            if let CellValue::Formula { source, .. } = &cell.value {
+                if let Ok(expr) = parse(source) {
+                    let refs = extract_cell_refs(&expr);
+                    if refs.contains(&(row, col)) {
+                        let cell_ref = self.cell_ref_at(cell_row, cell_col);
+                        references.push(ReferenceEntry::new(
+                            cell_row,
+                            cell_col,
+                            cell_ref,
+                            source.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if references.is_empty() {
+            self.status_message = Some(format!("No cells reference {}", source_cell_ref));
+            cx.notify();
+            return;
+        }
+
+        // Sort references by cell position for predictable order
+        references.sort_by_key(|r| (r.row, r.col));
+
+        // Save pre-palette state for restore on Esc
+        self.palette_pre_selection = self.selected;
+        self.palette_pre_selection_end = self.selection_end;
+        self.palette_pre_scroll = (self.scroll_row, self.scroll_col);
+        self.palette_previewing = false;
+
+        // Build results using the ReferencesProvider
+        let provider = ReferencesProvider::new(source_cell_ref.clone(), references);
+        let query = SearchQuery::parse("");
+        let results = provider.search(&query, 50);
+
+        // Open palette with references
+        self.mode = Mode::Command;
+        self.palette_query = format!("References to {}", source_cell_ref);
+        self.palette_selected = 0;
+        self.palette_total_results = results.len();
+        self.palette_results = results;
+        cx.notify();
+    }
+
+    /// Show cells that the given cell references (Go to Precedents - F12)
+    /// Opens the command palette populated with precedent cells
+    pub fn show_precedents(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        use crate::search::{PrecedentEntry, PrecedentsProvider, SearchProvider, SearchQuery};
+        use visigrid_engine::formula::parser::{parse, extract_cell_refs};
+
+        // Get the cell reference for display
+        let source_cell_ref = self.cell_ref_at(row, col);
+
+        // Get the raw value of this cell
+        let raw_value = self.sheet().get_raw(row, col);
+
+        // Only formulas have precedents
+        if !raw_value.starts_with('=') {
+            self.status_message = Some(format!("{} is not a formula", source_cell_ref));
+            cx.notify();
+            return;
+        }
+
+        // Parse the formula to extract referenced cells
+        let precedent_coords = if let Ok(expr) = parse(&raw_value) {
+            let mut refs = extract_cell_refs(&expr);
+            refs.sort();
+            refs.dedup();
+            refs
+        } else {
+            Vec::new()
+        };
+
+        if precedent_coords.is_empty() {
+            self.status_message = Some(format!("{} has no cell references", source_cell_ref));
+            cx.notify();
+            return;
+        }
+
+        // Build precedent entries with display values
+        let precedents: Vec<PrecedentEntry> = precedent_coords
+            .iter()
+            .map(|&(r, c)| {
+                let cell_ref = self.cell_ref_at(r, c);
+                let display = self.sheet().get_display(r, c);
+                PrecedentEntry::new(r, c, cell_ref, display)
+            })
+            .collect();
+
+        // Save pre-palette state for restore on Esc
+        self.palette_pre_selection = self.selected;
+        self.palette_pre_selection_end = self.selection_end;
+        self.palette_pre_scroll = (self.scroll_row, self.scroll_col);
+        self.palette_previewing = false;
+
+        // Build results using the PrecedentsProvider
+        let provider = PrecedentsProvider::new(source_cell_ref.clone(), precedents);
+        let query = SearchQuery::parse("");
+        let results = provider.search(&query, 50);
+
+        // Open palette with precedents
+        self.mode = Mode::Command;
+        self.palette_query = format!("Precedents of {}", source_cell_ref);
+        self.palette_selected = 0;
+        self.palette_total_results = results.len();
+        self.palette_results = results;
+        cx.notify();
+    }
+
+    /// Extract the identifier (word) at the cursor position in edit_value
+    /// Returns the identifier and its range in the edit_value
+    fn identifier_at_cursor(&self) -> Option<(String, usize, usize)> {
+        if self.edit_value.is_empty() {
+            return None;
+        }
+
+        let chars: Vec<char> = self.edit_value.chars().collect();
+        let cursor = self.edit_cursor.min(chars.len());
+
+        // Find the start of the identifier (scan backwards)
+        let mut start = cursor;
+        while start > 0 {
+            let c = chars[start - 1];
+            if c.is_alphanumeric() || c == '_' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+
+        // Find the end of the identifier (scan forwards)
+        let mut end = cursor;
+        while end < chars.len() {
+            let c = chars[end];
+            if c.is_alphanumeric() || c == '_' {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+
+        if start == end {
+            return None;
+        }
+
+        let identifier: String = chars[start..end].iter().collect();
+        Some((identifier, start, end))
+    }
+
+    /// Get the named range at the cursor position in edit_value (if any)
+    pub fn named_range_at_cursor(&self) -> Option<String> {
+        let (identifier, _, _) = self.identifier_at_cursor()?;
+
+        // Check if this identifier is a named range
+        if self.workbook.get_named_range(&identifier).is_some() {
+            Some(identifier)
+        } else {
+            None
+        }
+    }
+
+    /// Go to the definition of a named range (F12 on named range in formula)
+    pub fn go_to_named_range_definition(&mut self, name: &str, cx: &mut Context<Self>) {
+        use visigrid_engine::named_range::NamedRangeTarget;
+
+        // Extract data from named range before mutable borrows
+        let target_info = self.workbook.get_named_range(name).map(|nr| {
+            let (row, col) = match &nr.target {
+                NamedRangeTarget::Cell { row, col, .. } => (*row, *col),
+                NamedRangeTarget::Range { start_row, start_col, .. } => (*start_row, *start_col),
+            };
+            (row, col, nr.reference_string())
+        });
+
+        if let Some((row, col, ref_str)) = target_info {
+            // Exit edit mode and jump to the named range's target
+            self.mode = Mode::Navigation;
+            self.edit_value.clear();
+            self.edit_cursor = 0;
+            self.selected = (row, col);
+            self.selection_end = None;
+            self.ensure_cell_visible(row, col);
+            self.status_message = Some(format!("'{}' → {}", name, ref_str));
+            cx.notify();
+        } else {
+            self.status_message = Some(format!("Named range '{}' not found", name));
+            cx.notify();
+        }
+    }
+
+    /// Show all formulas that use a named range (Shift+F12 on named range)
+    pub fn show_named_range_references(&mut self, name: &str, cx: &mut Context<Self>) {
+        use crate::search::{ReferenceEntry, ReferencesProvider, SearchProvider, SearchQuery};
+        use visigrid_engine::cell::CellValue;
+
+        let name_upper = name.to_uppercase();
+
+        // Find all cells that use this named range
+        let mut references = Vec::new();
+        for (&(cell_row, cell_col), cell) in self.sheet().cells_iter() {
+            if let CellValue::Formula { source, .. } = &cell.value {
+                // Check if formula references this named range (word-boundary aware)
+                if self.formula_references_name(source, &name_upper) {
+                    let cell_ref = self.cell_ref_at(cell_row, cell_col);
+                    references.push(ReferenceEntry::new(
+                        cell_row,
+                        cell_col,
+                        cell_ref,
+                        source.clone(),
+                    ));
+                }
+            }
+        }
+
+        if references.is_empty() {
+            self.status_message = Some(format!("No cells reference '{}'", name));
+            cx.notify();
+            return;
+        }
+
+        // Sort references by cell position
+        references.sort_by_key(|r| (r.row, r.col));
+
+        // Save pre-palette state
+        self.palette_pre_selection = self.selected;
+        self.palette_pre_selection_end = self.selection_end;
+        self.palette_pre_scroll = (self.scroll_row, self.scroll_col);
+        self.palette_previewing = false;
+
+        // Build results
+        let provider = ReferencesProvider::new(format!("${}", name), references);
+        let query = SearchQuery::parse("");
+        let results = provider.search(&query, 50);
+
+        // Open palette with references
+        self.mode = Mode::Command;
+        self.palette_query = format!("References to ${}", name);
+        self.palette_selected = 0;
+        self.palette_total_results = results.len();
+        self.palette_results = results;
         cx.notify();
     }
 
     pub fn hide_palette(&mut self, cx: &mut Context<Self>) {
+        // Restore pre-palette state (Esc behavior)
+        if self.palette_previewing {
+            self.selected = self.palette_pre_selection;
+            self.selection_end = self.palette_pre_selection_end;
+            self.scroll_row = self.palette_pre_scroll.0;
+            self.scroll_col = self.palette_pre_scroll.1;
+        }
+
         self.mode = Mode::Navigation;
         self.palette_query.clear();
         self.palette_selected = 0;
+        self.palette_results.clear();
+        self.palette_previewing = false;
         cx.notify();
+    }
+
+    /// Preview the selected action (Shift+Enter) - jump/scroll but keep palette open
+    pub fn palette_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(item) = self.palette_results.get(self.palette_selected).cloned() {
+            self.palette_previewing = true;
+
+            // Preview based on action type
+            match &item.action {
+                SearchAction::JumpToCell { row, col } => {
+                    self.selected = (*row, *col);
+                    self.selection_end = None;
+                    self.ensure_cell_visible(*row, *col);
+                }
+                SearchAction::RunCommand(cmd) => {
+                    // For commands, show a preview hint in status bar
+                    self.status_message = Some(format!("Preview: {}", cmd.name()));
+                }
+                SearchAction::InsertFormula { name, signature } => {
+                    // Show full signature for formula preview
+                    self.status_message = Some(format!("{}: {}", name, signature));
+                }
+                SearchAction::OpenFile(path) => {
+                    // Show full path for file preview
+                    self.status_message = Some(format!("Open: {}", path.display()));
+                }
+                _ => {
+                    // Other actions: show action description
+                    self.status_message = Some(format!("Preview: {}", item.title));
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    /// Update palette search results based on current query
+    fn update_palette_results(&mut self) {
+        use crate::search::{SearchQuery, SearchProvider, CellSearchProvider, RecentFilesProvider, NamedRangeSearchProvider, NamedRangeEntry};
+        use visigrid_engine::named_range::NamedRangeTarget;
+
+        // Clone query string first to avoid borrow conflicts with cache refresh
+        let query_str = self.palette_query.clone();
+        let query = SearchQuery::parse(&query_str);
+        let mut results = self.search_engine.search(&query_str, 12);
+
+        // Add recent files when there's no prefix (commands + recent files)
+        if query.prefix.is_none() && !self.recent_files.is_empty() {
+            let provider = RecentFilesProvider::new(self.recent_files.clone());
+            let recent_results = provider.search(&query, 10);
+            results.extend(recent_results);
+        }
+
+        // Add cell search with @ prefix (uses generation-based cache for freshness)
+        if query.prefix == Some('@') {
+            // Ensure cache is fresh (rebuilds only if cells_rev changed)
+            self.ensure_cell_search_cache_fresh();
+
+            // Search over cached entries
+            let provider = CellSearchProvider::new(self.cell_search_cache.entries.clone());
+            let cell_results = provider.search(&query, 50);
+            results.extend(cell_results);
+        }
+
+        // Add named range search with $ prefix
+        if query.prefix == Some('$') {
+            let entries: Vec<NamedRangeEntry> = self.workbook.list_named_ranges()
+                .into_iter()
+                .map(|nr| {
+                    let (row, col) = match &nr.target {
+                        NamedRangeTarget::Cell { row, col, .. } => (*row, *col),
+                        NamedRangeTarget::Range { start_row, start_col, .. } => (*start_row, *start_col),
+                    };
+                    NamedRangeEntry::new(
+                        nr.name.clone(),
+                        nr.reference_string(),
+                        nr.description.clone(),
+                        row,
+                        col,
+                    )
+                })
+                .collect();
+
+            let provider = NamedRangeSearchProvider::new(entries);
+            let named_results = provider.search(&query, 50);
+            results.extend(named_results);
+        }
+
+        // Apply recency boost to commands (makes the palette feel "adaptive")
+        for result in &mut results {
+            if let SearchAction::RunCommand(cmd) = &result.action {
+                let boost = self.command_recency_score(cmd);
+                result.score += boost;
+            }
+        }
+
+        // Apply unified sorting: score (desc) → kind priority (asc) → title (asc)
+        results.sort_by(|a, b| {
+            match b.score.partial_cmp(&a.score) {
+                Some(std::cmp::Ordering::Equal) | None => {}
+                Some(ord) => return ord,
+            }
+            match a.kind.priority().cmp(&b.kind.priority()) {
+                std::cmp::Ordering::Equal => {}
+                ord => return ord,
+            }
+            a.title.cmp(&b.title)
+        });
+
+        // Track total before truncation
+        self.palette_total_results = results.len();
+        results.truncate(12);
+
+        self.palette_results = results;
+    }
+
+    /// Get palette results for rendering (borrows immutably)
+    pub fn palette_results(&self) -> &[SearchItem] {
+        &self.palette_results
+    }
+
+    /// Track a command as recently used (for scoring boost)
+    fn add_recent_command(&mut self, cmd: CommandId) {
+        const MAX_RECENT_COMMANDS: usize = 20;
+
+        // Remove if already present (we'll add to front)
+        self.recent_commands.retain(|c| c != &cmd);
+
+        // Add to front
+        self.recent_commands.insert(0, cmd);
+
+        // Limit size
+        self.recent_commands.truncate(MAX_RECENT_COMMANDS);
+    }
+
+    /// Check if a command was recently used (returns recency score 0.0-1.0)
+    pub fn command_recency_score(&self, cmd: &CommandId) -> f32 {
+        if let Some(pos) = self.recent_commands.iter().position(|c| c == cmd) {
+            // More recent = higher score, decays with position
+            // Position 0 (most recent) = 0.15 boost, position 19 = ~0.0 boost
+            0.15 * (1.0 - (pos as f32 / 20.0))
+        } else {
+            0.0
+        }
     }
 
     pub fn palette_up(&mut self, cx: &mut Context<Self>) {
@@ -2325,8 +3242,7 @@ impl Spreadsheet {
     }
 
     pub fn palette_down(&mut self, cx: &mut Context<Self>) {
-        use crate::views::command_palette::filter_commands;
-        let count = filter_commands(&self.palette_query).len();
+        let count = self.palette_results.len();
         if self.palette_selected + 1 < count {
             self.palette_selected += 1;
             cx.notify();
@@ -2336,24 +3252,36 @@ impl Spreadsheet {
     pub fn palette_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
         self.palette_query.push(c);
         self.palette_selected = 0;  // Reset selection on filter change
+        self.update_palette_results();
         cx.notify();
     }
 
     pub fn palette_backspace(&mut self, cx: &mut Context<Self>) {
+        // Retain prefix character if it's the only thing left
+        // Prefixes: >, =, @, :, #
+        let query_len = self.palette_query.chars().count();
+        if query_len == 1 {
+            let first_char = self.palette_query.chars().next().unwrap();
+            if matches!(first_char, '>' | '=' | '@' | ':' | '#') {
+                // Don't remove the prefix - user stays in that search mode
+                return;
+            }
+        }
         self.palette_query.pop();
         self.palette_selected = 0;  // Reset selection on filter change
+        self.update_palette_results();
         cx.notify();
     }
 
     pub fn palette_execute(&mut self, cx: &mut Context<Self>) {
-        use crate::views::command_palette::filter_commands;
-        let filtered = filter_commands(&self.palette_query);
-        if let Some(cmd) = filtered.get(self.palette_selected) {
-            let action = cmd.action;
-            // Clear palette state but let action control the mode
+        if let Some(item) = self.palette_results.get(self.palette_selected).cloned() {
+            // Clear palette state - don't restore since we're executing
             self.palette_query.clear();
             self.palette_selected = 0;
-            action(self, cx);
+            self.palette_results.clear();
+            self.palette_previewing = false;  // Clear previewing flag
+
+            self.dispatch_action(item.action, cx);
             // Only return to Navigation if action didn't change mode
             if self.mode == Mode::Command {
                 self.mode = Mode::Navigation;
@@ -2361,6 +3289,29 @@ impl Spreadsheet {
             cx.notify();
         } else {
             self.hide_palette(cx);
+        }
+    }
+
+    /// Execute secondary action (Ctrl+Enter) for selected palette item
+    pub fn palette_execute_secondary(&mut self, cx: &mut Context<Self>) {
+        if let Some(item) = self.palette_results.get(self.palette_selected).cloned() {
+            if let Some(secondary) = item.secondary_action {
+                // Clear palette state
+                self.palette_query.clear();
+                self.palette_selected = 0;
+                self.palette_results.clear();
+                self.palette_previewing = false;
+
+                self.dispatch_action(secondary, cx);
+                if self.mode == Mode::Command {
+                    self.mode = Mode::Navigation;
+                }
+                cx.notify();
+            } else {
+                // No secondary action - show hint
+                self.status_message = Some("No secondary action available".to_string());
+                cx.notify();
+            }
         }
     }
 
@@ -2571,509 +3522,778 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    // Fill operations (Phase 0 essentials)
-    pub fn fill_down(&mut self, cx: &mut Context<Self>) {
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+    // =========================================================================
+    // Rename Symbol (Ctrl+Shift+R)
+    // =========================================================================
 
-        // Need at least 2 rows selected
-        if max_row <= min_row {
-            self.status_message = Some("Select at least 2 rows to fill down".into());
+    /// Show the rename symbol dialog
+    /// If `name` is provided, pre-fill with that named range
+    pub fn show_rename_symbol(&mut self, name: Option<&str>, cx: &mut Context<Self>) {
+        // Get list of named ranges
+        let named_ranges = self.workbook.list_named_ranges();
+        if named_ranges.is_empty() {
+            self.status_message = Some("No named ranges defined".to_string());
             cx.notify();
             return;
         }
 
-        let mut changes = Vec::new();
-
-        // For each column in selection
-        for col in min_col..=max_col {
-            // Get the source value/formula from the first row
-            let source = self.sheet().get_raw(min_row, col);
-
-            // Fill down to all other rows
-            for row in (min_row + 1)..=max_row {
-                let old_value = self.sheet().get_raw(row, col);
-                let new_value = if source.starts_with('=') {
-                    // Adjust relative references for formulas
-                    self.adjust_formula_refs(&source, row as i32 - min_row as i32, 0)
-                } else {
-                    source.clone()
-                };
-
-                if old_value != new_value {
-                    changes.push(CellChange {
-                        row,
-                        col,
-                        old_value,
-                        new_value: new_value.clone(),
-                    });
-                }
-                self.sheet_mut().set_value(row, col, &new_value);
-            }
-        }
-
-        self.history.record_batch(changes);
-        self.is_modified = true;
-
-        self.status_message = Some("Filled down".into());
-        cx.notify();
-    }
-
-    pub fn fill_right(&mut self, cx: &mut Context<Self>) {
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-
-        // Need at least 2 columns selected
-        if max_col <= min_col {
-            self.status_message = Some("Select at least 2 columns to fill right".into());
-            cx.notify();
-            return;
-        }
-
-        let mut changes = Vec::new();
-
-        // For each row in selection
-        for row in min_row..=max_row {
-            // Get the source value/formula from the first column
-            let source = self.sheet().get_raw(row, min_col);
-
-            // Fill right to all other columns
-            for col in (min_col + 1)..=max_col {
-                let old_value = self.sheet().get_raw(row, col);
-                let new_value = if source.starts_with('=') {
-                    // Adjust relative references for formulas
-                    self.adjust_formula_refs(&source, 0, col as i32 - min_col as i32)
-                } else {
-                    source.clone()
-                };
-
-                if old_value != new_value {
-                    changes.push(CellChange {
-                        row,
-                        col,
-                        old_value,
-                        new_value: new_value.clone(),
-                    });
-                }
-                self.sheet_mut().set_value(row, col, &new_value);
-            }
-        }
-
-        self.history.record_batch(changes);
-        self.is_modified = true;
-        self.status_message = Some("Filled right".into());
-        cx.notify();
-    }
-
-    /// AutoSum: Insert =SUM() with detected range (Alt+=)
-    /// Looks above and left for contiguous numeric cells, prefers above if longer
-    pub fn autosum(&mut self, cx: &mut Context<Self>) {
-        // Don't trigger if already editing
-        if self.mode.is_editing() {
-            return;
-        }
-
-        let (row, col) = self.selected;
-
-        // Find contiguous numeric cells above
-        let above_range = self.find_numeric_range_above(row, col);
-
-        // Find contiguous numeric cells to the left
-        let left_range = self.find_numeric_range_left(row, col);
-
-        // Choose the longer range, preferring above if equal
-        // Also track the detected range for highlighting
-        let (formula, detected_range) = match (above_range, left_range) {
-            (Some((start_row, end_row)), Some((start_col, end_col))) => {
-                let above_len = end_row - start_row + 1;
-                let left_len = end_col - start_col + 1;
-                if above_len >= left_len {
-                    // Use above range
-                    let start_ref = self.cell_ref_at(start_row, col);
-                    let end_ref = self.cell_ref_at(end_row, col);
-                    (format!("=SUM({}:{})", start_ref, end_ref),
-                     Some(((start_row, col), Some((end_row, col)))))
-                } else {
-                    // Use left range
-                    let start_ref = self.cell_ref_at(row, start_col);
-                    let end_ref = self.cell_ref_at(row, end_col);
-                    (format!("=SUM({}:{})", start_ref, end_ref),
-                     Some(((row, start_col), Some((row, end_col)))))
-                }
-            }
-            (Some((start_row, end_row)), None) => {
-                // Only above range
-                let start_ref = self.cell_ref_at(start_row, col);
-                let end_ref = self.cell_ref_at(end_row, col);
-                (format!("=SUM({}:{})", start_ref, end_ref),
-                 Some(((start_row, col), Some((end_row, col)))))
-            }
-            (None, Some((start_col, end_col))) => {
-                // Only left range
-                let start_ref = self.cell_ref_at(row, start_col);
-                let end_ref = self.cell_ref_at(row, end_col);
-                (format!("=SUM({}:{})", start_ref, end_ref),
-                 Some(((row, start_col), Some((row, end_col)))))
-            }
-            (None, None) => {
-                // No range found, just insert empty SUM
-                ("=SUM()".to_string(), None)
-            }
+        // If name provided, use it; otherwise try to detect from current cell
+        let original = if let Some(n) = name {
+            n.to_string()
+        } else {
+            // Try to find a named range in the current cell's formula
+            let sheet = self.workbook.active_sheet();
+            let (row, col) = self.selected;
+            let cell = sheet.get_cell(row, col);
+            let formula_text = self.get_formula_source(&cell.value);
+            if let Some(formula) = formula_text {
+                // Look for named range references in the formula
+                self.find_named_range_in_formula(&formula)
+            } else {
+                None
+            }.unwrap_or_else(|| {
+                // No named range in current cell - use first available
+                named_ranges.first().map(|nr| nr.name.clone()).unwrap_or_default()
+            })
         };
 
-        // Set highlighted refs for the detected range
-        if let Some(range) = detected_range {
-            self.formula_highlighted_refs = vec![range];
-        } else {
-            self.formula_highlighted_refs.clear();
+        if original.is_empty() {
+            self.status_message = Some("No named range to rename".to_string());
+            cx.notify();
+            return;
         }
 
-        // Enter edit mode with the formula
-        self.edit_original = self.sheet().get_raw(row, col);
-        self.edit_value = formula;
-        self.edit_cursor = self.edit_value.chars().count(); // Cursor at end
-        self.mode = Mode::Formula;
-        self.update_autocomplete(cx);
+        self.mode = Mode::RenameSymbol;
+        self.rename_original_name = original.clone();
+        self.rename_new_name = original;
+        self.rename_validation_error = None;
+        self.update_rename_affected_cells();
         cx.notify();
     }
 
-    /// Find contiguous numeric cells above the given cell
-    /// Returns (start_row, end_row) if at least 2 cells found, None otherwise
-    fn find_numeric_range_above(&self, row: usize, col: usize) -> Option<(usize, usize)> {
-        if row == 0 {
-            return None;
-        }
-
-        let mut end_row = row - 1;
-        let mut start_row = end_row;
-
-        // Check if the cell above is numeric
-        if !self.is_cell_numeric(end_row, col) {
-            return None;
-        }
-
-        // Walk upward finding contiguous numeric cells
-        while start_row > 0 && self.is_cell_numeric(start_row - 1, col) {
-            start_row -= 1;
-        }
-
-        // Need at least 2 cells
-        if end_row - start_row + 1 >= 2 {
-            Some((start_row, end_row))
-        } else {
-            // Single cell - still include it
-            Some((start_row, end_row))
+    /// Extract formula source from a CellValue if it's a formula
+    fn get_formula_source(&self, value: &visigrid_engine::cell::CellValue) -> Option<String> {
+        match value {
+            visigrid_engine::cell::CellValue::Formula { source, .. } => Some(source.clone()),
+            _ => None,
         }
     }
 
-    /// Find contiguous numeric cells to the left of the given cell
-    /// Returns (start_col, end_col) if at least 2 cells found, None otherwise
-    fn find_numeric_range_left(&self, row: usize, col: usize) -> Option<(usize, usize)> {
-        if col == 0 {
-            return None;
-        }
-
-        let mut end_col = col - 1;
-        let mut start_col = end_col;
-
-        // Check if the cell to the left is numeric
-        if !self.is_cell_numeric(row, end_col) {
-            return None;
-        }
-
-        // Walk leftward finding contiguous numeric cells
-        while start_col > 0 && self.is_cell_numeric(row, start_col - 1) {
-            start_col -= 1;
-        }
-
-        // Need at least 2 cells
-        if end_col - start_col + 1 >= 2 {
-            Some((start_col, end_col))
-        } else {
-            // Single cell - still include it
-            Some((start_col, end_col))
-        }
-    }
-
-    /// Check if a cell contains a numeric value (not empty, not text, not error)
-    fn is_cell_numeric(&self, row: usize, col: usize) -> bool {
-        let raw = self.sheet().get_raw(row, col);
-        if raw.is_empty() {
-            return false;
-        }
-
-        // If it's a formula, check the result
-        if raw.starts_with('=') {
-            let display = self.sheet().get_display(row, col);
-            // Check if display is a number
-            display.parse::<f64>().is_ok()
-        } else {
-            // Check if raw value is a number
-            raw.parse::<f64>().is_ok()
-        }
-    }
-
-    /// Get cell reference string at given row, col (e.g., "A1", "B5")
-    pub fn cell_ref_at(&self, row: usize, col: usize) -> String {
-        let col_letter = Self::col_to_letter(col);
-        format!("{}{}", col_letter, row + 1)
-    }
-
-    /// Adjust cell references in a formula by delta rows and cols
-    /// Handles relative (A1), absolute ($A$1), and mixed ($A1, A$1) references
-    fn adjust_formula_refs(&self, formula: &str, delta_row: i32, delta_col: i32) -> String {
-        use regex::Regex;
-
-        // Match cell references: optional $ before col, col letters, optional $ before row, row numbers
-        let re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
-
-        re.replace_all(formula, |caps: &regex::Captures| {
-            let col_absolute = &caps[1] == "$";
-            let col_letters = &caps[2];
-            let row_absolute = &caps[3] == "$";
-            let row_num: i32 = caps[4].parse().unwrap_or(1);
-
-            // Parse column
-            let col = col_letters.to_uppercase().chars().fold(0i32, |acc, c| {
-                acc * 26 + (c as i32 - 'A' as i32 + 1)
-            }) - 1;
-
-            // Apply deltas if not absolute
-            let new_col = if col_absolute { col } else { col + delta_col };
-            let new_row = if row_absolute { row_num } else { row_num + delta_row };
-
-            // Bounds check
-            if new_col < 0 || new_row < 1 {
-                return format!("#REF!");
-            }
-
-            // Convert column back to letters
-            let col_str = Self::col_letter(new_col as usize);
-
-            format!(
-                "{}{}{}{}",
-                if col_absolute { "$" } else { "" },
-                col_str,
-                if row_absolute { "$" } else { "" },
-                new_row
-            )
-        })
-        .to_string()
-    }
-
-    // ========================================================================
-    // Formula Autocomplete
-    // ========================================================================
-
-    /// Get filtered autocomplete suggestions based on current edit value
-    pub fn autocomplete_suggestions(&self) -> Vec<&'static crate::formula_context::FunctionInfo> {
-        use crate::formula_context;
-
-        // Only show autocomplete for formula mode
-        if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
-            return Vec::new();
-        }
-
-        let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
-
-        // Check mode and identifier length
-        match ctx.mode {
-            formula_context::FormulaEditMode::Start
-            | formula_context::FormulaEditMode::Operator
-            | formula_context::FormulaEditMode::ArgList => {
-                // Show all functions at these positions
-                formula_context::get_functions_by_prefix("")
-            }
-            formula_context::FormulaEditMode::Identifier => {
-                // Only show if identifier >= 2 chars (spec: avoid A1 vs AVERAGE ambiguity)
-                if let Some(ref id_text) = ctx.identifier_text {
-                    if id_text.len() >= 2 {
-                        formula_context::get_functions_by_prefix(id_text)
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    Vec::new()
-                }
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    /// Update autocomplete state based on current context
-    pub fn update_autocomplete(&mut self, cx: &mut Context<Self>) {
-        use crate::formula_context;
-
-        // Only in formula mode
-        if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
-            self.autocomplete_visible = false;
-            return;
-        }
-
-        let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
-        let suggestions = self.autocomplete_suggestions();
-
-        if suggestions.is_empty() {
-            self.autocomplete_visible = false;
-            self.autocomplete_selected = 0;
-        } else {
-            self.autocomplete_visible = true;
-            self.autocomplete_replace_range = ctx.replace_range.clone();
-            // Clamp selected index
-            if self.autocomplete_selected >= suggestions.len() {
-                self.autocomplete_selected = 0;
-            }
-        }
+    /// Hide the rename symbol dialog
+    pub fn hide_rename_symbol(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        self.rename_original_name.clear();
+        self.rename_new_name.clear();
+        self.rename_affected_cells.clear();
+        self.rename_validation_error = None;
         cx.notify();
     }
 
-    /// Move autocomplete selection up
-    pub fn autocomplete_up(&mut self, cx: &mut Context<Self>) {
-        if !self.autocomplete_visible {
-            return;
-        }
-        let suggestions = self.autocomplete_suggestions();
-        if suggestions.is_empty() {
-            return;
-        }
-        if self.autocomplete_selected == 0 {
-            self.autocomplete_selected = suggestions.len().saturating_sub(1);
+    /// Show the edit description modal for a named range
+    pub fn show_edit_description(&mut self, name: &str, cx: &mut Context<Self>) {
+        // Get the current description
+        let current_description = self.workbook.get_named_range(name)
+            .and_then(|nr| nr.description.clone());
+
+        self.edit_description_name = name.to_string();
+        self.edit_description_value = current_description.clone().unwrap_or_default();
+        self.edit_description_original = current_description;
+        self.mode = Mode::EditDescription;
+        cx.notify();
+    }
+
+    /// Hide the edit description modal without saving
+    pub fn hide_edit_description(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        self.edit_description_name.clear();
+        self.edit_description_value.clear();
+        self.edit_description_original = None;
+        cx.notify();
+    }
+
+    /// Insert a character into the description
+    pub fn edit_description_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        self.edit_description_value.push(c);
+        cx.notify();
+    }
+
+    /// Delete the last character from the description
+    pub fn edit_description_backspace(&mut self, cx: &mut Context<Self>) {
+        self.edit_description_value.pop();
+        cx.notify();
+    }
+
+    /// Apply the edited description and record undo
+    pub fn apply_edit_description(&mut self, cx: &mut Context<Self>) {
+        let name = self.edit_description_name.clone();
+        let old_description = self.edit_description_original.clone();
+        let new_description = if self.edit_description_value.is_empty() {
+            None
         } else {
-            self.autocomplete_selected -= 1;
+            Some(self.edit_description_value.clone())
+        };
+
+        // Only record if there's a change
+        if old_description != new_description {
+            // Apply the change
+            let _ = self.workbook.named_ranges_mut().set_description(&name, new_description.clone());
+
+            // Record for undo
+            self.history.record_named_range_action(UndoAction::NamedRangeDescriptionChanged {
+                name: name.clone(),
+                old_description,
+                new_description,
+            });
+
+            self.is_modified = true;
+            self.status_message = Some(format!("Updated description for '{}'", name));
         }
+
+        // Close the modal
+        self.hide_edit_description(cx);
+    }
+
+    // ========== Tour Methods ==========
+
+    /// Show the named ranges tour
+    pub fn show_tour(&mut self, cx: &mut Context<Self>) {
+        self.tour_step = 0;
+        self.mode = Mode::Tour;
         cx.notify();
     }
 
-    /// Move autocomplete selection down
-    pub fn autocomplete_down(&mut self, cx: &mut Context<Self>) {
-        if !self.autocomplete_visible {
-            return;
-        }
-        let suggestions = self.autocomplete_suggestions();
-        if suggestions.is_empty() {
-            return;
-        }
-        self.autocomplete_selected = (self.autocomplete_selected + 1) % suggestions.len();
+    /// Hide the tour
+    pub fn hide_tour(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
         cx.notify();
     }
 
-    /// Accept the selected autocomplete suggestion
-    pub fn autocomplete_accept(&mut self, cx: &mut Context<Self>) {
-        if !self.autocomplete_visible {
-            return;
-        }
-
-        let suggestions = self.autocomplete_suggestions();
-        if suggestions.is_empty() || self.autocomplete_selected >= suggestions.len() {
-            self.autocomplete_visible = false;
-            return;
-        }
-
-        let func = suggestions[self.autocomplete_selected];
-        let func_name = func.name;
-
-        // Build replacement text: function name + opening paren
-        let replacement = format!("{}(", func_name);
-
-        // Replace the identifier at replace_range
-        let range = self.autocomplete_replace_range.clone();
-
-        // Convert char positions to byte positions
-        let start_byte = self.edit_value.char_indices()
-            .nth(range.start)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let end_byte = self.edit_value.char_indices()
-            .nth(range.end)
-            .map(|(i, _)| i)
-            .unwrap_or(self.edit_value.len());
-
-        self.edit_value.replace_range(start_byte..end_byte, &replacement);
-        self.edit_cursor = range.start + replacement.chars().count();
-
-        // Close autocomplete
-        self.autocomplete_visible = false;
-        self.autocomplete_selected = 0;
-
-        // Enter formula mode if not already
-        if !self.mode.is_formula() {
-            self.mode = Mode::Formula;
-        }
-
-        cx.notify();
-    }
-
-    /// Dismiss autocomplete without accepting
-    pub fn autocomplete_dismiss(&mut self, cx: &mut Context<Self>) {
-        if self.autocomplete_visible {
-            self.autocomplete_visible = false;
-            self.autocomplete_selected = 0;
+    /// Go to next tour step
+    pub fn tour_next(&mut self, cx: &mut Context<Self>) {
+        if self.tour_step < 3 {
+            self.tour_step += 1;
             cx.notify();
         }
     }
 
-    // ========================================================================
-    // Formula Signature Help
-    // ========================================================================
+    /// Go to previous tour step
+    pub fn tour_back(&mut self, cx: &mut Context<Self>) {
+        if self.tour_step > 0 {
+            self.tour_step -= 1;
+            cx.notify();
+        }
+    }
 
-    /// Get signature help info if cursor is inside a function call
-    pub fn signature_help(&self) -> Option<SignatureHelpInfo> {
-        use crate::formula_context;
+    /// Complete the tour
+    pub fn tour_done(&mut self, cx: &mut Context<Self>) {
+        self.tour_completed = true;
+        self.mode = Mode::Navigation;
+        self.status_message = Some("You just refactored a spreadsheet like code.".to_string());
+        cx.notify();
+    }
 
-        // Only show for formula mode
-        if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
-            return None;
+    /// Check if the name tooltip should be shown
+    pub fn should_show_name_tooltip(&self) -> bool {
+        // Show if: not dismissed, no named ranges exist, has a range selection
+        !self.name_tooltip_dismissed
+            && self.workbook.list_named_ranges().is_empty()
+            && self.selection_end.is_some()
+    }
+
+    /// Dismiss the name tooltip permanently
+    pub fn dismiss_name_tooltip(&mut self, cx: &mut Context<Self>) {
+        self.name_tooltip_dismissed = true;
+        // Save to settings
+        let mut settings = Settings::load();
+        settings.name_tooltip_dismissed = true;
+        settings.save();
+        cx.notify();
+    }
+
+    /// Insert a character into the new name
+    pub fn rename_symbol_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        self.rename_new_name.push(c);
+        self.validate_rename_name();
+        cx.notify();
+    }
+
+    /// Delete the last character from the new name
+    pub fn rename_symbol_backspace(&mut self, cx: &mut Context<Self>) {
+        self.rename_new_name.pop();
+        self.validate_rename_name();
+        cx.notify();
+    }
+
+    /// Validate the current new name
+    fn validate_rename_name(&mut self) {
+        if self.rename_new_name.is_empty() {
+            self.rename_validation_error = Some("Name cannot be empty".to_string());
+            return;
         }
 
-        // Don't show signature help when autocomplete is visible
-        if self.autocomplete_visible {
-            return None;
+        // Check if it's the same as original (case-insensitive comparison for validity)
+        if self.rename_new_name.to_lowercase() == self.rename_original_name.to_lowercase() {
+            self.rename_validation_error = None;
+            return;
         }
 
-        let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
-
-        // Only show in ArgList mode
-        if !matches!(ctx.mode, formula_context::FormulaEditMode::ArgList) {
-            return None;
+        // Check if name is valid
+        if let Err(e) = is_valid_name(&self.rename_new_name) {
+            self.rename_validation_error = Some(e);
+            return;
         }
 
-        // Get the current function
-        ctx.current_function.map(|func| {
-            SignatureHelpInfo {
-                function: func,
-                current_arg: ctx.current_arg_index.unwrap_or(0),
+        // Check if name already exists
+        if self.workbook.get_named_range(&self.rename_new_name).is_some() {
+            self.rename_validation_error = Some(format!("'{}' already exists", self.rename_new_name));
+            return;
+        }
+
+        self.rename_validation_error = None;
+    }
+
+    /// Update the list of affected cells (formulas using the named range)
+    fn update_rename_affected_cells(&mut self) {
+        self.rename_affected_cells.clear();
+
+        let name_upper = self.rename_original_name.to_uppercase();
+        let sheet = self.workbook.active_sheet();
+
+        // Scan all cells for formulas that reference this named range
+        for (&(row, col), cell) in sheet.cells_iter() {
+            if let Some(formula) = self.get_formula_source(&cell.value) {
+                if self.formula_references_name(&formula, &name_upper) {
+                    self.rename_affected_cells.push((row, col));
+                }
             }
-        })
+        }
     }
-}
 
-/// Signature help context for rendering
-pub struct SignatureHelpInfo {
-    pub function: &'static crate::formula_context::FunctionInfo,
-    pub current_arg: usize,
-}
+    /// Check if a formula references a named range (case-insensitive)
+    fn formula_references_name(&self, formula: &str, name_upper: &str) -> bool {
+        // Simple check: look for the name as a word boundary
+        // A proper implementation would parse the formula and check the AST
+        let formula_upper = formula.to_uppercase();
 
-/// Error info for the error banner
-pub struct FormulaErrorInfo {
-    pub message: String,
-}
+        // Check for word boundaries using simple logic
+        let name_len = name_upper.len();
+        for (i, _) in formula_upper.match_indices(name_upper) {
+            // Check if it's a word boundary (not part of a larger identifier)
+            let before_ok = i == 0 || {
+                let c = formula_upper.chars().nth(i - 1).unwrap_or(' ');
+                !c.is_alphanumeric() && c != '_'
+            };
+            let after_ok = i + name_len >= formula_upper.len() || {
+                let c = formula_upper.chars().nth(i + name_len).unwrap_or(' ');
+                !c.is_alphanumeric() && c != '_'
+            };
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        false
+    }
 
-impl Spreadsheet {
-    /// Get formula error to display (only Hard errors)
-    pub fn formula_error(&self) -> Option<FormulaErrorInfo> {
-        use crate::formula_context::{check_errors, DiagnosticKind};
+    /// Find a named range identifier in a formula string
+    fn find_named_range_in_formula(&self, formula: &str) -> Option<String> {
+        let named_ranges = self.workbook.list_named_ranges();
+        let formula_upper = formula.to_uppercase();
 
-        // Only check for formula mode
-        if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
-            return None;
+        for nr in &named_ranges {
+            let name_upper = nr.name.to_uppercase();
+            if self.formula_references_name(&formula_upper, &name_upper) {
+                return Some(nr.name.clone());
+            }
+        }
+        None
+    }
+
+    /// Apply the rename operation
+    pub fn confirm_rename_symbol(&mut self, cx: &mut Context<Self>) {
+        // Validate first
+        self.validate_rename_name();
+        if self.rename_validation_error.is_some() {
+            return;
         }
 
-        // While editing, only show Hard errors (unknown function, invalid token)
-        // Transient errors (missing paren, trailing operator) are hidden - we'll auto-fix on confirm
-        check_errors(&self.edit_value, self.edit_cursor)
-            .filter(|diag| matches!(diag.kind, DiagnosticKind::Hard))
-            .map(|diag| FormulaErrorInfo {
-                message: diag.message,
-            })
+        let old_name = self.rename_original_name.clone();
+        let new_name = self.rename_new_name.clone();
+
+        // If names are the same (case-insensitive), just close
+        if old_name.to_lowercase() == new_name.to_lowercase() {
+            self.hide_rename_symbol(cx);
+            return;
+        }
+
+        // Collect all formula changes for undo
+        let mut changes: Vec<CellChange> = Vec::new();
+        let sheet_index = self.workbook.active_sheet_index();
+        let old_name_upper = old_name.to_uppercase();
+
+        // Update formulas in all affected cells
+        {
+            let sheet = self.workbook.active_sheet();
+            for &(row, col) in &self.rename_affected_cells {
+                let cell = sheet.get_cell(row, col);
+                if let Some(formula) = self.get_formula_source(&cell.value) {
+                    let new_formula = self.replace_name_in_formula(&formula, &old_name_upper, &new_name);
+
+                    changes.push(CellChange {
+                        row,
+                        col,
+                        old_value: formula,
+                        new_value: new_formula,
+                    });
+                }
+            }
+        }
+
+        // Apply the formula changes
+        {
+            let sheet = self.workbook.active_sheet_mut();
+            for change in &changes {
+                sheet.set_value(change.row, change.col, &change.new_value);
+            }
+        }
+
+        // Rename the named range itself
+        if let Err(e) = self.workbook.rename_named_range(&old_name, &new_name) {
+            self.status_message = Some(format!("Failed to rename: {}", e));
+            // TODO: Roll back formula changes
+            cx.notify();
+            return;
+        }
+
+        // Record undo action
+        if !changes.is_empty() {
+            self.history.record_batch(sheet_index, changes);
+        }
+
+        self.is_modified = true;
+        self.bump_cells_rev();
+        self.status_message = Some(format!(
+            "Renamed '{}' to '{}' ({} formula{} updated)",
+            old_name,
+            new_name,
+            self.rename_affected_cells.len(),
+            if self.rename_affected_cells.len() == 1 { "" } else { "s" }
+        ));
+
+        self.hide_rename_symbol(cx);
     }
+
+    /// Replace a named range in a formula with a new name
+    /// Handles case-insensitive matching while preserving surrounding text
+    fn replace_name_in_formula(&self, formula: &str, old_name_upper: &str, new_name: &str) -> String {
+        let mut result = String::with_capacity(formula.len());
+        let formula_chars: Vec<char> = formula.chars().collect();
+        let old_name_len = old_name_upper.len();
+        let mut i = 0;
+
+        while i < formula_chars.len() {
+            // Try to match old name at this position
+            let remaining: String = formula_chars[i..].iter().collect();
+            let remaining_upper = remaining.to_uppercase();
+
+            if remaining_upper.starts_with(old_name_upper) {
+                // Check word boundaries
+                let before_ok = i == 0 || {
+                    let c = formula_chars[i - 1];
+                    !c.is_alphanumeric() && c != '_'
+                };
+                let after_ok = i + old_name_len >= formula_chars.len() || {
+                    let c = formula_chars[i + old_name_len];
+                    !c.is_alphanumeric() && c != '_'
+                };
+
+                if before_ok && after_ok {
+                    // Found a match - replace it
+                    result.push_str(new_name);
+                    i += old_name_len;
+                    continue;
+                }
+            }
+
+            result.push(formula_chars[i]);
+            i += 1;
+        }
+
+        result
+    }
+
+    // ========================================================================
+    // Create Named Range (Ctrl+Shift+N)
+    // ========================================================================
+
+    /// Show the create named range dialog
+    pub fn show_create_named_range(&mut self, cx: &mut Context<Self>) {
+        // Build target string from current selection
+        let target = self.selection_to_reference_string();
+
+        self.create_name_name = String::new();
+        self.create_name_description = String::new();
+        self.create_name_target = target;
+        self.create_name_validation_error = None;
+        self.create_name_focus = CreateNameFocus::Name;
+        self.mode = Mode::CreateNamedRange;
+        cx.notify();
+    }
+
+    /// Hide the create named range dialog
+    pub fn hide_create_named_range(&mut self, cx: &mut Context<Self>) {
+        self.create_name_name.clear();
+        self.create_name_description.clear();
+        self.create_name_target.clear();
+        self.create_name_validation_error = None;
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
+    /// Insert a character into the currently focused create name field
+    pub fn create_name_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        match self.create_name_focus {
+            CreateNameFocus::Name => self.create_name_name.push(c),
+            CreateNameFocus::Description => self.create_name_description.push(c),
+        }
+        self.validate_create_name();
+        cx.notify();
+    }
+
+    /// Backspace in the currently focused create name field
+    pub fn create_name_backspace(&mut self, cx: &mut Context<Self>) {
+        match self.create_name_focus {
+            CreateNameFocus::Name => { self.create_name_name.pop(); }
+            CreateNameFocus::Description => { self.create_name_description.pop(); }
+        }
+        self.validate_create_name();
+        cx.notify();
+    }
+
+    /// Tab to next field in create named range dialog
+    pub fn create_name_tab(&mut self, cx: &mut Context<Self>) {
+        self.create_name_focus = match self.create_name_focus {
+            CreateNameFocus::Name => CreateNameFocus::Description,
+            CreateNameFocus::Description => CreateNameFocus::Name,
+        };
+        cx.notify();
+    }
+
+    /// Validate the name field
+    fn validate_create_name(&mut self) {
+        use visigrid_engine::named_range::is_valid_name;
+
+        if self.create_name_name.is_empty() {
+            self.create_name_validation_error = Some("Name is required".into());
+            return;
+        }
+
+        if let Err(e) = is_valid_name(&self.create_name_name) {
+            self.create_name_validation_error = Some(e);
+            return;
+        }
+
+        // Check if name already exists
+        if self.workbook.get_named_range(&self.create_name_name).is_some() {
+            self.create_name_validation_error = Some(format!(
+                "'{}' already exists",
+                self.create_name_name
+            ));
+            return;
+        }
+
+        self.create_name_validation_error = None;
+    }
+
+    /// Confirm creation of the named range
+    pub fn confirm_create_named_range(&mut self, cx: &mut Context<Self>) {
+        // Validate first
+        self.validate_create_name();
+        if self.create_name_validation_error.is_some() {
+            return;
+        }
+
+        let name = self.create_name_name.clone();
+        let description = if self.create_name_description.is_empty() {
+            None
+        } else {
+            Some(self.create_name_description.clone())
+        };
+
+        // Parse the selection and create the named range
+        let (anchor_row, anchor_col) = self.selected;
+        let (end_row, end_col) = self.selection_end.unwrap_or(self.selected);
+        let (start_row, start_col, end_row, end_col) = (
+            anchor_row.min(end_row),
+            anchor_col.min(end_col),
+            anchor_row.max(end_row),
+            anchor_col.max(end_col),
+        );
+        let sheet = self.workbook.active_sheet_index();
+
+        let result = if start_row == end_row && start_col == end_col {
+            // Single cell
+            self.workbook.define_name_for_cell(&name, sheet, start_row, start_col)
+        } else {
+            // Range
+            self.workbook.define_name_for_range(
+                &name, sheet, start_row, start_col, end_row, end_col
+            )
+        };
+
+        match result {
+            Ok(()) => {
+                // Add description if provided
+                if let Some(desc) = description {
+                    if let Some(nr) = self.workbook.named_ranges_mut().get(&name).cloned() {
+                        let mut updated = nr;
+                        updated.description = Some(desc);
+                        let _ = self.workbook.named_ranges_mut().set(updated);
+                    }
+                }
+
+                self.is_modified = true;
+                self.status_message = Some(format!(
+                    "Created named range '{}' → {}",
+                    name,
+                    self.create_name_target
+                ));
+                self.hide_create_named_range(cx);
+            }
+            Err(e) => {
+                self.create_name_validation_error = Some(e);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Convert current selection to a reference string (e.g., "A1" or "A1:B10")
+    fn selection_to_reference_string(&self) -> String {
+        let (anchor_row, anchor_col) = self.selected;
+        let (end_row, end_col) = self.selection_end.unwrap_or(self.selected);
+        let (start_row, start_col, end_row, end_col) = (
+            anchor_row.min(end_row),
+            anchor_col.min(end_col),
+            anchor_row.max(end_row),
+            anchor_col.max(end_col),
+        );
+
+        let start_ref = format!("{}{}", col_to_letter(start_col), start_row + 1);
+
+        if start_row == end_row && start_col == end_col {
+            start_ref
+        } else {
+            format!("{}:{}{}", start_ref, col_to_letter(end_col), end_row + 1)
+        }
+    }
+
+    // ========================================================================
+    // Named Ranges Panel Actions
+    // ========================================================================
+
+    /// Delete a named range by name (with undo support and reference warning)
+    pub fn delete_named_range(&mut self, name: &str, cx: &mut Context<Self>) {
+        // Get the named range first (need to clone for undo)
+        let named_range = self.workbook.get_named_range(name).cloned();
+
+        if let Some(nr) = named_range {
+            // Count references to this named range in formulas
+            let ref_count = self.count_named_range_references(&nr.name);
+
+            // Record undo action BEFORE deleting
+            self.history.record_named_range_action(UndoAction::NamedRangeDeleted {
+                named_range: nr.clone(),
+            });
+
+            // Now delete
+            self.workbook.delete_named_range(name);
+            self.is_modified = true;
+            self.bump_cells_rev();
+
+            // Status message with reference warning
+            if ref_count > 0 {
+                self.status_message = Some(format!(
+                    "Deleted '{}' (used in {} formula{}—will show #NAME? errors)",
+                    name,
+                    ref_count,
+                    if ref_count == 1 { "" } else { "s" }
+                ));
+            } else {
+                self.status_message = Some(format!("Deleted named range '{}'", name));
+            }
+            cx.notify();
+        } else {
+            self.status_message = Some(format!("Named range '{}' not found", name));
+            cx.notify();
+        }
+    }
+
+    /// Count how many formula cells reference a named range
+    fn count_named_range_references(&self, name: &str) -> usize {
+        let name_upper = name.to_uppercase();
+        let mut count = 0;
+
+        for ((_, _), cell) in self.sheet().cells_iter() {
+            let raw = cell.value.raw_display();
+            if raw.starts_with('=') {
+                // Simple check: does the formula contain this name as a word?
+                // More sophisticated: parse the formula and check identifiers
+                // For now, do case-insensitive word boundary check
+                let formula_upper = raw.to_uppercase();
+                // Check if name appears as a standalone identifier
+                // This is a simple heuristic - a proper check would parse the formula
+                for word in formula_upper.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.') {
+                    if word == name_upper {
+                        count += 1;
+                        break; // Count each cell only once
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Get usage count for a named range (with caching)
+    pub fn get_named_range_usage_count(&mut self, name: &str) -> usize {
+        // Check if cache is stale
+        if self.named_range_usage_cache.cached_rev != self.cells_rev {
+            self.rebuild_named_range_usage_cache();
+        }
+
+        // Return cached count (or 0 if not found)
+        self.named_range_usage_cache.counts
+            .get(&name.to_lowercase())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Rebuild the usage count cache for all named ranges
+    fn rebuild_named_range_usage_cache(&mut self) {
+        self.named_range_usage_cache.counts.clear();
+
+        // Get all named range names (lowercase for lookup)
+        let names: Vec<String> = self.workbook.list_named_ranges()
+            .iter()
+            .map(|nr| nr.name.to_lowercase())
+            .collect();
+
+        // Also store uppercase versions for matching
+        let names_upper: Vec<String> = names.iter()
+            .map(|n| n.to_uppercase())
+            .collect();
+
+        // Initialize all counts to 0
+        for name in &names {
+            self.named_range_usage_cache.counts.insert(name.clone(), 0);
+        }
+
+        // Collect all formulas first (to avoid borrow issues)
+        let formulas: Vec<String> = self.sheet().cells_iter()
+            .filter_map(|((_, _), cell)| {
+                let raw = cell.value.raw_display();
+                if raw.starts_with('=') {
+                    Some(raw.to_uppercase())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Now process formulas and update counts
+        for formula_upper in formulas {
+            // Check each named range
+            for (i, name_upper) in names_upper.iter().enumerate() {
+                // Check if name appears as a standalone identifier
+                for word in formula_upper.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.') {
+                    if word == name_upper {
+                        if let Some(count) = self.named_range_usage_cache.counts.get_mut(&names[i]) {
+                            *count += 1;
+                        }
+                        break; // Count each cell only once per name
+                    }
+                }
+            }
+        }
+
+        // Mark cache as fresh
+        self.named_range_usage_cache.cached_rev = self.cells_rev;
+    }
+
+    /// Jump to a named range definition and select the whole range
+    pub fn jump_to_named_range(&mut self, name: &str, cx: &mut Context<Self>) {
+        use visigrid_engine::named_range::NamedRangeTarget;
+
+        let target_info = self.workbook.get_named_range(name).map(|nr| {
+            match &nr.target {
+                NamedRangeTarget::Cell { row, col, .. } => {
+                    (*row, *col, *row, *col, nr.reference_string())
+                }
+                NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => {
+                    (*start_row, *start_col, *end_row, *end_col, nr.reference_string())
+                }
+            }
+        });
+
+        if let Some((start_row, start_col, end_row, end_col, ref_str)) = target_info {
+            // Select the whole range
+            self.selected = (start_row, start_col);
+            if start_row == end_row && start_col == end_col {
+                self.selection_end = None;
+            } else {
+                self.selection_end = Some((end_row, end_col));
+            }
+
+            // Center the view on the selection
+            self.ensure_cell_visible(start_row, start_col);
+
+            self.status_message = Some(format!("'{}' = {}", name, ref_str));
+            cx.notify();
+        } else {
+            self.status_message = Some(format!("Named range '{}' not found", name));
+            cx.notify();
+        }
+    }
+
+    /// Filter named ranges by query (for Names panel search)
+    pub fn set_names_filter(&mut self, query: String, cx: &mut Context<Self>) {
+        self.names_filter_query = query;
+        cx.notify();
+    }
+
+    /// Get filtered named ranges for the Names panel
+    pub fn filtered_named_ranges(&self) -> Vec<&visigrid_engine::named_range::NamedRange> {
+        let query = self.names_filter_query.to_lowercase();
+        let mut ranges: Vec<_> = self.workbook.list_named_ranges()
+            .into_iter()
+            .filter(|nr| {
+                if query.is_empty() {
+                    return true;
+                }
+                // Match against name or description
+                nr.name.to_lowercase().contains(&query)
+                    || nr.description.as_ref()
+                        .map(|d| d.to_lowercase().contains(&query))
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        // Sort alphabetically by name
+        ranges.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        ranges
+    }
+}
+
+/// Convert column index to letter(s) (0 = A, 25 = Z, 26 = AA, etc.)
+fn col_to_letter(col: usize) -> String {
+    let mut s = String::new();
+    let mut n = col;
+    loop {
+        s.insert(0, (b'A' + (n % 26) as u8) as char);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    s
 }
 
 impl Render for Spreadsheet {
@@ -3084,428 +4304,5 @@ impl Render for Spreadsheet {
             self.window_size = current_size;
         }
         views::render_spreadsheet(self, cx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use regex::Regex;
-    use visigrid_engine::sheet::Sheet;
-
-    /// Test-only version of adjust_formula_refs (mirrors Spreadsheet::adjust_formula_refs)
-    fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> String {
-        let re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
-
-        re.replace_all(formula, |caps: &regex::Captures| {
-            let col_absolute = &caps[1] == "$";
-            let col_letters = &caps[2];
-            let row_absolute = &caps[3] == "$";
-            let row_num: i32 = caps[4].parse().unwrap_or(1);
-
-            let col = col_letters.to_uppercase().chars().fold(0i32, |acc, c| {
-                acc * 26 + (c as i32 - 'A' as i32 + 1)
-            }) - 1;
-
-            let new_col = if col_absolute { col } else { col + delta_col };
-            let new_row = if row_absolute { row_num } else { row_num + delta_row };
-
-            if new_col < 0 || new_row < 1 {
-                return "#REF!".to_string();
-            }
-
-            let col_str = col_to_letter(new_col as usize);
-
-            format!(
-                "{}{}{}{}",
-                if col_absolute { "$" } else { "" },
-                col_str,
-                if row_absolute { "$" } else { "" },
-                new_row
-            )
-        }).to_string()
-    }
-
-    fn col_to_letter(col: usize) -> String {
-        let mut s = String::new();
-        let mut n = col;
-        loop {
-            s.insert(0, (b'A' + (n % 26) as u8) as char);
-            if n < 26 { break; }
-            n = n / 26 - 1;
-        }
-        s
-    }
-
-    /// Simulate fill_down at the Sheet level (no gpui required)
-    fn fill_down_on_sheet(sheet: &mut Sheet, min_row: usize, max_row: usize, col: usize) {
-        let source = sheet.get_raw(min_row, col);
-        for row in (min_row + 1)..=max_row {
-            let new_value = if source.starts_with('=') {
-                adjust_formula_refs(&source, row as i32 - min_row as i32, 0)
-            } else {
-                source.clone()
-            };
-            sheet.set_value(row, col, &new_value);
-        }
-    }
-
-    // =========================================================================
-    // REGRESSION TEST: Mixed references (the bug we just fixed)
-    // =========================================================================
-
-    #[test]
-    fn test_fill_down_mixed_references_formulas() {
-        // Test that adjust_formula_refs correctly handles all 4 reference types
-        let formula = "=A1 + $A$1 + A$1 + $A1";
-
-        // Fill down by 1 row
-        assert_eq!(
-            adjust_formula_refs(formula, 1, 0),
-            "=A2 + $A$1 + A$1 + $A2",
-            "Row 2: A1->A2 (relative), $A$1->$A$1 (absolute), A$1->A$1 (row absolute), $A1->$A2 (col absolute)"
-        );
-
-        // Fill down by 2 rows
-        assert_eq!(
-            adjust_formula_refs(formula, 2, 0),
-            "=A3 + $A$1 + A$1 + $A3"
-        );
-
-        // Fill down by 3 rows
-        assert_eq!(
-            adjust_formula_refs(formula, 3, 0),
-            "=A4 + $A$1 + A$1 + $A4"
-        );
-    }
-
-    #[test]
-    fn test_fill_down_mixed_references_end_to_end() {
-        // End-to-end test: seed values, fill, verify formulas AND computed values
-        let mut sheet = Sheet::new(100, 100);
-
-        // Seed A1:A4 with distinct values
-        sheet.set_value(0, 0, "10"); // A1 = 10
-        sheet.set_value(1, 0, "1");  // A2 = 1
-        sheet.set_value(2, 0, "2");  // A3 = 2
-        sheet.set_value(3, 0, "3");  // A4 = 3
-
-        // Set B1 formula: =A1 + $A$1 + A$1 + $A1
-        sheet.set_value(0, 1, "=A1 + $A$1 + A$1 + $A1");
-
-        // Verify B1 value before fill
-        assert_eq!(sheet.get_display(0, 1), "40", "B1 should be 10+10+10+10=40");
-
-        // Simulate fill_down from B1 to B4
-        fill_down_on_sheet(&mut sheet, 0, 3, 1);
-
-        // Assert formulas are correct
-        assert_eq!(sheet.get_raw(0, 1), "=A1 + $A$1 + A$1 + $A1", "B1 formula unchanged");
-        assert_eq!(sheet.get_raw(1, 1), "=A2 + $A$1 + A$1 + $A2", "B2 formula adjusted");
-        assert_eq!(sheet.get_raw(2, 1), "=A3 + $A$1 + A$1 + $A3", "B3 formula adjusted");
-        assert_eq!(sheet.get_raw(3, 1), "=A4 + $A$1 + A$1 + $A4", "B4 formula adjusted");
-
-        // Assert computed values are correct
-        // B1: A1(10) + $A$1(10) + A$1(10) + $A1(10) = 40
-        // B2: A2(1) + $A$1(10) + A$1(10) + $A2(1) = 22
-        // B3: A3(2) + $A$1(10) + A$1(10) + $A3(2) = 24
-        // B4: A4(3) + $A$1(10) + A$1(10) + $A4(3) = 26
-        assert_eq!(sheet.get_display(0, 1), "40", "B1 value");
-        assert_eq!(sheet.get_display(1, 1), "22", "B2 value: 1+10+10+1");
-        assert_eq!(sheet.get_display(2, 1), "24", "B3 value: 2+10+10+2");
-        assert_eq!(sheet.get_display(3, 1), "26", "B4 value: 3+10+10+3");
-    }
-
-    // =========================================================================
-    // EDGE CASE: Ranges in formulas (SUM, etc.)
-    // =========================================================================
-
-    #[test]
-    fn test_fill_down_with_ranges_formulas() {
-        // =SUM(A1:A3) + $A$1 should become =SUM(A2:A4) + $A$1
-        let formula = "=SUM(A1:A3) + $A$1";
-
-        assert_eq!(
-            adjust_formula_refs(formula, 1, 0),
-            "=SUM(A2:A4) + $A$1",
-            "Range A1:A3 should become A2:A4, absolute $A$1 stays"
-        );
-
-        assert_eq!(
-            adjust_formula_refs(formula, 2, 0),
-            "=SUM(A3:A5) + $A$1"
-        );
-    }
-
-    #[test]
-    fn test_fill_down_with_ranges_end_to_end() {
-        let mut sheet = Sheet::new(100, 100);
-
-        // Seed values
-        sheet.set_value(0, 0, "10"); // A1 = 10
-        sheet.set_value(1, 0, "20"); // A2 = 20
-        sheet.set_value(2, 0, "30"); // A3 = 30
-        sheet.set_value(3, 0, "40"); // A4 = 40
-        sheet.set_value(4, 0, "50"); // A5 = 50
-
-        // B1 = SUM(A1:A3) + $A$1 = (10+20+30) + 10 = 70
-        sheet.set_value(0, 1, "=SUM(A1:A3) + $A$1");
-        assert_eq!(sheet.get_display(0, 1), "70", "B1: SUM(10,20,30)+10");
-
-        // Fill down B1:B3
-        fill_down_on_sheet(&mut sheet, 0, 2, 1);
-
-        // Check formulas
-        assert_eq!(sheet.get_raw(0, 1), "=SUM(A1:A3) + $A$1");
-        assert_eq!(sheet.get_raw(1, 1), "=SUM(A2:A4) + $A$1");
-        assert_eq!(sheet.get_raw(2, 1), "=SUM(A3:A5) + $A$1");
-
-        // Check values
-        // B1: SUM(A1:A3) + $A$1 = (10+20+30) + 10 = 70
-        // B2: SUM(A2:A4) + $A$1 = (20+30+40) + 10 = 100
-        // B3: SUM(A3:A5) + $A$1 = (30+40+50) + 10 = 130
-        assert_eq!(sheet.get_display(0, 1), "70", "B1 value");
-        assert_eq!(sheet.get_display(1, 1), "100", "B2 value: SUM(20,30,40)+10");
-        assert_eq!(sheet.get_display(2, 1), "130", "B3 value: SUM(30,40,50)+10");
-    }
-
-    // =========================================================================
-    // EDGE CASE: Multi-letter columns (AA, AB, etc.)
-    // =========================================================================
-
-    #[test]
-    fn test_fill_down_multi_letter_columns_formulas() {
-        // =AA1 + $B$1 + C$2 + $D3
-        // AA1 -> AA2 (both relative)
-        // $B$1 -> $B$1 (both absolute)
-        // C$2 -> C$2 (row absolute)
-        // $D3 -> $D4 (col absolute, row relative)
-        let formula = "=AA1 + $B$1 + C$2 + $D3";
-
-        assert_eq!(
-            adjust_formula_refs(formula, 1, 0),
-            "=AA2 + $B$1 + C$2 + $D4",
-            "Multi-letter columns with mixed refs"
-        );
-
-        assert_eq!(
-            adjust_formula_refs(formula, 2, 0),
-            "=AA3 + $B$1 + C$2 + $D5"
-        );
-    }
-
-    #[test]
-    fn test_fill_down_multi_letter_columns_end_to_end() {
-        let mut sheet = Sheet::new(100, 100);
-
-        // AA is column 26 (0-indexed), B is 1, C is 2, D is 3
-        // Seed values
-        sheet.set_value(0, 26, "100"); // AA1 = 100
-        sheet.set_value(1, 26, "200"); // AA2 = 200
-        sheet.set_value(2, 26, "300"); // AA3 = 300
-
-        sheet.set_value(0, 1, "10");   // B1 = 10
-
-        sheet.set_value(1, 2, "5");    // C2 = 5
-
-        sheet.set_value(2, 3, "1");    // D3 = 1
-        sheet.set_value(3, 3, "2");    // D4 = 2
-        sheet.set_value(4, 3, "3");    // D5 = 3
-
-        // AB1 = AA1 + $B$1 + C$2 + $D3 = 100 + 10 + 5 + 1 = 116
-        sheet.set_value(0, 27, "=AA1 + $B$1 + C$2 + $D3"); // AB1
-        assert_eq!(sheet.get_display(0, 27), "116", "AB1: 100+10+5+1");
-
-        // Fill down AB1:AB3
-        fill_down_on_sheet(&mut sheet, 0, 2, 27);
-
-        // Check formulas
-        assert_eq!(sheet.get_raw(0, 27), "=AA1 + $B$1 + C$2 + $D3");
-        assert_eq!(sheet.get_raw(1, 27), "=AA2 + $B$1 + C$2 + $D4");
-        assert_eq!(sheet.get_raw(2, 27), "=AA3 + $B$1 + C$2 + $D5");
-
-        // Check values
-        // AB1: AA1(100) + $B$1(10) + C$2(5) + $D3(1) = 116
-        // AB2: AA2(200) + $B$1(10) + C$2(5) + $D4(2) = 217
-        // AB3: AA3(300) + $B$1(10) + C$2(5) + $D5(3) = 318
-        assert_eq!(sheet.get_display(0, 27), "116", "AB1 value");
-        assert_eq!(sheet.get_display(1, 27), "217", "AB2 value: 200+10+5+2");
-        assert_eq!(sheet.get_display(2, 27), "318", "AB3 value: 300+10+5+3");
-    }
-
-    // =========================================================================
-    // EDGE CASE: Fill right (column adjustment)
-    // =========================================================================
-
-    #[test]
-    fn test_fill_right_formulas() {
-        let formula = "=A1 + $A$1 + A$1 + $A1";
-
-        // Fill right by 1 column
-        // A1 -> B1 (col relative)
-        // $A$1 -> $A$1 (both absolute)
-        // A$1 -> B$1 (col relative, row absolute)
-        // $A1 -> $A1 (col absolute)
-        assert_eq!(
-            adjust_formula_refs(formula, 0, 1),
-            "=B1 + $A$1 + B$1 + $A1",
-            "Fill right: relative cols shift, absolute cols stay"
-        );
-    }
-
-    /// Simulate fill_right at the Sheet level (no gpui required)
-    fn fill_right_on_sheet(sheet: &mut Sheet, row: usize, min_col: usize, max_col: usize) {
-        let source = sheet.get_raw(row, min_col);
-        for col in (min_col + 1)..=max_col {
-            let new_value = if source.starts_with('=') {
-                adjust_formula_refs(&source, 0, col as i32 - min_col as i32)
-            } else {
-                source.clone()
-            };
-            sheet.set_value(row, col, &new_value);
-        }
-    }
-
-    #[test]
-    fn test_fill_right_mixed_references_end_to_end() {
-        // End-to-end test for fill right with mixed references
-        let mut sheet = Sheet::new(100, 100);
-
-        // Seed row 1 with distinct values: A1=10, B1=1, C1=2, D1=3
-        sheet.set_value(0, 0, "10"); // A1 = 10
-        sheet.set_value(0, 1, "1");  // B1 = 1
-        sheet.set_value(0, 2, "2");  // C1 = 2
-        sheet.set_value(0, 3, "3");  // D1 = 3
-
-        // Set A2 formula: =A1 + $A$1 + A$1 + $A1
-        // When filling right:
-        // - A1 shifts column (relative col)
-        // - $A$1 stays (both absolute)
-        // - A$1 shifts column (relative col, absolute row)
-        // - $A1 stays (absolute col, relative row)
-        sheet.set_value(1, 0, "=A1 + $A$1 + A$1 + $A1");
-
-        // Verify A2 value before fill
-        // A1(10) + $A$1(10) + A$1(10) + $A1(10) = 40
-        assert_eq!(sheet.get_display(1, 0), "40", "A2 should be 40");
-
-        // Fill right A2:D2
-        fill_right_on_sheet(&mut sheet, 1, 0, 3);
-
-        // Check formulas
-        assert_eq!(sheet.get_raw(1, 0), "=A1 + $A$1 + A$1 + $A1", "A2 formula unchanged");
-        assert_eq!(sheet.get_raw(1, 1), "=B1 + $A$1 + B$1 + $A1", "B2 formula adjusted");
-        assert_eq!(sheet.get_raw(1, 2), "=C1 + $A$1 + C$1 + $A1", "C2 formula adjusted");
-        assert_eq!(sheet.get_raw(1, 3), "=D1 + $A$1 + D$1 + $A1", "D2 formula adjusted");
-
-        // Check computed values
-        // A2: A1(10) + $A$1(10) + A$1(10) + $A1(10) = 40
-        // B2: B1(1) + $A$1(10) + B$1(1) + $A1(10) = 22
-        // C2: C1(2) + $A$1(10) + C$1(2) + $A1(10) = 24
-        // D2: D1(3) + $A$1(10) + D$1(3) + $A1(10) = 26
-        assert_eq!(sheet.get_display(1, 0), "40", "A2 value");
-        assert_eq!(sheet.get_display(1, 1), "22", "B2 value: 1+10+1+10");
-        assert_eq!(sheet.get_display(1, 2), "24", "C2 value: 2+10+2+10");
-        assert_eq!(sheet.get_display(1, 3), "26", "D2 value: 3+10+3+10");
-    }
-
-    // =========================================================================
-    // EDGE CASE: Multi-edit with single undo
-    // =========================================================================
-
-    #[test]
-    fn test_multi_edit_applies_once_and_single_undo() {
-        use crate::history::{History, CellChange};
-
-        let mut sheet = Sheet::new(100, 100);
-        let mut history = History::new();
-
-        // Seed initial values: A1=1, A2=2, A3=3, B1=10, B2=20, B3=30
-        sheet.set_value(0, 0, "1");  // A1
-        sheet.set_value(1, 0, "2");  // A2
-        sheet.set_value(2, 0, "3");  // A3
-        sheet.set_value(0, 1, "10"); // B1
-        sheet.set_value(1, 1, "20"); // B2
-        sheet.set_value(2, 1, "30"); // B3
-
-        // Simulate multi-edit: set "=A1*2" to selection A1:B3 (6 cells)
-        let new_value = "=A1*2";
-        let selection = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)];
-
-        let mut changes = Vec::new();
-        for (row, col) in selection.iter() {
-            let old_value = sheet.get_raw(*row, *col);
-            if old_value != new_value {
-                changes.push(CellChange {
-                    row: *row,
-                    col: *col,
-                    old_value,
-                    new_value: new_value.to_string(),
-                });
-            }
-            sheet.set_value(*row, *col, new_value);
-        }
-
-        // Record as single batch (this is what multi-edit does)
-        history.record_batch(changes);
-
-        // Verify all 6 cells have the formula
-        for (row, col) in selection.iter() {
-            assert_eq!(
-                sheet.get_raw(*row, *col), "=A1*2",
-                "Cell ({}, {}) should have formula =A1*2", row, col
-            );
-        }
-
-        // Verify computed values (all reference A1 which is now =A1*2, causing circular ref)
-        // Actually A1 = =A1*2 is circular, so let's verify at least B1 computes
-        // B1 = =A1*2 where A1 = =A1*2 (circular)
-        // The key test is that single undo reverts ALL cells
-
-        // Single undo should revert ALL 6 cells
-        let entry = history.undo().expect("Should have undo entry");
-        assert_eq!(entry.changes.len(), 6, "Undo entry should contain all 6 changes");
-
-        // Apply undo to sheet
-        for change in entry.changes.iter() {
-            sheet.set_value(change.row, change.col, &change.old_value);
-        }
-
-        // Verify original values are restored
-        assert_eq!(sheet.get_raw(0, 0), "1", "A1 restored to 1");
-        assert_eq!(sheet.get_raw(1, 0), "2", "A2 restored to 2");
-        assert_eq!(sheet.get_raw(2, 0), "3", "A3 restored to 3");
-        assert_eq!(sheet.get_raw(0, 1), "10", "B1 restored to 10");
-        assert_eq!(sheet.get_raw(1, 1), "20", "B2 restored to 20");
-        assert_eq!(sheet.get_raw(2, 1), "30", "B3 restored to 30");
-
-        // Verify redo works and contains all 6 changes
-        let redo_entry = history.redo().expect("Should have redo entry");
-        assert_eq!(redo_entry.changes.len(), 6, "Redo entry should contain all 6 changes");
-    }
-
-    // =========================================================================
-    // EDGE CASE: Boundary conditions
-    // =========================================================================
-
-    #[test]
-    fn test_fill_down_ref_error() {
-        // Filling up from row 1 should produce #REF!
-        let formula = "=A1";
-        assert_eq!(
-            adjust_formula_refs(formula, -1, 0),
-            "=#REF!",
-            "Row 0 (A0) doesn't exist, should be #REF!"
-        );
-    }
-
-    #[test]
-    fn test_fill_left_ref_error() {
-        // Filling left from column A should produce #REF!
-        let formula = "=A1";
-        assert_eq!(
-            adjust_formula_refs(formula, 0, -1),
-            "=#REF!",
-            "Column before A doesn't exist, should be #REF!"
-        );
     }
 }

@@ -502,6 +502,21 @@ impl Sheet {
         cell.format.strikethrough = !cell.format.strikethrough;
     }
 
+    pub fn set_bold(&mut self, row: usize, col: usize, value: bool) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.bold = value;
+    }
+
+    pub fn set_italic(&mut self, row: usize, col: usize, value: bool) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.italic = value;
+    }
+
+    pub fn set_underline(&mut self, row: usize, col: usize, value: bool) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.underline = value;
+    }
+
     pub fn set_alignment(&mut self, row: usize, col: usize, alignment: Alignment) {
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format.alignment = alignment;

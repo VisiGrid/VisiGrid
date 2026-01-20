@@ -1,201 +1,27 @@
+//! Command palette rendering
+//!
+//! This module provides the UI for the command palette overlay.
+//! Search logic is handled by the search engine in `search.rs`.
+
 use std::time::Duration;
 use gpui::*;
+use gpui::prelude::FluentBuilder;
+
+use crate::actions::{PaletteUp, PaletteDown, PaletteExecute, PalettePreview, PaletteCancel};
 use crate::app::Spreadsheet;
-use crate::mode::Mode;
+use crate::search::SearchItem;
 use crate::theme::TokenKey;
-
-/// A command that can be executed from the palette
-#[derive(Clone)]
-pub struct Command {
-    pub name: &'static str,
-    pub keywords: &'static str,  // Additional search terms
-    pub shortcut: Option<&'static str>,
-    pub action: fn(&mut Spreadsheet, &mut Context<Spreadsheet>),
-}
-
-/// All available commands
-pub fn all_commands() -> Vec<Command> {
-    vec![
-        // Navigation
-        Command {
-            name: "Go to Cell",
-            keywords: "goto jump navigate",
-            shortcut: Some("Ctrl+G"),
-            action: |app, cx| app.show_goto(cx),
-        },
-        Command {
-            name: "Find in Cells",
-            keywords: "search",
-            shortcut: Some("Ctrl+F"),
-            action: |app, cx| app.show_find(cx),
-        },
-        Command {
-            name: "Go to Start (A1)",
-            keywords: "home beginning",
-            shortcut: Some("Ctrl+Home"),
-            action: |app, cx| {
-                app.selected = (0, 0);
-                app.selection_end = None;
-                app.scroll_row = 0;
-                app.scroll_col = 0;
-                cx.notify();
-            },
-        },
-        Command {
-            name: "Select All",
-            keywords: "selection",
-            shortcut: Some("Ctrl+A"),
-            action: |app, cx| app.select_all(cx),
-        },
-
-        // Editing
-        Command {
-            name: "Fill Down",
-            keywords: "copy formula",
-            shortcut: Some("Ctrl+D"),
-            action: |app, cx| app.fill_down(cx),
-        },
-        Command {
-            name: "Fill Right",
-            keywords: "copy formula",
-            shortcut: Some("Ctrl+R"),
-            action: |app, cx| app.fill_right(cx),
-        },
-        Command {
-            name: "Clear Cells",
-            keywords: "delete remove empty",
-            shortcut: Some("Delete"),
-            action: |app, cx| app.delete_selection(cx),
-        },
-        Command {
-            name: "Undo",
-            keywords: "revert back",
-            shortcut: Some("Ctrl+Z"),
-            action: |app, cx| app.undo(cx),
-        },
-        Command {
-            name: "Redo",
-            keywords: "forward",
-            shortcut: Some("Ctrl+Y"),
-            action: |app, cx| app.redo(cx),
-        },
-
-        // Clipboard
-        Command {
-            name: "Copy",
-            keywords: "clipboard",
-            shortcut: Some("Ctrl+C"),
-            action: |app, cx| app.copy(cx),
-        },
-        Command {
-            name: "Cut",
-            keywords: "clipboard",
-            shortcut: Some("Ctrl+X"),
-            action: |app, cx| app.cut(cx),
-        },
-        Command {
-            name: "Paste",
-            keywords: "clipboard",
-            shortcut: Some("Ctrl+V"),
-            action: |app, cx| app.paste(cx),
-        },
-
-        // Formatting
-        Command {
-            name: "Toggle Bold",
-            keywords: "format style",
-            shortcut: Some("Ctrl+B"),
-            action: |app, cx| app.toggle_bold(cx),
-        },
-        Command {
-            name: "Toggle Italic",
-            keywords: "format style",
-            shortcut: Some("Ctrl+I"),
-            action: |app, cx| app.toggle_italic(cx),
-        },
-        Command {
-            name: "Toggle Underline",
-            keywords: "format style",
-            shortcut: Some("Ctrl+U"),
-            action: |app, cx| app.toggle_underline(cx),
-        },
-
-        // File
-        Command {
-            name: "New File",
-            keywords: "create workbook",
-            shortcut: Some("Ctrl+N"),
-            action: |app, cx| app.new_file(cx),
-        },
-        Command {
-            name: "Open File",
-            keywords: "load",
-            shortcut: Some("Ctrl+O"),
-            action: |app, cx| app.open_file(cx),
-        },
-        Command {
-            name: "Save",
-            keywords: "write",
-            shortcut: Some("Ctrl+S"),
-            action: |app, cx| app.save(cx),
-        },
-        Command {
-            name: "Save As",
-            keywords: "write export",
-            shortcut: Some("Ctrl+Shift+S"),
-            action: |app, cx| app.save_as(cx),
-        },
-        Command {
-            name: "Export as CSV",
-            keywords: "save",
-            shortcut: None,
-            action: |app, cx| app.export_csv(cx),
-        },
-
-        // Appearance
-        Command {
-            name: "Select Theme...",
-            keywords: "appearance color scheme dark light",
-            shortcut: None,
-            action: |app, cx| app.show_theme_picker(cx),
-        },
-
-        // Help
-        Command {
-            name: "Show Keyboard Shortcuts",
-            keywords: "help keys bindings hotkeys",
-            shortcut: None,
-            action: |app, cx| {
-                app.status_message = Some("Shortcuts: Ctrl+D Fill Down, Ctrl+R Fill Right, Ctrl+Enter Multi-edit".into());
-                cx.notify();
-            },
-        },
-    ]
-}
-
-/// Filter commands by query (substring match on name + keywords)
-pub fn filter_commands(query: &str) -> Vec<Command> {
-    let commands = all_commands();
-    if query.is_empty() {
-        return commands;
-    }
-
-    let query_lower = query.to_lowercase();
-    commands
-        .into_iter()
-        .filter(|cmd| {
-            cmd.name.to_lowercase().contains(&query_lower)
-                || cmd.keywords.to_lowercase().contains(&query_lower)
-        })
-        .collect()
-}
 
 /// Render the command palette overlay
 pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    let filtered = filter_commands(&app.palette_query);
+    let results = app.palette_results();
     let selected_idx = app.palette_selected;
     let query = app.palette_query.clone();
     let has_query = !query.is_empty();
+    let is_previewing = app.palette_previewing;
+    let total_results = app.palette_total_results;
+    let shown_results = results.len();
+    let is_truncated = total_results > shown_results;
 
     // Theme colors
     let panel_bg = app.token(TokenKey::PanelBg);
@@ -220,6 +46,8 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
         }))
         .child(
             div()
+                .key_context("CommandPalette")
+                .track_focus(&app.focus_handle)
                 .w(px(500.0))
                 .max_h(px(380.0))
                 .bg(panel_bg)
@@ -228,6 +56,22 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 .overflow_hidden()
                 .flex()
                 .flex_col()
+                // Action handlers
+                .on_action(cx.listener(|this, _: &PaletteUp, _, cx| {
+                    this.palette_up(cx);
+                }))
+                .on_action(cx.listener(|this, _: &PaletteDown, _, cx| {
+                    this.palette_down(cx);
+                }))
+                .on_action(cx.listener(|this, _: &PaletteExecute, _, cx| {
+                    this.palette_execute(cx);
+                }))
+                .on_action(cx.listener(|this, _: &PalettePreview, _, cx| {
+                    this.palette_preview(cx);
+                }))
+                .on_action(cx.listener(|this, _: &PaletteCancel, _, cx| {
+                    this.hide_palette(cx);
+                }))
                 // Stop click propagation on the palette itself
                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                     cx.stop_propagation();
@@ -277,19 +121,50 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                 )
                         )
                 )
-                // Command list
+                // Result list
                 .child({
-                    let list = div()
+                    let mut list = div()
                         .flex_1()
                         .overflow_hidden()
-                        .py_1()
-                        .children(
-                            filtered.iter().enumerate().take(12).map(|(idx, cmd)| {
-                                let is_selected = idx == selected_idx;
-                                render_command_item(cmd, is_selected, idx, text_primary, text_muted, selection_bg, toolbar_hover, cx)
-                            })
+                        .py_1();
+
+                    // Show help hints when query is empty
+                    if !has_query {
+                        list = list.child(
+                            div()
+                                .px_4()
+                                .py_2()
+                                .text_color(text_disabled)
+                                .text_size(px(11.0))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div().flex().gap_4()
+                                        .child(div().child(">  commands"))
+                                        .child(div().child(":  go to cell"))
+                                )
+                                .child(
+                                    div().flex().gap_4()
+                                        .child(div().child("@  search cells"))
+                                        .child(div().child("=  functions"))
+                                )
+                                .child(
+                                    div().flex().gap_4()
+                                        .child(div().child("#  settings"))
+                                )
                         );
-                    if filtered.is_empty() {
+                    }
+
+                    // Add search results
+                    list = list.children(
+                        results.iter().enumerate().map(|(idx, item)| {
+                            let is_selected = idx == selected_idx;
+                            render_search_item(item, is_selected, idx, text_primary, text_muted, selection_bg, toolbar_hover, cx)
+                        })
+                    );
+
+                    if results.is_empty() && has_query {
                         list.child(
                             div()
                                 .px_4()
@@ -307,26 +182,133 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                     div()
                         .flex()
                         .items_center()
-                        .justify_end()
-                        .gap_3()
+                        .justify_between()
                         .px_3()
                         .py(px(6.0))
                         .border_t_1()
                         .border_color(panel_border)
                         .text_size(px(11.0))
                         .text_color(text_muted)
-                        .child("Run")
+                        // Left side: preview indicator or truncation notice
                         .child(
                             div()
-                                .text_color(text_disabled)
-                                .child("enter")
+                                .when(is_previewing, |el| {
+                                    el.child("Previewing - Esc to restore")
+                                })
+                                .when(!is_previewing && is_truncated, |el| {
+                                    el.child(format!("Showing {} of {} matches", shown_results, total_results))
+                                })
+                        )
+                        // Right side: keyboard hints
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child("Alt")
+                                        .child(
+                                            div()
+                                                .text_color(text_disabled)
+                                                .child("ctrl+↵")
+                                        )
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child("Preview")
+                                        .child(
+                                            div()
+                                                .text_color(text_disabled)
+                                                .child("shift+↵")
+                                        )
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child("Run")
+                                        .child(
+                                            div()
+                                                .text_color(text_disabled)
+                                                .child("↵")
+                                        )
+                                )
                         )
                 )
         )
 }
 
-fn render_command_item(
-    cmd: &Command,
+/// Render text with highlighted spans
+fn render_highlighted_text(
+    text: &str,
+    highlights: &[(usize, usize)],
+    normal_color: Hsla,
+    highlight_color: Hsla,
+) -> Div {
+    if highlights.is_empty() {
+        return div()
+            .flex()
+            .text_color(normal_color)
+            .text_size(px(13.0))
+            .child(text.to_string());
+    }
+
+    let mut container = div()
+        .flex()
+        .items_center()
+        .text_size(px(13.0));
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut pos = 0;
+
+    for &(start, end) in highlights {
+        // Clamp to valid range
+        let start = start.min(chars.len());
+        let end = end.min(chars.len());
+
+        // Add text before highlight
+        if pos < start {
+            let segment: String = chars[pos..start].iter().collect();
+            container = container.child(
+                div().text_color(normal_color).child(segment)
+            );
+        }
+
+        // Add highlighted text
+        if start < end {
+            let segment: String = chars[start..end].iter().collect();
+            container = container.child(
+                div()
+                    .text_color(highlight_color)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(segment)
+            );
+        }
+
+        pos = end;
+    }
+
+    // Add remaining text after last highlight
+    if pos < chars.len() {
+        let segment: String = chars[pos..].iter().collect();
+        container = container.child(
+            div().text_color(normal_color).child(segment)
+        );
+    }
+
+    container
+}
+
+fn render_search_item(
+    item: &SearchItem,
     is_selected: bool,
     idx: usize,
     text_primary: Hsla,
@@ -335,14 +317,21 @@ fn render_command_item(
     hover_bg: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    let action = cmd.action;
-    let name = cmd.name;
-    let shortcut = cmd.shortcut;
+    let title = item.title.clone();
+    let subtitle = item.subtitle.clone();
+    let kind = item.kind;
+    let highlights = item.highlights.clone();
 
     let bg_color = if is_selected { selection_bg } else { hsla(0.0, 0.0, 0.0, 0.0) };
 
-    let mut item = div()
-        .id(ElementId::NamedInteger("palette-cmd".into(), idx as u64))
+    // Icon based on result kind (use the centralized icon from SearchKind)
+    let icon = kind.icon();
+
+    // Highlight color: brighter version of primary
+    let highlight_color = hsla(0.55, 0.8, 0.65, 1.0);  // Bright cyan/teal for highlights
+
+    let mut row = div()
+        .id(ElementId::NamedInteger("palette-item".into(), idx as u64))
         .flex()
         .items_center()
         .justify_between()
@@ -351,35 +340,42 @@ fn render_command_item(
         .cursor_pointer()
         .bg(bg_color)
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            // Clear palette state but let the action control the mode
-            this.palette_query.clear();
-            this.palette_selected = 0;
-            action(this, cx);
-            // Only return to Navigation if action didn't change mode
-            if this.mode == Mode::Command {
-                this.mode = Mode::Navigation;
-            }
-            cx.notify();
+            // Select this item and execute
+            this.palette_selected = idx;
+            this.palette_execute(cx);
         }))
         .child(
             div()
-                .text_color(text_primary)
-                .text_size(px(13.0))
-                .child(name)
+                .flex()
+                .items_center()
+                .gap_2()
+                // Kind icon
+                .child(
+                    div()
+                        .text_color(text_muted)
+                        .text_size(px(12.0))
+                        .w(px(12.0))
+                        .child(icon)
+                )
+                // Title with highlighted matches
+                .child(
+                    render_highlighted_text(&title, &highlights, text_primary, highlight_color)
+                )
         );
 
     if !is_selected {
-        item = item.hover(move |s| s.bg(hover_bg));
+        row = row.hover(move |s| s.bg(hover_bg));
     }
 
-    if let Some(shortcut_text) = shortcut {
-        item = item.child(
+    // Subtitle (shortcut or description)
+    if let Some(sub) = subtitle {
+        row = row.child(
             div()
                 .text_color(text_muted)
                 .text_size(px(12.0))
-                .child(shortcut_text)
+                .child(sub)
         );
     }
 
-    item
+    row
 }

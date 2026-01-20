@@ -10,10 +10,11 @@ mod inspector_panel;
 mod menu_bar;
 mod status_bar;
 mod theme_picker;
+mod tour;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, CELL_HEIGHT, HEADER_WIDTH};
+use crate::app::{Spreadsheet, CELL_HEIGHT, HEADER_WIDTH, CreateNameFocus};
 use crate::actions::*;
 use crate::mode::{Mode, InspectorTab};
 use crate::theme::TokenKey;
@@ -26,6 +27,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let show_font_picker = app.mode == Mode::FontPicker;
     let show_theme_picker = app.mode == Mode::ThemePicker;
     let show_about = app.mode == Mode::About;
+    let show_rename_symbol = app.mode == Mode::RenameSymbol;
+    let show_create_named_range = app.mode == Mode::CreateNamedRange;
+    let show_edit_description = app.mode == Mode::EditDescription;
+    let show_tour = app.mode == Mode::Tour;
+    let show_name_tooltip = app.should_show_name_tooltip() && app.mode == Mode::Navigation;
     let show_inspector = app.inspector_visible;
 
     div()
@@ -273,6 +279,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 this.hide_theme_picker(cx);
             } else if this.mode == Mode::About {
                 this.hide_about(cx);
+            } else if this.inspector_visible && this.mode == Mode::Navigation {
+                // Esc closes inspector panel when in navigation mode
+                this.inspector_visible = false;
+                cx.notify();
             } else {
                 this.cancel_edit(cx);
             }
@@ -392,6 +402,37 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &FindPrev, _, cx| {
             this.find_prev(cx);
         }))
+        // IDE-style navigation (Find References / Go to Precedents)
+        .on_action(cx.listener(|this, _: &FindReferences, _, cx| {
+            // In edit mode, check if cursor is on a named range
+            if this.mode.is_editing() {
+                if let Some(name) = this.named_range_at_cursor() {
+                    this.show_named_range_references(&name, cx);
+                    return;
+                }
+            }
+            // Fall back to cell references
+            let (row, col) = this.selected;
+            this.show_references(row, col, cx);
+        }))
+        .on_action(cx.listener(|this, _: &GoToPrecedents, _, cx| {
+            // In edit mode, check if cursor is on a named range
+            if this.mode.is_editing() {
+                if let Some(name) = this.named_range_at_cursor() {
+                    this.go_to_named_range_definition(&name, cx);
+                    return;
+                }
+            }
+            // Fall back to cell precedents
+            let (row, col) = this.selected;
+            this.show_precedents(row, col, cx);
+        }))
+        .on_action(cx.listener(|this, _: &RenameSymbol, _, cx| {
+            this.show_rename_symbol(None, cx);
+        }))
+        .on_action(cx.listener(|this, _: &CreateNamedRange, _, cx| {
+            this.show_create_named_range(cx);
+        }))
         // Command palette
         .on_action(cx.listener(|this, _: &ToggleCommandPalette, _, cx| {
             this.toggle_palette(cx);
@@ -510,7 +551,16 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                         return;
                     }
                     "enter" => {
-                        this.palette_execute(cx);
+                        if event.keystroke.modifiers.control {
+                            // Ctrl+Enter = secondary action (copy path, copy ref, show help)
+                            this.palette_execute_secondary(cx);
+                        } else if event.keystroke.modifiers.shift {
+                            // Shift+Enter = preview (apply without closing)
+                            this.palette_preview(cx);
+                        } else {
+                            // Plain Enter = execute and close
+                            this.palette_execute(cx);
+                        }
                         return;
                     }
                     "up" => {
@@ -617,6 +667,153 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                         for c in key_char.chars() {
                             this.theme_picker_insert_char(c, cx);
                         }
+                        return;
+                    }
+                }
+            }
+
+            // Handle Rename Symbol mode
+            if this.mode == Mode::RenameSymbol {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.hide_rename_symbol(cx);
+                        return;
+                    }
+                    "enter" => {
+                        this.confirm_rename_symbol(cx);
+                        return;
+                    }
+                    "backspace" => {
+                        this.rename_symbol_backspace(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // Handle text input for rename
+                if let Some(key_char) = &event.keystroke.key_char {
+                    if !event.keystroke.modifiers.control
+                        && !event.keystroke.modifiers.alt
+                        && !event.keystroke.modifiers.platform
+                    {
+                        for c in key_char.chars().filter(|c| !c.is_control()) {
+                            this.rename_symbol_insert_char(c, cx);
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Handle Create Named Range mode
+            if this.mode == Mode::CreateNamedRange {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.hide_create_named_range(cx);
+                        return;
+                    }
+                    "enter" => {
+                        this.confirm_create_named_range(cx);
+                        return;
+                    }
+                    "backspace" => {
+                        this.create_name_backspace(cx);
+                        return;
+                    }
+                    "tab" => {
+                        this.create_name_tab(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // Handle text input for create name
+                if let Some(key_char) = &event.keystroke.key_char {
+                    if !event.keystroke.modifiers.control
+                        && !event.keystroke.modifiers.alt
+                        && !event.keystroke.modifiers.platform
+                    {
+                        for c in key_char.chars().filter(|c| !c.is_control()) {
+                            this.create_name_insert_char(c, cx);
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Handle Edit Description mode
+            if this.mode == Mode::EditDescription {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.hide_edit_description(cx);
+                        return;
+                    }
+                    "enter" => {
+                        this.apply_edit_description(cx);
+                        return;
+                    }
+                    "backspace" => {
+                        this.edit_description_backspace(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // Handle text input for description
+                if let Some(key_char) = &event.keystroke.key_char {
+                    if !event.keystroke.modifiers.control
+                        && !event.keystroke.modifiers.alt
+                        && !event.keystroke.modifiers.platform
+                    {
+                        for c in key_char.chars().filter(|c| !c.is_control()) {
+                            this.edit_description_insert_char(c, cx);
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Handle Names tab filter input (when inspector visible + Names tab + Navigation mode)
+            if this.inspector_visible
+                && this.inspector_tab == InspectorTab::Names
+                && this.mode == Mode::Navigation
+            {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        if !this.names_filter_query.is_empty() {
+                            // Clear filter first
+                            this.names_filter_query.clear();
+                            cx.notify();
+                        } else {
+                            // Close inspector
+                            this.inspector_visible = false;
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    "backspace" => {
+                        if !this.names_filter_query.is_empty() {
+                            this.names_filter_query.pop();
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    "/" => {
+                        // "/" focuses filter (already focused, this just prevents "/" from being typed)
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // Handle text input for filter (only alphanumeric and underscore)
+                if let Some(key_char) = &event.keystroke.key_char {
+                    if !event.keystroke.modifiers.control
+                        && !event.keystroke.modifiers.alt
+                        && !event.keystroke.modifiers.platform
+                    {
+                        for c in key_char.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '.') {
+                            this.names_filter_query.push(c);
+                        }
+                        cx.notify();
                         return;
                     }
                 }
@@ -745,6 +942,22 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .when(show_about, |div| {
             div.child(about_dialog::render_about_dialog(app, cx))
         })
+        .when(show_rename_symbol, |div| {
+            div.child(render_rename_symbol_dialog(app))
+        })
+        .when(show_create_named_range, |div| {
+            div.child(render_create_named_range_dialog(app))
+        })
+        .when(show_edit_description, |div| {
+            div.child(render_edit_description_dialog(app))
+        })
+        .when(show_tour, |div| {
+            div.child(tour::render_tour(app, cx))
+        })
+        // Name tooltip (one-time first-run hint)
+        .when(show_name_tooltip, |div| {
+            div.child(tour::render_name_tooltip(app, cx))
+        })
         .when(app.open_menu.is_some(), |div| {
             div.child(menu_bar::render_menu_dropdown(app, cx))
         })
@@ -817,4 +1030,329 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             let accent = app.token(TokenKey::Accent);
             div.child(formula_bar::render_hover_docs(func, panel_bg, panel_border, text_primary, text_muted, accent))
         })
+}
+
+/// Render the rename symbol dialog (Ctrl+Shift+R)
+fn render_rename_symbol_dialog(app: &Spreadsheet) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let error_color = app.token(TokenKey::Error);
+
+    let affected_count = app.rename_affected_cells.len();
+    let has_error = app.rename_validation_error.is_some();
+
+    // Build affected cells preview
+    let cells_preview: Vec<String> = app.rename_affected_cells
+        .iter()
+        .take(8)
+        .map(|(row, col)| {
+            let col_letter = col_to_letter(*col);
+            format!("{}{}", col_letter, row + 1)
+        })
+        .collect();
+
+    // Centered dialog overlay
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(0.0, 0.0, 0.0, 0.5))
+        .child(
+            div()
+                .w(px(400.0))
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .rounded_md()
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                // Header
+                .child(
+                    div()
+                        .text_color(text_primary)
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("Rename '{}'", app.rename_original_name))
+                )
+                // Input field
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .bg(hsla(0.0, 0.0, 0.0, 0.2))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(if has_error { error_color } else { panel_border })
+                        .text_color(text_primary)
+                        .child(app.rename_new_name.clone())
+                )
+                // Validation error (if any)
+                .when_some(app.rename_validation_error.clone(), |d, err| {
+                    d.child(
+                        div()
+                            .text_color(error_color)
+                            .text_xs()
+                            .child(err)
+                    )
+                })
+                // Affected cells count
+                .child(
+                    div()
+                        .text_color(text_muted)
+                        .text_xs()
+                        .child(format!(
+                            "{} formula{} will be updated",
+                            affected_count,
+                            if affected_count == 1 { "" } else { "s" }
+                        ))
+                )
+                // Preview of affected cells (show list of cell refs)
+                .when(affected_count > 0, |d| {
+                    let preview = cells_preview.join(", ");
+                    let more = if affected_count > 8 {
+                        format!(" ...and {} more", affected_count - 8)
+                    } else {
+                        String::new()
+                    };
+                    d.child(
+                        div()
+                            .text_color(text_muted)
+                            .text_xs()
+                            .child(format!("{}{}", preview, more))
+                    )
+                })
+                // Instructions
+                .child(
+                    div()
+                        .text_color(text_muted)
+                        .text_xs()
+                        .child("Enter to confirm • Escape to cancel")
+                )
+        )
+}
+
+/// Render the edit description dialog
+fn render_edit_description_dialog(app: &Spreadsheet) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+
+    // Centered dialog overlay
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(0.0, 0.0, 0.0, 0.5))
+        .child(
+            div()
+                .w(px(400.0))
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .rounded_md()
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                // Header
+                .child(
+                    div()
+                        .text_color(text_primary)
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("Edit description for '{}'", app.edit_description_name))
+                )
+                // Input field
+                .child(
+                    div()
+                        .px_2()
+                        .py_2()
+                        .bg(hsla(0.0, 0.0, 0.0, 0.2))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(panel_border)
+                        .text_color(if app.edit_description_value.is_empty() { text_muted } else { text_primary })
+                        .min_h(px(60.0))
+                        .child(if app.edit_description_value.is_empty() {
+                            "Enter a description...".to_string()
+                        } else {
+                            app.edit_description_value.clone()
+                        })
+                )
+                // Instructions
+                .child(
+                    div()
+                        .text_color(text_muted)
+                        .text_xs()
+                        .child("Enter to save • Escape to cancel")
+                )
+        )
+}
+
+/// Convert column index to letter(s) (0 = A, 25 = Z, 26 = AA, etc.)
+fn col_to_letter(col: usize) -> String {
+    let mut s = String::new();
+    let mut n = col;
+    loop {
+        s.insert(0, (b'A' + (n % 26) as u8) as char);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    s
+}
+
+/// Render the create named range dialog (Ctrl+Shift+N)
+fn render_create_named_range_dialog(app: &Spreadsheet) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let error_color = app.token(TokenKey::Error);
+    let accent = app.token(TokenKey::Accent);
+
+    let has_error = app.create_name_validation_error.is_some();
+    let name_focused = app.create_name_focus == CreateNameFocus::Name;
+    let desc_focused = app.create_name_focus == CreateNameFocus::Description;
+
+    // Centered dialog overlay
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(0.0, 0.0, 0.0, 0.5))
+        .child(
+            div()
+                .w(px(400.0))
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .rounded_md()
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                // Header
+                .child(
+                    div()
+                        .text_color(text_primary)
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Create Named Range")
+                )
+                // Target (read-only display)
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_color(text_muted)
+                                .text_xs()
+                                .w(px(70.0))
+                                .child("Target:")
+                        )
+                        .child(
+                            div()
+                                .text_color(text_primary)
+                                .text_sm()
+                                .child(app.create_name_target.clone())
+                        )
+                )
+                // Name input
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_color(text_muted)
+                                .text_xs()
+                                .w(px(70.0))
+                                .child("Name:")
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .px_2()
+                                .py_1()
+                                .bg(hsla(0.0, 0.0, 0.0, 0.2))
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(if name_focused && has_error {
+                                    error_color
+                                } else if name_focused {
+                                    accent
+                                } else {
+                                    panel_border
+                                })
+                                .text_color(text_primary)
+                                .child(if app.create_name_name.is_empty() && !name_focused {
+                                    "(required)".to_string()
+                                } else {
+                                    app.create_name_name.clone()
+                                })
+                        )
+                )
+                // Description input
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_color(text_muted)
+                                .text_xs()
+                                .w(px(70.0))
+                                .child("Description:")
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .px_2()
+                                .py_1()
+                                .bg(hsla(0.0, 0.0, 0.0, 0.2))
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(if desc_focused { accent } else { panel_border })
+                                .text_color(if app.create_name_description.is_empty() { text_muted } else { text_primary })
+                                .child(if app.create_name_description.is_empty() {
+                                    "(optional)".to_string()
+                                } else {
+                                    app.create_name_description.clone()
+                                })
+                        )
+                )
+                // Validation error (if any)
+                .when_some(app.create_name_validation_error.clone(), |d, err| {
+                    d.child(
+                        div()
+                            .text_color(error_color)
+                            .text_xs()
+                            .child(err)
+                    )
+                })
+                // Instructions
+                .child(
+                    div()
+                        .text_color(text_muted)
+                        .text_xs()
+                        .child("Tab to switch fields • Enter to confirm • Escape to cancel")
+                )
+        )
 }

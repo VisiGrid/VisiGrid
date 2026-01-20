@@ -5589,6 +5589,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "visigrid-engine",
 ]
 

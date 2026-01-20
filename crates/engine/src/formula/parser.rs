@@ -23,6 +23,8 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    /// Named range reference (resolved at evaluation time)
+    NamedRange(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -402,7 +404,8 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> 
                     ));
                 }
             }
-            Err(format!("Unknown identifier: {}", name))
+            // Not a function call - treat as a named range (resolved at evaluation time)
+            Ok((Expr::NamedRange(name.clone()), pos + 1))
         }
         Token::LParen => {
             let (expr, pos) = parse_comparison(tokens, pos + 1)?;
@@ -468,7 +471,9 @@ pub fn extract_cell_refs(expr: &Expr) -> Vec<(usize, usize)> {
 
 fn collect_cell_refs(expr: &Expr, refs: &mut Vec<(usize, usize)>) {
     match expr {
-        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) => {}
+        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::NamedRange(_) => {
+            // NamedRange refs are resolved at evaluation time with access to NamedRangeStore
+        }
         Expr::CellRef { col, row } => {
             refs.push((*row, *col));
         }

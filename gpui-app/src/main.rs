@@ -3,13 +3,20 @@
 
 mod actions;
 mod app;
+mod autocomplete;
 mod file_ops;
+mod fill;
+mod formatting;
 mod formula_context;
 mod history;
 mod keybindings;
 mod mode;
+mod search;
 mod theme;
 mod views;
+
+#[cfg(test)]
+mod tests;
 
 use gpui::*;
 use app::Spreadsheet;

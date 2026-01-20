@@ -196,6 +196,25 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Import certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
       - name: Build universal binary
         run: |
           cargo build --release --target x86_64-apple-darwin -p visigrid-gpui
@@ -234,6 +253,20 @@ jobs:
 
           echo -n "APPLVSGD" > "$APP_DIR/Contents/PkgInfo"
 
+      - name: Sign app bundle
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Sign the binary first, then the app bundle
+          codesign --force --options runtime --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
+            --timestamp "dist/VisiGrid.app/Contents/MacOS/visigrid"
+
+          codesign --force --options runtime --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
+            --timestamp "dist/VisiGrid.app"
+
+          # Verify signature
+          codesign --verify --verbose=2 "dist/VisiGrid.app"
+
       - name: Create DMG
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -246,6 +279,33 @@ jobs:
             -srcfolder "dist/dmg-temp" \
             -ov -format UDBZ \
             "dist/VisiGrid-${VERSION}-macOS-universal.dmg"
+
+      - name: Sign DMG
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          codesign --force --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
+            --timestamp "dist/VisiGrid-${VERSION}-macOS-universal.dmg"
+
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DMG_PATH="dist/VisiGrid-${VERSION}-macOS-universal.dmg"
+
+          # Submit for notarization
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          # Staple the notarization ticket
+          xcrun stapler staple "$DMG_PATH"
 
       - name: Create zip (alternative to DMG)
         run: |

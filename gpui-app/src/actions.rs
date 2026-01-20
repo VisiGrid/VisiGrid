@@ -18,6 +18,9 @@ actions!(navigation, [
     FindInCells,
     FindNext,
     FindPrev,
+    // IDE-style navigation (Shift+F12 / F12)
+    FindReferences,    // Shift+F12: Find cells that reference current cell
+    GoToPrecedents,    // F12: Go to cells that current cell references
 ]);
 
 // Editing actions
@@ -53,6 +56,10 @@ actions!(editing, [
     CycleReference,
     // Alt+= AutoSum
     AutoSum,
+    // IDE-style Rename Symbol
+    RenameSymbol,
+    // Create Named Range from selection
+    CreateNamedRange,
 ]);
 
 // Selection actions
@@ -132,4 +139,13 @@ actions!(sheets, [
     NextSheet,
     PrevSheet,
     AddSheet,
+]);
+
+// Command palette actions
+actions!(palette, [
+    PaletteUp,
+    PaletteDown,
+    PaletteExecute,
+    PalettePreview,   // Shift+Enter - preview without closing
+    PaletteCancel,    // Escape - cancel and restore
 ]);
