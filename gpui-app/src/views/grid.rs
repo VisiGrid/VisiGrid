@@ -91,6 +91,9 @@ fn render_cell(
     let cell_row = row;
     let cell_col = col;
 
+    let border_color = cell_border(app, is_editing, is_active, is_selected, is_formula_ref);
+    let needs_full_border = is_editing || is_active || is_selected || is_formula_ref;
+
     let mut cell = div()
         .id(ElementId::Name(format!("cell-{}-{}", row, col).into()))
         .flex_shrink_0()
@@ -100,10 +103,19 @@ fn render_cell(
         .items_center()
         .px_1()
         .overflow_hidden()
-        .bg(cell_background(is_editing, is_active, is_selected, is_formula_ref))
-        .border_1()
-        .border_color(cell_border(is_editing, is_active, is_selected, is_formula_ref))
-        .text_color(cell_text_color(is_editing))
+        .bg(cell_background(app, is_editing, is_active, is_selected, is_formula_ref))
+        .border_color(border_color);
+
+    // Only right+bottom borders for normal cells (thinner gridlines)
+    // Full border for selected/editing cells
+    cell = if needs_full_border {
+        cell.border_1()
+    } else {
+        cell.border_r_1().border_b_1()
+    };
+
+    cell = cell
+        .text_color(cell_text_color(app, is_editing))
         .text_sm()
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             // Don't handle clicks if we're resizing
@@ -195,9 +207,9 @@ fn render_cell(
             let byte_sel_end = display_chars.iter().take(disp_sel_end).collect::<String>().len();
             let total_bytes = display_text.len();
 
-            let normal_color = cell_text_color(is_editing);
-            let selection_bg: Hsla = rgb(0x264f78).into(); // Blue selection background
-            let selection_fg: Hsla = rgb(0xffffff).into(); // White text on selection
+            let normal_color = cell_text_color(app, is_editing);
+            let selection_bg = app.token(TokenKey::EditorSelectionBg);
+            let selection_fg = app.token(TokenKey::EditorSelectionText);
 
             let mut runs = Vec::new();
 
@@ -256,7 +268,7 @@ fn render_cell(
                     weight: if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
                     style: if format.italic { FontStyle::Italic } else { FontStyle::Normal },
                 },
-                color: cell_text_color(is_editing),
+                color: cell_text_color(app, is_editing),
                 background_color: None,
                 underline: if format.underline {
                     Some(UnderlineStyle {

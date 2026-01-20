@@ -2,40 +2,64 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
 use crate::mode::Menu;
+use crate::theme::TokenKey;
 
-const MENU_HEIGHT: f32 = 24.0;
+const MENU_HEIGHT: f32 = 22.0;  // Compact chrome height
 const DROPDOWN_WIDTH: f32 = 200.0;
 
-/// Render the Excel 2003-style menu bar (header row only)
+/// Render the modern menu bar - compact chrome, not content
 pub fn render_menu_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let open_menu = app.open_menu;
+    let header_bg = app.token(TokenKey::HeaderBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let selection_bg = app.token(TokenKey::SelectionBg);
+    let toolbar_hover = app.token(TokenKey::ToolbarButtonHoverBg);
+
+    // Menu text at ~75% opacity for chrome feel (hover restores full)
+    let menu_text = text_primary.opacity(0.75);
 
     div()
         .flex()
         .flex_shrink_0()
         .h(px(MENU_HEIGHT))
         .w_full()
-        .bg(rgb(0x2d2d2d))
+        .bg(header_bg)
         .border_b_1()
-        .border_color(rgb(0x3d3d3d))
+        .border_color(panel_border)
         .items_center()
         .px_1()
         .gap_0()
-        .text_sm()
-        .text_color(rgb(0xcccccc))
-        .child(menu_header("File", 'F', Menu::File, open_menu, cx))
-        .child(menu_header("Edit", 'E', Menu::Edit, open_menu, cx))
-        .child(menu_header("View", 'V', Menu::View, open_menu, cx))
-        .child(menu_header("Insert", 'I', Menu::Insert, open_menu, cx))
-        .child(menu_header("Format", 'O', Menu::Format, open_menu, cx))
-        .child(menu_header("Data", 'D', Menu::Data, open_menu, cx))
-        .child(menu_header("Help", 'H', Menu::Help, open_menu, cx))
+        .text_size(px(11.0))  // Smaller than content text
+        .font_weight(FontWeight::NORMAL)  // Light weight for chrome
+        .text_color(menu_text)
+        // Group 1: File, Edit, View
+        .child(menu_header("File", 'F', Menu::File, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Edit", 'E', Menu::Edit, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("View", 'V', Menu::View, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        // Visual separator - extra space before Insert
+        .child(div().w(px(8.0)))
+        // Group 2: Insert, Format
+        .child(menu_header("Insert", 'I', Menu::Insert, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Format", 'O', Menu::Format, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        // Visual separator - extra space before Data
+        .child(div().w(px(8.0)))
+        // Group 3: Data, Help
+        .child(menu_header("Data", 'D', Menu::Data, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Help", 'H', Menu::Help, open_menu, text_primary, selection_bg, toolbar_hover, cx))
 }
 
 /// Render the dropdown menu overlay (should be rendered at root level)
 pub fn render_menu_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let menu = app.open_menu.unwrap();
-    render_dropdown(menu, cx)
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let text_disabled = app.token(TokenKey::TextDisabled);
+    let selection_bg = app.token(TokenKey::SelectionBg);
+
+    render_dropdown(menu, panel_bg, panel_border, text_primary, text_muted, text_disabled, selection_bg, cx)
 }
 
 /// Render a menu header button with underlined accelerator
@@ -44,6 +68,9 @@ fn menu_header(
     accel: char,
     menu: Menu,
     open_menu: Option<Menu>,
+    text_full: Hsla,  // Full opacity text for hover/active states
+    selection_bg: Hsla,
+    hover_bg: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let is_open = open_menu == Some(menu);
@@ -55,15 +82,15 @@ fn menu_header(
         .id(ElementId::Name(format!("menu-{:?}", menu).into()))
         .flex()
         .items_center()
-        .px_2()
+        .px_3()  // Slightly more horizontal padding
         .h_full()
         .cursor_pointer()
-        .when(is_open, |d: Stateful<Div>| d.bg(rgb(0x094771)))
-        .hover(|style: StyleRefinement| {
+        .when(is_open, move |d: Stateful<Div>| d.bg(selection_bg).text_color(text_full))
+        .hover(move |style: StyleRefinement| {
             if is_open {
                 style
             } else {
-                style.bg(rgb(0x404040))
+                style.bg(hover_bg).text_color(text_full)  // Restore full opacity on hover
             }
         })
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
@@ -92,25 +119,35 @@ fn menu_header(
 }
 
 /// Render the dropdown menu for the given menu type
-fn render_dropdown(menu: Menu, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+fn render_dropdown(
+    menu: Menu,
+    panel_bg: Hsla,
+    panel_border: Hsla,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    text_disabled: Hsla,
+    selection_bg: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    // Offsets account for: px_1 (4px), px_3 per item (12px each side), 8px spacers
     let left_offset = match menu {
         Menu::File => 4.0,
-        Menu::Edit => 40.0,
-        Menu::View => 76.0,
-        Menu::Insert => 118.0,
-        Menu::Format => 166.0,
-        Menu::Data => 226.0,
-        Menu::Help => 270.0,
+        Menu::Edit => 48.0,      // File width ~44px
+        Menu::View => 92.0,      // + Edit width ~44px
+        Menu::Insert => 148.0,   // + View ~44px + 8px spacer
+        Menu::Format => 204.0,   // + Insert ~56px
+        Menu::Data => 276.0,     // + Format ~64px + 8px spacer
+        Menu::Help => 328.0,     // + Data ~52px
     };
 
     let menu_content = match menu {
-        Menu::File => render_file_menu(cx),
-        Menu::Edit => render_edit_menu(cx),
-        Menu::View => render_view_menu(cx),
-        Menu::Insert => render_insert_menu(),
-        Menu::Format => render_format_menu(cx),
-        Menu::Data => render_data_menu(cx),
-        Menu::Help => render_help_menu(cx),
+        Menu::File => render_file_menu(text_primary, text_muted, selection_bg, panel_border, cx),
+        Menu::Edit => render_edit_menu(text_primary, text_muted, selection_bg, panel_border, cx),
+        Menu::View => render_view_menu(text_primary, text_muted, selection_bg, panel_border, cx),
+        Menu::Insert => render_insert_menu(text_disabled, panel_border),
+        Menu::Format => render_format_menu(text_primary, text_muted, text_disabled, selection_bg, panel_border, cx),
+        Menu::Data => render_data_menu(text_primary, text_muted, text_disabled, selection_bg, panel_border, cx),
+        Menu::Help => render_help_menu(text_primary, selection_bg, cx),
     };
 
     div()
@@ -118,100 +155,102 @@ fn render_dropdown(menu: Menu, cx: &mut Context<Spreadsheet>) -> impl IntoElemen
         .top(px(MENU_HEIGHT))
         .left(px(left_offset))
         .w(px(DROPDOWN_WIDTH))
-        .bg(rgb(0x252526))
+        .bg(panel_bg)
         .border_1()
-        .border_color(rgb(0x3d3d3d))
+        .border_color(panel_border)
         .shadow_lg()
         .py_1()
         .child(menu_content)
 }
 
-fn render_file_menu(cx: &mut Context<Spreadsheet>) -> Div {
+fn render_file_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
     div()
         .flex()
         .flex_col()
-        .child(menu_item("New", Some("Ctrl+N"), cx, |this, cx| { this.close_menu(cx); this.new_file(cx); }))
-        .child(menu_item("Open...", Some("Ctrl+O"), cx, |this, cx| { this.close_menu(cx); this.open_file(cx); }))
-        .child(menu_item("Save", Some("Ctrl+S"), cx, |this, cx| { this.close_menu(cx); this.save(cx); }))
-        .child(menu_item("Save As...", Some("Ctrl+Shift+S"), cx, |this, cx| { this.close_menu(cx); this.save_as(cx); }))
-        .child(menu_separator())
-        .child(menu_item("Export as CSV...", None, cx, |this, cx| { this.close_menu(cx); this.export_csv(cx); }))
+        .child(menu_item("New", Some("Ctrl+N"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.new_file(cx); }))
+        .child(menu_item("Open...", Some("Ctrl+O"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.open_file(cx); }))
+        .child(menu_item("Save", Some("Ctrl+S"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.save(cx); }))
+        .child(menu_item("Save As...", Some("Ctrl+Shift+S"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.save_as(cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Export as CSV...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.export_csv(cx); }))
 }
 
-fn render_edit_menu(cx: &mut Context<Spreadsheet>) -> Div {
+fn render_edit_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
     div()
         .flex()
         .flex_col()
-        .child(menu_item("Undo", Some("Ctrl+Z"), cx, |this, cx| { this.close_menu(cx); this.undo(cx); }))
-        .child(menu_item("Redo", Some("Ctrl+Y"), cx, |this, cx| { this.close_menu(cx); this.redo(cx); }))
-        .child(menu_separator())
-        .child(menu_item("Cut", Some("Ctrl+X"), cx, |this, cx| { this.close_menu(cx); this.cut(cx); }))
-        .child(menu_item("Copy", Some("Ctrl+C"), cx, |this, cx| { this.close_menu(cx); this.copy(cx); }))
-        .child(menu_item("Paste", Some("Ctrl+V"), cx, |this, cx| { this.close_menu(cx); this.paste(cx); }))
-        .child(menu_separator())
-        .child(menu_item("Delete", Some("Del"), cx, |this, cx| { this.close_menu(cx); this.delete_selection(cx); }))
-        .child(menu_separator())
-        .child(menu_item("Find...", Some("Ctrl+F"), cx, |this, cx| { this.close_menu(cx); this.show_find(cx); }))
-        .child(menu_item("Go To...", Some("Ctrl+G"), cx, |this, cx| { this.close_menu(cx); this.show_goto(cx); }))
+        .child(menu_item("Undo", Some("Ctrl+Z"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.undo(cx); }))
+        .child(menu_item("Redo", Some("Ctrl+Y"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.redo(cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Cut", Some("Ctrl+X"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.cut(cx); }))
+        .child(menu_item("Copy", Some("Ctrl+C"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.copy(cx); }))
+        .child(menu_item("Paste", Some("Ctrl+V"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.paste(cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Delete", Some("Del"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.delete_selection(cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Find...", Some("Ctrl+F"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.show_find(cx); }))
+        .child(menu_item("Go To...", Some("Ctrl+G"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.show_goto(cx); }))
 }
 
-fn render_view_menu(cx: &mut Context<Spreadsheet>) -> Div {
+fn render_view_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, _border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
     div()
         .flex()
         .flex_col()
-        .child(menu_item("Command Palette", Some("Ctrl+Shift+P"), cx, |this, cx| { this.close_menu(cx); this.toggle_palette(cx); }))
+        .child(menu_item("Command Palette", Some("Ctrl+Shift+P"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.toggle_palette(cx); }))
 }
 
-fn render_insert_menu() -> Div {
+fn render_insert_menu(text_disabled: Hsla, border: Hsla) -> Div {
     div()
         .flex()
         .flex_col()
-        .child(menu_item_disabled("Rows"))
-        .child(menu_item_disabled("Columns"))
-        .child(menu_separator())
-        .child(menu_item_disabled("Function..."))
+        .child(menu_item_disabled("Rows", text_disabled))
+        .child(menu_item_disabled("Columns", text_disabled))
+        .child(menu_separator(border))
+        .child(menu_item_disabled("Function...", text_disabled))
 }
 
-fn render_format_menu(cx: &mut Context<Spreadsheet>) -> Div {
+fn render_format_menu(text_primary: Hsla, text_muted: Hsla, text_disabled: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
     div()
         .flex()
         .flex_col()
-        .child(menu_item("Bold", Some("Ctrl+B"), cx, |this, cx| { this.close_menu(cx); this.toggle_bold(cx); }))
-        .child(menu_item("Italic", Some("Ctrl+I"), cx, |this, cx| { this.close_menu(cx); this.toggle_italic(cx); }))
-        .child(menu_item("Underline", Some("Ctrl+U"), cx, |this, cx| { this.close_menu(cx); this.toggle_underline(cx); }))
-        .child(menu_separator())
-        .child(menu_item("Font...", None, cx, |this, cx| { this.close_menu(cx); this.show_font_picker(cx); }))
-        .child(menu_item_disabled("Cells..."))
-        .child(menu_separator())
-        .child(menu_item_disabled("Row Height..."))
-        .child(menu_item_disabled("Column Width..."))
+        .child(menu_item("Bold", Some("Ctrl+B"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.toggle_bold(cx); }))
+        .child(menu_item("Italic", Some("Ctrl+I"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.toggle_italic(cx); }))
+        .child(menu_item("Underline", Some("Ctrl+U"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.toggle_underline(cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Font...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.show_font_picker(cx); }))
+        .child(menu_item_disabled("Cells...", text_disabled))
+        .child(menu_separator(border))
+        .child(menu_item_disabled("Row Height...", text_disabled))
+        .child(menu_item_disabled("Column Width...", text_disabled))
 }
 
-fn render_data_menu(cx: &mut Context<Spreadsheet>) -> Div {
+fn render_data_menu(text_primary: Hsla, text_muted: Hsla, text_disabled: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
     div()
         .flex()
         .flex_col()
-        .child(menu_item("Fill Down", Some("Ctrl+D"), cx, |this, cx| { this.close_menu(cx); this.fill_down(cx); }))
-        .child(menu_item("Fill Right", Some("Ctrl+R"), cx, |this, cx| { this.close_menu(cx); this.fill_right(cx); }))
-        .child(menu_separator())
-        .child(menu_item_disabled("Sort..."))
-        .child(menu_item_disabled("Filter"))
+        .child(menu_item("Fill Down", Some("Ctrl+D"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.fill_down(cx); }))
+        .child(menu_item("Fill Right", Some("Ctrl+R"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.fill_right(cx); }))
+        .child(menu_separator(border))
+        .child(menu_item_disabled("Sort...", text_disabled))
+        .child(menu_item_disabled("Filter", text_disabled))
 }
 
-fn render_help_menu(cx: &mut Context<Spreadsheet>) -> Div {
+fn render_help_menu(text_primary: Hsla, selection_bg: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
     div()
         .flex()
         .flex_col()
-        .child(menu_item("About VisiGrid", None, cx, |this, cx| {
+        .child(menu_item("About VisiGrid", None, text_primary, text_primary, selection_bg, cx, |this, cx| {
             this.close_menu(cx);
-            this.status_message = Some("VisiGrid - A modern spreadsheet application".to_string());
-            cx.notify();
+            this.show_about(cx);
         }))
 }
 
 fn menu_item(
     label: &'static str,
     shortcut: Option<&'static str>,
+    text_color: Hsla,
+    shortcut_color: Hsla,
+    hover_bg: Hsla,
     cx: &mut Context<Spreadsheet>,
     action: impl Fn(&mut Spreadsheet, &mut Context<Spreadsheet>) + 'static,
 ) -> impl IntoElement {
@@ -221,43 +260,43 @@ fn menu_item(
         .items_center()
         .justify_between()
         .px_3()
-        .py_1()
+        .py(px(4.0))  // Slightly tighter vertical padding
         .mx_1()
         .rounded_sm()
-        .text_sm()
-        .text_color(rgb(0xcccccc))
+        .text_size(px(12.0))  // Match menu bar scale
+        .text_color(text_color)
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(0x094771)))
+        .hover(move |style| style.bg(hover_bg))
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
             action(this, cx);
         }))
         .child(label)
-        .when(shortcut.is_some(), |d: Stateful<Div>| {
+        .when(shortcut.is_some(), move |d: Stateful<Div>| {
             d.child(
                 div()
-                    .text_color(rgb(0x888888))
-                    .text_xs()
+                    .text_color(shortcut_color)
+                    .text_size(px(10.0))  // Smaller shortcuts
                     .child(shortcut.unwrap_or(""))
             )
         })
 }
 
-fn menu_item_disabled(label: &'static str) -> impl IntoElement {
+fn menu_item_disabled(label: &'static str, text_color: Hsla) -> impl IntoElement {
     div()
         .flex()
         .items_center()
         .px_3()
-        .py_1()
+        .py(px(4.0))
         .mx_1()
-        .text_sm()
-        .text_color(rgb(0x666666))
+        .text_size(px(12.0))
+        .text_color(text_color)
         .child(label)
 }
 
-fn menu_separator() -> impl IntoElement {
+fn menu_separator(border_color: Hsla) -> impl IntoElement {
     div()
         .h(px(1.0))
         .mx_2()
         .my_1()
-        .bg(rgb(0x3d3d3d))
+        .bg(border_color)
 }

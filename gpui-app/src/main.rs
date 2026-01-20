@@ -1,3 +1,6 @@
+// Hide console window on Windows
+#![windows_subsystem = "windows"]
+
 mod actions;
 mod app;
 mod file_ops;

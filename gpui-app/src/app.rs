@@ -1,14 +1,44 @@
 use gpui::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::fs;
 use visigrid_engine::sheet::Sheet;
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::formula::eval::CellLookup;
 
 use crate::history::{History, CellChange};
 use crate::mode::Mode;
-use crate::theme::{Theme, TokenKey, visigrid_theme};
+use crate::theme::{Theme, TokenKey, visigrid_theme, builtin_themes, get_theme};
 use crate::views;
+
+// User settings that persist across sessions
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct Settings {
+    theme_id: Option<String>,
+}
+
+impl Settings {
+    fn path() -> Option<PathBuf> {
+        dirs::config_dir().map(|p| p.join("visigrid").join("settings.json"))
+    }
+
+    fn load() -> Self {
+        Self::path()
+            .and_then(|p| fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self) {
+        if let Some(path) = Self::path() {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(path, serde_json::to_string_pretty(self).unwrap_or_default());
+        }
+    }
+}
 
 // Grid configuration
 pub const NUM_ROWS: usize = 65536;
@@ -85,6 +115,10 @@ pub struct Spreadsheet {
     pub font_picker_query: String,         // Filter query
     pub font_picker_selected: usize,       // Selected item index
 
+    // Theme picker state
+    pub theme_picker_query: String,        // Filter query
+    pub theme_picker_selected: usize,      // Selected item index
+
     // Drag selection state
     pub dragging_selection: bool,          // Currently dragging to select cells
 
@@ -105,6 +139,13 @@ impl Spreadsheet {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         let window_size = window.viewport_size();
+
+        // Load saved theme or default
+        let settings = Settings::load();
+        let theme = settings.theme_id
+            .as_ref()
+            .and_then(|id| get_theme(id))
+            .unwrap_or_else(visigrid_theme);
 
         Self {
             workbook,
@@ -144,11 +185,13 @@ impl Spreadsheet {
             available_fonts: Self::enumerate_fonts(),
             font_picker_query: String::new(),
             font_picker_selected: 0,
+            theme_picker_query: String::new(),
+            theme_picker_selected: 0,
             dragging_selection: false,
             formula_ref_cell: None,
             formula_ref_end: None,
             formula_ref_start_cursor: 0,
-            theme: visigrid_theme(),
+            theme,
             theme_preview: None,
         }
     }
@@ -2063,8 +2106,15 @@ impl Spreadsheet {
         let filtered = filter_commands(&self.palette_query);
         if let Some(cmd) = filtered.get(self.palette_selected) {
             let action = cmd.action;
-            self.hide_palette(cx);
+            // Clear palette state but let action control the mode
+            self.palette_query.clear();
+            self.palette_selected = 0;
             action(self, cx);
+            // Only return to Navigation if action didn't change mode
+            if self.mode == Mode::Command {
+                self.mode = Mode::Navigation;
+            }
+            cx.notify();
         } else {
             self.hide_palette(cx);
         }
@@ -2163,6 +2213,105 @@ impl Spreadsheet {
 
         self.is_modified = true;
         self.status_message = Some("Cleared font from selection".to_string());
+        cx.notify();
+    }
+
+    // Theme Picker
+    pub fn show_theme_picker(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::ThemePicker;
+        self.theme_picker_query.clear();
+        self.theme_picker_selected = 0;
+        self.theme_preview = None;
+        cx.notify();
+    }
+
+    pub fn hide_theme_picker(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        self.theme_picker_query.clear();
+        self.theme_picker_selected = 0;
+        self.theme_preview = None;
+        cx.notify();
+    }
+
+    pub fn theme_picker_up(&mut self, cx: &mut Context<Self>) {
+        if self.theme_picker_selected > 0 {
+            self.theme_picker_selected -= 1;
+            self.update_theme_preview(cx);
+        }
+    }
+
+    pub fn theme_picker_down(&mut self, cx: &mut Context<Self>) {
+        let filtered = self.filter_themes();
+        if self.theme_picker_selected + 1 < filtered.len() {
+            self.theme_picker_selected += 1;
+            self.update_theme_preview(cx);
+        }
+    }
+
+    pub fn theme_picker_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        self.theme_picker_query.push(c);
+        self.theme_picker_selected = 0;
+        self.update_theme_preview(cx);
+    }
+
+    pub fn theme_picker_backspace(&mut self, cx: &mut Context<Self>) {
+        self.theme_picker_query.pop();
+        self.theme_picker_selected = 0;
+        self.update_theme_preview(cx);
+    }
+
+    pub fn theme_picker_execute(&mut self, cx: &mut Context<Self>) {
+        self.apply_theme_at_index(self.theme_picker_selected, cx);
+    }
+
+    pub fn apply_theme_at_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        let filtered = self.filter_themes();
+        if let Some(theme) = filtered.get(index) {
+            self.theme = theme.clone();
+            self.status_message = Some(format!("Applied theme: {}", theme.meta.name));
+            // Persist theme selection
+            let settings = Settings { theme_id: Some(theme.meta.id.to_string()) };
+            settings.save();
+        }
+        self.theme_preview = None;
+        self.mode = Mode::Navigation;
+        self.theme_picker_query.clear();
+        self.theme_picker_selected = 0;
+        cx.notify();
+    }
+
+    /// Filter available themes by query
+    pub fn filter_themes(&self) -> Vec<Theme> {
+        let themes = builtin_themes();
+        if self.theme_picker_query.is_empty() {
+            return themes;
+        }
+        let query_lower = self.theme_picker_query.to_lowercase();
+        themes
+            .into_iter()
+            .filter(|t| t.meta.name.to_lowercase().contains(&query_lower))
+            .collect()
+    }
+
+    /// Update theme preview based on current selection
+    fn update_theme_preview(&mut self, cx: &mut Context<Self>) {
+        let filtered = self.filter_themes();
+        if let Some(theme) = filtered.get(self.theme_picker_selected) {
+            self.theme_preview = Some(theme.clone());
+        } else {
+            self.theme_preview = None;
+        }
+        cx.notify();
+    }
+
+    // About dialog
+    pub fn show_about(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::About;
+        cx.notify();
+    }
+
+    pub fn hide_about(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
         cx.notify();
     }
 

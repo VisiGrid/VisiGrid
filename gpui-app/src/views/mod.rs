@@ -1,3 +1,4 @@
+mod about_dialog;
 pub mod command_palette;
 mod find_dialog;
 mod font_picker;
@@ -7,12 +8,14 @@ mod grid;
 mod headers;
 mod menu_bar;
 mod status_bar;
+mod theme_picker;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, CELL_HEIGHT};
 use crate::actions::*;
 use crate::mode::Mode;
+use crate::theme::TokenKey;
 
 pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let editing = app.mode.is_editing();
@@ -20,6 +23,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let show_find = app.mode == Mode::Find;
     let show_command = app.mode == Mode::Command;
     let show_font_picker = app.mode == Mode::FontPicker;
+    let show_theme_picker = app.mode == Mode::ThemePicker;
+    let show_about = app.mode == Mode::About;
 
     div()
         .relative()
@@ -27,17 +32,21 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .track_focus(&app.focus_handle)
         // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
-            if this.mode.is_formula() {
-                this.formula_move_ref(-1, 0, cx);
-            } else {
-                this.move_selection(-1, 0, cx);
+            match this.mode {
+                Mode::Command => this.palette_up(cx),
+                Mode::FontPicker => this.font_picker_up(cx),
+                Mode::ThemePicker => this.theme_picker_up(cx),
+                Mode::Formula => this.formula_move_ref(-1, 0, cx),
+                _ => this.move_selection(-1, 0, cx),
             }
         }))
         .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
-            if this.mode.is_formula() {
-                this.formula_move_ref(1, 0, cx);
-            } else {
-                this.move_selection(1, 0, cx);
+            match this.mode {
+                Mode::Command => this.palette_down(cx),
+                Mode::FontPicker => this.font_picker_down(cx),
+                Mode::ThemePicker => this.theme_picker_down(cx),
+                Mode::Formula => this.formula_move_ref(1, 0, cx),
+                _ => this.move_selection(1, 0, cx),
             }
         }))
         .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
@@ -223,7 +232,14 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             this.start_edit(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, _, cx| {
-            this.confirm_edit(cx);
+            // Handle Enter key based on current mode
+            match this.mode {
+                Mode::ThemePicker => this.theme_picker_execute(cx),
+                Mode::FontPicker => this.font_picker_execute(cx),
+                Mode::Command => this.palette_execute(cx),
+                Mode::GoTo => this.confirm_goto(cx),
+                _ => this.confirm_edit(cx),
+            }
         }))
         .on_action(cx.listener(|this, _: &CancelEdit, _, cx| {
             if this.open_menu.is_some() {
@@ -234,6 +250,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 this.hide_goto(cx);
             } else if this.mode == Mode::Find {
                 this.hide_find(cx);
+            } else if this.mode == Mode::FontPicker {
+                this.hide_font_picker(cx);
+            } else if this.mode == Mode::ThemePicker {
+                this.hide_theme_picker(cx);
+            } else if this.mode == Mode::About {
+                this.hide_about(cx);
             } else {
                 this.cancel_edit(cx);
             }
@@ -491,6 +513,46 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 }
             }
 
+            // Handle Theme Picker mode
+            if this.mode == Mode::ThemePicker {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.hide_theme_picker(cx);
+                        return;
+                    }
+                    "enter" => {
+                        this.theme_picker_execute(cx);
+                        return;
+                    }
+                    "up" => {
+                        this.theme_picker_up(cx);
+                        return;
+                    }
+                    "down" => {
+                        this.theme_picker_down(cx);
+                        return;
+                    }
+                    "backspace" => {
+                        this.theme_picker_backspace(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // Handle text input for theme picker
+                if let Some(key_char) = &event.keystroke.key_char {
+                    if !event.keystroke.modifiers.control
+                        && !event.keystroke.modifiers.alt
+                        && !event.keystroke.modifiers.platform
+                    {
+                        for c in key_char.chars() {
+                            this.theme_picker_insert_char(c, cx);
+                        }
+                        return;
+                    }
+                }
+            }
+
             // Handle GoTo mode
             if this.mode == Mode::GoTo {
                 if event.keystroke.key == "enter" {
@@ -590,7 +652,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .flex()
         .flex_col()
         .size_full()
-        .bg(rgb(0x1e1e1e))
+        .bg(app.token(TokenKey::AppBg))
         .child(menu_bar::render_menu_bar(app, cx))
         .child(formula_bar::render_formula_bar(app))
         .child(headers::render_column_headers(app, cx))
@@ -607,6 +669,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         })
         .when(show_font_picker, |div| {
             div.child(font_picker::render_font_picker(app, cx))
+        })
+        .when(show_theme_picker, |div| {
+            div.child(theme_picker::render_theme_picker(app, cx))
+        })
+        .when(show_about, |div| {
+            div.child(about_dialog::render_about_dialog(app, cx))
         })
         .when(app.open_menu.is_some(), |div| {
             div.child(menu_bar::render_menu_dropdown(app, cx))

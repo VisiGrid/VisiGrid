@@ -10,6 +10,8 @@ pub enum Mode {
     QuickOpen,   // Quick file open (Ctrl+P)
     Find,        // Find in cells (Ctrl+F)
     FontPicker,  // Font selection dialog
+    ThemePicker, // Theme selection dialog
+    About,       // About VisiGrid dialog
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -40,6 +42,6 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker)
+        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About)
     }
 }

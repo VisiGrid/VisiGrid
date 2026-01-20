@@ -231,14 +231,21 @@ jobs:
 
           hdiutil create -volname "VisiGrid" \
             -srcfolder "dist/dmg-temp" \
-            -ov -format UDZO \
+            -ov -format UDBZ \
             "dist/VisiGrid-${VERSION}-macOS-universal.dmg"
+
+      - name: Create zip (alternative to DMG)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cd dist && zip -r "VisiGrid-${VERSION}-macOS-universal.zip" VisiGrid.app
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: macos-release
-          path: dist/*.dmg
+          path: |
+            dist/*.dmg
+            dist/*.zip
 
   create-release:
     needs: [build-linux, build-windows, build-macos]

@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
+use crate::theme::TokenKey;
 
 /// Render the bottom status bar (Zed-inspired minimal design)
 pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -23,18 +24,25 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
     let rename_input = app.sheet_rename_input.clone();
     let context_menu_sheet = app.sheet_context_menu;
 
+    // Theme colors
+    let status_bg = app.token(TokenKey::StatusBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let panel_bg = app.token(TokenKey::PanelBg);
+
     div()
         .relative()
         .flex_shrink_0()
         .h(px(22.0))
-        .bg(rgb(0x252526))
+        .bg(panel_bg)
         .border_t_1()
-        .border_color(rgb(0x3d3d3d))
+        .border_color(panel_border)
         .flex()
         .items_center()
         .justify_between()
         .px_2()
-        .text_color(rgb(0x858585))
+        .text_color(text_muted)
         .text_xs()
         .child(
             // Left side: sheet tabs + add button + mode
@@ -49,7 +57,7 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                         let is_renaming = renaming_sheet == Some(idx);
                         let name_str = name.to_string();
                         let input_str = rename_input.clone();
-                        sheet_tab_wrapper(name_str, input_str, idx, is_active, is_renaming, cx)
+                        sheet_tab_wrapper(app, name_str, input_str, idx, is_active, is_renaming, cx)
                     })
                 )
                 // Add sheet button
@@ -59,8 +67,8 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                         .px_1()
                         .py_px()
                         .cursor_pointer()
-                        .text_color(rgb(0x858585))
-                        .hover(|s| s.text_color(rgb(0xcccccc)).bg(rgb(0x3d3d3d)))
+                        .text_color(text_muted)
+                        .hover(move |s| s.text_color(text_primary).bg(panel_border))
                         .rounded_sm()
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.add_sheet(cx);
@@ -72,13 +80,13 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                     div()
                         .w(px(1.0))
                         .h(px(12.0))
-                        .bg(rgb(0x3d3d3d))
+                        .bg(panel_border)
                         .mx_2()
                 )
                 // Status message or mode
                 .child(
                     div()
-                        .text_color(rgb(0x858585))
+                        .text_color(text_muted)
                         .child(
                             if let Some(msg) = &app.status_message {
                                 msg.clone()
@@ -98,12 +106,13 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
         )
         // Context menu overlay
         .when(context_menu_sheet.is_some(), |d| {
-            d.child(render_sheet_context_menu(context_menu_sheet.unwrap(), cx))
+            d.child(render_sheet_context_menu(app, context_menu_sheet.unwrap(), cx))
         })
 }
 
 /// Wrapper to return consistent type for sheet tabs
 fn sheet_tab_wrapper(
+    app: &Spreadsheet,
     name: String,
     rename_input: String,
     index: usize,
@@ -112,29 +121,35 @@ fn sheet_tab_wrapper(
     cx: &mut Context<Spreadsheet>,
 ) -> Stateful<Div> {
     if is_renaming {
-        sheet_tab_editing(rename_input, index)
+        sheet_tab_editing(app, rename_input, index)
     } else {
-        sheet_tab(name, index, is_active, cx)
+        sheet_tab(app, name, index, is_active, cx)
     }
 }
 
 /// Render a single sheet tab (normal mode)
-fn sheet_tab(name: String, index: usize, is_active: bool, cx: &mut Context<Spreadsheet>) -> Stateful<Div> {
+fn sheet_tab(app: &Spreadsheet, name: String, index: usize, is_active: bool, cx: &mut Context<Spreadsheet>) -> Stateful<Div> {
+    let app_bg = app.token(TokenKey::AppBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let header_bg = app.token(TokenKey::HeaderBg);
+
     div()
         .id(ElementId::Name(format!("sheet-tab-{}", index).into()))
         .px_2()
         .py_px()
         .cursor_pointer()
         .rounded_sm()
-        .when(is_active, |d: Stateful<Div>| {
-            d.bg(rgb(0x1e1e1e))
+        .when(is_active, move |d: Stateful<Div>| {
+            d.bg(app_bg)
                 .border_1()
-                .border_color(rgb(0x3d3d3d))
-                .text_color(rgb(0xcccccc))
+                .border_color(panel_border)
+                .text_color(text_primary)
         })
-        .when(!is_active, |d: Stateful<Div>| {
-            d.text_color(rgb(0x858585))
-                .hover(|s| s.bg(rgb(0x2d2d2d)).text_color(rgb(0xcccccc)))
+        .when(!is_active, move |d: Stateful<Div>| {
+            d.text_color(text_muted)
+                .hover(move |s| s.bg(header_bg).text_color(text_primary))
         })
         // Click to switch sheet
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
@@ -148,39 +163,48 @@ fn sheet_tab(name: String, index: usize, is_active: bool, cx: &mut Context<Sprea
 }
 
 /// Render a sheet tab in editing/rename mode
-fn sheet_tab_editing(current_value: String, index: usize) -> Stateful<Div> {
+fn sheet_tab_editing(app: &Spreadsheet, current_value: String, index: usize) -> Stateful<Div> {
     let display_value = if current_value.is_empty() {
         " ".to_string()
     } else {
         current_value
     };
 
+    let app_bg = app.token(TokenKey::AppBg);
+    let accent = app.token(TokenKey::Accent);
+    let text_primary = app.token(TokenKey::TextPrimary);
+
     div()
         .id(ElementId::Name(format!("sheet-tab-edit-{}", index).into()))
         .px_1()
         .py_px()
-        .bg(rgb(0x1e1e1e))
+        .bg(app_bg)
         .border_1()
-        .border_color(rgb(0x007acc))
+        .border_color(accent)
         .rounded_sm()
         .child(
             div()
                 .min_w(px(40.0))
-                .text_color(rgb(0xcccccc))
+                .text_color(text_primary)
                 .child(display_value)
         )
 }
 
 /// Render the sheet context menu
-fn render_sheet_context_menu(sheet_index: usize, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let selection_bg = app.token(TokenKey::SelectionBg);
+
     div()
         .absolute()
         .bottom(px(24.0))
         .left(px(4.0 + (sheet_index as f32 * 70.0))) // Approximate position
         .w(px(120.0))
-        .bg(rgb(0x252526))
+        .bg(panel_bg)
         .border_1()
-        .border_color(rgb(0x3d3d3d))
+        .border_color(panel_border)
         .rounded_sm()
         .shadow_lg()
         .py_1()
@@ -191,9 +215,9 @@ fn render_sheet_context_menu(sheet_index: usize, cx: &mut Context<Spreadsheet>) 
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .text_color(rgb(0xcccccc))
+                .text_color(text_primary)
                 .text_xs()
-                .hover(|s| s.bg(rgb(0x094771)))
+                .hover(move |s| s.bg(selection_bg))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                     this.hide_sheet_context_menu(cx);
                     this.add_sheet(cx);
@@ -207,9 +231,9 @@ fn render_sheet_context_menu(sheet_index: usize, cx: &mut Context<Spreadsheet>) 
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .text_color(rgb(0xcccccc))
+                .text_color(text_primary)
                 .text_xs()
-                .hover(|s| s.bg(rgb(0x094771)))
+                .hover(move |s| s.bg(selection_bg))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                     this.delete_sheet(sheet_index, cx);
                 }))
@@ -222,9 +246,9 @@ fn render_sheet_context_menu(sheet_index: usize, cx: &mut Context<Spreadsheet>) 
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .text_color(rgb(0xcccccc))
+                .text_color(text_primary)
                 .text_xs()
-                .hover(|s| s.bg(rgb(0x094771)))
+                .hover(move |s| s.bg(selection_bg))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                     this.hide_sheet_context_menu(cx);
                     this.start_sheet_rename(sheet_index, cx);
@@ -234,8 +258,10 @@ fn render_sheet_context_menu(sheet_index: usize, cx: &mut Context<Spreadsheet>) 
 }
 
 /// Calculate statistics for the current selection
-fn calculate_selection_stats(app: &Spreadsheet) -> Vec<impl IntoElement> {
+fn calculate_selection_stats(app: &Spreadsheet) -> Vec<Div> {
     let ((min_row, min_col), (max_row, max_col)) = app.selection_range();
+    let text_muted = app.token(TokenKey::TextMuted);
+    let text_primary = app.token(TokenKey::TextPrimary);
 
     // Only show stats if more than one cell is selected
     let is_multi_select = min_row != max_row || min_col != max_col;
@@ -260,7 +286,7 @@ fn calculate_selection_stats(app: &Spreadsheet) -> Vec<impl IntoElement> {
     if values.is_empty() {
         // No numeric values, just show count
         return vec![
-            stat_item("Count", &count.to_string()),
+            stat_item("Count", &count.to_string(), text_muted, text_primary),
         ];
     }
 
@@ -270,27 +296,27 @@ fn calculate_selection_stats(app: &Spreadsheet) -> Vec<impl IntoElement> {
     let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
     vec![
-        stat_item("Sum", &format_number(sum)),
-        stat_item("Average", &format_number(avg)),
-        stat_item("Min", &format_number(min)),
-        stat_item("Max", &format_number(max)),
-        stat_item("Count", &count.to_string()),
+        stat_item("Sum", &format_number(sum), text_muted, text_primary),
+        stat_item("Average", &format_number(avg), text_muted, text_primary),
+        stat_item("Min", &format_number(min), text_muted, text_primary),
+        stat_item("Max", &format_number(max), text_muted, text_primary),
+        stat_item("Count", &count.to_string(), text_muted, text_primary),
     ]
 }
 
-fn stat_item(label: &str, value: &str) -> Div {
+fn stat_item(label: &str, value: &str, label_color: Hsla, value_color: Hsla) -> Div {
     div()
         .flex()
         .items_center()
         .gap_1()
         .child(
             div()
-                .text_color(rgb(0x6a6a6a))
+                .text_color(label_color)
                 .child(format!("{}:", label))
         )
         .child(
             div()
-                .text_color(rgb(0xcccccc))
+                .text_color(value_color)
                 .child(value.to_string())
         )
 }

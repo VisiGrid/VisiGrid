@@ -1,5 +1,6 @@
 use gpui::*;
 use crate::app::{Spreadsheet, CELL_HEIGHT};
+use crate::theme::TokenKey;
 
 /// Render the formula bar (cell reference + formula/value input)
 pub fn render_formula_bar(app: &Spreadsheet) -> impl IntoElement {
@@ -13,14 +14,29 @@ pub fn render_formula_bar(app: &Spreadsheet) -> impl IntoElement {
         app.sheet().get_raw(app.selected.0, app.selected.1)
     };
 
+    // Theme colors
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let app_bg = app.token(TokenKey::AppBg);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let selection_bg = app.token(TokenKey::SelectionBg);
+    let text_inverse = app.token(TokenKey::TextInverse);
+
+    let (input_bg, input_text) = if editing {
+        (selection_bg, text_primary)
+    } else {
+        (app_bg, text_primary)
+    };
+
     div()
         .flex_shrink_0()
         .h(px(CELL_HEIGHT))
-        .bg(rgb(0x252526))
+        .bg(panel_bg)
         .flex()
         .items_center()
         .border_b_1()
-        .border_color(rgb(0x3c3c3c))
+        .border_color(panel_border)
         // Cell reference label
         .child(
             div()
@@ -30,9 +46,9 @@ pub fn render_formula_bar(app: &Spreadsheet) -> impl IntoElement {
                 .items_center()
                 .justify_center()
                 .border_r_1()
-                .border_color(rgb(0x3c3c3c))
-                .bg(rgb(0x1e1e1e))
-                .text_color(rgb(0xcccccc))
+                .border_color(panel_border)
+                .bg(app_bg)
+                .text_color(text_primary)
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
                 .child(cell_ref)
@@ -46,8 +62,8 @@ pub fn render_formula_bar(app: &Spreadsheet) -> impl IntoElement {
                 .items_center()
                 .justify_center()
                 .border_r_1()
-                .border_color(rgb(0x3c3c3c))
-                .text_color(rgb(0x808080))
+                .border_color(panel_border)
+                .text_color(text_muted)
                 .text_sm()
                 .child("fx")
         )
@@ -59,8 +75,8 @@ pub fn render_formula_bar(app: &Spreadsheet) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .px_2()
-                .text_color(if editing { rgb(0xffffff) } else { rgb(0xcccccc) })
-                .bg(if editing { rgb(0x264f78) } else { rgb(0x1e1e1e) })
+                .text_color(input_text)
+                .bg(input_bg)
                 .text_sm()
                 .overflow_hidden()
                 .child(display_value)

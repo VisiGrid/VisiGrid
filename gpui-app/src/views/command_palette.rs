@@ -1,6 +1,8 @@
 use std::time::Duration;
 use gpui::*;
 use crate::app::Spreadsheet;
+use crate::mode::Mode;
+use crate::theme::TokenKey;
 
 /// A command that can be executed from the palette
 #[derive(Clone)]
@@ -150,6 +152,14 @@ pub fn all_commands() -> Vec<Command> {
             action: |app, cx| app.export_csv(cx),
         },
 
+        // Appearance
+        Command {
+            name: "Select Theme...",
+            keywords: "appearance color scheme dark light",
+            shortcut: None,
+            action: |app, cx| app.show_theme_picker(cx),
+        },
+
         // Help
         Command {
             name: "Show Keyboard Shortcuts",
@@ -180,22 +190,21 @@ pub fn filter_commands(query: &str) -> Vec<Command> {
         .collect()
 }
 
-// Colors - subtle dark theme like Zed
-const BG_OVERLAY: u32 = 0x00000060;        // Subtle dark overlay
-const BG_PALETTE: u32 = 0x2b2d30;          // Dark gray palette background
-const BG_SELECTED: u32 = 0x3c3f41;         // Subtle gray selection
-const BG_HOVER: u32 = 0x35373a;            // Very subtle hover
-const TEXT_PRIMARY: u32 = 0xbcbec4;        // Slightly muted white text
-const TEXT_SECONDARY: u32 = 0x6f737a;      // Muted gray text
-const TEXT_PLACEHOLDER: u32 = 0x5a5d63;    // Placeholder text
-const BORDER_SUBTLE: u32 = 0x3c3f41;       // Subtle borders
-
 /// Render the command palette overlay
 pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let filtered = filter_commands(&app.palette_query);
     let selected_idx = app.palette_selected;
     let query = app.palette_query.clone();
     let has_query = !query.is_empty();
+
+    // Theme colors
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let text_disabled = app.token(TokenKey::TextDisabled);
+    let selection_bg = app.token(TokenKey::SelectionBg);
+    let toolbar_hover = app.token(TokenKey::ToolbarButtonHoverBg);
 
     div()
         .absolute()
@@ -204,7 +213,7 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .items_start()
         .justify_center()
         .pt(px(100.0))
-        .bg(rgba(BG_OVERLAY))
+        .bg(hsla(0.0, 0.0, 0.0, 0.4))
         // Click outside to close
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
             this.hide_palette(cx);
@@ -213,7 +222,7 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
             div()
                 .w(px(500.0))
                 .max_h(px(380.0))
-                .bg(rgb(BG_PALETTE))
+                .bg(panel_bg)
                 .rounded_md()
                 .shadow_lg()
                 .overflow_hidden()
@@ -231,7 +240,7 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                         .px_3()
                         .py(px(10.0))
                         .border_b_1()
-                        .border_color(rgb(BORDER_SUBTLE))
+                        .border_color(panel_border)
                         // Input area with cursor
                         .child(
                             div()
@@ -240,7 +249,7 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                 .items_center()
                                 .child(
                                     div()
-                                        .text_color(if has_query { rgb(TEXT_PRIMARY) } else { rgb(TEXT_PLACEHOLDER) })
+                                        .text_color(if has_query { text_primary } else { text_disabled })
                                         .text_size(px(13.0))
                                         .child(if has_query {
                                             query.clone()
@@ -253,7 +262,7 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                     div()
                                         .w(px(1.0))
                                         .h(px(14.0))
-                                        .bg(rgb(TEXT_PRIMARY))
+                                        .bg(text_primary)
                                         .ml(px(1.0))
                                         .with_animation(
                                             "cursor-blink",
@@ -277,7 +286,7 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                         .children(
                             filtered.iter().enumerate().take(12).map(|(idx, cmd)| {
                                 let is_selected = idx == selected_idx;
-                                render_command_item(cmd, is_selected, idx, cx)
+                                render_command_item(cmd, is_selected, idx, text_primary, text_muted, selection_bg, toolbar_hover, cx)
                             })
                         );
                     if filtered.is_empty() {
@@ -285,7 +294,7 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                             div()
                                 .px_4()
                                 .py_6()
-                                .text_color(rgb(TEXT_SECONDARY))
+                                .text_color(text_muted)
                                 .text_size(px(14.0))
                                 .child("No matching commands")
                         )
@@ -303,13 +312,13 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                         .px_3()
                         .py(px(6.0))
                         .border_t_1()
-                        .border_color(rgb(BORDER_SUBTLE))
+                        .border_color(panel_border)
                         .text_size(px(11.0))
-                        .text_color(rgb(TEXT_SECONDARY))
+                        .text_color(text_muted)
                         .child("Run")
                         .child(
                             div()
-                                .text_color(rgb(TEXT_PLACEHOLDER))
+                                .text_color(text_disabled)
                                 .child("enter")
                         )
                 )
@@ -320,13 +329,17 @@ fn render_command_item(
     cmd: &Command,
     is_selected: bool,
     idx: usize,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    selection_bg: Hsla,
+    hover_bg: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let action = cmd.action;
     let name = cmd.name;
     let shortcut = cmd.shortcut;
 
-    let bg_color = if is_selected { rgb(BG_SELECTED) } else { rgba(0x00000000) };
+    let bg_color = if is_selected { selection_bg } else { hsla(0.0, 0.0, 0.0, 0.0) };
 
     let mut item = div()
         .id(ElementId::NamedInteger("palette-cmd".into(), idx as u64))
@@ -338,24 +351,31 @@ fn render_command_item(
         .cursor_pointer()
         .bg(bg_color)
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            // Clear palette state but let the action control the mode
+            this.palette_query.clear();
+            this.palette_selected = 0;
             action(this, cx);
-            this.hide_palette(cx);
+            // Only return to Navigation if action didn't change mode
+            if this.mode == Mode::Command {
+                this.mode = Mode::Navigation;
+            }
+            cx.notify();
         }))
         .child(
             div()
-                .text_color(rgb(TEXT_PRIMARY))
+                .text_color(text_primary)
                 .text_size(px(13.0))
                 .child(name)
         );
 
     if !is_selected {
-        item = item.hover(|s| s.bg(rgb(BG_HOVER)));
+        item = item.hover(move |s| s.bg(hover_bg));
     }
 
     if let Some(shortcut_text) = shortcut {
         item = item.child(
             div()
-                .text_color(rgb(TEXT_SECONDARY))
+                .text_color(text_muted)
                 .text_size(px(12.0))
                 .child(shortcut_text)
         );

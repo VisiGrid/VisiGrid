@@ -225,79 +225,96 @@ pub fn rgba(hex: u32) -> Hsla {
 // Built-in Themes
 // ============================================================================
 
-/// VisiGrid default theme - modern dark
+/// VisiGrid default theme - modern dark with slate-blue tones
+/// Colors based on the VisiGrid landing page palette
 pub fn visigrid_theme() -> Theme {
     let mut tokens = HashMap::new();
 
+    // Slate-blue palette from landing page (Tailwind slate)
+    // Full palette for reference:
+    // 950: #020617, 900: #0f172a, 800: #1e293b, 700: #334155
+    // 600: #475569, 500: #64748b, 400: #94a3b8, 300: #cbd5e1
+    // 200: #e2e8f0, 100: #f1f5f9, 50: #f8fafc
+    let grid_900 = rgb(0x0f172a);  // Main background
+    let grid_800 = rgb(0x1e293b);  // Panels, headers
+    let grid_700 = rgb(0x334155);  // Borders, subtle elements
+    let grid_600 = rgb(0x475569);  // Disabled text
+    let grid_500 = rgb(0x64748b);  // Muted elements
+    let grid_400 = rgb(0x94a3b8);  // Secondary text
+    let grid_200 = rgb(0xe2e8f0);  // Bright text
+    let grid_100 = rgb(0xf1f5f9);  // Brightest
+    let accent = rgb(0x3b82f6);    // Blue accent
+    let accent_hover = rgb(0x2563eb);
+
     // App surfaces
-    tokens.insert(TokenKey::AppBg, rgb(0x1e1e1e));
-    tokens.insert(TokenKey::PanelBg, rgb(0x252526));
-    tokens.insert(TokenKey::PanelBorder, rgb(0x3d3d3d));
-    tokens.insert(TokenKey::TextPrimary, rgb(0xd4d4d4));
-    tokens.insert(TokenKey::TextMuted, rgb(0x808080));
-    tokens.insert(TokenKey::TextDisabled, rgb(0x5a5a5a));
-    tokens.insert(TokenKey::TextInverse, rgb(0x1e1e1e));
+    tokens.insert(TokenKey::AppBg, grid_900);
+    tokens.insert(TokenKey::PanelBg, grid_800);
+    tokens.insert(TokenKey::PanelBorder, grid_700);
+    tokens.insert(TokenKey::TextPrimary, grid_200);
+    tokens.insert(TokenKey::TextMuted, grid_400);
+    tokens.insert(TokenKey::TextDisabled, grid_600);
+    tokens.insert(TokenKey::TextInverse, grid_900);
 
     // Grid surfaces
-    tokens.insert(TokenKey::GridBg, rgb(0x1e1e1e));
-    tokens.insert(TokenKey::GridLines, rgb(0x3d3d3d));
-    tokens.insert(TokenKey::GridLinesBold, rgb(0x505050));
+    tokens.insert(TokenKey::GridBg, grid_900);
+    tokens.insert(TokenKey::GridLines, rgba(0x33415540));  // Subtle gridlines (25% opacity)
+    tokens.insert(TokenKey::GridLinesBold, grid_700);
 
     // Headers
-    tokens.insert(TokenKey::HeaderBg, rgb(0x2d2d2d));
-    tokens.insert(TokenKey::HeaderText, rgb(0xd4d4d4));
-    tokens.insert(TokenKey::HeaderTextMuted, rgb(0x808080));
-    tokens.insert(TokenKey::HeaderBorder, rgb(0x3d3d3d));
-    tokens.insert(TokenKey::HeaderHoverBg, rgb(0x3d3d3d));
-    tokens.insert(TokenKey::HeaderActiveBg, rgb(0x094771));
+    tokens.insert(TokenKey::HeaderBg, grid_800);
+    tokens.insert(TokenKey::HeaderText, grid_200);
+    tokens.insert(TokenKey::HeaderTextMuted, grid_400);
+    tokens.insert(TokenKey::HeaderBorder, grid_700);
+    tokens.insert(TokenKey::HeaderHoverBg, grid_700);
+    tokens.insert(TokenKey::HeaderActiveBg, accent_hover);
 
     // Cells
-    tokens.insert(TokenKey::CellBg, rgb(0x1e1e1e));
-    tokens.insert(TokenKey::CellBgAlt, rgb(0x232323));
-    tokens.insert(TokenKey::CellText, rgb(0xd4d4d4));
-    tokens.insert(TokenKey::CellTextMuted, rgb(0x808080));
-    tokens.insert(TokenKey::CellBorderFocus, rgb(0x007acc));
-    tokens.insert(TokenKey::CellHoverBg, rgb(0x2a2d2e));
+    tokens.insert(TokenKey::CellBg, grid_900);
+    tokens.insert(TokenKey::CellBgAlt, rgb(0x131c2e));  // Slightly lighter than grid_900
+    tokens.insert(TokenKey::CellText, grid_200);
+    tokens.insert(TokenKey::CellTextMuted, grid_400);
+    tokens.insert(TokenKey::CellBorderFocus, accent);
+    tokens.insert(TokenKey::CellHoverBg, grid_800);
 
     // Selection + cursor
-    tokens.insert(TokenKey::SelectionBg, rgba(0x264f7880));
-    tokens.insert(TokenKey::SelectionBorder, rgb(0x007acc));
-    tokens.insert(TokenKey::SelectionHandle, rgb(0x007acc));
-    tokens.insert(TokenKey::CursorBg, rgb(0xffffff));
-    tokens.insert(TokenKey::CursorText, rgb(0x000000));
+    tokens.insert(TokenKey::SelectionBg, rgba(0x3b82f625));  // Range selection - subtle (15% opacity)
+    tokens.insert(TokenKey::SelectionBorder, rgba(0x3b82f680));  // Selection border - visible but not harsh
+    tokens.insert(TokenKey::SelectionHandle, accent);
+    tokens.insert(TokenKey::CursorBg, grid_100);
+    tokens.insert(TokenKey::CursorText, grid_900);
 
-    // Formula bar + editor
-    tokens.insert(TokenKey::EditorBg, rgb(0xffffff));
-    tokens.insert(TokenKey::EditorBorder, rgb(0x3d3d3d));
-    tokens.insert(TokenKey::EditorText, rgb(0x000000));
-    tokens.insert(TokenKey::EditorPlaceholder, rgb(0x808080));
-    tokens.insert(TokenKey::EditorSelectionBg, rgb(0x264f78));
-    tokens.insert(TokenKey::EditorSelectionText, rgb(0xffffff));
+    // Formula bar + editor (subtle highlight within the blue theme)
+    tokens.insert(TokenKey::EditorBg, rgb(0x1a2744));  // Slightly blue-tinted
+    tokens.insert(TokenKey::EditorBorder, accent);
+    tokens.insert(TokenKey::EditorText, grid_100);
+    tokens.insert(TokenKey::EditorPlaceholder, grid_500);
+    tokens.insert(TokenKey::EditorSelectionBg, rgba(0x3b82f660));
+    tokens.insert(TokenKey::EditorSelectionText, grid_100);
 
     // Status + chrome
-    tokens.insert(TokenKey::StatusBg, rgb(0x007acc));
-    tokens.insert(TokenKey::StatusText, rgb(0xffffff));
-    tokens.insert(TokenKey::StatusTextMuted, rgba(0xffffffaa));
-    tokens.insert(TokenKey::ToolbarBg, rgb(0x2d2d2d));
-    tokens.insert(TokenKey::ToolbarBorder, rgb(0x3d3d3d));
-    tokens.insert(TokenKey::ToolbarButtonHoverBg, rgb(0x3d3d3d));
-    tokens.insert(TokenKey::ToolbarButtonActiveBg, rgb(0x094771));
+    tokens.insert(TokenKey::StatusBg, grid_800);
+    tokens.insert(TokenKey::StatusText, grid_200);
+    tokens.insert(TokenKey::StatusTextMuted, grid_400);
+    tokens.insert(TokenKey::ToolbarBg, grid_800);
+    tokens.insert(TokenKey::ToolbarBorder, grid_700);
+    tokens.insert(TokenKey::ToolbarButtonHoverBg, grid_700);
+    tokens.insert(TokenKey::ToolbarButtonActiveBg, accent_hover);
 
     // Semantic feedback
-    tokens.insert(TokenKey::Accent, rgb(0x007acc));
-    tokens.insert(TokenKey::Ok, rgb(0x4ec9b0));
-    tokens.insert(TokenKey::Warn, rgb(0xdcdcaa));
-    tokens.insert(TokenKey::Error, rgb(0xf44747));
-    tokens.insert(TokenKey::ErrorBg, rgba(0xf4474720));
-    tokens.insert(TokenKey::Link, rgb(0x3794ff));
+    tokens.insert(TokenKey::Accent, accent);
+    tokens.insert(TokenKey::Ok, rgb(0x22c55e));       // Green
+    tokens.insert(TokenKey::Warn, rgb(0xeab308));     // Yellow
+    tokens.insert(TokenKey::Error, rgb(0xef4444));    // Red
+    tokens.insert(TokenKey::ErrorBg, rgba(0xef444420));
+    tokens.insert(TokenKey::Link, rgb(0x60a5fa));     // Light blue
 
     // Spreadsheet semantics
-    tokens.insert(TokenKey::FormulaText, rgb(0x9cdcfe));
-    tokens.insert(TokenKey::RefHighlight1, rgb(0x4ec9b0));
-    tokens.insert(TokenKey::RefHighlight2, rgb(0xdcdcaa));
-    tokens.insert(TokenKey::RefHighlight3, rgb(0xc586c0));
-    tokens.insert(TokenKey::SpillBorder, rgb(0x569cd6));
-    tokens.insert(TokenKey::CommentIndicator, rgb(0xf44747));
+    tokens.insert(TokenKey::FormulaText, rgb(0x93c5fd));  // Light blue
+    tokens.insert(TokenKey::RefHighlight1, rgb(0x22c55e)); // Green
+    tokens.insert(TokenKey::RefHighlight2, rgb(0xfbbf24)); // Amber
+    tokens.insert(TokenKey::RefHighlight3, rgb(0xa855f7)); // Purple
+    tokens.insert(TokenKey::SpillBorder, rgb(0x60a5fa));   // Light blue
+    tokens.insert(TokenKey::CommentIndicator, rgb(0xef4444));
 
     Theme {
         meta: ThemeMeta {
@@ -326,8 +343,8 @@ pub fn classic_theme() -> Theme {
 
     // Grid surfaces
     tokens.insert(TokenKey::GridBg, rgb(0xffffff));
-    tokens.insert(TokenKey::GridLines, rgb(0xd0d0d0));
-    tokens.insert(TokenKey::GridLinesBold, rgb(0xa0a0a0));
+    tokens.insert(TokenKey::GridLines, rgba(0xc0c0c050));  // Subtle gridlines (30% opacity)
+    tokens.insert(TokenKey::GridLinesBold, rgb(0xc0c0c0));
 
     // Headers
     tokens.insert(TokenKey::HeaderBg, rgb(0xe8e8e8));
@@ -346,8 +363,8 @@ pub fn classic_theme() -> Theme {
     tokens.insert(TokenKey::CellHoverBg, rgb(0xf0f8ff));
 
     // Selection + cursor
-    tokens.insert(TokenKey::SelectionBg, rgba(0xb4d6fa80));
-    tokens.insert(TokenKey::SelectionBorder, rgb(0x217346));
+    tokens.insert(TokenKey::SelectionBg, rgba(0xb4d6fa40));  // Range selection - subtle (25% opacity)
+    tokens.insert(TokenKey::SelectionBorder, rgba(0x21734680));  // Selection border - visible but softer
     tokens.insert(TokenKey::SelectionHandle, rgb(0x217346));
     tokens.insert(TokenKey::CursorBg, rgb(0x000000));
     tokens.insert(TokenKey::CursorText, rgb(0xffffff));
@@ -418,8 +435,8 @@ pub fn visicalc_theme() -> Theme {
 
     // Grid surfaces
     tokens.insert(TokenKey::GridBg, black);
-    tokens.insert(TokenKey::GridLines, rgb(0x003300));
-    tokens.insert(TokenKey::GridLinesBold, green_dim);
+    tokens.insert(TokenKey::GridLines, rgba(0x00990030));  // Faint green gridlines (18% opacity)
+    tokens.insert(TokenKey::GridLinesBold, rgb(0x004400));
 
     // Headers
     tokens.insert(TokenKey::HeaderBg, black);
@@ -438,16 +455,16 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::CellHoverBg, rgb(0x001100));
 
     // Selection + cursor
-    tokens.insert(TokenKey::SelectionBg, green_bg);
-    tokens.insert(TokenKey::SelectionBorder, green);
+    tokens.insert(TokenKey::SelectionBg, rgba(0x00330060));  // Subtle green for range (37% opacity)
+    tokens.insert(TokenKey::SelectionBorder, rgba(0x00ff66a0));  // Selection border - visible but not harsh
     tokens.insert(TokenKey::SelectionHandle, green);
     tokens.insert(TokenKey::CursorBg, green);
     tokens.insert(TokenKey::CursorText, black);
 
-    // Formula bar + editor
-    tokens.insert(TokenKey::EditorBg, black);
-    tokens.insert(TokenKey::EditorBorder, green_dim);
-    tokens.insert(TokenKey::EditorText, green);
+    // Formula bar + editor (slightly lifted from pure black to indicate editing)
+    tokens.insert(TokenKey::EditorBg, rgb(0x0a1a0a));  // Very dark green tint
+    tokens.insert(TokenKey::EditorBorder, green);
+    tokens.insert(TokenKey::EditorText, green_bright);
     tokens.insert(TokenKey::EditorPlaceholder, green_dim);
     tokens.insert(TokenKey::EditorSelectionBg, green_bg);
     tokens.insert(TokenKey::EditorSelectionText, green_bright);
