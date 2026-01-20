@@ -7,6 +7,7 @@ use visigrid_engine::formula::eval::CellLookup;
 
 use crate::history::{History, CellChange};
 use crate::mode::Mode;
+use crate::theme::{Theme, TokenKey, visigrid_theme};
 use crate::views;
 
 // Grid configuration
@@ -91,6 +92,10 @@ pub struct Spreadsheet {
     pub formula_ref_cell: Option<(usize, usize)>,      // Current reference cell (or range start)
     pub formula_ref_end: Option<(usize, usize)>,       // Range end (None = single cell)
     pub formula_ref_start_cursor: usize,               // Cursor position where reference started
+
+    // Theme
+    pub theme: Theme,
+    pub theme_preview: Option<Theme>,  // For live preview in picker
 }
 
 impl Spreadsheet {
@@ -143,7 +148,19 @@ impl Spreadsheet {
             formula_ref_cell: None,
             formula_ref_end: None,
             formula_ref_start_cursor: 0,
+            theme: visigrid_theme(),
+            theme_preview: None,
         }
+    }
+
+    /// Get the active theme (preview if set, otherwise current)
+    pub fn active_theme(&self) -> &Theme {
+        self.theme_preview.as_ref().unwrap_or(&self.theme)
+    }
+
+    /// Get a theme token color
+    pub fn token(&self, key: TokenKey) -> Hsla {
+        self.active_theme().get(key)
     }
 
     /// Enumerate available system fonts

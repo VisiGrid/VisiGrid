@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui::StyledText;
 use crate::app::Spreadsheet;
+use crate::theme::TokenKey;
 use super::headers::render_row_header;
 
 /// Render the main cell grid
@@ -162,80 +163,149 @@ fn render_cell(
     if format.underline {
         cell = cell.underline();
     }
-    // Build the text content with cursor at correct position
-    let text_content: SharedString = if is_editing {
+    // Build the text content with cursor and selection highlight
+    if is_editing {
         let cursor_pos = app.edit_cursor;
-        // Insert cursor character at the correct position
         let chars: Vec<char> = value.chars().collect();
-        let before: String = chars.iter().take(cursor_pos).collect();
-        let after: String = chars.iter().skip(cursor_pos).collect();
-        format!("{}|{}", before, after).into()
-    } else {
-        value.into()
-    };
+        let selection = app.edit_selection_range();
 
-    // Apply per-cell font family using StyledText with explicit runs
-    // BUG: Font rendering not working - gpui may need different approach
-    // See: https://github.com/anthropics/visigrid/issues/XXX
-    if let Some(ref font_family) = format.font_family {
-        let run = TextRun {
-            len: text_content.len(),
-            font: Font {
-                family: font_family.clone().into(),
-                features: FontFeatures::default(),
-                fallbacks: None,
-                weight: if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
-                style: if format.italic { FontStyle::Italic } else { FontStyle::Normal },
-            },
-            color: cell_text_color(is_editing),
-            background_color: None,
-            underline: if format.underline {
-                Some(UnderlineStyle {
-                    thickness: px(1.0),
-                    color: None,
-                    wavy: false,
-                })
+        // Build display string with cursor
+        let before_cursor: String = chars.iter().take(cursor_pos).collect();
+        let after_cursor: String = chars.iter().skip(cursor_pos).collect();
+        let display_text: SharedString = format!("{}|{}", before_cursor, after_cursor).into();
+
+        // Create styled text with selection highlighting
+        if let Some((sel_start, sel_end)) = selection {
+            // Calculate display positions accounting for cursor character '|'
+            // Cursor is inserted at cursor_pos, so positions after cursor shift by 1
+            let (disp_sel_start, disp_sel_end) = if cursor_pos <= sel_start {
+                // Cursor before or at selection start - selection shifts right by 1
+                (sel_start + 1, sel_end + 1)
+            } else if cursor_pos >= sel_end {
+                // Cursor at or after selection end - selection unchanged
+                (sel_start, sel_end)
             } else {
-                None
-            },
-            strikethrough: None,
-        };
-        cell.child(StyledText::new(text_content).with_runs(vec![run]))
+                // Cursor inside selection (shouldn't happen with our selection model)
+                (sel_start, sel_end + 1)
+            };
+
+            // Convert char positions to byte positions for the display string
+            let display_chars: Vec<char> = display_text.chars().collect();
+            let byte_sel_start = display_chars.iter().take(disp_sel_start).collect::<String>().len();
+            let byte_sel_end = display_chars.iter().take(disp_sel_end).collect::<String>().len();
+            let total_bytes = display_text.len();
+
+            let normal_color = cell_text_color(is_editing);
+            let selection_bg: Hsla = rgb(0x264f78).into(); // Blue selection background
+            let selection_fg: Hsla = rgb(0xffffff).into(); // White text on selection
+
+            let mut runs = Vec::new();
+
+            // Before selection
+            if byte_sel_start > 0 {
+                runs.push(TextRun {
+                    len: byte_sel_start,
+                    font: Font::default(),
+                    color: normal_color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+
+            // Selected text
+            if byte_sel_end > byte_sel_start {
+                runs.push(TextRun {
+                    len: byte_sel_end - byte_sel_start,
+                    font: Font::default(),
+                    color: selection_fg,
+                    background_color: Some(selection_bg),
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+
+            // After selection
+            if total_bytes > byte_sel_end {
+                runs.push(TextRun {
+                    len: total_bytes - byte_sel_end,
+                    font: Font::default(),
+                    color: normal_color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+
+            cell.child(StyledText::new(display_text).with_runs(runs))
+        } else {
+            // No selection - plain text with cursor
+            cell.child(display_text)
+        }
     } else {
-        cell.child(text_content)
+        // Not editing - show value, possibly with custom font
+        let text_content: SharedString = value.into();
+
+        if let Some(ref font_family) = format.font_family {
+            let run = TextRun {
+                len: text_content.len(),
+                font: Font {
+                    family: font_family.clone().into(),
+                    features: FontFeatures::default(),
+                    fallbacks: None,
+                    weight: if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
+                    style: if format.italic { FontStyle::Italic } else { FontStyle::Normal },
+                },
+                color: cell_text_color(is_editing),
+                background_color: None,
+                underline: if format.underline {
+                    Some(UnderlineStyle {
+                        thickness: px(1.0),
+                        color: None,
+                        wavy: false,
+                    })
+                } else {
+                    None
+                },
+                strikethrough: None,
+            };
+            cell.child(StyledText::new(text_content).with_runs(vec![run]))
+        } else {
+            cell.child(text_content)
+        }
     }
 }
 
-fn cell_background(is_editing: bool, is_active: bool, is_selected: bool, is_formula_ref: bool) -> Hsla {
+fn cell_background(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected: bool, is_formula_ref: bool) -> Hsla {
     if is_editing {
-        rgb(0xffffff).into()  // White when editing
+        app.token(TokenKey::EditorBg)
     } else if is_formula_ref {
-        rgba(0x4ec9b060).into()  // Teal/green for formula reference (semi-transparent)
+        app.token(TokenKey::RefHighlight1)
     } else if is_active {
-        rgb(0x264f78).into()  // Blue for active cell
+        app.token(TokenKey::SelectionBg)
     } else if is_selected {
-        rgba(0x264f7880).into()  // Lighter blue for selection range (50% alpha)
+        app.token(TokenKey::SelectionBg)
     } else {
-        rgb(0x1e1e1e).into()  // Default dark
+        app.token(TokenKey::CellBg)
     }
 }
 
-fn cell_border(is_editing: bool, is_active: bool, is_selected: bool, is_formula_ref: bool) -> Hsla {
+fn cell_border(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected: bool, is_formula_ref: bool) -> Hsla {
     if is_editing || is_active {
-        rgb(0x007acc).into()  // Blue border
+        app.token(TokenKey::CellBorderFocus)
     } else if is_formula_ref {
-        rgb(0x4ec9b0).into()  // Teal/green border for formula reference
+        app.token(TokenKey::RefHighlight1)
     } else if is_selected {
-        rgba(0x007acc80).into()  // 50% alpha
+        app.token(TokenKey::SelectionBorder)
     } else {
-        rgb(0x3d3d3d).into()  // Default gray
+        app.token(TokenKey::GridLines)
     }
 }
 
-fn cell_text_color(is_editing: bool) -> Hsla {
+fn cell_text_color(app: &Spreadsheet, is_editing: bool) -> Hsla {
     if is_editing {
-        rgb(0x000000).into()  // Black text when editing
+        app.token(TokenKey::EditorText)
     } else {
-        rgb(0xd4d4d4).into()  // Light gray text
+        app.token(TokenKey::CellText)
     }
 }

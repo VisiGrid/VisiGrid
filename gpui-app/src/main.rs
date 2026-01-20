@@ -4,6 +4,7 @@ mod file_ops;
 mod history;
 mod keybindings;
 mod mode;
+mod theme;
 mod views;
 
 use gpui::*;

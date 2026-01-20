@@ -25,7 +25,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfuse2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
