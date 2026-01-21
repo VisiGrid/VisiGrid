@@ -55,14 +55,13 @@ jobs:
 
       - name: Create tarball
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          mkdir -p dist/VisiGrid-${VERSION}-linux-x86_64
-          cp target/release/visigrid dist/VisiGrid-${VERSION}-linux-x86_64/
-          cp assets/visigrid.desktop dist/VisiGrid-${VERSION}-linux-x86_64/
-          cp gpui-app/assets/icon-256.png dist/VisiGrid-${VERSION}-linux-x86_64/visigrid.png
+          mkdir -p dist/VisiGrid-linux-x86_64
+          cp target/release/visigrid dist/VisiGrid-linux-x86_64/
+          cp assets/visigrid.desktop dist/VisiGrid-linux-x86_64/
+          cp gpui-app/assets/icon-256.png dist/VisiGrid-linux-x86_64/visigrid.png
 
           cd dist
-          tar -czvf VisiGrid-${VERSION}-linux-x86_64.tar.gz VisiGrid-${VERSION}-linux-x86_64
+          tar -czvf VisiGrid-linux-x86_64.tar.gz VisiGrid-linux-x86_64
 
       - name: Create AppImage
         run: |
@@ -93,7 +92,7 @@ jobs:
           # Download and run appimagetool
           wget -q -O appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool dist/AppDir dist/VisiGrid-${VERSION}-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool dist/AppDir dist/VisiGrid-x86_64.AppImage
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -153,7 +152,7 @@ jobs:
         shell: pwsh
         run: |
           $Version = "${{ steps.version.outputs.version }}"
-          $DistDir = "dist\VisiGrid-${Version}-windows-x64"
+          $DistDir = "dist\VisiGrid-windows-x64"
 
           New-Item -ItemType Directory -Path $DistDir -Force
           Copy-Item "target\release\visigrid.exe" $DistDir
@@ -163,10 +162,10 @@ jobs:
           VisiGrid $Version
           ==================
           Double-click visigrid.exe to run.
-          Visit https://visigrid.com for documentation.
+          Visit https://visigrid.app for documentation.
           "@ | Out-File -FilePath "$DistDir\README.txt" -Encoding UTF8
 
-          Compress-Archive -Path $DistDir -DestinationPath "dist\VisiGrid-${Version}-windows-x64.zip"
+          Compress-Archive -Path $DistDir -DestinationPath "dist\VisiGrid-windows-x64.zip"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -269,8 +268,6 @@ jobs:
 
       - name: Create DMG
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-
           mkdir -p dist/dmg-temp
           cp -R "dist/VisiGrid.app" "dist/dmg-temp/"
           ln -s /Applications "dist/dmg-temp/Applications"
@@ -278,15 +275,14 @@ jobs:
           hdiutil create -volname "VisiGrid" \
             -srcfolder "dist/dmg-temp" \
             -ov -format UDBZ \
-            "dist/VisiGrid-${VERSION}-macOS-universal.dmg"
+            "dist/VisiGrid-macOS-universal.dmg"
 
       - name: Sign DMG
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           codesign --force --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
-            --timestamp "dist/VisiGrid-${VERSION}-macOS-universal.dmg"
+            --timestamp "dist/VisiGrid-macOS-universal.dmg"
 
       - name: Notarize DMG
         timeout-minutes: 30
@@ -295,8 +291,7 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          DMG_PATH="dist/VisiGrid-${VERSION}-macOS-universal.dmg"
+          DMG_PATH="dist/VisiGrid-macOS-universal.dmg"
 
           # Submit for notarization (timeout after 20 minutes)
           xcrun notarytool submit "$DMG_PATH" \
@@ -311,8 +306,7 @@ jobs:
 
       - name: Create zip (alternative to DMG)
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          cd dist && zip -r "VisiGrid-${VERSION}-macOS-universal.zip" VisiGrid.app
+          cd dist && zip -r "VisiGrid-macOS-universal.zip" VisiGrid.app
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -354,10 +348,10 @@ jobs:
 
             | Platform | Download |
             |----------|----------|
-            | **macOS** (Universal) | `VisiGrid-${{ steps.version.outputs.version }}-macOS-universal.dmg` |
-            | **Windows** (x64) | `VisiGrid-${{ steps.version.outputs.version }}-windows-x64.zip` |
-            | **Linux** (x86_64) | `VisiGrid-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz` |
-            | **Linux** (AppImage) | `VisiGrid-${{ steps.version.outputs.version }}-x86_64.AppImage` |
+            | **macOS** (Universal) | `VisiGrid-macOS-universal.dmg` |
+            | **Windows** (x64) | `VisiGrid-windows-x64.zip` |
+            | **Linux** (x86_64) | `VisiGrid-linux-x86_64.tar.gz` |
+            | **Linux** (AppImage) | `VisiGrid-x86_64.AppImage` |
 
             ### Installation
 
