@@ -56,6 +56,9 @@ VisiGrid was originally built with iced. This document tracks the gpui rebuild.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
+| Keyboard hints (Vimium-style) | ✅ Done | g to show labels, type to jump |
+| Vim mode | ✅ Done | hjkl navigation, i to edit |
+| Session persistence | ✅ Done | Window position, open files, cursor |
 | Excel import (xlsx/xls/ods) | ✅ Done | Background import, Import Report dialog |
 | Named ranges | ✅ Done | Create, rename, delete, extract from formula |
 | Inspector panel | ✅ Done | Cell info, format tab |
@@ -78,7 +81,8 @@ VisiGrid was originally built with iced. This document tracks the gpui rebuild.
 | Replace (Ctrl+H) | P2 | Easy | |
 | Zoom | P2 | Easy | Ctrl++/- |
 | Cell context menu | P3 | Medium | Right-click on cells |
-| Zen Mode | P3 | Easy | F11 |
+| Zen Mode | P3 | Easy | ✅ Done (F11) |
+| URL/Path detection | P3 | Easy | ✅ Done (Ctrl+Enter) |
 | Split view | P3 | Hard | |
 | Cross-sheet references | P3 | Medium | =Sheet2!A1 |
 
@@ -107,9 +111,12 @@ gpui-app/
 │   ├── app.rs            # Spreadsheet state, methods
 │   ├── actions.rs        # gpui actions
 │   ├── keybindings.rs    # Key bindings
-│   ├── mode.rs           # Navigation/Edit/GoTo/Find modes
+│   ├── mode.rs           # Navigation/Edit/GoTo/Find/Hint modes
+│   ├── hints.rs          # Keyboard hints system (Vimium-style)
+│   ├── links.rs          # URL/email/path detection for Ctrl+Enter
 │   ├── history.rs        # Undo/redo
 │   ├── file_ops.rs       # File operations
+│   ├── session.rs        # Session persistence
 │   ├── settings/         # Settings architecture
 │   │   ├── mod.rs        # Module exports
 │   │   ├── types.rs      # Setting<T>, EnterBehavior, etc.
@@ -195,12 +202,15 @@ crates/
 
 ### Phase 5: Polish (Next)
 
-1. Array formula visualization (spill borders)
-2. Zoom (Ctrl++/-)
-3. Split view
-4. Zen mode (F11)
-5. Cell context menu
-6. More formula functions (as discovered via import telemetry)
+1. ✅ Zen mode (F11) — hides UI chrome
+2. ✅ Keyboard hints (g) — Vimium-style cell jumping
+3. ✅ Vim mode navigation — hjkl, 0/$, w/b
+4. ✅ URL/Path detection — Ctrl+Enter opens links
+5. Array formula visualization (spill borders)
+6. Zoom (Ctrl++/-)
+7. Split view
+8. Cell context menu
+9. More formula functions (as discovered via import telemetry)
 
 ---
 
@@ -211,7 +221,7 @@ crates/
 | UI framework | gpui | GPU-accelerated, Wayland-native |
 | Window sizing | Dynamic | Calculate visible rows/cols from window size |
 | Menu style | Toolbar (v1) | Simpler; dropdowns in v2 |
-| Mode system | Enum | Navigation/Edit/GoTo/Find |
+| Mode system | Enum | Navigation/Edit/GoTo/Find/Hint |
 | Selection | Anchor+End | Supports range selection |
 | History | Per-action | Single undo step per user action |
 

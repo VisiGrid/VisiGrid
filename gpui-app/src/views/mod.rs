@@ -10,6 +10,13 @@ pub mod impact_preview;
 mod import_overlay;
 mod import_report_dialog;
 pub mod inspector_panel;
+#[cfg(feature = "pro")]
+mod lua_console;
+#[cfg(not(feature = "pro"))]
+mod lua_console_stub;
+#[cfg(not(feature = "pro"))]
+use lua_console_stub as lua_console;
+pub mod license_dialog;
 mod preferences_panel;
 pub mod refactor_log;
 mod menu_bar;
@@ -41,10 +48,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let show_extract_named_range = app.mode == Mode::ExtractNamedRange;
     let show_import_report = app.mode == Mode::ImportReport;
     let show_preferences = app.mode == Mode::Preferences;
+    let show_license = app.mode == Mode::License;
     let show_import_overlay = app.import_overlay_visible;
     let show_name_tooltip = app.should_show_name_tooltip(cx) && app.mode == Mode::Navigation;
     let show_f2_tip = app.should_show_f2_tip(cx);  // Show immediately on trigger, not gated on mode
     let show_inspector = app.inspector_visible;
+    let zen_mode = app.zen_mode;
 
     div()
         .relative()
@@ -52,6 +61,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .track_focus(&app.focus_handle)
         // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
+            // Lua console: history prev
+            if this.lua_console.visible {
+                this.lua_console.history_prev();
+                cx.notify();
+                return;
+            }
             // Autocomplete navigation takes priority
             if this.autocomplete_visible {
                 this.autocomplete_up(cx);
@@ -66,6 +81,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             }
         }))
         .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
+            // Lua console: history next
+            if this.lua_console.visible {
+                this.lua_console.history_next();
+                cx.notify();
+                return;
+            }
             // Autocomplete navigation takes priority
             if this.autocomplete_visible {
                 this.autocomplete_down(cx);
@@ -80,6 +101,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             }
         }))
         .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
+            // Lua console: cursor left
+            if this.lua_console.visible {
+                this.lua_console.cursor_left();
+                cx.notify();
+                return;
+            }
             if this.mode.is_formula() {
                 this.formula_move_ref(0, -1, cx);
             } else if this.mode.is_editing() {
@@ -89,6 +116,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             }
         }))
         .on_action(cx.listener(|this, _: &MoveRight, _, cx| {
+            // Lua console: cursor right
+            if this.lua_console.visible {
+                this.lua_console.cursor_right();
+                cx.notify();
+                return;
+            }
             if this.mode.is_formula() {
                 this.formula_move_ref(0, 1, cx);
             } else if this.mode.is_editing() {
@@ -219,6 +252,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 this.select_all(cx);
             }
         }))
+        .on_action(cx.listener(|this, _: &SelectBlanks, _, cx| {
+            if !this.mode.is_editing() {
+                this.select_blanks(cx);
+            }
+        }))
         .on_action(cx.listener(|this, _: &SelectRow, _, cx| {
             if !this.mode.is_editing() {
                 let row = this.selected.0;
@@ -247,6 +285,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &ExportCsv, _, cx| {
             this.export_csv(cx);
         }))
+        .on_action(cx.listener(|this, _: &ExportTsv, _, cx| {
+            this.export_tsv(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ExportJson, _, cx| {
+            this.export_json(cx);
+        }))
         // Clipboard actions
         .on_action(cx.listener(|this, _: &Copy, _, cx| {
             this.copy(cx);
@@ -262,6 +306,17 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 this.delete_selection(cx);
             }
         }))
+        // Insert/Delete rows/columns (Ctrl+= / Ctrl+-)
+        .on_action(cx.listener(|this, _: &InsertRowsOrCols, _, cx| {
+            if !this.mode.is_editing() {
+                this.insert_rows_or_cols(cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &DeleteRowsOrCols, _, cx| {
+            if !this.mode.is_editing() {
+                this.delete_rows_or_cols(cx);
+            }
+        }))
         // Undo/Redo
         .on_action(cx.listener(|this, _: &Undo, _, cx| {
             this.undo(cx);
@@ -275,7 +330,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             // On macOS, show tip about enabling F2 (catches Ctrl+U and menu-driven edit)
             this.maybe_show_f2_tip(cx);
         }))
-        .on_action(cx.listener(|this, _: &ConfirmEdit, _, cx| {
+        .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
+            // Lua console handles its own Enter
+            if this.lua_console.visible {
+                crate::views::lua_console::execute_console(this, cx);
+                return;
+            }
             // If autocomplete is visible, Enter accepts the suggestion
             if this.autocomplete_visible {
                 this.autocomplete_accept(cx);
@@ -290,7 +350,29 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 _ => this.confirm_edit(cx),
             }
         }))
-        .on_action(cx.listener(|this, _: &CancelEdit, _, cx| {
+        .on_action(cx.listener(|this, _: &ConfirmEditUp, _, cx| {
+            // Lua console handles its own Shift+Enter (insert newline)
+            if this.lua_console.visible {
+                this.lua_console.insert("\n");
+                cx.notify();
+                return;
+            }
+            // Shift+Enter: confirm and move up (or just move up in nav mode)
+            match this.mode {
+                Mode::ThemePicker | Mode::FontPicker | Mode::Command | Mode::GoTo => {
+                    // Shift+Enter does nothing special in these modes
+                }
+                _ => this.confirm_edit_up(cx),
+            }
+        }))
+        .on_action(cx.listener(|this, _: &CancelEdit, window, cx| {
+            // Lua console handles its own Escape
+            if this.lua_console.visible {
+                this.lua_console.hide();
+                window.focus(&this.focus_handle, cx);
+                cx.notify();
+                return;
+            }
             // Import overlay takes priority - dismiss it but let import continue
             if this.import_overlay_visible {
                 this.dismiss_import_overlay(cx);
@@ -328,6 +410,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 this.hide_import_report(cx);
             } else if this.mode == Mode::Preferences {
                 this.hide_preferences(cx);
+            } else if this.mode == Mode::License {
+                this.hide_license(cx);
             } else if this.inspector_visible && this.mode == Mode::Navigation {
                 // Esc closes inspector panel when in navigation mode
                 this.inspector_visible = false;
@@ -356,6 +440,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             }
         }))
         .on_action(cx.listener(|this, _: &BackspaceChar, _, cx| {
+            // Lua console handles its own backspace
+            if this.lua_console.visible {
+                this.lua_console.backspace();
+                cx.notify();
+                return;
+            }
             if this.mode == Mode::Command {
                 this.palette_backspace(cx);
             } else if this.mode == Mode::GoTo {
@@ -367,6 +457,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             }
         }))
         .on_action(cx.listener(|this, _: &DeleteChar, _, cx| {
+            // Lua console handles its own delete
+            if this.lua_console.visible {
+                this.lua_console.delete();
+                cx.notify();
+                return;
+            }
             this.delete_char(cx);
         }))
         .on_action(cx.listener(|this, _: &FillDown, _, cx| {
@@ -378,6 +474,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &AutoSum, _, cx| {
             this.autosum(cx);
         }))
+        .on_action(cx.listener(|this, _: &TrimWhitespace, _, cx| {
+            this.trim_whitespace(cx);
+        }))
         .on_action(cx.listener(|this, _: &ToggleFormulaView, _, cx| {
             this.toggle_show_formulas(cx);
         }))
@@ -385,10 +484,39 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             this.toggle_show_zeros(cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
+            // Pro feature gate
+            if !visigrid_license::is_feature_enabled("inspector") {
+                this.status_message = Some("Inspector requires VisiGrid Pro".to_string());
+                cx.notify();
+                return;
+            }
             this.inspector_visible = !this.inspector_visible;
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &ToggleZenMode, _, cx| {
+            this.zen_mode = !this.zen_mode;
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &ToggleLuaConsole, window, cx| {
+            // Pro feature gate
+            if !visigrid_license::is_feature_enabled("lua") {
+                this.status_message = Some("Lua scripting requires VisiGrid Pro".to_string());
+                cx.notify();
+                return;
+            }
+            this.lua_console.toggle();
+            if this.lua_console.visible {
+                window.focus(&this.console_focus_handle, cx);
+            }
+            cx.notify();
+        }))
         .on_action(cx.listener(|this, _: &ShowFormatPanel, _, cx| {
+            // Pro feature gate
+            if !visigrid_license::is_feature_enabled("inspector") {
+                this.status_message = Some("Inspector requires VisiGrid Pro".to_string());
+                cx.notify();
+                return;
+            }
             this.inspector_visible = true;
             this.inspector_tab = InspectorTab::Format;
             cx.notify();
@@ -427,6 +555,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             this.cycle_reference(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEditInPlace, _, cx| {
+            // Lua console handles its own Ctrl+Enter (execute)
+            if this.lua_console.visible {
+                crate::views::lua_console::execute_console(this, cx);
+                return;
+            }
             this.confirm_edit_in_place(cx);
         }))
         // Formatting
@@ -498,6 +631,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .on_action(cx.listener(|this, _: &ShowPreferences, _, cx| {
             this.show_preferences(cx);
         }))
+        .on_action(cx.listener(|this, _: &OpenKeybindings, _, cx| {
+            this.open_keybindings(cx);
+        }))
         .on_action(cx.listener(|_this, _: &CloseWindow, window, _cx| {
             // Close the current window (not quit the app)
             window.remove_window();
@@ -535,13 +671,26 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             this.add_sheet(cx);
         }))
         // Character input (handles editing, goto, find, and command modes)
-        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            // Route keys to Lua console when visible
+            if this.lua_console.visible {
+                crate::views::lua_console::handle_console_key_from_main(this, event, window, cx);
+                return;
+            }
+
             // Handle sheet context menu (close on any key)
             if this.sheet_context_menu.is_some() {
                 this.hide_sheet_context_menu(cx);
                 if event.keystroke.key == "escape" {
                     return;
                 }
+            }
+
+            // Exit zen mode with Escape
+            if this.zen_mode && event.keystroke.key == "escape" {
+                this.zen_mode = false;
+                cx.notify();
+                return;
             }
 
             // Handle sheet rename mode
@@ -932,6 +1081,104 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 return; // Consume all keystrokes in extract mode
             }
 
+            // Handle License mode
+            if this.mode == Mode::License {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.hide_license(cx);
+                        return;
+                    }
+                    "enter" => {
+                        if !this.license_input.is_empty() {
+                            this.apply_license(cx);
+                        }
+                        return;
+                    }
+                    "backspace" => {
+                        this.license_backspace(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // Handle text input for license
+                if let Some(key_char) = &event.keystroke.key_char {
+                    if !event.keystroke.modifiers.control
+                        && !event.keystroke.modifiers.alt
+                        && !event.keystroke.modifiers.platform
+                    {
+                        for c in key_char.chars().filter(|c| !c.is_control()) {
+                            this.license_insert_char(c, cx);
+                        }
+                        return;
+                    }
+                }
+                return; // Consume all keystrokes in license mode
+            }
+
+            // Handle About mode (consume keystrokes, only escape closes)
+            if this.mode == Mode::About {
+                if event.keystroke.key == "escape" {
+                    this.hide_about(cx);
+                }
+                return; // Consume all keystrokes in about mode
+            }
+
+            // Handle Preferences mode (consume keystrokes, only escape closes)
+            if this.mode == Mode::Preferences {
+                if event.keystroke.key == "escape" {
+                    this.hide_preferences(cx);
+                }
+                return; // Consume all keystrokes in preferences mode
+            }
+
+            // Handle Hint mode (Vimium-style jump navigation)
+            if this.mode == Mode::Hint {
+                let key = event.keystroke.key.as_str();
+                if this.apply_hint_key(key, cx) {
+                    return;
+                }
+                // Unhandled key in hint mode - exit without action
+                this.exit_hint_mode(cx);
+                return;
+            }
+
+            // Handle Navigation mode with keyboard hints or vim mode enabled
+            // (before Names tab filter and before regular text input)
+            if this.mode == Mode::Navigation
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt
+                && !event.keystroke.modifiers.platform
+                && !event.keystroke.modifiers.shift
+            {
+                let key = event.keystroke.key.as_str();
+                let hints_enabled = this.keyboard_hints_enabled(cx);
+                let vim_enabled = this.vim_mode_enabled(cx);
+
+                // 'g' enters command/hint mode (if hints OR vim mode enabled)
+                // - With hints: shows cell labels + g-commands (gg)
+                // - With vim only: just g-commands (gg), no labels
+                if (hints_enabled || vim_enabled) && key == "g" {
+                    this.enter_hint_mode_with_labels(hints_enabled, cx);
+                    return;
+                }
+
+                // Vim keys (if vim mode enabled)
+                if vim_enabled {
+                    if this.apply_vim_key(key, cx) {
+                        return;
+                    }
+                    // For non-vim keys in vim mode, don't start edit - just ignore
+                    if key.len() == 1 && key.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+                        // In vim mode, typing letters doesn't start edit
+                        // Show status hint for unknown vim key
+                        this.status_message = Some(format!("Unknown vim key: {}", key));
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+
             // Handle Names tab filter input (when inspector visible + Names tab + Navigation mode)
             if this.inspector_visible
                 && this.inspector_tab == InspectorTab::Names
@@ -1050,6 +1297,17 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         }))
         // Mouse move for resize and header selection dragging
         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            // Handle Lua console resize drag
+            if this.lua_console.resizing {
+                let y: f32 = event.position.y.into();
+                let delta = this.lua_console.resize_start_y - y; // Inverted: dragging up increases height
+                let new_height = (this.lua_console.resize_start_height + delta)
+                    .max(crate::scripting::MIN_CONSOLE_HEIGHT)
+                    .min(crate::scripting::MAX_CONSOLE_HEIGHT);
+                this.lua_console.height = new_height;
+                cx.notify();
+                return; // Don't process other drags while resizing console
+            }
             // Handle column resize drag
             if let Some(col) = this.resizing_col {
                 let x: f32 = event.position.x.into();
@@ -1083,6 +1341,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         }))
         // Mouse up to end resize and header selection drag
         .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            // End Lua console resize
+            if this.lua_console.resizing {
+                this.lua_console.resizing = false;
+                cx.notify();
+            }
             if this.resizing_col.is_some() || this.resizing_row.is_some() {
                 this.resizing_col = None;
                 this.resizing_row = None;
@@ -1101,13 +1364,20 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .size_full()
         .bg(app.token(TokenKey::AppBg))
         // Hide in-app menu bar on macOS (uses native menu bar instead)
-        .when(!cfg!(target_os = "macos"), |div| {
+        // Also hide in zen mode
+        .when(!cfg!(target_os = "macos") && !zen_mode, |div| {
             div.child(menu_bar::render_menu_bar(app, cx))
         })
-        .child(formula_bar::render_formula_bar(app, cx))
+        .when(!zen_mode, |div| {
+            div.child(formula_bar::render_formula_bar(app, cx))
+        })
         .child(headers::render_column_headers(app, cx))
         .child(grid::render_grid(app, cx))
-        .child(status_bar::render_status_bar(app, editing, cx))
+        // Lua console panel (above status bar)
+        .child(lua_console::render_lua_console(app, cx))
+        .when(!zen_mode, |div| {
+            div.child(status_bar::render_status_bar(app, editing, cx))
+        })
         .when(show_goto, |div| {
             div.child(goto_dialog::render_goto_dialog(app))
         })
@@ -1128,6 +1398,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         })
         .when(show_about, |div| {
             div.child(about_dialog::render_about_dialog(app, cx))
+        })
+        .when(show_license, |div| {
+            div.child(license_dialog::render_license_dialog(app, cx))
         })
         .when(show_import_report, |div| {
             div.child(import_report_dialog::render_import_report_dialog(app, cx))

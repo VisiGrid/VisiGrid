@@ -14,7 +14,7 @@ pub fn is_known_function(name: &str) -> bool {
         // Logic functions
         "IF" | "IFS" | "AND" | "OR" | "NOT" | "IFERROR" | "IFNA" | "SWITCH" |
         // Information functions
-        "ISBLANK" | "ISNUMBER" | "ISTEXT" | "ISERROR" |
+        "ISBLANK" | "ISNUMBER" | "ISTEXT" | "ISERROR" | "ISNA" |
         // Text functions
         "CONCATENATE" | "CONCAT" | "TEXTJOIN" | "LEFT" | "RIGHT" | "MID" | "LEN" |
         "UPPER" | "LOWER" | "TRIM" | "TEXT" | "VALUE" | "FIND" | "SUBSTITUTE" | "REPT" |

@@ -28,6 +28,7 @@ actions!(editing, [
     StartEdit,
     ConfirmEdit,
     ConfirmEditInPlace,  // Ctrl+Enter - confirms without moving
+    ConfirmEditUp,       // Shift+Enter - confirms and moves up
     CancelEdit,
     TabNext,
     TabPrev,
@@ -36,6 +37,9 @@ actions!(editing, [
     DeleteCell,
     FillDown,
     FillRight,
+    TrimWhitespace,
+    InsertRowsOrCols,    // Ctrl+= / Ctrl++ - insert rows/cols based on selection
+    DeleteRowsOrCols,    // Ctrl+- - delete rows/cols based on selection
     // Edit mode cursor movement
     EditCursorLeft,
     EditCursorRight,
@@ -65,6 +69,7 @@ actions!(editing, [
 // Selection actions
 actions!(selection, [
     SelectAll,
+    SelectBlanks,   // Select blank cells in current selection
     SelectRow,      // Shift+Space - select entire row
     SelectColumn,   // Ctrl+Space - select entire column
     ExtendUp,
@@ -91,6 +96,8 @@ actions!(file, [
     Save,
     SaveAs,
     ExportCsv,
+    ExportTsv,
+    ExportJson,
     CloseWindow,
     Quit,
 ]);
@@ -101,8 +108,10 @@ actions!(view, [
     ToggleInspector,
     ShowFormatPanel,  // Ctrl+1 - opens inspector with Format tab
     ShowPreferences,  // Cmd+, on macOS - currently routes to theme picker
+    OpenKeybindings,  // Open keybindings.json for editing
     ToggleProblems,
     ToggleZenMode,
+    ToggleLuaConsole, // Ctrl+Shift+L - Lua scripting REPL
     ToggleFormulaView,
     ToggleShowZeros,
     ZoomIn,

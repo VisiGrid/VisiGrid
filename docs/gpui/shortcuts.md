@@ -9,16 +9,17 @@ Current status of keyboard shortcuts in the gpui version.
 | Category | Implemented | Target | Coverage |
 |----------|-------------|--------|----------|
 | Navigation | 14 | 20 | 70% |
-| Selection | 11 | 12 | 92% |
-| Editing | 14 | 20 | 70% |
+| Selection | 12 | 12 | 100% |
+| Editing | 15 | 20 | 75% |
 | Clipboard | 3 | 5 | 60% |
-| File | 5 | 6 | 83% |
+| File | 8 | 8 | 100% |
 | Formatting | 3 | 10 | 30% |
-| View | 5 | 8 | 63% |
+| View | 7 | 8 | 88% |
 | Menu | 7 | 7 | 100% |
 | Sheets | 5 | 5 | 100% |
 | Named Ranges | 3 | 3 | 100% |
-| **Total** | **70** | **96** | **73%** |
+| Optional Nav (hints+vim) | 15 | 15 | 100% |
+| **Total** | **92** | **113** | **81%** |
 
 ---
 
@@ -54,6 +55,7 @@ Current status of keyboard shortcuts in the gpui version.
 | Click | Select cell | ✅ |
 | Shift+Space | Select row | ✅ |
 | Ctrl+Space | Select column | ✅ |
+| (Command Palette) | Select blanks in region | ✅ |
 
 ### Editing
 
@@ -62,7 +64,7 @@ Current status of keyboard shortcuts in the gpui version.
 | F2 | Start edit | ✅ |
 | Escape | Cancel edit | ✅ |
 | Enter | Confirm edit | ✅ |
-| Ctrl+Enter | Confirm without moving / Multi-edit | ✅ |
+| Ctrl+Enter | Confirm without moving / Multi-edit / Open link | ✅ |
 | Delete | Delete selection | ✅ |
 | Backspace | Backspace in edit | ✅ |
 | Ctrl+D | Fill Down | ✅ |
@@ -71,6 +73,7 @@ Current status of keyboard shortcuts in the gpui version.
 | Ctrl+Y | Redo | ✅ |
 | Ctrl+Shift+Z | Redo (alt) | ✅ |
 | Any character | Start edit with char | ✅ |
+| (Command Palette) | Trim whitespace | ✅ |
 
 ### Clipboard
 
@@ -88,6 +91,9 @@ Current status of keyboard shortcuts in the gpui version.
 | Ctrl+O | Open file | ✅ |
 | Ctrl+S | Save | ✅ |
 | Ctrl+Shift+S | Save As | ✅ |
+| (Menu/Palette) | Export as CSV | ✅ |
+| (Menu/Palette) | Export as TSV | ✅ |
+| (Menu/Palette) | Export as JSON | ✅ |
 
 ### Formatting
 
@@ -106,6 +112,7 @@ Current status of keyboard shortcuts in the gpui version.
 | Ctrl+Shift+I | Inspector Panel | ✅ |
 | Ctrl+K Ctrl+T | Theme Picker | ✅ |
 | Ctrl+, | Preferences | ✅ |
+| (Command Palette) | Open Keybindings (JSON) | ✅ |
 
 ### Named Ranges
 
@@ -161,7 +168,7 @@ Current status of keyboard shortcuts in the gpui version.
 | Ctrl+- | Zoom out | |
 | Ctrl+0 | Zoom reset | |
 | F9 | Recalculate | |
-| F11 | Zen mode | |
+| F11 | Zen mode | ✅ Implemented |
 | Alt+= | AutoSum | |
 
 ### Priority 3 (Nice to Have)
@@ -192,12 +199,76 @@ Editor-inspired shortcuts that differentiate from Excel:
 | Ctrl+, | Preferences | ✅ |
 | Ctrl+Shift+N | Define Named Range | ✅ |
 | Ctrl+Shift+R | Rename Symbol | ✅ |
+| (Palette) | Transform: Trim Whitespace | ✅ |
+| (Palette) | Select: Blanks in Region | ✅ |
+| (Palette) | Open Keybindings (JSON) | ✅ |
 | Ctrl+Shift+M | Problems Panel | ❌ |
 | Ctrl+\ | Split View | ❌ |
-| F11 | Zen Mode | ❌ |
+| F11 | Zen Mode | ✅ |
 | F1 | Context Help | ❌ |
 | F12 | Go to Definition | ❌ |
 | Shift+F12 | Find All References | ❌ |
+
+---
+
+## Optional Navigation Modes
+
+Enable in Preferences (Ctrl+,) → Navigation. Both are off by default.
+
+### Keyboard Hints (Vimium-style)
+
+| Shortcut | Action | Notes |
+|----------|--------|-------|
+| g | Show cell labels | Type letters to jump |
+| gg | Go to A1 | Command resolved first |
+| a-z, aa-zz | Jump to labeled cell | Auto-confirms on unique match |
+| Escape | Cancel hint mode | |
+| Backspace | Delete last character | |
+
+### Vim Mode
+
+| Shortcut | Action | Notes |
+|----------|--------|-------|
+| h / j / k / l | Move left/down/up/right | |
+| i | Enter edit mode | |
+| 0 | Jump to column A | |
+| $ | Jump to last data column | |
+| w | Jump right (next data edge) | |
+| b | Jump left (prev data edge) | |
+
+When enabled, the status bar shows VIM instead of NAV.
+
+---
+
+## Keybinding Customization
+
+VisiGrid supports fully remappable keybindings via JSON:
+
+**Location:** `~/.config/visigrid/keybindings.json`
+
+**Access:** Command Palette → "Open Keybindings (JSON)"
+
+**Format:**
+```json
+{
+  "ctrl-shift-d": "edit.filldown",
+  "ctrl-;": "edit.trim",
+  "alt-enter": "edit.confirminplace"
+}
+```
+
+**Available action categories:**
+- `navigation.*` — up, down, goto, find, jumpup, etc.
+- `edit.*` — start, confirm, filldown, fillright, trim, undo, redo
+- `selection.*` — all, blanks, row, column, extendup/down/left/right
+- `clipboard.*` — copy, cut, paste
+- `file.*` — new, open, save, saveas, exportcsv, exporttsv, exportjson
+- `format.*` — bold, italic, underline
+- `view.*` — palette, inspector, formulas
+- `history.*` — undo, redo
+- `sheet.*` — next, prev, add
+
+User keybindings take precedence over defaults. Restart required after changes.
 
 ---
 
@@ -231,8 +302,9 @@ Editor-inspired shortcuts that differentiate from Excel:
 6. ✅ Ctrl+, (Preferences)
 
 ### Sprint 5: Polish (Next)
-1. Zoom shortcuts (Ctrl++/-)
-2. F9 recalculate
-3. F11 zen mode
-4. Alt+= AutoSum
-5. Ctrl+H (Replace)
+1. ✅ F11 zen mode
+2. ✅ URL/path detection (Ctrl+Enter opens links)
+3. Zoom shortcuts (Ctrl++/-)
+4. F9 recalculate
+5. Alt+= AutoSum
+6. Ctrl+H (Replace)

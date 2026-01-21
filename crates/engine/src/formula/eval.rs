@@ -785,6 +785,13 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
             let result = evaluate(&args[0], lookup);
             EvalResult::Boolean(result.is_error())
         }
+        "ISNA" => {
+            if args.len() != 1 {
+                return EvalResult::Error("ISNA requires exactly one argument".to_string());
+            }
+            let result = evaluate(&args[0], lookup);
+            EvalResult::Boolean(matches!(result, EvalResult::Error(ref e) if e == "#N/A"))
+        }
 
         // =====================
         // TEXT FUNCTIONS
@@ -3314,6 +3321,38 @@ mod tests {
         let expr = parse(r#"=IFNA(VLOOKUP("Found", A1:B1, 2, FALSE), "Not Available")"#).unwrap();
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(100.0));
+    }
+
+    #[test]
+    fn test_isna_with_na_error() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "NotFound");
+        lookup.set(0, 1, "100");
+
+        // ISNA(VLOOKUP("X", A1:B1, 2, FALSE)) - should be TRUE (returns #N/A)
+        let expr = parse(r#"=ISNA(VLOOKUP("X", A1:B1, 2, FALSE))"#).unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(true));
+    }
+
+    #[test]
+    fn test_isna_with_other_error() {
+        let lookup = TestLookup::new();
+
+        // ISNA(1/0) - should be FALSE (division by zero is not #N/A)
+        let expr = parse("=ISNA(1/0)").unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(false));
+    }
+
+    #[test]
+    fn test_isna_with_value() {
+        let lookup = TestLookup::new();
+
+        // ISNA(42) - should be FALSE (not an error)
+        let expr = parse("=ISNA(42)").unwrap();
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(false));
     }
 
     #[test]

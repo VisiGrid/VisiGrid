@@ -439,6 +439,15 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
         ],
     },
     FunctionInfo {
+        name: "ISNA",
+        signature: "ISNA(value)",
+        description: "Returns TRUE if the value is the #N/A error.",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The value to check.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
         name: "IFS",
         signature: "IFS(logical_test1, value_if_true1, [logical_test2, value_if_true2], ...)",
         description: "Checks multiple conditions and returns the first true result.",

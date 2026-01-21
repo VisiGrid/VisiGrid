@@ -1,12 +1,12 @@
-# Lua Scripting: VisiGrid gpui
+# Lua Scripting: VisiGrid
 
-Planned scripting system using embedded Lua, accessible via `Ctrl+`` (backtick).
+A transactional, sandboxed scripting system for spreadsheet automation via `Ctrl+Shift+L`.
 
 ---
 
-## Status: NOT YET IMPLEMENTED
+## Status: IMPLEMENTED (v1 Stable)
 
-Lua scripting is a future feature. This document outlines the design for when it's built.
+The Lua Console is a platform primitive: sandboxed, deterministic, fully undoable.
 
 ---
 
@@ -21,152 +21,159 @@ Lua scripting is a future feature. This document outlines the design for when it
 
 ---
 
-## Planned Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────┐
-│  App                                        │
+│  Spreadsheet                                │
 │    │                                        │
 │    ├── LuaRuntime (sandboxed)               │
-│    │     ├── "sheet" global → SheetApi      │
-│    │     └── "app" global → AppApi          │
+│    │     └── "sheet" global → DynOpSink     │
 │    │                                        │
-│    ├── CommandQueue                         │
-│    │     └── Vec<LuaOp> (batched edits)     │
+│    ├── Operation Journal                    │
+│    │     ├── Vec<LuaOp> (batched edits)     │
+│    │     └── Pending shadow map (R-A-W)     │
 │    │                                        │
-│    └── REPL Panel                           │
-│          ├── Output history (scrollable)    │
-│          └── Input prompt (multiline)       │
+│    └── Console Panel                        │
+│          ├── Output (virtual scroll)        │
+│          ├── Input (multiline)              │
+│          └── Examples system                │
 └─────────────────────────────────────────────┘
 ```
 
-**Execution model:** Lua calls queue operations. After the chunk finishes, ops are applied as a batch on the UI thread. This avoids borrow panics and enables single-undo grouping.
+**Execution model:** Lua calls queue operations into a journal. The pending map handles read-after-write. After the chunk finishes, ops are applied as a batch with a single undo entry.
 
 ---
 
-## Planned API
+## Sheet API (v1 Stable)
 
-### Cell Access (Typed Values)
+All coordinates are **1-indexed** for Lua convention.
+
+### Cell Access
 
 ```lua
--- Get typed value (not display string!)
-sheet:get_value(row, col)
-sheet:get_value(1, 1)      -- A1 (1-indexed!)
+-- Read/write by row, col
+sheet:get_value(row, col)      -- → value or nil
+sheet:set_value(row, col, val) -- sets cell value
+sheet:get_formula(row, col)    -- → formula string or nil
+sheet:set_formula(row, col, f) -- sets formula
 
--- Get formatted display string
-sheet:get_display(row, col)
-
--- Get raw formula (or nil if not a formula)
-sheet:get_formula(row, col)
-
--- Set typed value
-sheet:set_value(row, col, value)
-sheet:set_value(1, 1, 42)          -- number
-sheet:set_value(1, 2, "Hello")     -- string
-sheet:set_value(1, 3, true)        -- boolean
-sheet:set_value(1, 4, nil)         -- clear cell
-
--- Set formula
-sheet:set_formula(row, col, formula)
-sheet:set_formula(1, 5, "=A1*2")
+-- Read/write by A1 notation (shorthand)
+sheet:get("A1")                -- → value at A1
+sheet:set("A1", val)           -- sets value at A1
+sheet:get_a1("B2")             -- same as get()
+sheet:set_a1("B2", val)        -- same as set()
 ```
 
-### A1-Style Addressing
+### Sheet Info
 
 ```lua
-sheet:get_a1("A1")
-sheet:set_a1("B2", 100)
-sheet:set_formula_a1("C3", "=A1+B2")
-
--- Ranges
-local r = sheet:range("A1:C10")
-r:values()                         -- 2D table
-r:set_values({{1,2,3}, {4,5,6}})   -- bulk set
-r:map(function(v) return v * 2 end) -- transform
+sheet:rows()      -- → number of rows with data
+sheet:cols()      -- → number of columns with data
+sheet:selection() -- → {start_row, start_col, end_row, end_col, range}
 ```
 
-### Selection
-
+**Selection example:**
 ```lua
-local sel = sheet:selection()  -- {start_row, start_col, end_row, end_col}
-sheet:select(1, 1, 10, 1)      -- Select A1:A10
-sheet:select_a1("A1:C10")
+local sel = sheet:selection()
+print(sel.range)      -- "A1:C5"
+print(sel.start_row)  -- 1
+print(sel.end_col)    -- 3
 ```
 
----
+### Range Operations (Bulk Read/Write)
 
-## Example Use Cases
-
-### Bulk Operations
 ```lua
--- Fill column A with row numbers
-for i = 1, 10 do
-  sheet:set_value(i, 1, i)
-end
+local r = sheet:range("A1:C5")
 
--- Sum values in column A
-local sum = 0
-for i = 1, 10 do
-  local v = sheet:get_value(i, 1)
-  if type(v) == "number" then
-    sum = sum + v
-  end
-end
-print(sum)  -- 55
+-- Read all values as 2D table
+local data = r:values()
+print(data[1][1])  -- value at A1
+print(data[2][3])  -- value at C2
+
+-- Write 2D table to range
+r:set_values({
+    {1, 2, 3},
+    {4, 5, 6},
+    {7, 8, 9}
+})
+
+-- Range info
+r:rows()     -- → 5
+r:cols()     -- → 3
+r:address()  -- → "A1:C5"
 ```
 
-### Data Transformation
+### Transactions
+
 ```lua
--- Uppercase all text in column B
-for i = 1, sheet:rows() do
-  local val = sheet:get_value(i, 2)
-  if type(val) == "string" then
-    sheet:set_value(i, 2, string.upper(val))
-  end
-end
+sheet:begin()    -- start transaction (noop, for clarity)
+sheet:rollback() -- discard pending changes, returns count
+sheet:commit()   -- commit changes (noop, auto-committed at script end)
+```
+
+**Rollback example:**
+```lua
+sheet:set("A1", 100)
+sheet:set("A2", 200)
+local discarded = sheet:rollback()  -- → 2
+-- No changes will be applied
 ```
 
 ---
 
-## REPL Panel Design
+## Console Commands
 
-```
-┌─────────────────────────────────────────────┐
-│ Lua REPL                                  × │
-├─────────────────────────────────────────────┤
-│ > sheet:get_a1("A1")                        │
-│ 42                                          │
-│ > for i = 1, 10 do                          │
-│ ...   sheet:set_value(i, 1, i)              │
-│ ... end                                     │
-│ nil                                         │
-├─────────────────────────────────────────────┤
-│ > _                                         │
-└─────────────────────────────────────────────┘
-```
+Type these directly in the console input:
 
-**Input modes:**
-- `Enter` - Execute when chunk complete
-- `Shift+Enter` - Insert newline (multiline)
-- `Esc` - Cancel running script
+| Command | Description |
+|---------|-------------|
+| `help` | Show all commands and shortcuts |
+| `examples` | List available example scripts |
+| `example N` | Load example N (or name) into input |
+| `clear` | Clear output history |
+
+### First-Open Experience
+
+On first open, the console pre-fills `examples` in the input. Press Enter to see the list of available scripts.
 
 ---
 
-## Keyboard Shortcuts (Planned)
+## Built-in Examples
+
+| Name | Description |
+|------|-------------|
+| Fill Series | Fill A1:A10 with powers of 2 |
+| Trim Whitespace | Remove leading/trailing spaces from column A |
+| Find Duplicates | Find and report duplicate values in column A |
+| Normalize Dates | Convert date formats to YYYY-MM-DD |
+| Compare Columns | Find mismatches between columns A and B |
+| Generate Multiplication Table | Create 10x10 table starting at A1 |
+| Sum Column | Calculate sum and average of numbers in column A |
+
+Load any example: `example 1` or `example "Fill Series"`
+
+---
+
+## Keyboard Shortcuts
 
 | Action | Shortcut |
 |--------|----------|
-| Toggle REPL | `Ctrl+`` (backtick) |
-| Execute code | `Enter` |
-| Newline | `Shift+Enter` |
+| Toggle console | `Ctrl+Shift+L` |
+| Execute | `Enter` or `Ctrl+Enter` |
+| Newline (multiline) | `Shift+Enter` |
 | Previous command | `Up Arrow` |
 | Next command | `Down Arrow` |
-| Cancel execution | `Escape` |
-| Clear history | Type `clear` |
+| Scroll output up | `Page Up` |
+| Scroll output down | `Page Down` |
+| Scroll to top | `Ctrl+Home` |
+| Scroll to bottom | `Ctrl+End` |
+| Clear output | `Ctrl+L` |
+| Close console | `Escape` |
 
 ---
 
-## Sandboxing (Required)
+## Sandboxing
 
 ### Disabled Libraries
 
@@ -175,50 +182,108 @@ end
 | `table` | Enabled | Safe |
 | `string` | Enabled | Safe |
 | `math` | Enabled | Safe |
+| `utf8` | Enabled | Safe |
 | `os` | **Disabled** | System calls |
 | `io` | **Disabled** | File I/O |
 | `debug` | **Disabled** | Introspection |
+| `package` | **Disabled** | Module loading |
 | `require` | **Disabled** | Module loading |
+| `load` | **Disabled** | Bytecode execution |
+| `loadfile` | **Disabled** | File loading |
+| `dofile` | **Disabled** | File execution |
 
 ### Resource Limits
 
 | Limit | Value | Purpose |
 |-------|-------|---------|
-| Memory | 10MB | Prevent huge allocations |
-| Instructions | 10M | Prevent infinite loops |
-| Wall-clock | 200ms interactive | UI responsiveness |
-| Recursion | 200 | Prevent stack overflow |
+| Operations | 1,000,000 | Prevent runaway scripts |
+| Output lines | 5,000 | Prevent memory exhaustion |
+| Instructions | 100,000,000 | Prevent infinite loops |
+| Wall-clock | 30 seconds | Catch pathological patterns |
+
+### Safety Guarantees
+
+- **No filesystem access** - Scripts cannot read or write files
+- **No network access** - Scripts cannot make HTTP requests
+- **No system calls** - Scripts cannot execute commands
+- **Single undo** - All changes from one script = one Ctrl+Z
+- **Deterministic** - Same input always produces same output
 
 ---
 
-## Implementation Priority
+## Execution Stats
 
-### Phase 1: Basic REPL
-1. Toggle REPL panel with Ctrl+`
-2. Execute Lua expressions
-3. sheet:get_value / set_value
-4. Command queue (batch ops)
-5. Single undo step per script
+After each script, the console shows:
+```
+ops: 100 | cells: 50 | time: 12.5ms
+```
 
-### Phase 2: Range Operations
-1. A1-style addressing
-2. Range object with map/set_values
-3. Multiline input
-4. Command history
-
-### Phase 3: Integration
-1. app:execute() for VisiGrid commands
-2. Bind scripts to shortcuts
-3. Script files per workbook
-4. Syntax highlighting
+- **ops**: Total operations queued
+- **cells**: Unique cells modified (deduplicated)
+- **time**: Wall-clock execution time
 
 ---
 
-## Dependencies
+## Example Scripts
 
-```toml
-# Cargo.toml (when implemented)
-mlua = { version = "0.11", features = ["lua54"] }
+### Fill Column with Sequence
+```lua
+for i = 1, 100 do
+    sheet:set("A" .. i, i * 2)
+end
+print("Filled 100 cells")
+```
+
+### Process Selection
+```lua
+local sel = sheet:selection()
+for row = sel.start_row, sel.end_row do
+    for col = sel.start_col, sel.end_col do
+        local val = sheet:get_value(row, col)
+        if type(val) == "number" then
+            sheet:set_value(row, col, val * 1.1)  -- +10%
+        end
+    end
+end
+```
+
+### Bulk Transform with Range
+```lua
+local r = sheet:range("A1:C10")
+local data = r:values()
+
+-- Double all numbers
+for i, row in ipairs(data) do
+    for j, val in ipairs(row) do
+        if type(val) == "number" then
+            data[i][j] = val * 2
+        end
+    end
+end
+
+r:set_values(data)
+```
+
+### Conditional Rollback
+```lua
+sheet:begin()
+
+for i = 1, 100 do
+    sheet:set("A" .. i, math.random(1, 100))
+end
+
+-- Check if sum exceeds threshold
+local sum = 0
+for i = 1, 100 do
+    sum = sum + (sheet:get("A" .. i) or 0)
+end
+
+if sum > 5000 then
+    local discarded = sheet:rollback()
+    print("Rolled back " .. discarded .. " ops (sum too high)")
+else
+    print("Sum: " .. sum)
+end
 ```
 
 ---
@@ -232,7 +297,36 @@ Spreadsheet users think in A1, not (0,0). The Lua API matches user mental model.
 1. No borrow panics at runtime
 2. One recalc at end of script
 3. Clean undo grouping
-4. Future async/background scripts
+4. Read-after-write consistency via pending map
 
 ### Why typed values?
 Returning display strings forces parsing `"$1,234.56"` back to numbers. Typed values are unambiguous.
+
+### Why no persistent scripts?
+Trust. Every script is explicit, visible, and immediately undoable. No "run on open" surprises.
+
+---
+
+## Dependencies
+
+```toml
+# Cargo.toml
+mlua = { version = "0.11", features = ["lua54"] }
+```
+
+---
+
+## API Stability
+
+The Sheet API documented here is **v1 Stable**. Breaking changes require major version bumps.
+
+| API | Status |
+|-----|--------|
+| `sheet:get/set` | Stable |
+| `sheet:get_value/set_value` | Stable |
+| `sheet:get_formula/set_formula` | Stable |
+| `sheet:rows/cols` | Stable |
+| `sheet:selection` | Stable |
+| `sheet:range` | Stable |
+| `range:values/set_values` | Stable |
+| `sheet:begin/rollback/commit` | Stable |

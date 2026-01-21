@@ -1,6 +1,6 @@
 # Lua Scripting REPL
 
-Integrated scripting console using Lua, accessible via `Ctrl+`` (backtick).
+Integrated scripting console using Lua, accessible via `Ctrl+Shift+L`.
 
 ---
 
@@ -246,7 +246,7 @@ end
 
 | Action | Shortcut |
 |--------|----------|
-| Toggle REPL | `Ctrl+`` (backtick) |
+| Toggle REPL | `Ctrl+Shift+L` |
 | Execute code | `Enter` (when complete) |
 | Newline | `Shift+Enter` |
 | Previous command | `Up Arrow` |

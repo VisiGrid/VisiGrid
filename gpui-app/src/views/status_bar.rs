@@ -1,6 +1,8 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
+use crate::links::LinkTarget;
+use crate::mode::Mode;
 use crate::theme::TokenKey;
 
 /// Render the bottom status bar (Zed-inspired minimal design)
@@ -8,16 +10,38 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
     // Calculate selection stats if multiple cells selected
     let selection_stats = calculate_selection_stats(app);
 
-    // Mode indicator - show contextual tip when user has named ranges (post-activation)
-    let has_named_ranges = !app.workbook.list_named_ranges().is_empty();
-    let mode_text = if editing {
-        "Edit"
+    // Detect link in current cell (only in navigation mode with single cell selected)
+    // Don't show hint if multi-selection is active (Ctrl+Enter won't work anyway)
+    let detected_link = if !editing && app.mode == Mode::Navigation && !app.is_multi_selection() {
+        app.detected_link()
+    } else {
+        None
+    };
+
+    // Mode indicator - show current mode (VIM/HINT/NAV/EDIT)
+    let vim_enabled = app.vim_mode_enabled(cx);
+    let mode_text = if app.mode == Mode::Hint {
+        // Show hint buffer as user types
+        if app.hint_state.buffer.is_empty() {
+            "HINT"
+        } else {
+            "" // We'll show the buffer separately
+        }
+    } else if editing {
+        "EDIT"
     } else if app.status_message.is_some() {
         ""
-    } else if has_named_ranges {
-        "Tip: Named ranges let you refactor spreadsheets safely."
+    } else if vim_enabled {
+        "VIM"
     } else {
-        "Ready"
+        "NAV"
+    };
+
+    // Hint buffer display (when typing in hint mode)
+    let hint_buffer = if app.mode == Mode::Hint && !app.hint_state.buffer.is_empty() {
+        Some(format!("HINT: {}", app.hint_state.buffer))
+    } else {
+        None
     };
 
     // Get sheet information
@@ -87,14 +111,31 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                         .mx_2()
                 )
                 // Status message or mode
-                .child(render_status_message(app, mode_text, text_muted, cx))
+                .child(render_status_message(app, mode_text, hint_buffer.as_deref(), text_muted, cx))
         )
         .child(
-            // Right side: selection stats
+            // Right side: link hint + selection stats
             div()
                 .flex()
                 .items_center()
                 .gap_4()
+                // Link hint (when link detected in current cell)
+                .when(detected_link.is_some(), |d| {
+                    let link_type = match detected_link.as_ref() {
+                        Some(LinkTarget::Url(_)) => "URL",
+                        Some(LinkTarget::Email(_)) => "Email",
+                        Some(LinkTarget::Path(_)) => "File",
+                        None => "",
+                    };
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_color(text_muted)
+                            .child(format!("{}: Ctrl+Enter to open", link_type))
+                    )
+                })
                 .children(selection_stats)
         )
         // Context menu overlay
@@ -251,11 +292,20 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
 }
 
 /// Render the status message, making it clickable if an import report is available
-fn render_status_message(app: &Spreadsheet, mode_text: &str, text_muted: Hsla, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+fn render_status_message(
+    app: &Spreadsheet,
+    mode_text: &str,
+    hint_buffer: Option<&str>,
+    text_muted: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
     let has_import_result = app.import_result.is_some();
     let accent = app.token(TokenKey::Accent);
 
-    let message = if let Some(msg) = &app.status_message {
+    // Priority: hint buffer > status message > mode text
+    let message = if let Some(hint) = hint_buffer {
+        hint.to_string()
+    } else if let Some(msg) = &app.status_message {
         msg.clone()
     } else {
         mode_text.to_string()
@@ -271,6 +321,12 @@ fn render_status_message(app: &Spreadsheet, mode_text: &str, text_muted: Hsla, c
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.show_import_report(cx);
             }))
+            .child(message)
+            .into_any_element()
+    } else if hint_buffer.is_some() {
+        // Hint mode gets accent color to stand out
+        div()
+            .text_color(accent)
             .child(message)
             .into_any_element()
     } else {

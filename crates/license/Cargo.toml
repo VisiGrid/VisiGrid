@@ -1,0 +1,24 @@
+[package]
+name = "visigrid-license"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "License verification for VisiGrid"
+
+[features]
+default = []
+# Commercial build: runtime license checking enabled
+commercial = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+once_cell = "1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+rand = "0.8"

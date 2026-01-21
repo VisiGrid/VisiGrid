@@ -147,7 +147,7 @@ fn render_dropdown(
         Menu::Insert => render_insert_menu(text_disabled, panel_border),
         Menu::Format => render_format_menu(text_primary, text_muted, text_disabled, selection_bg, panel_border, cx),
         Menu::Data => render_data_menu(text_primary, text_muted, text_disabled, selection_bg, panel_border, cx),
-        Menu::Help => render_help_menu(text_primary, selection_bg, cx),
+        Menu::Help => render_help_menu(text_primary, selection_bg, panel_border, cx),
     };
 
     div()
@@ -173,6 +173,8 @@ fn render_file_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, bo
         .child(menu_item("Save As...", Some("Ctrl+Shift+S"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.save_as(cx); }))
         .child(menu_separator(border))
         .child(menu_item("Export as CSV...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.export_csv(cx); }))
+        .child(menu_item("Export as TSV...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.export_tsv(cx); }))
+        .child(menu_item("Export as JSON...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.export_json(cx); }))
 }
 
 fn render_edit_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
@@ -240,7 +242,9 @@ fn render_data_menu(text_primary: Hsla, text_muted: Hsla, text_disabled: Hsla, s
         .child(menu_item_disabled("Filter", text_disabled))
 }
 
-fn render_help_menu(text_primary: Hsla, selection_bg: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
+fn render_help_menu(text_primary: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
+    let has_license = visigrid_license::is_pro();
+
     div()
         .flex()
         .flex_col()
@@ -248,6 +252,19 @@ fn render_help_menu(text_primary: Hsla, selection_bg: Hsla, cx: &mut Context<Spr
             this.close_menu(cx);
             this.show_about(cx);
         }))
+        .child(menu_separator(border))
+        .when(has_license, |d| {
+            d.child(menu_item("Manage License...", None, text_primary, text_primary, selection_bg, cx, |this, cx| {
+                this.close_menu(cx);
+                this.show_license(cx);
+            }))
+        })
+        .when(!has_license, |d| {
+            d.child(menu_item("Enter License...", None, text_primary, text_primary, selection_bg, cx, |this, cx| {
+                this.close_menu(cx);
+                this.show_license(cx);
+            }))
+        })
 }
 
 fn menu_item(

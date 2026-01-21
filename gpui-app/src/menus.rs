@@ -34,6 +34,8 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Save As...", SaveAs),
                 MenuItem::separator(),
                 MenuItem::action("Export as CSV...", ExportCsv),
+                MenuItem::action("Export as TSV...", ExportTsv),
+                MenuItem::action("Export as JSON...", ExportJson),
                 MenuItem::separator(),
                 MenuItem::action("Close", CloseWindow),
             ],

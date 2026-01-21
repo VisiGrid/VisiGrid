@@ -720,3 +720,416 @@ fn test_extract_word_boundary_prevents_partial_match() {
     let result2 = replace_range_in_formula(formula2, "A1:B2", "MyRange");
     assert_eq!(result2, "=A1:B2_total", "Underscore suffix prevents match");
 }
+
+// =========================================================================
+// PROPERTY-BASED UNDO TESTS
+// =========================================================================
+//
+// These tests verify that undo perfectly restores sheet state after
+// arbitrary sequences of cell operations. This is critical for trust:
+// users won't forgive corrupted spreadsheets.
+
+/// Simple deterministic PRNG (Xorshift64) - no external dependencies
+struct Xorshift64 {
+    state: u64,
+}
+
+impl Xorshift64 {
+    fn new(seed: u64) -> Self {
+        // Ensure non-zero state
+        Self { state: if seed == 0 { 1 } else { seed } }
+    }
+
+    fn next(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+
+    fn next_usize(&mut self, max: usize) -> usize {
+        (self.next() as usize) % max
+    }
+
+    fn next_bool(&mut self) -> bool {
+        self.next() % 2 == 0
+    }
+}
+
+/// Canonical snapshot of sheet state for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct SheetState {
+    /// (row, col, raw_value) for all populated cells, sorted for deterministic comparison
+    cells: Vec<(usize, usize, String)>,
+}
+
+impl SheetState {
+    fn from_sheet(sheet: &Sheet) -> Self {
+        let mut cells: Vec<_> = sheet.cells_iter()
+            .map(|(&(row, col), cell)| (row, col, cell.value.raw_display()))
+            .filter(|(_, _, val)| !val.is_empty())
+            .collect();
+        cells.sort_by_key(|(r, c, _)| (*r, *c));
+        Self { cells }
+    }
+}
+
+/// Op types for random generation (mirrors LuaOp but simpler for testing)
+#[derive(Debug, Clone)]
+enum TestOp {
+    SetValue { row: usize, col: usize, value: String },
+    SetFormula { row: usize, col: usize, formula: String },
+    Clear { row: usize, col: usize },
+}
+
+/// Generate a random op sequence
+fn generate_ops(rng: &mut Xorshift64, count: usize, rows: usize, cols: usize) -> Vec<TestOp> {
+    // Safe formula set (deterministic, no circular refs in small scope)
+    const FORMULAS: &[&str] = &[
+        "=1+1",
+        "=2*3",
+        "=10/2",
+        "=SUM(1,2,3)",
+        "=A1+1",
+        "=B2*2",
+        "=A1+B1",
+        "=SUM(A1:A3)",
+        "=AVERAGE(A1:B2)",
+        "=IF(A1>0,1,0)",
+    ];
+
+    let mut ops = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let row = rng.next_usize(rows);
+        let col = rng.next_usize(cols);
+
+        let op = match rng.next_usize(10) {
+            0..=3 => {
+                // SetValue: number
+                let n = rng.next() % 1000;
+                TestOp::SetValue { row, col, value: n.to_string() }
+            }
+            4..=5 => {
+                // SetValue: string
+                let s = format!("text{}", rng.next() % 100);
+                TestOp::SetValue { row, col, value: s }
+            }
+            6..=7 => {
+                // SetFormula
+                let formula = FORMULAS[rng.next_usize(FORMULAS.len())];
+                TestOp::SetFormula { row, col, formula: formula.to_string() }
+            }
+            8 => {
+                // SetValue: bool
+                let b = if rng.next_bool() { "TRUE" } else { "FALSE" };
+                TestOp::SetValue { row, col, value: b.to_string() }
+            }
+            _ => {
+                // Clear (set to empty)
+                TestOp::Clear { row, col }
+            }
+        };
+        ops.push(op);
+    }
+
+    ops
+}
+
+/// Apply ops to sheet and record history, returning changes for verification
+fn apply_ops_with_history(
+    sheet: &mut Sheet,
+    history: &mut crate::history::History,
+    ops: &[TestOp],
+) -> Vec<crate::history::CellChange> {
+    use crate::history::CellChange;
+
+    let mut changes = Vec::new();
+
+    for op in ops {
+        match op {
+            TestOp::SetValue { row, col, value } => {
+                let old_value = sheet.get_raw(*row, *col);
+                sheet.set_value(*row, *col, value);
+                changes.push(CellChange {
+                    row: *row,
+                    col: *col,
+                    old_value,
+                    new_value: value.clone(),
+                });
+            }
+            TestOp::SetFormula { row, col, formula } => {
+                let old_value = sheet.get_raw(*row, *col);
+                sheet.set_value(*row, *col, formula);
+                changes.push(CellChange {
+                    row: *row,
+                    col: *col,
+                    old_value,
+                    new_value: formula.clone(),
+                });
+            }
+            TestOp::Clear { row, col } => {
+                let old_value = sheet.get_raw(*row, *col);
+                sheet.set_value(*row, *col, "");
+                changes.push(CellChange {
+                    row: *row,
+                    col: *col,
+                    old_value,
+                    new_value: String::new(),
+                });
+            }
+        }
+    }
+
+    // Record as single batch (like Lua script commit)
+    history.record_batch(0, changes.clone());
+
+    changes
+}
+
+/// Apply undo to sheet
+///
+/// CRITICAL: Changes must be applied in REVERSE order.
+/// If the same cell is modified multiple times in a batch, we need to undo
+/// the last change first to restore the original value correctly.
+fn apply_undo(sheet: &mut Sheet, history: &mut crate::history::History) -> bool {
+    use crate::history::UndoAction;
+
+    if let Some(entry) = history.undo() {
+        match entry.action {
+            UndoAction::Values { changes, .. } => {
+                // Apply in reverse order to handle same-cell sequences correctly
+                for change in changes.iter().rev() {
+                    sheet.set_value(change.row, change.col, &change.old_value);
+                }
+                true
+            }
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
+/// Apply redo to sheet
+fn apply_redo(sheet: &mut Sheet, history: &mut crate::history::History) -> bool {
+    use crate::history::UndoAction;
+
+    if let Some(entry) = history.redo() {
+        match entry.action {
+            UndoAction::Values { changes, .. } => {
+                for change in changes {
+                    sheet.set_value(change.row, change.col, &change.new_value);
+                }
+                true
+            }
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
+#[test]
+fn test_undo_restores_original_state_property_based() {
+    // Property: For any random op sequence, undo should restore original state exactly.
+    // Run 1000 iterations with different seeds.
+
+    const ITERATIONS: u64 = 1000;
+    const SHEET_ROWS: usize = 20;
+    const SHEET_COLS: usize = 20;
+
+    for seed in 0..ITERATIONS {
+        let mut rng = Xorshift64::new(seed + 1);
+
+        // Create sheet with some initial data
+        let mut sheet = Sheet::new(100, 100);
+
+        // Seed with some initial values (20% of cells)
+        for _ in 0..(SHEET_ROWS * SHEET_COLS / 5) {
+            let row = rng.next_usize(SHEET_ROWS);
+            let col = rng.next_usize(SHEET_COLS);
+            let val = rng.next() % 100;
+            sheet.set_value(row, col, &val.to_string());
+        }
+
+        // Snapshot original state
+        let original = SheetState::from_sheet(&sheet);
+
+        // Generate random ops (1-200)
+        let op_count = 1 + rng.next_usize(200);
+        let ops = generate_ops(&mut rng, op_count, SHEET_ROWS, SHEET_COLS);
+
+        // Apply ops
+        let mut history = crate::history::History::new();
+        apply_ops_with_history(&mut sheet, &mut history, &ops);
+
+        // Undo
+        let undone = apply_undo(&mut sheet, &mut history);
+        assert!(undone, "Seed {}: Undo should succeed", seed);
+
+        // Verify state matches original
+        let restored = SheetState::from_sheet(&sheet);
+        assert_eq!(
+            original, restored,
+            "Seed {}: State mismatch after undo.\nOps: {:?}\nOriginal: {:?}\nRestored: {:?}",
+            seed, ops, original, restored
+        );
+    }
+}
+
+#[test]
+fn test_undo_redo_idempotence() {
+    // Property: apply → undo → redo → undo = original state
+    // This tests that redo doesn't corrupt the undo chain.
+
+    const ITERATIONS: u64 = 500;
+    const SHEET_ROWS: usize = 20;
+    const SHEET_COLS: usize = 20;
+
+    for seed in 0..ITERATIONS {
+        let mut rng = Xorshift64::new(seed + 1000);
+
+        let mut sheet = Sheet::new(100, 100);
+
+        // Seed initial data
+        for _ in 0..(SHEET_ROWS * SHEET_COLS / 5) {
+            let row = rng.next_usize(SHEET_ROWS);
+            let col = rng.next_usize(SHEET_COLS);
+            let val = rng.next() % 100;
+            sheet.set_value(row, col, &val.to_string());
+        }
+
+        let original = SheetState::from_sheet(&sheet);
+
+        // Generate ops
+        let op_count = 1 + rng.next_usize(100);
+        let ops = generate_ops(&mut rng, op_count, SHEET_ROWS, SHEET_COLS);
+
+        // Apply
+        let mut history = crate::history::History::new();
+        apply_ops_with_history(&mut sheet, &mut history, &ops);
+
+        let after_apply = SheetState::from_sheet(&sheet);
+
+        // Undo
+        apply_undo(&mut sheet, &mut history);
+        let after_undo = SheetState::from_sheet(&sheet);
+        assert_eq!(original, after_undo, "Seed {}: First undo should restore original", seed);
+
+        // Redo
+        apply_redo(&mut sheet, &mut history);
+        let after_redo = SheetState::from_sheet(&sheet);
+        assert_eq!(after_apply, after_redo, "Seed {}: Redo should restore applied state", seed);
+
+        // Undo again
+        apply_undo(&mut sheet, &mut history);
+        let after_undo2 = SheetState::from_sheet(&sheet);
+        assert_eq!(original, after_undo2, "Seed {}: Second undo should restore original", seed);
+    }
+}
+
+#[test]
+fn test_same_cell_sequences() {
+    // Explicitly test sequences that mutate the same cell multiple times.
+    // This is where undo bugs typically hide.
+
+    const ITERATIONS: u64 = 500;
+
+    for seed in 0..ITERATIONS {
+        let mut rng = Xorshift64::new(seed + 2000);
+
+        let mut sheet = Sheet::new(100, 100);
+
+        // Start with a known value in cell (5, 5)
+        sheet.set_value(5, 5, "initial");
+
+        let original = SheetState::from_sheet(&sheet);
+
+        // Generate ops that all target the same cell or nearby cells
+        let op_count = 5 + rng.next_usize(20);
+        let mut ops = Vec::new();
+
+        for _ in 0..op_count {
+            // 80% chance to hit (5,5), 20% to hit nearby
+            let (row, col) = if rng.next_usize(10) < 8 {
+                (5, 5)
+            } else {
+                (5 + rng.next_usize(3), 5 + rng.next_usize(3))
+            };
+
+            let op = match rng.next_usize(4) {
+                0 => TestOp::SetValue { row, col, value: format!("v{}", rng.next() % 100) },
+                1 => TestOp::SetFormula { row, col, formula: "=1+1".to_string() },
+                2 => TestOp::SetFormula { row, col, formula: "=A1+B2".to_string() },
+                _ => TestOp::Clear { row, col },
+            };
+            ops.push(op);
+        }
+
+        // Apply
+        let mut history = crate::history::History::new();
+        apply_ops_with_history(&mut sheet, &mut history, &ops);
+
+        // Undo
+        apply_undo(&mut sheet, &mut history);
+
+        let restored = SheetState::from_sheet(&sheet);
+        assert_eq!(
+            original, restored,
+            "Seed {}: Same-cell sequence failed.\nOps: {:?}",
+            seed, ops
+        );
+    }
+}
+
+#[test]
+fn test_touched_cells_completeness() {
+    // Property: Every cell modified by ops should be in the history changes.
+    // This verifies the "touched cells" tracking is complete.
+
+    const ITERATIONS: u64 = 500;
+    const SHEET_ROWS: usize = 20;
+    const SHEET_COLS: usize = 20;
+
+    for seed in 0..ITERATIONS {
+        let mut rng = Xorshift64::new(seed + 3000);
+
+        let mut sheet = Sheet::new(100, 100);
+
+        // Track which cells we're going to modify
+        let op_count = 1 + rng.next_usize(100);
+        let ops = generate_ops(&mut rng, op_count, SHEET_ROWS, SHEET_COLS);
+
+        // Collect all cells that ops will touch
+        let mut touched: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+        for op in &ops {
+            let (row, col) = match op {
+                TestOp::SetValue { row, col, .. } => (*row, *col),
+                TestOp::SetFormula { row, col, .. } => (*row, *col),
+                TestOp::Clear { row, col } => (*row, *col),
+            };
+            touched.insert((row, col));
+        }
+
+        // Apply and get recorded changes
+        let mut history = crate::history::History::new();
+        let changes = apply_ops_with_history(&mut sheet, &mut history, &ops);
+
+        // Verify every touched cell appears in changes
+        let changed_cells: std::collections::HashSet<(usize, usize)> = changes
+            .iter()
+            .map(|c| (c.row, c.col))
+            .collect();
+
+        for (row, col) in &touched {
+            assert!(
+                changed_cells.contains(&(*row, *col)),
+                "Seed {}: Cell ({}, {}) was touched but not in history changes",
+                seed, row, col
+            );
+        }
+    }
+}

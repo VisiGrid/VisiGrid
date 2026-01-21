@@ -1,6 +1,6 @@
-//! Fill operations for spreadsheet
+//! Fill and transform operations for spreadsheet
 //!
-//! This module contains Fill Down, Fill Right, and AutoSum functionality.
+//! This module contains Fill Down, Fill Right, AutoSum, and transform operations.
 
 use gpui::*;
 use regex::Regex;
@@ -299,5 +299,100 @@ impl Spreadsheet {
             )
         })
         .to_string()
+    }
+
+    // Transform operations
+
+    /// Trim whitespace from all cells in the selection
+    pub fn trim_whitespace(&mut self, cx: &mut Context<Self>) {
+        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+
+        let mut changes = Vec::new();
+        let mut trimmed_count = 0;
+
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                let old_value = self.sheet().get_raw(row, col);
+
+                // Skip empty cells and formulas
+                if old_value.is_empty() || old_value.starts_with('=') {
+                    continue;
+                }
+
+                let new_value = old_value.trim().to_string();
+
+                if old_value != new_value {
+                    changes.push(CellChange {
+                        row,
+                        col,
+                        old_value,
+                        new_value: new_value.clone(),
+                    });
+                    self.sheet_mut().set_value(row, col, &new_value);
+                    trimmed_count += 1;
+                }
+            }
+        }
+
+        if !changes.is_empty() {
+            self.history.record_batch(self.sheet_index(), changes);
+            self.bump_cells_rev();
+            self.is_modified = true;
+        }
+
+        let msg = if trimmed_count == 0 {
+            "No whitespace to trim".to_string()
+        } else if trimmed_count == 1 {
+            "Trimmed 1 cell".to_string()
+        } else {
+            format!("Trimmed {} cells", trimmed_count)
+        };
+        self.status_message = Some(msg);
+        cx.notify();
+    }
+
+    // Selection operations
+
+    /// Select all blank (empty) cells within the current selection region
+    pub fn select_blanks(&mut self, cx: &mut Context<Self>) {
+        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+
+        // Find all blank cells in the region
+        let mut blank_cells: Vec<(usize, usize)> = Vec::new();
+
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                let value = self.sheet().get_raw(row, col);
+                if value.is_empty() {
+                    blank_cells.push((row, col));
+                }
+            }
+        }
+
+        if blank_cells.is_empty() {
+            self.status_message = Some("No blank cells in selection".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Set the first blank as the primary selection
+        let first = blank_cells.remove(0);
+        self.selected = first;
+        self.selection_end = None;
+
+        // Add remaining blanks as additional selections (single-cell each)
+        self.additional_selections.clear();
+        for cell in blank_cells {
+            self.additional_selections.push((cell, None));
+        }
+
+        let count = 1 + self.additional_selections.len();
+        let msg = if count == 1 {
+            "Selected 1 blank cell".to_string()
+        } else {
+            format!("Selected {} blank cells", count)
+        };
+        self.status_message = Some(msg);
+        cx.notify();
     }
 }

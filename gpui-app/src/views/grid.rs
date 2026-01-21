@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui::StyledText;
 use crate::app::Spreadsheet;
+use crate::mode::Mode;
 use crate::settings::{user_settings, Setting};
 use crate::theme::TokenKey;
 use super::headers::render_row_header;
@@ -91,6 +92,20 @@ fn render_cell(
     let is_editing = editing && is_active;
     let is_formula_ref = app.is_formula_ref(row, col);
 
+    // Check for hint mode and get hint label for this cell
+    let hint_label = if app.mode == Mode::Hint {
+        app.hint_state.labels.iter()
+            .find(|h| h.row == row && h.col == col)
+            .map(|h| {
+                let buffer = &app.hint_state.buffer;
+                let matches = h.label.starts_with(buffer);
+                let is_unique = app.hint_state.matching_labels().len() == 1 && matches;
+                (h.label.clone(), matches, is_unique)
+            })
+    } else {
+        None
+    };
+
     // Spill state detection
     let is_spill_parent = app.sheet().is_spill_parent(row, col);
     let is_spill_receiver = app.sheet().is_spill_receiver(row, col);
@@ -129,9 +144,7 @@ fn render_cell(
 
     let mut cell = div()
         .id(ElementId::Name(format!("cell-{}-{}", row, col).into()))
-        .flex_shrink_0()
-        .w(px(col_width))
-        .h_full()
+        .size_full()
         .flex()
         .items_center()
         .px_1()
@@ -169,7 +182,7 @@ fn render_cell(
     };
 
     cell = cell
-        .text_color(cell_text_color(app, is_editing))
+        .text_color(cell_text_color(app, is_editing, is_selected))
         .text_sm()
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             // Don't handle clicks if we're resizing
@@ -270,7 +283,7 @@ fn render_cell(
             let byte_sel_end = display_chars.iter().take(disp_sel_end).collect::<String>().len();
             let total_bytes = display_text.len();
 
-            let normal_color = cell_text_color(app, is_editing);
+            let normal_color = cell_text_color(app, is_editing, is_selected);
             let selection_bg = app.token(TokenKey::EditorSelectionBg);
             let selection_fg = app.token(TokenKey::EditorSelectionText);
 
@@ -312,10 +325,10 @@ fn render_cell(
                 });
             }
 
-            cell.child(StyledText::new(display_text).with_runs(runs))
+            cell = cell.child(StyledText::new(display_text).with_runs(runs));
         } else {
             // No selection - plain text with cursor
-            cell.child(display_text)
+            cell = cell.child(display_text);
         }
     } else {
         // Not editing - show value, possibly with custom font
@@ -331,7 +344,7 @@ fn render_cell(
                     weight: if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
                     style: if format.italic { FontStyle::Italic } else { FontStyle::Normal },
                 },
-                color: cell_text_color(app, is_editing),
+                color: cell_text_color(app, is_editing, is_selected),
                 background_color: None,
                 underline: if format.underline {
                     Some(UnderlineStyle {
@@ -344,11 +357,59 @@ fn render_cell(
                 },
                 strikethrough: None,
             };
-            cell.child(StyledText::new(text_content).with_runs(vec![run]))
+            cell = cell.child(StyledText::new(text_content).with_runs(vec![run]));
         } else {
-            cell.child(text_content)
+            cell = cell.child(text_content);
         }
     }
+
+    // Add hint badge overlay when in hint mode
+    if let Some((label, matches, is_unique)) = hint_label {
+        let badge_bg = if is_unique {
+            // Unique match - highlight strongly
+            app.token(TokenKey::HintBadgeUniqueBg)
+        } else if matches {
+            // Matches current buffer - brighter
+            app.token(TokenKey::HintBadgeMatchBg)
+        } else {
+            // Doesn't match - muted
+            app.token(TokenKey::HintBadgeBg)
+        };
+
+        let badge_text = if is_unique {
+            app.token(TokenKey::HintBadgeUniqueText)
+        } else if matches {
+            app.token(TokenKey::HintBadgeMatchText)
+        } else {
+            app.token(TokenKey::HintBadgeText)
+        };
+
+        // Only show if matches or buffer is empty (show all at start)
+        if matches || app.hint_state.buffer.is_empty() {
+            cell = cell.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .px(px(2.0))
+                    .py(px(1.0))
+                    .bg(badge_bg)
+                    .rounded_sm()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(badge_text)
+                    .child(label)
+            );
+        }
+    }
+
+    // Wrap in relative container for absolute hint badge positioning
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(px(col_width))
+        .h_full()
+        .child(cell)
 }
 
 fn cell_background(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected: bool, is_formula_ref: bool) -> Hsla {
@@ -378,9 +439,14 @@ fn cell_border(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected
     }
 }
 
-fn cell_text_color(app: &Spreadsheet, is_editing: bool) -> Hsla {
+fn cell_text_color(app: &Spreadsheet, is_editing: bool, is_selected: bool) -> Hsla {
     if is_editing {
         app.token(TokenKey::EditorText)
+    } else if is_selected {
+        // Use primary text color for selected cells to ensure contrast
+        // SelectionBg is semi-transparent, so text should be visible,
+        // but use a slightly brighter color to ensure readability
+        app.token(TokenKey::TextPrimary)
     } else {
         app.token(TokenKey::CellText)
     }

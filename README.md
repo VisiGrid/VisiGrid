@@ -15,14 +15,15 @@ Built as a native desktop app in Rust, powered by [GPUI](https://gpui.rs)—the 
 
 ## Features (Free)
 
-- Core grid + editing
-- Multi-selection + multi-edit
-- Command palette + quick open
-- Formula autocomplete + error checking
-- Problems panel + split view
-- Themes + keybindings (JSON)
+- Core grid, selection, and editing
+- Multi-selection and multi-edit
+- Command palette
+- Formula autocomplete and error reporting
+- Fast search and navigation
 - Export data freely (CSV, TSV, JSON)
 - Cross-platform: macOS, Windows, Linux
+
+Some advanced features are under active development. See the [roadmap](ROADMAP.md) for details.
 
 ## Download
 
@@ -57,28 +58,27 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 For power users who want leverage: speed, scale, and automation.
 
-- Everything in Free
-- Fast large-file mode (million+ rows)
+- Everything in Free, plus:
+- Large-file performance optimizations
 - Advanced transforms (clean, split, dedupe, fill)
-- Inspector (dependency graphs + formula diagnostics)
-- Scripting & automation (Lua)
+- Inspector tools (dependencies, diagnostics)
+- Scripting and automation (Lua)
 - Plugin runtime
 
 **$12/month · $99/year · $249 perpetual**
 
-One license. No account. No telemetry. Yours forever.
+One license. No account. No telemetry. Yours.
 
 [Get Pro →](https://visigrid.app)
 
 ## VisiGrid Pro+
 
-For serious work: continuity, confidence, and collaboration.
+For workflows that need continuity.
 
-- Everything in Pro
-- Includes VisiHub Pro
-- Never lose work (cloud sync & backup)
-- Know what changed (version history)
-- Share without exporting (publish datasets)
+- Everything in Pro, plus:
+- Cloud sync and backups (via VisiHub)
+- Version history
+- Dataset publishing
 - Priority support
 
 **$19/month · $149/year**

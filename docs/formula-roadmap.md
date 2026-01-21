@@ -209,7 +209,7 @@ These separate casual users from power users. Good candidates for Pro edition.
 | `SWITCH` | Match value to results | ✓ Done |
 | `CHOOSE` | Select by index | ✓ Done |
 | `ISERROR` | Check for error | ✓ Done |
-| `ISNA` | Check for #N/A | Not yet |
+| `ISNA` | Check for #N/A | ✓ Done |
 
 ---
 
@@ -373,7 +373,7 @@ For reference, Google Sheets has **500+** functions across categories:
 
 **VisiGrid Target:** ~100 functions covers 95% of real-world use cases. The long tail (engineering, specialized statistical) can wait.
 
-**Current VisiGrid Count:** 96 functions (96% of target)
+**Current VisiGrid Count:** 97 functions (97% of target)
 
 ---
 

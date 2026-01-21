@@ -74,6 +74,38 @@ pub enum UndoAction {
         actions: Vec<UndoAction>,
         description: String,
     },
+    /// Rows inserted (for undo: delete the inserted rows)
+    RowsInserted {
+        sheet_index: usize,
+        at_row: usize,
+        count: usize,
+    },
+    /// Rows deleted (for undo: re-insert rows and restore cell data)
+    RowsDeleted {
+        sheet_index: usize,
+        at_row: usize,
+        count: usize,
+        /// Deleted cell data: (row, col, value, format)
+        deleted_cells: Vec<(usize, usize, String, CellFormat)>,
+        /// Deleted row heights: (row, height)
+        deleted_row_heights: Vec<(usize, f32)>,
+    },
+    /// Columns inserted (for undo: delete the inserted columns)
+    ColsInserted {
+        sheet_index: usize,
+        at_col: usize,
+        count: usize,
+    },
+    /// Columns deleted (for undo: re-insert columns and restore cell data)
+    ColsDeleted {
+        sheet_index: usize,
+        at_col: usize,
+        count: usize,
+        /// Deleted cell data: (row, col, value, format)
+        deleted_cells: Vec<(usize, usize, String, CellFormat)>,
+        /// Deleted column widths: (col, width)
+        deleted_col_widths: Vec<(usize, f32)>,
+    },
 }
 
 #[derive(Clone, Debug)]

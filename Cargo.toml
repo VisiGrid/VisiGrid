@@ -5,11 +5,12 @@ members = [
     "crates/core",
     "crates/io",
     "crates/config",
+    "crates/license",
     "gpui-app",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.4"
 edition = "2021"
 license = "MIT"
 
@@ -26,6 +27,7 @@ visigrid-engine = { path = "crates/engine" }
 visigrid-core = { path = "crates/core" }
 visigrid-io = { path = "crates/io" }
 visigrid-config = { path = "crates/config" }
+visigrid-license = { path = "crates/license" }
 
 [profile.release]
 lto = true

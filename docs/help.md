@@ -467,66 +467,221 @@ All formulas using that name are updated automatically.
 
 ## Lua Scripting
 
-VisiGrid includes a Lua REPL for automating tasks and manipulating data programmatically.
+VisiGrid includes a sandboxed Lua console for automating tasks and manipulating data programmatically. All operations are transactional and fully undoable.
 
-### Opening the REPL
+### Opening the Console
 
-Press `Ctrl+Shift+L` to toggle the Lua REPL panel.
+Press `Ctrl+Shift+L` to toggle the Lua console panel. On first open, the input is pre-filled with `examples` - press Enter to see available scripts.
 
 ```
 ┌─────────────────────────────────────────┐
-│ > sheet:get_a1("A1")                    │
+│ > sheet:get("A1")                       │
 │ 42                                      │
 │ > for r = 1, 10 do                      │
-│ ...   sheet:set_value(r, 1, r * 2)      │
+│ ...   sheet:set("A" .. r, r * 2)        │
 │ ... end                                 │
 │ nil                                     │
-│ 10 cells modified                       │
+│ ops: 10 | cells: 10 | time: 1.2ms       │
 │ >                                       │
+│         Ctrl+Enter to run · Undo reverses the entire script │
 └─────────────────────────────────────────┘
 ```
 
+### Console Commands
+
+Type these directly in the input:
+
+| Command | Description |
+|---------|-------------|
+| `help` | Show all commands and shortcuts |
+| `examples` | List available example scripts |
+| `example N` | Load example N into input |
+| `clear` | Clear output history |
+
+### Built-in Examples
+
+| # | Name | Description |
+|---|------|-------------|
+| 1 | Fill Series | Fill A1:A10 with powers of 2 |
+| 2 | Trim Whitespace | Remove leading/trailing spaces from column A |
+| 3 | Find Duplicates | Find and report duplicate values in column A |
+| 4 | Normalize Dates | Convert date formats to YYYY-MM-DD |
+| 5 | Compare Columns | Find mismatches between columns A and B |
+| 6 | Generate Multiplication Table | Create 10x10 table starting at A1 |
+| 7 | Sum Column | Calculate sum and average of numbers in column A |
+
+Load any example: `example 1` or `example "Fill Series"`
+
 ### Sheet API
+
+All coordinates are **1-indexed** to match spreadsheet conventions.
+
+**Cell Access:**
 
 | Method | Description |
 |--------|-------------|
-| `sheet:get_value(row, col)` | Get typed value (1-indexed) |
-| `sheet:get_display(row, col)` | Get formatted display string |
-| `sheet:get_formula(row, col)` | Get formula or nil |
+| `sheet:get("A1")` | Get value using A1 notation (shorthand) |
+| `sheet:set("A1", val)` | Set value using A1 notation (shorthand) |
+| `sheet:get_value(row, col)` | Get typed value by row/col |
 | `sheet:set_value(row, col, val)` | Set cell value |
-| `sheet:set_formula(row, col, formula)` | Set formula |
-| `sheet:get_a1("A1")` | Get value using A1 notation |
-| `sheet:set_a1("A1", val)` | Set value using A1 notation |
-| `sheet:clear(row, col)` | Clear cell |
-| `sheet:rows()` | Get row count |
-| `sheet:cols()` | Get column count |
+| `sheet:get_formula(row, col)` | Get formula string or nil |
+| `sheet:set_formula(row, col, f)` | Set formula |
 
-### Examples
+**Sheet Info:**
+
+| Method | Description |
+|--------|-------------|
+| `sheet:rows()` | Number of rows with data |
+| `sheet:cols()` | Number of columns with data |
+| `sheet:selection()` | Current selection (see below) |
+
+**Selection API:**
 
 ```lua
--- Set a range of values
-for r = 1, 100 do
-    sheet:set_value(r, 1, r * 2)
-end
+local sel = sheet:selection()
+print(sel.range)      -- "A1:C5"
+print(sel.start_row)  -- 1
+print(sel.start_col)  -- 1
+print(sel.end_row)    -- 5
+print(sel.end_col)    -- 3
+```
 
--- Copy a column
-for r = 1, sheet:rows() do
-    local val = sheet:get_value(r, 1)
-    sheet:set_value(r, 2, val)
-end
+**Range API (Bulk Read/Write):**
 
--- Apply formula to column
-for r = 2, 50 do
-    sheet:set_formula(r, 3, "=A" .. r .. "+B" .. r)
+```lua
+local r = sheet:range("A1:C5")
+
+-- Read all values as 2D table
+local data = r:values()
+print(data[1][1])  -- value at A1
+print(data[2][3])  -- value at C2
+
+-- Write 2D table to range
+r:set_values({
+    {1, 2, 3},
+    {4, 5, 6},
+    {7, 8, 9}
+})
+
+-- Range info
+r:rows()     -- → 5
+r:cols()     -- → 3
+r:address()  -- → "A1:C5"
+```
+
+**Transaction Control:**
+
+| Method | Description |
+|--------|-------------|
+| `sheet:begin()` | Start transaction (noop, for clarity) |
+| `sheet:rollback()` | Discard pending changes, returns count |
+| `sheet:commit()` | Commit changes (noop, auto-commits at end) |
+
+### Example Scripts
+
+```lua
+-- Fill column with sequence
+for i = 1, 100 do
+    sheet:set("A" .. i, i * 2)
+end
+print("Filled 100 cells")
+```
+
+```lua
+-- Process current selection
+local sel = sheet:selection()
+for row = sel.start_row, sel.end_row do
+    for col = sel.start_col, sel.end_col do
+        local val = sheet:get_value(row, col)
+        if type(val) == "number" then
+            sheet:set_value(row, col, val * 1.1)  -- +10%
+        end
+    end
 end
 ```
 
-### Safety
+```lua
+-- Bulk transform with Range
+local r = sheet:range("A1:C10")
+local data = r:values()
 
-- Scripts run in a sandboxed environment
-- No file system or network access
-- Instruction limits prevent infinite loops
-- Use `Ctrl+C` to interrupt long-running scripts
+for i, row in ipairs(data) do
+    for j, val in ipairs(row) do
+        if type(val) == "number" then
+            data[i][j] = val * 2
+        end
+    end
+end
+
+r:set_values(data)
+```
+
+```lua
+-- Conditional rollback
+sheet:begin()
+for i = 1, 100 do
+    sheet:set("A" .. i, math.random(1, 100))
+end
+
+local sum = 0
+for i = 1, 100 do
+    sum = sum + (sheet:get("A" .. i) or 0)
+end
+
+if sum > 5000 then
+    local discarded = sheet:rollback()
+    print("Rolled back " .. discarded .. " ops (sum too high)")
+else
+    print("Sum: " .. sum)
+end
+```
+
+### Keyboard Shortcuts
+
+| Action | Shortcut |
+|--------|----------|
+| Toggle console | `Ctrl+Shift+L` |
+| Execute script | `Enter` or `Ctrl+Enter` |
+| Newline (multiline) | `Shift+Enter` |
+| Previous command | `Up Arrow` |
+| Next command | `Down Arrow` |
+| Scroll output up | `Page Up` |
+| Scroll output down | `Page Down` |
+| Scroll to top | `Ctrl+Home` |
+| Scroll to bottom | `Ctrl+End` |
+| Clear output | `Ctrl+L` |
+| Close console | `Escape` |
+
+### Execution Stats
+
+After each script runs, the console shows:
+```
+ops: 100 | cells: 50 | time: 12.5ms
+```
+
+- **ops**: Total operations queued
+- **cells**: Unique cells modified (deduplicated)
+- **time**: Wall-clock execution time
+
+### Sandboxing and Safety
+
+**Enabled Libraries:** `table`, `string`, `math`, `utf8`
+
+**Disabled (for security):** `os`, `io`, `debug`, `package`, `require`, `load`, `loadfile`, `dofile`
+
+**Resource Limits:**
+
+| Limit | Value |
+|-------|-------|
+| Operations | 1,000,000 |
+| Output lines | 5,000 |
+| Instructions | 100,000,000 |
+| Wall-clock | 30 seconds |
+
+**Safety Guarantees:**
+- No filesystem or network access
+- Single undo entry per script (Ctrl+Z reverses entire script)
+- Deterministic execution (same input = same output)
 
 ---
 
@@ -974,7 +1129,7 @@ VisiGrid is designed for keyboard-first usage. Learn a few shortcuts each day an
 If you're familiar with Vim, enable `editor.vimMode` in settings for hjkl navigation. Press `i` to edit cells, `Escape` to navigate.
 
 ### 7. Automate with Lua
-Use the Lua REPL (`Ctrl+Shift+L`) to automate repetitive tasks. A simple loop can update hundreds of cells in seconds.
+Use the Lua console (`Ctrl+Shift+L`) to automate repetitive tasks. Type `examples` to see 7 ready-to-run scripts. Use `sheet:selection()` to process the current selection, or `sheet:range("A1:C10")` for bulk operations. Every script is a single undo.
 
 ### 8. Use Paste Special
 When pasting data, `Ctrl+Alt+V` lets you paste just values (no formulas), apply math operations, or transpose rows/columns.

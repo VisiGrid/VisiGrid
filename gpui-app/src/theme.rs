@@ -99,6 +99,14 @@ pub enum TokenKey {
     FormulaOperator,
     FormulaParens,
     FormulaError,
+
+    // Keyboard hints (Vimium-style)
+    HintBadgeBg,           // Background for non-matching hints (muted)
+    HintBadgeText,         // Text for non-matching hints
+    HintBadgeMatchBg,      // Background for matching hints (brighter)
+    HintBadgeMatchText,    // Text for matching hints
+    HintBadgeUniqueBg,     // Background for unique match (highlight)
+    HintBadgeUniqueText,   // Text for unique match
 }
 
 impl TokenKey {
@@ -176,6 +184,13 @@ impl TokenKey {
         TokenKey::FormulaOperator,
         TokenKey::FormulaParens,
         TokenKey::FormulaError,
+        // Keyboard hints
+        TokenKey::HintBadgeBg,
+        TokenKey::HintBadgeText,
+        TokenKey::HintBadgeMatchBg,
+        TokenKey::HintBadgeMatchText,
+        TokenKey::HintBadgeUniqueBg,
+        TokenKey::HintBadgeUniqueText,
     ];
 }
 
@@ -351,6 +366,14 @@ pub fn visigrid_theme() -> Theme {
     tokens.insert(TokenKey::FormulaParens, rgb(0x94a3b8));    // Gray - parentheses
     tokens.insert(TokenKey::FormulaError, rgb(0xef4444));     // Red - errors
 
+    // Keyboard hints (Vimium-style yellow badges)
+    tokens.insert(TokenKey::HintBadgeBg, rgb(0x52525b));           // Muted gray for non-matches
+    tokens.insert(TokenKey::HintBadgeText, rgb(0xa1a1aa));         // Muted text
+    tokens.insert(TokenKey::HintBadgeMatchBg, rgb(0xfbbf24));      // Yellow for matches
+    tokens.insert(TokenKey::HintBadgeMatchText, rgb(0x18181b));    // Dark text on yellow
+    tokens.insert(TokenKey::HintBadgeUniqueBg, rgb(0x22c55e));     // Green for unique match
+    tokens.insert(TokenKey::HintBadgeUniqueText, rgb(0x18181b));   // Dark text on green
+
     Theme {
         meta: ThemeMeta {
             id: "visigrid",
@@ -448,6 +471,14 @@ pub fn classic_theme() -> Theme {
     tokens.insert(TokenKey::FormulaOperator, rgb(0x000000));  // Black - operators
     tokens.insert(TokenKey::FormulaParens, rgb(0x000000));    // Black - parentheses
     tokens.insert(TokenKey::FormulaError, rgb(0xff0000));     // Red - errors
+
+    // Keyboard hints (Vimium-style)
+    tokens.insert(TokenKey::HintBadgeBg, rgb(0xe5e5e5));           // Light gray for non-matches
+    tokens.insert(TokenKey::HintBadgeText, rgb(0x737373));         // Muted text
+    tokens.insert(TokenKey::HintBadgeMatchBg, rgb(0xfcd34d));      // Yellow for matches
+    tokens.insert(TokenKey::HintBadgeMatchText, rgb(0x1f2937));    // Dark text on yellow
+    tokens.insert(TokenKey::HintBadgeUniqueBg, rgb(0x22c55e));     // Green for unique match
+    tokens.insert(TokenKey::HintBadgeUniqueText, rgb(0xffffff));   // White text on green
 
     Theme {
         meta: ThemeMeta {
@@ -552,6 +583,14 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::FormulaOperator, rgb(0x00ff00));  // Green - operators
     tokens.insert(TokenKey::FormulaParens, rgb(0x00ff00));    // Green - parentheses
     tokens.insert(TokenKey::FormulaError, rgb(0xff5555));     // Red - errors
+
+    // Keyboard hints (retro style)
+    tokens.insert(TokenKey::HintBadgeBg, rgb(0x003300));           // Dark green for non-matches
+    tokens.insert(TokenKey::HintBadgeText, rgb(0x55aa55));         // Dim green text
+    tokens.insert(TokenKey::HintBadgeMatchBg, rgb(0x00ff00));      // Bright green for matches
+    tokens.insert(TokenKey::HintBadgeMatchText, rgb(0x000000));    // Black text on green
+    tokens.insert(TokenKey::HintBadgeUniqueBg, rgb(0xffff00));     // Yellow for unique match
+    tokens.insert(TokenKey::HintBadgeUniqueText, rgb(0x000000));   // Black text on yellow
 
     Theme {
         meta: ThemeMeta {
@@ -677,6 +716,14 @@ pub fn catppuccin_theme() -> Theme {
     tokens.insert(TokenKey::FormulaOperator, text);       // Text - operators
     tokens.insert(TokenKey::FormulaParens, text);         // Text - parentheses
     tokens.insert(TokenKey::FormulaError, red);           // Red - errors
+
+    // Keyboard hints (Catppuccin style)
+    tokens.insert(TokenKey::HintBadgeBg, surface1);             // Surface for non-matches
+    tokens.insert(TokenKey::HintBadgeText, subtext0);           // Muted text
+    tokens.insert(TokenKey::HintBadgeMatchBg, yellow);          // Yellow for matches
+    tokens.insert(TokenKey::HintBadgeMatchText, base);          // Dark text on yellow
+    tokens.insert(TokenKey::HintBadgeUniqueBg, green);          // Green for unique match
+    tokens.insert(TokenKey::HintBadgeUniqueText, base);         // Dark text on green
 
     Theme {
         meta: ThemeMeta {

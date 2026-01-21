@@ -256,6 +256,8 @@ mod tests {
             },
             navigation: crate::settings::user::NavigationSettings {
                 tab_moves_right: Setting::Inherit,
+                keyboard_hints: Setting::Inherit,
+                vim_mode: Setting::Inherit,
             },
             tips: Default::default(),
         };

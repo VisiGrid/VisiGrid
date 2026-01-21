@@ -68,6 +68,9 @@ Quick reference for current functionality.
 | Open file | Ctrl+O |
 | Save | Ctrl+S |
 | Save As | Ctrl+Shift+S |
+| Export CSV | File menu or Palette |
+| Export TSV | File menu or Palette |
+| Export JSON | File menu or Palette |
 
 ### Find
 
@@ -77,6 +80,14 @@ Quick reference for current functionality.
 | Find next | F3 |
 | Find previous | Shift+F3 |
 | Close Find | Escape |
+
+### View
+
+| Action | Shortcut |
+|--------|----------|
+| Zen Mode (distraction-free) | F11 |
+| Command Palette | Ctrl+Shift+P |
+| Fuzzy Finder | Ctrl+P |
 
 ---
 
@@ -167,10 +178,13 @@ VisiGrid can open Excel files:
 - Unsupported functions are tracked and reported
 - Dates, formulas, and formatting are preserved
 
-### CSV Import/Export
+### CSV/TSV/JSON Export
 
-- Open CSV files directly
-- Export current sheet to CSV via File → Export CSV
+- Open CSV and TSV files directly
+- Export via File menu or Command Palette:
+  - **CSV** — comma-separated values
+  - **TSV** — tab-separated values
+  - **JSON** — array of arrays format
 
 ---
 
@@ -184,8 +198,44 @@ VisiGrid has distinct input modes:
 | Edit | Arrow keys move cursor in cell |
 | GoTo | Type cell reference (e.g., "A1") |
 | Find | Type search text |
+| Hint | Type letters to jump to labeled cells |
 
 Press Escape to return to Navigation mode.
+
+---
+
+## Optional Navigation Modes
+
+Enable these in Preferences (Ctrl+,) → Navigation. Both are off by default to preserve the "type to start editing" behavior.
+
+### Keyboard Hints (Vimium-style)
+
+Press `g` to show letter labels on visible cells, then type the letters to jump directly.
+
+| Shortcut | Action |
+|----------|--------|
+| g | Enter hint mode (show labels) |
+| gg | Go to cell A1 |
+| a-z, aa-zz | Jump to labeled cell |
+| Escape | Cancel hint mode |
+| Backspace | Delete last character |
+
+The status bar shows `HINT` when active, plus the letters you've typed.
+
+### Vim Mode
+
+Navigate without entering edit mode accidentally.
+
+| Shortcut | Action |
+|----------|--------|
+| h / j / k / l | Move left/down/up/right |
+| i | Enter edit mode |
+| 0 | Jump to column A |
+| $ | Jump to last data column in row |
+| w | Jump right (next data edge) |
+| b | Jump left (prev data edge) |
+
+The status bar shows `VIM` instead of `NAV` when enabled.
 
 ---
 
@@ -223,6 +273,72 @@ Named ranges appear in:
 |--------|----------|
 | Theme picker | Ctrl+K Ctrl+T |
 | Preferences | Ctrl+, |
+| Open Keybindings | Command Palette |
+
+---
+
+## Zen Mode
+
+Press **F11** to toggle Zen Mode — a distraction-free view that hides the menu bar, formula bar, and status bar. Only the grid remains.
+
+| Action | Shortcut |
+|--------|----------|
+| Toggle Zen Mode | F11 |
+| Exit Zen Mode | Escape or F11 |
+
+Also available via Command Palette: "Toggle Zen Mode"
+
+---
+
+## Link Detection
+
+VisiGrid detects URLs, email addresses, and file paths in cells and lets you open them directly.
+
+| Type | Example | Opens with |
+|------|---------|------------|
+| URL | `https://example.com` | Default browser |
+| Email | `user@example.com` | Default mail client (mailto:) |
+| File path | `/home/user/doc.pdf` | System default handler |
+
+**Usage:** Select a cell containing a link, then press **Ctrl+Enter** to open it.
+
+**Detection rules (conservative):**
+- URLs must have a scheme (http://, https://, ftp://, file://)
+- Emails must have user@domain.tld format (dot required in domain)
+- File paths must start with `/` or `~` and the file must exist
+
+The status bar shows a hint like "URL: Ctrl+Enter to open" when a link is detected.
+
+---
+
+## Transform Commands
+
+Available via Command Palette (Ctrl+Shift+P):
+
+| Command | Description |
+|---------|-------------|
+| Transform: Trim Whitespace | Remove leading/trailing spaces from selected cells |
+| Select: Blanks in Region | Select all empty cells within current selection |
+
+---
+
+## Keybinding Customization
+
+Customize shortcuts via JSON file:
+
+**Location:** `~/.config/visigrid/keybindings.json`
+
+**Access:** Command Palette → "Open Keybindings (JSON)"
+
+**Example:**
+```json
+{
+  "ctrl-shift-d": "edit.filldown",
+  "ctrl-;": "edit.trim"
+}
+```
+
+User keybindings override defaults. Restart required after changes.
 
 ---
 
@@ -257,6 +373,6 @@ Current limitations:
 - No cross-sheet references (=Sheet2!A1)
 - No zoom (Ctrl++/-)
 - No freeze panes
-- No XLSX export (import only)
+- No XLSX export (import only, use CSV/TSV/JSON for export)
 - No Replace dialog (Ctrl+H)
 - No Format Cells dialog (Ctrl+1)

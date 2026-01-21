@@ -30,6 +30,16 @@ pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
         Setting::Inherit => EnterBehavior::MoveDown,
     };
 
+    let keyboard_hints = match &user_settings.navigation.keyboard_hints {
+        Setting::Value(v) => *v,
+        Setting::Inherit => false, // Default
+    };
+
+    let vim_mode = match &user_settings.navigation.vim_mode {
+        Setting::Value(v) => *v,
+        Setting::Inherit => false, // Default
+    };
+
     div()
         .absolute()
         .inset_0()
@@ -183,6 +193,116 @@ pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                                                 .child(enter_option("Down", EnterBehavior::MoveDown, enter_behavior, accent, text_primary, text_muted, cx))
                                                 .child(enter_option("Right", EnterBehavior::MoveRight, enter_behavior, accent, text_primary, text_muted, cx))
                                                 .child(enter_option("Stay", EnterBehavior::Stay, enter_behavior, accent, text_primary, text_muted, cx))
+                                        )
+                                )
+                        )
+                        // =========================================================
+                        // Navigation section
+                        // =========================================================
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(section_header("NAVIGATION", text_primary))
+                                // Keyboard hints row
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(row_label("Keyboard hints", text_muted))
+                                                .child(
+                                                    div()
+                                                        .size(px(16.0))
+                                                        .rounded_sm()
+                                                        .border_1()
+                                                        .border_color(if keyboard_hints { accent } else { editor_border })
+                                                        .bg(if keyboard_hints { accent } else { editor_bg })
+                                                        .cursor_pointer()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .child(if keyboard_hints {
+                                                            div()
+                                                                .text_size(px(10.0))
+                                                                .text_color(gpui::white())
+                                                                .child("✓")
+                                                                .into_any_element()
+                                                        } else {
+                                                            div().into_any_element()
+                                                        })
+                                                        .id("pref-keyboard-hints-cb")
+                                                        .on_click(cx.listener(move |_this, _, _, cx| {
+                                                            let new_value = !keyboard_hints;
+                                                            cx.update_global::<SettingsStore, _>(|store, _| {
+                                                                store.user_settings_mut().navigation.keyboard_hints = Setting::Value(new_value);
+                                                                store.save();
+                                                            });
+                                                            cx.notify();
+                                                        }))
+                                                )
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.0))
+                                                .text_color(text_muted.opacity(0.7))
+                                                .child("Press g then type letters to jump to any cell")
+                                        )
+                                )
+                                // Vim mode row
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(row_label("Vim mode", text_muted))
+                                                .child(
+                                                    div()
+                                                        .size(px(16.0))
+                                                        .rounded_sm()
+                                                        .border_1()
+                                                        .border_color(if vim_mode { accent } else { editor_border })
+                                                        .bg(if vim_mode { accent } else { editor_bg })
+                                                        .cursor_pointer()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .child(if vim_mode {
+                                                            div()
+                                                                .text_size(px(10.0))
+                                                                .text_color(gpui::white())
+                                                                .child("✓")
+                                                                .into_any_element()
+                                                        } else {
+                                                            div().into_any_element()
+                                                        })
+                                                        .id("pref-vim-mode-cb")
+                                                        .on_click(cx.listener(move |_this, _, _, cx| {
+                                                            let new_value = !vim_mode;
+                                                            cx.update_global::<SettingsStore, _>(|store, _| {
+                                                                store.user_settings_mut().navigation.vim_mode = Setting::Value(new_value);
+                                                                store.save();
+                                                            });
+                                                            cx.notify();
+                                                        }))
+                                                )
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.0))
+                                                .text_color(text_muted.opacity(0.7))
+                                                .child("Navigate with h/j/k/l, press i to edit")
                                         )
                                 )
                         )

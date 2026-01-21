@@ -29,6 +29,7 @@ visigrid-engine = { workspace = true }
 visigrid-core = { workspace = true }
 visigrid-io = { workspace = true }
 visigrid-config = { workspace = true }
+visigrid-license = { workspace = true }
 
 # gpui
 gpui = { git = "https://github.com/zed-industries/zed" }
@@ -38,6 +39,21 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
 regex = "1"
+open = "5"
+
+# Lua scripting (Pro only)
+mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
+
+[features]
+default = []
+
+# OSS build with Pro features compiled in (for development/testing)
+# Use: cargo build --features pro
+pro = ["mlua"]
+
+# Commercial build: all features compiled, runtime license gating
+# Use: cargo build --features commercial
+commercial = ["mlua", "visigrid-license/commercial"]
 
 # Pin core-text to fix macOS build (https://github.com/zed-industries/zed/issues/31045)
 [target.'cfg(target_os = "macos")'.dependencies]

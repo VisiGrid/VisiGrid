@@ -2,7 +2,7 @@ use gpui::*;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use visigrid_engine::workbook::Workbook;
-use visigrid_io::{csv, native, xlsx};
+use visigrid_io::{csv, json, native, xlsx};
 
 use crate::app::Spreadsheet;
 use crate::settings::{load_doc_settings, save_doc_settings, DocumentSettings};
@@ -52,15 +52,24 @@ impl Spreadsheet {
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let ext_lower = extension.to_lowercase();
 
-        // Excel files use background import
+        // Excel files: background import for Pro, synchronous for Free
         if matches!(ext_lower.as_str(), "xlsx" | "xls" | "xlsb" | "xlsm" | "ods") {
-            self.start_excel_import(path, cx);
+            if visigrid_license::is_feature_enabled("fast_large_files") {
+                self.start_excel_import(path, cx);
+            } else {
+                // Free users: synchronous import with upgrade hint
+                self.status_message = Some("Importing... (upgrade to Pro for faster large file imports)".to_string());
+                cx.notify();
+                self.load_excel_sync(path, cx);
+            }
             return;
         }
 
         // Non-Excel files: synchronous load (fast, no need for background)
         let result: Result<Workbook, String> = match ext_lower.as_str() {
             "csv" => csv::import(path)
+                .map(|sheet| Workbook::from_sheets(vec![sheet], 0)),
+            "tsv" => csv::import_tsv(path)
                 .map(|sheet| Workbook::from_sheets(vec![sheet], 0)),
             "sheet" => native::load_workbook(path),
             _ => Err(format!("Unknown file type: {}", extension)),
@@ -83,6 +92,10 @@ impl Spreadsheet {
                 self.history.clear();
                 self.bump_cells_rev();
                 self.add_recent_file(path);
+
+                // Update session with new file path
+                self.update_session_cached(cx);
+
                 let named_count = self.workbook.list_named_ranges().len();
 
                 let status = if named_count > 0 {
@@ -206,6 +219,63 @@ impl Spreadsheet {
         .detach();
     }
 
+    /// Synchronous Excel import for Free users (no background processing)
+    fn load_excel_sync(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "file".to_string());
+        let source_dir = path.parent().map(|p| p.to_path_buf());
+        let start_time = std::time::Instant::now();
+
+        match xlsx::import(path) {
+            Ok((workbook, mut result)) => {
+                let duration_ms = start_time.elapsed().as_millis();
+
+                self.workbook = workbook;
+                self.current_file = None;  // Force Save As for .sheet
+                self.is_modified = true;
+                self.import_filename = Some(filename.clone());
+                self.import_source_dir = source_dir;
+                self.doc_settings = DocumentSettings::default();
+                self.selected = (0, 0);
+                self.selection_end = None;
+                self.scroll_row = 0;
+                self.scroll_col = 0;
+                self.history.clear();
+                self.bump_cells_rev();
+                self.add_recent_file(path);
+
+                let duration_str = if duration_ms >= 1000 {
+                    format!("{:.2}s", duration_ms as f64 / 1000.0)
+                } else {
+                    format!("{}ms", duration_ms)
+                };
+
+                let mut status = format!(
+                    "Imported {} in {} — Save As to keep changes",
+                    filename,
+                    duration_str
+                );
+
+                if result.has_warnings() {
+                    status.push_str(" (see Import Report)");
+                }
+
+                result.import_duration_ms = duration_ms;
+                self.import_result = Some(result);
+                self.status_message = Some(status);
+            }
+            Err(e) => {
+                self.import_result = None;
+                self.import_filename = None;
+                self.import_source_dir = None;
+                self.status_message = Some(format!("Import failed: {}", e));
+            }
+        }
+        cx.notify();
+    }
+
     pub fn save(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = &self.current_file.clone() {
             self.save_to_path(path, cx);
@@ -269,6 +339,9 @@ impl Spreadsheet {
                 // (best-effort - don't fail the whole save if sidecar fails)
                 let _ = save_doc_settings(path, &self.doc_settings);
 
+                // Update session with new file path
+                self.update_session_cached(cx);
+
                 let named_count = self.workbook.list_named_ranges().len();
                 let status = if named_count > 0 {
                     format!("Saved: {} ({} named ranges)", path.display(), named_count)
@@ -285,6 +358,21 @@ impl Spreadsheet {
     }
 
     pub fn export_csv(&mut self, cx: &mut Context<Self>) {
+        self.export_delimited(cx, "csv", csv::export);
+    }
+
+    pub fn export_tsv(&mut self, cx: &mut Context<Self>) {
+        self.export_delimited(cx, "tsv", csv::export_tsv);
+    }
+
+    pub fn export_json(&mut self, cx: &mut Context<Self>) {
+        self.export_delimited(cx, "json", json::export);
+    }
+
+    fn export_delimited<F>(&mut self, cx: &mut Context<Self>, ext: &'static str, export_fn: F)
+    where
+        F: Fn(&visigrid_engine::sheet::Sheet, &std::path::Path) -> Result<(), String> + Send + 'static,
+    {
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
@@ -294,13 +382,13 @@ impl Spreadsheet {
             .and_then(|p| p.file_stem())
             .and_then(|n| n.to_str())
             .unwrap_or("export");
-        let suggested_name = format!("{}.csv", base_name);
+        let suggested_name = format!("{}.{}", base_name, ext);
 
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
                 let _ = this.update(cx, |this, cx| {
-                    match csv::export(this.sheet(), &path) {
+                    match export_fn(this.sheet(), &path) {
                         Ok(()) => {
                             this.status_message = Some(format!("Exported: {}", path.display()));
                         }

@@ -30,6 +30,7 @@ pub fn register(cx: &mut App) {
         // Editing
         KeyBinding::new("f2", StartEdit, Some("Spreadsheet")),
         KeyBinding::new("enter", ConfirmEdit, Some("Spreadsheet")),
+        KeyBinding::new("shift-enter", ConfirmEditUp, Some("Spreadsheet")),
         KeyBinding::new("ctrl-enter", ConfirmEditInPlace, Some("Spreadsheet")),
         KeyBinding::new("tab", TabNext, Some("Spreadsheet")),
         KeyBinding::new("shift-tab", TabPrev, Some("Spreadsheet")),
@@ -39,6 +40,9 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("delete", DeleteCell, Some("Spreadsheet")),
         KeyBinding::new("ctrl-d", FillDown, Some("Spreadsheet")),
         KeyBinding::new("ctrl-r", FillRight, Some("Spreadsheet")),
+        // Insert/Delete rows/cols (context-sensitive)
+        KeyBinding::new("ctrl-=", InsertRowsOrCols, Some("Spreadsheet")),
+        KeyBinding::new("ctrl--", DeleteRowsOrCols, Some("Spreadsheet")),
         // Edit mode cursor (Home/End only - left/right handled in MoveLeft/MoveRight)
         KeyBinding::new("home", EditCursorHome, Some("Spreadsheet")),
         KeyBinding::new("end", EditCursorEnd, Some("Spreadsheet")),
@@ -77,6 +81,7 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("ctrl-1", ShowFormatPanel, Some("Spreadsheet")),
         KeyBinding::new("ctrl-shift-m", ToggleProblems, Some("Spreadsheet")),
         KeyBinding::new("f11", ToggleZenMode, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-shift-l", ToggleLuaConsole, Some("Spreadsheet")),
         KeyBinding::new("ctrl-`", ToggleFormulaView, Some("Spreadsheet")),
 
         // Format

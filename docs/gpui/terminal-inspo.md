@@ -9,11 +9,11 @@ Design patterns from premium terminals (Ghostty, Kitty, WezTerm, Alacritty) that
 | Pattern | Terminal Example | gpui Status |
 |---------|------------------|-------------|
 | GPU rendering | wgpu, Metal | ✅ gpui uses Metal/Vulkan |
-| Keyboard-first | Shortcuts for everything | ✅ 37 shortcuts implemented |
-| Minimal chrome | No decorations | ❌ Zen mode not yet |
-| Config as code | TOML/JSON files | ❌ Not yet |
-| Themes | Easy switching | ❌ Not yet |
-| Session persistence | tmux-resurrect | ❌ Not yet |
+| Keyboard-first | Shortcuts for everything | ✅ 76+ shortcuts implemented |
+| Minimal chrome | No decorations | ✅ Zen mode (F11) |
+| Config as code | TOML/JSON files | ✅ settings.json + keybindings.json |
+| Themes | Easy switching | ✅ Theme picker (Ctrl+K Ctrl+T) |
+| Session persistence | tmux-resurrect | ⚪ Partial (recent files) |
 
 ---
 
@@ -60,7 +60,7 @@ Type 'H' → cursor jumps to that cell
 - Type letters to filter; jumps when unique
 - `Backspace` to correct, `Escape` to cancel
 
-**Priority:** P2 | **Status:** ❌ Not implemented
+**Priority:** P2 | **Status:** ✅ Implemented (press 'g' to show hints)
 
 ---
 
@@ -148,7 +148,7 @@ Auto-detect and open URLs, file paths, email with Ctrl+Click.
 - Email: `user@domain.com`
 - Paths: `/absolute/path`, `~/relative`
 
-**Priority:** P2 | **Status:** ❌ Not implemented
+**Priority:** P2 | **Status:** ✅ Implemented (Ctrl+Enter to open)
 
 ---
 
@@ -158,7 +158,13 @@ Auto-detect and open URLs, file paths, email with Ctrl+Click.
 
 Auto-save state on quit, restore on reopen.
 
-**Saved state:**
+**Current implementation:**
+- ✅ Recent files remembered
+- ❌ Cursor position not saved per-file
+- ❌ Scroll position not saved
+- ❌ Selection not saved
+
+**Saved state (future):**
 ```json
 {
   "files": [{
@@ -174,7 +180,7 @@ Auto-save state on quit, restore on reopen.
 }
 ```
 
-**Priority:** P2 | **Status:** ❌ Not implemented
+**Priority:** P2 | **Status:** ⚪ Partial (recent files only)
 
 ---
 
@@ -193,12 +199,19 @@ Long operations run async, notify on completion.
 🔔 Notification: "Export complete"
 ```
 
+**Current implementation:**
+- ✅ Excel import runs in background (UI stays responsive)
+- ✅ Import progress shown in status bar
+- ✅ Import report dialog on completion
+- ❌ Desktop notifications
+- ❌ Job queue UI
+
 **Use cases:**
 - Large file imports (100K+ rows)
 - Complex recalculations
 - Export to slow formats
 
-**Priority:** P3 | **Status:** ❌ Not implemented
+**Priority:** P3 | **Status:** ⚪ Partial (async import only)
 
 ---
 
@@ -268,23 +281,42 @@ User-configurable status bar.
 | Rank | Feature | Effort | Impact | gpui Status |
 |------|---------|--------|--------|-------------|
 | 1 | Pipe-friendly CLI | Medium | High | ❌ |
-| 2 | Keyboard hints | Low | High | ❌ |
-| 3 | URL detection | Low | Medium | ❌ |
-| 4 | Session persistence | Low | Medium | ❌ |
+| 2 | Keyboard hints | Low | High | ✅ Done |
+| 3 | URL detection | Low | Medium | ✅ Done |
+| 4 | Session persistence | Low | Medium | ⚪ Partial |
 | 5 | Inline sparklines | Medium | Medium | ❌ |
 | 6 | Semantic regions | Medium | Medium | ❌ |
-| 7 | Background jobs | Medium | Low | ❌ |
+| 7 | Background jobs | Medium | Low | ⚪ Partial |
 | 8 | Status customization | Low | Low | ❌ |
 | 9 | Formula ligatures | Low | Low | ❌ |
 
 ---
 
+## Completed Features
+
+Terminal-inspired features that are now implemented:
+
+| Feature | How to Access |
+|---------|---------------|
+| Config as code | `~/.config/visigrid/settings.json` |
+| Custom keybindings | `~/.config/visigrid/keybindings.json` |
+| Theme switching | Ctrl+K Ctrl+T |
+| Command Palette | Ctrl+Shift+P |
+| Fuzzy Finder | Ctrl+P |
+| Fill Down/Right | Ctrl+D / Ctrl+R |
+| Background import | Automatic for Excel files |
+| Recent files | File menu |
+| Keyboard hints (Vimium) | Press 'g' to show labels |
+| Vim mode navigation | Enable in Preferences |
+| URL/Path detection | Ctrl+Enter opens links |
+| Zen mode | F11 hides UI chrome |
+
+---
+
 ## Near-Term Focus
 
-For gpui MVP, focus on:
+Next terminal-inspired features to implement:
 
-1. **Core spreadsheet functionality** (current)
-2. **Command Palette** (editor-style)
-3. **Fill Down/Right** (Excel compat)
-
-Terminal-inspired features come after core parity.
+1. **Pipe-friendly CLI** (headless mode) - Medium effort, high impact
+2. **Inline sparklines** - Medium effort, medium impact
+3. **Semantic regions** - Medium effort, medium impact

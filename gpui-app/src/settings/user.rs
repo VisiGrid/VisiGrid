@@ -103,6 +103,18 @@ pub struct NavigationSettings {
     /// This is "locked" but shown in UI for documentation
     #[serde(default = "default_tab_moves_right", skip_serializing_if = "Setting::is_inherit")]
     pub tab_moves_right: Setting<bool>,
+
+    /// Enable keyboard hints (Vimium-style 'g' to show jump labels)
+    /// When enabled, pressing 'g' in navigation mode shows letter hints on cells.
+    /// Type the hint letters to jump directly to that cell.
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub keyboard_hints: Setting<bool>,
+
+    /// Enable vim-style navigation (hjkl movement, i to edit)
+    /// When enabled, letter keys become vim commands instead of starting cell edit.
+    /// Press 'i' to enter edit mode (like vim insert).
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub vim_mode: Setting<bool>,
 }
 
 fn default_tab_moves_right() -> Setting<bool> {
@@ -113,6 +125,8 @@ impl Default for NavigationSettings {
     fn default() -> Self {
         Self {
             tab_moves_right: Setting::Value(true),
+            keyboard_hints: Setting::Value(false),
+            vim_mode: Setting::Value(false),
         }
     }
 }

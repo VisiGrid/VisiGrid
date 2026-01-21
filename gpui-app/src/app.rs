@@ -9,12 +9,15 @@ use visigrid_engine::named_range::is_valid_name;
 use crate::history::{History, CellChange, UndoAction};
 use crate::mode::Mode;
 use crate::search::{SearchEngine, SearchAction, CommandId, CommandSearchProvider, GoToSearchProvider, SearchItem};
+use crate::session::SessionManager;
 use crate::settings::{
     user_settings_path, open_settings_file, user_settings, update_user_settings,
     observe_settings, Setting, TipId,
 };
 use crate::theme::{Theme, TokenKey, visigrid_theme, builtin_themes, get_theme};
+use crate::user_keybindings;
 use crate::views;
+use crate::links;
 use crate::formula_context::{tokenize_for_highlight, TokenType};
 
 // Re-export from autocomplete module for external access
@@ -169,8 +172,10 @@ pub struct Spreadsheet {
 
     // UI state
     pub focus_handle: FocusHandle,
+    pub console_focus_handle: FocusHandle,
     pub status_message: Option<String>,
     pub window_size: Size<Pixels>,
+    pub cached_window_bounds: Option<WindowBounds>,  // Cached for session snapshot
 
     // Column/row sizing
     pub col_widths: HashMap<usize, f32>,   // Custom column widths (default: CELL_WIDTH)
@@ -237,6 +242,12 @@ pub struct Spreadsheet {
     pub inspector_pinned: Option<(usize, usize)>,  // Pinned cell (None = follows selection)
     pub names_filter_query: String,  // Filter query for Names tab
 
+    // Zen mode (distraction-free editing)
+    pub zen_mode: bool,
+
+    // Link opening state (debounce rapid Ctrl+Enter)
+    pub link_open_in_flight: bool,
+
     // Theme
     pub theme: Theme,
     pub theme_preview: Option<Theme>,  // For live preview in picker
@@ -300,6 +311,17 @@ pub struct Spreadsheet {
     pub import_in_progress: bool,
     pub import_overlay_visible: bool,
     pub import_started_at: Option<std::time::Instant>,
+
+    // Keyboard hints state (Vimium-style jump)
+    pub hint_state: crate::hints::HintState,
+
+    // Lua scripting state
+    pub lua_runtime: crate::scripting::LuaRuntime,
+    pub lua_console: crate::scripting::ConsoleState,
+
+    // License dialog state
+    pub license_input: String,
+    pub license_error: Option<String>,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -338,6 +360,7 @@ impl Spreadsheet {
         let workbook = Workbook::new();
 
         let focus_handle = cx.focus_handle();
+        let console_focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         let window_size = window.viewport_size();
 
@@ -385,8 +408,10 @@ impl Spreadsheet {
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             focus_handle,
+            console_focus_handle,
             status_message: None,
             window_size,
+            cached_window_bounds: Some(window.window_bounds()),
             col_widths: HashMap::new(),
             row_heights: HashMap::new(),
             resizing_col: None,
@@ -467,6 +492,17 @@ impl Spreadsheet {
             import_in_progress: false,
             import_overlay_visible: false,
             import_started_at: None,
+
+            hint_state: crate::hints::HintState::default(),
+
+            zen_mode: false,
+            link_open_in_flight: false,
+
+            lua_runtime: crate::scripting::LuaRuntime::default(),
+            lua_console: crate::scripting::ConsoleState::default(),
+
+            license_input: String::new(),
+            license_error: None,
         }
     }
 
@@ -690,11 +726,13 @@ impl Spreadsheet {
                 cx.notify();
             }
             CommandId::SelectAll => self.select_all(cx),
+            CommandId::SelectBlanks => self.select_blanks(cx),
 
             // Editing
             CommandId::FillDown => self.fill_down(cx),
             CommandId::FillRight => self.fill_right(cx),
             CommandId::ClearCells => self.delete_selection(cx),
+            CommandId::TrimWhitespace => self.trim_whitespace(cx),
             CommandId::Undo => self.undo(cx),
             CommandId::Redo => self.redo(cx),
             CommandId::AutoSum => self.autosum(cx),
@@ -721,6 +759,8 @@ impl Spreadsheet {
             CommandId::Save => self.save(cx),
             CommandId::SaveAs => self.save_as(cx),
             CommandId::ExportCsv => self.export_csv(cx),
+            CommandId::ExportTsv => self.export_tsv(cx),
+            CommandId::ExportJson => self.export_json(cx),
 
             // Appearance
             CommandId::SelectTheme => self.show_theme_picker(cx),
@@ -731,11 +771,18 @@ impl Spreadsheet {
                 self.inspector_visible = !self.inspector_visible;
                 cx.notify();
             }
+            CommandId::ToggleZenMode => {
+                self.zen_mode = !self.zen_mode;
+                cx.notify();
+            }
 
             // Help
             CommandId::ShowShortcuts => {
                 self.status_message = Some("Shortcuts: Ctrl+D Fill Down, Ctrl+R Fill Right, Ctrl+Enter Multi-edit".into());
                 cx.notify();
+            }
+            CommandId::OpenKeybindings => {
+                self.open_keybindings(cx);
             }
             CommandId::ShowAbout => {
                 self.status_message = Some("VisiGrid - A spreadsheet for power users".into());
@@ -773,6 +820,59 @@ impl Spreadsheet {
             self.open_menu = None;
             cx.notify();
         }
+    }
+
+    // ========================================================================
+    // Session persistence
+    // ========================================================================
+
+    /// Update the global session with this window's current state.
+    /// Called on significant state changes (file open/save, panel toggles).
+    pub fn update_session(&self, window: &Window, cx: &mut Context<Self>) {
+        let snapshot = self.snapshot(window);
+        self.update_session_with_snapshot(snapshot, cx);
+    }
+
+    /// Update session using cached window bounds (for use without Window access).
+    /// Useful from file_ops or other places where Window isn't available.
+    pub fn update_session_cached(&self, cx: &mut Context<Self>) {
+        let snapshot = self.snapshot_cached();
+        self.update_session_with_snapshot(snapshot, cx);
+    }
+
+    /// Internal: update session with a snapshot
+    fn update_session_with_snapshot(&self, snapshot: crate::session::WindowSession, cx: &mut Context<Self>) {
+        cx.update_global::<SessionManager, _>(|mgr, _| {
+            // Find and update this window's entry, or add a new one
+            // For now, we use the file path as the key (simple single-window case)
+            let session = mgr.session_mut();
+
+            // Find existing window by file path, or add new
+            let idx = session.windows.iter().position(|w| w.file == snapshot.file);
+
+            if let Some(idx) = idx {
+                session.windows[idx] = snapshot;
+            } else {
+                session.windows.push(snapshot);
+            }
+        });
+    }
+
+    /// Save session immediately (for quit/close).
+    /// This saves the session to disk synchronously.
+    pub fn save_session_now(&self, window: &Window, cx: &mut Context<Self>) {
+        self.update_session(window, cx);
+        cx.update_global::<SessionManager, _>(|mgr, _| {
+            mgr.save_now();
+        });
+    }
+
+    /// Save session using cached window bounds (for use without Window access).
+    pub fn save_session_cached(&self, cx: &mut Context<Self>) {
+        self.update_session_cached(cx);
+        cx.update_global::<SessionManager, _>(|mgr, _| {
+            mgr.save_now();
+        });
     }
 
     // Sheet access convenience methods
@@ -1640,6 +1740,10 @@ impl Spreadsheet {
         self.confirm_edit_and_move(1, 0, cx);  // Enter moves down
     }
 
+    pub fn confirm_edit_up(&mut self, cx: &mut Context<Self>) {
+        self.confirm_edit_and_move(-1, 0, cx);  // Shift+Enter moves up
+    }
+
     pub fn confirm_edit_and_move_right(&mut self, cx: &mut Context<Self>) {
         self.confirm_edit_and_move(0, 1, cx);  // Tab moves right
     }
@@ -1649,9 +1753,14 @@ impl Spreadsheet {
     }
 
     /// Ctrl+Enter: Confirm edit and apply to ALL selected cells (multi-edit)
+    /// In navigation mode, opens detected link if present
     pub fn confirm_edit_in_place(&mut self, cx: &mut Context<Self>) {
         if !self.mode.is_editing() {
-            // If not editing, start editing
+            // In navigation mode, try to open detected link first
+            if self.try_open_link(cx) {
+                return;
+            }
+            // If no link, start editing
             self.start_edit(cx);
             return;
         }
@@ -1693,9 +1802,75 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Try to open a detected link in the current cell.
+    /// Returns true if a link was found and opened, false otherwise.
+    ///
+    /// Guards:
+    /// - Only works with single-cell selection (multi-selection returns false)
+    /// - Debounced: ignores rapid Ctrl+Enter if open is already in-flight
+    pub fn try_open_link(&mut self, cx: &mut Context<Self>) -> bool {
+        // Guard: only open links from single-cell selection
+        // This prevents accidental opens when multi-selecting
+        if self.is_multi_selection() {
+            return false;
+        }
+
+        // Guard: debounce - ignore if already opening a link
+        if self.link_open_in_flight {
+            return false;
+        }
+
+        let (row, col) = self.selected;
+        let cell_value = self.sheet().get_display(row, col);
+
+        if let Some(target) = links::detect_link(&cell_value) {
+            let open_string = target.open_string();
+            let target_desc = match &target {
+                links::LinkTarget::Url(_) => "Opening URL...",
+                links::LinkTarget::Email(_) => "Opening email...",
+                links::LinkTarget::Path(_) => "Opening file...",
+            };
+
+            // Mark as in-flight
+            self.link_open_in_flight = true;
+
+            // Open asynchronously to avoid blocking the UI
+            // Note: open::that() is non-blocking on most platforms (sends to OS and returns)
+            cx.spawn(async move |this, cx| {
+                // Run open and capture result
+                let result = open::that(&open_string);
+
+                // Always reset in-flight and update status in a single update call
+                // If update fails (entity dropped), the flag doesn't matter
+                let _ = this.update(cx, |this, cx| {
+                    this.link_open_in_flight = false;
+                    this.status_message = Some(match result {
+                        Ok(()) => format!("Opened: {}", open_string),
+                        Err(e) => format!("Couldn't open link: {}", e),
+                    });
+                    cx.notify();
+                });
+            }).detach();
+
+            self.status_message = Some(target_desc.to_string());
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Detect link in current cell (for status bar hint)
+    pub fn detected_link(&self) -> Option<links::LinkTarget> {
+        let (row, col) = self.selected;
+        let cell_value = self.sheet().get_display(row, col);
+        links::detect_link(&cell_value)
+    }
+
     fn confirm_edit_and_move(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if !self.mode.is_editing() {
-            self.start_edit(cx);
+            // Not editing - just move (Excel behavior)
+            self.move_selection(dr, dc, cx);
             return;
         }
 
@@ -1786,6 +1961,7 @@ impl Spreadsheet {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
                 self.update_autocomplete(cx);
+                cx.notify();
                 return;
             }
             // Otherwise delete char before cursor
@@ -1805,6 +1981,7 @@ impl Spreadsheet {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
                 self.update_autocomplete(cx);
+                cx.notify();
             }
         }
     }
@@ -2646,6 +2823,108 @@ impl Spreadsheet {
                     }
                     self.status_message = Some(format!("Undo: {}", description));
                 }
+                UndoAction::RowsInserted { sheet_index, at_row, count } => {
+                    // Undo insert by deleting the rows
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.delete_rows(at_row, count);
+                    }
+                    // Shift row heights back up
+                    let heights_to_shift: Vec<_> = self.row_heights
+                        .iter()
+                        .filter(|(r, _)| **r >= at_row + count)
+                        .map(|(r, h)| (*r, *h))
+                        .collect();
+                    for r in at_row..NUM_ROWS {
+                        self.row_heights.remove(&r);
+                    }
+                    for (r, h) in heights_to_shift {
+                        self.row_heights.insert(r - count, h);
+                    }
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Undo: inserted {} row(s)", count));
+                }
+                UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights } => {
+                    // Undo delete by re-inserting rows and restoring data
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.insert_rows(at_row, count);
+                        // Restore the deleted cells
+                        for (row, col, value, format) in deleted_cells {
+                            sheet.set_value(row, col, &value);
+                            sheet.set_format(row, col, format);
+                        }
+                    }
+                    // Shift row heights down and restore deleted heights
+                    let heights_to_shift: Vec<_> = self.row_heights
+                        .iter()
+                        .filter(|(r, _)| **r >= at_row)
+                        .map(|(r, h)| (*r, *h))
+                        .collect();
+                    for (r, _) in &heights_to_shift {
+                        self.row_heights.remove(r);
+                    }
+                    for (r, h) in heights_to_shift {
+                        if r + count < NUM_ROWS {
+                            self.row_heights.insert(r + count, h);
+                        }
+                    }
+                    // Restore deleted row heights
+                    for (r, h) in deleted_row_heights {
+                        self.row_heights.insert(r, h);
+                    }
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Undo: deleted {} row(s)", count));
+                }
+                UndoAction::ColsInserted { sheet_index, at_col, count } => {
+                    // Undo insert by deleting the columns
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.delete_cols(at_col, count);
+                    }
+                    // Shift column widths back left
+                    let widths_to_shift: Vec<_> = self.col_widths
+                        .iter()
+                        .filter(|(c, _)| **c >= at_col + count)
+                        .map(|(c, w)| (*c, *w))
+                        .collect();
+                    for c in at_col..NUM_COLS {
+                        self.col_widths.remove(&c);
+                    }
+                    for (c, w) in widths_to_shift {
+                        self.col_widths.insert(c - count, w);
+                    }
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Undo: inserted {} column(s)", count));
+                }
+                UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths } => {
+                    // Undo delete by re-inserting columns and restoring data
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.insert_cols(at_col, count);
+                        // Restore the deleted cells
+                        for (row, col, value, format) in deleted_cells {
+                            sheet.set_value(row, col, &value);
+                            sheet.set_format(row, col, format);
+                        }
+                    }
+                    // Shift column widths right and restore deleted widths
+                    let widths_to_shift: Vec<_> = self.col_widths
+                        .iter()
+                        .filter(|(c, _)| **c >= at_col)
+                        .map(|(c, w)| (*c, *w))
+                        .collect();
+                    for (c, _) in &widths_to_shift {
+                        self.col_widths.remove(c);
+                    }
+                    for (c, w) in widths_to_shift {
+                        if c + count < NUM_COLS {
+                            self.col_widths.insert(c + count, w);
+                        }
+                    }
+                    // Restore deleted column widths
+                    for (c, w) in deleted_col_widths {
+                        self.col_widths.insert(c, w);
+                    }
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Undo: deleted {} column(s)", count));
+                }
             }
             self.is_modified = true;
             cx.notify();
@@ -2657,7 +2936,9 @@ impl Spreadsheet {
         match action {
             UndoAction::Values { sheet_index, changes } => {
                 if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
-                    for change in changes {
+                    // CRITICAL: Apply in reverse order to handle same-cell sequences correctly.
+                    // If cell X was changed A→B→C in one batch, we must undo C→B first, then B→A.
+                    for change in changes.iter().rev() {
                         sheet.set_value(change.row, change.col, &change.old_value);
                     }
                 }
@@ -2690,6 +2971,96 @@ impl Spreadsheet {
                 for sub_action in actions.into_iter().rev() {
                     self.apply_undo_action(sub_action);
                 }
+            }
+            UndoAction::RowsInserted { sheet_index, at_row, count } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.delete_rows(at_row, count);
+                }
+                // Shift row heights back up
+                let heights_to_shift: Vec<_> = self.row_heights
+                    .iter()
+                    .filter(|(r, _)| **r >= at_row + count)
+                    .map(|(r, h)| (*r, *h))
+                    .collect();
+                for r in at_row..NUM_ROWS {
+                    self.row_heights.remove(&r);
+                }
+                for (r, h) in heights_to_shift {
+                    self.row_heights.insert(r - count, h);
+                }
+                self.bump_cells_rev();
+            }
+            UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.insert_rows(at_row, count);
+                    for (row, col, value, format) in deleted_cells {
+                        sheet.set_value(row, col, &value);
+                        sheet.set_format(row, col, format);
+                    }
+                }
+                // Shift row heights down and restore deleted heights
+                let heights_to_shift: Vec<_> = self.row_heights
+                    .iter()
+                    .filter(|(r, _)| **r >= at_row)
+                    .map(|(r, h)| (*r, *h))
+                    .collect();
+                for (r, _) in &heights_to_shift {
+                    self.row_heights.remove(r);
+                }
+                for (r, h) in heights_to_shift {
+                    if r + count < NUM_ROWS {
+                        self.row_heights.insert(r + count, h);
+                    }
+                }
+                for (r, h) in deleted_row_heights {
+                    self.row_heights.insert(r, h);
+                }
+                self.bump_cells_rev();
+            }
+            UndoAction::ColsInserted { sheet_index, at_col, count } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.delete_cols(at_col, count);
+                }
+                // Shift column widths back left
+                let widths_to_shift: Vec<_> = self.col_widths
+                    .iter()
+                    .filter(|(c, _)| **c >= at_col + count)
+                    .map(|(c, w)| (*c, *w))
+                    .collect();
+                for c in at_col..NUM_COLS {
+                    self.col_widths.remove(&c);
+                }
+                for (c, w) in widths_to_shift {
+                    self.col_widths.insert(c - count, w);
+                }
+                self.bump_cells_rev();
+            }
+            UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.insert_cols(at_col, count);
+                    for (row, col, value, format) in deleted_cells {
+                        sheet.set_value(row, col, &value);
+                        sheet.set_format(row, col, format);
+                    }
+                }
+                // Shift column widths right and restore deleted widths
+                let widths_to_shift: Vec<_> = self.col_widths
+                    .iter()
+                    .filter(|(c, _)| **c >= at_col)
+                    .map(|(c, w)| (*c, *w))
+                    .collect();
+                for (c, _) in &widths_to_shift {
+                    self.col_widths.remove(c);
+                }
+                for (c, w) in widths_to_shift {
+                    if c + count < NUM_COLS {
+                        self.col_widths.insert(c + count, w);
+                    }
+                }
+                for (c, w) in deleted_col_widths {
+                    self.col_widths.insert(c, w);
+                }
+                self.bump_cells_rev();
             }
         }
     }
@@ -2732,6 +3103,82 @@ impl Spreadsheet {
                 for sub_action in actions {
                     self.apply_redo_action(sub_action);
                 }
+            }
+            UndoAction::RowsInserted { sheet_index, at_row, count } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.insert_rows(at_row, count);
+                }
+                // Shift row heights down (same as insert_rows in main code)
+                let heights_to_shift: Vec<_> = self.row_heights
+                    .iter()
+                    .filter(|(r, _)| **r >= at_row)
+                    .map(|(r, h)| (*r, *h))
+                    .collect();
+                for (r, _) in &heights_to_shift {
+                    self.row_heights.remove(r);
+                }
+                for (r, h) in heights_to_shift {
+                    if r + count < NUM_ROWS {
+                        self.row_heights.insert(r + count, h);
+                    }
+                }
+                self.bump_cells_rev();
+            }
+            UndoAction::RowsDeleted { sheet_index, at_row, count, .. } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.delete_rows(at_row, count);
+                }
+                // Shift row heights up (same as delete_rows in main code)
+                let heights_to_shift: Vec<_> = self.row_heights
+                    .iter()
+                    .filter(|(r, _)| **r >= at_row + count)
+                    .map(|(r, h)| (*r, *h))
+                    .collect();
+                for r in at_row..NUM_ROWS {
+                    self.row_heights.remove(&r);
+                }
+                for (r, h) in heights_to_shift {
+                    self.row_heights.insert(r - count, h);
+                }
+                self.bump_cells_rev();
+            }
+            UndoAction::ColsInserted { sheet_index, at_col, count } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.insert_cols(at_col, count);
+                }
+                // Shift column widths right (same as insert_cols in main code)
+                let widths_to_shift: Vec<_> = self.col_widths
+                    .iter()
+                    .filter(|(c, _)| **c >= at_col)
+                    .map(|(c, w)| (*c, *w))
+                    .collect();
+                for (c, _) in &widths_to_shift {
+                    self.col_widths.remove(c);
+                }
+                for (c, w) in widths_to_shift {
+                    if c + count < NUM_COLS {
+                        self.col_widths.insert(c + count, w);
+                    }
+                }
+                self.bump_cells_rev();
+            }
+            UndoAction::ColsDeleted { sheet_index, at_col, count, .. } => {
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.delete_cols(at_col, count);
+                }
+                // Shift column widths left (same as delete_cols in main code)
+                let widths_to_shift: Vec<_> = self.col_widths
+                    .iter()
+                    .filter(|(c, _)| **c >= at_col + count)
+                    .map(|(c, w)| (*c, *w))
+                    .collect();
+                for c in at_col..NUM_COLS {
+                    self.col_widths.remove(&c);
+                }
+                for (c, w) in widths_to_shift {
+                    self.col_widths.insert(c - count, w);
+                }
+                self.bump_cells_rev();
             }
         }
     }
@@ -2786,6 +3233,90 @@ impl Spreadsheet {
                     }
                     self.status_message = Some(format!("Redo: {}", description));
                 }
+                UndoAction::RowsInserted { sheet_index, at_row, count } => {
+                    // Re-insert the rows
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.insert_rows(at_row, count);
+                    }
+                    // Shift row heights down
+                    let heights_to_shift: Vec<_> = self.row_heights
+                        .iter()
+                        .filter(|(r, _)| **r >= at_row)
+                        .map(|(r, h)| (*r, *h))
+                        .collect();
+                    for (r, _) in &heights_to_shift {
+                        self.row_heights.remove(r);
+                    }
+                    for (r, h) in heights_to_shift {
+                        if r + count < NUM_ROWS {
+                            self.row_heights.insert(r + count, h);
+                        }
+                    }
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Redo: insert {} row(s)", count));
+                }
+                UndoAction::RowsDeleted { sheet_index, at_row, count, .. } => {
+                    // Re-delete the rows
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.delete_rows(at_row, count);
+                    }
+                    // Shift row heights up
+                    let heights_to_shift: Vec<_> = self.row_heights
+                        .iter()
+                        .filter(|(r, _)| **r >= at_row + count)
+                        .map(|(r, h)| (*r, *h))
+                        .collect();
+                    for r in at_row..NUM_ROWS {
+                        self.row_heights.remove(&r);
+                    }
+                    for (r, h) in heights_to_shift {
+                        self.row_heights.insert(r - count, h);
+                    }
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Redo: delete {} row(s)", count));
+                }
+                UndoAction::ColsInserted { sheet_index, at_col, count } => {
+                    // Re-insert the columns
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.insert_cols(at_col, count);
+                    }
+                    // Shift column widths right
+                    let widths_to_shift: Vec<_> = self.col_widths
+                        .iter()
+                        .filter(|(c, _)| **c >= at_col)
+                        .map(|(c, w)| (*c, *w))
+                        .collect();
+                    for (c, _) in &widths_to_shift {
+                        self.col_widths.remove(c);
+                    }
+                    for (c, w) in widths_to_shift {
+                        if c + count < NUM_COLS {
+                            self.col_widths.insert(c + count, w);
+                        }
+                    }
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Redo: insert {} column(s)", count));
+                }
+                UndoAction::ColsDeleted { sheet_index, at_col, count, .. } => {
+                    // Re-delete the columns
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.delete_cols(at_col, count);
+                    }
+                    // Shift column widths left
+                    let widths_to_shift: Vec<_> = self.col_widths
+                        .iter()
+                        .filter(|(c, _)| **c >= at_col + count)
+                        .map(|(c, w)| (*c, *w))
+                        .collect();
+                    for c in at_col..NUM_COLS {
+                        self.col_widths.remove(&c);
+                    }
+                    for (c, w) in widths_to_shift {
+                        self.col_widths.insert(c - count, w);
+                    }
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Redo: delete {} column(s)", count));
+                }
             }
             self.is_modified = true;
             cx.notify();
@@ -2801,6 +3332,22 @@ impl Spreadsheet {
         let min_col = start.1.min(end.1);
         let max_col = start.1.max(end.1);
         ((min_row, min_col), (max_row, max_col))
+    }
+
+    /// Returns true if more than one cell is selected.
+    /// This includes range selections and Ctrl+Click additional selections.
+    pub fn is_multi_selection(&self) -> bool {
+        // Check if primary selection is a range (more than one cell)
+        if let Some(end) = self.selection_end {
+            if end != self.selected {
+                return true;
+            }
+        }
+        // Check if there are additional Ctrl+Click selections
+        if !self.additional_selections.is_empty() {
+            return true;
+        }
+        false
     }
 
     pub fn is_selected(&self, row: usize, col: usize) -> bool {
@@ -3004,8 +3551,277 @@ impl Spreadsheet {
         self.select_col(col, false, cx);
     }
 
+    // Row/Column insert/delete operations (Ctrl+= / Ctrl+-)
+
+    /// Insert rows or columns based on current selection (Ctrl+=)
+    pub fn insert_rows_or_cols(&mut self, cx: &mut Context<Self>) {
+        // v1: Only operate on primary selection, ignore additional selections
+        if !self.additional_selections.is_empty() {
+            self.status_message = Some("Insert not supported with multiple selections".to_string());
+            cx.notify();
+            return;
+        }
+
+        if self.is_row_selection() {
+            // Insert rows above selection
+            let ((min_row, _), (max_row, _)) = self.selection_range();
+            let count = max_row - min_row + 1;
+            self.insert_rows(min_row, count, cx);
+        } else if self.is_col_selection() {
+            // Insert columns left of selection
+            let ((_, min_col), (_, max_col)) = self.selection_range();
+            let count = max_col - min_col + 1;
+            self.insert_cols(min_col, count, cx);
+        } else {
+            // v1: No dialog, just show status message
+            self.status_message = Some("Select entire row (Shift+Space) or column (Ctrl+Space) first".to_string());
+            cx.notify();
+        }
+    }
+
+    /// Delete rows or columns based on current selection (Ctrl+-)
+    pub fn delete_rows_or_cols(&mut self, cx: &mut Context<Self>) {
+        // v1: Only operate on primary selection, ignore additional selections
+        if !self.additional_selections.is_empty() {
+            self.status_message = Some("Delete not supported with multiple selections".to_string());
+            cx.notify();
+            return;
+        }
+
+        if self.is_row_selection() {
+            // Delete selected rows
+            let ((min_row, _), (max_row, _)) = self.selection_range();
+            let count = max_row - min_row + 1;
+            self.delete_rows(min_row, count, cx);
+        } else if self.is_col_selection() {
+            // Delete selected columns
+            let ((_, min_col), (_, max_col)) = self.selection_range();
+            let count = max_col - min_col + 1;
+            self.delete_cols(min_col, count, cx);
+        } else {
+            // v1: No dialog, just show status message
+            self.status_message = Some("Select entire row (Shift+Space) or column (Ctrl+Space) first".to_string());
+            cx.notify();
+        }
+    }
+
+    /// Insert rows at position with undo support
+    fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
+        let sheet_index = self.workbook.active_sheet_index();
+
+        // Perform the insert
+        if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+            sheet.insert_rows(at_row, count);
+        }
+
+        // Shift row heights down (from bottom to avoid overwriting)
+        let heights_to_shift: Vec<_> = self.row_heights
+            .iter()
+            .filter(|(r, _)| **r >= at_row)
+            .map(|(r, h)| (*r, *h))
+            .collect();
+        for (r, _) in &heights_to_shift {
+            self.row_heights.remove(r);
+        }
+        for (r, h) in heights_to_shift {
+            let new_row = r + count;
+            if new_row < NUM_ROWS {
+                self.row_heights.insert(new_row, h);
+            }
+        }
+
+        // Record undo entry
+        self.history.record_named_range_action(crate::history::UndoAction::RowsInserted {
+            sheet_index,
+            at_row,
+            count,
+        });
+
+        self.bump_cells_rev();
+        self.is_modified = true;
+        self.status_message = Some(format!("Inserted {} row(s)", count));
+        cx.notify();
+    }
+
+    /// Delete rows at position with undo support
+    fn delete_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
+        let sheet_index = self.workbook.active_sheet_index();
+
+        // Capture cells to be deleted for undo
+        let mut deleted_cells = Vec::new();
+        if let Some(sheet) = self.workbook.sheet(sheet_index) {
+            for row in at_row..at_row + count {
+                for col in 0..NUM_COLS {
+                    let raw = sheet.get_raw(row, col);
+                    let format = sheet.get_format(row, col);
+                    // Only store non-empty cells
+                    if !raw.is_empty() || format != Default::default() {
+                        deleted_cells.push((row, col, raw, format));
+                    }
+                }
+            }
+        }
+
+        // Capture row heights for deleted rows
+        let deleted_row_heights: Vec<_> = self.row_heights
+            .iter()
+            .filter(|(r, _)| **r >= at_row && **r < at_row + count)
+            .map(|(r, h)| (*r, *h))
+            .collect();
+
+        // Remove heights for deleted rows and shift remaining up
+        let heights_to_shift: Vec<_> = self.row_heights
+            .iter()
+            .filter(|(r, _)| **r >= at_row + count)
+            .map(|(r, h)| (*r, *h))
+            .collect();
+        // Remove all affected heights
+        for r in at_row..NUM_ROWS {
+            self.row_heights.remove(&r);
+        }
+        // Re-insert shifted heights
+        for (r, h) in heights_to_shift {
+            self.row_heights.insert(r - count, h);
+        }
+
+        // Perform the delete
+        if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+            sheet.delete_rows(at_row, count);
+        }
+
+        // Record undo entry
+        self.history.record_named_range_action(crate::history::UndoAction::RowsDeleted {
+            sheet_index,
+            at_row,
+            count,
+            deleted_cells,
+            deleted_row_heights,
+        });
+
+        // Move selection up if needed
+        if self.selected.0 >= at_row + count {
+            self.selected.0 -= count;
+        } else if self.selected.0 >= at_row {
+            self.selected.0 = at_row.saturating_sub(1);
+        }
+        self.selection_end = None;
+
+        self.bump_cells_rev();
+        self.is_modified = true;
+        self.status_message = Some(format!("Deleted {} row(s)", count));
+        cx.notify();
+    }
+
+    /// Insert columns at position with undo support
+    fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+        let sheet_index = self.workbook.active_sheet_index();
+
+        // Perform the insert
+        if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+            sheet.insert_cols(at_col, count);
+        }
+
+        // Shift column widths right (from right to avoid overwriting)
+        let widths_to_shift: Vec<_> = self.col_widths
+            .iter()
+            .filter(|(c, _)| **c >= at_col)
+            .map(|(c, w)| (*c, *w))
+            .collect();
+        for (c, _) in &widths_to_shift {
+            self.col_widths.remove(c);
+        }
+        for (c, w) in widths_to_shift {
+            let new_col = c + count;
+            if new_col < NUM_COLS {
+                self.col_widths.insert(new_col, w);
+            }
+        }
+
+        // Record undo entry
+        self.history.record_named_range_action(crate::history::UndoAction::ColsInserted {
+            sheet_index,
+            at_col,
+            count,
+        });
+
+        self.bump_cells_rev();
+        self.is_modified = true;
+        self.status_message = Some(format!("Inserted {} column(s)", count));
+        cx.notify();
+    }
+
+    /// Delete columns at position with undo support
+    fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+        let sheet_index = self.workbook.active_sheet_index();
+
+        // Capture cells to be deleted for undo
+        let mut deleted_cells = Vec::new();
+        if let Some(sheet) = self.workbook.sheet(sheet_index) {
+            for col in at_col..at_col + count {
+                for row in 0..NUM_ROWS {
+                    let raw = sheet.get_raw(row, col);
+                    let format = sheet.get_format(row, col);
+                    // Only store non-empty cells
+                    if !raw.is_empty() || format != Default::default() {
+                        deleted_cells.push((row, col, raw, format));
+                    }
+                }
+            }
+        }
+
+        // Capture column widths for deleted columns
+        let deleted_col_widths: Vec<_> = self.col_widths
+            .iter()
+            .filter(|(c, _)| **c >= at_col && **c < at_col + count)
+            .map(|(c, w)| (*c, *w))
+            .collect();
+
+        // Remove widths for deleted columns and shift remaining left
+        let widths_to_shift: Vec<_> = self.col_widths
+            .iter()
+            .filter(|(c, _)| **c >= at_col + count)
+            .map(|(c, w)| (*c, *w))
+            .collect();
+        // Remove all affected widths
+        for c in at_col..NUM_COLS {
+            self.col_widths.remove(&c);
+        }
+        // Re-insert shifted widths
+        for (c, w) in widths_to_shift {
+            self.col_widths.insert(c - count, w);
+        }
+
+        // Perform the delete
+        if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+            sheet.delete_cols(at_col, count);
+        }
+
+        // Record undo entry
+        self.history.record_named_range_action(crate::history::UndoAction::ColsDeleted {
+            sheet_index,
+            at_col,
+            count,
+            deleted_cells,
+            deleted_col_widths,
+        });
+
+        // Move selection left if needed
+        if self.selected.1 >= at_col + count {
+            self.selected.1 -= count;
+        } else if self.selected.1 >= at_col {
+            self.selected.1 = at_col.saturating_sub(1);
+        }
+        self.selection_end = None;
+
+        self.bump_cells_rev();
+        self.is_modified = true;
+        self.status_message = Some(format!("Deleted {} column(s)", count));
+        cx.notify();
+    }
+
     // Go To cell dialog
     pub fn show_goto(&mut self, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
         self.mode = Mode::GoTo;
         self.goto_input.clear();
         cx.notify();
@@ -3124,6 +3940,7 @@ impl Spreadsheet {
 
     // Find in cells
     pub fn show_find(&mut self, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
         self.mode = Mode::Find;
         self.find_input.clear();
         self.find_results.clear();
@@ -3233,6 +4050,7 @@ impl Spreadsheet {
     }
 
     pub fn show_palette(&mut self, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
         // Save pre-palette state for restore on Esc
         self.palette_pre_selection = self.selected;
         self.palette_pre_selection_end = self.selection_end;
@@ -3746,6 +4564,7 @@ impl Spreadsheet {
 
     // Font Picker
     pub fn show_font_picker(&mut self, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
         self.mode = Mode::FontPicker;
         self.font_picker_query.clear();
         self.font_picker_selected = 0;
@@ -3842,6 +4661,7 @@ impl Spreadsheet {
 
     // Theme Picker
     pub fn show_theme_picker(&mut self, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
         self.mode = Mode::ThemePicker;
         self.theme_picker_query.clear();
         self.theme_picker_selected = 0;
@@ -3857,11 +4677,25 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    // Open keybindings.json in user's editor
+    pub fn open_keybindings(&mut self, cx: &mut Context<Self>) {
+        match user_keybindings::open_keybindings_file() {
+            Ok(_) => {
+                self.status_message = Some("Opened keybindings.json - restart to apply changes".into());
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to open keybindings: {}", e));
+            }
+        }
+        cx.notify();
+    }
+
     // =========================================================================
     // Preferences panel
     // =========================================================================
 
     pub fn show_preferences(&mut self, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
         self.mode = Mode::Preferences;
         cx.notify();
     }
@@ -3946,6 +4780,8 @@ impl Spreadsheet {
 
     // About dialog
     pub fn show_about(&mut self, cx: &mut Context<Self>) {
+        // Close console if open (About dialog needs focus)
+        self.lua_console.visible = false;
         self.mode = Mode::About;
         cx.notify();
     }
@@ -3955,9 +4791,70 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    // License dialog
+    pub fn show_license(&mut self, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
+        self.license_input.clear();
+        self.license_error = None;
+        self.mode = Mode::License;
+        cx.notify();
+    }
+
+    pub fn hide_license(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        self.license_input.clear();
+        self.license_error = None;
+        cx.notify();
+    }
+
+    pub fn license_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        self.license_input.push(c);
+        self.license_error = None;
+        cx.notify();
+    }
+
+    pub fn license_backspace(&mut self, cx: &mut Context<Self>) {
+        self.license_input.pop();
+        self.license_error = None;
+        cx.notify();
+    }
+
+    pub fn apply_license(&mut self, cx: &mut Context<Self>) {
+        use crate::views::license_dialog::user_friendly_error;
+
+        match visigrid_license::load_license(&self.license_input) {
+            Ok(validation) => {
+                if validation.valid {
+                    self.status_message = Some(format!(
+                        "License activated: {}",
+                        visigrid_license::license_summary()
+                    ));
+                    self.hide_license(cx);
+                } else {
+                    // Convert technical error to user-friendly message
+                    let raw_error = validation.error.as_deref().unwrap_or("Unknown error");
+                    self.license_error = Some(user_friendly_error(raw_error));
+                    cx.notify();
+                }
+            }
+            Err(e) => {
+                // Convert technical error to user-friendly message
+                self.license_error = Some(user_friendly_error(&e));
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn clear_license(&mut self, cx: &mut Context<Self>) {
+        visigrid_license::clear_license();
+        self.status_message = Some("License removed".to_string());
+        self.hide_license(cx);
+    }
+
     // Import report dialog
     pub fn show_import_report(&mut self, cx: &mut Context<Self>) {
         if self.import_result.is_some() {
+            self.lua_console.visible = false;
             self.mode = Mode::ImportReport;
             cx.notify();
         }
@@ -3994,6 +4891,7 @@ impl Spreadsheet {
     /// Show the rename symbol dialog
     /// If `name` is provided, pre-fill with that named range
     pub fn show_rename_symbol(&mut self, name: Option<&str>, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
         // Get list of named ranges
         let named_ranges = self.workbook.list_named_ranges();
         if named_ranges.is_empty() {
@@ -4058,6 +4956,7 @@ impl Spreadsheet {
 
     /// Show the edit description modal for a named range
     pub fn show_edit_description(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
         // Get the current description
         let current_description = self.workbook.get_named_range(name)
             .and_then(|nr| nr.description.clone());
@@ -4132,6 +5031,7 @@ impl Spreadsheet {
 
     /// Show the named ranges tour
     pub fn show_tour(&mut self, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
         self.tour_step = 0;
         self.mode = Mode::Tour;
         cx.notify();
@@ -5168,6 +6068,7 @@ impl Spreadsheet {
 
     /// Show the create named range dialog
     pub fn show_create_named_range(&mut self, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
         // Build target string from current selection
         let target = self.selection_to_reference_string();
 
@@ -5538,6 +6439,234 @@ impl Spreadsheet {
         ranges.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         ranges
     }
+
+    // ========================================================================
+    // Keyboard hints (Vimium-style jump navigation)
+    // ========================================================================
+
+    /// Enter keyboard hint mode - show jump labels on visible cells.
+    pub fn enter_hint_mode(&mut self, cx: &mut Context<Self>) {
+        self.enter_hint_mode_with_labels(true, cx);
+    }
+
+    /// Enter hint/command mode with optional labels.
+    ///
+    /// - `show_labels`: if true, generate cell labels (full hint mode)
+    /// - `show_labels`: if false, command-only mode (for vim gg without labels)
+    pub fn enter_hint_mode_with_labels(&mut self, show_labels: bool, cx: &mut Context<Self>) {
+        self.hint_state.buffer.clear();
+
+        if show_labels {
+            // Full hint mode: generate labels for visible cells
+            let visible_rows = self.visible_rows();
+            let visible_cols = self.visible_cols();
+            self.hint_state.labels = crate::hints::generate_hints(
+                self.scroll_row,
+                self.scroll_col,
+                visible_rows,
+                visible_cols,
+            );
+            self.hint_state.viewport = (self.scroll_row, self.scroll_col, visible_rows, visible_cols);
+            self.status_message = Some("Hint: type letters to jump".into());
+        } else {
+            // Command-only mode: no labels, just waiting for g-commands (gg, etc.)
+            self.hint_state.labels.clear();
+            self.hint_state.viewport = (0, 0, 0, 0);
+            self.status_message = Some("g-".into());
+        }
+
+        self.mode = Mode::Hint;
+        cx.notify();
+    }
+
+    /// Exit keyboard hint mode without jumping.
+    pub fn exit_hint_mode(&mut self, cx: &mut Context<Self>) {
+        self.hint_state.clear();
+        self.mode = Mode::Navigation;
+        self.status_message = None;
+        cx.notify();
+    }
+
+    /// Handle a key press in hint mode.
+    /// Returns true if the key was consumed.
+    ///
+    /// Uses the resolver architecture from hints.rs:
+    /// 1. Exact command match (gg → GotoTop)
+    /// 2. Cell label resolution (a, ab, zz)
+    /// 3. No match → exit
+    pub fn apply_hint_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        use crate::hints::{resolve_hint_buffer, HintResolution, GCommand, HintExitReason};
+
+        match key {
+            "escape" => {
+                self.hint_state.last_exit_reason = Some(HintExitReason::Cancelled);
+                self.exit_hint_mode(cx);
+                true
+            }
+            "backspace" => {
+                self.hint_state.buffer.pop();
+                self.update_hint_status(cx);
+                true
+            }
+            _ if key.len() == 1 && key.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false) => {
+                self.hint_state.buffer.push_str(key);
+
+                // Resolve the buffer through the phase system
+                match resolve_hint_buffer(&self.hint_state) {
+                    HintResolution::Command(cmd) => {
+                        self.hint_state.last_exit_reason = Some(HintExitReason::Command);
+                        self.execute_g_command(cmd, cx);
+                        self.exit_hint_mode(cx);
+                    }
+                    HintResolution::Jump(row, col) => {
+                        self.hint_state.last_exit_reason = Some(HintExitReason::LabelJump);
+                        self.selected = (row, col);
+                        self.selection_end = None;
+                        self.additional_selections.clear();
+                        self.ensure_cell_visible(row, col);
+                        self.exit_hint_mode(cx);
+                    }
+                    HintResolution::NoMatch => {
+                        self.hint_state.last_exit_reason = Some(HintExitReason::NoMatch);
+                        self.exit_hint_mode(cx);
+                    }
+                    HintResolution::Pending => {
+                        self.update_hint_status(cx);
+                    }
+                }
+                true
+            }
+            _ => false, // Unhandled key
+        }
+    }
+
+    /// Execute a g-prefixed command.
+    fn execute_g_command(&mut self, cmd: crate::hints::GCommand, cx: &mut Context<Self>) {
+        use crate::hints::GCommand;
+
+        match cmd {
+            GCommand::GotoTop => {
+                // gg - Go to A1
+                self.selected = (0, 0);
+                self.selection_end = None;
+                self.additional_selections.clear();
+                self.scroll_row = 0;
+                self.scroll_col = 0;
+                self.status_message = Some("Jumped to A1".into());
+                cx.notify();
+            }
+            // Future commands go here
+        }
+    }
+
+    /// Update status bar with current hint state.
+    fn update_hint_status(&mut self, cx: &mut Context<Self>) {
+        let matches = self.hint_state.matching_labels();
+        let buffer = &self.hint_state.buffer;
+
+        if buffer.is_empty() {
+            self.status_message = Some("Hint: type letters to jump".into());
+        } else if matches.is_empty() {
+            self.status_message = Some(format!("Hint: {} (no matches)", buffer));
+        } else if matches.len() == 1 {
+            // This shouldn't happen (we auto-jump on unique match), but handle it
+            self.status_message = Some(format!("Hint: {} → jumping", buffer));
+        } else {
+            self.status_message = Some(format!("Hint: {} ({} matches)", buffer, matches.len()));
+        }
+        cx.notify();
+    }
+
+    /// Check if hints are enabled in settings.
+    pub fn keyboard_hints_enabled(&self, cx: &Context<Self>) -> bool {
+        use crate::settings::user_settings;
+        user_settings(cx)
+            .navigation
+            .keyboard_hints
+            .as_value()
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Check if vim mode is enabled in settings.
+    pub fn vim_mode_enabled(&self, cx: &Context<Self>) -> bool {
+        use crate::settings::user_settings;
+        user_settings(cx)
+            .navigation
+            .vim_mode
+            .as_value()
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Handle vim-style navigation keys.
+    /// Returns true if the key was consumed.
+    pub fn apply_vim_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        match key {
+            "h" => {
+                self.move_selection(0, -1, cx);
+                true
+            }
+            "j" => {
+                self.move_selection(1, 0, cx);
+                true
+            }
+            "k" => {
+                self.move_selection(-1, 0, cx);
+                true
+            }
+            "l" => {
+                self.move_selection(0, 1, cx);
+                true
+            }
+            "i" => {
+                // Enter edit mode (like F2 - edit without replacing)
+                self.start_edit(cx);
+                true
+            }
+            "0" => {
+                // Move to first column
+                self.selected = (self.selected.0, 0);
+                self.selection_end = None;
+                self.ensure_cell_visible(self.selected.0, 0);
+                cx.notify();
+                true
+            }
+            "$" => {
+                // Move to last column with data in current row (or last visible)
+                let row = self.selected.0;
+                let last_col = self.find_last_data_col_in_row(row);
+                self.selected = (row, last_col);
+                self.selection_end = None;
+                self.ensure_cell_visible(row, last_col);
+                cx.notify();
+                true
+            }
+            "w" => {
+                // Forward jump: Ctrl+Right equivalent
+                self.jump_selection(0, 1, cx);
+                true
+            }
+            "b" => {
+                // Back jump: Ctrl+Left equivalent
+                self.jump_selection(0, -1, cx);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Find the last column with data in a given row.
+    fn find_last_data_col_in_row(&self, row: usize) -> usize {
+        let sheet = self.workbook.active_sheet();
+        for col in (0..NUM_COLS).rev() {
+            let cell = sheet.get_cell(row, col);
+            if !cell.value.raw_display().is_empty() {
+                return col;
+            }
+        }
+        0 // Default to first column if row is empty
+    }
 }
 
 /// Convert column index to letter(s) (0 = A, 25 = Z, 26 = AA, etc.)
@@ -5561,6 +6690,9 @@ impl Render for Spreadsheet {
         if self.window_size != current_size {
             self.window_size = current_size;
         }
+
+        // Cache window bounds for session snapshot (updated each render)
+        self.cached_window_bounds = Some(window.window_bounds());
 
         // Update grid layout cache for hit-testing
         let menu_height = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
