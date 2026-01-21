@@ -46,17 +46,54 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
   libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
 ```
 
-## VisiGrid Pro
+## Editions
 
-VisiGrid is free for personal use. [VisiGrid Pro](https://visigrid.app) adds:
+### Free
 
-- Lua scripting
-- Large file performance mode
+Open source. Local-first. No lock-in — your data is always yours.
+
+- Core grid + editing
+- Multi-selection + multi-edit
+- Command palette + quick open
+- Formula autocomplete + error checking
+- Themes + keybindings (JSON)
+- Export data freely (CSV, TSV, JSON)
+
+### Pro
+
+For power users who want leverage: speed, scale, and automation.
+
+- Everything in Free
+- Fast large-file mode (million+ rows)
+- Advanced transforms (clean, split, dedupe, fill)
+- Inspector (dependency graphs + formula diagnostics)
+- Scripting & automation (Lua)
+- Plugin runtime
+
+**$12/month · $99/year · $249 perpetual**
+
+One license. No account. No telemetry. Yours forever.
+
+[Get Pro](https://visigrid.app)
+
+### Pro+
+
+For serious work: continuity, confidence, and collaboration.
+
+- Everything in Pro
+- Includes VisiHub Pro
+- Cloud sync & backup
+- Version history
+- Share without exporting (publish datasets)
 - Priority support
+
+**$19/month · $149/year**
+
+[Get Pro+](https://visigrid.app)
 
 ## License
 
-VisiGrid is source-available under the [FSL-1.1-MIT](LICENSE.md) license. After two years, each release converts to MIT.
+Source-available under the [FSL-1.1-MIT](LICENSE.md) license. After two years, each version converts to MIT.
 
 ## Contributing
 
