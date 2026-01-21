@@ -62,7 +62,6 @@ What's built, what's next, and what's not planned.
 ### Developer Features
 - Lua scripting console (Ctrl+Shift+L)
 - Inspector panel (Ctrl+Shift+I) - precedents, dependents, diagnostics
-- Problems panel (Ctrl+Shift+M) - all formula errors
 - Configurable keybindings (`~/.config/visigrid/keybindings.json`)
 - Themes (10+ built-in, Ctrl+K Ctrl+T)
 - Split view (Ctrl+\)
@@ -89,6 +88,7 @@ What's built, what's next, and what's not planned.
 ## Planned
 
 ### Near-term
+- Problems panel (Ctrl+Shift+M) - all formula errors
 - Find and replace (Ctrl+H)
 - Cross-sheet references (=Sheet2!A1)
 - Zoom (Ctrl++/-)
