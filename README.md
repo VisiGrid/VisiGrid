@@ -1,8 +1,10 @@
 # VisiGrid
 
-A fast, native spreadsheet built with [GPUI](https://gpui.rs) — the GPU-accelerated UI framework behind [Zed](https://zed.dev).
+A fast, local-first spreadsheet for serious data work.
 
-VisiGrid is a local-first, native spreadsheet for people who work with real data. It prioritizes speed, correctness, and keyboard-driven workflows over cloud lock-in.
+VisiGrid prioritizes speed, correctness, and keyboard-driven workflows over cloud lock-in and opaque automation.
+
+Built as a native desktop app in Rust, powered by [GPUI](https://gpui.rs)—the GPU-accelerated UI framework behind [Zed](https://zed.dev)—for instant startup, smooth scrolling, and low-latency interaction.
 
 ## Principles
 
@@ -11,16 +13,15 @@ VisiGrid is a local-first, native spreadsheet for people who work with real data
 - **Serious workflows**: Built for analysts, engineers, and operators.
 - **No lock-in**: Export freely. Files are standard formats, not hosted documents.
 
-## Features
+## Features (Free)
 
-- Multi-selection and multi-edit
-- Formula bar with autocomplete and signature help
-- Named ranges with rename refactoring
-- 96 spreadsheet functions (financial, statistical, text, date/time, logical)
-- Undo/redo with full history
-- Command palette and quick open
-- Excel, CSV, and TSV import
-- Themes and custom keybindings (JSON)
+- Core grid + editing
+- Multi-selection + multi-edit
+- Command palette + quick open
+- Formula autocomplete + error checking
+- Problems panel + split view
+- Themes + keybindings (JSON)
+- Export data freely (CSV, TSV, JSON)
 - Cross-platform: macOS, Windows, Linux
 
 ## Download
@@ -54,35 +55,31 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 ## VisiGrid Pro
 
-VisiGrid is free and fully usable.
+For power users who want leverage: speed, scale, and automation.
 
-Pro unlocks capabilities for large datasets and automation:
-
-- **Fast large-file mode** — million+ rows without lag
-- **Lua scripting** — automate transforms and workflows
-- **Inspector panel** — dependency graphs and formula diagnostics
-- **Advanced transforms** — clean, split, dedupe, fill
-- **Plugin runtime** — extend VisiGrid with custom tools
-
-Pro is licensed locally:
-- No account required
-- No telemetry
-- Works offline forever
-- One license, yours to keep
+- Everything in Free
+- Fast large-file mode (million+ rows)
+- Advanced transforms (clean, split, dedupe, fill)
+- Inspector (dependency graphs + formula diagnostics)
+- Scripting & automation (Lua)
+- Plugin runtime
 
 **$12/month · $99/year · $249 perpetual**
+
+One license. No account. No telemetry. Yours forever.
 
 [Get Pro →](https://visigrid.app)
 
 ## VisiGrid Pro+
 
-Everything in Pro, plus cloud continuity:
+For serious work: continuity, confidence, and collaboration.
 
-- **VisiHub Pro** included
-- **Cloud sync & backup** — never lose work
-- **Version history** — know what changed
-- **Publish datasets** — share without exporting
-- **Priority support**
+- Everything in Pro
+- Includes VisiHub Pro
+- Never lose work (cloud sync & backup)
+- Know what changed (version history)
+- Share without exporting (publish datasets)
+- Priority support
 
 **$19/month · $149/year**
 
