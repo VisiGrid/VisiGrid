@@ -52,7 +52,7 @@ What's built, what's next, and what's not planned.
   - Rename across all formulas (Ctrl+Shift+R)
 
 ### Formatting
-- Bold, italic, underline, strikethrough
+- Bold, italic, underline, strikethrough (bold/italic not rendering on Linux, see [docs/font-rendering-issue.md](docs/font-rendering-issue.md))
 - Number formats (currency, percent, decimal, general)
 - Format Cells dialog (Ctrl+1)
 - Cell alignment
