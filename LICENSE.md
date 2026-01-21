@@ -1,114 +1,51 @@
-# Functional Source License, Version 1.1, MIT Future License
+# GNU Affero General Public License v3.0
 
-## Abbreviation
+Copyright (C) 2024-2026 RegAtlas, LLC
 
-FSL-1.1-MIT
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-## Notice
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-Copyright 2024-2026 RegAtlas, LLC
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-## Terms and Conditions
+---
 
-### Licensor ("We")
+## Plugin Exception
 
-The party offering the Software under these Terms and Conditions.
+Plugins that use only the documented public plugin API are not considered
+derivative works and may be licensed independently. This means you can create
+proprietary plugins for VisiGrid without being required to open-source them,
+as long as they interact with VisiGrid solely through the public API.
 
-### The Software
+**What's allowed:**
+- Proprietary plugins using the public plugin API
+- Commercial plugins sold independently
+- Internal plugins for your organization
 
-The "Software" is each version of the software that we make available under
-these Terms and Conditions, as indicated by our inclusion of these Terms and
-Conditions with the Software.
+**What requires AGPLv3:**
+- Modifications to VisiGrid's core source code
+- Plugins that link against private/internal modules
+- Forks or derivatives of the core engine
 
-### License Grant
+---
 
-Subject to your compliance with this License Grant and the Patents,
-Redistribution and Trademark clauses below, we hereby grant you the right to
-use, copy, modify, create derivative works, publicly perform, publicly display
-and redistribute the Software for any Permitted Purpose identified below.
+## Commercial Licensing
 
-### Permitted Purpose
+If the AGPLv3 doesn't work for your use case, commercial licenses are available.
+Contact licensing@visigrid.app for:
 
-A Permitted Purpose is any purpose other than a Competing Use. A Competing Use
-means making the Software available to others in a commercial product or
-service that:
+- Embedding VisiGrid in proprietary software
+- Hosting VisiGrid as a service without releasing source code
+- Distributing modified versions in closed-source products
 
-1. substitutes for the Software;
+---
 
-2. substitutes for any other product or service we offer using the Software
-   that exists as of the date we make the Software available; or
-
-3. offers the same or substantially similar functionality as the Software.
-
-Permitted Purposes specifically include using the Software:
-
-1. for your own personal use;
-
-2. for your organization's internal business purposes;
-
-3. to study the source code and learn from it;
-
-4. to create modifications for your own personal use or your organization's
-   internal business purposes;
-
-5. to share modifications with others, provided such sharing is not a
-   Competing Use.
-
-### Patents
-
-To the extent your use for a Permitted Purpose would necessarily infringe our
-patents, the license grant above includes a license under our patents. If you
-make a claim against any party that the Software infringes or contributes to
-the infringement of any patent, then your patent license to the Software ends
-immediately.
-
-### Redistribution
-
-The Terms and Conditions apply to all copies, modifications and derivatives of
-the Software.
-
-If you redistribute any copies, modifications or derivatives of the Software,
-you must include a copy of or a link to these Terms and Conditions and not
-remove any copyright notices provided in or with the Software.
-
-### Disclaimer
-
-THE SOFTWARE IS PROVIDED "AS IS" AND WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING WITHOUT LIMITATION WARRANTIES OF FITNESS FOR A PARTICULAR
-PURPOSE, MERCHANTABILITY, TITLE OR NON-INFRINGEMENT.
-
-IN NO EVENT WILL WE HAVE ANY LIABILITY TO YOU ARISING OUT OF OR RELATED TO THE
-SOFTWARE, INCLUDING INDIRECT, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES,
-EVEN IF WE HAVE BEEN INFORMED OF THEIR POSSIBILITY IN ADVANCE.
-
-### Trademarks
-
-Except for displaying the above copyright notice and this License, you have no
-right under these Terms and Conditions to use any trade names, trademarks,
-service marks, or product names of the Licensor.
-
-## Grant of Future License
-
-We hereby irrevocably grant you an additional license to use the Software under
-the MIT License at https://opensource.org/license/mit, effective on the second
-anniversary of the date we make the Software available. On or after that date,
-you may use the Software under the MIT License, in which case the following
-will apply:
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+The full text of the GNU Affero General Public License v3.0 is available at:
+https://www.gnu.org/licenses/agpl-3.0.txt

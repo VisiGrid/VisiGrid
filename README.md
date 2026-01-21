@@ -93,7 +93,7 @@ For serious work: continuity, confidence, and collaboration.
 
 ## License
 
-Source-available under the [FSL-1.1-MIT](LICENSE.md) license. After two years, each version converts to MIT.
+VisiGrid is open source under the [AGPLv3](LICENSE.md) license with a plugin exception. Commercial licenses available for embedding or hosting. See [LICENSE.md](LICENSE.md) for details.
 
 ## Contributing
 
