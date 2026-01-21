@@ -31,7 +31,7 @@ use crate::actions::*;
 use crate::mode::{Mode, InspectorTab};
 use crate::theme::TokenKey;
 
-pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let editing = app.mode.is_editing();
     let show_goto = app.mode == Mode::GoTo;
     let show_find = app.mode == Mode::Find;
@@ -484,12 +484,6 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             this.toggle_show_zeros(cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
-            // Pro feature gate
-            if !visigrid_license::is_feature_enabled("inspector") {
-                this.status_message = Some("Inspector requires VisiGrid Pro".to_string());
-                cx.notify();
-                return;
-            }
             this.inspector_visible = !this.inspector_visible;
             cx.notify();
         }))
@@ -511,12 +505,6 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &ShowFormatPanel, _, cx| {
-            // Pro feature gate
-            if !visigrid_license::is_feature_enabled("inspector") {
-                this.status_message = Some("Inspector requires VisiGrid Pro".to_string());
-                cx.notify();
-                return;
-            }
             this.inspector_visible = true;
             this.inspector_tab = InspectorTab::Format;
             cx.notify();
@@ -571,6 +559,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
         }))
         .on_action(cx.listener(|this, _: &ToggleUnderline, _, cx| {
             this.toggle_underline(cx);
+        }))
+        .on_action(cx.listener(|this, _: &FormatCurrency, _, cx| {
+            this.format_currency(cx);
+        }))
+        .on_action(cx.listener(|this, _: &FormatPercent, _, cx| {
+            this.format_percent(cx);
         }))
         // Go To dialog
         .on_action(cx.listener(|this, _: &GoToCell, _, cx| {
@@ -1372,7 +1366,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) 
             div.child(formula_bar::render_formula_bar(app, cx))
         })
         .child(headers::render_column_headers(app, cx))
-        .child(grid::render_grid(app, cx))
+        .child(grid::render_grid(app, window, cx))
         // Lua console panel (above status bar)
         .child(lua_console::render_lua_console(app, cx))
         .when(!zen_mode, |div| {

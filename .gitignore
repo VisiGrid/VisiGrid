@@ -24,3 +24,7 @@ visigrid-site/
 visihub-api/
 visihub-app/
 visihub-site/
+
+# Distribution repos (managed separately)
+homebrew-tap/
+winget-manifests/

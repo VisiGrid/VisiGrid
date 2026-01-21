@@ -1,63 +1,77 @@
 # VisiGrid Roadmap
 
-This document tracks what's built, what's in progress, and what's intentionally not planned.
+What's built, what's next, and what's not planned.
 
-> This roadmap reflects current functionality and direction, not guarantees.
-> Some features may be partial, evolving, or subject to change prior to v1.0.
+> Current status: Early access (pre-v1.0). Expect breaking changes to `.sheet` format.
 
 ---
 
 ## Shipped
 
-### Core Spreadsheet (Stable)
+### Core Spreadsheet
 - GPU-accelerated grid rendering (GPUI)
 - Cell editing with formula bar
 - Selection, multi-selection, and range operations
-- Multi-edit with live preview (type once, apply to all selected cells with formula shifting)
+- Multi-edit (type once, apply to all selected cells with formula shifting)
 - Undo/redo
-- Clipboard integration (copy/paste)
+- Clipboard (copy/cut/paste)
+- Paste Special (values, formulas, transpose, operations)
 - Fill down (Ctrl+D) and fill right (Ctrl+R)
 
 ### Navigation & Workflow
-- Keyboard-driven navigation (arrow keys, Ctrl+arrows, Home/End)
+- Keyboard-driven navigation (arrows, Ctrl+arrows, Home/End, Page Up/Down)
 - Command palette (Ctrl+Shift+P)
+- Fuzzy finder (Ctrl+P) - cells, named ranges, recent files
 - Go To dialog (Ctrl+G)
-- Find (with incremental search)
-- Session restore (reopen files, scroll position, selection, panels)
+- Find with incremental search (Ctrl+F)
+- Keyboard hints (press `g` for Vimium-style jumping)
+- Vim mode (hjkl navigation, optional)
+- Session restore (files, scroll position, selection, panels)
+- Zen mode (F11)
 
 ### File Formats
-- Native `.sheet` format (preserves values, formulas, formatting)
+- Native `.sheet` format (SQLite-based, preserves everything)
 - CSV/TSV import and export
 - JSON export
-- Excel import (common cases; fidelity varies by file)
+- Excel import (.xlsx, .xls, .xlsb, .ods) with background processing
 
-### Formula Engine (96 built-in functions)
-
-Broad coverage across:
-- Math, logical, text, lookup, date/time, statistical, and array formulas
-- Dynamic arrays (spill behavior)
-- Dependency tracking and recalculation
-
-Exact function list available in documentation.
+### Formula Engine (97 functions)
+- Math, logical, text, lookup, date/time, statistical, array
+- Dynamic arrays with spill behavior
+- SUMIFS, COUNTIFS, XLOOKUP, FILTER, SORT, UNIQUE
+- Autocomplete with signature help
+- Syntax highlighting and error validation
+- Context help (F1)
 
 ### Multi-Sheet & Organization
 - Multiple sheets per workbook
-- Sheet tabs (rename, delete, reorder)
-- Named ranges (create, rename, delete)
+- Sheet tabs (add, rename, delete, reorder)
+- Named ranges with full IDE support:
+  - Create (Ctrl+Shift+N)
+  - Go to definition (F12)
+  - Find all references (Shift+F12)
+  - Rename across all formulas (Ctrl+Shift+R)
+
+### Formatting
+- Bold, italic, underline, strikethrough
+- Number formats (currency, percent, decimal, general)
+- Format Cells dialog (Ctrl+1)
+- Cell alignment
+- Column/row resize (drag or double-click to auto-fit)
+
+### Developer Features
+- Lua scripting console (Ctrl+Shift+L)
+- Inspector panel (Ctrl+Shift+I) - precedents, dependents, diagnostics
+- Problems panel (Ctrl+Shift+M) - all formula errors
+- Configurable keybindings (`~/.config/visigrid/keybindings.json`)
+- Themes (10+ built-in, Ctrl+K Ctrl+T)
+- Split view (Ctrl+\)
+- URL/path detection (Ctrl+Enter to open)
 
 ### Platform
 - macOS (Universal binary, signed and notarized)
 - Windows (x64)
 - Linux (x86_64, tar.gz and AppImage)
-
-### Pro Features (Advanced)
-- Background Excel import with progress reporting
-- Import Report (fidelity tracking, unsupported features)
-- Inspector panel (dependencies, diagnostics)
-
-### Pro Platform Capabilities (Evolving)
-- Lua scripting console (Ctrl+Shift+L)
-- Configurable keybindings (`~/.config/visigrid/keybindings.json`)
 
 ---
 
@@ -67,28 +81,39 @@ Exact function list available in documentation.
 - Freeze panes (lock rows/columns while scrolling)
 
 ### Formula Coverage
-- Multi-condition functions: SUMIFS, COUNTIFS, AVERAGEIF, AVERAGEIFS
-- Modern lookup: XLOOKUP
-- Financial functions: PMT, FV, PV, NPV, IRR
+- AVERAGEIF, AVERAGEIFS
+- Financial: PMT, FV, PV, NPV, IRR
 
 ---
 
 ## Planned
 
 ### Near-term
-- Find and replace
+- Find and replace (Ctrl+H)
+- Cross-sheet references (=Sheet2!A1)
+- Zoom (Ctrl++/-)
+- XLSX export
 - Data validation (dropdowns, constraints)
 - Conditional formatting (basic rules)
-- Print to PDF
 - Comments/notes on cells
+- Print to PDF
+
+### Medium-term
+- CLI / headless mode (pipe-friendly, `visigrid calc`, `visigrid convert`)
+- Sparklines (=SPARKLINE formula, Unicode mini-charts)
+- AutoFilter and Sort
+- Cell context menu (right-click)
+- Fill Handle (drag to extend selection pattern)
+- Series Fill (smart pattern detection: 1,2,3 → 4,5,6)
+- Merged cells
 
 ### Long-term: Systems of Record
 
 Connect to authoritative data sources without sync risk.
 
-**Concept:** Import data from ERPs, payment processors, and ledgers as read-only snapshots. Every pull is versioned with a timestamp. User controls when to refresh. No silent syncs. No write-back.
+Import data from ERPs, payment processors, and ledgers as read-only snapshots. Every pull is versioned with a timestamp. User controls when to refresh. No silent syncs. No write-back.
 
-**Target sources:**
+Target sources:
 - Stripe / payment processors
 - QuickBooks / accounting systems
 - Bank feeds
@@ -98,30 +123,37 @@ Connect to authoritative data sources without sync risk.
 
 AI helps you reason about data without modifying it.
 
-**Concept:** AI proposes operations (compare, flag, explain differences). User reviews and approves. VisiGrid executes deterministically. Every step is visible and auditable.
+AI proposes operations (compare, flag, explain). User reviews and approves. VisiGrid executes deterministically. Every step visible and auditable.
 
-**AI can:**
-- Compare records across sources
-- Explain differences
-- Flag anomalies
-- Summarize discrepancies
+**AI can:** Compare records, explain differences, flag anomalies, summarize discrepancies
 
-**AI cannot:**
-- Edit cells without approval
-- Fetch data directly
-- Hide steps
-- Invent values
+**AI cannot:** Edit cells without approval, fetch data directly, hide steps, invent values
+
+### Long-term: Extensibility
+- Plugin architecture (WASM-based)
+- Custom functions
+- Data connectors
+- Minimap for large sheets
+
+---
+
+## Upstream Contributions
+
+Fixes we may contribute to dependencies:
+
+| Project | Issue | Details |
+|---------|-------|---------|
+| gpui/Zed | Linux font rendering | Bold, italic, per-cell fonts don't render. See [docs/font-rendering-issue.md](docs/font-rendering-issue.md) |
 
 ---
 
 ## Non-Goals
 
-These are explicit rejections, not "not yet":
+Explicit rejections, not "not yet":
 
 | Feature | Rationale |
 |---------|-----------|
 | VBA/macro compatibility | Lua scripting instead |
-| XLSX export | One-way import; save as .sheet |
 | Real-time collaboration | Local-first philosophy |
 | Web version | Desktop-native performance |
 | Mobile/tablet | Desktop-first workflows |
@@ -133,6 +165,6 @@ These are explicit rejections, not "not yet":
 
 ## Versioning
 
-VisiGrid uses [CalVer](https://calver.org/) for releases: `YYYY.MM.PATCH`
+VisiGrid uses [SemVer](https://semver.org/): `MAJOR.MINOR.PATCH`
 
-Current status: Early access (pre-v1.0). Expect breaking changes to the `.sheet` format.
+Current: Early access (0.x). Breaking changes possible before v1.0.

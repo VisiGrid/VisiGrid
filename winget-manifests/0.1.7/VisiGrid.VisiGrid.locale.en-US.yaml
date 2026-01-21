@@ -1,0 +1,25 @@
+PackageIdentifier: VisiGrid.VisiGrid
+PackageVersion: 0.1.7
+PackageLocale: en-US
+Publisher: RegAtlas, LLC
+PublisherUrl: https://visigrid.com
+PublisherSupportUrl: https://github.com/VisiGrid/VisiGrid/issues
+PrivacyUrl: https://visigrid.com/privacy
+PackageName: VisiGrid
+PackageUrl: https://visigrid.com
+License: AGPL-3.0
+LicenseUrl: https://github.com/VisiGrid/VisiGrid/blob/main/LICENSE
+ShortDescription: Fast, native spreadsheet with GPU-accelerated rendering
+Description: |
+  VisiGrid is a native, GPU-accelerated spreadsheet built for speed and keyboard-driven workflows.
+  Features include formula support (96 functions), multi-sheet workbooks, Excel import,
+  CSV/TSV/JSON export, and a command palette for power users.
+Tags:
+  - spreadsheet
+  - csv
+  - excel
+  - productivity
+  - office
+ReleaseNotesUrl: https://github.com/VisiGrid/VisiGrid/releases/tag/v0.1.7
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

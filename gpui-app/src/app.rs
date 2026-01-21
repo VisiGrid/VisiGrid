@@ -746,6 +746,8 @@ impl Spreadsheet {
             CommandId::ToggleBold => self.toggle_bold(cx),
             CommandId::ToggleItalic => self.toggle_italic(cx),
             CommandId::ToggleUnderline => self.toggle_underline(cx),
+            CommandId::FormatCurrency => self.format_currency(cx),
+            CommandId::FormatPercent => self.format_percent(cx),
             CommandId::FormatCells => {
                 // Open inspector to format tab
                 self.inspector_visible = true;
@@ -3669,6 +3671,30 @@ impl Spreadsheet {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     self.sheet_mut().toggle_underline(row, col);
+                }
+            }
+        }
+        self.is_modified = true;
+        cx.notify();
+    }
+
+    pub fn format_currency(&mut self, cx: &mut Context<Self>) {
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    self.sheet_mut().set_number_format(row, col, NumberFormat::Currency { decimals: 2 });
+                }
+            }
+        }
+        self.is_modified = true;
+        cx.notify();
+    }
+
+    pub fn format_percent(&mut self, cx: &mut Context<Self>) {
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    self.sheet_mut().set_number_format(row, col, NumberFormat::Percent { decimals: 2 });
                 }
             }
         }
@@ -6973,6 +6999,6 @@ impl Render for Spreadsheet {
             viewport_size: (grid_viewport_width, grid_viewport_height),
         };
 
-        views::render_spreadsheet(self, cx)
+        views::render_spreadsheet(self, window, cx)
     }
 }

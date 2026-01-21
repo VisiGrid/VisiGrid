@@ -24,6 +24,7 @@ pub fn render_inspector_panel(app: &mut Spreadsheet, cx: &mut Context<Spreadshee
     let current_tab = app.inspector_tab;
 
     div()
+        .id("inspector-panel")
         .absolute()
         .right_0()
         .top_0()
@@ -35,6 +36,10 @@ pub fn render_inspector_panel(app: &mut Spreadsheet, cx: &mut Context<Spreadshee
         .flex()
         .flex_col()
         .overflow_hidden()
+        // Capture mouse events to prevent click-through to grid
+        .on_mouse_down(MouseButton::Left, |_, _, _| {
+            // Absorb click - don't propagate to grid
+        })
         // Header with title and close button
         .child(render_header(&cell_ref, is_pinned, text_primary, text_muted, panel_border, cx))
         // Tab bar
@@ -219,7 +224,7 @@ fn render_content(
         .flex_1()
         .overflow_hidden()
         .child(match current_tab {
-            InspectorTab::Inspector => render_inspector_tab(app, row, col, text_primary, text_muted, accent, panel_border, cx).into_any_element(),
+            InspectorTab::Inspector => render_inspector_tab(app, row, col, text_primary, text_muted, accent, panel_border, cx),
             InspectorTab::Format => render_format_tab(app, row, col, text_primary, text_muted, panel_border, accent, cx).into_any_element(),
             InspectorTab::Names => names_content.unwrap().into_any_element(),
         })
@@ -234,7 +239,34 @@ fn render_inspector_tab(
     accent: Hsla,
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
+) -> AnyElement {
+    // Pro feature gate for Inspector tab
+    if !visigrid_license::is_feature_enabled("inspector") {
+        return div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_4()
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(text_primary)
+                    .child("Inspector requires VisiGrid Pro")
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(text_muted)
+                    .text_center()
+                    .child("View cell dependencies, formula analysis, and debugging info.")
+            )
+            .into_any_element();
+    }
+
     let raw_value = app.sheet().get_raw(row, col);
     let display_value = app.sheet().get_display(row, col);
     let is_formula = raw_value.starts_with('=');
@@ -380,7 +412,7 @@ fn render_inspector_tab(
         );
     }
 
-    content
+    content.into_any_element()
 }
 
 fn render_format_tab(

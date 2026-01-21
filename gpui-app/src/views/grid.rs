@@ -5,9 +5,10 @@ use crate::mode::Mode;
 use crate::settings::{user_settings, Setting};
 use crate::theme::TokenKey;
 use super::headers::render_row_header;
+use visigrid_engine::cell::{Alignment, VerticalAlignment};
 
 /// Render the main cell grid
-pub fn render_grid(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let scroll_row = app.scroll_row;
     let scroll_col = app.scroll_col;
     let selected = app.selected;
@@ -41,6 +42,7 @@ pub fn render_grid(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl
                             &edit_value,
                             show_gridlines,
                             app,
+                            window,
                             cx,
                         )
                     })
@@ -57,6 +59,7 @@ fn render_row(
     edit_value: &str,
     show_gridlines: bool,
     app: &Spreadsheet,
+    window: &Window,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let row_height = app.row_height(row);
@@ -70,7 +73,7 @@ fn render_row(
             (0..visible_cols).map(|visible_col| {
                 let col = scroll_col + visible_col;
                 let col_width = app.col_width(col);
-                render_cell(row, col, col_width, row_height, selected, editing, edit_value, show_gridlines, app, cx)
+                render_cell(row, col, col_width, row_height, selected, editing, edit_value, show_gridlines, app, window, cx)
             })
         )
 }
@@ -85,6 +88,7 @@ fn render_cell(
     edit_value: &str,
     show_gridlines: bool,
     app: &Spreadsheet,
+    window: &Window,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let is_selected = app.is_selected(row, col);
@@ -123,7 +127,7 @@ fn render_cell(
     } else if app.show_formulas() {
         app.sheet().get_raw(row, col)
     } else {
-        let display = app.sheet().get_display(row, col);
+        let display = app.sheet().get_formatted_display(row, col);
         // Hide zero values if show_zeros is false
         if !app.show_zeros() && display == "0" {
             String::new()
@@ -151,11 +155,24 @@ fn render_cell(
         .id(ElementId::Name(format!("cell-{}-{}", row, col).into()))
         .size_full()
         .flex()
-        .items_center()
         .px_1()
         .overflow_hidden()
         .bg(cell_background(app, is_editing, is_active, is_selected, is_formula_ref))
         .border_color(border_color);
+
+    // Apply horizontal alignment
+    cell = match format.alignment {
+        Alignment::Left => cell.justify_start(),
+        Alignment::Center => cell.justify_center(),
+        Alignment::Right => cell.justify_end(),
+    };
+
+    // Apply vertical alignment
+    cell = match format.vertical_alignment {
+        VerticalAlignment::Top => cell.items_start(),
+        VerticalAlignment::Middle => cell.items_center(),
+        VerticalAlignment::Bottom => cell.items_end(),
+    };
 
     // Only right+bottom borders for normal cells (thinner gridlines)
     // For selected cells, only draw outer edges of the selection (not interior borders)
@@ -206,6 +223,10 @@ fn render_cell(
         .text_color(cell_text_color(app, is_editing, is_selected, is_multi_edit_preview))
         .text_sm()
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            // Don't handle clicks if inspector is visible (like Excel's Ctrl+1 modal behavior)
+            if this.inspector_visible {
+                return;
+            }
             // Don't handle clicks if we're resizing
             if this.resizing_col.is_some() || this.resizing_row.is_some() {
                 return;
@@ -248,6 +269,10 @@ fn render_cell(
             }
         }))
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
+            // Don't handle if inspector is visible
+            if this.inspector_visible {
+                return;
+            }
             // Continue drag selection if active
             if this.dragging_selection {
                 if this.mode.is_formula() {
@@ -258,20 +283,14 @@ fn render_cell(
             }
         }))
         .on_mouse_up(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            // Don't handle if inspector is visible
+            if this.inspector_visible {
+                return;
+            }
             // End drag selection (works for both normal and formula mode)
             this.end_drag_selection(cx);
         }));
 
-    // Apply formatting
-    if format.bold {
-        cell = cell.font_weight(FontWeight::BOLD);
-    }
-    if format.italic {
-        cell = cell.italic();
-    }
-    if format.underline {
-        cell = cell.underline();
-    }
     // Build the text content with cursor and selection highlight
     if is_editing {
         let cursor_pos = app.edit_cursor;
@@ -352,34 +371,36 @@ fn render_cell(
             cell = cell.child(display_text);
         }
     } else {
-        // Not editing - show value, possibly with custom font
+        // Not editing - show value with formatting using StyledText
         let text_content: SharedString = value.into();
 
-        if let Some(ref font_family) = format.font_family {
-            let run = TextRun {
-                len: text_content.len(),
-                font: Font {
-                    family: font_family.clone().into(),
-                    features: FontFeatures::default(),
-                    fallbacks: None,
-                    weight: if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
-                    style: if format.italic { FontStyle::Italic } else { FontStyle::Normal },
-                },
-                color: cell_text_color(app, is_editing, is_selected, is_multi_edit_preview),
-                background_color: None,
-                underline: if format.underline {
-                    Some(UnderlineStyle {
-                        thickness: px(1.0),
-                        color: None,
-                        wavy: false,
-                    })
-                } else {
-                    None
-                },
-                strikethrough: None,
-            };
-            cell = cell.child(StyledText::new(text_content).with_runs(vec![run]));
+        // Check if any formatting is applied
+        let has_formatting = format.bold || format.italic || format.underline;
+
+        if has_formatting {
+            // Get base text style from window and apply cell formatting
+            let mut text_style = window.text_style();
+            text_style.color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
+
+            // Note: Bold/italic font variants may not render on Linux due to gpui limitations
+            // with cosmic-text font selection. Underline works because it's drawn separately.
+            // See: https://github.com/zed-industries/zed - Linux text system TODOs
+            if format.bold {
+                text_style.font_weight = FontWeight::BOLD;
+            }
+            if format.italic {
+                text_style.font_style = FontStyle::Italic;
+            }
+            if format.underline {
+                text_style.underline = Some(UnderlineStyle {
+                    thickness: px(1.),
+                    ..Default::default()
+                });
+            }
+
+            cell = cell.child(StyledText::new(text_content).with_default_highlights(&text_style, []));
         } else {
+            // No formatting - just add text directly
             cell = cell.child(text_content);
         }
     }

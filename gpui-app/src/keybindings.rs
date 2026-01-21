@@ -94,6 +94,10 @@ pub fn register(cx: &mut App) {
         #[cfg(target_os = "macos")]
         KeyBinding::new("ctrl-u", StartEdit, Some("Spreadsheet")),
 
+        // Number formats (Ctrl+Shift+4 = $, Ctrl+Shift+5 = %)
+        KeyBinding::new("ctrl-shift-4", FormatCurrency, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-shift-5", FormatPercent, Some("Spreadsheet")),
+
         // History
         KeyBinding::new("ctrl-z", Undo, Some("Spreadsheet")),
         KeyBinding::new("ctrl-y", Redo, Some("Spreadsheet")),
