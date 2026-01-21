@@ -63,7 +63,6 @@ What's built, what's next, and what's not planned.
 - Inspector panel (Ctrl+Shift+I) - precedents, dependents, diagnostics
 - Configurable keybindings (`~/.config/visigrid/keybindings.json`)
 - Themes (10+ built-in, Ctrl+K Ctrl+T)
-- Split view (Ctrl+\)
 - URL/path detection (Ctrl+Enter to open)
 
 ### Platform
@@ -87,6 +86,7 @@ What's built, what's next, and what's not planned.
 ## Planned
 
 ### Near-term
+- Split view (Ctrl+\)
 - Problems panel (Ctrl+Shift+M) - all formula errors
 - Find and replace (Ctrl+H)
 - Cross-sheet references (=Sheet2!A1)
