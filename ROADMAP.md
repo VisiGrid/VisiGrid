@@ -20,8 +20,7 @@ What's built, what's next, and what's not planned.
 
 ### Navigation & Workflow
 - Keyboard-driven navigation (arrows, Ctrl+arrows, Home/End, Page Up/Down)
-- Command palette (Ctrl+Shift+P)
-- Fuzzy finder (Ctrl+P) - cells, named ranges, recent files
+- Command palette (Ctrl+Shift+P) with fuzzy search for commands, cells, named ranges, recent files
 - Go To dialog (Ctrl+G)
 - Find with incremental search (Ctrl+F)
 - Keyboard hints (press `g` for Vimium-style jumping)
