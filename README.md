@@ -1,16 +1,27 @@
 # VisiGrid
 
-A fast, native spreadsheet built with [GPUI](https://gpui.rs) (the framework behind [Zed](https://zed.dev)).
+A fast, native spreadsheet built with [GPUI](https://gpui.rs) — the GPU-accelerated UI framework behind [Zed](https://zed.dev).
+
+VisiGrid is a local-first, native spreadsheet for people who work with real data. It prioritizes speed, correctness, and keyboard-driven workflows over cloud lock-in.
+
+## Principles
+
+- **Local-first**: Your data lives on your machine. No accounts required.
+- **Native performance**: GPU-accelerated rendering. Smooth at any scale.
+- **Serious workflows**: Built for analysts, engineers, and operators.
+- **No lock-in**: Export freely. Files are standard formats, not hosted documents.
 
 ## Features
 
-- **GPU-accelerated rendering** - smooth scrolling and editing at any scale
-- **96 spreadsheet functions** - financial, statistical, text, date/time, and more
-- **Excel/CSV/TSV import** - open existing files
-- **Named ranges** - organize your data with semantic names
-- **Formula bar with autocomplete** - IntelliSense-style function help
-- **Undo/redo** - full edit history
-- **Cross-platform** - macOS, Windows, Linux
+- Multi-selection and multi-edit
+- Formula bar with autocomplete and signature help
+- Named ranges with rename refactoring
+- 96 spreadsheet functions (financial, statistical, text, date/time, logical)
+- Undo/redo with full history
+- Command palette and quick open
+- Excel, CSV, and TSV import
+- Themes and custom keybindings (JSON)
+- Cross-platform: macOS, Windows, Linux
 
 ## Download
 
@@ -27,14 +38,9 @@ Get the latest release from the [Releases page](https://github.com/VisiGrid/Visi
 Requires [Rust](https://rustup.rs/) 1.75+.
 
 ```bash
-# Clone
 git clone https://github.com/VisiGrid/VisiGrid.git
 cd VisiGrid
-
-# Build
 cargo build --release -p visigrid-gpui
-
-# Run
 ./target/release/visigrid
 ```
 
@@ -46,54 +52,49 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
   libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
 ```
 
-## Editions
+## VisiGrid Pro
 
-### Free
+VisiGrid is free and fully usable.
 
-Open source. Local-first. No lock-in — your data is always yours.
+Pro unlocks capabilities for large datasets and automation:
 
-- Core grid + editing
-- Multi-selection + multi-edit
-- Command palette + quick open
-- Formula autocomplete + error checking
-- Themes + keybindings (JSON)
-- Export data freely (CSV, TSV, JSON)
+- **Fast large-file mode** — million+ rows without lag
+- **Lua scripting** — automate transforms and workflows
+- **Inspector panel** — dependency graphs and formula diagnostics
+- **Advanced transforms** — clean, split, dedupe, fill
+- **Plugin runtime** — extend VisiGrid with custom tools
 
-### Pro
-
-For power users who want leverage: speed, scale, and automation.
-
-- Everything in Free
-- Fast large-file mode (million+ rows)
-- Advanced transforms (clean, split, dedupe, fill)
-- Inspector (dependency graphs + formula diagnostics)
-- Scripting & automation (Lua)
-- Plugin runtime
+Pro is licensed locally:
+- No account required
+- No telemetry
+- Works offline forever
+- One license, yours to keep
 
 **$12/month · $99/year · $249 perpetual**
 
-One license. No account. No telemetry. Yours forever.
+[Get Pro →](https://visigrid.app)
 
-[Get Pro](https://visigrid.app)
+## VisiGrid Pro+
 
-### Pro+
+Everything in Pro, plus cloud continuity:
 
-For serious work: continuity, confidence, and collaboration.
-
-- Everything in Pro
-- Includes VisiHub Pro
-- Cloud sync & backup
-- Version history
-- Share without exporting (publish datasets)
-- Priority support
+- **VisiHub Pro** included
+- **Cloud sync & backup** — never lose work
+- **Version history** — know what changed
+- **Publish datasets** — share without exporting
+- **Priority support**
 
 **$19/month · $149/year**
 
-[Get Pro+](https://visigrid.app)
+[Get Pro+ →](https://visigrid.app)
 
 ## License
 
-VisiGrid is open source under the [AGPLv3](LICENSE.md) license with a plugin exception. Commercial licenses available for embedding or hosting. See [LICENSE.md](LICENSE.md) for details.
+VisiGrid is open source under the [AGPLv3](LICENSE.md) with a plugin exception.
+
+This ensures improvements remain open while allowing commercial plugins and extensions. Plugins using the public API may be licensed independently. Commercial licenses available for embedding or hosting.
+
+See [LICENSE.md](LICENSE.md) for details.
 
 ## Contributing
 
