@@ -111,8 +111,15 @@ fn render_cell(
     let is_spill_receiver = app.sheet().is_spill_receiver(row, col);
     let has_spill_error = app.sheet().has_spill_error(row, col);
 
+    // Check for multi-edit preview (shows what each selected cell will receive)
+    let multi_edit_preview = app.multi_edit_preview(row, col);
+    let is_multi_edit_preview = multi_edit_preview.is_some();
+
     let value = if is_editing {
         edit_value.to_string()
+    } else if let Some(preview) = multi_edit_preview {
+        // Show the preview value for cells in multi-selection during editing
+        preview
     } else if app.show_formulas() {
         app.sheet().get_raw(row, col)
     } else {
@@ -140,8 +147,6 @@ fn render_cell(
         cell_border(app, is_editing, is_active, is_selected, is_formula_ref)
     };
 
-    let needs_full_border = is_editing || is_active || is_selected;
-
     let mut cell = div()
         .id(ElementId::Name(format!("cell-{}-{}", row, col).into()))
         .size_full()
@@ -153,11 +158,21 @@ fn render_cell(
         .border_color(border_color);
 
     // Only right+bottom borders for normal cells (thinner gridlines)
-    // Full border for selected/editing cells
+    // For selected cells, only draw outer edges of the selection (not interior borders)
     // For formula refs, only draw outer edges of the range (not interior borders)
     // Spill parent/blocked get 2px border, receiver gets 1px
-    cell = if needs_full_border {
+    cell = if is_editing {
+        // Editing cell gets full border
         cell.border_1()
+    } else if is_selected {
+        // Selected cells: only draw outer edges to avoid double borders
+        let (top, right, bottom, left) = app.selection_borders(row, col);
+        let mut c = cell;
+        if top { c = c.border_t_1(); }
+        if right { c = c.border_r_1(); }
+        if bottom { c = c.border_b_1(); }
+        if left { c = c.border_l_1(); }
+        c
     } else if has_spill_error || is_spill_parent {
         // 2px solid border for spill parent and blocked cells
         cell.border_2()
@@ -175,14 +190,20 @@ fn render_cell(
         c
     } else if show_gridlines {
         // Normal gridlines (only when enabled in settings)
-        cell.border_r_1().border_b_1()
+        // Don't draw gridlines toward selected cells (selection borders handle those edges)
+        let cell_right_selected = app.is_selected(row, col + 1);
+        let cell_below_selected = app.is_selected(row + 1, col);
+        let mut c = cell;
+        if !cell_right_selected { c = c.border_r_1(); }
+        if !cell_below_selected { c = c.border_b_1(); }
+        c
     } else {
         // No gridlines - plain cell
         cell
     };
 
     cell = cell
-        .text_color(cell_text_color(app, is_editing, is_selected))
+        .text_color(cell_text_color(app, is_editing, is_selected, is_multi_edit_preview))
         .text_sm()
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             // Don't handle clicks if we're resizing
@@ -283,7 +304,7 @@ fn render_cell(
             let byte_sel_end = display_chars.iter().take(disp_sel_end).collect::<String>().len();
             let total_bytes = display_text.len();
 
-            let normal_color = cell_text_color(app, is_editing, is_selected);
+            let normal_color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
             let selection_bg = app.token(TokenKey::EditorSelectionBg);
             let selection_fg = app.token(TokenKey::EditorSelectionText);
 
@@ -344,7 +365,7 @@ fn render_cell(
                     weight: if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
                     style: if format.italic { FontStyle::Italic } else { FontStyle::Normal },
                 },
-                color: cell_text_color(app, is_editing, is_selected),
+                color: cell_text_color(app, is_editing, is_selected, is_multi_edit_preview),
                 background_color: None,
                 underline: if format.underline {
                     Some(UnderlineStyle {
@@ -439,9 +460,12 @@ fn cell_border(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected
     }
 }
 
-fn cell_text_color(app: &Spreadsheet, is_editing: bool, is_selected: bool) -> Hsla {
+fn cell_text_color(app: &Spreadsheet, is_editing: bool, is_selected: bool, is_multi_edit_preview: bool) -> Hsla {
     if is_editing {
         app.token(TokenKey::EditorText)
+    } else if is_multi_edit_preview {
+        // Show preview text in a muted/dimmed color to distinguish from the active edit cell
+        app.token(TokenKey::TextMuted)
     } else if is_selected {
         // Use primary text color for selected cells to ensure contrast
         // SelectionBg is semi-transparent, so text should be visible,

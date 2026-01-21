@@ -1344,6 +1344,30 @@ impl Spreadsheet {
         (top, right, bottom, left)
     }
 
+    /// Calculate which borders to draw for a selected cell.
+    /// Returns (top, right, bottom, left) indicating which borders to draw.
+    ///
+    /// Strategy:
+    /// - Always draw right+bottom (internal gridlines within selection)
+    /// - Draw top only if cell above is NOT selected (outer edge)
+    /// - Draw left only if cell to left is NOT selected (outer edge)
+    /// This maintains the grid appearance while avoiding double borders at edges.
+    pub fn selection_borders(&self, row: usize, col: usize) -> (bool, bool, bool, bool) {
+        // Check if adjacent cells are also selected
+        let cell_above_selected = row > 0 && self.is_selected(row - 1, col);
+        let cell_left_selected = col > 0 && self.is_selected(row, col - 1);
+
+        // Top/left: only at outer edges of selection
+        let top = !cell_above_selected;
+        let left = !cell_left_selected;
+
+        // Right/bottom: always draw for internal gridlines
+        let right = true;
+        let bottom = true;
+
+        (top, right, bottom, left)
+    }
+
     /// Calculate visible rows based on window height
     pub fn visible_rows(&self) -> usize {
         let height: f32 = self.window_size.height.into();
@@ -1737,7 +1761,12 @@ impl Spreadsheet {
     }
 
     pub fn confirm_edit(&mut self, cx: &mut Context<Self>) {
-        self.confirm_edit_and_move(1, 0, cx);  // Enter moves down
+        // Multi-edit: If multiple cells selected, apply to all (the "wow" moment)
+        if self.is_multi_selection() {
+            self.confirm_edit_in_place(cx);
+        } else {
+            self.confirm_edit_and_move(1, 0, cx);  // Enter moves down
+        }
     }
 
     pub fn confirm_edit_up(&mut self, cx: &mut Context<Self>) {
@@ -1752,53 +1781,232 @@ impl Spreadsheet {
         self.confirm_edit_and_move(0, -1, cx);  // Shift+Tab moves left
     }
 
-    /// Ctrl+Enter: Confirm edit and apply to ALL selected cells (multi-edit)
-    /// In navigation mode, opens detected link if present
+    /// Ctrl+Enter: Multi-edit commit / Fill selection / Open link
+    ///
+    /// Behavior (Excel muscle memory):
+    /// - If editing: apply edit to ALL selected cells with formula shifting
+    /// - If navigation + multi-selection: fill selection from primary cell
+    /// - If navigation + single cell + link: open link
+    /// - If navigation + single cell + no link: start editing
+    ///
+    /// Multi-edit semantics:
+    /// - Applies edited value to all cells in primary selection AND additional_selections
+    /// - For formulas: shifts relative references for each target cell
+    ///   (e.g., =A1 typed at B2, applied to C3, becomes =B2)
+    /// - Absolute references ($A$1) are preserved unchanged
+    /// - One undo step for all changes
     pub fn confirm_edit_in_place(&mut self, cx: &mut Context<Self>) {
         if !self.mode.is_editing() {
-            // In navigation mode, try to open detected link first
+            // Navigation mode: fill selection or open link
+            if self.is_multi_selection() {
+                // Multi-selection: fill from primary cell (Excel Ctrl+Enter)
+                self.fill_selection_from_primary(cx);
+                return;
+            }
+            // Single cell: try to open link, else start editing
             if self.try_open_link(cx) {
                 return;
             }
-            // If no link, start editing
             self.start_edit(cx);
             return;
         }
 
-        let new_value = self.edit_value.clone();
+        // Convert leading + to = for formulas (Excel compatibility)
+        let mut base_value = if self.edit_value.starts_with('+') {
+            format!("={}", &self.edit_value[1..])
+        } else {
+            self.edit_value.clone()
+        };
+
+        // Auto-close unmatched parentheses (Excel compatibility)
+        if base_value.starts_with('=') {
+            let open_count = base_value.chars().filter(|&c| c == '(').count();
+            let close_count = base_value.chars().filter(|&c| c == ')').count();
+            if open_count > close_count {
+                for _ in 0..(open_count - close_count) {
+                    base_value.push(')');
+                }
+            }
+        }
+
+        let is_formula = base_value.starts_with('=');
+        let primary_cell = self.selected;  // Base cell for formula reference shifting
+
+        // Collect all target cells from primary selection and additional_selections
+        let mut target_cells: Vec<(usize, usize)> = Vec::new();
+
+        // Primary selection rectangle
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                target_cells.push((row, col));
+            }
+        }
+
+        // Additional selections (Ctrl+Click)
+        for (start, end) in &self.additional_selections {
+            let end = end.unwrap_or(*start);
+            let min_r = start.0.min(end.0);
+            let max_r = start.0.max(end.0);
+            let min_c = start.1.min(end.1);
+            let max_c = start.1.max(end.1);
+            for row in min_r..=max_r {
+                for col in min_c..=max_c {
+                    // Avoid duplicates (primary selection might overlap)
+                    if !target_cells.contains(&(row, col)) {
+                        target_cells.push((row, col));
+                    }
+                }
+            }
+        }
 
         let mut changes = Vec::new();
 
-        // Apply to all cells in selection
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let old_value = self.sheet().get_raw(row, col);
-                if old_value != new_value {
-                    changes.push(CellChange {
-                        row,
-                        col,
-                        old_value,
-                        new_value: new_value.clone(),
-                    });
-                }
-                self.sheet_mut().set_value(row, col, &new_value);
+        // Apply to all target cells
+        for (row, col) in &target_cells {
+            // Skip spill receivers
+            if self.sheet().get_spill_parent(*row, *col).is_some() {
+                continue;
             }
+
+            let old_value = self.sheet().get_raw(*row, *col);
+
+            // For formulas, shift relative references based on delta from primary cell
+            let new_value = if is_formula {
+                let delta_row = *row as i32 - primary_cell.0 as i32;
+                let delta_col = *col as i32 - primary_cell.1 as i32;
+                self.adjust_formula_refs(&base_value, delta_row, delta_col)
+            } else {
+                base_value.clone()
+            };
+
+            if old_value != new_value {
+                changes.push(CellChange {
+                    row: *row,
+                    col: *col,
+                    old_value,
+                    new_value: new_value.clone(),
+                });
+            }
+            self.sheet_mut().set_value(*row, *col, &new_value);
         }
 
         self.history.record_batch(self.sheet_index(), changes);
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
+        self.additional_selections.clear();  // Clear multi-selection after commit
         self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
         // Clear formula highlighting state
         self.formula_highlighted_refs.clear();
 
-        let cell_count = (max_row - min_row + 1) * (max_col - min_col + 1);
+        let cell_count = target_cells.len();
         if cell_count > 1 {
-            self.status_message = Some(format!("Applied to {} cells", cell_count));
+            self.status_message = Some(format!("Edited {} cells", cell_count));
         }
+        cx.notify();
+    }
+
+    /// Fill selection from primary cell (Ctrl+Enter in navigation mode with multi-selection)
+    ///
+    /// Excel muscle memory: select range, type in first cell, Ctrl+Enter fills all.
+    /// This is the navigation-mode equivalent - fills from existing primary cell content.
+    ///
+    /// - Fills all selected cells with primary cell's content
+    /// - If primary is blank, clears all selected cells (Excel behavior)
+    /// - Formula references shift relative to primary cell
+    /// - One undo step
+    fn fill_selection_from_primary(&mut self, cx: &mut Context<Self>) {
+        let primary_cell = self.selected;
+        let base_value = self.sheet().get_raw(primary_cell.0, primary_cell.1);
+
+        // If primary cell is empty, we still fill (clears the selection - Excel behavior)
+
+        let is_formula = base_value.starts_with('=');
+
+        // Collect all target cells (excluding primary cell itself)
+        let mut target_cells: Vec<(usize, usize)> = Vec::new();
+
+        // Primary selection rectangle
+        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                if (row, col) != primary_cell {
+                    target_cells.push((row, col));
+                }
+            }
+        }
+
+        // Additional selections (Ctrl+Click)
+        for (start, end) in &self.additional_selections {
+            let end = end.unwrap_or(*start);
+            let min_r = start.0.min(end.0);
+            let max_r = start.0.max(end.0);
+            let min_c = start.1.min(end.1);
+            let max_c = start.1.max(end.1);
+            for row in min_r..=max_r {
+                for col in min_c..=max_c {
+                    if (row, col) != primary_cell && !target_cells.contains(&(row, col)) {
+                        target_cells.push((row, col));
+                    }
+                }
+            }
+        }
+
+        if target_cells.is_empty() {
+            return;
+        }
+
+        let mut changes = Vec::new();
+        let mut filled_count = 0;
+        let mut skipped_spill = 0;
+
+        for (row, col) in &target_cells {
+            // Skip spill receivers
+            if self.sheet().get_spill_parent(*row, *col).is_some() {
+                skipped_spill += 1;
+                continue;
+            }
+
+            let old_value = self.sheet().get_raw(*row, *col);
+
+            // For formulas, shift relative references based on delta from primary cell
+            let new_value = if is_formula {
+                let delta_row = *row as i32 - primary_cell.0 as i32;
+                let delta_col = *col as i32 - primary_cell.1 as i32;
+                self.adjust_formula_refs(&base_value, delta_row, delta_col)
+            } else {
+                base_value.clone()
+            };
+
+            if old_value != new_value {
+                changes.push(CellChange {
+                    row: *row,
+                    col: *col,
+                    old_value,
+                    new_value: new_value.clone(),
+                });
+            }
+            self.sheet_mut().set_value(*row, *col, &new_value);
+            filled_count += 1;
+        }
+
+        if !changes.is_empty() {
+            self.history.record_batch(self.sheet_index(), changes);
+            self.bump_cells_rev();
+            self.is_modified = true;
+        }
+
+        self.additional_selections.clear();
+
+        // Status message with optional spill skip note
+        let status = if skipped_spill > 0 {
+            format!("Filled {} cells (skipped {} spill)", filled_count, skipped_spill)
+        } else {
+            format!("Filled {} cells", filled_count)
+        };
+        self.status_message = Some(status);
         cx.notify();
     }
 
@@ -2723,8 +2931,22 @@ impl Spreadsheet {
             // Only take first line if multi-line, and trim whitespace
             let text = text.lines().next().unwrap_or("").trim();
             if !text.is_empty() {
-                // Append to edit value (no cursor position tracking yet)
-                self.edit_value.push_str(text);
+                // Insert at cursor position
+                let char_count = self.edit_value.chars().count();
+                let cursor_pos = self.edit_cursor.min(char_count);
+
+                // Convert cursor char position to byte position
+                let byte_pos = self.edit_value.char_indices()
+                    .nth(cursor_pos)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.edit_value.len());
+
+                self.edit_value.insert_str(byte_pos, text);
+                self.edit_cursor = cursor_pos + text.chars().count();
+
+                // Update autocomplete for formulas
+                self.update_autocomplete(cx);
+
                 self.status_message = Some(format!("Pasted: {}", text));
                 cx.notify();
             }
@@ -3368,6 +3590,36 @@ impl Spreadsheet {
             }
         }
         false
+    }
+
+    /// Get multi-edit preview for a cell during editing.
+    /// Returns the value that will be applied to this cell when edit is confirmed.
+    /// Returns None if not in multi-edit mode or if this is the active cell.
+    pub fn multi_edit_preview(&self, row: usize, col: usize) -> Option<String> {
+        // Only in editing mode with multi-selection
+        if !self.mode.is_editing() || !self.is_multi_selection() {
+            return None;
+        }
+        // Skip the active cell (it shows the real edit_value)
+        if (row, col) == self.selected {
+            return None;
+        }
+        // Only for selected cells
+        if !self.is_selected(row, col) {
+            return None;
+        }
+
+        // Compute delta from primary cell
+        let delta_row = row as i32 - self.selected.0 as i32;
+        let delta_col = col as i32 - self.selected.1 as i32;
+
+        // If it's a formula, adjust references
+        if self.edit_value.starts_with('=') {
+            Some(self.adjust_formula_refs(&self.edit_value, delta_row, delta_col))
+        } else {
+            // Plain text: same value for all cells
+            Some(self.edit_value.clone())
+        }
     }
 
     /// Get all selection ranges (for operations that apply to all selected cells)

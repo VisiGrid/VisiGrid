@@ -63,8 +63,8 @@ Current status of keyboard shortcuts in the gpui version.
 |----------|--------|--------|
 | F2 | Start edit | ✅ |
 | Escape | Cancel edit | ✅ |
-| Enter | Confirm edit | ✅ |
-| Ctrl+Enter | Confirm without moving / Multi-edit / Open link | ✅ |
+| Enter | Confirm edit (multi-edit applies to all selected) | ✅ |
+| Ctrl+Enter | Fill selection from primary / Open link | ✅ |
 | Delete | Delete selection | ✅ |
 | Backspace | Backspace in edit | ✅ |
 | Ctrl+D | Fill Down | ✅ |
@@ -74,6 +74,9 @@ Current status of keyboard shortcuts in the gpui version.
 | Ctrl+Shift+Z | Redo (alt) | ✅ |
 | Any character | Start edit with char | ✅ |
 | (Command Palette) | Trim whitespace | ✅ |
+
+**Multi-Edit with Live Preview:**
+When multiple cells are selected (via Ctrl+Click or Shift+Click), typing shows a live preview in all cells. Formula references shift automatically relative to each cell's position. Press Enter to apply, Escape to cancel.
 
 ### Clipboard
 

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use super::cell::{Alignment, Cell, CellFormat, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment};
-use super::formula::eval::{self, Array2D, CellLookup, EvalResult, Value};
+use super::formula::eval::{self, Array2D, CellLookup, EvalResult, LookupWithContext, Value};
 
 // Thread-local set to track cells currently being evaluated (for cycle detection)
 thread_local! {
@@ -41,7 +41,7 @@ impl CellLookup for Sheet {
 
         self.cells
             .get(&(row, col))
-            .map(|c| self.evaluate_cell_value(&c.value))
+            .map(|c| self.evaluate_cell_value(&c.value, row, col))
             .unwrap_or(0.0)
     }
 
@@ -74,7 +74,8 @@ impl CellLookup for Sheet {
                 CellValue::Formula { ast: Some(ast), .. } => {
                     // Track that we're evaluating this cell
                     EVALUATING.with(|eval| eval.borrow_mut().insert((row, col)));
-                    let result = eval::evaluate(ast, self).to_text();
+                    let lookup = LookupWithContext::new(self, row, col);
+                    let result = eval::evaluate(ast, &lookup).to_text();
                     EVALUATING.with(|eval| eval.borrow_mut().remove(&(row, col)));
                     result
                 }
@@ -118,8 +119,9 @@ impl Sheet {
             None => return,
         };
 
-        // Evaluate the formula
-        let result = eval::evaluate(&ast, self);
+        // Evaluate the formula with current cell context for ROW()/COLUMN()
+        let lookup = LookupWithContext::new(self, row, col);
+        let result = eval::evaluate(&ast, &lookup);
 
         // If it's an array, try to apply spill
         if let EvalResult::Array(array) = result {
@@ -330,7 +332,7 @@ impl Sheet {
                 if cell.spill_error.is_some() {
                     return "#SPILL!".to_string();
                 }
-                self.display_cell_value(&cell.value)
+                self.display_cell_value(&cell.value, row, col)
             }
             None => String::new(),
         }
@@ -359,7 +361,10 @@ impl Sheet {
                 // Get the result for formatting
                 let result = match &cell.value {
                     CellValue::Number(n) => EvalResult::Number(*n),
-                    CellValue::Formula { ast: Some(ast), .. } => eval::evaluate(ast, self),
+                    CellValue::Formula { ast: Some(ast), .. } => {
+                        let lookup = LookupWithContext::new(self, row, col);
+                        eval::evaluate(ast, &lookup)
+                    }
                     CellValue::Text(s) => EvalResult::Text(s.clone()),
                     CellValue::Empty => return String::new(),
                     CellValue::Formula { ast: None, .. } => return "#ERR".to_string(),
@@ -401,13 +406,14 @@ impl Sheet {
             .unwrap_or_default()
     }
 
-    fn evaluate_cell_value(&self, value: &CellValue) -> f64 {
+    fn evaluate_cell_value(&self, value: &CellValue, row: usize, col: usize) -> f64 {
         match value {
             CellValue::Empty => 0.0,
             CellValue::Number(n) => *n,
             CellValue::Text(s) => s.parse().unwrap_or(0.0),
             CellValue::Formula { ast: Some(ast), .. } => {
-                match eval::evaluate(ast, self) {
+                let lookup = LookupWithContext::new(self, row, col);
+                match eval::evaluate(ast, &lookup) {
                     EvalResult::Number(n) => n,
                     EvalResult::Boolean(b) => if b { 1.0 } else { 0.0 },
                     EvalResult::Text(s) => s.parse().unwrap_or(0.0),
@@ -419,7 +425,7 @@ impl Sheet {
         }
     }
 
-    fn display_cell_value(&self, value: &CellValue) -> String {
+    fn display_cell_value(&self, value: &CellValue, row: usize, col: usize) -> String {
         match value {
             CellValue::Empty => String::new(),
             CellValue::Text(s) => s.clone(),
@@ -431,7 +437,8 @@ impl Sheet {
                 }
             }
             CellValue::Formula { ast: Some(ast), .. } => {
-                match eval::evaluate(ast, self) {
+                let lookup = LookupWithContext::new(self, row, col);
+                match eval::evaluate(ast, &lookup) {
                     EvalResult::Number(n) => {
                         if n.fract() == 0.0 {
                             format!("{}", n as i64)
@@ -1262,5 +1269,38 @@ mod tests {
         assert!(!sheet.is_spill_receiver(2, 0));
         assert!(!sheet.is_spill_receiver(3, 0));
         assert!(!sheet.is_spill_receiver(4, 0));
+    }
+
+    #[test]
+    fn test_row_column_without_arguments() {
+        let mut sheet = Sheet::new(10, 10);
+
+        // ROW() without argument should return the current row (1-indexed)
+        sheet.set_value(0, 0, "=ROW()");      // A1 -> 1
+        sheet.set_value(4, 0, "=ROW()");      // A5 -> 5
+        sheet.set_value(9, 2, "=ROW()");      // C10 -> 10
+
+        assert_eq!(sheet.get_display(0, 0), "1");
+        assert_eq!(sheet.get_display(4, 0), "5");
+        assert_eq!(sheet.get_display(9, 2), "10");
+
+        // COLUMN() without argument should return the current column (1-indexed)
+        sheet.set_value(0, 0, "=COLUMN()");   // A1 -> 1
+        sheet.set_value(0, 2, "=COLUMN()");   // C1 -> 3
+        sheet.set_value(0, 9, "=COLUMN()");   // J1 -> 10
+
+        assert_eq!(sheet.get_display(0, 0), "1");
+        assert_eq!(sheet.get_display(0, 2), "3");
+        assert_eq!(sheet.get_display(0, 9), "10");
+
+        // Combined usage
+        sheet.set_value(3, 4, "=ROW()+COLUMN()");  // E4 -> 4+5=9
+        assert_eq!(sheet.get_display(3, 4), "9");
+
+        // ROW/COLUMN with argument should still work
+        sheet.set_value(0, 5, "=ROW(B3)");    // Row of B3 -> 3
+        sheet.set_value(0, 6, "=COLUMN(D1)"); // Column of D1 -> 4
+        assert_eq!(sheet.get_display(0, 5), "3");
+        assert_eq!(sheet.get_display(0, 6), "4");
     }
 }

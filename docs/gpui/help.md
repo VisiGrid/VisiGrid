@@ -36,6 +36,21 @@ Quick reference for current functionality.
 | Extend selection | Shift+Arrow |
 | Select all | Ctrl+A |
 | Extend by clicking | Shift+Click |
+| Add to selection | Ctrl+Click |
+
+### Multi-Edit
+
+Select multiple cells, then type to edit all at once:
+
+| Action | Shortcut |
+|--------|----------|
+| Apply edit to all cells | Enter |
+| Fill from primary cell | Ctrl+Enter |
+| Cancel | Escape |
+
+**Live Preview:** All selected cells show what they'll receive while you type.
+
+**Formula Shifting:** Relative references adjust automatically (e.g., `=A1*2` becomes `=B2*2` in the next cell).
 
 ### Clipboard
 

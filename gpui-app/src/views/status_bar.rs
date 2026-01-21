@@ -114,11 +114,26 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                 .child(render_status_message(app, mode_text, hint_buffer.as_deref(), text_muted, cx))
         )
         .child(
-            // Right side: link hint + selection stats
+            // Right side: multi-selection hint + link hint + selection stats
             div()
                 .flex()
                 .items_center()
                 .gap_4()
+                // Multi-selection hint (context-aware)
+                .when(app.is_multi_selection(), |d| {
+                    let hint = if editing {
+                        "Enter to apply · Esc to cancel"
+                    } else {
+                        "Type to edit all · Ctrl+Enter to fill"
+                    };
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .text_color(text_muted)
+                            .child(hint)
+                    )
+                })
                 // Link hint (when link detected in current cell)
                 .when(detected_link.is_some(), |d| {
                     let link_type = match detected_link.as_ref() {

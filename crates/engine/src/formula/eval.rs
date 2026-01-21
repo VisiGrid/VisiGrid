@@ -18,6 +18,12 @@ pub trait CellLookup {
     fn resolve_named_range(&self, _name: &str) -> Option<NamedRangeResolution> {
         None
     }
+
+    /// Get the current cell being evaluated (for ROW()/COLUMN() without args).
+    /// Default implementation returns None (not in cell context).
+    fn current_cell(&self) -> Option<(usize, usize)> {
+        None
+    }
 }
 
 /// A lookup that wraps another CellLookup and adds named range resolution
@@ -43,6 +49,41 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup 
 
     fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
         (self.resolver)(name)
+    }
+
+    fn current_cell(&self) -> Option<(usize, usize)> {
+        self.inner.current_cell()
+    }
+}
+
+/// A lookup wrapper that provides current cell context for ROW()/COLUMN()
+pub struct LookupWithContext<'a, L: CellLookup> {
+    inner: &'a L,
+    current_row: usize,
+    current_col: usize,
+}
+
+impl<'a, L: CellLookup> LookupWithContext<'a, L> {
+    pub fn new(inner: &'a L, current_row: usize, current_col: usize) -> Self {
+        Self { inner, current_row, current_col }
+    }
+}
+
+impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
+    fn get_value(&self, row: usize, col: usize) -> f64 {
+        self.inner.get_value(row, col)
+    }
+
+    fn get_text(&self, row: usize, col: usize) -> String {
+        self.inner.get_text(row, col)
+    }
+
+    fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
+        self.inner.resolve_named_range(name)
+    }
+
+    fn current_cell(&self) -> Option<(usize, usize)> {
+        Some((self.current_row, self.current_col))
     }
 }
 
@@ -1805,8 +1846,11 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
         "ROW" => {
             // ROW([reference]) - returns the row number
             if args.is_empty() {
-                // Would need current cell context, return error for now
-                return EvalResult::Error("ROW() without argument not supported".to_string());
+                // No argument: return row of current cell being evaluated
+                return match lookup.current_cell() {
+                    Some((row, _)) => EvalResult::Number((row + 1) as f64),
+                    None => EvalResult::Error("ROW() requires cell context".to_string()),
+                };
             }
             if args.len() != 1 {
                 return EvalResult::Error("ROW requires 0 or 1 argument".to_string());
@@ -1820,7 +1864,11 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
         "COLUMN" => {
             // COLUMN([reference]) - returns the column number
             if args.is_empty() {
-                return EvalResult::Error("COLUMN() without argument not supported".to_string());
+                // No argument: return column of current cell being evaluated
+                return match lookup.current_cell() {
+                    Some((_, col)) => EvalResult::Number((col + 1) as f64),
+                    None => EvalResult::Error("COLUMN() requires cell context".to_string()),
+                };
             }
             if args.len() != 1 {
                 return EvalResult::Error("COLUMN requires 0 or 1 argument".to_string());

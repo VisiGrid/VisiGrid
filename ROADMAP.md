@@ -13,6 +13,7 @@ This document tracks what's built, what's in progress, and what's intentionally 
 - GPU-accelerated grid rendering (GPUI)
 - Cell editing with formula bar
 - Selection, multi-selection, and range operations
+- Multi-edit with live preview (type once, apply to all selected cells with formula shifting)
 - Undo/redo
 - Clipboard integration (copy/paste)
 - Fill down (Ctrl+D) and fill right (Ctrl+R)

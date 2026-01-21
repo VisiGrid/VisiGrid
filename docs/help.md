@@ -160,7 +160,48 @@ VisiGrid supports optional Vim-style navigation for power users. Enable it in se
 | Select column | Click column header |
 | Select row | Click row number |
 
-When multiple cells are selected, typing affects all selected cells simultaneously.
+### Multi-Edit (Edit Multiple Cells at Once)
+
+When multiple cells are selected, typing affects all selected cells simultaneously with **live preview** and **smart formula shifting**.
+
+**How it works:**
+1. Select multiple cells using `Ctrl+Click` or `Shift+Click`
+2. Start typing - all selected cells show a preview of what they'll receive
+3. Press `Enter` to apply to all cells, or `Escape` to cancel
+
+**Formula Reference Shifting:**
+
+When entering a formula with multi-selection, relative references automatically shift based on each cell's position relative to the primary cell:
+
+```
+Example: Select D1, E2, F3 (Ctrl+Click), type =A1*2
+
+While typing, you see:
+  D1: =A1*2     (active edit cell)
+  E2: =B2*2     (dimmed preview - shifted by +1 row, +1 col)
+  F3: =C3*2     (dimmed preview - shifted by +2 rows, +2 cols)
+
+Press Enter → all three formulas are applied with shifted references
+```
+
+**Reference types:**
+- **Relative** (`A1`): Shifts with each cell's position
+- **Absolute** (`$A$1`): Stays fixed in all cells
+- **Mixed** (`$A1` or `A$1`): Partially shifts
+
+**Fill Selection (Ctrl+Enter):**
+
+In navigation mode with multi-selection, press `Ctrl+Enter` to fill all selected cells with the primary cell's content (with formula shifting).
+
+| Action | Shortcut |
+|--------|----------|
+| Apply edit to all selected cells | `Enter` |
+| Fill selection from primary cell | `Ctrl+Enter` |
+| Cancel multi-edit | `Escape` |
+
+**Status bar hints:**
+- Navigation mode: "Type to edit all · Ctrl+Enter to fill"
+- Edit mode: "Enter to apply · Esc to cancel"
 
 ---
 

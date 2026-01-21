@@ -263,7 +263,8 @@ impl Spreadsheet {
 
     /// Adjust cell references in a formula by delta rows and cols
     /// Handles relative (A1), absolute ($A$1), and mixed ($A1, A$1) references
-    fn adjust_formula_refs(&self, formula: &str, delta_row: i32, delta_col: i32) -> String {
+    /// Used by fill operations and multi-edit
+    pub fn adjust_formula_refs(&self, formula: &str, delta_row: i32, delta_col: i32) -> String {
         // Match cell references: optional $ before col, col letters, optional $ before row, row numbers
         let re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
 

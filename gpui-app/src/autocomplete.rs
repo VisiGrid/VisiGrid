@@ -135,14 +135,24 @@ impl Spreadsheet {
         let range = self.autocomplete_replace_range.clone();
 
         // Convert char positions to byte positions
-        let start_byte = self.edit_value.char_indices()
-            .nth(range.start)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let end_byte = self.edit_value.char_indices()
-            .nth(range.end)
-            .map(|(i, _)| i)
-            .unwrap_or(self.edit_value.len());
+        // Note: when position is at or past the end, use string length (for insertion at end)
+        let char_count = self.edit_value.chars().count();
+        let start_byte = if range.start >= char_count {
+            self.edit_value.len()
+        } else {
+            self.edit_value.char_indices()
+                .nth(range.start)
+                .map(|(i, _)| i)
+                .unwrap_or(self.edit_value.len())
+        };
+        let end_byte = if range.end >= char_count {
+            self.edit_value.len()
+        } else {
+            self.edit_value.char_indices()
+                .nth(range.end)
+                .map(|(i, _)| i)
+                .unwrap_or(self.edit_value.len())
+        };
 
         self.edit_value.replace_range(start_byte..end_byte, &replacement);
         self.edit_cursor = range.start + replacement.chars().count();
