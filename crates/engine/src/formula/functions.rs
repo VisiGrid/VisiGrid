@@ -2,39 +2,42 @@
 
 use super::eval::EvalResult;
 
+/// All supported function names, sorted alphabetically.
+/// This is the single source of truth for the function list.
+const FUNCTION_NAMES: &[&str] = &[
+    "ABS", "ACOS", "AND", "ASIN", "ATAN", "ATAN2",
+    "AVERAGE", "AVG",
+    "CEILING", "CHOOSE", "COLUMN", "COLUMNS", "CONCAT", "CONCATENATE",
+    "COS", "COUNT", "COUNTA", "COUNTBLANK", "COUNTIF", "COUNTIFS",
+    "DATE", "DATEDIF", "DAY", "DEGREES",
+    "EDATE", "EOMONTH", "EXP",
+    "FILTER", "FIND", "FLOOR",
+    "HLOOKUP", "HOUR",
+    "IF", "IFERROR", "IFNA", "IFS", "INDEX", "INT",
+    "ISBLANK", "ISERROR", "ISNA", "ISNUMBER", "ISTEXT",
+    "LEFT", "LEN", "LN", "LOG", "LOG10", "LOWER",
+    "MATCH", "MAX", "MEDIAN", "MID", "MIN", "MINUTE", "MOD", "MONTH",
+    "NOT", "NOW",
+    "OR",
+    "PI", "POWER", "PRODUCT",
+    "RADIANS", "RAND", "RANDBETWEEN", "REPT", "RIGHT", "ROUND", "ROW", "ROWS",
+    "SECOND", "SEQUENCE", "SIN", "SORT", "SQRT", "STDEV", "SUBSTITUTE", "SUM", "SUMIF", "SUMIFS", "SWITCH",
+    "TAN", "TEXT", "TEXTJOIN", "TODAY", "TRANSPOSE", "TRIM",
+    "UNIQUE", "UPPER",
+    "VALUE", "VAR", "VLOOKUP",
+    "WEEKDAY",
+    "XLOOKUP",
+    "YEAR",
+];
+
+/// Returns all supported function names, sorted alphabetically.
+pub fn list_functions() -> &'static [&'static str] {
+    FUNCTION_NAMES
+}
+
 /// Check if a function name is a known built-in function.
-/// This is the single source of truth for supported functions.
-/// Function names must be uppercase (as produced by the parser).
 pub fn is_known_function(name: &str) -> bool {
-    matches!(name,
-        // Math functions
-        "SUM" | "AVERAGE" | "AVG" | "MIN" | "MAX" | "COUNT" | "COUNTA" |
-        "ABS" | "ROUND" | "INT" | "MOD" | "POWER" | "SQRT" | "CEILING" | "FLOOR" |
-        "PRODUCT" | "MEDIAN" | "STDEV" | "VAR" |
-        // Logic functions
-        "IF" | "IFS" | "AND" | "OR" | "NOT" | "IFERROR" | "IFNA" | "SWITCH" |
-        // Information functions
-        "ISBLANK" | "ISNUMBER" | "ISTEXT" | "ISERROR" | "ISNA" |
-        // Text functions
-        "CONCATENATE" | "CONCAT" | "TEXTJOIN" | "LEFT" | "RIGHT" | "MID" | "LEN" |
-        "UPPER" | "LOWER" | "TRIM" | "TEXT" | "VALUE" | "FIND" | "SUBSTITUTE" | "REPT" |
-        // Conditional aggregation
-        "SUMIF" | "COUNTIF" | "COUNTBLANK" | "SUMIFS" | "COUNTIFS" |
-        // Lookup functions
-        "VLOOKUP" | "HLOOKUP" | "XLOOKUP" | "INDEX" | "MATCH" | "CHOOSE" |
-        // Reference functions
-        "ROW" | "COLUMN" | "ROWS" | "COLUMNS" |
-        // Date/time functions
-        "TODAY" | "NOW" | "DATE" | "YEAR" | "MONTH" | "DAY" | "WEEKDAY" |
-        "DATEDIF" | "EDATE" | "EOMONTH" | "HOUR" | "MINUTE" | "SECOND" |
-        // Random functions
-        "RAND" | "RANDBETWEEN" |
-        // Math/trig functions
-        "LOG" | "LOG10" | "LN" | "EXP" | "PI" | "DEGREES" | "RADIANS" |
-        "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" | "ATAN2" |
-        // Array functions
-        "FILTER" | "SORT" | "UNIQUE" | "SEQUENCE" | "TRANSPOSE"
-    )
+    FUNCTION_NAMES.binary_search(&name).is_ok()
 }
 
 pub type FunctionImpl = fn(args: &[EvalResult]) -> EvalResult;

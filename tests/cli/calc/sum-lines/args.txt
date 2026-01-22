@@ -1,0 +1,4 @@
+calc
+=SUM(A1:A3)
+--from
+lines

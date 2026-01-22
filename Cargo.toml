@@ -6,6 +6,7 @@ members = [
     "crates/io",
     "crates/config",
     "crates/license",
+    "crates/cli",
     "gpui-app",
 ]
 

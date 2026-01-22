@@ -1,0 +1,4 @@
+calc
+=SUM($A:$A)
+--from
+lines

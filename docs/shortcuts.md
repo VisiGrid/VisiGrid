@@ -66,7 +66,6 @@ Complete reference for keyboard shortcuts.
 | Ctrl+C | Copy |
 | Ctrl+X | Cut |
 | Ctrl+V | Paste |
-| Ctrl+Shift+V | Paste Special |
 
 ---
 
@@ -220,6 +219,7 @@ User keybindings override defaults.
 
 | Shortcut | Action |
 |----------|--------|
+| Ctrl+Shift+V | Paste Special |
 | Ctrl+H | Find and Replace |
 | Ctrl+- | Zoom out |
 | Alt+Enter | Line break in cell |

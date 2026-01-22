@@ -15,7 +15,6 @@ What's built, what's next, and what's not planned.
 - Multi-edit (type once, apply to all selected cells with formula shifting)
 - Undo/redo
 - Clipboard (copy/cut/paste)
-- Paste Special (values, formulas, transpose, operations)
 - Fill down (Ctrl+D) and fill right (Ctrl+R)
 
 ### Navigation & Workflow
@@ -74,9 +73,6 @@ What's built, what's next, and what's not planned.
 
 ## In Progress
 
-### Polish
-- Freeze panes (lock rows/columns while scrolling)
-
 ### Formula Coverage
 - AVERAGEIF, AVERAGEIFS
 - Financial: PMT, FV, PV, NPV, IRR
@@ -86,8 +82,17 @@ What's built, what's next, and what's not planned.
 ## Planned
 
 ### Near-term
-- Split view (Ctrl+\)
-- Problems panel (Ctrl+Shift+M) - all formula errors
+- Paste Special (values, formulas, transpose, operations)
+- Freeze panes (lock rows/columns while scrolling)
+- Fill Handle (drag corner to extend selection)
+  - Copy values and formulas with reference adjustment
+  - Double-click to auto-fill to last adjacent row
+- Series Fill (smart pattern detection)
+  - Numbers: 1, 2, 3 → 4, 5, 6
+  - Dates: Jan 1 → Jan 2, Jan 3...
+  - Months: Jan, Feb → Mar, Apr...
+  - Weekdays: Mon, Tue → Wed, Thu...
+  - Custom step sizes
 - Find and replace (Ctrl+H)
 - Cross-sheet references (=Sheet2!A1)
 - Zoom (Ctrl++/-)
@@ -102,9 +107,9 @@ What's built, what's next, and what's not planned.
 - Sparklines (=SPARKLINE formula, Unicode mini-charts)
 - AutoFilter and Sort
 - Cell context menu (right-click)
-- Fill Handle (drag to extend selection pattern)
-- Series Fill (smart pattern detection: 1,2,3 → 4,5,6)
 - Merged cells
+- Split view (Ctrl+\)
+- Problems panel (Ctrl+Shift+M) - all formula errors
 
 ### Long-term: Systems of Record
 

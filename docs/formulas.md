@@ -1,8 +1,6 @@
-# VisiGrid Formula System (gpui)
+# VisiGrid Formula System
 
-> **This document defines formula UI behavior for gpui. The formula engine is shared with the iced version and is complete. This spec covers the UI layer that must be rebuilt.**
->
-> **If observed behavior differs from this document, the behavior is a bug.**
+> **This document defines formula UI behavior. If observed behavior differs from this document, the behavior is a bug.**
 
 ---
 
@@ -14,7 +12,7 @@
 |-----------|--------|----------|
 | Formula engine | Complete | `crates/engine/src/formula/` |
 | Parser (tokenizer, AST) | Complete | `parser.rs` |
-| Evaluator (96 functions) | Complete | `eval.rs` |
+| Evaluator (97 functions) | Complete | `eval.rs` |
 | Cell references (A1, $A$1) | Complete | parser + eval |
 | Range references (A1:B10) | Complete | parser + eval |
 | Dependency tracking | Complete | `extract_cell_refs()` |
@@ -30,6 +28,9 @@
 | Function autocomplete | ✅ Done | Fuzzy matching, shows signature |
 | Signature help | ✅ Done | Shows current parameter |
 | Syntax highlighting | ✅ Done | Functions, refs, numbers, strings |
+| F4 cycle reference type | ✅ Done | Cycles $A$1 → A$1 → $A1 → A1 |
+| Alt+= AutoSum | ✅ Done | Inserts SUM with detected range |
+| Ctrl+` formula view | ✅ Done | Toggle formula display in cells |
 | XLOOKUP | ✅ Done | Exact and wildcard match modes |
 | TEXTJOIN | ✅ Done | With ignore_empty option |
 | SUMIFS/COUNTIFS | ✅ Done | Multi-criteria aggregation |
@@ -41,11 +42,8 @@
 |---------|----------|---------|
 | Formula context analyzer | P0 | [Context Analyzer](#formula-context-analyzer) |
 | Error banner | P1 | [Error Highlighting](#error-highlighting) |
-| F4 cycle reference type | P1 | [Quick Actions](#quick-actions) |
 | Hover docs | P2 | [Hover Documentation](#hover-documentation) |
-| Alt+= AutoSum | P2 | [Quick Actions](#quick-actions) |
 | Spill visualization | P3 | [Array Visualization](#array-visualization) |
-| Ctrl+` formula view | P3 | [Formula View](#formula-view-toggle) |
 
 ---
 
@@ -767,22 +765,22 @@ This matches Excel behavior and user expectations.
 
 ---
 
-## Function Inventory (96 Functions)
+## Function Inventory (97 Functions)
 
-### Math (23)
+### Math (22)
 `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `ABS`, `ROUND`, `INT`, `MOD`, `POWER`, `SQRT`, `CEILING`, `FLOOR`, `PRODUCT`, `MEDIAN`, `LOG`, `LOG10`, `LN`, `EXP`, `RAND`, `RANDBETWEEN`
 
-### Logical (12)
-`IF`, `AND`, `OR`, `NOT`, `IFERROR`, `ISBLANK`, `ISNUMBER`, `ISTEXT`, `ISERROR`, `IFS`, `SWITCH`, `CHOOSE`
+### Logical (13)
+`IF`, `AND`, `OR`, `NOT`, `IFERROR`, `IFNA`, `ISBLANK`, `ISNUMBER`, `ISTEXT`, `ISERROR`, `IFS`, `SWITCH`, `CHOOSE`
 
-### Text (14)
-`CONCATENATE`, `CONCAT`, `LEFT`, `RIGHT`, `MID`, `LEN`, `UPPER`, `LOWER`, `TRIM`, `TEXT`, `VALUE`, `FIND`, `SUBSTITUTE`, `REPT`
+### Text (15)
+`CONCATENATE`, `CONCAT`, `TEXTJOIN`, `LEFT`, `RIGHT`, `MID`, `LEN`, `UPPER`, `LOWER`, `TRIM`, `TEXT`, `VALUE`, `FIND`, `SUBSTITUTE`, `REPT`
 
-### Conditional (3)
-`SUMIF`, `COUNTIF`, `COUNTBLANK`
+### Conditional (5)
+`SUMIF`, `SUMIFS`, `COUNTIF`, `COUNTIFS`, `COUNTBLANK`
 
-### Lookup (8)
-`VLOOKUP`, `HLOOKUP`, `INDEX`, `MATCH`, `ROW`, `COLUMN`, `ROWS`, `COLUMNS`
+### Lookup (9)
+`VLOOKUP`, `HLOOKUP`, `XLOOKUP`, `INDEX`, `MATCH`, `ROW`, `COLUMN`, `ROWS`, `COLUMNS`
 
 ### Date/Time (13)
 `TODAY`, `NOW`, `DATE`, `YEAR`, `MONTH`, `DAY`, `WEEKDAY`, `DATEDIF`, `EDATE`, `EOMONTH`, `HOUR`, `MINUTE`, `SECOND`
@@ -1111,7 +1109,8 @@ These are the bugs that ruin "it feels like an IDE":
 
 ## Version History
 
-- **v1** (2026-01): Initial gpui implementation spec
+- **v1** (2026-01): Initial implementation spec
 - **v1.1** (2026-01): Added FormulaContext analyzer, UI state model, expanded token types, copy clarification
 - **v1.2** (2026-01): Added cursor indexing policy (char vs byte), Tab/Shift+Tab behavior, identifier length rule for autocomplete, error taxonomy (Hard vs Transient), primary_span, function name normalization, additional token types (Whitespace, Bang, Percent, UnaryMinus)
 - **v1.3** (2026-01): Added Edge Cases section (10 decisions), Golden Tests section (50+ behavioral fixtures)
+- **v1.4** (2026-01): Updated function count to 97, added XLOOKUP/TEXTJOIN/SUMIFS/COUNTIFS/IFNA to inventory, marked F4 cycle/Alt+= AutoSum/Ctrl+` formula view as implemented

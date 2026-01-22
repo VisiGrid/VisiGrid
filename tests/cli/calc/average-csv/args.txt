@@ -1,0 +1,4 @@
+calc
+=AVERAGE(B2:B4)
+--from
+csv

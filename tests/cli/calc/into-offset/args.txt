@@ -1,0 +1,6 @@
+calc
+=SUM(B2:B4)
+--from
+lines
+--into
+B2
