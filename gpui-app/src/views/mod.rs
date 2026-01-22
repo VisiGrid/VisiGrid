@@ -1,5 +1,6 @@
 mod about_dialog;
 pub mod command_palette;
+mod export_report_dialog;
 mod find_dialog;
 mod font_picker;
 mod formula_bar;
@@ -47,6 +48,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_refactor_log = app.mode == Mode::RefactorLog;
     let show_extract_named_range = app.mode == Mode::ExtractNamedRange;
     let show_import_report = app.mode == Mode::ImportReport;
+    let show_export_report = app.mode == Mode::ExportReport;
     let show_preferences = app.mode == Mode::Preferences;
     let show_license = app.mode == Mode::License;
     let show_import_overlay = app.import_overlay_visible;
@@ -290,6 +292,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &ExportJson, _, cx| {
             this.export_json(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ExportXlsx, _, cx| {
+            this.export_xlsx(cx);
         }))
         // Clipboard actions
         .on_action(cx.listener(|this, _: &Copy, _, cx| {
@@ -1398,6 +1403,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_import_report, |div| {
             div.child(import_report_dialog::render_import_report_dialog(app, cx))
+        })
+        .when(show_export_report, |div| {
+            div.child(export_report_dialog::render_export_report_dialog(app, cx))
         })
         // Import overlay: shows during background Excel imports (after 150ms delay)
         .when(show_import_overlay, |div| {

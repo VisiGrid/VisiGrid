@@ -98,6 +98,7 @@ actions!(file, [
     ExportCsv,
     ExportTsv,
     ExportJson,
+    ExportXlsx,
     CloseWindow,
     Quit,
 ]);

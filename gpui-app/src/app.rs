@@ -163,6 +163,7 @@ pub struct Spreadsheet {
 
     // Clipboard
     pub clipboard: Option<String>,
+    pub clipboard_source: Option<(usize, usize)>,  // Top-left cell of copied region
 
     // File state
     pub current_file: Option<PathBuf>,
@@ -312,6 +313,10 @@ pub struct Spreadsheet {
     pub import_overlay_visible: bool,
     pub import_started_at: Option<std::time::Instant>,
 
+    // Export report state (for Excel exports with warnings)
+    pub export_result: Option<visigrid_io::xlsx::ExportResult>,
+    pub export_filename: Option<String>,  // Exported filename for display
+
     // Keyboard hints state (Vimium-style jump)
     pub hint_state: crate::hints::HintState,
 
@@ -403,6 +408,7 @@ impl Spreadsheet {
             palette_pre_scroll: (0, 0),
             palette_previewing: false,
             clipboard: None,
+            clipboard_source: None,
             current_file: None,
             is_modified: false,
             recent_files: Vec::new(),
@@ -492,6 +498,9 @@ impl Spreadsheet {
             import_in_progress: false,
             import_overlay_visible: false,
             import_started_at: None,
+
+            export_result: None,
+            export_filename: None,
 
             hint_state: crate::hints::HintState::default(),
 
@@ -2834,14 +2843,14 @@ impl Spreadsheet {
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
-        // Build tab-separated values for clipboard
+        // Build tab-separated values for clipboard (copy formulas, not computed values)
         let mut text = String::new();
         for row in min_row..=max_row {
             for col in min_col..=max_col {
                 if col > min_col {
                     text.push('\t');
                 }
-                text.push_str(&self.sheet().get_display(row, col));
+                text.push_str(&self.sheet().get_raw(row, col));
             }
             if row < max_row {
                 text.push('\n');
@@ -2849,6 +2858,7 @@ impl Spreadsheet {
         }
 
         self.clipboard = Some(text.clone());
+        self.clipboard_source = Some((min_row, min_col));  // Store source position for formula adjustment
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.status_message = Some("Copied to clipboard".to_string());
         cx.notify();
@@ -2885,15 +2895,31 @@ impl Spreadsheet {
             return;
         }
 
-        let text = if let Some(item) = cx.read_from_clipboard() {
-            item.text().map(|s| s.to_string())
+        // Try system clipboard first, track if it matches our internal clipboard
+        let (text, use_internal_source) = if let Some(item) = cx.read_from_clipboard() {
+            let system_text = item.text().map(|s| s.to_string());
+            // Check if system clipboard matches our internal clipboard
+            let matches_internal = system_text.as_ref() == self.clipboard.as_ref();
+            (system_text, matches_internal)
         } else {
-            self.clipboard.clone()
+            (self.clipboard.clone(), true)
         };
 
         if let Some(text) = text {
             let (start_row, start_col) = self.selected;
             let mut changes = Vec::new();
+
+            // Calculate delta from source if we have internal clipboard source AND
+            // the pasted text matches our internal clipboard
+            let (delta_row, delta_col) = if use_internal_source {
+                if let Some((src_row, src_col)) = self.clipboard_source {
+                    (start_row as i32 - src_row as i32, start_col as i32 - src_col as i32)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (0, 0)  // External clipboard - no adjustment
+            };
 
             // Parse tab-separated values
             for (row_offset, line) in text.lines().enumerate() {
@@ -2902,13 +2928,20 @@ impl Spreadsheet {
                     let col = start_col + col_offset;
                     if row < NUM_ROWS && col < NUM_COLS {
                         let old_value = self.sheet().get_raw(row, col);
-                        let new_value = value.to_string();
+
+                        // Adjust formula references if this is a formula and we have source position
+                        let new_value = if value.starts_with('=') && use_internal_source && self.clipboard_source.is_some() {
+                            self.adjust_formula_refs(value, delta_row, delta_col)
+                        } else {
+                            value.to_string()
+                        };
+
                         if old_value != new_value {
                             changes.push(CellChange {
-                                row, col, old_value, new_value,
+                                row, col, old_value, new_value: new_value.clone(),
                             });
                         }
-                        self.sheet_mut().set_value(row, col, value);
+                        self.sheet_mut().set_value(row, col, &new_value);
                     }
                 }
             }
@@ -5139,6 +5172,20 @@ impl Spreadsheet {
     }
 
     pub fn hide_import_report(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
+    // Export report dialog
+    pub fn show_export_report(&mut self, cx: &mut Context<Self>) {
+        if self.export_result.is_some() {
+            self.lua_console.visible = false;
+            self.mode = Mode::ExportReport;
+            cx.notify();
+        }
+    }
+
+    pub fn hide_export_report(&mut self, cx: &mut Context<Self>) {
         self.mode = Mode::Navigation;
         cx.notify();
     }

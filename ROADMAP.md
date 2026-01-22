@@ -77,7 +77,7 @@ What's built, what's next, and what's not planned.
 - Column references (A:A), headers support, spill output
 - Typed JSON output (numbers/booleans preserved)
 - 3ms cold start, pipe-friendly, deterministic
-- See [docs/cli-v1.md](docs/cli-v1.md) for full specification
+- See `visigrid-cli --help` for usage
 
 ---
 

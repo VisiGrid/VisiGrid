@@ -369,6 +369,102 @@ impl Spreadsheet {
         self.export_delimited(cx, "json", json::export);
     }
 
+    /// Export workbook to Excel (.xlsx) format
+    /// This is a presentation snapshot - not a round-trip format.
+    pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
+        let directory = self.current_file.as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .or_else(|| self.import_source_dir.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        let base_name = self.current_file.as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|n| n.to_str())
+            .or_else(|| {
+                self.import_filename.as_ref()
+                    .and_then(|name| std::path::Path::new(name).file_stem())
+                    .and_then(|s| s.to_str())
+            })
+            .unwrap_or("export");
+        let suggested_name = format!("{}.xlsx", base_name);
+
+        // Build layout information for each sheet
+        let layouts = self.build_export_layouts();
+
+        let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = future.await {
+                let _ = this.update(cx, |this, cx| {
+                    // Rebuild layouts in case data changed
+                    let layouts = this.build_export_layouts();
+
+                    match xlsx::export(&this.workbook, &path, Some(&layouts)) {
+                        Ok(result) => {
+                            let filename = path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("file.xlsx")
+                                .to_string();
+
+                            let has_warnings = result.has_warnings();
+                            let mut status = format!("Exported to {}", path.display());
+                            if let Some(warning) = result.warning_summary() {
+                                status.push_str(&format!(" ({})", warning));
+                            }
+                            this.status_message = Some(status);
+
+                            // Store result and show dialog if there are warnings
+                            if has_warnings {
+                                this.export_result = Some(result);
+                                this.export_filename = Some(filename);
+                                this.show_export_report(cx);
+                            } else {
+                                this.export_result = None;
+                                this.export_filename = None;
+                            }
+                        }
+                        Err(e) => {
+                            this.status_message = Some(format!("Export failed: {}", e));
+                            this.export_result = None;
+                            this.export_filename = None;
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Build ExportLayout for each sheet (column widths, row heights)
+    /// Note: Frozen panes will be added when that feature is implemented (see roadmap)
+    fn build_export_layouts(&self) -> Vec<xlsx::ExportLayout> {
+        let mut layouts = Vec::new();
+
+        for _ in 0..self.workbook.sheet_count() {
+            let mut layout = xlsx::ExportLayout::default();
+
+            // Copy column widths from the app state
+            // Note: We store these per-sheet in the future, but for now use current sheet's widths
+            for (col, width) in &self.col_widths {
+                layout.col_widths.insert(*col, *width);
+            }
+
+            // Row heights (if we track them)
+            for (row, height) in &self.row_heights {
+                layout.row_heights.insert(*row, *height);
+            }
+
+            // Frozen panes: Not yet implemented in VisiGrid (see roadmap)
+            // layout.frozen_rows = ...;
+            // layout.frozen_cols = ...;
+
+            layouts.push(layout);
+        }
+
+        layouts
+    }
+
     fn export_delimited<F>(&mut self, cx: &mut Context<Self>, ext: &'static str, export_fn: F)
     where
         F: Fn(&visigrid_engine::sheet::Sheet, &std::path::Path) -> Result<(), String> + Send + 'static,

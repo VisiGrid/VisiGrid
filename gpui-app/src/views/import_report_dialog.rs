@@ -35,6 +35,7 @@ pub fn render_import_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
         .bg(hsla(0.0, 0.0, 0.0, 0.5))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
             this.hide_import_report(cx);
+            cx.stop_propagation();
         }))
         .child(
             div()

@@ -274,18 +274,18 @@ jobs:
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          # Sign the binaries first, then the app bundle
-          codesign --force --options runtime --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
-            --timestamp "dist/VisiGrid.app/Contents/MacOS/visigrid"
+          # List what's in the bundle
+          echo "Contents of app bundle:"
+          ls -la "dist/VisiGrid.app/Contents/MacOS/"
 
-          codesign --force --options runtime --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
-            --timestamp "dist/VisiGrid.app/Contents/MacOS/visigrid-cli"
-
-          codesign --force --options runtime --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
+          # Sign the entire app bundle with --deep to include all nested binaries
+          echo "Signing app bundle (deep)..."
+          codesign --force --deep --options runtime --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
             --timestamp "dist/VisiGrid.app"
 
           # Verify signature
-          codesign --verify --verbose=2 "dist/VisiGrid.app"
+          echo "Verifying signature..."
+          codesign --verify --deep --verbose=2 "dist/VisiGrid.app"
 
       - name: Create DMG
         run: |

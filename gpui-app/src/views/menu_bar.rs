@@ -175,6 +175,7 @@ fn render_file_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, bo
         .child(menu_item("Export as CSV...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.export_csv(cx); }))
         .child(menu_item("Export as TSV...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.export_tsv(cx); }))
         .child(menu_item("Export as JSON...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.export_json(cx); }))
+        .child(menu_item("Export to Excel (.xlsx)...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.export_xlsx(cx); }))
 }
 
 fn render_edit_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
