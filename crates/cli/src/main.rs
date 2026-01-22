@@ -16,7 +16,7 @@ const EXIT_PARSE_ERROR: u8 = 4;
 const EXIT_FORMAT_ERROR: u8 = 5;
 
 #[derive(Parser)]
-#[command(name = "visigrid")]
+#[command(name = "visigrid-cli")]
 #[command(about = "Fast, native spreadsheet (CLI mode, headless)")]
 #[command(version)]
 #[command(subcommand_required = false)]

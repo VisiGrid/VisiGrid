@@ -42,7 +42,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release
-        run: cargo build --release -p visigrid-gpui
+        run: |
+          cargo build --release -p visigrid-gpui
+          cargo build --release -p visigrid-cli
 
       - name: Get version
         id: version
@@ -57,6 +59,7 @@ jobs:
         run: |
           mkdir -p dist/VisiGrid-linux-x86_64
           cp target/release/visigrid dist/VisiGrid-linux-x86_64/
+          cp target/release/visigrid-cli dist/VisiGrid-linux-x86_64/
           cp assets/visigrid.desktop dist/VisiGrid-linux-x86_64/
           cp gpui-app/assets/icon-256.png dist/VisiGrid-linux-x86_64/visigrid.png
 
@@ -73,6 +76,7 @@ jobs:
           mkdir -p dist/AppDir/usr/share/icons/hicolor/256x256/apps
 
           cp target/release/visigrid dist/AppDir/usr/bin/
+          cp target/release/visigrid-cli dist/AppDir/usr/bin/
           cp assets/visigrid.desktop dist/AppDir/usr/share/applications/
           cp assets/visigrid.desktop dist/AppDir/
           cp gpui-app/assets/icon-256.png dist/AppDir/usr/share/icons/hicolor/256x256/apps/visigrid.png
@@ -123,7 +127,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release
-        run: cargo build --release -p visigrid-gpui
+        run: |
+          cargo build --release -p visigrid-gpui
+          cargo build --release -p visigrid-cli
 
       - name: Sign executable
         continue-on-error: true
@@ -156,6 +162,7 @@ jobs:
 
           New-Item -ItemType Directory -Path $DistDir -Force
           Copy-Item "target\release\visigrid.exe" $DistDir
+          Copy-Item "target\release\visigrid-cli.exe" $DistDir
           Copy-Item "gpui-app\windows\visigrid.ico" $DistDir
 
           @"
@@ -216,14 +223,24 @@ jobs:
 
       - name: Build universal binary
         run: |
+          # Build GUI
           cargo build --release --target x86_64-apple-darwin -p visigrid-gpui
           cargo build --release --target aarch64-apple-darwin -p visigrid-gpui
+
+          # Build CLI
+          cargo build --release --target x86_64-apple-darwin -p visigrid-cli
+          cargo build --release --target aarch64-apple-darwin -p visigrid-cli
 
           mkdir -p dist/universal
           lipo -create \
             target/x86_64-apple-darwin/release/visigrid \
             target/aarch64-apple-darwin/release/visigrid \
             -output dist/universal/visigrid
+
+          lipo -create \
+            target/x86_64-apple-darwin/release/visigrid-cli \
+            target/aarch64-apple-darwin/release/visigrid-cli \
+            -output dist/universal/visigrid-cli
 
       - name: Get version
         id: version
@@ -243,6 +260,7 @@ jobs:
           mkdir -p "$APP_DIR/Contents/Resources"
 
           cp dist/universal/visigrid "$APP_DIR/Contents/MacOS/"
+          cp dist/universal/visigrid-cli "$APP_DIR/Contents/MacOS/"
 
           # Update Info.plist with version
           sed -e "s/0\.1\.0/$VERSION/g" gpui-app/macos/Info.plist > "$APP_DIR/Contents/Info.plist"
@@ -256,9 +274,12 @@ jobs:
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          # Sign the binary first, then the app bundle
+          # Sign the binaries first, then the app bundle
           codesign --force --options runtime --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
             --timestamp "dist/VisiGrid.app/Contents/MacOS/visigrid"
+
+          codesign --force --options runtime --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
+            --timestamp "dist/VisiGrid.app/Contents/MacOS/visigrid-cli"
 
           codesign --force --options runtime --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
             --timestamp "dist/VisiGrid.app"

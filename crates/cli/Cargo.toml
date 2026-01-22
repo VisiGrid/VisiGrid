@@ -6,7 +6,7 @@ license.workspace = true
 description = "Command-line interface for VisiGrid spreadsheet operations"
 
 [[bin]]
-name = "visigrid"
+name = "visigrid-cli"
 path = "src/main.rs"
 
 [dependencies]
