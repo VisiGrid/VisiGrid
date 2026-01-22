@@ -69,6 +69,16 @@ What's built, what's next, and what's not planned.
 - Windows (x64)
 - Linux (x86_64, tar.gz and AppImage)
 
+### CLI (v0.1.8+)
+- Headless spreadsheet operations via `visigrid-cli`
+- `calc`: Evaluate formulas against piped data (CSV, TSV, JSON, lines)
+- `convert`: Transform between file formats
+- `list-functions`: Show all supported functions
+- Column references (A:A), headers support, spill output
+- Typed JSON output (numbers/booleans preserved)
+- 3ms cold start, pipe-friendly, deterministic
+- See [docs/cli-v1.md](docs/cli-v1.md) for full specification
+
 ---
 
 ## In Progress
@@ -103,7 +113,6 @@ What's built, what's next, and what's not planned.
 - Print to PDF
 
 ### Medium-term
-- CLI / headless mode (pipe-friendly, `visigrid calc`, `visigrid convert`)
 - Sparklines (=SPARKLINE formula, Unicode mini-charts)
 - AutoFilter and Sort
 - Cell context menu (right-click)

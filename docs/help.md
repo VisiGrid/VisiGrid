@@ -962,28 +962,102 @@ VisiGrid can also import/export CSV files.
 
 ## CLI Tools
 
-VisiGrid provides command-line tools for scripting and automation.
+VisiGrid provides `visigrid-cli` for headless spreadsheet operations in scripts and pipelines.
 
-### Diff Two Sheets
-
-Compare two `.sheet` files and output a text diff:
+### Quick Examples
 
 ```bash
-visigrid diff old.sheet new.sheet
+# Sum a column from CSV
+cat sales.csv | visigrid-cli calc -f csv --headers '=SUM(revenue)'
+
+# Convert CSV to JSON
+visigrid-cli convert data.csv -t json --headers
+
+# List all supported functions
+visigrid-cli list-functions
 ```
 
-Output format (unified diff style):
-```
---- old.sheet
-+++ new.sheet
-@@ A1 @@
--100
-+150
-@@ B3 @@
-+=SUM(A1:A10)
+### calc - Evaluate Formulas
+
+Evaluate spreadsheet formulas against piped data:
+
+```bash
+visigrid-cli calc -f <format> [options] '<formula>'
 ```
 
-Shows added (`+`), removed (`-`), and changed cells with their cell references.
+| Option | Description |
+|--------|-------------|
+| `-f, --from` | Input format: `csv`, `tsv`, `json`, `lines`, `xlsx` |
+| `--headers` | First row is headers (excluded from formulas) |
+| `--into` | Load data starting at cell (default: A1) |
+| `--delimiter` | CSV delimiter (default: comma) |
+| `--spill` | Output format for array results: `csv` or `json` |
+
+**Examples:**
+
+```bash
+# Average of column B
+cat data.csv | visigrid-cli calc -f csv '=AVERAGE(B:B)'
+
+# Sum with headers
+echo -e "amount\n10\n20\n30" | visigrid-cli calc -f csv --headers '=SUM(amount)'
+
+# Count lines in a file
+cat file.txt | visigrid-cli calc -f lines '=COUNTA(A:A)'
+
+# Array formula with spill
+cat data.csv | visigrid-cli calc -f csv --spill json '=FILTER(A:A, B:B>10)'
+```
+
+### convert - Transform Formats
+
+Convert between file formats:
+
+```bash
+visigrid-cli convert [input] -t <format> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-f, --from` | Input format (required when reading from stdin) |
+| `-t, --to` | Output format: `csv`, `tsv`, `json`, `lines` |
+| `-o, --output` | Output file (default: stdout) |
+| `--headers` | First row is headers (affects JSON object keys) |
+| `--delimiter` | CSV/TSV delimiter |
+
+**Examples:**
+
+```bash
+# CSV to JSON with headers as keys
+visigrid-cli convert data.csv -t json --headers
+
+# JSON to CSV
+curl api.example.com/data | visigrid-cli convert -f json -t csv
+
+# Pipe CSV to JSON
+cat data.csv | visigrid-cli convert -f csv -t json
+```
+
+### list-functions - Show Available Functions
+
+```bash
+visigrid-cli list-functions
+```
+
+Outputs all 96+ supported functions, one per line.
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Evaluation error (formula returned error) |
+| 2 | Invalid arguments |
+| 3 | I/O error |
+| 4 | Parse error (malformed input) |
+| 5 | Format error (unsupported format) |
+
+See [docs/cli-v1.md](cli-v1.md) for complete specification.
 
 ### Session Restore
 

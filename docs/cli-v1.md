@@ -2,7 +2,7 @@
 
 Command-line interface for headless spreadsheet operations.
 
-> **Status:** Planned. v1 scope locked.
+> **Status:** Shipped (v0.1.8). v1 scope locked.
 >
 > **Changes to this spec require an RFC.** This is the contract.
 
@@ -20,8 +20,8 @@ Command-line interface for headless spreadsheet operations.
 ## Architecture
 
 ```
-crates/cli/     → visigrid (headless, no gpui)
-gpui-app/       → visigrid-gui
+crates/cli/     → visigrid-cli (headless, no gpui)
+gpui-app/       → visigrid (GUI)
 ```
 
 CLI depends only on `engine`, `io`, `core`. No GUI dependencies.
@@ -103,27 +103,27 @@ CLI does not normalize Unicode. Input and output preserve codepoints exactly as 
 
 ---
 
-## `visigrid convert`
+## `visigrid-cli convert`
 
 Convert between formats.
 
 ```
-visigrid convert [INPUT] --to FORMAT [OPTIONS]
+visigrid-cli convert [INPUT] --to FORMAT [OPTIONS]
 ```
 
 **Examples:**
 ```bash
 # File to stdout
-visigrid convert data.xlsx --to csv
+visigrid-cli convert data.xlsx --to csv
 
 # File to file
-visigrid convert data.xlsx --to csv --output data.csv
+visigrid-cli convert data.xlsx --to csv --output data.csv
 
 # Stdin to stdout
-cat data.csv | visigrid convert --from csv --to json
+cat data.csv | visigrid-cli convert --from csv --to json
 
 # Override inferred format
-visigrid convert data.txt --from tsv --to csv
+visigrid-cli convert data.txt --from tsv --to csv
 ```
 
 **Arguments:**
@@ -144,26 +144,26 @@ visigrid convert data.txt --from tsv --to csv
 
 ---
 
-## `visigrid calc`
+## `visigrid-cli calc`
 
 Evaluate formula against stdin data.
 
 ```
-visigrid calc FORMULA --from FORMAT [OPTIONS]
+visigrid-cli calc FORMULA --from FORMAT [OPTIONS]
 ```
 
 **Examples:**
 ```bash
 # Sum a column of numbers
-echo -e "10\n20\n30" | visigrid calc "=SUM(A:A)" --from lines
+echo -e "10\n20\n30" | visigrid-cli calc "=SUM(A:A)" --from lines
 # stdout: 60
 
 # Average from CSV
-cat sales.csv | visigrid calc "=AVERAGE(B:B)" --from csv
+cat sales.csv | visigrid-cli calc "=AVERAGE(B:B)" --from csv
 # stdout: 4500.5
 
 # With spill output
-cat matrix.csv | visigrid calc "=TRANSPOSE(A1:C3)" --from csv --spill csv
+cat matrix.csv | visigrid-cli calc "=TRANSPOSE(A1:C3)" --from csv --spill csv
 ```
 
 **Arguments:**
@@ -221,12 +221,12 @@ Example: `1234.5678` not `1,234.57` or `$1,234.57`.
 
 ---
 
-## `visigrid list-functions`
+## `visigrid-cli list-functions`
 
 Print supported functions.
 
 ```
-visigrid list-functions
+visigrid-cli list-functions
 ```
 
 **Output:**
@@ -245,12 +245,12 @@ One function per line, sorted alphabetically. Suitable for `grep`, `wc -l`.
 
 ---
 
-## `visigrid open`
+## `visigrid-cli open`
 
 Launch GUI.
 
 ```
-visigrid open [FILE]
+visigrid-cli open [FILE]
 ```
 
 Shells out to `visigrid-gui` (Linux/Windows) or `VisiGrid.app` (macOS).
@@ -369,11 +369,11 @@ tests/cli/
 
 ## Performance
 
-| Metric | Target | Measurement |
-|--------|--------|-------------|
-| Cold start | <50ms | `time visigrid list-functions > /dev/null` |
-| calc 10K rows | <500ms | Golden test with 10K row CSV |
-| convert 1MB CSV | <1s | Golden test with 1MB file |
+| Metric | Target | Actual |
+|--------|--------|--------|
+| Cold start | <50ms | ~3ms (`time visigrid-cli list-functions > /dev/null`) |
+| calc 10K rows | <500ms | TBD |
+| convert 1MB CSV | <1s | TBD |
 
 **CI enforcement:** Benchmark on every PR. Block merge if regression >10%.
 
@@ -385,8 +385,8 @@ tests/cli/
 
 | Platform | CLI | GUI |
 |----------|-----|-----|
-| macOS | `/usr/local/bin/visigrid` | `VisiGrid.app` |
-| Windows | `visigrid.exe` in PATH | `VisiGrid.exe` |
-| Linux | `/usr/local/bin/visigrid` | `visigrid-gui` |
+| macOS | `visigrid-cli` in `VisiGrid.app/Contents/MacOS/` | `VisiGrid.app` |
+| Windows | `visigrid-cli.exe` | `visigrid.exe` |
+| Linux | `visigrid-cli` | `visigrid` |
 
-Homebrew/Winget install both binaries.
+Both binaries are included in all release packages.
