@@ -1666,7 +1666,7 @@ fn clickable_cell_row(
 }
 
 // Get precedents from a formula string
-fn get_precedents(formula: &str) -> Vec<(usize, usize)> {
+pub fn get_precedents(formula: &str) -> Vec<(usize, usize)> {
     if let Ok(expr) = parse(formula) {
         let mut refs = extract_cell_refs(&expr);
         refs.sort();
@@ -1678,7 +1678,7 @@ fn get_precedents(formula: &str) -> Vec<(usize, usize)> {
 }
 
 // Get dependents (cells that reference the given cell)
-fn get_dependents(app: &Spreadsheet, row: usize, col: usize) -> Vec<(usize, usize)> {
+pub fn get_dependents(app: &Spreadsheet, row: usize, col: usize) -> Vec<(usize, usize)> {
     let mut dependents = Vec::new();
 
     // Iterate through all cells with formulas and check if they reference this cell

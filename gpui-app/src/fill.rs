@@ -13,7 +13,11 @@ use crate::mode::Mode;
 pub const FILL_HANDLE_HIT_SIZE: f32 = 14.0;
 
 /// Visual size for fill handle (logical pixels, unscaled by zoom)
-pub const FILL_HANDLE_VISUAL_SIZE: f32 = 8.0;
+/// Excel uses approximately 6x6 pixels
+pub const FILL_HANDLE_VISUAL_SIZE: f32 = 6.0;
+
+/// Border width for fill handle (gives it the Excel-style white outline)
+pub const FILL_HANDLE_BORDER: f32 = 1.0;
 
 impl Spreadsheet {
     // Fill operations
@@ -170,8 +174,25 @@ impl Spreadsheet {
         };
 
         // Set highlighted refs for the detected range
-        if let Some(range) = detected_range {
-            self.formula_highlighted_refs = vec![range];
+        if let Some((start, end)) = detected_range {
+            use crate::app::{RefKey, FormulaRef};
+            let (r1, c1) = start;
+            let key = if let Some((r2, c2)) = end {
+                RefKey::Range { r1, c1, r2, c2 }
+            } else {
+                RefKey::Cell { row: r1, col: c1 }
+            };
+            // For AutoSum, the range text spans the whole formula argument
+            // e.g., "=SUM(A1:A5)" - the text range would be 5..10
+            let text_start = 5; // After "=SUM("
+            let text_end = formula.len() - 1; // Before ")"
+            self.formula_highlighted_refs = vec![FormulaRef {
+                key,
+                start,
+                end,
+                color_index: 0,
+                text_range: text_start..text_end,
+            }];
         } else {
             self.formula_highlighted_refs.clear();
         }

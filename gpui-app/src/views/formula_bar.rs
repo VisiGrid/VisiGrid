@@ -1,8 +1,8 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, CELL_HEIGHT};
+use crate::app::{Spreadsheet, CELL_HEIGHT, REF_COLORS};
 use crate::theme::TokenKey;
-use crate::formula_context::{tokenize_for_highlight, TokenType};
+use crate::formula_context::{tokenize_for_highlight, TokenType, char_to_byte};
 
 /// Render the formula bar (cell reference + formula/value input)
 pub fn render_formula_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -163,15 +163,40 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
     let color_parens = app.token(TokenKey::FormulaParens);
     let color_error = app.token(TokenKey::FormulaError);
 
-    // Map TokenType to color
-    let get_color = |token_type: &TokenType| -> Hsla {
+    // Get formula refs for multi-color cell reference highlighting
+    // Uses cached refs to avoid re-parsing on every render
+    // When editing: use live formula_highlighted_refs (updated as user types)
+    // When not editing: use cached refs (updated in render() when cell/formula changes)
+    let formula_refs = if editing {
+        &app.formula_highlighted_refs
+    } else {
+        &app.formula_bar_cache_refs
+    };
+
+    // Helper: find FormulaRef color for a token range (returns color if token overlaps a ref)
+    let get_ref_color = |token_range: &std::ops::Range<usize>| -> Option<Hsla> {
+        for fref in formula_refs {
+            // Check if this token's range overlaps with the ref's text_range
+            // For exact matches or containment
+            if token_range.start >= fref.text_range.start && token_range.end <= fref.text_range.end {
+                return Some(rgb(REF_COLORS[fref.color_index % 8]).into());
+            }
+        }
+        None
+    };
+
+    // Map TokenType to color, with override for cell refs using FormulaRef colors
+    let get_color = |token_type: &TokenType, token_range: &std::ops::Range<usize>| -> Hsla {
         match token_type {
             TokenType::Function => color_function,
-            TokenType::CellRef | TokenType::Range => color_cell_ref,
+            TokenType::CellRef | TokenType::Range | TokenType::Colon => {
+                // Use FormulaRef color if available, otherwise default
+                get_ref_color(token_range).unwrap_or(color_cell_ref)
+            }
             TokenType::Number => color_number,
             TokenType::String => color_string,
             TokenType::Boolean => color_boolean,
-            TokenType::Operator | TokenType::Comparison | TokenType::Comma | TokenType::Colon => color_operator,
+            TokenType::Operator | TokenType::Comparison | TokenType::Comma => color_operator,
             TokenType::Paren => color_parens,
             TokenType::Error => color_error,
             _ => text_primary,
@@ -179,10 +204,13 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
     };
 
     // Build text runs for styled text
+    // Note: tokenizer returns char indices, but TextRun.len and string slicing use byte indices.
+    // We track both: char indices for token/ref comparison, byte indices for slicing.
     let mut runs: Vec<TextRun> = Vec::new();
-    let mut last_end = 0;
+    let mut last_end_char = 0usize;  // Char index
+    let mut last_end_byte = 0usize;  // Byte index
 
-    // Handle cursor insertion for editing mode
+    // Handle cursor insertion for editing mode (cursor_pos is in char indices)
     let cursor_pos = if editing { app.edit_cursor } else { usize::MAX };
 
     // Build display text with cursor inserted
@@ -195,15 +223,21 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
         raw_value.to_string()
     };
 
+    let raw_char_count = raw_value.chars().count();
+
     // Process tokens and build runs
+    // Token ranges are in char indices
     for (range, token_type) in &tokens {
         // Fill gap before this token (if any) with default color
-        if range.start > last_end {
-            let gap_text = &raw_value[last_end..range.start];
-            let gap_len = gap_text.len();
-            // Adjust for cursor if it falls in this gap
-            let adjusted_len = if editing && cursor_pos >= last_end && cursor_pos < range.start {
-                gap_len + 1 // +1 for cursor character
+        if range.start > last_end_char {
+            // Convert char indices to byte indices for slicing
+            let gap_start_byte = last_end_byte;
+            let gap_end_byte = char_to_byte(raw_value, range.start);
+            let gap_text = &raw_value[gap_start_byte..gap_end_byte];
+            let gap_len = gap_text.len();  // byte length
+            // Adjust for cursor if it falls in this gap (char comparison)
+            let adjusted_len = if editing && cursor_pos >= last_end_char && cursor_pos < range.start {
+                gap_len + 1 // +1 for cursor character '|'
             } else {
                 gap_len
             };
@@ -220,11 +254,14 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
         }
 
         // Add this token's text run
-        let token_text = &raw_value[range.clone()];
-        let token_len = token_text.len();
-        // Adjust for cursor if it falls in this token
+        // Convert char indices to byte indices for slicing
+        let token_start_byte = char_to_byte(raw_value, range.start);
+        let token_end_byte = char_to_byte(raw_value, range.end);
+        let token_text = &raw_value[token_start_byte..token_end_byte];
+        let token_len = token_text.len();  // byte length
+        // Adjust for cursor if it falls in this token (char comparison)
         let adjusted_len = if editing && cursor_pos >= range.start && cursor_pos < range.end {
-            token_len + 1 // +1 for cursor character
+            token_len + 1 // +1 for cursor character '|'
         } else if editing && cursor_pos == range.end {
             token_len // Cursor is right after this token
         } else {
@@ -235,21 +272,22 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
             runs.push(TextRun {
                 len: adjusted_len,
                 font: Font::default(),
-                color: get_color(token_type),
+                color: get_color(token_type, range),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
             });
         }
 
-        last_end = range.end;
+        last_end_char = range.end;
+        last_end_byte = token_end_byte;
     }
 
     // Handle remaining text after last token
-    if last_end < raw_value.len() {
-        let remaining = &raw_value[last_end..];
-        let remaining_len = remaining.len();
-        let adjusted_len = if editing && cursor_pos >= last_end {
+    if last_end_char < raw_char_count {
+        let remaining = &raw_value[last_end_byte..];
+        let remaining_len = remaining.len();  // byte length
+        let adjusted_len = if editing && cursor_pos >= last_end_char {
             remaining_len + 1
         } else {
             remaining_len
@@ -264,7 +302,7 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
                 strikethrough: None,
             });
         }
-    } else if editing && cursor_pos >= last_end {
+    } else if editing && cursor_pos >= last_end_char {
         // Cursor is at the very end
         runs.push(TextRun {
             len: 1,
@@ -276,7 +314,7 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
         });
     }
 
-    // Ensure runs cover the entire display text
+    // Ensure runs cover the entire display text (byte comparison)
     let total_run_len: usize = runs.iter().map(|r| r.len).sum();
     if total_run_len < display_text.len() {
         runs.push(TextRun {

@@ -122,7 +122,15 @@ fn main() {
         // Initialize session manager
         cx.set_global(SessionManager::new());
 
-        keybindings::register(cx);
+        // Get modifier style preference for keybindings
+        let modifier_style = settings::user_settings(cx)
+            .navigation
+            .modifier_style
+            .as_value()
+            .copied()
+            .unwrap_or_default();
+
+        keybindings::register(cx, modifier_style);
         user_keybindings::register_user_keybindings(cx);
 
         // Set up quit handler (save session before quit)

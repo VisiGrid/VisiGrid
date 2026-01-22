@@ -101,6 +101,25 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Setting<T> {
 }
 
 // ============================================================================
+// Keyboard modifier types
+// ============================================================================
+
+/// Keyboard modifier style preference (primarily for macOS users)
+///
+/// On macOS, users can choose between platform-native shortcuts (Cmd+C, Cmd+V)
+/// or Windows-style shortcuts (Ctrl+C, Ctrl+V) for familiarity.
+/// On Windows/Linux, this setting has no effect (Ctrl is always used).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModifierStyle {
+    /// Use platform-native modifier (Cmd on macOS, Ctrl on Windows/Linux)
+    #[default]
+    Platform,
+    /// Always use Ctrl (for users who prefer Windows-style shortcuts on Mac)
+    Ctrl,
+}
+
+// ============================================================================
 // Editing behavior types
 // ============================================================================
 

@@ -1829,4 +1829,113 @@ mod tests {
         assert!(funcs.iter().any(|f| f.name == "SUMIF"));
         assert!(funcs.iter().any(|f| f.name == "SUBSTITUTE"));
     }
+
+    // =========================================================================
+    // Regression tests for formula reference highlighting (Phase 2.1)
+    // =========================================================================
+
+    #[test]
+    fn test_unicode_sheet_name_no_panic() {
+        // Unicode sheet name: should tokenize without panic
+        // Char indices must be correct even with multi-byte chars
+        let formula = "='Ünicode'!A1 + B2";
+        let tokens = tokenize_for_highlight(formula);
+
+        // Should have tokens (function of formula structure)
+        assert!(!tokens.is_empty(), "Should produce tokens");
+
+        // Verify char→byte conversion works
+        for (range, _) in &tokens {
+            let byte_start = char_to_byte(formula, range.start);
+            let byte_end = char_to_byte(formula, range.end);
+            // This should not panic - proves char indices are valid
+            let _slice = &formula[byte_start..byte_end];
+        }
+
+        // Find cell refs - should have A1 and B2
+        let cell_refs: Vec<_> = tokens.iter()
+            .filter(|(_, t)| *t == TokenType::CellRef)
+            .collect();
+        assert_eq!(cell_refs.len(), 2, "Should find A1 and B2");
+    }
+
+    #[test]
+    fn test_duplicate_ref_same_token_content() {
+        // Duplicate ref: =A1+A1 - both A1 refs should have same text content
+        let formula = "=A1+A1";
+        let tokens = tokenize_for_highlight(formula);
+
+        let cell_refs: Vec<_> = tokens.iter()
+            .filter(|(_, t)| *t == TokenType::CellRef)
+            .collect();
+
+        assert_eq!(cell_refs.len(), 2, "Should find two A1 refs");
+
+        // Both should extract to "A1"
+        for (range, _) in &cell_refs {
+            let byte_start = char_to_byte(formula, range.start);
+            let byte_end = char_to_byte(formula, range.end);
+            let text = &formula[byte_start..byte_end];
+            assert_eq!(text, "A1", "Both refs should be A1");
+        }
+
+        // Verify they have different positions
+        assert_ne!(cell_refs[0].0.start, cell_refs[1].0.start, "Refs at different positions");
+    }
+
+    #[test]
+    fn test_two_ranges_distinct_tokens() {
+        // Two ranges: =SUM(A1:B5,C1:D5) - both ranges tokenized correctly
+        let formula = "=SUM(A1:B5,C1:D5)";
+        let tokens = tokenize_for_highlight(formula);
+
+        // Find all cell refs (A1, B5, C1, D5)
+        let cell_refs: Vec<_> = tokens.iter()
+            .filter(|(_, t)| *t == TokenType::CellRef)
+            .collect();
+        assert_eq!(cell_refs.len(), 4, "Should find 4 cell refs: A1, B5, C1, D5");
+
+        // Find colons
+        let colons: Vec<_> = tokens.iter()
+            .filter(|(_, t)| *t == TokenType::Colon)
+            .collect();
+        assert_eq!(colons.len(), 2, "Should find 2 colons for ranges");
+
+        // Verify extraction works for all tokens
+        for (range, _) in &tokens {
+            let byte_start = char_to_byte(formula, range.start);
+            let byte_end = char_to_byte(formula, range.end);
+            // Should not panic
+            let _text = &formula[byte_start..byte_end];
+        }
+
+        // Verify the cell ref texts
+        let ref_texts: Vec<_> = cell_refs.iter()
+            .map(|(range, _)| {
+                let byte_start = char_to_byte(formula, range.start);
+                let byte_end = char_to_byte(formula, range.end);
+                &formula[byte_start..byte_end]
+            })
+            .collect();
+        assert!(ref_texts.contains(&"A1"));
+        assert!(ref_texts.contains(&"B5"));
+        assert!(ref_texts.contains(&"C1"));
+        assert!(ref_texts.contains(&"D5"));
+    }
+
+    #[test]
+    fn test_char_to_byte_with_unicode() {
+        // Direct test of char→byte conversion
+        let s = "=Ü+A1";  // Ü is 2 bytes in UTF-8
+
+        // Char indices: = is 0, Ü is 1, + is 2, A is 3, 1 is 4
+        // Byte indices: = is 0, Ü is 1-2 (2 bytes), + is 3, A is 4, 1 is 5
+
+        assert_eq!(char_to_byte(s, 0), 0);  // '='
+        assert_eq!(char_to_byte(s, 1), 1);  // 'Ü' starts at byte 1
+        assert_eq!(char_to_byte(s, 2), 3);  // '+' starts at byte 3 (after 2-byte Ü)
+        assert_eq!(char_to_byte(s, 3), 4);  // 'A'
+        assert_eq!(char_to_byte(s, 4), 5);  // '1'
+        assert_eq!(char_to_byte(s, 5), 6);  // end of string
+    }
 }

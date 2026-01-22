@@ -6,6 +6,17 @@ use std::fs;
 use std::path::PathBuf;
 use crate::theme::ThemeSource;
 
+/// Keyboard modifier style preference (primarily for macOS users)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModifierStyle {
+    /// Use platform-native modifier (Cmd on macOS, Ctrl on Windows/Linux)
+    #[default]
+    Platform,
+    /// Always use Ctrl (for users who prefer Windows-style shortcuts on Mac)
+    Ctrl,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -57,6 +68,10 @@ pub struct Settings {
     // Theme
     #[serde(rename = "theme.source")]
     pub theme_source: ThemeSource,
+
+    // Keyboard
+    #[serde(rename = "keyboard.modifierStyle")]
+    pub modifier_style: ModifierStyle,
 }
 
 impl Default for Settings {
@@ -83,6 +98,8 @@ impl Default for Settings {
             vim_mode: false,
             // Theme
             theme_source: ThemeSource::Auto,
+            // Keyboard
+            modifier_style: ModifierStyle::default(),
         }
     }
 }
@@ -179,7 +196,10 @@ impl Settings {
     // UI elements
     "ui.showFormulaBar": true,
     "ui.showStatusBar": true,
-    "ui.showSheetTabs": true
+    "ui.showSheetTabs": true,
+
+    // Keyboard (macOS only: "platform" = Cmd, "ctrl" = Ctrl)
+    "keyboard.modifierStyle": "platform"
 }
 "#;
 

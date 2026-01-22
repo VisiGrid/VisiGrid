@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::types::{DismissedTips, EnterBehavior, Setting};
+use super::types::{DismissedTips, EnterBehavior, ModifierStyle, Setting};
 
 /// User-level settings (global, persistent)
 ///
@@ -115,10 +115,21 @@ pub struct NavigationSettings {
     /// Press 'i' to enter edit mode (like vim insert).
     #[serde(default, skip_serializing_if = "Setting::is_inherit")]
     pub vim_mode: Setting<bool>,
+
+    /// Keyboard modifier style (macOS only)
+    /// "platform" = use Cmd for shortcuts (macOS native)
+    /// "ctrl" = use Ctrl for shortcuts (Windows-style, for users switching from Windows)
+    /// On Windows/Linux, this setting has no effect.
+    #[serde(default = "default_modifier_style", skip_serializing_if = "Setting::is_inherit")]
+    pub modifier_style: Setting<ModifierStyle>,
 }
 
 fn default_tab_moves_right() -> Setting<bool> {
     Setting::Value(true)
+}
+
+fn default_modifier_style() -> Setting<ModifierStyle> {
+    Setting::Value(ModifierStyle::Platform)
 }
 
 impl Default for NavigationSettings {
@@ -127,6 +138,7 @@ impl Default for NavigationSettings {
             tab_moves_right: Setting::Value(true),
             keyboard_hints: Setting::Value(false),
             vim_mode: Setting::Value(false),
+            modifier_style: Setting::Value(ModifierStyle::Platform),
         }
     }
 }

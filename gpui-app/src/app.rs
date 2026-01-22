@@ -19,7 +19,7 @@ use crate::theme::{Theme, TokenKey, visigrid_theme, builtin_themes, get_theme};
 use crate::user_keybindings;
 use crate::views;
 use crate::links;
-use crate::formula_context::{tokenize_for_highlight, TokenType};
+use crate::formula_context::{tokenize_for_highlight, TokenType, char_to_byte};
 
 // Re-export from autocomplete module for external access
 pub use crate::autocomplete::{SignatureHelpInfo, FormulaErrorInfo};
@@ -58,6 +58,35 @@ impl<T: PartialEq + Clone> TriState<T> {
         matches!(self, TriState::Mixed)
     }
 }
+
+/// Stable key for formula reference deduplication - same ref gets same color
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RefKey {
+    Cell { row: usize, col: usize },
+    Range { r1: usize, c1: usize, r2: usize, c2: usize },  // normalized min/max
+}
+
+/// Formula reference with color assignment and text position
+#[derive(Clone, Debug)]
+pub struct FormulaRef {
+    pub key: RefKey,
+    pub start: (usize, usize),                // top-left of range
+    pub end: Option<(usize, usize)>,          // bottom-right (None for single cell)
+    pub color_index: usize,                   // 0-7 rotating
+    pub text_range: std::ops::Range<usize>,   // char range in formula text
+}
+
+/// Color palette for formula references (Excel-like)
+pub const REF_COLORS: [u32; 8] = [
+    0x4472C4,  // 0: Blue
+    0xED7D31,  // 1: Orange
+    0x9B59B6,  // 2: Purple
+    0x70AD47,  // 3: Green
+    0x00B0F0,  // 4: Cyan
+    0xFFC000,  // 5: Yellow
+    0xFF6B9D,  // 6: Pink
+    0x00B294,  // 7: Teal
+];
 
 /// Which field has focus in the Create Named Range dialog
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -342,8 +371,14 @@ pub struct Spreadsheet {
     pub formula_ref_start_cursor: usize,               // Cursor position where reference started
 
     // Highlighted formula references (for existing formulas when editing)
-    // Each entry is (start_cell, optional_end_cell_for_ranges)
-    pub formula_highlighted_refs: Vec<((usize, usize), Option<(usize, usize)>)>,
+    // Each entry has color index, cell bounds, and text position for formula bar coloring
+    pub formula_highlighted_refs: Vec<FormulaRef>,
+
+    // Formula bar display cache (avoids re-parsing on every render)
+    // Only used when NOT editing - caches parsed refs for the currently selected cell
+    pub formula_bar_cache_cell: Option<(usize, usize)>,
+    pub formula_bar_cache_formula: String,
+    pub formula_bar_cache_refs: Vec<FormulaRef>,
 
     // Formula autocomplete state
     pub autocomplete_visible: bool,
@@ -364,6 +399,9 @@ pub struct Spreadsheet {
 
     // Zen mode (distraction-free editing)
     pub zen_mode: bool,
+
+    // F1 context help (hold-to-peek)
+    pub f1_help_visible: bool,
 
     // Zoom
     pub zoom_level: f32,
@@ -572,6 +610,9 @@ impl Spreadsheet {
             formula_ref_end: None,
             formula_ref_start_cursor: 0,
             formula_highlighted_refs: Vec::new(),
+            formula_bar_cache_cell: None,
+            formula_bar_cache_formula: String::new(),
+            formula_bar_cache_refs: Vec::new(),
             autocomplete_visible: false,
             autocomplete_selected: 0,
             autocomplete_replace_range: 0..0,
@@ -634,6 +675,7 @@ impl Spreadsheet {
             hint_state: crate::hints::HintState::default(),
 
             zen_mode: false,
+            f1_help_visible: false,
             zoom_level: DEFAULT_ZOOM,
             metrics: GridMetrics::default(),
             zoom_wheel_accumulator: 0.0,
@@ -1574,23 +1616,51 @@ impl Spreadsheet {
         }
 
         // Check the highlighted refs from parsed formula
-        for (start_cell, end_cell) in &self.formula_highlighted_refs {
-            if let Some((end_row, end_col)) = end_cell {
+        for fref in &self.formula_highlighted_refs {
+            if let Some((end_row, end_col)) = fref.end {
                 // Range - check if cell is within
-                let (min_row, max_row) = (start_cell.0.min(*end_row), start_cell.0.max(*end_row));
-                let (min_col, max_col) = (start_cell.1.min(*end_col), start_cell.1.max(*end_col));
-                if row >= min_row && row <= max_row && col >= min_col && col <= max_col {
+                if row >= fref.start.0 && row <= end_row && col >= fref.start.1 && col <= end_col {
                     return true;
                 }
             } else {
                 // Single cell
-                if row == start_cell.0 && col == start_cell.1 {
+                if row == fref.start.0 && col == fref.start.1 {
                     return true;
                 }
             }
         }
 
         false
+    }
+
+    /// Get the color index for a formula reference at this cell (for multi-color highlighting).
+    /// Returns the earliest ref's color (by text position) to avoid muddy overlap.
+    /// Returns None if cell is not a formula ref.
+    pub fn formula_ref_color(&self, row: usize, col: usize) -> Option<usize> {
+        // Must be in formula mode or editing a formula
+        let is_formula_editing = self.mode.is_formula() ||
+            (self.mode.is_editing() && self.is_formula_content());
+
+        if !is_formula_editing {
+            return None;
+        }
+
+        // Check the highlighted refs (already sorted by text position, so first match = earliest)
+        for fref in &self.formula_highlighted_refs {
+            if let Some((end_row, end_col)) = fref.end {
+                // Range
+                if row >= fref.start.0 && row <= end_row && col >= fref.start.1 && col <= end_col {
+                    return Some(fref.color_index);
+                }
+            } else {
+                // Single cell
+                if row == fref.start.0 && col == fref.start.1 {
+                    return Some(fref.color_index);
+                }
+            }
+        }
+
+        None
     }
 
     /// Get which borders should be drawn for a formula ref cell
@@ -1629,19 +1699,17 @@ impl Spreadsheet {
         }
 
         // Check the highlighted refs from parsed formula
-        for (start_cell, end_cell) in &self.formula_highlighted_refs {
-            if let Some((end_row, end_col)) = end_cell {
-                let (min_row, max_row) = (start_cell.0.min(*end_row), start_cell.0.max(*end_row));
-                let (min_col, max_col) = (start_cell.1.min(*end_col), start_cell.1.max(*end_col));
-                if row >= min_row && row <= max_row && col >= min_col && col <= max_col {
-                    if row == min_row { top = true; }
-                    if row == max_row { bottom = true; }
-                    if col == min_col { left = true; }
-                    if col == max_col { right = true; }
+        for fref in &self.formula_highlighted_refs {
+            if let Some((end_row, end_col)) = fref.end {
+                if row >= fref.start.0 && row <= end_row && col >= fref.start.1 && col <= end_col {
+                    if row == fref.start.0 { top = true; }
+                    if row == end_row { bottom = true; }
+                    if col == fref.start.1 { left = true; }
+                    if col == end_col { right = true; }
                 }
             } else {
                 // Single cell - all borders
-                if row == start_cell.0 && col == start_cell.1 {
+                if row == fref.start.0 && col == fref.start.1 {
                     top = true; right = true; bottom = true; left = true;
                 }
             }
@@ -3400,29 +3468,26 @@ impl Spreadsheet {
             return;
         }
 
-        // Read clipboard item to get both text and metadata
+        // Read clipboard item to get text
         let clipboard_item = cx.read_from_clipboard();
         let system_text = clipboard_item.as_ref().and_then(|item| item.text().map(|s| s.to_string()));
-        let metadata = clipboard_item.as_ref().and_then(|item| item.metadata().cloned());
 
-        // Check if clipboard matches our internal clipboard via metadata ID (primary)
-        // Fall back to normalized string comparison only if metadata absent (legacy)
-        let is_internal = self.internal_clipboard.as_ref().map_or(false, |ic| {
-            let expected_id = format!("\"{}\"", ic.id);
-            if let Some(ref m) = metadata {
-                m == &expected_id
-            } else {
-                // Legacy fallback: normalized string compare when metadata missing
-                system_text.as_ref().map_or(false, |st| {
-                    Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv)
-                })
-            }
+        // For Paste Values, prefer internal clipboard values if they exist and text matches.
+        // This avoids depending on metadata (which doesn't round-trip on Windows).
+        // The internal clipboard stores computed values, which is exactly what we want.
+        let use_internal_values = self.internal_clipboard.as_ref().map_or(false, |ic| {
+            // Use internal values if we have them AND either:
+            // 1. System clipboard matches our raw_tsv (we copied it)
+            // 2. System clipboard is empty/unavailable (use what we have)
+            system_text.as_ref().map_or(true, |st| {
+                Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv)
+            })
         });
 
         let (start_row, start_col) = self.selected;
         let mut changes = Vec::new();
 
-        if is_internal {
+        if use_internal_values {
             // Use typed values from internal clipboard (clone to avoid borrow issues)
             let values = self.internal_clipboard.as_ref().map(|ic| ic.values.clone());
             if let Some(values) = values {
@@ -3444,7 +3509,7 @@ impl Spreadsheet {
                     }
                 }
             }
-        } else if let Some(text) = system_text.or_else(|| self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone())) {
+        } else if let Some(text) = system_text {
             // Parse external clipboard with leading-zero guard
             for (row_offset, line) in text.lines().enumerate() {
                 for (col_offset, cell_text) in line.split('\t').enumerate() {
@@ -3550,38 +3615,31 @@ impl Spreadsheet {
 
     /// Paste values into edit buffer: use canonical text of top-left value only.
     fn paste_values_into_edit(&mut self, cx: &mut Context<Self>) {
-        // Read clipboard item to get both text and metadata
+        // Read clipboard item to get text
         let clipboard_item = cx.read_from_clipboard();
         let system_text = clipboard_item.as_ref().and_then(|item| item.text().map(|s| s.to_string()));
-        let metadata = clipboard_item.as_ref().and_then(|item| item.metadata().cloned());
 
-        // Check if clipboard matches our internal clipboard via metadata ID (primary)
-        let is_internal = self.internal_clipboard.as_ref().map_or(false, |ic| {
-            let expected_id = format!("\"{}\"", ic.id);
-            if let Some(ref m) = metadata {
-                m == &expected_id
-            } else {
-                // Legacy fallback: normalized string compare when metadata missing
-                system_text.as_ref().map_or(false, |st| {
-                    Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv)
-                })
-            }
+        // For Paste Values, prefer internal clipboard values if they exist and text matches.
+        // This avoids depending on metadata (which doesn't round-trip on Windows).
+        let use_internal_values = self.internal_clipboard.as_ref().map_or(false, |ic| {
+            system_text.as_ref().map_or(true, |st| {
+                Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv)
+            })
         });
 
-        let text = if is_internal {
+        let text = if use_internal_values {
             // Get top-left value from internal clipboard
             self.internal_clipboard.as_ref().and_then(|ic| {
                 ic.values.first().and_then(|row| row.first()).map(|v| Self::value_to_canonical_string(v))
             })
         } else {
             // Parse top-left cell from external clipboard
-            system_text.or_else(|| self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()))
-                .map(|text| {
-                    let first_cell = text.lines().next().unwrap_or("")
-                        .split('\t').next().unwrap_or("");
-                    let value = Self::parse_external_value(first_cell);
-                    Self::value_to_canonical_string(&value)
-                })
+            system_text.map(|text| {
+                let first_cell = text.lines().next().unwrap_or("")
+                    .split('\t').next().unwrap_or("");
+                let value = Self::parse_external_value(first_cell);
+                Self::value_to_canonical_string(&value)
+            })
         };
 
         if let Some(text) = text {
@@ -4820,22 +4878,26 @@ impl Spreadsheet {
         Some((row, col))
     }
 
-    /// Parse all cell references from a formula and return as (start, optional_end) tuples
-    /// Handles both single cells (A1) and ranges (A1:B5)
-    fn parse_formula_refs(formula: &str) -> Vec<((usize, usize), Option<(usize, usize)>)> {
-        if !formula.starts_with('=') {
+    /// Parse all cell references from a formula with deterministic color assignment.
+    /// Returns FormulaRef entries sorted by text position, with first-seen refs getting unique colors.
+    fn parse_formula_refs(formula: &str) -> Vec<FormulaRef> {
+        if !formula.starts_with('=') && !formula.starts_with('+') {
             return Vec::new();
         }
 
         let tokens = tokenize_for_highlight(formula);
-        let mut refs = Vec::new();
+        // Collect raw refs with text ranges: (RefKey, start, end, text_range)
+        let mut parsed_refs: Vec<(RefKey, (usize, usize), Option<(usize, usize)>, std::ops::Range<usize>)> = Vec::new();
         let mut i = 0;
 
         while i < tokens.len() {
             let (range, token_type) = &tokens[i];
 
             if *token_type == TokenType::CellRef {
-                let cell_text = &formula[range.clone()];
+                // Convert char indices to byte indices for safe slicing
+                let byte_start = char_to_byte(formula, range.start);
+                let byte_end = char_to_byte(formula, range.end);
+                let cell_text = &formula[byte_start..byte_end];
                 // Strip any $ signs for absolute references
                 let cell_text_clean: String = cell_text.chars().filter(|c| *c != '$').collect();
 
@@ -4846,24 +4908,49 @@ impl Spreadsheet {
                         let (range2, next_next_type) = &tokens[i + 2];
 
                         if *next_type == TokenType::Colon && *next_next_type == TokenType::CellRef {
-                            let end_text = &formula[range2.clone()];
+                            // Convert char indices to byte indices for safe slicing
+                            let byte_start2 = char_to_byte(formula, range2.start);
+                            let byte_end2 = char_to_byte(formula, range2.end);
+                            let end_text = &formula[byte_start2..byte_end2];
                             let end_text_clean: String = end_text.chars().filter(|c| *c != '$').collect();
 
                             if let Some(end_cell) = Self::parse_cell_ref(&end_text_clean) {
-                                refs.push((start_cell, Some(end_cell)));
+                                // Normalize range to min/max for stable RefKey
+                                let r1 = start_cell.0.min(end_cell.0);
+                                let c1 = start_cell.1.min(end_cell.1);
+                                let r2 = start_cell.0.max(end_cell.0);
+                                let c2 = start_cell.1.max(end_cell.1);
+                                let key = RefKey::Range { r1, c1, r2, c2 };
+                                let text_range = range.start..range2.end;
+                                parsed_refs.push((key, (r1, c1), Some((r2, c2)), text_range));
                                 i += 3;  // Skip the whole range
                                 continue;
                             }
                         }
                     }
                     // Single cell reference
-                    refs.push((start_cell, None));
+                    let key = RefKey::Cell { row: start_cell.0, col: start_cell.1 };
+                    parsed_refs.push((key, start_cell, None, range.clone()));
                 }
             }
             i += 1;
         }
 
-        refs
+        // Sort by text position (left-to-right in formula) for deterministic color assignment
+        parsed_refs.sort_by_key(|(_, _, _, text_range)| text_range.start);
+
+        // Assign colors: first-seen order, deduplicate by RefKey (same ref = same color)
+        let mut color_map: HashMap<RefKey, usize> = HashMap::new();
+        let mut next_color = 0;
+
+        parsed_refs.into_iter().map(|(key, start, end, text_range)| {
+            let color_index = *color_map.entry(key.clone()).or_insert_with(|| {
+                let c = next_color;
+                next_color = (next_color + 1) % 8;
+                c
+            });
+            FormulaRef { key, start, end, color_index, text_range }
+        }).collect()
     }
 
     // =========================================================================
@@ -8026,6 +8113,27 @@ impl Render for Spreadsheet {
             grid_body_origin: (grid_body_x, grid_body_y),
             viewport_size: (grid_viewport_width, grid_viewport_height),
         };
+
+        // Update formula bar display cache (only when not editing)
+        // This avoids re-parsing on every render
+        if !self.mode.is_editing() {
+            let cell = self.selected;
+            let formula = self.sheet().get_raw(cell.0, cell.1);
+
+            // Only update cache if cell or formula changed
+            let cache_valid = self.formula_bar_cache_cell == Some(cell)
+                && self.formula_bar_cache_formula == formula;
+
+            if !cache_valid {
+                self.formula_bar_cache_cell = Some(cell);
+                self.formula_bar_cache_formula = formula.clone();
+                self.formula_bar_cache_refs = if formula.starts_with('=') || formula.starts_with('+') {
+                    Self::parse_formula_refs(&formula)
+                } else {
+                    Vec::new()
+                };
+            }
+        }
 
         views::render_spreadsheet(self, window, cx)
     }

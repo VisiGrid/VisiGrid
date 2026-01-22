@@ -46,15 +46,19 @@ What's built, what's next, and what's not planned.
   - Large numbers (16+ digits) as text to preserve precision
   - Export Report dialog shows exactly what changed
 
-### Formula Engine (107 functions)
+### Formula Engine (108 functions)
 - Math, logical, text, lookup, date/time, statistical, array
 - Dynamic arrays with spill behavior
 - SUMIF/SUMIFS, COUNTIF/COUNTIFS, AVERAGEIF/AVERAGEIFS
-- XLOOKUP, FILTER, SORT, UNIQUE
+- XLOOKUP, FILTER, SORT, UNIQUE, SPARKLINE
 - Financial: PMT, FV, PV, NPV, IRR
 - Autocomplete with signature help
 - Syntax highlighting and error validation
-- Context help (F1)
+- Context help (F1): hold to peek cell inspector
+  - Formula cells: formula text, computed value, format, precedents, dependents
+  - Value cells: value, format, dependents
+  - Range selection: count, sum, average, min, max
+  - Positioned near selection
 
 ### Multi-Sheet & Organization
 - Multiple sheets per workbook
@@ -128,6 +132,33 @@ What's built, what's next, and what's not planned.
 - See: [docs/features/paste-values-spec.md](docs/features/paste-values-spec.md)
 - **Deferred:** Paste Special dialog, Paste Formats, Paste Transpose
 
+### Sparklines (v0.2.3+)
+- `=SPARKLINE(range)` formula returns Unicode mini-bar-chart
+- `=SPARKLINE(range, "winloss")` for win/loss charts (▲▼▬)
+- 8-level bar heights using Unicode block characters (▁▂▃▄▅▆▇█)
+- Auto-scales to data min/max
+
+### Fill Handle Improvements (v0.2.3+)
+- Excel-style rendering: solid fill with contrasting border
+- Shows at bottom-right corner of range selections (not just single cells)
+- Smaller, more precise hit target (6px visual, 14px hit area)
+
+### macOS Keyboard (v0.2.3+)
+- Modifier key preference: choose Cmd (default) or Ctrl for shortcuts
+- Setting: `keyboard.modifierStyle` in `~/.config/visigrid/settings.json`
+- Delete key now clears selected cells (maps to backspace on Mac keyboards)
+- System shortcuts (Cmd+Q, Cmd+W, Cmd+,) always use Cmd regardless of preference
+
+### Multi-Color Formula Reference Highlighting (v0.2.3+)
+- Grid: referenced cells/ranges highlighted with 8 rotating colors
+- Stable colors per reference (duplicate refs share one color)
+- Selection always visually dominant over formula highlights
+- Formula bar: reference tokens colored to match grid highlights
+- Live updates while editing formulas
+- Unicode-safe: token spans handle non-ASCII correctly (char→byte fixed)
+- See: [docs/features/formula-reference-highlighting-spec.md](docs/features/formula-reference-highlighting-spec.md)
+- **Deferred:** Marching ants animation (Phase 3)
+
 ---
 
 ## Planned
@@ -146,12 +177,17 @@ What's built, what's next, and what's not planned.
 - Print to PDF
 
 ### Medium-term
-- Sparklines (=SPARKLINE formula, Unicode mini-charts)
-- AutoFilter and Sort
+- AutoFilter and Sort (see [docs/features/autofilter-sort-spec.md](docs/features/autofilter-sort-spec.md))
 - Cell context menu (right-click)
 - Merged cells
 - Split view (Ctrl+\)
 - Problems panel (Ctrl+Shift+M) - all formula errors
+
+### Polish
+- Windows title bar integration (custom titlebar with integrated menu)
+  - Eliminates "menu on 2nd line" non-native feel
+  - See [docs/features/windows-titlebar-spec.md](docs/features/windows-titlebar-spec.md)
+  - Windows-first, behind feature flag, with acceptance checklist
 
 ### Long-term: Systems of Record
 

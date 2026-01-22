@@ -258,6 +258,7 @@ mod tests {
                 tab_moves_right: Setting::Inherit,
                 keyboard_hints: Setting::Inherit,
                 vim_mode: Setting::Inherit,
+                modifier_style: Setting::Inherit,
             },
             tips: Default::default(),
         };

@@ -2,7 +2,7 @@ use gpui::*;
 use gpui::StyledText;
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
-use crate::fill::{FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_SIZE};
+use crate::fill::{FILL_HANDLE_BORDER, FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_SIZE};
 use crate::mode::Mode;
 use crate::settings::{user_settings, Setting};
 use crate::theme::TokenKey;
@@ -230,6 +230,7 @@ fn render_cell(
     let is_active = selected == (row, col);
     let is_editing = editing && is_active;
     let is_formula_ref = app.is_formula_ref(row, col);
+    let formula_ref_color = app.formula_ref_color(row, col);  // Color index for multi-color refs
 
     // Check for hint mode and get hint label for this cell
     let hint_label = if app.mode == Mode::Hint {
@@ -283,7 +284,7 @@ fn render_cell(
     } else if is_spill_receiver {
         app.token(TokenKey::SpillReceiverBorder)
     } else {
-        cell_border(app, is_editing, is_active, is_selected, is_formula_ref)
+        cell_border(app, is_editing, is_active, is_selected, formula_ref_color)
     };
 
     let mut cell = div()
@@ -299,7 +300,7 @@ fn render_cell(
     // Add selection/formula-ref overlay (semi-transparent, layered on top of cell background)
     // This allows custom background colors to show through the selection highlight
     if !is_editing && (is_active || is_selected || is_formula_ref) {
-        if let Some(overlay_color) = selection_overlay_color(app, is_active, is_formula_ref) {
+        if let Some(overlay_color) = selection_overlay_color(app, is_active, is_selected, formula_ref_color) {
             cell = cell.child(
                 div()
                     .absolute()
@@ -634,16 +635,22 @@ fn render_cell(
     }
 
     // Determine if we should show the fill handle on this cell
-    // Show fill handle when:
-    // - This is the active cell
-    // - Not editing
-    // - Not in hint mode
-    // - Single cell selected (no range or multi-selection)
-    // - Not already fill dragging
-    let show_fill_handle = is_active
+    // Excel-style: show fill handle at bottom-right corner of selection
+    // - For single cell: show on active cell
+    // - For range selection: show on cell at (max_row, max_col)
+    // - No additional selections (Ctrl+Click multi-select)
+    // - Not editing, not in hint mode, not already fill dragging
+    let is_fill_handle_cell = if app.selection_end.is_some() {
+        // Range selection: fill handle goes on bottom-right corner
+        let ((_min_row, _min_col), (max_row, max_col)) = app.selection_range();
+        row == max_row && col == max_col
+    } else {
+        // Single cell: fill handle goes on active cell
+        is_active
+    };
+    let show_fill_handle = is_fill_handle_cell
         && !is_editing
         && app.mode != Mode::Hint
-        && app.selection_end.is_none()
         && app.additional_selections.is_empty()
         && !app.is_fill_dragging();
 
@@ -656,10 +663,15 @@ fn render_cell(
         .child(cell);
 
     // Add fill handle at bottom-right corner of active cell
+    // Excel-style: solid opaque square with contrasting border
     if show_fill_handle {
-        let handle_color = app.token(TokenKey::SelectionBorder);
+        // Use opaque Accent color (not semi-transparent SelectionBorder)
+        let handle_fill = app.token(TokenKey::Accent);
+        // Use cell background for border (white on light themes, dark on dark themes)
+        let handle_border = app.token(TokenKey::CellBg);
         let zoom = app.metrics.zoom;
         let visual_size = FILL_HANDLE_VISUAL_SIZE * zoom;
+        let border_width = FILL_HANDLE_BORDER * zoom;
         let hit_size = FILL_HANDLE_HIT_SIZE * zoom;
         // Offset to center the hit area on the corner, with visual centered inside
         let hit_offset = hit_size / 2.0;
@@ -678,7 +690,7 @@ fn render_cell(
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _event: &MouseDownEvent, _, cx| {
                     this.start_fill_drag(cx);
                 }))
-                // Visual handle (smaller, centered in hit area)
+                // Visual handle (smaller, centered in hit area) with Excel-style appearance
                 .child(
                     div()
                         .absolute()
@@ -686,7 +698,9 @@ fn render_cell(
                         .left(px(visual_offset))
                         .w(px(visual_size))
                         .h(px(visual_size))
-                        .bg(handle_color)
+                        .bg(handle_fill)
+                        .border_color(handle_border)
+                        .border(px(border_width))
                 )
         );
     }
@@ -717,26 +731,40 @@ fn cell_base_background(
 }
 
 /// Returns the selection overlay color (semi-transparent) for layering on top of cell background.
-fn selection_overlay_color(app: &Spreadsheet, is_active: bool, is_formula_ref: bool) -> Option<Hsla> {
-    if is_formula_ref {
-        // Formula reference highlight (semi-transparent)
-        Some(app.token(TokenKey::RefHighlight1).opacity(0.25))
-    } else if is_active {
+/// For formula refs, uses the color index to pick from the rotating palette.
+/// Selection ALWAYS takes precedence over formula ref highlighting.
+fn selection_overlay_color(app: &Spreadsheet, is_active: bool, is_selected: bool, formula_ref_color: Option<usize>) -> Option<Hsla> {
+    // Selection overlay takes precedence over formula ref (user sees their selection clearly)
+    if is_active {
         // Active cell gets slightly stronger highlight
         Some(app.token(TokenKey::SelectionBg).opacity(0.5))
-    } else {
-        // Selected cells get standard overlay
+    } else if is_selected {
+        // Selected cells get standard overlay (selection wins over formula ref)
         Some(app.token(TokenKey::SelectionBg).opacity(0.4))
+    } else if let Some(color_idx) = formula_ref_color {
+        // Formula reference highlight with per-ref color (semi-transparent)
+        Some(ref_color_hsla(color_idx).opacity(0.25))
+    } else {
+        None
     }
 }
 
-fn cell_border(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected: bool, is_formula_ref: bool) -> Hsla {
+/// Get the HSLA color for a formula reference by index (0-7 rotating)
+fn ref_color_hsla(color_idx: usize) -> Hsla {
+    use crate::app::REF_COLORS;
+    let color = REF_COLORS[color_idx % 8];
+    rgb(color).into()
+}
+
+fn cell_border(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected: bool, formula_ref_color: Option<usize>) -> Hsla {
+    // Selection border ALWAYS wins over formula ref (user needs to see what they've selected)
     if is_editing || is_active {
         app.token(TokenKey::CellBorderFocus)
-    } else if is_formula_ref {
-        app.token(TokenKey::RefHighlight1)
     } else if is_selected {
         app.token(TokenKey::SelectionBorder)
+    } else if let Some(color_idx) = formula_ref_color {
+        // Formula ref border uses per-ref color
+        ref_color_hsla(color_idx)
     } else {
         app.token(TokenKey::GridLines)
     }

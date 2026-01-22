@@ -3325,6 +3325,63 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
             EvalResult::Array(array)
         }
 
+        "SPARKLINE" => {
+            // SPARKLINE(data_range, [type])
+            // Creates a Unicode mini-chart from numeric data
+            // type: "bar" (default), "line", or "winloss"
+            if args.is_empty() || args.len() > 2 {
+                return EvalResult::Error("SPARKLINE requires 1-2 arguments".to_string());
+            }
+
+            // Collect numbers from first argument
+            let nums = match collect_numbers(&args[0..1], lookup) {
+                Ok(v) if v.is_empty() => return EvalResult::Text(String::new()),
+                Ok(v) => v,
+                Err(e) => return EvalResult::Error(e),
+            };
+
+            // Get chart type (default "bar")
+            let chart_type = if args.len() > 1 {
+                evaluate(&args[1], lookup).to_text().to_lowercase()
+            } else {
+                "bar".to_string()
+            };
+
+            match chart_type.as_str() {
+                "bar" | "line" => {
+                    // Bar/line sparkline using Unicode block characters
+                    // ▁▂▃▄▅▆▇█ (U+2581 to U+2588) - 8 height levels
+                    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+                    let min = nums.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let max = nums.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let range = max - min;
+
+                    let sparkline: String = if range == 0.0 {
+                        // All values equal - show middle bars
+                        BARS[3].to_string().repeat(nums.len())
+                    } else {
+                        nums.iter().map(|&n| {
+                            let normalized = (n - min) / range;
+                            let idx = ((normalized * 7.0).round() as usize).min(7);
+                            BARS[idx]
+                        }).collect()
+                    };
+                    EvalResult::Text(sparkline)
+                }
+                "winloss" => {
+                    // Win/loss sparkline: ▲ for positive, ▼ for negative, ▬ for zero
+                    let sparkline: String = nums.iter().map(|&n| {
+                        if n > 0.0 { '▲' }
+                        else if n < 0.0 { '▼' }
+                        else { '▬' }
+                    }).collect();
+                    EvalResult::Text(sparkline)
+                }
+                _ => EvalResult::Error(format!("Unknown sparkline type: {}. Use 'bar', 'line', or 'winloss'", chart_type)),
+            }
+        }
+
         _ => EvalResult::Error(format!("Unknown function: {}", name)),
     }
 }
@@ -4348,5 +4405,102 @@ mod tests {
         let expr = parse_and_bind("=XLOOKUP(102, A1:A3, B1:B3)");
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Text("Bob".to_string()));
+    }
+
+    // =========================================================================
+    // SPARKLINE tests
+    // =========================================================================
+
+    #[test]
+    fn test_sparkline_bar_basic() {
+        let mut lookup = TestLookup::new();
+        // Values: 1, 2, 3, 4, 5, 6, 7, 8 (linear progression)
+        for i in 0..8 {
+            lookup.set(0, i, &format!("{}", i + 1));
+        }
+
+        let expr = parse_and_bind("=SPARKLINE(A1:H1)");
+        let result = evaluate(&expr, &lookup);
+        // Should produce 8 bars from lowest to highest
+        assert_eq!(result, EvalResult::Text("▁▂▃▄▅▆▇█".to_string()));
+    }
+
+    #[test]
+    fn test_sparkline_bar_reverse() {
+        let mut lookup = TestLookup::new();
+        // Values: 8, 7, 6, 5, 4, 3, 2, 1 (reverse)
+        for i in 0..8 {
+            lookup.set(0, i, &format!("{}", 8 - i));
+        }
+
+        let expr = parse_and_bind("=SPARKLINE(A1:H1)");
+        let result = evaluate(&expr, &lookup);
+        // Should produce 8 bars from highest to lowest
+        assert_eq!(result, EvalResult::Text("█▇▆▅▄▃▂▁".to_string()));
+    }
+
+    #[test]
+    fn test_sparkline_flat_data() {
+        let mut lookup = TestLookup::new();
+        // All values are 5
+        for i in 0..4 {
+            lookup.set(0, i, "5");
+        }
+
+        let expr = parse_and_bind("=SPARKLINE(A1:D1)");
+        let result = evaluate(&expr, &lookup);
+        // All same value - should show middle bars
+        assert_eq!(result, EvalResult::Text("▄▄▄▄".to_string()));
+    }
+
+    #[test]
+    fn test_sparkline_winloss() {
+        let mut lookup = TestLookup::new();
+        // Values: 10, -5, 0, 15, -3
+        lookup.set(0, 0, "10");
+        lookup.set(0, 1, "-5");
+        lookup.set(0, 2, "0");
+        lookup.set(0, 3, "15");
+        lookup.set(0, 4, "-3");
+
+        let expr = parse_and_bind(r#"=SPARKLINE(A1:E1, "winloss")"#);
+        let result = evaluate(&expr, &lookup);
+        // Positive = ▲, Negative = ▼, Zero = ▬
+        assert_eq!(result, EvalResult::Text("▲▼▬▲▼".to_string()));
+    }
+
+    #[test]
+    fn test_sparkline_empty_range() {
+        let lookup = TestLookup::new();
+        // Empty range
+        let expr = parse_and_bind("=SPARKLINE(A1:A1)");
+        let result = evaluate(&expr, &lookup);
+        // Empty input returns empty string
+        assert_eq!(result, EvalResult::Text("".to_string()));
+    }
+
+    #[test]
+    fn test_sparkline_invalid_type() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "1");
+        lookup.set(0, 1, "2");
+
+        let expr = parse_and_bind(r#"=SPARKLINE(A1:B1, "invalid")"#);
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Error(e) => assert!(e.contains("Unknown sparkline type")),
+            _ => panic!("Expected error for invalid sparkline type"),
+        }
+    }
+
+    #[test]
+    fn test_sparkline_single_value() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "42");
+
+        let expr = parse_and_bind("=SPARKLINE(A1:A1)");
+        let result = evaluate(&expr, &lookup);
+        // Single value - should show middle bar
+        assert_eq!(result, EvalResult::Text("▄".to_string()));
     }
 }

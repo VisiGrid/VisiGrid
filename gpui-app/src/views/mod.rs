@@ -772,6 +772,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 return;
             }
 
+            // F1 hold-to-peek: show context help while F1 is held
+            if event.keystroke.key == "f1" {
+                this.f1_help_visible = true;
+                cx.notify();
+                return;
+            }
+
             // Handle sheet rename mode
             if this.renaming_sheet.is_some() {
                 match event.keystroke.key.as_str() {
@@ -1366,6 +1373,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
             }
         }))
+        // F1 hold-to-peek: hide help when F1 is released
+        .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
+            if event.keystroke.key == "f1" && this.f1_help_visible {
+                this.f1_help_visible = false;
+                cx.notify();
+            }
+        }))
         // Mouse wheel scrolling (or zoom with Ctrl/Cmd)
         .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
             // Check for zoom modifier (Ctrl on Linux/Windows, Cmd on macOS)
@@ -1614,6 +1628,648 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             let accent = app.token(TokenKey::Accent);
             div.child(formula_bar::render_hover_docs(func, panel_bg, panel_border, text_primary, text_muted, accent))
         })
+        // F1 hold-to-peek context help overlay
+        .when(app.f1_help_visible, |div| {
+            div.child(render_f1_help_overlay(app))
+        })
+}
+
+/// Render the F1 hold-to-peek context help overlay
+fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let text_disabled = app.token(TokenKey::TextDisabled);
+    let accent = app.token(TokenKey::Accent);
+
+    // Build content based on context
+    let content = if let Some(sig_info) = app.signature_help() {
+        // In formula mode with a function: show full signature help
+        let func = sig_info.function;
+        let current_arg = sig_info.current_arg;
+
+        let params: Vec<_> = func.parameters.iter().enumerate().map(|(i, param)| {
+            let is_current = i == current_arg;
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .py(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(if is_current { accent } else { text_muted })
+                        .font_weight(if is_current { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                        .min_w(px(90.0))
+                        .child(param.name)
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(text_disabled)
+                        .child(param.description)
+                )
+        }).collect();
+
+        div()
+            .flex()
+            .flex_col()
+            // Header: function name
+            .child(
+                div()
+                    .px_3()
+                    .py(px(10.0))
+                    .border_b_1()
+                    .border_color(panel_border)
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .text_color(text_primary)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(func.name)
+                    )
+            )
+            // Signature
+            .child(
+                div()
+                    .px_3()
+                    .py(px(8.0))
+                    .text_size(px(13.0))
+                    .text_color(text_muted)
+                    .child(func.signature)
+            )
+            // Description
+            .child(
+                div()
+                    .px_3()
+                    .pb(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(text_disabled)
+                    .child(func.description)
+            )
+            // Parameters
+            .when(!func.parameters.is_empty(), |d| {
+                d.child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_t_1()
+                        .border_color(panel_border)
+                        .flex()
+                        .flex_col()
+                        .children(params)
+                )
+            })
+    } else if app.is_multi_selection() {
+        // Multi-cell selection: show range stats
+        let ((min_row, min_col), (max_row, max_col)) = app.selection_range();
+        let start_ref = app.cell_ref_at(min_row, min_col);
+        let end_ref = app.cell_ref_at(max_row, max_col);
+        let range_ref = format!("{}:{}", start_ref, end_ref);
+
+        // Calculate stats
+        let mut count = 0usize;
+        let mut numeric_count = 0usize;
+        let mut sum = 0.0f64;
+        let mut min_val: Option<f64> = None;
+        let mut max_val: Option<f64> = None;
+
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                let display = app.sheet().get_display(row, col);
+                if !display.is_empty() {
+                    count += 1;
+                    // Try to parse as number (handles both values and formula results)
+                    let clean = display.replace(',', "").replace('$', "").replace('%', "");
+                    if let Ok(num) = clean.parse::<f64>() {
+                        numeric_count += 1;
+                        sum += num;
+                        min_val = Some(min_val.map_or(num, |m| m.min(num)));
+                        max_val = Some(max_val.map_or(num, |m| m.max(num)));
+                    }
+                }
+            }
+        }
+
+        let cell_count = (max_row - min_row + 1) * (max_col - min_col + 1);
+        let average = if numeric_count > 0 { Some(sum / numeric_count as f64) } else { None };
+
+        // Helper to format numbers with thousands separators
+        let fmt_num = |n: f64| -> String {
+            let base = if n.fract() == 0.0 {
+                format!("{}", n as i64)
+            } else {
+                format!("{:.2}", n)
+            };
+            // Add thousands separators
+            let parts: Vec<&str> = base.split('.').collect();
+            let int_part = parts[0];
+            let dec_part = parts.get(1);
+            let negative = int_part.starts_with('-');
+            let digits: String = int_part.chars().filter(|c| c.is_ascii_digit()).collect();
+            let with_commas: String = digits
+                .chars()
+                .rev()
+                .enumerate()
+                .map(|(i, c)| if i > 0 && i % 3 == 0 { format!(",{}", c) } else { c.to_string() })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let result = if negative { format!("-{}", with_commas) } else { with_commas };
+            if let Some(dec) = dec_part {
+                format!("{}.{}", result, dec)
+            } else {
+                result
+            }
+        };
+
+        let mut content = div()
+            .flex()
+            .flex_col()
+            // Header: range reference
+            .child(
+                div()
+                    .px_3()
+                    .py(px(10.0))
+                    .border_b_1()
+                    .border_color(panel_border)
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .text_color(text_primary)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(range_ref)
+                    )
+            )
+            // Cell count
+            .child(
+                div()
+                    .px_3()
+                    .py(px(8.0))
+                    .border_b_1()
+                    .border_color(panel_border)
+                    .flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(text_muted)
+                            .child("Cells")
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(text_primary)
+                            .child(format!("{}", cell_count))
+                    )
+            );
+
+        // Count (non-empty)
+        if count > 0 {
+            content = content.child(
+                div()
+                    .px_3()
+                    .py(px(8.0))
+                    .border_b_1()
+                    .border_color(panel_border)
+                    .flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(text_muted)
+                            .child("Count")
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(text_primary)
+                            .child(format!("{}", count))
+                    )
+            );
+        }
+
+        // Numeric stats
+        if numeric_count > 0 {
+            content = content
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .flex()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
+                                .child("Sum")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_primary)
+                                .child(fmt_num(sum))
+                        )
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .flex()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
+                                .child("Average")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_primary)
+                                .child(fmt_num(average.unwrap()))
+                        )
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .flex()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
+                                .child("Min")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_primary)
+                                .child(fmt_num(min_val.unwrap()))
+                        )
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .flex()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
+                                .child("Max")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_primary)
+                                .child(fmt_num(max_val.unwrap()))
+                        )
+                );
+        }
+
+        content
+    } else {
+        // Single cell inspector
+        let (row, col) = app.selected;
+        let cell_ref = app.cell_ref_at(row, col);
+        let raw_value = app.sheet().get_raw(row, col);
+        let display_value = app.sheet().get_display(row, col);
+        let is_formula = raw_value.starts_with('=');
+        let format = app.sheet().get_format(row, col);
+
+        // Get dependents (always useful)
+        let dependents = inspector_panel::get_dependents(app, row, col);
+
+        // Build format badges
+        let mut format_badges: Vec<&str> = Vec::new();
+        match &format.number_format {
+            visigrid_engine::cell::NumberFormat::Number { .. } => format_badges.push("Number"),
+            visigrid_engine::cell::NumberFormat::Currency { .. } => format_badges.push("Currency"),
+            visigrid_engine::cell::NumberFormat::Percent { .. } => format_badges.push("Percent"),
+            visigrid_engine::cell::NumberFormat::Date { .. } => format_badges.push("Date"),
+            visigrid_engine::cell::NumberFormat::Time => format_badges.push("Time"),
+            visigrid_engine::cell::NumberFormat::DateTime => format_badges.push("DateTime"),
+            visigrid_engine::cell::NumberFormat::General => {}
+        }
+        if format.bold { format_badges.push("Bold"); }
+        if format.italic { format_badges.push("Italic"); }
+        if format.underline { format_badges.push("Underline"); }
+
+        // Get precedents for formulas
+        let precedents = if is_formula {
+            inspector_panel::get_precedents(&raw_value)
+        } else {
+            Vec::new()
+        };
+
+        if is_formula {
+            // Formula cell: full inspector view
+            let mut content = div()
+                .flex()
+                .flex_col()
+                // Header: "Inspector: {cell}"
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(10.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(text_muted)
+                                .child(format!("Inspector: {}", cell_ref))
+                        )
+                )
+                // Formula section
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_disabled)
+                                .child("Formula")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(text_primary)
+                                .child(raw_value)
+                        )
+                )
+                // Value section
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_disabled)
+                                .child("Value")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(text_primary)
+                                .child(if display_value.is_empty() { "(empty)".to_string() } else { display_value.clone() })
+                        )
+                );
+
+            // Precedents section (Depends on)
+            if !precedents.is_empty() {
+                let prec_cells: Vec<_> = precedents.iter().take(8).map(|(r, c)| {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(accent)
+                        .child(app.cell_ref_at(*r, *c))
+                }).collect();
+
+                content = content.child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_disabled)
+                                .mb(px(4.0))
+                                .child(format!("Depends on ({}):", precedents.len()))
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(8.0))
+                                .children(prec_cells)
+                        )
+                        .when(precedents.len() > 8, |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(text_muted)
+                                    .mt(px(4.0))
+                                    .child(format!("+ {} more", precedents.len() - 8))
+                            )
+                        })
+                );
+            }
+
+            // Dependents section (Used by)
+            if !dependents.is_empty() {
+                let dep_cells: Vec<_> = dependents.iter().take(8).map(|(r, c)| {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(accent)
+                        .child(app.cell_ref_at(*r, *c))
+                }).collect();
+
+                content = content.child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_disabled)
+                                .mb(px(4.0))
+                                .child(format!("Used by ({}):", dependents.len()))
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(8.0))
+                                .children(dep_cells)
+                        )
+                        .when(dependents.len() > 8, |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(text_muted)
+                                    .mt(px(4.0))
+                                    .child(format!("+ {} more", dependents.len() - 8))
+                            )
+                        })
+                );
+            }
+
+            // Format section (if any formatting applied)
+            if !format_badges.is_empty() {
+                let badges: Vec<_> = format_badges.iter().map(|label| {
+                    div()
+                        .px(px(8.0))
+                        .py(px(3.0))
+                        .bg(panel_border)
+                        .rounded(px(4.0))
+                        .text_size(px(11.0))
+                        .text_color(text_primary)
+                        .child(*label)
+                }).collect();
+
+                content = content.child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_disabled)
+                                .mb(px(6.0))
+                                .child("Format")
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.0))
+                                .children(badges)
+                        )
+                );
+            }
+
+            content
+        } else {
+            // Simple value cell: compact view
+            let mut content = div()
+                .flex()
+                .flex_col()
+                // Header: just cell ref
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(10.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .text_color(text_primary)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(cell_ref)
+                        )
+                )
+                // Value
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(text_primary)
+                                .child(if display_value.is_empty() { "(empty)".to_string() } else { display_value })
+                        )
+                );
+
+            // Used by section
+            if !dependents.is_empty() {
+                let dep_cells: Vec<_> = dependents.iter().take(8).map(|(r, c)| {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(accent)
+                        .child(app.cell_ref_at(*r, *c))
+                }).collect();
+
+                content = content.child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_t_1()
+                        .border_color(panel_border)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_disabled)
+                                .mb(px(4.0))
+                                .child(format!("Used by ({}):", dependents.len()))
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(8.0))
+                                .children(dep_cells)
+                        )
+                        .when(dependents.len() > 8, |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(text_muted)
+                                    .mt(px(4.0))
+                                    .child(format!("+ {} more", dependents.len() - 8))
+                            )
+                        })
+                );
+            }
+
+            content
+        }
+    };
+
+    // Position overlay near the selection
+    // Calculate position based on selection and scroll
+    let ((min_row, min_col), (max_row, max_col)) = app.selection_range();
+
+    // Calculate pixel position of selection end (bottom-right of selection)
+    // Account for: header width, scroll position, cell dimensions
+    let header_w = app.metrics.header_w;
+    let header_h = app.metrics.header_h;
+    let cell_w = app.metrics.cell_w;
+    let cell_h = app.metrics.cell_h;
+
+    // Menu bar + formula bar height (approximate)
+    let top_offset = 24.0 + 32.0 + header_h; // menu + formula bar + column headers
+
+    // X position: right edge of selection, offset from scroll
+    let col_offset = (max_col as f32 - app.scroll_col as f32 + 1.0) * cell_w;
+    let overlay_x = header_w + col_offset + 8.0; // 8px gap from selection
+
+    // Y position: below the selection
+    let row_offset = (max_row as f32 - app.scroll_row as f32 + 1.0) * cell_h;
+    let overlay_y = top_offset + row_offset + 4.0; // 4px gap below selection
+
+    // Clamp to reasonable bounds (don't go off screen)
+    let overlay_x = overlay_x.max(header_w + 20.0);
+    let overlay_y = overlay_y.max(top_offset + 20.0);
+
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .absolute()
+                .left(px(overlay_x))
+                .top(px(overlay_y))
+                .w(px(240.0))
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .rounded_md()
+                .shadow_lg()
+                .overflow_hidden()
+                .child(content)
+        )
 }
 
 /// Render the rename symbol dialog (Ctrl+Shift+R)
