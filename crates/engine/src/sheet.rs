@@ -5,15 +5,154 @@ use serde::{Deserialize, Serialize};
 
 use super::cell::{Alignment, Cell, CellFormat, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment};
 use super::formula::eval::{self, Array2D, CellLookup, EvalResult, LookupWithContext, Value};
+use super::formula::parser::bind_expr_same_sheet;
 
 // Thread-local set to track cells currently being evaluated (for cycle detection)
 thread_local! {
     static EVALUATING: RefCell<HashSet<(usize, usize)>> = RefCell::new(HashSet::new());
 }
 
+// =============================================================================
+// SheetId - Stable identity for sheets (never changes, never reused)
+// =============================================================================
+
+/// A stable, unique identifier for a sheet.
+///
+/// SheetId is distinct from sheet index (position in the tab bar):
+/// - SheetId: Identity - never changes for a sheet's lifetime, never reused after deletion
+/// - Index: Position - changes when sheets are reordered, inserted, or deleted
+///
+/// Use SheetId for:
+/// - Cross-sheet formula references
+/// - Dependency tracking
+/// - Named range targets
+///
+/// Use index for:
+/// - UI tab order
+/// - Active sheet selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SheetId(pub u64);
+
+impl SheetId {
+    /// Create a new SheetId from a raw value (used during deserialization)
+    pub fn from_raw(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// Get the raw u64 value (used during serialization)
+    pub fn raw(&self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for SheetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SheetId({})", self.0)
+    }
+}
+
+// =============================================================================
+// SheetRef - Sheet reference in formulas (resolved form)
+// =============================================================================
+
+/// A resolved sheet reference in a formula.
+///
+/// This is the form stored in the AST after binding/resolution.
+/// Parser produces `UnboundSheetRef`, which is then resolved to `SheetRef`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SheetRef {
+    /// Reference to the current/local sheet (no sheet prefix in formula)
+    Current,
+    /// Reference to a specific sheet by its stable ID
+    Id(SheetId),
+    /// Reference to a deleted sheet - shows as #REF! during evaluation
+    RefError {
+        /// The ID of the deleted sheet (for debugging/logging)
+        id: SheetId,
+        /// The sheet name at the time of deletion (for display)
+        last_known_name: String,
+    },
+}
+
+impl SheetRef {
+    /// Check if this is a reference error (deleted sheet)
+    pub fn is_error(&self) -> bool {
+        matches!(self, SheetRef::RefError { .. })
+    }
+
+    /// Get the SheetId if this is a valid reference
+    pub fn sheet_id(&self) -> Option<SheetId> {
+        match self {
+            SheetRef::Id(id) => Some(*id),
+            _ => None,
+        }
+    }
+}
+
+// =============================================================================
+// UnboundSheetRef - Sheet reference before resolution
+// =============================================================================
+
+/// An unresolved sheet reference from the parser.
+///
+/// Parser produces this form; it must be resolved to `SheetRef` before evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnboundSheetRef {
+    /// Reference to the current/local sheet (no sheet prefix in formula)
+    Current,
+    /// Reference to a sheet by name (needs resolution to SheetId)
+    Named(String),
+}
+
+impl UnboundSheetRef {
+    /// Create a reference to the current sheet
+    pub fn current() -> Self {
+        UnboundSheetRef::Current
+    }
+
+    /// Create a reference to a named sheet
+    pub fn named(name: impl Into<String>) -> Self {
+        UnboundSheetRef::Named(name.into())
+    }
+}
+
+// =============================================================================
+// Sheet Name Normalization
+// =============================================================================
+
+/// Normalize a sheet name for case-insensitive comparison.
+///
+/// Rules:
+/// - Trim leading/trailing whitespace
+/// - Convert to ASCII lowercase (MVP: ASCII only, documented limitation)
+///
+/// Future: Could use Unicode casefold for full international support.
+pub fn normalize_sheet_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
+}
+
+/// Check if a sheet name is valid.
+///
+/// Rules:
+/// - Cannot be empty after trimming
+/// - (Future: could add more restrictions)
+pub fn is_valid_sheet_name(name: &str) -> bool {
+    !name.trim().is_empty()
+}
+
+// =============================================================================
+// Sheet
+// =============================================================================
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sheet {
+    /// Stable identity - never changes, never reused after deletion
+    pub id: SheetId,
+    /// Display name (can be changed via rename)
     pub name: String,
+    /// Normalized name for case-insensitive lookup (trimmed + lowercased)
+    #[serde(default)]
+    pub name_key: String,
     cells: HashMap<(usize, usize), Cell>,
     pub rows: usize,
     pub cols: usize,
@@ -75,7 +214,8 @@ impl CellLookup for Sheet {
                     // Track that we're evaluating this cell
                     EVALUATING.with(|eval| eval.borrow_mut().insert((row, col)));
                     let lookup = LookupWithContext::new(self, row, col);
-                    let result = eval::evaluate(ast, &lookup).to_text();
+                    let bound_ast = bind_expr_same_sheet(ast);
+                    let result = eval::evaluate(&bound_ast, &lookup).to_text();
                     EVALUATING.with(|eval| eval.borrow_mut().remove(&(row, col)));
                     result
                 }
@@ -87,14 +227,41 @@ impl CellLookup for Sheet {
 }
 
 impl Sheet {
-    pub fn new(rows: usize, cols: usize) -> Self {
+    /// Create a new sheet with the given dimensions and a unique ID
+    pub fn new(id: SheetId, rows: usize, cols: usize) -> Self {
+        let name = String::from("Sheet1");
+        let name_key = normalize_sheet_name(&name);
         Self {
-            name: String::from("Sheet1"),
+            id,
+            name,
+            name_key,
             cells: HashMap::new(),
             rows,
             cols,
             spill_values: HashMap::new(),
         }
+    }
+
+    /// Create a new sheet with the given dimensions, ID, and name
+    pub fn new_with_name(id: SheetId, rows: usize, cols: usize, name: &str) -> Self {
+        let name = name.trim().to_string();
+        let name_key = normalize_sheet_name(&name);
+        Self {
+            id,
+            name,
+            name_key,
+            cells: HashMap::new(),
+            rows,
+            cols,
+            spill_values: HashMap::new(),
+        }
+    }
+
+    /// Update the sheet name (also updates name_key)
+    pub fn set_name(&mut self, name: &str) {
+        let trimmed = name.trim();
+        self.name = trimmed.to_string();
+        self.name_key = normalize_sheet_name(trimmed);
     }
 
     pub fn set_value(&mut self, row: usize, col: usize, value: &str) {
@@ -121,7 +288,8 @@ impl Sheet {
 
         // Evaluate the formula with current cell context for ROW()/COLUMN()
         let lookup = LookupWithContext::new(self, row, col);
-        let result = eval::evaluate(&ast, &lookup);
+        let bound_ast = bind_expr_same_sheet(&ast);
+        let result = eval::evaluate(&bound_ast, &lookup);
 
         // If it's an array, try to apply spill
         if let EvalResult::Array(array) = result {
@@ -363,7 +531,8 @@ impl Sheet {
                     CellValue::Number(n) => EvalResult::Number(*n),
                     CellValue::Formula { ast: Some(ast), .. } => {
                         let lookup = LookupWithContext::new(self, row, col);
-                        eval::evaluate(ast, &lookup)
+                        let bound_ast = bind_expr_same_sheet(ast);
+                        eval::evaluate(&bound_ast, &lookup)
                     }
                     CellValue::Text(s) => EvalResult::Text(s.clone()),
                     CellValue::Empty => return String::new(),
@@ -413,7 +582,8 @@ impl Sheet {
             CellValue::Text(s) => s.parse().unwrap_or(0.0),
             CellValue::Formula { ast: Some(ast), .. } => {
                 let lookup = LookupWithContext::new(self, row, col);
-                match eval::evaluate(ast, &lookup) {
+                let bound_ast = bind_expr_same_sheet(ast);
+                match eval::evaluate(&bound_ast, &lookup) {
                     EvalResult::Number(n) => n,
                     EvalResult::Boolean(b) => if b { 1.0 } else { 0.0 },
                     EvalResult::Text(s) => s.parse().unwrap_or(0.0),
@@ -438,7 +608,8 @@ impl Sheet {
             }
             CellValue::Formula { ast: Some(ast), .. } => {
                 let lookup = LookupWithContext::new(self, row, col);
-                match eval::evaluate(ast, &lookup) {
+                let bound_ast = bind_expr_same_sheet(ast);
+                match eval::evaluate(&bound_ast, &lookup) {
                     EvalResult::Number(n) => {
                         if n.fract() == 0.0 {
                             format!("{}", n as i64)
@@ -667,7 +838,7 @@ mod tests {
 
     #[test]
     fn test_set_text_overflow() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Default should be Clip
         let format = sheet.get_format(0, 0);
@@ -686,7 +857,7 @@ mod tests {
 
     #[test]
     fn test_set_vertical_alignment() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Default should be Middle
         let format = sheet.get_format(0, 0);
@@ -705,7 +876,7 @@ mod tests {
 
     #[test]
     fn test_format_persists_with_value() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set format first
         sheet.set_text_overflow(0, 0, TextOverflow::Wrap);
@@ -723,7 +894,7 @@ mod tests {
     #[test]
     fn test_spill_stops_at_nonempty_cell() {
         // This tests the data model aspect - the renderer logic is tested elsewhere
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Cell A1 has long text with Spill mode
         sheet.set_value(0, 0, "This is a very long text that should spill");
@@ -740,7 +911,7 @@ mod tests {
 
     #[test]
     fn test_spill_stops_at_formatted_cell() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Cell A1 has Spill mode
         sheet.set_value(0, 0, "Long text here");
@@ -757,7 +928,7 @@ mod tests {
 
     #[test]
     fn test_format_painter_copy_paste() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up source cell with complex formatting
         sheet.set_value(0, 0, "Source");
@@ -802,7 +973,7 @@ mod tests {
 
     #[test]
     fn test_format_painter_large_selection() {
-        let mut sheet = Sheet::new(100, 100);
+        let mut sheet = Sheet::new(SheetId(1), 100, 100);
 
         // Set up source format
         sheet.toggle_bold(0, 0);
@@ -825,7 +996,7 @@ mod tests {
 
     #[test]
     fn test_sequence_spill() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Enter SEQUENCE formula that should create a 3x2 array
         sheet.set_value(0, 0, "=SEQUENCE(3,2)");
@@ -858,7 +1029,7 @@ mod tests {
 
     #[test]
     fn test_sequence_with_start_and_step() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // SEQUENCE(3, 1, 10, 5) should produce: 10, 15, 20
         sheet.set_value(0, 0, "=SEQUENCE(3,1,10,5)");
@@ -870,7 +1041,7 @@ mod tests {
 
     #[test]
     fn test_spill_collision_shows_error() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Put a value in the way of where spill would go
         sheet.set_value(1, 0, "blocker");
@@ -888,7 +1059,7 @@ mod tests {
 
     #[test]
     fn test_spill_cleared_when_formula_changes() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Enter SEQUENCE that spills
         sheet.set_value(0, 0, "=SEQUENCE(3,2)");
@@ -912,7 +1083,7 @@ mod tests {
 
     #[test]
     fn test_transpose_spill() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up a column of values
         sheet.set_value(0, 0, "1");
@@ -930,7 +1101,7 @@ mod tests {
 
     #[test]
     fn test_reference_to_spill_receiver() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Create a SEQUENCE that spills to multiple cells
         // A1: =SEQUENCE(3,1) produces 1, 2, 3 in A1:A3
@@ -957,7 +1128,7 @@ mod tests {
 
     #[test]
     fn test_spill_receiver_in_range_functions() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Create sequence in A1:A5
         sheet.set_value(0, 0, "=SEQUENCE(5,1,10,10)"); // 10, 20, 30, 40, 50
@@ -980,7 +1151,7 @@ mod tests {
 
     #[test]
     fn test_sort_numeric_ascending() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up data: unsorted numbers in A1:A5
         sheet.set_value(0, 0, "30");
@@ -1002,7 +1173,7 @@ mod tests {
 
     #[test]
     fn test_sort_numeric_descending() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up data: unsorted numbers in A1:A5
         sheet.set_value(0, 0, "30");
@@ -1024,7 +1195,7 @@ mod tests {
 
     #[test]
     fn test_sort_multi_column_by_second_column() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up 2-column data
         // A1:B3: (Alice, 30), (Bob, 10), (Charlie, 20)
@@ -1046,7 +1217,7 @@ mod tests {
 
     #[test]
     fn test_sort_text_alphabetical() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up text data
         sheet.set_value(0, 0, "Banana");
@@ -1064,7 +1235,7 @@ mod tests {
 
     #[test]
     fn test_unique_single_column() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up data with duplicates
         sheet.set_value(0, 0, "Apple");
@@ -1085,7 +1256,7 @@ mod tests {
 
     #[test]
     fn test_unique_multi_column() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up 2-column data with duplicate rows
         sheet.set_value(0, 0, "Alice");   sheet.set_value(0, 1, "30");
@@ -1108,7 +1279,7 @@ mod tests {
 
     #[test]
     fn test_unique_case_insensitive() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up data with case differences
         sheet.set_value(0, 0, "Apple");
@@ -1126,7 +1297,7 @@ mod tests {
 
     #[test]
     fn test_unique_numeric() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up numeric data with duplicates
         sheet.set_value(0, 0, "10");
@@ -1144,7 +1315,7 @@ mod tests {
 
     #[test]
     fn test_filter_basic() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up data: names in A, scores in B, pass/fail in C (1=pass, 0=fail)
         sheet.set_value(0, 0, "Alice");   sheet.set_value(0, 1, "85"); sheet.set_value(0, 2, "1");
@@ -1166,7 +1337,7 @@ mod tests {
 
     #[test]
     fn test_filter_no_matches() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up data where all fail filter
         sheet.set_value(0, 0, "Apple");  sheet.set_value(0, 1, "0");
@@ -1181,7 +1352,7 @@ mod tests {
 
     #[test]
     fn test_filter_single_column() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Set up single column with filter criteria
         sheet.set_value(0, 0, "10"); sheet.set_value(0, 1, "1");
@@ -1200,7 +1371,7 @@ mod tests {
 
     #[test]
     fn test_filter_combined_with_sort() {
-        let mut sheet = Sheet::new(15, 15);
+        let mut sheet = Sheet::new(SheetId(1), 15, 15);
 
         // Set up data
         sheet.set_value(0, 0, "Alice");   sheet.set_value(0, 1, "85"); sheet.set_value(0, 2, "1");
@@ -1223,7 +1394,7 @@ mod tests {
     fn test_filter_include_semantics() {
         // Lock behavior: FILTER treats non-zero as TRUE, zero as FALSE
         // Text is NOT coerced - it evaluates to 0.0 (FALSE)
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Test with various include values
         sheet.set_value(0, 0, "A"); sheet.set_value(0, 1, "1");      // 1 = TRUE
@@ -1243,7 +1414,7 @@ mod tests {
     #[test]
     fn test_spill_shrinks_clears_old_receivers() {
         // When a spill range shrinks, old receivers outside the new range must be cleared
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // Create a 5-row spill
         sheet.set_value(0, 0, "=SEQUENCE(5,1)");
@@ -1273,7 +1444,7 @@ mod tests {
 
     #[test]
     fn test_row_column_without_arguments() {
-        let mut sheet = Sheet::new(10, 10);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
 
         // ROW() without argument should return the current row (1-indexed)
         sheet.set_value(0, 0, "=ROW()");      // A1 -> 1

@@ -23,7 +23,7 @@ use super::parser::Expr;
 /// tally_unknown_functions(&ast, &mut counts);
 /// // counts now contains {"XLOOKUP": 2, "TEXTJOIN": 1}
 /// ```
-pub fn tally_unknown_functions(expr: &Expr, counts: &mut HashMap<String, usize>) {
+pub fn tally_unknown_functions<S>(expr: &Expr<S>, counts: &mut HashMap<String, usize>) {
     walk_expr(expr, &mut |name| {
         if !is_known_function(name) {
             *counts.entry(name.to_string()).or_insert(0) += 1;
@@ -32,7 +32,7 @@ pub fn tally_unknown_functions(expr: &Expr, counts: &mut HashMap<String, usize>)
 }
 
 /// Walk the AST and call the visitor for each function name encountered.
-fn walk_expr<F: FnMut(&str)>(expr: &Expr, visitor: &mut F) {
+fn walk_expr<S, F: FnMut(&str)>(expr: &Expr<S>, visitor: &mut F) {
     match expr {
         Expr::Function { name, args } => {
             // Visit this function
@@ -60,7 +60,7 @@ fn walk_expr<F: FnMut(&str)>(expr: &Expr, visitor: &mut F) {
 ///
 /// Returns true if at least one function in the AST is not known.
 /// More efficient than tally_unknown_functions when you only need a boolean.
-pub fn has_unknown_functions(expr: &Expr) -> bool {
+pub fn has_unknown_functions<S>(expr: &Expr<S>) -> bool {
     let mut found = false;
     walk_expr(expr, &mut |name| {
         if !found && !is_known_function(name) {
@@ -73,7 +73,7 @@ pub fn has_unknown_functions(expr: &Expr) -> bool {
 /// Collect all function names used in a formula (known and unknown).
 ///
 /// Useful for debugging or displaying formula dependencies.
-pub fn collect_function_names(expr: &Expr) -> Vec<String> {
+pub fn collect_function_names<S>(expr: &Expr<S>) -> Vec<String> {
     let mut names = Vec::new();
     walk_expr(expr, &mut |name| {
         if !names.contains(&name.to_string()) {

@@ -13,7 +13,7 @@ use rust_xlsxwriter::{Format, FormatAlign, FormatUnderline, Workbook as XlsxWork
 use visigrid_engine::cell::{Alignment, CellFormat, CellValue, DateStyle, NumberFormat, VerticalAlignment};
 use visigrid_engine::formula::analyze::tally_unknown_functions;
 use visigrid_engine::formula::parser::parse as parse_formula;
-use visigrid_engine::sheet::Sheet;
+use visigrid_engine::sheet::{Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
 
 /// Per-sheet import statistics
@@ -134,6 +134,7 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
 
     let mut total_cells = 0;
     let mut hit_cell_limit = false;
+    let mut next_sheet_id: u64 = 1;
 
     for sheet_name in &sheet_names {
         let range = workbook.worksheet_range(sheet_name)
@@ -148,8 +149,8 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
 
         // Skip empty sheets but still create them
         if height == 0 || width == 0 {
-            let mut sheet = Sheet::new(MAX_ROWS, MAX_COLS);
-            sheet.name = sheet_name.clone();
+            let sheet = Sheet::new_with_name(SheetId(next_sheet_id), MAX_ROWS, MAX_COLS, sheet_name);
+            next_sheet_id += 1;
             sheets.push(sheet);
             result.sheets_imported += 1;
             result.sheet_stats.push(stats);
@@ -170,8 +171,8 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
             ));
         }
 
-        let mut sheet = Sheet::new(MAX_ROWS, MAX_COLS);
-        sheet.name = sheet_name.clone();
+        let mut sheet = Sheet::new_with_name(SheetId(next_sheet_id), MAX_ROWS, MAX_COLS, sheet_name);
+        next_sheet_id += 1;
 
         for (row_idx, row) in range.rows().enumerate() {
             if row_idx >= effective_rows {

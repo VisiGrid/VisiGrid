@@ -203,8 +203,17 @@ fn render_view_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, bo
         .child(menu_separator(border))
         .child(menu_item("Inspector", Some("Ctrl+Shift+I"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.inspector_visible = !this.inspector_visible; cx.notify(); }))
         .child(menu_separator(border))
+        .child(menu_item("Zoom In", Some("Ctrl+Shift+="), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.zoom_in(cx); }))
+        .child(menu_item("Zoom Out", Some("Ctrl+Shift+-"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.zoom_out(cx); }))
+        .child(menu_item("Reset Zoom", Some("Ctrl+0"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.zoom_reset(cx); }))
+        .child(menu_separator(border))
         .child(menu_item("Show Formulas", Some("Ctrl+`"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.toggle_show_formulas(cx); }))
         .child(menu_item("Show Zeros", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.toggle_show_zeros(cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Freeze Top Row", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.freeze_top_row(cx); }))
+        .child(menu_item("Freeze First Column", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.freeze_first_column(cx); }))
+        .child(menu_item("Freeze Panes", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.freeze_panes(cx); }))
+        .child(menu_item("Unfreeze Panes", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.unfreeze_panes(cx); }))
 }
 
 fn render_insert_menu(text_disabled: Hsla, border: Hsla) -> Div {

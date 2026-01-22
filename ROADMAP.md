@@ -24,11 +24,17 @@ What's built, what's next, and what's not planned.
 - Keyboard-driven navigation (arrows, Ctrl+arrows, Home/End, Page Up/Down)
 - Command palette (Ctrl+Shift+P) with fuzzy search (prefixes: `>` commands, `@` cells, `$` named ranges, `:` goto)
 - Go To dialog (Ctrl+G)
-- Find with incremental search (Ctrl+F)
+- Find and Replace (Ctrl+F / Ctrl+H)
+  - Incremental search in text and formula cells
+  - One dialog, two modes (Ctrl+F/H toggles while open)
+  - Token-aware formula replacement (preserves cell references)
+  - Replace Next (Enter), Replace All (Ctrl+Enter)
+  - Single undo point for Replace All
 - Keyboard hints (press `g` for Vimium-style jumping)
 - Vim mode (hjkl navigation, optional)
 - Session restore (files, scroll position, selection, panels)
 - Zen mode (F11)
+- Freeze panes (View menu or command palette)
 
 ### File Formats
 - Native `.sheet` format (SQLite-based, preserves everything)
@@ -40,10 +46,12 @@ What's built, what's next, and what's not planned.
   - Large numbers (16+ digits) as text to preserve precision
   - Export Report dialog shows exactly what changed
 
-### Formula Engine (97 functions)
+### Formula Engine (104 functions)
 - Math, logical, text, lookup, date/time, statistical, array
 - Dynamic arrays with spill behavior
-- SUMIFS, COUNTIFS, XLOOKUP, FILTER, SORT, UNIQUE
+- SUMIF/SUMIFS, COUNTIF/COUNTIFS, AVERAGEIF/AVERAGEIFS
+- XLOOKUP, FILTER, SORT, UNIQUE
+- Financial: PMT, FV, PV, NPV, IRR
 - Autocomplete with signature help
 - Syntax highlighting and error validation
 - Context help (F1)
@@ -90,9 +98,7 @@ What's built, what's next, and what's not planned.
 
 ## In Progress
 
-### Formula Coverage
-- AVERAGEIF, AVERAGEIFS
-- Financial: PMT, FV, PV, NPV, IRR
+*No major features currently in progress.*
 
 ---
 
@@ -100,7 +106,6 @@ What's built, what's next, and what's not planned.
 
 ### Near-term
 - Paste Special (values, formulas, transpose, operations)
-- Freeze panes (lock rows/columns while scrolling)
 - Fill Handle (drag corner to extend selection)
   - Copy values and formulas with reference adjustment
   - Double-click to auto-fill to last adjacent row
@@ -110,7 +115,6 @@ What's built, what's next, and what's not planned.
   - Months: Jan, Feb → Mar, Apr...
   - Weekdays: Mon, Tue → Wed, Thu...
   - Custom step sizes
-- Find and replace (Ctrl+H)
 - Cross-sheet references (=Sheet2!A1)
 - Zoom (Ctrl++/-)
 - Data validation (dropdowns, constraints)

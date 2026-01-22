@@ -1,14 +1,27 @@
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
-use crate::sheet::Sheet;
+use crate::sheet::{Sheet, SheetId, normalize_sheet_name, is_valid_sheet_name};
 use crate::named_range::{NamedRange, NamedRangeStore};
+use crate::formula::eval::{CellLookup, NamedRangeResolution, Value};
 
 /// A workbook containing multiple sheets
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workbook {
     sheets: Vec<Sheet>,
     active_sheet: usize,
+    /// Next ID to assign to a new sheet. Monotonically increasing, never reused.
+    #[serde(default = "default_next_sheet_id")]
+    next_sheet_id: u64,
     #[serde(default)]
     named_ranges: NamedRangeStore,
+    /// Tracks which cells reference each sheet (for efficient deletion patching)
+    /// Key: sheet being referenced, Value: set of (source_sheet_id, row, col)
+    #[serde(skip)]
+    sheet_referrers: std::collections::HashMap<SheetId, HashSet<(SheetId, usize, usize)>>,
+}
+
+fn default_next_sheet_id() -> u64 {
+    1
 }
 
 impl Default for Workbook {
@@ -20,13 +33,31 @@ impl Default for Workbook {
 impl Workbook {
     /// Create a new workbook with one default sheet
     pub fn new() -> Self {
-        let mut sheet = Sheet::new(65536, 256);
-        sheet.name = "Sheet1".to_string();
+        let sheet = Sheet::new(SheetId(1), 65536, 256);
         Self {
             sheets: vec![sheet],
             active_sheet: 0,
+            next_sheet_id: 2, // Next ID will be 2
             named_ranges: NamedRangeStore::new(),
+            sheet_referrers: std::collections::HashMap::new(),
         }
+    }
+
+    /// Generate a new unique SheetId (monotonically increasing, never reused)
+    fn generate_sheet_id(&mut self) -> SheetId {
+        let id = SheetId(self.next_sheet_id);
+        self.next_sheet_id += 1;
+        id
+    }
+
+    /// Get the next_sheet_id value (for persistence)
+    pub fn next_sheet_id(&self) -> u64 {
+        self.next_sheet_id
+    }
+
+    /// Set the next_sheet_id value (for loading from persistence)
+    pub fn set_next_sheet_id(&mut self, id: u64) {
+        self.next_sheet_id = id;
     }
 
     /// Get the number of sheets
@@ -79,26 +110,46 @@ impl Workbook {
         let sheet_num = self.sheets.len() + 1;
         let mut new_name = format!("Sheet{}", sheet_num);
 
-        // Ensure unique name
-        while self.sheets.iter().any(|s| s.name == new_name) {
+        // Ensure unique name (case-insensitive)
+        while self.sheet_name_exists(&new_name) {
             let num: usize = new_name.strip_prefix("Sheet")
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(sheet_num);
             new_name = format!("Sheet{}", num + 1);
         }
 
-        let mut sheet = Sheet::new(65536, 256);
-        sheet.name = new_name;
+        let id = self.generate_sheet_id();
+        let sheet = Sheet::new_with_name(id, 65536, 256, &new_name);
         self.sheets.push(sheet);
         self.sheets.len() - 1
     }
 
     /// Add a new sheet with a specific name
-    pub fn add_sheet_named(&mut self, name: &str) -> usize {
-        let mut sheet = Sheet::new(65536, 256);
-        sheet.name = name.to_string();
+    /// Returns None if name is invalid or already exists
+    pub fn add_sheet_named(&mut self, name: &str) -> Option<usize> {
+        if !is_valid_sheet_name(name) {
+            return None;
+        }
+        if self.sheet_name_exists(name) {
+            return None;
+        }
+        let id = self.generate_sheet_id();
+        let sheet = Sheet::new_with_name(id, 65536, 256, name);
         self.sheets.push(sheet);
-        self.sheets.len() - 1
+        Some(self.sheets.len() - 1)
+    }
+
+    /// Check if a sheet name already exists (case-insensitive)
+    pub fn sheet_name_exists(&self, name: &str) -> bool {
+        let key = normalize_sheet_name(name);
+        self.sheets.iter().any(|s| s.name_key == key)
+    }
+
+    /// Check if a sheet name is available for a given sheet (for rename)
+    /// Returns true if the name is not used by any other sheet
+    pub fn is_name_available(&self, name: &str, exclude_id: SheetId) -> bool {
+        let key = normalize_sheet_name(name);
+        !self.sheets.iter().any(|s| s.id != exclude_id && s.name_key == key)
     }
 
     /// Delete a sheet by index
@@ -120,14 +171,67 @@ impl Workbook {
         true
     }
 
-    /// Rename a sheet
+    /// Rename a sheet by index
+    /// Returns false if:
+    /// - Index is invalid
+    /// - Name is invalid (empty after trim)
+    /// - Name is already used by another sheet (case-insensitive)
     pub fn rename_sheet(&mut self, index: usize, new_name: &str) -> bool {
-        if let Some(sheet) = self.sheets.get_mut(index) {
-            sheet.name = new_name.to_string();
-            true
-        } else {
-            false
+        if !is_valid_sheet_name(new_name) {
+            return false;
         }
+        if let Some(sheet) = self.sheets.get(index) {
+            let sheet_id = sheet.id;
+            if !self.is_name_available(new_name, sheet_id) {
+                return false;
+            }
+            // Now safe to mutate
+            if let Some(sheet) = self.sheets.get_mut(index) {
+                sheet.set_name(new_name);
+                return true;
+            }
+        }
+        false
+    }
+
+    // =========================================================================
+    // Sheet ID-based Access
+    // =========================================================================
+
+    /// Get a sheet's index by its ID
+    pub fn idx_for_sheet_id(&self, id: SheetId) -> Option<usize> {
+        self.sheets.iter().position(|s| s.id == id)
+    }
+
+    /// Get the SheetId at a given index
+    pub fn sheet_id_at_idx(&self, idx: usize) -> Option<SheetId> {
+        self.sheets.get(idx).map(|s| s.id)
+    }
+
+    /// Get a reference to a sheet by its ID
+    pub fn sheet_by_id(&self, id: SheetId) -> Option<&Sheet> {
+        self.sheets.iter().find(|s| s.id == id)
+    }
+
+    /// Get a mutable reference to a sheet by its ID
+    pub fn sheet_by_id_mut(&mut self, id: SheetId) -> Option<&mut Sheet> {
+        self.sheets.iter_mut().find(|s| s.id == id)
+    }
+
+    /// Find a sheet by name (case-insensitive)
+    pub fn sheet_by_name(&self, name: &str) -> Option<&Sheet> {
+        let key = normalize_sheet_name(name);
+        self.sheets.iter().find(|s| s.name_key == key)
+    }
+
+    /// Get the SheetId for a sheet by name (case-insensitive)
+    pub fn sheet_id_by_name(&self, name: &str) -> Option<SheetId> {
+        self.sheet_by_name(name).map(|s| s.id)
+    }
+
+    /// Get the active sheet's ID
+    pub fn active_sheet_id(&self) -> SheetId {
+        self.sheets[self.active_sheet].id
     }
 
     /// Move to the next sheet
@@ -156,12 +260,29 @@ impl Workbook {
     }
 
     /// Create a workbook from sheets (for deserialization)
+    /// Note: next_sheet_id should be set separately via set_next_sheet_id if loading from file
     pub fn from_sheets(sheets: Vec<Sheet>, active: usize) -> Self {
+        let active_sheet = active.min(sheets.len().saturating_sub(1));
+        // Calculate next_sheet_id as max existing id + 1
+        let max_id = sheets.iter().map(|s| s.id.raw()).max().unwrap_or(0);
+        Self {
+            sheets,
+            active_sheet,
+            next_sheet_id: max_id + 1,
+            named_ranges: NamedRangeStore::new(),
+            sheet_referrers: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Create a workbook from sheets with explicit next_sheet_id (for full deserialization)
+    pub fn from_sheets_with_meta(sheets: Vec<Sheet>, active: usize, next_sheet_id: u64) -> Self {
         let active_sheet = active.min(sheets.len().saturating_sub(1));
         Self {
             sheets,
             active_sheet,
+            next_sheet_id,
             named_ranges: NamedRangeStore::new(),
+            sheet_referrers: std::collections::HashMap::new(),
         }
     }
 
@@ -229,6 +350,193 @@ impl Workbook {
     pub fn list_named_ranges(&self) -> Vec<&NamedRange> {
         self.named_ranges.list()
     }
+
+    // =========================================================================
+    // Cross-Sheet Cell Evaluation
+    // =========================================================================
+
+    /// Get the display value of a cell, with full cross-sheet reference support.
+    /// This should be used instead of sheet.get_display() when cross-sheet refs are possible.
+    pub fn get_cell_display(&self, sheet_idx: usize, row: usize, col: usize) -> String {
+        use crate::cell::CellValue;
+        use crate::formula::parser::bind_expr;
+        use crate::formula::eval::{evaluate, EvalResult};
+
+        let sheet = match self.sheets.get(sheet_idx) {
+            Some(s) => s,
+            None => return String::new(),
+        };
+
+        let cell = sheet.get_cell(row, col);
+
+        match &cell.value {
+            CellValue::Empty => String::new(),
+            CellValue::Text(s) => s.clone(),
+            CellValue::Number(n) => {
+                CellValue::format_number(*n, &cell.format.number_format)
+            }
+            CellValue::Formula { ast: Some(ast), .. } => {
+                // Bind with workbook context for cross-sheet refs
+                let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
+                let sheet_id = sheet.id;
+                let lookup = WorkbookLookup::with_cell_context(self, sheet_id, row, col);
+                let result = evaluate(&bound, &lookup);
+
+                match result {
+                    EvalResult::Number(n) => CellValue::format_number(n, &cell.format.number_format),
+                    EvalResult::Text(s) => s,
+                    EvalResult::Boolean(b) => if b { "TRUE".to_string() } else { "FALSE".to_string() },
+                    EvalResult::Error(e) => e,
+                    EvalResult::Array(arr) => arr.top_left().to_text(),
+                }
+            }
+            CellValue::Formula { ast: None, .. } => "#ERR".to_string(),
+        }
+    }
+
+    /// Get the text value of a cell, with full cross-sheet reference support.
+    pub fn get_cell_text(&self, sheet_idx: usize, row: usize, col: usize) -> String {
+        use crate::cell::CellValue;
+        use crate::formula::parser::bind_expr;
+        use crate::formula::eval::evaluate;
+
+        let sheet = match self.sheets.get(sheet_idx) {
+            Some(s) => s,
+            None => return String::new(),
+        };
+
+        let cell = sheet.get_cell(row, col);
+
+        match &cell.value {
+            CellValue::Empty => String::new(),
+            CellValue::Text(s) => s.clone(),
+            CellValue::Number(n) => {
+                if n.fract() == 0.0 {
+                    format!("{}", *n as i64)
+                } else {
+                    format!("{}", n)
+                }
+            }
+            CellValue::Formula { ast: Some(ast), .. } => {
+                let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
+                let sheet_id = sheet.id;
+                let lookup = WorkbookLookup::with_cell_context(self, sheet_id, row, col);
+                evaluate(&bound, &lookup).to_text()
+            }
+            CellValue::Formula { ast: None, .. } => String::new(),
+        }
+    }
+}
+
+// =============================================================================
+// WorkbookLookup - CellLookup implementation with cross-sheet support
+// =============================================================================
+
+/// A CellLookup implementation that supports cross-sheet references.
+///
+/// This wraps a Workbook reference and provides data access for formula evaluation.
+/// Same-sheet lookups (get_value, get_text) access the current sheet.
+/// Cross-sheet lookups (get_value_sheet, get_text_sheet) access any sheet by ID.
+pub struct WorkbookLookup<'a> {
+    workbook: &'a Workbook,
+    current_sheet_id: SheetId,
+    current_cell: Option<(usize, usize)>,
+}
+
+impl<'a> WorkbookLookup<'a> {
+    /// Create a new WorkbookLookup for the given sheet
+    pub fn new(workbook: &'a Workbook, current_sheet_id: SheetId) -> Self {
+        Self {
+            workbook,
+            current_sheet_id,
+            current_cell: None,
+        }
+    }
+
+    /// Create a new WorkbookLookup with cell context (for ROW()/COLUMN() without args)
+    pub fn with_cell_context(workbook: &'a Workbook, current_sheet_id: SheetId, row: usize, col: usize) -> Self {
+        Self {
+            workbook,
+            current_sheet_id,
+            current_cell: Some((row, col)),
+        }
+    }
+
+    /// Get the current sheet
+    fn current_sheet(&self) -> Option<&Sheet> {
+        self.workbook.sheet_by_id(self.current_sheet_id)
+    }
+}
+
+impl<'a> CellLookup for WorkbookLookup<'a> {
+    fn get_value(&self, row: usize, col: usize) -> f64 {
+        self.current_sheet()
+            .map(|sheet| {
+                // Use the sheet's get_text to handle formulas, then parse
+                let text = sheet.get_text(row, col);
+                text.parse().unwrap_or(0.0)
+            })
+            .unwrap_or(0.0)
+    }
+
+    fn get_text(&self, row: usize, col: usize) -> String {
+        self.current_sheet()
+            .map(|sheet| sheet.get_text(row, col))
+            .unwrap_or_default()
+    }
+
+    fn get_value_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Value {
+        match self.workbook.sheet_by_id(sheet_id) {
+            Some(sheet) => {
+                let text = sheet.get_text(row, col);
+                if text.is_empty() {
+                    Value::Empty
+                } else if text.starts_with('#') {
+                    // Error value (e.g., #REF!, #VALUE!)
+                    Value::Error(text)
+                } else if let Ok(n) = text.parse::<f64>() {
+                    Value::Number(n)
+                } else if text.eq_ignore_ascii_case("TRUE") {
+                    Value::Boolean(true)
+                } else if text.eq_ignore_ascii_case("FALSE") {
+                    Value::Boolean(false)
+                } else {
+                    Value::Text(text)
+                }
+            }
+            None => Value::Error("#REF!".to_string()),
+        }
+    }
+
+    fn get_text_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> String {
+        match self.workbook.sheet_by_id(sheet_id) {
+            Some(sheet) => sheet.get_text(row, col),
+            None => "#REF!".to_string(),
+        }
+    }
+
+    fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
+        use crate::named_range::NamedRangeTarget;
+        self.workbook.named_ranges.get(name).map(|nr| {
+            match &nr.target {
+                NamedRangeTarget::Cell { row, col, .. } => {
+                    NamedRangeResolution::Cell { row: *row, col: *col }
+                }
+                NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => {
+                    NamedRangeResolution::Range {
+                        start_row: *start_row,
+                        start_col: *start_col,
+                        end_row: *end_row,
+                        end_col: *end_col,
+                    }
+                }
+            }
+        })
+    }
+
+    fn current_cell(&self) -> Option<(usize, usize)> {
+        self.current_cell
+    }
 }
 
 #[cfg(test)]
@@ -283,5 +591,216 @@ mod tests {
         // Can't delete last sheet
         assert!(wb.delete_sheet(0));
         assert!(!wb.delete_sheet(0)); // Last one, can't delete
+    }
+
+    // =========================================================================
+    // Cross-Sheet Reference Acceptance Tests
+    // =========================================================================
+
+    use crate::formula::parser::{parse, bind_expr, format_expr};
+    use crate::formula::eval::evaluate;
+
+    #[test]
+    fn test_cross_sheet_cell_ref() {
+        // =Sheet2!A1 returns value from sheet2
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2
+
+        // Put value in Sheet2!A1
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "42");
+
+        // Parse and bind formula
+        let parsed = parse("=Sheet2!A1").unwrap();
+        let bound = bind_expr(&parsed, |name| wb.sheet_id_by_name(name));
+
+        // Evaluate with WorkbookLookup
+        let sheet1_id = wb.sheet_id_at_idx(0).unwrap();
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+
+        assert_eq!(result.to_text(), "42");
+    }
+
+    #[test]
+    fn test_cross_sheet_quoted_name() {
+        // ='My Sheet'!A1 works
+        let mut wb = Workbook::new();
+        wb.add_sheet_named("My Sheet").unwrap();
+
+        // Put value in 'My Sheet'!A1
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "hello");
+
+        let parsed = parse("='My Sheet'!A1").unwrap();
+        let bound = bind_expr(&parsed, |name| wb.sheet_id_by_name(name));
+
+        let sheet1_id = wb.sheet_id_at_idx(0).unwrap();
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+
+        assert_eq!(result.to_text(), "hello");
+    }
+
+    #[test]
+    fn test_cross_sheet_escaped_quote() {
+        // ='Bob''s Sheet'!A1 works
+        let mut wb = Workbook::new();
+        wb.add_sheet_named("Bob's Sheet").unwrap();
+
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "test");
+
+        let parsed = parse("='Bob''s Sheet'!A1").unwrap();
+        let bound = bind_expr(&parsed, |name| wb.sheet_id_by_name(name));
+
+        let sheet1_id = wb.sheet_id_at_idx(0).unwrap();
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+
+        assert_eq!(result.to_text(), "test");
+    }
+
+    #[test]
+    fn test_cross_sheet_range_sum() {
+        // =SUM(Sheet2!A1:A3) works
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2
+
+        // Put values in Sheet2!A1:A3
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "10");
+        wb.sheet_mut(1).unwrap().set_value(1, 0, "20");
+        wb.sheet_mut(1).unwrap().set_value(2, 0, "30");
+
+        let parsed = parse("=SUM(Sheet2!A1:A3)").unwrap();
+        let bound = bind_expr(&parsed, |name| wb.sheet_id_by_name(name));
+
+        let sheet1_id = wb.sheet_id_at_idx(0).unwrap();
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+
+        assert_eq!(result.to_text(), "60");
+    }
+
+    #[test]
+    fn test_cross_sheet_rename_updates_print() {
+        // Rename sheet2 → formulas print new name
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2
+
+        let parsed = parse("=Sheet2!A1").unwrap();
+        let bound = bind_expr(&parsed, |name| wb.sheet_id_by_name(name));
+
+        // Formula should print "Sheet2"
+        let formula_str = format_expr(&bound, |id| wb.sheet_by_id(id).map(|s| s.name.clone()));
+        assert_eq!(formula_str, "=Sheet2!A1");
+
+        // Rename Sheet2 to "Data"
+        wb.rename_sheet(1, "Data");
+
+        // Formula should now print "Data"
+        let formula_str = format_expr(&bound, |id| wb.sheet_by_id(id).map(|s| s.name.clone()));
+        assert_eq!(formula_str, "=Data!A1");
+    }
+
+    #[test]
+    fn test_cross_sheet_insert_preserves_refs() {
+        // Insert/reorder sheets → references still correct
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "original");
+
+        // Get Sheet2's ID before any changes
+        let sheet2_id = wb.sheet_id_at_idx(1).unwrap();
+
+        let parsed = parse("=Sheet2!A1").unwrap();
+        let bound = bind_expr(&parsed, |name| wb.sheet_id_by_name(name));
+
+        // Add another sheet (Sheet3) - this doesn't change indices but tests stability
+        wb.add_sheet();
+
+        // Reference should still work (SheetId is stable)
+        let sheet1_id = wb.sheet_id_at_idx(0).unwrap();
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+        assert_eq!(result.to_text(), "original");
+
+        // Sheet2 still has the same ID
+        assert_eq!(wb.sheet_id_at_idx(1).unwrap(), sheet2_id);
+    }
+
+    #[test]
+    fn test_cross_sheet_delete_becomes_ref_error() {
+        // Delete referenced sheet → formula evaluates #REF!
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2
+        wb.add_sheet(); // Sheet3
+
+        // Store formula referencing Sheet2
+        let parsed = parse("=Sheet2!A1").unwrap();
+        let bound = bind_expr(&parsed, |name| wb.sheet_id_by_name(name));
+
+        // Verify it works before deletion
+        let sheet1_id = wb.sheet_id_at_idx(0).unwrap();
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+        assert!(!result.to_text().contains("#REF"));
+
+        // Delete Sheet2
+        wb.delete_sheet(1);
+
+        // Now evaluation should return #REF! because sheet ID no longer exists
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+        assert!(result.to_text().contains("#REF"), "Expected #REF! but got: {}", result.to_text());
+    }
+
+    #[test]
+    fn test_cross_sheet_unknown_sheet_ref_error() {
+        // Reference to unknown sheet → #REF! at bind time
+        let wb = Workbook::new();
+
+        let parsed = parse("=NonExistent!A1").unwrap();
+        let bound = bind_expr(&parsed, |name| wb.sheet_id_by_name(name));
+
+        let sheet1_id = wb.sheet_id_at_idx(0).unwrap();
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+
+        assert!(result.to_text().contains("#REF"), "Expected #REF! but got: {}", result.to_text());
+    }
+
+    #[test]
+    fn test_cross_sheet_rename_eval_twice_still_correct() {
+        // Regression test: rename sheet → evaluate formula twice → still correct
+        // This guards the "bind every eval" contract (no accidental caching)
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "42");
+
+        // Parse formula (stores name, not ID)
+        let parsed = parse("=Sheet2!A1").unwrap();
+
+        // Evaluate before rename
+        let sheet1_id = wb.sheet_id_at_idx(0).unwrap();
+        let bound = bind_expr(&parsed, |name| wb.sheet_id_by_name(name));
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+        assert_eq!(result.to_text(), "42");
+
+        // Rename Sheet2 to Data
+        wb.rename_sheet(1, "Data");
+
+        // Re-bind and evaluate - should still work (formula stores "Sheet2" name)
+        // but binding now fails because "Sheet2" doesn't exist
+        let bound = bind_expr(&parsed, |name| wb.sheet_id_by_name(name));
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+        // After rename, "Sheet2" no longer exists, so this becomes #REF!
+        assert!(result.to_text().contains("#REF"), "Expected #REF! after rename, got: {}", result.to_text());
+
+        // But if we parse with the new name, it works
+        let parsed_new = parse("=Data!A1").unwrap();
+        let bound = bind_expr(&parsed_new, |name| wb.sheet_id_by_name(name));
+        let lookup = WorkbookLookup::new(&wb, sheet1_id);
+        let result = evaluate(&bound, &lookup);
+        assert_eq!(result.to_text(), "42");
     }
 }

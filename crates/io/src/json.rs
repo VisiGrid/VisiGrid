@@ -4,7 +4,7 @@ use std::path::Path;
 use std::fs::File;
 use std::io::BufWriter;
 
-use visigrid_engine::sheet::Sheet;
+use visigrid_engine::sheet::{Sheet, SheetId};
 
 /// Export sheet as JSON array of arrays
 /// Each row is an array of cell values (strings)
@@ -52,7 +52,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.json");
 
-        let mut sheet = Sheet::new(100, 10);
+        let mut sheet = Sheet::new(SheetId(1), 100, 10);
         sheet.set_value(0, 0, "Name");
         sheet.set_value(0, 1, "Value");
         sheet.set_value(1, 0, "Alice");

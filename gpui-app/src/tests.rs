@@ -4,7 +4,7 @@
 //! multi-edit undo, and format undo coalescing.
 
 use regex::Regex;
-use visigrid_engine::sheet::Sheet;
+use visigrid_engine::sheet::{Sheet, SheetId};
 
 /// Test-only version of adjust_formula_refs (mirrors Spreadsheet::adjust_formula_refs)
 fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> String {
@@ -95,7 +95,7 @@ fn test_fill_down_mixed_references_formulas() {
 #[test]
 fn test_fill_down_mixed_references_end_to_end() {
     // End-to-end test: seed values, fill, verify formulas AND computed values
-    let mut sheet = Sheet::new(100, 100);
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
 
     // Seed A1:A4 with distinct values
     sheet.set_value(0, 0, "10"); // A1 = 10
@@ -152,7 +152,7 @@ fn test_fill_down_with_ranges_formulas() {
 
 #[test]
 fn test_fill_down_with_ranges_end_to_end() {
-    let mut sheet = Sheet::new(100, 100);
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
 
     // Seed values
     sheet.set_value(0, 0, "10"); // A1 = 10
@@ -209,7 +209,7 @@ fn test_fill_down_multi_letter_columns_formulas() {
 
 #[test]
 fn test_fill_down_multi_letter_columns_end_to_end() {
-    let mut sheet = Sheet::new(100, 100);
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
 
     // AA is column 26 (0-indexed), B is 1, C is 2, D is 3
     // Seed values
@@ -282,7 +282,7 @@ fn fill_right_on_sheet(sheet: &mut Sheet, row: usize, min_col: usize, max_col: u
 #[test]
 fn test_fill_right_mixed_references_end_to_end() {
     // End-to-end test for fill right with mixed references
-    let mut sheet = Sheet::new(100, 100);
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
 
     // Seed row 1 with distinct values: A1=10, B1=1, C1=2, D1=3
     sheet.set_value(0, 0, "10"); // A1 = 10
@@ -330,7 +330,7 @@ fn test_fill_right_mixed_references_end_to_end() {
 fn test_multi_edit_applies_once_and_single_undo() {
     use crate::history::{History, CellChange, UndoAction};
 
-    let mut sheet = Sheet::new(100, 100);
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
     let mut history = History::new();
 
     // Seed initial values: A1=1, A2=2, A3=3, B1=10, B2=20, B3=30
@@ -498,9 +498,9 @@ fn test_format_coalescing_different_cells_separate() {
 fn test_format_undo_restores_mixed_state() {
     use crate::history::{History, CellFormatPatch, FormatActionKind, UndoAction};
     use visigrid_engine::cell::CellFormat;
-    use visigrid_engine::sheet::Sheet;
+    use visigrid_engine::sheet::{Sheet, SheetId};
 
-    let mut sheet = Sheet::new(100, 100);
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
     let mut history = History::new();
 
     // Set up mixed initial state: A1 bold, A2 not bold, A3 italic
@@ -945,7 +945,7 @@ fn test_undo_restores_original_state_property_based() {
         let mut rng = Xorshift64::new(seed + 1);
 
         // Create sheet with some initial data
-        let mut sheet = Sheet::new(100, 100);
+        let mut sheet = Sheet::new(SheetId(1), 100, 100);
 
         // Seed with some initial values (20% of cells)
         for _ in 0..(SHEET_ROWS * SHEET_COLS / 5) {
@@ -992,7 +992,7 @@ fn test_undo_redo_idempotence() {
     for seed in 0..ITERATIONS {
         let mut rng = Xorshift64::new(seed + 1000);
 
-        let mut sheet = Sheet::new(100, 100);
+        let mut sheet = Sheet::new(SheetId(1), 100, 100);
 
         // Seed initial data
         for _ in 0..(SHEET_ROWS * SHEET_COLS / 5) {
@@ -1041,7 +1041,7 @@ fn test_same_cell_sequences() {
     for seed in 0..ITERATIONS {
         let mut rng = Xorshift64::new(seed + 2000);
 
-        let mut sheet = Sheet::new(100, 100);
+        let mut sheet = Sheet::new(SheetId(1), 100, 100);
 
         // Start with a known value in cell (5, 5)
         sheet.set_value(5, 5, "initial");
@@ -1097,7 +1097,7 @@ fn test_touched_cells_completeness() {
     for seed in 0..ITERATIONS {
         let mut rng = Xorshift64::new(seed + 3000);
 
-        let mut sheet = Sheet::new(100, 100);
+        let mut sheet = Sheet::new(SheetId(1), 100, 100);
 
         // Track which cells we're going to modify
         let op_count = 1 + rng.next_usize(100);

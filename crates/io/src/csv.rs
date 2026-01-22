@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use visigrid_engine::sheet::Sheet;
+use visigrid_engine::sheet::{Sheet, SheetId};
 
 pub fn import(path: &Path) -> Result<Sheet, String> {
     import_with_delimiter(path, b',')
@@ -19,7 +19,7 @@ fn import_with_delimiter(path: &Path, delimiter: u8) -> Result<Sheet, String> {
         .from_path(path)
         .map_err(|e| e.to_string())?;
 
-    let mut sheet = Sheet::new(1000, 26);
+    let mut sheet = Sheet::new(SheetId(1), 1000, 26);
 
     for (row_idx, result) in reader.records().enumerate() {
         let record = result.map_err(|e| e.to_string())?;
@@ -82,7 +82,7 @@ mod tests {
         let path = dir.path().join("test.tsv");
 
         // Create a sheet with some data
-        let mut sheet = Sheet::new(100, 10);
+        let mut sheet = Sheet::new(SheetId(1), 100, 10);
         sheet.set_value(0, 0, "Name");
         sheet.set_value(0, 1, "Value");
         sheet.set_value(1, 0, "Alice");

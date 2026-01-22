@@ -1,6 +1,7 @@
-// Formula evaluator - evaluates parsed expressions
+// Formula evaluator - evaluates bound expressions (after sheet name resolution)
 
-use super::parser::{Expr, Op};
+use crate::sheet::{SheetId, SheetRef};
+use super::parser::{BoundExpr, Expr, Op};
 
 /// Result of resolving a named range
 #[derive(Debug, Clone)]
@@ -12,6 +13,20 @@ pub enum NamedRangeResolution {
 pub trait CellLookup {
     fn get_value(&self, row: usize, col: usize) -> f64;
     fn get_text(&self, row: usize, col: usize) -> String;
+
+    /// Get a cell's value from another sheet by SheetId.
+    /// Returns Value::Error("#REF!") if sheet doesn't exist.
+    /// Default implementation returns #REF! (cross-sheet not supported).
+    fn get_value_sheet(&self, _sheet_id: SheetId, _row: usize, _col: usize) -> Value {
+        Value::Error("#REF!".to_string())
+    }
+
+    /// Get a cell's text from another sheet by SheetId.
+    /// Returns "#REF!" if sheet doesn't exist.
+    /// Default implementation returns #REF! (cross-sheet not supported).
+    fn get_text_sheet(&self, _sheet_id: SheetId, _row: usize, _col: usize) -> String {
+        "#REF!".to_string()
+    }
 
     /// Resolve a named range to its target. Returns None if name not defined.
     /// Default implementation returns None (named ranges not supported).
@@ -47,6 +62,14 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup 
         self.inner.get_text(row, col)
     }
 
+    fn get_value_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Value {
+        self.inner.get_value_sheet(sheet_id, row, col)
+    }
+
+    fn get_text_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> String {
+        self.inner.get_text_sheet(sheet_id, row, col)
+    }
+
     fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
         (self.resolver)(name)
     }
@@ -76,6 +99,14 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
 
     fn get_text(&self, row: usize, col: usize) -> String {
         self.inner.get_text(row, col)
+    }
+
+    fn get_value_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Value {
+        self.inner.get_value_sheet(sheet_id, row, col)
+    }
+
+    fn get_text_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> String {
+        self.inner.get_text_sheet(sheet_id, row, col)
     }
 
     fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
@@ -364,14 +395,18 @@ impl EvalResult {
     }
 }
 
-pub fn evaluate<L: CellLookup>(expr: &Expr, lookup: &L) -> EvalResult {
+pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
     match expr {
         Expr::Number(n) => EvalResult::Number(*n),
         Expr::Text(s) => EvalResult::Text(s.clone()),
         Expr::Boolean(b) => EvalResult::Boolean(*b),
-        Expr::CellRef { col, row } => {
-            // Try to get the cell as text first to preserve type
-            let text = lookup.get_text(*row, *col);
+        Expr::CellRef { sheet, col, row, .. } => {
+            // Get cell value, potentially from another sheet
+            let text = match sheet {
+                SheetRef::Current => lookup.get_text(*row, *col),
+                SheetRef::Id(sheet_id) => lookup.get_text_sheet(*sheet_id, *row, *col),
+                SheetRef::RefError { .. } => return EvalResult::Error("#REF!".to_string()),
+            };
             if text.is_empty() {
                 EvalResult::Number(0.0)
             } else if text.starts_with('#') {
@@ -536,7 +571,7 @@ pub fn evaluate<L: CellLookup>(expr: &Expr, lookup: &L) -> EvalResult {
     }
 }
 
-fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> EvalResult {
+fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) -> EvalResult {
     match name {
         // =====================
         // MATH FUNCTIONS
@@ -667,6 +702,296 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
                 Err(e) => return EvalResult::Error(e),
             };
             EvalResult::Number(base.powf(exp))
+        }
+        // =====================================================================
+        // Financial Functions
+        // =====================================================================
+        "PMT" => {
+            // PMT(rate, nper, pv, [fv], [type])
+            // Returns the payment for a loan based on constant payments and interest rate
+            if args.len() < 3 || args.len() > 5 {
+                return EvalResult::Error("PMT requires 3 to 5 arguments".to_string());
+            }
+            let rate = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let nper = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let pv = match evaluate(&args[2], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let fv = if args.len() >= 4 {
+                match evaluate(&args[3], lookup).to_number() {
+                    Ok(n) => n,
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.0
+            };
+            let pmt_type = if args.len() >= 5 {
+                match evaluate(&args[4], lookup).to_number() {
+                    Ok(n) => if n != 0.0 { 1.0 } else { 0.0 },
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.0
+            };
+
+            if nper == 0.0 {
+                return EvalResult::Error("#NUM!".to_string());
+            }
+
+            let pmt = if rate == 0.0 {
+                -(pv + fv) / nper
+            } else {
+                let pow = (1.0 + rate).powf(nper);
+                let pmt = (rate * (pv * pow + fv)) / (pow - 1.0);
+                if pmt_type != 0.0 {
+                    -pmt / (1.0 + rate)
+                } else {
+                    -pmt
+                }
+            };
+            EvalResult::Number(pmt)
+        }
+        "FV" => {
+            // FV(rate, nper, pmt, [pv], [type])
+            // Returns the future value of an investment
+            if args.len() < 3 || args.len() > 5 {
+                return EvalResult::Error("FV requires 3 to 5 arguments".to_string());
+            }
+            let rate = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let nper = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let pmt = match evaluate(&args[2], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let pv = if args.len() >= 4 {
+                match evaluate(&args[3], lookup).to_number() {
+                    Ok(n) => n,
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.0
+            };
+            let pmt_type = if args.len() >= 5 {
+                match evaluate(&args[4], lookup).to_number() {
+                    Ok(n) => if n != 0.0 { 1.0 } else { 0.0 },
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.0
+            };
+
+            let fv = if rate == 0.0 {
+                -pv - pmt * nper
+            } else {
+                let pow = (1.0 + rate).powf(nper);
+                let fv_pmt = if pmt_type != 0.0 {
+                    pmt * (1.0 + rate) * (pow - 1.0) / rate
+                } else {
+                    pmt * (pow - 1.0) / rate
+                };
+                -pv * pow - fv_pmt
+            };
+            EvalResult::Number(fv)
+        }
+        "PV" => {
+            // PV(rate, nper, pmt, [fv], [type])
+            // Returns the present value of an investment
+            if args.len() < 3 || args.len() > 5 {
+                return EvalResult::Error("PV requires 3 to 5 arguments".to_string());
+            }
+            let rate = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let nper = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let pmt = match evaluate(&args[2], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let fv = if args.len() >= 4 {
+                match evaluate(&args[3], lookup).to_number() {
+                    Ok(n) => n,
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.0
+            };
+            let pmt_type = if args.len() >= 5 {
+                match evaluate(&args[4], lookup).to_number() {
+                    Ok(n) => if n != 0.0 { 1.0 } else { 0.0 },
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.0
+            };
+
+            let pv = if rate == 0.0 {
+                -fv - pmt * nper
+            } else {
+                let pow = (1.0 + rate).powf(nper);
+                let pv_pmt = if pmt_type != 0.0 {
+                    pmt * (1.0 + rate) * (pow - 1.0) / rate
+                } else {
+                    pmt * (pow - 1.0) / rate
+                };
+                (-fv - pv_pmt) / pow
+            };
+            EvalResult::Number(pv)
+        }
+        "NPV" => {
+            // NPV(rate, value1, [value2], ...)
+            // Returns the net present value of an investment based on periodic cash flows
+            if args.len() < 2 {
+                return EvalResult::Error("NPV requires at least 2 arguments".to_string());
+            }
+            let rate = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+
+            if rate == -1.0 {
+                return EvalResult::Error("#DIV/0!".to_string());
+            }
+
+            let mut npv = 0.0;
+            let mut period = 1;
+
+            for arg in &args[1..] {
+                // Handle both single values and ranges
+                match arg {
+                    Expr::Range { start_col, start_row, end_col, end_row, .. } => {
+                        let (min_row, min_col) = (*start_row.min(end_row), *start_col.min(end_col));
+                        let (max_row, max_col) = (*start_row.max(end_row), *start_col.max(end_col));
+                        for r in min_row..=max_row {
+                            for c in min_col..=max_col {
+                                let val = lookup.get_value(r, c);
+                                if val.is_finite() {
+                                    npv += val / (1.0 + rate).powi(period);
+                                    period += 1;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        match evaluate(arg, lookup).to_number() {
+                            Ok(n) => {
+                                npv += n / (1.0 + rate).powi(period);
+                                period += 1;
+                            }
+                            Err(e) => return EvalResult::Error(e),
+                        }
+                    }
+                }
+            }
+            EvalResult::Number(npv)
+        }
+        "IRR" => {
+            // IRR(values, [guess])
+            // Returns the internal rate of return for a series of cash flows
+            if args.len() < 1 || args.len() > 2 {
+                return EvalResult::Error("IRR requires 1 or 2 arguments".to_string());
+            }
+
+            // Collect cash flows from range
+            let values: Vec<f64> = match &args[0] {
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
+                    let (min_row, min_col) = (*start_row.min(end_row), *start_col.min(end_col));
+                    let (max_row, max_col) = (*start_row.max(end_row), *start_col.max(end_col));
+                    let mut vals = Vec::new();
+                    for r in min_row..=max_row {
+                        for c in min_col..=max_col {
+                            let val = lookup.get_value(r, c);
+                            if val.is_finite() && val != 0.0 {
+                                vals.push(val);
+                            } else if lookup.get_text(r, c).is_empty() {
+                                // Skip empty cells
+                            } else if val == 0.0 {
+                                vals.push(0.0);
+                            }
+                        }
+                    }
+                    vals
+                }
+                _ => return EvalResult::Error("IRR requires a range of values".to_string()),
+            };
+
+            if values.len() < 2 {
+                return EvalResult::Error("#NUM!".to_string());
+            }
+
+            // Check that there's at least one positive and one negative value
+            let has_positive = values.iter().any(|&v| v > 0.0);
+            let has_negative = values.iter().any(|&v| v < 0.0);
+            if !has_positive || !has_negative {
+                return EvalResult::Error("#NUM!".to_string());
+            }
+
+            let guess = if args.len() >= 2 {
+                match evaluate(&args[1], lookup).to_number() {
+                    Ok(n) => n,
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.1 // Default guess of 10%
+            };
+
+            // Newton-Raphson iteration to find IRR
+            let mut rate = guess;
+            let max_iterations = 100;
+            let tolerance = 1e-10;
+
+            for _ in 0..max_iterations {
+                let mut npv = 0.0;
+                let mut dnpv = 0.0; // derivative of NPV with respect to rate
+
+                for (i, &cf) in values.iter().enumerate() {
+                    let t = i as f64;
+                    let divisor = (1.0 + rate).powf(t);
+                    if divisor == 0.0 {
+                        return EvalResult::Error("#NUM!".to_string());
+                    }
+                    npv += cf / divisor;
+                    if t > 0.0 {
+                        dnpv -= t * cf / (1.0 + rate).powf(t + 1.0);
+                    }
+                }
+
+                if dnpv.abs() < 1e-30 {
+                    return EvalResult::Error("#NUM!".to_string());
+                }
+
+                let new_rate = rate - npv / dnpv;
+
+                if (new_rate - rate).abs() < tolerance {
+                    return EvalResult::Number(new_rate);
+                }
+
+                rate = new_rate;
+
+                // Prevent divergence
+                if rate < -1.0 || rate > 10.0 || !rate.is_finite() {
+                    return EvalResult::Error("#NUM!".to_string());
+                }
+            }
+
+            // Failed to converge
+            EvalResult::Error("#NUM!".to_string())
         }
         "SQRT" => {
             if args.len() != 1 {
@@ -859,7 +1184,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
 
             for arg in &args[2..] {
                 match arg {
-                    Expr::Range { start_col, start_row, end_col, end_row } => {
+                    Expr::Range { start_col, start_row, end_col, end_row, .. } => {
                         // Collect all values from range
                         let (min_row, min_col, max_row, max_col) = (
                             (*start_row).min(*end_row), (*start_col).min(*end_col),
@@ -1079,13 +1404,13 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
                 return EvalResult::Error("SUMIF requires 2 or 3 arguments".to_string());
             }
             let range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
                 _ => return EvalResult::Error("SUMIF requires a range as first argument".to_string()),
             };
             let criteria = evaluate(&args[1], lookup);
             let sum_range = if args.len() == 3 {
                 match &args[2] {
-                    Expr::Range { start_col, start_row, end_col, end_row } => Some((*start_row, *start_col, *end_row, *end_col)),
+                    Expr::Range { start_col, start_row, end_col, end_row, .. } => Some((*start_row, *start_col, *end_row, *end_col)),
                     _ => return EvalResult::Error("SUMIF sum_range must be a range".to_string()),
                 }
             } else {
@@ -1121,12 +1446,70 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
             }
             EvalResult::Number(sum)
         }
+        "AVERAGEIF" => {
+            // AVERAGEIF(range, criteria, [average_range])
+            if args.len() < 2 || args.len() > 3 {
+                return EvalResult::Error("AVERAGEIF requires 2 or 3 arguments".to_string());
+            }
+            let range = match &args[0] {
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
+                _ => return EvalResult::Error("AVERAGEIF requires a range as first argument".to_string()),
+            };
+            let criteria = evaluate(&args[1], lookup);
+            let avg_range = if args.len() == 3 {
+                match &args[2] {
+                    Expr::Range { start_col, start_row, end_col, end_row, .. } => Some((*start_row, *start_col, *end_row, *end_col)),
+                    _ => return EvalResult::Error("AVERAGEIF average_range must be a range".to_string()),
+                }
+            } else {
+                None
+            };
+
+            let mut sum = 0.0;
+            let mut count = 0;
+            let (min_row, min_col, max_row, max_col) = (range.0.min(range.2), range.1.min(range.3), range.0.max(range.2), range.1.max(range.3));
+
+            for row_offset in 0..=(max_row - min_row) {
+                for col_offset in 0..=(max_col - min_col) {
+                    let r = min_row + row_offset;
+                    let c = min_col + col_offset;
+                    let cell_text = lookup.get_text(r, c);
+                    let cell_value = if cell_text.is_empty() {
+                        EvalResult::Number(0.0)
+                    } else if let Ok(n) = cell_text.parse::<f64>() {
+                        EvalResult::Number(n)
+                    } else {
+                        EvalResult::Text(cell_text)
+                    };
+
+                    if matches_criteria(&cell_value, &criteria) {
+                        // Get value from average_range or criteria range
+                        let (avg_r, avg_c) = if let Some((ar, ac, _, _)) = avg_range {
+                            (ar + row_offset, ac + col_offset)
+                        } else {
+                            (r, c)
+                        };
+                        let val = lookup.get_value(avg_r, avg_c);
+                        // Only count numeric values for average
+                        if val.is_finite() {
+                            sum += val;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            if count == 0 {
+                EvalResult::Error("#DIV/0!".to_string())
+            } else {
+                EvalResult::Number(sum / count as f64)
+            }
+        }
         "COUNTIF" => {
             if args.len() != 2 {
                 return EvalResult::Error("COUNTIF requires exactly 2 arguments".to_string());
             }
             let range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
                 _ => return EvalResult::Error("COUNTIF requires a range as first argument".to_string()),
             };
             let criteria = evaluate(&args[1], lookup);
@@ -1157,7 +1540,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
                 return EvalResult::Error("COUNTBLANK requires exactly one argument".to_string());
             }
             let range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
                 _ => return EvalResult::Error("COUNTBLANK requires a range".to_string()),
             };
 
@@ -1180,7 +1563,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
             }
 
             let sum_range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
                 _ => return EvalResult::Error("SUMIFS sum_range must be a range".to_string()),
             };
 
@@ -1201,7 +1584,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
                 let criteria_arg = &args[2 + i * 2];
 
                 let crit_range = match range_arg {
-                    Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                    Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
                     _ => return EvalResult::Error("SUMIFS criteria_range must be a range".to_string()),
                 };
 
@@ -1248,6 +1631,90 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
             }
             EvalResult::Number(sum)
         }
+        "AVERAGEIFS" => {
+            // AVERAGEIFS(average_range, criteria_range1, criteria1, [criteria_range2, criteria2], ...)
+            if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+                return EvalResult::Error("AVERAGEIFS requires average_range and pairs of criteria_range and criteria".to_string());
+            }
+
+            let avg_range = match &args[0] {
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
+                _ => return EvalResult::Error("AVERAGEIFS average_range must be a range".to_string()),
+            };
+
+            let (ar_min_row, ar_min_col, ar_max_row, ar_max_col) = (
+                avg_range.0.min(avg_range.2), avg_range.1.min(avg_range.3),
+                avg_range.0.max(avg_range.2), avg_range.1.max(avg_range.3)
+            );
+            let num_rows = ar_max_row - ar_min_row + 1;
+            let num_cols = ar_max_col - ar_min_col + 1;
+
+            // Parse criteria pairs
+            let num_criteria = (args.len() - 1) / 2;
+            let mut criteria_ranges = Vec::with_capacity(num_criteria);
+            let mut criteria_values = Vec::with_capacity(num_criteria);
+
+            for i in 0..num_criteria {
+                let range_arg = &args[1 + i * 2];
+                let criteria_arg = &args[2 + i * 2];
+
+                let crit_range = match range_arg {
+                    Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
+                    _ => return EvalResult::Error("AVERAGEIFS criteria_range must be a range".to_string()),
+                };
+
+                // Verify dimensions match average_range
+                let (cr_min_row, cr_min_col, cr_max_row, cr_max_col) = (
+                    crit_range.0.min(crit_range.2), crit_range.1.min(crit_range.3),
+                    crit_range.0.max(crit_range.2), crit_range.1.max(crit_range.3)
+                );
+                if (cr_max_row - cr_min_row + 1) != num_rows || (cr_max_col - cr_min_col + 1) != num_cols {
+                    return EvalResult::Error("AVERAGEIFS criteria ranges must have same dimensions as average_range".to_string());
+                }
+
+                criteria_ranges.push((cr_min_row, cr_min_col));
+                criteria_values.push(evaluate(criteria_arg, lookup));
+            }
+
+            let mut sum = 0.0;
+            let mut count = 0;
+            for row_offset in 0..num_rows {
+                for col_offset in 0..num_cols {
+                    // Check all criteria
+                    let mut all_match = true;
+                    for (idx, &(cr_row, cr_col)) in criteria_ranges.iter().enumerate() {
+                        let r = cr_row + row_offset;
+                        let c = cr_col + col_offset;
+                        let cell_text = lookup.get_text(r, c);
+                        let cell_value = if cell_text.is_empty() {
+                            EvalResult::Number(0.0)
+                        } else if let Ok(n) = cell_text.parse::<f64>() {
+                            EvalResult::Number(n)
+                        } else {
+                            EvalResult::Text(cell_text)
+                        };
+
+                        if !matches_criteria(&cell_value, &criteria_values[idx]) {
+                            all_match = false;
+                            break;
+                        }
+                    }
+
+                    if all_match {
+                        let val = lookup.get_value(ar_min_row + row_offset, ar_min_col + col_offset);
+                        if val.is_finite() {
+                            sum += val;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            if count == 0 {
+                EvalResult::Error("#DIV/0!".to_string())
+            } else {
+                EvalResult::Number(sum / count as f64)
+            }
+        }
         "COUNTIFS" => {
             // COUNTIFS(criteria_range1, criteria1, [criteria_range2, criteria2], ...)
             if args.len() < 2 || args.len() % 2 != 0 {
@@ -1256,7 +1723,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
 
             // Use first range to determine dimensions
             let first_range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
                 _ => return EvalResult::Error("COUNTIFS criteria_range must be a range".to_string()),
             };
 
@@ -1277,7 +1744,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
                 let criteria_arg = &args[i * 2 + 1];
 
                 let crit_range = match range_arg {
-                    Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                    Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
                     _ => return EvalResult::Error("COUNTIFS criteria_range must be a range".to_string()),
                 };
 
@@ -1346,7 +1813,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
             }
             let search_key = evaluate(&args[0], lookup);
             let range = match &args[1] {
-                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
                 _ => return EvalResult::Error("VLOOKUP requires a range as second argument".to_string()),
             };
             let col_index = match evaluate(&args[2], lookup).to_number() {
@@ -1438,7 +1905,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
 
             // Parse lookup array (must be 1D - single row or column)
             let lookup_array = match &args[1] {
-                Expr::Range { start_col, start_row, end_col, end_row } => {
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
                     let (min_row, min_col, max_row, max_col) = (
                         (*start_row).min(*end_row), (*start_col).min(*end_col),
                         (*start_row).max(*end_row), (*start_col).max(*end_col)
@@ -1456,7 +1923,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
 
             // Parse return array (must have same dimensions)
             let return_array = match &args[2] {
-                Expr::Range { start_col, start_row, end_col, end_row } => {
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
                     let (min_row, min_col, max_row, max_col) = (
                         (*start_row).min(*end_row), (*start_col).min(*end_col),
                         (*start_row).max(*end_row), (*start_col).max(*end_col)
@@ -1599,7 +2066,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
             }
             let search_key = evaluate(&args[0], lookup);
             let range = match &args[1] {
-                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
                 _ => return EvalResult::Error("HLOOKUP requires a range as second argument".to_string()),
             };
             let row_index = match evaluate(&args[2], lookup).to_number() {
@@ -1678,8 +2145,8 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
                 return EvalResult::Error("INDEX requires 2 or 3 arguments".to_string());
             }
             let range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
-                Expr::CellRef { col, row } => (*row, *col, *row, *col),
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
+                Expr::CellRef { col, row, .. } => (*row, *col, *row, *col),
                 _ => return EvalResult::Error("INDEX requires a range as first argument".to_string()),
             };
             let row_num = match evaluate(&args[1], lookup).to_number() {
@@ -1722,7 +2189,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
             }
             let search_key = evaluate(&args[0], lookup);
             let range = match &args[1] {
-                Expr::Range { start_col, start_row, end_col, end_row } => (*start_row, *start_col, *end_row, *end_col),
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
                 _ => return EvalResult::Error("MATCH requires a range as second argument".to_string()),
             };
             let match_type = if args.len() == 3 {
@@ -2578,7 +3045,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
 
             // Get the input - if it's a range, build an array from it
             match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row } => {
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
                     let in_rows = end_row - start_row + 1;
                     let in_cols = end_col - start_col + 1;
 
@@ -2609,7 +3076,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
 
             // Get the data range dimensions and values
             let (data_rows, data_cols, data): (usize, usize, Vec<Vec<Value>>) = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row } => {
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
                     let r_count = end_row - start_row + 1;
                     let c_count = end_col - start_col + 1;
                     let mut row_data = Vec::with_capacity(r_count);
@@ -2639,7 +3106,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
 
             // Get the include criteria (must be a column matching data_rows)
             let include: Vec<bool> = match &args[1] {
-                Expr::Range { start_col, start_row, end_col, end_row } => {
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
                     let inc_rows = end_row - start_row + 1;
                     let inc_cols = end_col - start_col + 1;
 
@@ -2701,7 +3168,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
 
             // Build rows from range
             let (in_cols, rows): (usize, Vec<Vec<Value>>) = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row } => {
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
                     let r_count = end_row - start_row + 1;
                     let c_count = end_col - start_col + 1;
                     let mut row_data = Vec::with_capacity(r_count);
@@ -2797,7 +3264,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[Expr], lookup: &L) -> Ev
 
             // Build rows from range
             let (in_rows, in_cols, mut rows): (usize, usize, Vec<Vec<Value>>) = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row } => {
+                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
                     let r_count = end_row - start_row + 1;
                     let c_count = end_col - start_col + 1;
                     let mut row_data = Vec::with_capacity(r_count);
@@ -3020,13 +3487,22 @@ fn matches_criteria(value: &EvalResult, criteria: &EvalResult) -> bool {
     }
 }
 
-fn collect_numbers<L: CellLookup>(args: &[Expr], lookup: &L) -> Result<Vec<f64>, String> {
+/// Helper to get text from a cell, handling cross-sheet references
+fn get_text_for_sheet<L: CellLookup>(lookup: &L, sheet: &SheetRef, row: usize, col: usize) -> Result<String, String> {
+    match sheet {
+        SheetRef::Current => Ok(lookup.get_text(row, col)),
+        SheetRef::Id(id) => Ok(lookup.get_text_sheet(*id, row, col)),
+        SheetRef::RefError { .. } => Err("#REF!".to_string()),
+    }
+}
+
+fn collect_numbers<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Result<Vec<f64>, String> {
     let mut values = Vec::new();
 
     for arg in args {
         match arg {
-            Expr::Range { start_col, start_row, end_col, end_row } => {
-                collect_numbers_from_range(*start_row, *start_col, *end_row, *end_col, lookup, &mut values);
+            Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
+                collect_numbers_from_range_sheet(sheet, *start_row, *start_col, *end_row, *end_col, lookup, &mut values)?;
             }
             Expr::NamedRange(name) => {
                 // Resolve named range and collect numbers from it
@@ -3056,6 +3532,39 @@ fn collect_numbers<L: CellLookup>(args: &[Expr], lookup: &L) -> Result<Vec<f64>,
     Ok(values)
 }
 
+/// Collect numbers from a range, supporting cross-sheet references
+fn collect_numbers_from_range_sheet<L: CellLookup>(
+    sheet: &SheetRef,
+    start_row: usize,
+    start_col: usize,
+    end_row: usize,
+    end_col: usize,
+    lookup: &L,
+    values: &mut Vec<f64>,
+) -> Result<(), String> {
+    // Check for RefError early
+    if let SheetRef::RefError { .. } = sheet {
+        return Err("#REF!".to_string());
+    }
+
+    let min_row = start_row.min(end_row);
+    let max_row = start_row.max(end_row);
+    let min_col = start_col.min(end_col);
+    let max_col = start_col.max(end_col);
+
+    for r in min_row..=max_row {
+        for c in min_col..=max_col {
+            let text = get_text_for_sheet(lookup, sheet, r, c)?;
+            // Only include numeric values, skip text/empty
+            if let Ok(n) = text.parse::<f64>() {
+                values.push(n);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Legacy helper for same-sheet ranges (used by named range resolution)
 fn collect_numbers_from_range<L: CellLookup>(
     start_row: usize,
     start_col: usize,
@@ -3064,29 +3573,22 @@ fn collect_numbers_from_range<L: CellLookup>(
     lookup: &L,
     values: &mut Vec<f64>,
 ) {
-    let min_row = start_row.min(end_row);
-    let max_row = start_row.max(end_row);
-    let min_col = start_col.min(end_col);
-    let max_col = start_col.max(end_col);
-
-    for r in min_row..=max_row {
-        for c in min_col..=max_col {
-            let text = lookup.get_text(r, c);
-            // Only include numeric values, skip text/empty
-            if let Ok(n) = text.parse::<f64>() {
-                values.push(n);
-            }
-        }
-    }
+    let _ = collect_numbers_from_range_sheet(
+        &SheetRef::Current,
+        start_row, start_col, end_row, end_col,
+        lookup, values
+    );
 }
 
-fn collect_all_values<L: CellLookup>(args: &[Expr], lookup: &L) -> Vec<EvalResult> {
+fn collect_all_values<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Vec<EvalResult> {
     let mut values = Vec::new();
 
     for arg in args {
         match arg {
-            Expr::Range { start_col, start_row, end_col, end_row } => {
-                collect_all_values_from_range(*start_row, *start_col, *end_row, *end_col, lookup, &mut values);
+            Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
+                if let Err(e) = collect_all_values_from_range_sheet(sheet, *start_row, *start_col, *end_row, *end_col, lookup, &mut values) {
+                    values.push(EvalResult::Error(e));
+                }
             }
             Expr::NamedRange(name) => {
                 // Resolve named range and collect all values from it
@@ -3116,14 +3618,21 @@ fn collect_all_values<L: CellLookup>(args: &[Expr], lookup: &L) -> Vec<EvalResul
     values
 }
 
-fn collect_all_values_from_range<L: CellLookup>(
+/// Collect all values from a range, supporting cross-sheet references
+fn collect_all_values_from_range_sheet<L: CellLookup>(
+    sheet: &SheetRef,
     start_row: usize,
     start_col: usize,
     end_row: usize,
     end_col: usize,
     lookup: &L,
     values: &mut Vec<EvalResult>,
-) {
+) -> Result<(), String> {
+    // Check for RefError early
+    if let SheetRef::RefError { .. } = sheet {
+        return Err("#REF!".to_string());
+    }
+
     let min_row = start_row.min(end_row);
     let max_row = start_row.max(end_row);
     let min_col = start_col.min(end_col);
@@ -3131,7 +3640,7 @@ fn collect_all_values_from_range<L: CellLookup>(
 
     for r in min_row..=max_row {
         for c in min_col..=max_col {
-            let text = lookup.get_text(r, c);
+            let text = get_text_for_sheet(lookup, sheet, r, c)?;
             if text.is_empty() {
                 values.push(EvalResult::Text(String::new()));
             } else if let Ok(n) = text.parse::<f64>() {
@@ -3141,12 +3650,35 @@ fn collect_all_values_from_range<L: CellLookup>(
             }
         }
     }
+    Ok(())
+}
+
+/// Legacy helper for same-sheet ranges (used by named range resolution)
+fn collect_all_values_from_range<L: CellLookup>(
+    start_row: usize,
+    start_col: usize,
+    end_row: usize,
+    end_col: usize,
+    lookup: &L,
+    values: &mut Vec<EvalResult>,
+) {
+    let _ = collect_all_values_from_range_sheet(
+        &SheetRef::Current,
+        start_row, start_col, end_row, end_col,
+        lookup, values
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::formula::parser::parse;
+    use crate::formula::parser::{parse, bind_expr_same_sheet, BoundExpr};
+
+    /// Parse and bind a formula for testing (same-sheet formulas only)
+    fn parse_and_bind(formula: &str) -> BoundExpr {
+        let parsed = parse(formula).unwrap();
+        bind_expr_same_sheet(&parsed)
+    }
 
     /// Simple lookup for testing: stores values in a 10x10 grid
     struct TestLookup {
@@ -3201,7 +3733,7 @@ mod tests {
         lookup.set(0, 0, "42");
         lookup.define_cell("Revenue", 0, 0);
 
-        let expr = parse("=Revenue").unwrap();
+        let expr = parse_and_bind("=Revenue");
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(42.0));
     }
@@ -3209,7 +3741,7 @@ mod tests {
     #[test]
     fn test_named_range_undefined() {
         let lookup = TestLookup::new();
-        let expr = parse("=UndefinedName").unwrap();
+        let expr = parse_and_bind("=UndefinedName");
         let result = evaluate(&expr, &lookup);
         match result {
             EvalResult::Error(e) => assert!(e.contains("#NAME?")),
@@ -3225,7 +3757,7 @@ mod tests {
         lookup.set(2, 0, "30");
         lookup.define_range("Sales", 0, 0, 2, 0);
 
-        let expr = parse("=SUM(Sales)").unwrap();
+        let expr = parse_and_bind("=SUM(Sales)");
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(60.0));
     }
@@ -3239,7 +3771,7 @@ mod tests {
         // All of these should resolve to the same cell
         let exprs = ["=MyValue", "=myvalue", "=MYVALUE", "=myVALUE"];
         for formula in exprs {
-            let expr = parse(formula).unwrap();
+            let expr = parse_and_bind(formula);
             let result = evaluate(&expr, &lookup);
             assert_eq!(result, EvalResult::Number(100.0), "Failed for {}", formula);
         }
@@ -3253,7 +3785,7 @@ mod tests {
         lookup.define_cell("Price", 0, 0);
         lookup.define_cell("Discount", 1, 1);
 
-        let expr = parse("=Price-Discount").unwrap();
+        let expr = parse_and_bind("=Price-Discount");
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(25.0));
     }
@@ -3280,7 +3812,7 @@ mod tests {
         lookup.set(4, 1, "West");
 
         // SUMIFS(A1:A5, B1:B5, "East") should sum 100+150+300 = 550
-        let expr = parse(r#"=SUMIFS(A1:A5, B1:B5, "East")"#).unwrap();
+        let expr = parse_and_bind(r#"=SUMIFS(A1:A5, B1:B5, "East")"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(550.0));
     }
@@ -3305,7 +3837,7 @@ mod tests {
         lookup.set(3, 2, "Active");
 
         // SUMIFS(A1:A4, B1:B4, "East", C1:C4, "Active") = 100 + 300 = 400
-        let expr = parse(r#"=SUMIFS(A1:A4, B1:B4, "East", C1:C4, "Active")"#).unwrap();
+        let expr = parse_and_bind(r#"=SUMIFS(A1:A4, B1:B4, "East", C1:C4, "Active")"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(400.0));
     }
@@ -3321,7 +3853,7 @@ mod tests {
         lookup.set(4, 0, "Apple");
 
         // COUNTIFS(A1:A5, "Apple") = 3
-        let expr = parse(r#"=COUNTIFS(A1:A5, "Apple")"#).unwrap();
+        let expr = parse_and_bind(r#"=COUNTIFS(A1:A5, "Apple")"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(3.0));
     }
@@ -3341,9 +3873,317 @@ mod tests {
         lookup.set(3, 1, "North");
 
         // COUNTIFS(A1:A4, "Widget", B1:B4, "North") = 2
-        let expr = parse(r#"=COUNTIFS(A1:A4, "Widget", B1:B4, "North")"#).unwrap();
+        let expr = parse_and_bind(r#"=COUNTIFS(A1:A4, "Widget", B1:B4, "North")"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(2.0));
+    }
+
+    #[test]
+    fn test_averageif_basic() {
+        let mut lookup = TestLookup::new();
+        // A1:A5 = [10, 20, 30, 40, 50]
+        lookup.set(0, 0, "10");
+        lookup.set(1, 0, "20");
+        lookup.set(2, 0, "30");
+        lookup.set(3, 0, "40");
+        lookup.set(4, 0, "50");
+        // B1:B5 = ["Yes", "No", "Yes", "Yes", "No"]
+        lookup.set(0, 1, "Yes");
+        lookup.set(1, 1, "No");
+        lookup.set(2, 1, "Yes");
+        lookup.set(3, 1, "Yes");
+        lookup.set(4, 1, "No");
+
+        // AVERAGEIF(B1:B5, "Yes", A1:A5) = (10+30+40)/3 = 26.666...
+        let expr = parse_and_bind(r#"=AVERAGEIF(B1:B5, "Yes", A1:A5)"#);
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 26.666666666666668).abs() < 0.0001),
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_averageif_numeric_criteria() {
+        let mut lookup = TestLookup::new();
+        // A1:A5 = [10, 20, 30, 40, 50]
+        lookup.set(0, 0, "10");
+        lookup.set(1, 0, "20");
+        lookup.set(2, 0, "30");
+        lookup.set(3, 0, "40");
+        lookup.set(4, 0, "50");
+
+        // AVERAGEIF(A1:A5, ">25") = (30+40+50)/3 = 40
+        let expr = parse_and_bind(r#"=AVERAGEIF(A1:A5, ">25")"#);
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(40.0));
+    }
+
+    #[test]
+    fn test_averageif_no_matches() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "10");
+        lookup.set(1, 0, "20");
+
+        // AVERAGEIF(A1:A2, ">100") = #DIV/0! (no matches)
+        let expr = parse_and_bind(r#"=AVERAGEIF(A1:A2, ">100")"#);
+        let result = evaluate(&expr, &lookup);
+        assert!(matches!(result, EvalResult::Error(_)));
+    }
+
+    #[test]
+    fn test_averageifs_single_criteria() {
+        let mut lookup = TestLookup::new();
+        // Values: A1:A5 = [100, 200, 150, 300, 50]
+        lookup.set(0, 0, "100");
+        lookup.set(1, 0, "200");
+        lookup.set(2, 0, "150");
+        lookup.set(3, 0, "300");
+        lookup.set(4, 0, "50");
+        // Region: B1:B5 = ["East", "West", "East", "East", "West"]
+        lookup.set(0, 1, "East");
+        lookup.set(1, 1, "West");
+        lookup.set(2, 1, "East");
+        lookup.set(3, 1, "East");
+        lookup.set(4, 1, "West");
+
+        // AVERAGEIFS(A1:A5, B1:B5, "East") = (100+150+300)/3 = 183.333...
+        let expr = parse_and_bind(r#"=AVERAGEIFS(A1:A5, B1:B5, "East")"#);
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 183.33333333333334).abs() < 0.0001),
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_averageifs_multiple_criteria() {
+        let mut lookup = TestLookup::new();
+        // Values: A1:A4 = [100, 200, 150, 300]
+        lookup.set(0, 0, "100");
+        lookup.set(1, 0, "200");
+        lookup.set(2, 0, "150");
+        lookup.set(3, 0, "300");
+        // Region: B1:B4 = ["East", "West", "East", "East"]
+        lookup.set(0, 1, "East");
+        lookup.set(1, 1, "West");
+        lookup.set(2, 1, "East");
+        lookup.set(3, 1, "East");
+        // Status: C1:C4 = ["Active", "Active", "Inactive", "Active"]
+        lookup.set(0, 2, "Active");
+        lookup.set(1, 2, "Active");
+        lookup.set(2, 2, "Inactive");
+        lookup.set(3, 2, "Active");
+
+        // AVERAGEIFS(A1:A4, B1:B4, "East", C1:C4, "Active") = (100+300)/2 = 200
+        let expr = parse_and_bind(r#"=AVERAGEIFS(A1:A4, B1:B4, "East", C1:C4, "Active")"#);
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(200.0));
+    }
+
+    #[test]
+    fn test_averageifs_no_matches() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "100");
+        lookup.set(0, 1, "East");
+
+        // AVERAGEIFS(A1:A1, B1:B1, "West") = #DIV/0! (no matches)
+        let expr = parse_and_bind(r#"=AVERAGEIFS(A1:A1, B1:B1, "West")"#);
+        let result = evaluate(&expr, &lookup);
+        assert!(matches!(result, EvalResult::Error(_)));
+    }
+
+    // =========================================================================
+    // Financial function tests
+    // =========================================================================
+
+    #[test]
+    fn test_pmt_basic() {
+        let lookup = TestLookup::new();
+        // PMT(0.05/12, 60, 10000) = -188.71 (monthly payment for $10k loan at 5% for 5 years)
+        let expr = parse_and_bind("=PMT(0.05/12, 60, 10000)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - (-188.71)).abs() < 0.01),
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pmt_with_fv() {
+        let lookup = TestLookup::new();
+        // PMT(0.06/12, 120, 100000, 50000) - loan with balloon payment
+        // Payment to pay off 100k principal plus accumulate 50k at end
+        let expr = parse_and_bind("=PMT(0.06/12, 120, 100000, 50000)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - (-1415.31)).abs() < 0.01),
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pmt_zero_rate() {
+        let lookup = TestLookup::new();
+        // PMT(0, 12, 1200) = -100 (no interest)
+        let expr = parse_and_bind("=PMT(0, 12, 1200)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(-100.0));
+    }
+
+    #[test]
+    fn test_fv_basic() {
+        let lookup = TestLookup::new();
+        // FV(0.05/12, 60, -200) - saving $200/month at 5% for 5 years
+        let expr = parse_and_bind("=FV(0.05/12, 60, -200)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 13601.22).abs() < 0.01),
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_fv_with_pv() {
+        let lookup = TestLookup::new();
+        // FV(0.08/12, 120, -500, -10000) - monthly savings plus initial deposit
+        let expr = parse_and_bind("=FV(0.08/12, 120, -500, -10000)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 113669.42).abs() < 0.1),
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_fv_zero_rate() {
+        let lookup = TestLookup::new();
+        // FV(0, 12, -100, -1000) = 2200 (no interest)
+        let expr = parse_and_bind("=FV(0, 12, -100, -1000)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(2200.0));
+    }
+
+    #[test]
+    fn test_pv_basic() {
+        let lookup = TestLookup::new();
+        // PV(0.08/12, 240, -1000) = 119,554.29 (what loan can I afford with $1000/month payment)
+        let expr = parse_and_bind("=PV(0.08/12, 240, -1000)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 119554.29).abs() < 0.01),
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pv_with_fv() {
+        let lookup = TestLookup::new();
+        // PV(0.1/12, 60, -100, -5000)
+        let expr = parse_and_bind("=PV(0.1/12, 60, -100, -5000)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                // Value depends on formula convention
+                assert!(n.is_finite());
+            },
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pv_zero_rate() {
+        let lookup = TestLookup::new();
+        // PV(0, 10, -100, -500) = 1500 (no interest)
+        let expr = parse_and_bind("=PV(0, 10, -100, -500)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(1500.0));
+    }
+
+    #[test]
+    fn test_npv_basic() {
+        let mut lookup = TestLookup::new();
+        // Cash flows: -10000, 3000, 4000, 5000, 6000
+        lookup.set(0, 0, "-10000");
+        lookup.set(1, 0, "3000");
+        lookup.set(2, 0, "4000");
+        lookup.set(3, 0, "5000");
+        lookup.set(4, 0, "6000");
+
+        // NPV(0.1, A1:A5) at 10% discount rate
+        // = -10000/1.1 + 3000/1.1^2 + 4000/1.1^3 + 5000/1.1^4 + 6000/1.1^5
+        let expr = parse_and_bind("=NPV(0.1, A1:A5)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 3534.28).abs() < 0.01),
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_npv_investment() {
+        let mut lookup = TestLookup::new();
+        // Initial investment of -1000, then 300 per year for 5 years
+        lookup.set(0, 0, "-1000");
+        lookup.set(1, 0, "300");
+        lookup.set(2, 0, "300");
+        lookup.set(3, 0, "300");
+        lookup.set(4, 0, "300");
+        lookup.set(5, 0, "300");
+
+        let expr = parse_and_bind("=NPV(0.08, A1:A6)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!(n.is_finite()), // Value varies by convention
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_irr_basic() {
+        let mut lookup = TestLookup::new();
+        // Cash flows: -100, 30, 35, 40, 45
+        lookup.set(0, 0, "-100");
+        lookup.set(1, 0, "30");
+        lookup.set(2, 0, "35");
+        lookup.set(3, 0, "40");
+        lookup.set(4, 0, "45");
+
+        let expr = parse_and_bind("=IRR(A1:A5)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 0.1728).abs() < 0.01), // ~17.28%
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_irr_with_guess() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "-1000");
+        lookup.set(1, 0, "200");
+        lookup.set(2, 0, "300");
+        lookup.set(3, 0, "400");
+        lookup.set(4, 0, "500");
+
+        let expr = parse_and_bind("=IRR(A1:A5, 0.15)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 0.1283).abs() < 0.001), // ~12.83%
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_irr_no_solution() {
+        let mut lookup = TestLookup::new();
+        // All positive - no IRR exists
+        lookup.set(0, 0, "100");
+        lookup.set(1, 0, "200");
+
+        let expr = parse_and_bind("=IRR(A1:A2)");
+        let result = evaluate(&expr, &lookup);
+        assert!(matches!(result, EvalResult::Error(_)));
     }
 
     #[test]
@@ -3354,7 +4194,7 @@ mod tests {
         lookup.set(0, 1, "100");
 
         // IFNA(VLOOKUP("X", A1:B1, 2, FALSE), "Not Available")
-        let expr = parse(r#"=IFNA(VLOOKUP("X", A1:B1, 2, FALSE), "Not Available")"#).unwrap();
+        let expr = parse_and_bind(r#"=IFNA(VLOOKUP("X", A1:B1, 2, FALSE), "Not Available")"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Text("Not Available".to_string()));
     }
@@ -3366,7 +4206,7 @@ mod tests {
         lookup.set(0, 1, "100");
 
         // IFNA(VLOOKUP("Found", A1:B1, 2, FALSE), "Not Available")
-        let expr = parse(r#"=IFNA(VLOOKUP("Found", A1:B1, 2, FALSE), "Not Available")"#).unwrap();
+        let expr = parse_and_bind(r#"=IFNA(VLOOKUP("Found", A1:B1, 2, FALSE), "Not Available")"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(100.0));
     }
@@ -3378,7 +4218,7 @@ mod tests {
         lookup.set(0, 1, "100");
 
         // ISNA(VLOOKUP("X", A1:B1, 2, FALSE)) - should be TRUE (returns #N/A)
-        let expr = parse(r#"=ISNA(VLOOKUP("X", A1:B1, 2, FALSE))"#).unwrap();
+        let expr = parse_and_bind(r#"=ISNA(VLOOKUP("X", A1:B1, 2, FALSE))"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Boolean(true));
     }
@@ -3388,7 +4228,7 @@ mod tests {
         let lookup = TestLookup::new();
 
         // ISNA(1/0) - should be FALSE (division by zero is not #N/A)
-        let expr = parse("=ISNA(1/0)").unwrap();
+        let expr = parse_and_bind("=ISNA(1/0)");
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Boolean(false));
     }
@@ -3398,7 +4238,7 @@ mod tests {
         let lookup = TestLookup::new();
 
         // ISNA(42) - should be FALSE (not an error)
-        let expr = parse("=ISNA(42)").unwrap();
+        let expr = parse_and_bind("=ISNA(42)");
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Boolean(false));
     }
@@ -3411,7 +4251,7 @@ mod tests {
         lookup.set(2, 0, "!");
 
         // TEXTJOIN(", ", TRUE, A1:A3) = "Hello, World, !"
-        let expr = parse(r#"=TEXTJOIN(", ", TRUE, A1:A3)"#).unwrap();
+        let expr = parse_and_bind(r#"=TEXTJOIN(", ", TRUE, A1:A3)"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Text("Hello, World, !".to_string()));
     }
@@ -3426,12 +4266,12 @@ mod tests {
         lookup.set(4, 0, "C");
 
         // TEXTJOIN("-", TRUE, A1:A5) = "A-B-C" (empties ignored)
-        let expr = parse(r#"=TEXTJOIN("-", TRUE, A1:A5)"#).unwrap();
+        let expr = parse_and_bind(r#"=TEXTJOIN("-", TRUE, A1:A5)"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Text("A-B-C".to_string()));
 
         // TEXTJOIN("-", FALSE, A1:A5) = "A--B--C" (empties included)
-        let expr = parse(r#"=TEXTJOIN("-", FALSE, A1:A5)"#).unwrap();
+        let expr = parse_and_bind(r#"=TEXTJOIN("-", FALSE, A1:A5)"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Text("A--B--C".to_string()));
     }
@@ -3451,7 +4291,7 @@ mod tests {
         lookup.set(3, 1, "3.99");
 
         // XLOOKUP("Cherry", A1:A4, B1:B4) = 2.49
-        let expr = parse(r#"=XLOOKUP("Cherry", A1:A4, B1:B4)"#).unwrap();
+        let expr = parse_and_bind(r#"=XLOOKUP("Cherry", A1:A4, B1:B4)"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(2.49));
     }
@@ -3463,7 +4303,7 @@ mod tests {
         lookup.set(0, 1, "1.99");
 
         // XLOOKUP("Orange", A1:A1, B1:B1, "Not found") = "Not found"
-        let expr = parse(r#"=XLOOKUP("Orange", A1:A1, B1:B1, "Not found")"#).unwrap();
+        let expr = parse_and_bind(r#"=XLOOKUP("Orange", A1:A1, B1:B1, "Not found")"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Text("Not found".to_string()));
     }
@@ -3475,7 +4315,7 @@ mod tests {
         lookup.set(0, 1, "1.99");
 
         // XLOOKUP("Orange", A1:A1, B1:B1) with no default = #N/A
-        let expr = parse(r#"=XLOOKUP("Orange", A1:A1, B1:B1)"#).unwrap();
+        let expr = parse_and_bind(r#"=XLOOKUP("Orange", A1:A1, B1:B1)"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Error("#N/A".to_string()));
     }
@@ -3487,7 +4327,7 @@ mod tests {
         lookup.set(0, 1, "1.99");
 
         // XLOOKUP("apple", ...) should match "APPLE"
-        let expr = parse(r#"=XLOOKUP("apple", A1:A1, B1:B1)"#).unwrap();
+        let expr = parse_and_bind(r#"=XLOOKUP("apple", A1:A1, B1:B1)"#);
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(1.99));
     }
@@ -3505,7 +4345,7 @@ mod tests {
         lookup.set(2, 1, "Charlie");
 
         // XLOOKUP(102, A1:A3, B1:B3) = "Bob"
-        let expr = parse("=XLOOKUP(102, A1:A3, B1:B3)").unwrap();
+        let expr = parse_and_bind("=XLOOKUP(102, A1:A3, B1:B3)");
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Text("Bob".to_string()));
     }

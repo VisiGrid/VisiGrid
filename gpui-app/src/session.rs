@@ -72,6 +72,13 @@ pub struct WindowSession {
     pub fullscreen: bool,
     /// Panel visibility
     pub panels: PanelState,
+    /// Zoom level (default 1.0 = 100%)
+    #[serde(default = "default_zoom")]
+    pub zoom_level: f32,
+}
+
+fn default_zoom() -> f32 {
+    1.0
 }
 
 /// State for a single sheet within a workbook
@@ -572,6 +579,7 @@ impl Spreadsheet {
                 inspector_visible: self.inspector_visible,
                 inspector_tab: self.inspector_tab.into(),
             },
+            zoom_level: self.zoom_level,
         }
     }
 
@@ -634,6 +642,14 @@ impl Spreadsheet {
         // Apply panel state
         self.inspector_visible = session.panels.inspector_visible;
         self.inspector_tab = session.panels.inspector_tab.into();
+
+        // Apply zoom level (clamp to valid range)
+        use crate::app::{ZOOM_STEPS, GridMetrics};
+        let zoom = session.zoom_level
+            .max(ZOOM_STEPS[0])
+            .min(ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
+        self.zoom_level = zoom;
+        self.metrics = GridMetrics::new(zoom);
     }
 }
 

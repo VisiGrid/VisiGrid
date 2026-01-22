@@ -1,5 +1,6 @@
 use gpui::*;
 use gpui::StyledText;
+use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
 use crate::mode::Mode;
 use crate::settings::{user_settings, Setting};
@@ -7,15 +8,23 @@ use crate::theme::TokenKey;
 use super::headers::render_row_header;
 use visigrid_engine::cell::{Alignment, VerticalAlignment};
 
-/// Render the main cell grid
+/// Render the main cell grid with freeze pane support
+///
+/// When frozen_rows > 0 or frozen_cols > 0, renders 4 regions:
+/// 1. Frozen corner (top-left, never scrolls)
+/// 2. Frozen rows (top, scrolls horizontally only)
+/// 3. Frozen cols (left, scrolls vertically only)
+/// 4. Main grid (scrolls both directions)
 pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let scroll_row = app.scroll_row;
     let scroll_col = app.scroll_col;
     let selected = app.selected;
     let editing = app.mode.is_editing();
     let edit_value = app.edit_value.clone();
-    let visible_rows = app.visible_rows();
-    let visible_cols = app.visible_cols();
+    let total_visible_rows = app.visible_rows();
+    let total_visible_cols = app.visible_cols();
+    let frozen_rows = app.frozen_rows;
+    let frozen_cols = app.frozen_cols;
 
     // Read show_gridlines from global settings
     let show_gridlines = match &user_settings(cx).appearance.show_gridlines {
@@ -23,31 +32,155 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
         Setting::Inherit => true, // Default to showing gridlines
     };
 
+    // Calculate scrollable region dimensions
+    let scrollable_visible_rows = total_visible_rows.saturating_sub(frozen_rows);
+    let scrollable_visible_cols = total_visible_cols.saturating_sub(frozen_cols);
+
+    // Get divider color for freeze pane separators
+    let divider_color = app.token(TokenKey::PanelBorder);
+
+    // No freeze panes - simple single-region rendering
+    if frozen_rows == 0 && frozen_cols == 0 {
+        return div()
+            .flex_1()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(
+                        (0..total_visible_rows).map(|visible_row| {
+                            let row = scroll_row + visible_row;
+                            render_row(
+                                row,
+                                scroll_col,
+                                total_visible_cols,
+                                selected,
+                                editing,
+                                &edit_value,
+                                show_gridlines,
+                                app,
+                                window,
+                                cx,
+                            )
+                        })
+                    )
+            )
+            .into_any_element();
+    }
+
+    // Get metrics for scaled dimensions
+    let metrics = &app.metrics;
+
+    // Freeze panes active - render 4 regions
     div()
         .flex_1()
         .overflow_hidden()
+        .flex()
+        .flex_col()
+        // Top section: frozen corner + frozen rows
+        .when(frozen_rows > 0, |d| {
+            d.child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .children(
+                        (0..frozen_rows).map(|row| {
+                            // Use scaled row height for rendering
+                            let row_height = metrics.row_height(app.row_height(row));
+                            div()
+                                .flex()
+                                .flex_shrink_0()
+                                .h(px(row_height))
+                                // Row header for frozen row
+                                .child(render_row_header(app, row, cx))
+                                // Frozen corner cells (cols 0..frozen_cols)
+                                .when(frozen_cols > 0, |d| {
+                                    d.children(
+                                        (0..frozen_cols).map(|col| {
+                                            let col_width = metrics.col_width(app.col_width(col));
+                                            render_cell(row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                        })
+                                    )
+                                })
+                                // Vertical divider after frozen cols (1px stays constant)
+                                .when(frozen_cols > 0, |d| {
+                                    d.child(
+                                        div()
+                                            .w(px(1.0))
+                                            .h_full()
+                                            .bg(divider_color)
+                                    )
+                                })
+                                // Frozen row cells (cols scroll_col..scroll_col+scrollable_visible_cols)
+                                .children(
+                                    (0..scrollable_visible_cols).map(|visible_col| {
+                                        let col = scroll_col + visible_col;
+                                        let col_width = metrics.col_width(app.col_width(col));
+                                        render_cell(row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                    })
+                                )
+                        })
+                    )
+            )
+            // Horizontal divider after frozen rows (1px stays constant)
+            .child(
+                div()
+                    .w_full()
+                    .h(px(1.0))
+                    .bg(divider_color)
+            )
+        })
+        // Bottom section: frozen cols + main grid
         .child(
             div()
-                .flex()
-                .flex_col()
-                .children(
-                    (0..visible_rows).map(|visible_row| {
-                        let row = scroll_row + visible_row;
-                        render_row(
-                            row,
-                            scroll_col,
-                            visible_cols,
-                            selected,
-                            editing,
-                            &edit_value,
-                            show_gridlines,
-                            app,
-                            window,
-                            cx,
+                .flex_1()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .children(
+                            (0..scrollable_visible_rows).map(|visible_row| {
+                                let row = scroll_row + visible_row;
+                                let row_height = metrics.row_height(app.row_height(row));
+                                div()
+                                    .flex()
+                                    .flex_shrink_0()
+                                    .h(px(row_height))
+                                    // Row header
+                                    .child(render_row_header(app, row, cx))
+                                    // Frozen column cells (cols 0..frozen_cols)
+                                    .when(frozen_cols > 0, |d| {
+                                        d.children(
+                                            (0..frozen_cols).map(|col| {
+                                                let col_width = metrics.col_width(app.col_width(col));
+                                                render_cell(row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                            })
+                                        )
+                                    })
+                                    // Vertical divider after frozen cols (1px stays constant)
+                                    .when(frozen_cols > 0, |d| {
+                                        d.child(
+                                            div()
+                                                .w(px(1.0))
+                                                .h_full()
+                                                .bg(divider_color)
+                                        )
+                                    })
+                                    // Main grid cells
+                                    .children(
+                                        (0..scrollable_visible_cols).map(|visible_col| {
+                                            let col = scroll_col + visible_col;
+                                            let col_width = metrics.col_width(app.col_width(col));
+                                            render_cell(row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                        })
+                                    )
+                            })
                         )
-                    })
                 )
         )
+        .into_any_element()
 }
 
 fn render_row(
@@ -62,7 +195,8 @@ fn render_row(
     window: &Window,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    let row_height = app.row_height(row);
+    // Use scaled dimensions for rendering
+    let row_height = app.metrics.row_height(app.row_height(row));
 
     div()
         .flex()
@@ -72,7 +206,7 @@ fn render_row(
         .children(
             (0..visible_cols).map(|visible_col| {
                 let col = scroll_col + visible_col;
-                let col_width = app.col_width(col);
+                let col_width = app.metrics.col_width(app.col_width(col));
                 render_cell(row, col, col_width, row_height, selected, editing, edit_value, show_gridlines, app, window, cx)
             })
         )
@@ -221,7 +355,7 @@ fn render_cell(
 
     cell = cell
         .text_color(cell_text_color(app, is_editing, is_selected, is_multi_edit_preview))
-        .text_sm()
+        .text_size(px(app.metrics.font_size))  // Scaled font size for zoom
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             // Don't handle clicks if inspector is visible (like Excel's Ctrl+1 modal behavior)
             if this.inspector_visible {

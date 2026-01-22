@@ -616,7 +616,7 @@ pub fn register_sheet_global_with_selection(
 // Workbook Adapter (for actual VisiGrid sheets)
 // ============================================================================
 
-use visigrid_engine::sheet::Sheet;
+use visigrid_engine::sheet::{Sheet, SheetId};
 use visigrid_engine::cell::CellValue;
 
 /// Adapter that wraps a snapshot of sheet data for Lua read access.
@@ -800,7 +800,7 @@ mod tests {
     fn test_snapshot_sparse_performance() {
         // Create a large sheet (1000 rows x 100 cols = 100k grid)
         // but with only 10k populated cells (10% density)
-        let mut sheet = Sheet::new(1000, 100);
+        let mut sheet = Sheet::new(SheetId(1), 1000, 100);
 
         // Populate 10k cells - use deterministic pattern with no collisions
         // row = i / 100, col = i % 100 gives unique (row, col) for i in 0..10k
@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn test_snapshot_read_performance() {
         // Create sheet with 10k cells
-        let mut sheet = Sheet::new(1000, 100);
+        let mut sheet = Sheet::new(SheetId(1), 1000, 100);
         for i in 0..10_000usize {
             let row = i / 100;
             let col = i % 100;
@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn test_snapshot_empty_sheet_fast() {
         // Large dimensions but empty - should be instant
-        let sheet = Sheet::new(10_000, 1_000);  // 10M grid, 0 cells
+        let sheet = Sheet::new(SheetId(1), 10_000, 1_000);  // 10M grid, 0 cells
 
         let start = std::time::Instant::now();
         let snapshot = SheetSnapshot::from_sheet(&sheet);

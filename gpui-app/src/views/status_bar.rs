@@ -152,6 +152,14 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                     )
                 })
                 .children(selection_stats)
+                // Zoom indicator
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .text_color(text_muted)
+                        .child(app.zoom_display())
+                )
         )
         // Context menu overlay
         .when(context_menu_sheet.is_some(), |d| {

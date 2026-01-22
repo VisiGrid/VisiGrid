@@ -18,6 +18,9 @@ actions!(navigation, [
     FindInCells,
     FindNext,
     FindPrev,
+    FindReplace,    // Ctrl+H: Find and Replace dialog
+    ReplaceNext,    // Replace current match and find next
+    ReplaceAll,     // Replace all matches
     // IDE-style navigation (Shift+F12 / F12)
     FindReferences,    // Shift+F12: Find cells that reference current cell
     GoToPrecedents,    // F12: Go to cells that current cell references
@@ -120,6 +123,11 @@ actions!(view, [
     ZoomReset,
     ShowAbout,
     ShowFontPicker,
+    // Freeze panes
+    FreezeTopRow,      // Freeze first row only
+    FreezeFirstColumn, // Freeze first column only
+    FreezePanes,       // Freeze rows/cols above and left of current cell
+    UnfreezePanes,     // Clear all freeze panes
 ]);
 
 // Format actions

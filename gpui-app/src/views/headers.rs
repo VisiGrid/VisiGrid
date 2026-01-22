@@ -1,6 +1,6 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, CELL_HEIGHT, HEADER_WIDTH};
+use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
 
 /// Render the column header row (A, B, C, ...) with resize handles
@@ -10,18 +10,19 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
     let selection_bg = app.token(TokenKey::SelectionBg);
+    let metrics = &app.metrics;
 
     div()
         .flex()
         .flex_shrink_0()
-        .h(px(CELL_HEIGHT))
+        .h(px(metrics.header_h))  // Scaled header height
         .bg(header_bg)
         // Corner cell - click to select all
         .child(
             div()
                 .id("select-all-corner")
                 .flex_shrink_0()
-                .w(px(HEADER_WIDTH))
+                .w(px(metrics.header_w))  // Scaled header width
                 .h_full()
                 .border_1()
                 .border_color(header_border)
@@ -35,7 +36,8 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         .children(
             (0..visible_cols).map(move |i| {
                 let col = scroll_col + i;
-                let col_width = app.col_width(col);
+                // Pass scaled width for rendering
+                let col_width = metrics.col_width(app.col_width(col));
                 let is_selected = app.is_col_header_selected(col);
                 render_column_header(app, col, col_width, is_selected, cx)
             })
@@ -79,8 +81,9 @@ fn render_column_header(
             // Check if click is in the resize handle area (last 6px of column)
             // Skip selection handling if so - let the resize handle deal with it
             let click_x: f32 = event.position.x.into();
-            let col_start_x = HEADER_WIDTH + this.col_x_offset(col);
-            let col_end_x = col_start_x + width;
+            // Use scaled header width (col_x_offset already returns scaled value)
+            let col_start_x = this.metrics.header_w + this.col_x_offset(col);
+            let col_end_x = col_start_x + width; // width is already scaled from caller
             let resize_area_start = col_end_x - 6.0;
 
             if click_x >= resize_area_start {
@@ -130,7 +133,8 @@ fn render_column_header(
 
 /// Render a row header (1, 2, 3, ...) with resize handle and selection support
 pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    let row_height = app.row_height(row);
+    // Get scaled row height for rendering
+    let row_height_scaled = app.metrics.row_height(app.row_height(row));
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
     let header_text = app.token(TokenKey::HeaderTextMuted);
@@ -141,8 +145,8 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
     div()
         .id(ElementId::NamedInteger("row-header".into(), row as u64))
         .flex_shrink_0()
-        .w(px(HEADER_WIDTH))
-        .h(px(row_height))
+        .w(px(app.metrics.header_w))  // Scaled header width
+        .h(px(row_height_scaled))     // Scaled row height
         .relative()
         .flex()
         .items_center()
@@ -152,7 +156,7 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
         .border_1()
         .border_color(header_border)
         .text_color(header_text)
-        .text_sm()
+        .text_size(px(app.metrics.font_size))  // Scaled font size
         .cursor_pointer()
         .hover(|s| s.bg(selection_bg.opacity(0.3)))
         .child(format!("{}", row + 1))
@@ -161,8 +165,9 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
             // Check if click is in the resize handle area (bottom 4px of row)
             // Skip selection handling if so - let the resize handle deal with it
             let click_y: f32 = event.position.y.into();
+            // row_y_offset returns scaled value
             let row_start_y = this.grid_layout.grid_body_origin.1 + this.row_y_offset(row);
-            let row_end_y = row_start_y + row_height;
+            let row_end_y = row_start_y + this.metrics.row_height(this.row_height(row));
             let resize_area_start = row_end_y - 4.0;
 
             if click_y >= resize_area_start {

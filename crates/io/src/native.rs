@@ -5,7 +5,7 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 
 use visigrid_engine::cell::{Alignment, CellFormat, DateStyle, NumberFormat, TextOverflow, VerticalAlignment};
-use visigrid_engine::sheet::Sheet;
+use visigrid_engine::sheet::{Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
 
@@ -179,8 +179,8 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
         })
         .unwrap_or(26);
 
-    let mut sheet = Sheet::new(rows, cols);
-    sheet.name = sheet_name;
+    let mut sheet = Sheet::new(SheetId(1), rows, cols);
+    sheet.set_name(&sheet_name);
 
     // Load cells - check if format columns exist for backward compatibility
     let has_alignment_columns = conn

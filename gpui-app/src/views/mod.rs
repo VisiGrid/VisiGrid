@@ -27,7 +27,7 @@ mod tour;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, CELL_HEIGHT, HEADER_WIDTH, CreateNameFocus};
+use crate::app::{Spreadsheet, CELL_HEIGHT, MENU_BAR_HEIGHT, FORMULA_BAR_HEIGHT, CreateNameFocus};
 use crate::actions::*;
 use crate::mode::{Mode, InspectorTab};
 use crate::theme::TokenKey;
@@ -496,6 +496,29 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.zen_mode = !this.zen_mode;
             cx.notify();
         }))
+        // Zoom
+        .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+            this.zoom_in(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+            this.zoom_out(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ZoomReset, _, cx| {
+            this.zoom_reset(cx);
+        }))
+        // Freeze panes
+        .on_action(cx.listener(|this, _: &FreezeTopRow, _, cx| {
+            this.freeze_top_row(cx);
+        }))
+        .on_action(cx.listener(|this, _: &FreezeFirstColumn, _, cx| {
+            this.freeze_first_column(cx);
+        }))
+        .on_action(cx.listener(|this, _: &FreezePanes, _, cx| {
+            this.freeze_panes(cx);
+        }))
+        .on_action(cx.listener(|this, _: &UnfreezePanes, _, cx| {
+            this.unfreeze_panes(cx);
+        }))
         .on_action(cx.listener(|this, _: &ToggleLuaConsole, window, cx| {
             // Pro feature gate
             if !visigrid_license::is_feature_enabled("lua") {
@@ -584,6 +607,15 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &FindPrev, _, cx| {
             this.find_prev(cx);
+        }))
+        .on_action(cx.listener(|this, _: &FindReplace, _, cx| {
+            this.show_find_replace(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ReplaceNext, _, cx| {
+            this.replace_next(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ReplaceAll, _, cx| {
+            this.replace_all(cx);
         }))
         // IDE-style navigation (Find References / Go to Precedents)
         .on_action(cx.listener(|this, _: &FindReferences, _, cx| {
@@ -1247,6 +1279,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 } else if event.keystroke.key == "backspace" {
                     this.find_backspace(cx);
                     return;
+                } else if event.keystroke.key == "tab" {
+                    // Tab toggles focus between find and replace inputs
+                    this.find_toggle_focus(cx);
+                    return;
                 }
             }
 
@@ -1282,11 +1318,24 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
             }
         }))
-        // Mouse wheel scrolling
+        // Mouse wheel scrolling (or zoom with Ctrl/Cmd)
         .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            // Check for zoom modifier (Ctrl on Linux/Windows, Cmd on macOS)
+            #[cfg(target_os = "macos")]
+            let zoom_modifier = event.modifiers.command;
+            #[cfg(not(target_os = "macos"))]
+            let zoom_modifier = event.modifiers.control;
+
             let delta = event.delta.pixel_delta(px(CELL_HEIGHT));
-            // Convert pixel delta to row/col delta (negative Y = scroll up)
             let dy: f32 = delta.y.into();
+
+            if zoom_modifier {
+                // Zoom: Ctrl/Cmd + wheel
+                this.zoom_wheel(dy, cx);
+                return; // Don't scroll
+            }
+
+            // Normal scrolling
             let dx: f32 = delta.x.into();
             let delta_rows = (-dy / CELL_HEIGHT).round() as i32;
             let delta_cols = (-dx / CELL_HEIGHT).round() as i32;
@@ -1452,9 +1501,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(app.autocomplete_visible, |div| {
             let suggestions = app.autocomplete_suggestions();
             let selected = app.autocomplete_selected;
-            // Calculate popup position below the active cell
-            let popup_x = HEADER_WIDTH + app.col_x_offset(app.selected.1);
-            let popup_y = CELL_HEIGHT * 3.0 + app.row_y_offset(app.selected.0) + app.row_height(app.selected.0);
+            // Calculate popup position below the active cell (scaled for zoom)
+            let popup_x = app.metrics.header_w + app.col_x_offset(app.selected.1);
+            let popup_y = MENU_BAR_HEIGHT + FORMULA_BAR_HEIGHT + app.metrics.header_h
+                + app.row_y_offset(app.selected.0) + app.metrics.row_height(app.row_height(app.selected.0));
             let panel_bg = app.token(TokenKey::PanelBg);
             let panel_border = app.token(TokenKey::PanelBorder);
             let text_primary = app.token(TokenKey::TextPrimary);
@@ -1475,9 +1525,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         // Formula signature help (rendered at top level)
         .when_some(app.signature_help(), |div, sig_info| {
-            // Calculate popup position below the active cell
-            let popup_x = HEADER_WIDTH + app.col_x_offset(app.selected.1);
-            let popup_y = CELL_HEIGHT * 3.0 + app.row_y_offset(app.selected.0) + app.row_height(app.selected.0);
+            // Calculate popup position below the active cell (scaled for zoom)
+            let popup_x = app.metrics.header_w + app.col_x_offset(app.selected.1);
+            let popup_y = MENU_BAR_HEIGHT + FORMULA_BAR_HEIGHT + app.metrics.header_h
+                + app.row_y_offset(app.selected.0) + app.metrics.row_height(app.row_height(app.selected.0));
             let panel_bg = app.token(TokenKey::PanelBg);
             let panel_border = app.token(TokenKey::PanelBorder);
             let text_primary = app.token(TokenKey::TextPrimary);
@@ -1496,9 +1547,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         // Formula error banner (rendered at top level)
         .when_some(app.formula_error(), |div, error_info| {
-            // Calculate popup position below the active cell
-            let popup_x = HEADER_WIDTH + app.col_x_offset(app.selected.1);
-            let popup_y = CELL_HEIGHT * 3.0 + app.row_y_offset(app.selected.0) + app.row_height(app.selected.0);
+            // Calculate popup position below the active cell (scaled for zoom)
+            let popup_x = app.metrics.header_w + app.col_x_offset(app.selected.1);
+            let popup_y = MENU_BAR_HEIGHT + FORMULA_BAR_HEIGHT + app.metrics.header_h
+                + app.row_y_offset(app.selected.0) + app.metrics.row_height(app.row_height(app.selected.0));
             let error_bg = app.token(TokenKey::ErrorBg);
             let error_color = app.token(TokenKey::Error);
             let panel_border = app.token(TokenKey::PanelBorder);

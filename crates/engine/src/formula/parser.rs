@@ -2,30 +2,55 @@
 // Supports: numbers, cell refs (A1), ranges (A1:A5), functions (SUM), basic math (+, -, *, /)
 // Also supports: comparison operators (<, >, =, <=, >=, <>), string literals, concatenation (&)
 
+use crate::sheet::{SheetId, SheetRef, UnboundSheetRef};
+
+/// Generic expression AST, parameterized over sheet reference type.
+/// - Parser outputs `ParsedExpr = Expr<UnboundSheetRef>` (sheet names unresolved)
+/// - After binding, becomes `BoundExpr = Expr<SheetRef>` (sheet IDs resolved)
 #[derive(Debug, Clone)]
-pub enum Expr {
+pub enum Expr<S> {
     Number(f64),
     Text(String),
     Boolean(bool),
-    CellRef { col: usize, row: usize },
+    /// Cell reference with sheet context
+    /// - col_abs/row_abs: true if that component is absolute ($A vs A, $1 vs 1)
+    CellRef {
+        sheet: S,
+        col: usize,
+        row: usize,
+        col_abs: bool,
+        row_abs: bool,
+    },
+    /// Range reference with sheet context
     Range {
+        sheet: S,
         start_col: usize,
         start_row: usize,
         end_col: usize,
         end_row: usize,
+        start_col_abs: bool,
+        start_row_abs: bool,
+        end_col_abs: bool,
+        end_row_abs: bool,
     },
     Function {
         name: String,
-        args: Vec<Expr>,
+        args: Vec<Expr<S>>,
     },
     BinaryOp {
         op: Op,
-        left: Box<Expr>,
-        right: Box<Expr>,
+        left: Box<Expr<S>>,
+        right: Box<Expr<S>>,
     },
     /// Named range reference (resolved at evaluation time)
     NamedRange(String),
 }
+
+/// Parser output: sheet references are unresolved names
+pub type ParsedExpr = Expr<UnboundSheetRef>;
+
+/// Bound expression: sheet references resolved to stable IDs
+pub type BoundExpr = Expr<SheetRef>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Op {
@@ -45,7 +70,9 @@ pub enum Op {
     Concat,  // &
 }
 
-pub fn parse(formula: &str) -> Result<Expr, String> {
+/// Parse a formula string into an unbound AST (sheet names not yet resolved to IDs).
+/// Call `bind_expr()` with workbook context to resolve sheet references before evaluation.
+pub fn parse(formula: &str) -> Result<ParsedExpr, String> {
     let formula = formula.trim();
     if !formula.starts_with('=') {
         return Err("Formula must start with =".to_string());
@@ -63,7 +90,15 @@ pub fn parse(formula: &str) -> Result<Expr, String> {
 enum Token {
     Number(f64),
     StringLit(String),
-    CellRef { col: usize, row: usize },
+    /// Cell reference with absolute/relative flags
+    CellRef {
+        col: usize,
+        row: usize,
+        col_abs: bool,
+        row_abs: bool,
+    },
+    /// Sheet name prefix (e.g., "Sheet1" from "Sheet1!A1")
+    SheetPrefix(String),
     Ident(String),
     Plus,
     Minus,
@@ -135,8 +170,34 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
                 tokens.push(Token::StringLit(s));
             }
+            '\'' => {
+                // Quoted sheet name (e.g., 'My Sheet'!A1 or 'Bob''s Sheet'!A1)
+                // Doubled quotes ('') inside are escape for a single quote
+                chars.next(); // consume opening quote
+                let mut sheet_name = String::new();
+                loop {
+                    match chars.next() {
+                        Some('\'') => {
+                            // Check if it's an escaped quote (doubled)
+                            if chars.peek() == Some(&'\'') {
+                                chars.next(); // consume second quote
+                                sheet_name.push('\''); // add single quote to name
+                            } else {
+                                break; // end of quoted name
+                            }
+                        }
+                        Some(ch) => sheet_name.push(ch),
+                        None => return Err("Unterminated sheet name".to_string()),
+                    }
+                }
+                // Must be followed by !
+                if chars.next() != Some('!') {
+                    return Err("Quoted sheet name must be followed by !".to_string());
+                }
+                tokens.push(Token::SheetPrefix(sheet_name));
+            }
             'A'..='Z' | 'a'..='z' => {
-                // Could be cell reference (A1) or function name (SUM)
+                // Could be cell reference (A1), function name (SUM), or sheet prefix (Sheet1!)
                 let mut ident = String::new();
                 while let Some(&ch) = chars.peek() {
                     if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
@@ -145,6 +206,13 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     } else {
                         break;
                     }
+                }
+
+                // Check if followed by ! (sheet reference prefix)
+                if chars.peek() == Some(&'!') {
+                    chars.next(); // consume the !
+                    tokens.push(Token::SheetPrefix(ident));
+                    continue;
                 }
 
                 // Check for TRUE/FALSE boolean literals
@@ -202,10 +270,13 @@ fn try_parse_cell_ref(s: &str) -> Option<Token> {
     let s = s.to_uppercase();
     let mut chars = s.chars().peekable();
 
-    // Skip leading $ for absolute column reference
-    if chars.peek() == Some(&'$') {
+    // Check for $ (absolute column reference)
+    let col_abs = if chars.peek() == Some(&'$') {
         chars.next();
-    }
+        true
+    } else {
+        false
+    };
 
     // Collect column letters (now supports multi-letter like AA, AB, etc.)
     let mut col_str = String::new();
@@ -222,10 +293,13 @@ fn try_parse_cell_ref(s: &str) -> Option<Token> {
         return None;
     }
 
-    // Skip $ for absolute row reference
-    if chars.peek() == Some(&'$') {
+    // Check for $ (absolute row reference)
+    let row_abs = if chars.peek() == Some(&'$') {
         chars.next();
-    }
+        true
+    } else {
+        false
+    };
 
     let row_str: String = chars.collect();
     if row_str.is_empty() || !row_str.chars().all(|c| c.is_ascii_digit()) {
@@ -242,15 +316,15 @@ fn try_parse_cell_ref(s: &str) -> Option<Token> {
         acc * 26 + (c as usize - 'A' as usize + 1)
     }) - 1;
 
-    Some(Token::CellRef { col, row: row - 1 })
+    Some(Token::CellRef { col, row: row - 1, col_abs, row_abs })
 }
 
-fn parse_expr(tokens: &[Token]) -> Result<Expr, String> {
+fn parse_expr(tokens: &[Token]) -> Result<ParsedExpr, String> {
     parse_comparison(tokens, 0).map(|(expr, _)| expr)
 }
 
 // Lowest precedence: comparison operators
-fn parse_comparison(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> {
+fn parse_comparison(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), String> {
     let (mut left, mut pos) = parse_concat(tokens, pos)?;
 
     while pos < tokens.len() {
@@ -276,7 +350,7 @@ fn parse_comparison(tokens: &[Token], pos: usize) -> Result<(Expr, usize), Strin
 }
 
 // String concatenation (&)
-fn parse_concat(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> {
+fn parse_concat(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), String> {
     let (mut left, mut pos) = parse_add_sub(tokens, pos)?;
 
     while pos < tokens.len() {
@@ -296,7 +370,7 @@ fn parse_concat(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> {
     Ok((left, pos))
 }
 
-fn parse_add_sub(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> {
+fn parse_add_sub(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), String> {
     let (mut left, mut pos) = parse_mul_div(tokens, pos)?;
 
     while pos < tokens.len() {
@@ -326,7 +400,7 @@ fn parse_add_sub(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> 
     Ok((left, pos))
 }
 
-fn parse_mul_div(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> {
+fn parse_mul_div(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), String> {
     let (mut left, mut pos) = parse_primary(tokens, pos)?;
 
     while pos < tokens.len() {
@@ -356,7 +430,7 @@ fn parse_mul_div(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> 
     Ok((left, pos))
 }
 
-fn parse_primary(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> {
+fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), String> {
     if pos >= tokens.len() {
         return Err("Unexpected end of expression".to_string());
     }
@@ -364,24 +438,63 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> 
     match &tokens[pos] {
         Token::Number(n) => Ok((Expr::Number(*n), pos + 1)),
         Token::StringLit(s) => Ok((Expr::Text(s.clone()), pos + 1)),
-        Token::CellRef { col, row } => {
+        Token::SheetPrefix(sheet_name) => {
+            // Sheet prefix must be followed by a cell reference
+            if pos + 1 >= tokens.len() {
+                return Err("Sheet reference must be followed by cell reference".to_string());
+            }
+            let sheet = UnboundSheetRef::Named(sheet_name.clone());
+            match &tokens[pos + 1] {
+                Token::CellRef { col, row, col_abs, row_abs } => {
+                    // Check if this is a range (Sheet1!A1:B5)
+                    if pos + 3 < tokens.len() {
+                        if let Token::Colon = &tokens[pos + 2] {
+                            if let Token::CellRef { col: end_col, row: end_row, col_abs: end_col_abs, row_abs: end_row_abs } = &tokens[pos + 3] {
+                                return Ok((
+                                    Expr::Range {
+                                        sheet,
+                                        start_col: *col,
+                                        start_row: *row,
+                                        end_col: *end_col,
+                                        end_row: *end_row,
+                                        start_col_abs: *col_abs,
+                                        start_row_abs: *row_abs,
+                                        end_col_abs: *end_col_abs,
+                                        end_row_abs: *end_row_abs,
+                                    },
+                                    pos + 4,
+                                ));
+                            }
+                        }
+                    }
+                    Ok((Expr::CellRef { sheet, col: *col, row: *row, col_abs: *col_abs, row_abs: *row_abs }, pos + 2))
+                }
+                _ => Err("Sheet reference must be followed by cell reference".to_string()),
+            }
+        }
+        Token::CellRef { col, row, col_abs, row_abs } => {
             // Check if this is a range (A1:B5)
             if pos + 2 < tokens.len() {
                 if let Token::Colon = &tokens[pos + 1] {
-                    if let Token::CellRef { col: end_col, row: end_row } = &tokens[pos + 2] {
+                    if let Token::CellRef { col: end_col, row: end_row, col_abs: end_col_abs, row_abs: end_row_abs } = &tokens[pos + 2] {
                         return Ok((
                             Expr::Range {
+                                sheet: UnboundSheetRef::Current,
                                 start_col: *col,
                                 start_row: *row,
                                 end_col: *end_col,
                                 end_row: *end_row,
+                                start_col_abs: *col_abs,
+                                start_row_abs: *row_abs,
+                                end_col_abs: *end_col_abs,
+                                end_row_abs: *end_row_abs,
                             },
                             pos + 3,
                         ));
                     }
                 }
             }
-            Ok((Expr::CellRef { col: *col, row: *row }, pos + 1))
+            Ok((Expr::CellRef { sheet: UnboundSheetRef::Current, col: *col, row: *row, col_abs: *col_abs, row_abs: *row_abs }, pos + 1))
         }
         Token::Ident(name) => {
             // Check for boolean literals
@@ -433,7 +546,7 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(Expr, usize), String> 
     }
 }
 
-fn parse_function_args(tokens: &[Token], pos: usize) -> Result<(Vec<Expr>, usize), String> {
+fn parse_function_args(tokens: &[Token], pos: usize) -> Result<(Vec<ParsedExpr>, usize), String> {
     let mut args = Vec::new();
     let mut pos = pos;
 
@@ -461,23 +574,248 @@ fn parse_function_args(tokens: &[Token], pos: usize) -> Result<(Vec<Expr>, usize
     }
 }
 
+// =============================================================================
+// Expression Binding - Convert ParsedExpr to BoundExpr
+// =============================================================================
+
+/// Bind a parsed expression by resolving sheet names to SheetIds.
+///
+/// The resolver function takes a sheet name and returns:
+/// - Some(SheetId) if the sheet exists
+/// - None if the sheet doesn't exist (will become #REF! error)
+pub fn bind_expr<F>(expr: &ParsedExpr, resolver: F) -> BoundExpr
+where
+    F: Fn(&str) -> Option<SheetId> + Copy,
+{
+    match expr {
+        Expr::Number(n) => Expr::Number(*n),
+        Expr::Text(s) => Expr::Text(s.clone()),
+        Expr::Boolean(b) => Expr::Boolean(*b),
+        Expr::NamedRange(name) => Expr::NamedRange(name.clone()),
+        Expr::CellRef { sheet, col, row, col_abs, row_abs } => {
+            let bound_sheet = bind_sheet_ref(sheet, resolver);
+            Expr::CellRef {
+                sheet: bound_sheet,
+                col: *col,
+                row: *row,
+                col_abs: *col_abs,
+                row_abs: *row_abs,
+            }
+        }
+        Expr::Range { sheet, start_col, start_row, end_col, end_row, start_col_abs, start_row_abs, end_col_abs, end_row_abs } => {
+            let bound_sheet = bind_sheet_ref(sheet, resolver);
+            Expr::Range {
+                sheet: bound_sheet,
+                start_col: *start_col,
+                start_row: *start_row,
+                end_col: *end_col,
+                end_row: *end_row,
+                start_col_abs: *start_col_abs,
+                start_row_abs: *start_row_abs,
+                end_col_abs: *end_col_abs,
+                end_row_abs: *end_row_abs,
+            }
+        }
+        Expr::Function { name, args } => {
+            let bound_args = args.iter().map(|arg| bind_expr(arg, resolver)).collect();
+            Expr::Function {
+                name: name.clone(),
+                args: bound_args,
+            }
+        }
+        Expr::BinaryOp { op, left, right } => {
+            Expr::BinaryOp {
+                op: *op,
+                left: Box::new(bind_expr(left, resolver)),
+                right: Box::new(bind_expr(right, resolver)),
+            }
+        }
+    }
+}
+
+/// Bind a sheet reference from unbound (name) to bound (ID).
+fn bind_sheet_ref<F>(sheet: &UnboundSheetRef, resolver: F) -> SheetRef
+where
+    F: Fn(&str) -> Option<SheetId>,
+{
+    match sheet {
+        UnboundSheetRef::Current => SheetRef::Current,
+        UnboundSheetRef::Named(name) => {
+            match resolver(name) {
+                Some(id) => SheetRef::Id(id),
+                None => SheetRef::RefError {
+                    id: SheetId::from_raw(0), // Placeholder for unknown sheet
+                    last_known_name: name.clone(),
+                },
+            }
+        }
+    }
+}
+
+/// Bind a parsed expression for same-sheet formulas (no cross-sheet references).
+/// This is a convenience function that treats all Named refs as errors.
+pub fn bind_expr_same_sheet(expr: &ParsedExpr) -> BoundExpr {
+    bind_expr(expr, |_name| None)
+}
+
+// =============================================================================
+// Formula Printing - Convert BoundExpr back to string
+// =============================================================================
+
+/// Format a bound expression as a formula string (with leading '=').
+///
+/// The `name_resolver` function takes a SheetId and returns the current sheet name.
+/// This allows formulas to display updated names after sheet renames.
+pub fn format_expr<F>(expr: &BoundExpr, name_resolver: F) -> String
+where
+    F: Fn(SheetId) -> Option<String> + Copy,
+{
+    format!("={}", format_expr_inner(expr, name_resolver))
+}
+
+/// Format a bound expression without the leading '='.
+pub fn format_expr_inner<F>(expr: &BoundExpr, name_resolver: F) -> String
+where
+    F: Fn(SheetId) -> Option<String> + Copy,
+{
+    match expr {
+        Expr::Number(n) => {
+            if n.fract() == 0.0 && n.abs() < 1e15 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        Expr::Text(s) => format!("\"{}\"", s.replace('"', "\"\"")),
+        Expr::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        Expr::NamedRange(name) => name.clone(),
+        Expr::CellRef { sheet, col, row, col_abs, row_abs } => {
+            let prefix = format_sheet_prefix(sheet, name_resolver);
+            let addr = format_cell_addr(*col, *row, *col_abs, *row_abs);
+            format!("{}{}", prefix, addr)
+        }
+        Expr::Range { sheet, start_col, start_row, end_col, end_row, start_col_abs, start_row_abs, end_col_abs, end_row_abs } => {
+            let prefix = format_sheet_prefix(sheet, name_resolver);
+            let start = format_cell_addr(*start_col, *start_row, *start_col_abs, *start_row_abs);
+            let end = format_cell_addr(*end_col, *end_row, *end_col_abs, *end_row_abs);
+            format!("{}{}:{}", prefix, start, end)
+        }
+        Expr::Function { name, args } => {
+            let args_str: Vec<String> = args.iter()
+                .map(|arg| format_expr_inner(arg, name_resolver))
+                .collect();
+            format!("{}({})", name, args_str.join(","))
+        }
+        Expr::BinaryOp { op, left, right } => {
+            let left_str = format_expr_inner(left, name_resolver);
+            let right_str = format_expr_inner(right, name_resolver);
+            let op_str = match op {
+                Op::Add => "+",
+                Op::Sub => "-",
+                Op::Mul => "*",
+                Op::Div => "/",
+                Op::Lt => "<",
+                Op::Gt => ">",
+                Op::Eq => "=",
+                Op::LtEq => "<=",
+                Op::GtEq => ">=",
+                Op::NotEq => "<>",
+                Op::Concat => "&",
+            };
+            format!("{}{}{}", left_str, op_str, right_str)
+        }
+    }
+}
+
+/// Format a sheet reference prefix (empty for Current, "SheetName!" for Id, "#REF!" for RefError)
+fn format_sheet_prefix<F>(sheet: &SheetRef, name_resolver: F) -> String
+where
+    F: Fn(SheetId) -> Option<String>,
+{
+    match sheet {
+        SheetRef::Current => String::new(),
+        SheetRef::Id(id) => {
+            match name_resolver(*id) {
+                Some(name) => format!("{}!", format_sheet_name(&name)),
+                None => "#REF!".to_string(), // Sheet was deleted
+            }
+        }
+        SheetRef::RefError { last_known_name, .. } => {
+            // Show #REF! - the original name is lost for display purposes
+            // but we keep last_known_name for potential future "restore" features
+            let _ = last_known_name; // Acknowledge we have it but don't use for now
+            "#REF!".to_string()
+        }
+    }
+}
+
+/// Format a sheet name, adding quotes if necessary
+pub fn format_sheet_name(name: &str) -> String {
+    // Need quotes if name contains spaces, special characters, or starts with a digit
+    let needs_quotes = name.contains(' ')
+        || name.contains('!')
+        || name.contains('\'')
+        || name.contains(':')
+        || name.contains('[')
+        || name.contains(']')
+        || name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+
+    if needs_quotes {
+        // Escape single quotes by doubling them
+        format!("'{}'", name.replace('\'', "''"))
+    } else {
+        name.to_string()
+    }
+}
+
+/// Format a cell address in A1 notation
+fn format_cell_addr(col: usize, row: usize, col_abs: bool, row_abs: bool) -> String {
+    let col_str = if col_abs {
+        format!("${}", col_to_letters(col))
+    } else {
+        col_to_letters(col)
+    };
+    let row_str = if row_abs {
+        format!("${}", row + 1)
+    } else {
+        format!("{}", row + 1)
+    };
+    format!("{}{}", col_str, row_str)
+}
+
+/// Convert column index to letter(s): 0 -> A, 25 -> Z, 26 -> AA, etc.
+fn col_to_letters(col: usize) -> String {
+    let mut result = String::new();
+    let mut n = col + 1; // 1-indexed for calculation
+    while n > 0 {
+        n -= 1;
+        result.insert(0, (b'A' + (n % 26) as u8) as char);
+        n /= 26;
+    }
+    result
+}
+
+// =============================================================================
+// Cell Reference Extraction
+// =============================================================================
+
 /// Extract all cell references from an expression (for dependency tracking)
 /// Returns a list of (row, col) tuples for single cells and expanded ranges
-pub fn extract_cell_refs(expr: &Expr) -> Vec<(usize, usize)> {
+pub fn extract_cell_refs<S>(expr: &Expr<S>) -> Vec<(usize, usize)> {
     let mut refs = Vec::new();
     collect_cell_refs(expr, &mut refs);
     refs
 }
 
-fn collect_cell_refs(expr: &Expr, refs: &mut Vec<(usize, usize)>) {
+fn collect_cell_refs<S>(expr: &Expr<S>, refs: &mut Vec<(usize, usize)>) {
     match expr {
         Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::NamedRange(_) => {
             // NamedRange refs are resolved at evaluation time with access to NamedRangeStore
         }
-        Expr::CellRef { col, row } => {
+        Expr::CellRef { col, row, .. } => {
             refs.push((*row, *col));
         }
-        Expr::Range { start_col, start_row, end_col, end_row } => {
+        Expr::Range { start_col, start_row, end_col, end_row, .. } => {
             // Expand range to individual cells
             for r in *start_row..=*end_row {
                 for c in *start_col..=*end_col {

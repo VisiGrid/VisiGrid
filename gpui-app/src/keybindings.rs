@@ -19,6 +19,7 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("pagedown", PageDown, Some("Spreadsheet")),
         KeyBinding::new("ctrl-g", GoToCell, Some("Spreadsheet")),
         KeyBinding::new("ctrl-f", FindInCells, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-h", FindReplace, Some("Spreadsheet")),
         KeyBinding::new("f3", FindNext, Some("Spreadsheet")),
         KeyBinding::new("shift-f3", FindPrev, Some("Spreadsheet")),
         // IDE-style navigation
@@ -84,6 +85,20 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("ctrl-shift-l", ToggleLuaConsole, Some("Spreadsheet")),
         KeyBinding::new("ctrl-`", ToggleFormulaView, Some("Spreadsheet")),
 
+        // Zoom (Ctrl+Shift+= / Ctrl+Shift+- to avoid conflict with insert/delete rows/cols)
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-=", ZoomIn, Some("Spreadsheet")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift--", ZoomOut, Some("Spreadsheet")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-0", ZoomReset, Some("Spreadsheet")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-=", ZoomIn, Some("Spreadsheet")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift--", ZoomOut, Some("Spreadsheet")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-0", ZoomReset, Some("Spreadsheet")),
+
         // Format
         KeyBinding::new("ctrl-b", ToggleBold, Some("Spreadsheet")),
         KeyBinding::new("ctrl-i", ToggleItalic, Some("Spreadsheet")),
@@ -135,5 +150,15 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("enter", PaletteExecute, Some("CommandPalette")),
         KeyBinding::new("shift-enter", PalettePreview, Some("CommandPalette")),
         KeyBinding::new("escape", PaletteCancel, Some("CommandPalette")),
+
+        // Find dialog (in FindDialog context)
+        KeyBinding::new("ctrl-f", FindInCells, Some("FindDialog")),    // Collapse to Find-only
+        KeyBinding::new("ctrl-h", FindReplace, Some("FindDialog")),    // Expand to Replace
+        KeyBinding::new("enter", ReplaceNext, Some("FindDialog")),
+        KeyBinding::new("ctrl-enter", ReplaceAll, Some("FindDialog")),
+        KeyBinding::new("shift-enter", FindPrev, Some("FindDialog")),
+        KeyBinding::new("f3", FindNext, Some("FindDialog")),
+        KeyBinding::new("shift-f3", FindPrev, Some("FindDialog")),
+        KeyBinding::new("escape", CancelEdit, Some("FindDialog")),
     ]);
 }

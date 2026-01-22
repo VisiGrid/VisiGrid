@@ -115,6 +115,51 @@ pub const FORMULA_BAR_HEIGHT: f32 = 28.0;
 pub const COLUMN_HEADER_HEIGHT: f32 = 24.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 
+// Zoom configuration
+pub const ZOOM_STEPS: &[f32] = &[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+pub const DEFAULT_ZOOM: f32 = 1.0;
+
+/// Cached grid metrics scaled by zoom level.
+/// Single source of truth for all scaled geometry.
+#[derive(Clone, Copy)]
+pub struct GridMetrics {
+    pub zoom: f32,
+    pub cell_w: f32,
+    pub cell_h: f32,
+    pub header_w: f32,
+    pub header_h: f32,
+    pub font_size: f32,
+}
+
+impl GridMetrics {
+    pub fn new(zoom: f32) -> Self {
+        Self {
+            zoom,
+            cell_w: CELL_WIDTH * zoom,
+            cell_h: CELL_HEIGHT * zoom,
+            header_w: HEADER_WIDTH * zoom,
+            header_h: COLUMN_HEADER_HEIGHT * zoom,
+            font_size: 13.0 * zoom,
+        }
+    }
+
+    /// Get scaled width for a column (model width * zoom)
+    pub fn col_width(&self, model_width: f32) -> f32 {
+        model_width * self.zoom
+    }
+
+    /// Get scaled height for a row (model height * zoom)
+    pub fn row_height(&self, model_height: f32) -> f32 {
+        model_height * self.zoom
+    }
+}
+
+impl Default for GridMetrics {
+    fn default() -> Self {
+        Self::new(DEFAULT_ZOOM)
+    }
+}
+
 /// Cached layout measurements for hit-testing (updated each render)
 #[derive(Clone, Copy, Default)]
 pub struct GridLayout {
@@ -122,6 +167,32 @@ pub struct GridLayout {
     pub grid_body_origin: (f32, f32),
     /// Viewport size for the grid body (for limiting iteration)
     pub viewport_size: (f32, f32),
+}
+
+/// The kind of cell content for a find match
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchKind {
+    /// Raw text cell - can find and replace
+    Text,
+    /// Formula cell - can find and replace (token-aware)
+    Formula,
+}
+
+/// A single match hit from find operation
+#[derive(Clone, Debug)]
+pub struct MatchHit {
+    /// Sheet index (for future cross-sheet support)
+    pub sheet: usize,
+    /// Row index
+    pub row: usize,
+    /// Column index
+    pub col: usize,
+    /// What kind of cell this is
+    pub kind: MatchKind,
+    /// Byte offset of match start in the raw string
+    pub start: usize,
+    /// Byte offset of match end in the raw string
+    pub end: usize,
 }
 
 pub struct Spreadsheet {
@@ -138,6 +209,10 @@ pub struct Spreadsheet {
     pub scroll_row: usize,
     pub scroll_col: usize,
 
+    // Freeze panes (structural context - headers stay in place while scrolling)
+    pub frozen_rows: usize,  // Number of rows frozen at top (0 = none)
+    pub frozen_cols: usize,  // Number of columns frozen at left (0 = none)
+
     // Mode & editing
     pub mode: Mode,
     pub edit_value: String,
@@ -146,8 +221,11 @@ pub struct Spreadsheet {
     pub edit_original: String,
     pub goto_input: String,
     pub find_input: String,
-    pub find_results: Vec<(usize, usize)>,
+    pub find_results: Vec<MatchHit>,
     pub find_index: usize,
+    pub replace_input: String,
+    pub find_replace_mode: bool,      // true = Find & Replace (Ctrl+H), false = Find only (Ctrl+F)
+    pub find_focus_replace: bool,     // true = replace input has focus, false = find input
 
     // Command palette
     pub palette_query: String,
@@ -245,6 +323,11 @@ pub struct Spreadsheet {
 
     // Zen mode (distraction-free editing)
     pub zen_mode: bool,
+
+    // Zoom
+    pub zoom_level: f32,
+    pub metrics: GridMetrics,
+    zoom_wheel_accumulator: f32,  // For smooth wheel zoom debounce
 
     // Link opening state (debounce rapid Ctrl+Enter)
     pub link_open_in_flight: bool,
@@ -389,6 +472,8 @@ impl Spreadsheet {
             additional_selections: Vec::new(),
             scroll_row: 0,
             scroll_col: 0,
+            frozen_rows: 0,
+            frozen_cols: 0,
             mode: Mode::Navigation,
             edit_value: String::new(),
             edit_cursor: 0,
@@ -398,6 +483,9 @@ impl Spreadsheet {
             find_input: String::new(),
             find_results: Vec::new(),
             find_index: 0,
+            replace_input: String::new(),
+            find_replace_mode: false,
+            find_focus_replace: false,
             palette_query: String::new(),
             palette_selected: 0,
             search_engine: Self::create_search_engine(),
@@ -505,6 +593,9 @@ impl Spreadsheet {
             hint_state: crate::hints::HintState::default(),
 
             zen_mode: false,
+            zoom_level: DEFAULT_ZOOM,
+            metrics: GridMetrics::default(),
+            zoom_wheel_accumulator: 0.0,
             link_open_in_flight: false,
 
             lua_runtime: crate::scripting::LuaRuntime::default(),
@@ -563,6 +654,139 @@ impl Spreadsheet {
         self.doc_settings.display.show_zeros = Setting::Value(!current);
         self.save_doc_settings_if_needed();
         cx.notify();
+    }
+
+    // =========================================================================
+    // Zoom
+    // =========================================================================
+
+    /// Set zoom level (all zoom changes go through this)
+    pub fn set_zoom(&mut self, new_zoom: f32, cx: &mut Context<Self>) {
+        // Clamp to valid range
+        let clamped = new_zoom.max(ZOOM_STEPS[0]).min(ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
+        if (clamped - self.zoom_level).abs() < 0.001 {
+            return; // No change
+        }
+        self.zoom_level = clamped;
+        self.metrics = GridMetrics::new(clamped);
+        self.ensure_visible(cx);
+        // Show status message
+        let percent = (clamped * 100.0).round() as i32;
+        self.status_message = Some(format!("Zoom: {}%", percent));
+        cx.notify();
+    }
+
+    /// Zoom in to next step on the ladder
+    pub fn zoom_in(&mut self, cx: &mut Context<Self>) {
+        if let Some(&next) = ZOOM_STEPS.iter().find(|&&z| z > self.zoom_level + 0.001) {
+            self.set_zoom(next, cx);
+        }
+    }
+
+    /// Zoom out to previous step on the ladder
+    pub fn zoom_out(&mut self, cx: &mut Context<Self>) {
+        if let Some(&prev) = ZOOM_STEPS.iter().rev().find(|&&z| z < self.zoom_level - 0.001) {
+            self.set_zoom(prev, cx);
+        }
+    }
+
+    /// Reset zoom to 100%
+    pub fn zoom_reset(&mut self, cx: &mut Context<Self>) {
+        self.set_zoom(DEFAULT_ZOOM, cx);
+    }
+
+    /// Handle zoom from mouse wheel (with debounce/accumulation)
+    pub fn zoom_wheel(&mut self, delta_y: f32, cx: &mut Context<Self>) {
+        // Accumulate wheel delta - threshold before stepping
+        self.zoom_wheel_accumulator += delta_y;
+        let threshold = 50.0; // Pixels of wheel movement to trigger one step
+        if self.zoom_wheel_accumulator > threshold {
+            self.zoom_wheel_accumulator = 0.0;
+            self.zoom_out(cx);
+        } else if self.zoom_wheel_accumulator < -threshold {
+            self.zoom_wheel_accumulator = 0.0;
+            self.zoom_in(cx);
+        }
+    }
+
+    /// Get zoom percentage for display (e.g., "100%")
+    pub fn zoom_display(&self) -> String {
+        let percent = (self.zoom_level * 100.0).round() as i32;
+        format!("{}%", percent)
+    }
+
+    // =========================================================================
+    // Freeze Panes
+    // =========================================================================
+
+    /// Freeze the top row (row 0)
+    pub fn freeze_top_row(&mut self, cx: &mut Context<Self>) {
+        self.frozen_rows = 1;
+        self.frozen_cols = 0;
+        self.clamp_scroll_to_freeze(cx);
+        self.status_message = Some("Frozen top row".to_string());
+        cx.notify();
+    }
+
+    /// Freeze the first column (column A)
+    pub fn freeze_first_column(&mut self, cx: &mut Context<Self>) {
+        self.frozen_rows = 0;
+        self.frozen_cols = 1;
+        self.clamp_scroll_to_freeze(cx);
+        self.status_message = Some("Frozen first column".to_string());
+        cx.notify();
+    }
+
+    /// Freeze panes at the current selection
+    /// Freezes all rows above and all columns to the left of the active cell
+    pub fn freeze_panes(&mut self, cx: &mut Context<Self>) {
+        let (row, col) = self.selected;
+        if row == 0 && col == 0 {
+            // Nothing to freeze - show message
+            self.status_message = Some("Select a cell to freeze rows above and columns to the left".to_string());
+            cx.notify();
+            return;
+        }
+        self.frozen_rows = row;
+        self.frozen_cols = col;
+        self.clamp_scroll_to_freeze(cx);
+        let msg = match (row, col) {
+            (0, c) => format!("Frozen {} column{}", c, if c == 1 { "" } else { "s" }),
+            (r, 0) => format!("Frozen {} row{}", r, if r == 1 { "" } else { "s" }),
+            (r, c) => format!("Frozen {} row{} and {} column{}", r, if r == 1 { "" } else { "s" }, c, if c == 1 { "" } else { "s" }),
+        };
+        self.status_message = Some(msg);
+        cx.notify();
+    }
+
+    /// Remove all freeze panes
+    pub fn unfreeze_panes(&mut self, cx: &mut Context<Self>) {
+        if self.frozen_rows == 0 && self.frozen_cols == 0 {
+            self.status_message = Some("No frozen panes to unfreeze".to_string());
+            cx.notify();
+            return;
+        }
+        self.frozen_rows = 0;
+        self.frozen_cols = 0;
+        self.status_message = Some("Unfrozen all panes".to_string());
+        cx.notify();
+    }
+
+    /// Clamp scroll position to ensure it doesn't overlap with frozen regions
+    fn clamp_scroll_to_freeze(&mut self, _cx: &mut Context<Self>) {
+        // When freeze panes are active, scrollable region starts after frozen rows/cols
+        // Ensure scroll position doesn't show frozen rows/cols in the scrollable area
+        if self.frozen_rows > 0 && self.scroll_row < self.frozen_rows {
+            self.scroll_row = self.frozen_rows;
+        }
+        if self.frozen_cols > 0 && self.scroll_col < self.frozen_cols {
+            self.scroll_col = self.frozen_cols;
+        }
+    }
+
+    /// Check if freeze panes are active
+    pub fn has_frozen_panes(&self) -> bool {
+        self.frozen_rows > 0 || self.frozen_cols > 0
     }
 
     /// Save document settings to sidecar if document has a path
@@ -786,6 +1010,13 @@ impl Spreadsheet {
                 self.zen_mode = !self.zen_mode;
                 cx.notify();
             }
+            CommandId::ZoomIn => self.zoom_in(cx),
+            CommandId::ZoomOut => self.zoom_out(cx),
+            CommandId::ZoomReset => self.zoom_reset(cx),
+            CommandId::FreezeTopRow => self.freeze_top_row(cx),
+            CommandId::FreezeFirstColumn => self.freeze_first_column(cx),
+            CommandId::FreezePanes => self.freeze_panes(cx),
+            CommandId::UnfreezePanes => self.unfreeze_panes(cx),
 
             // Help
             CommandId::ShowShortcuts => {
@@ -1053,25 +1284,28 @@ impl Spreadsheet {
     }
 
     /// Get the X position of a column's left edge (relative to start of grid, after row header)
+    /// Returns scaled (zoomed) position for rendering.
     pub fn col_x_offset(&self, target_col: usize) -> f32 {
         let mut x = 0.0;
         for col in self.scroll_col..target_col {
-            x += self.col_width(col);
+            x += self.metrics.col_width(self.col_width(col));
         }
         x
     }
 
     /// Get the Y position of a row's top edge (relative to start of grid, after column header)
+    /// Returns scaled (zoomed) position for rendering.
     pub fn row_y_offset(&self, target_row: usize) -> f32 {
         let mut y = 0.0;
         for row in self.scroll_row..target_row {
-            y += self.row_height(row);
+            y += self.metrics.row_height(self.row_height(row));
         }
         y
     }
 
     /// Convert window X position to column index.
     /// Uses measured grid_layout.grid_body_origin for accuracy.
+    /// Uses scaled (zoomed) column widths for hit-testing.
     pub fn col_from_window_x(&self, window_x: f32) -> Option<usize> {
         let x = window_x - self.grid_layout.grid_body_origin.0;
         if x < 0.0 { return None; }
@@ -1080,7 +1314,8 @@ impl Spreadsheet {
         let mut current_x = 0.0;
         for col in self.scroll_col..NUM_COLS {
             if current_x > viewport_width { break; }
-            let width = self.col_width(col);
+            // Use scaled width for hit-testing in screen coordinates
+            let width = self.metrics.col_width(self.col_width(col));
             if x < current_x + width {
                 return Some(col);
             }
@@ -1091,13 +1326,14 @@ impl Spreadsheet {
 
     /// Convert window Y position to row index.
     /// O(1) for uniform heights, O(visible rows) for variable heights.
+    /// Uses scaled (zoomed) row heights for hit-testing.
     pub fn row_from_window_y(&self, window_y: f32) -> Option<usize> {
         let y = window_y - self.grid_layout.grid_body_origin.1;
         if y < 0.0 { return None; }
 
-        // O(1) fast path: uniform row heights
+        // O(1) fast path: uniform row heights (use scaled cell height)
         if self.row_heights.is_empty() {
-            let row = self.scroll_row + (y / CELL_HEIGHT).floor() as usize;
+            let row = self.scroll_row + (y / self.metrics.cell_h).floor() as usize;
             return Some(row.min(NUM_ROWS - 1));
         }
 
@@ -1108,7 +1344,8 @@ impl Spreadsheet {
         for row in self.scroll_row..NUM_ROWS {
             if current_y > viewport_height { break; }
             last_row = row;
-            let height = self.row_height(row);
+            // Use scaled height for hit-testing in screen coordinates
+            let height = self.metrics.row_height(self.row_height(row));
             if y < current_y + height {
                 return Some(row);
             }
@@ -1382,20 +1619,21 @@ impl Spreadsheet {
     /// Calculate visible rows based on window height
     pub fn visible_rows(&self) -> usize {
         let height: f32 = self.window_size.height.into();
+        // Menu bar, formula bar, status bar don't scale; column header does
         let available_height = height
             - MENU_BAR_HEIGHT
             - FORMULA_BAR_HEIGHT
-            - COLUMN_HEADER_HEIGHT
+            - self.metrics.header_h  // Column header scales with zoom
             - STATUS_BAR_HEIGHT;
-        let rows = (available_height / CELL_HEIGHT).floor() as usize;
+        let rows = (available_height / self.metrics.cell_h).floor() as usize;
         rows.max(1).min(NUM_ROWS)
     }
 
     /// Calculate visible columns based on window width
     pub fn visible_cols(&self) -> usize {
         let width: f32 = self.window_size.width.into();
-        let available_width = width - HEADER_WIDTH;
-        let cols = (available_width / CELL_WIDTH).floor() as usize;
+        let available_width = width - self.metrics.header_w;  // Row header scales with zoom
+        let cols = (available_width / self.metrics.cell_w).floor() as usize;
         cols.max(1).min(NUM_COLS)
     }
 
@@ -1618,19 +1856,33 @@ impl Spreadsheet {
         let visible_rows = self.visible_rows();
         let visible_cols = self.visible_cols();
 
-        // Vertical scroll
-        if row < self.scroll_row {
+        // When freeze panes are active, calculate scrollable region
+        let scrollable_visible_rows = visible_rows.saturating_sub(self.frozen_rows);
+        let scrollable_visible_cols = visible_cols.saturating_sub(self.frozen_cols);
+
+        // Vertical scroll - frozen rows are always visible, only scroll for rows in scrollable region
+        if row < self.frozen_rows {
+            // Row is in frozen region - always visible, but ensure scroll_row is valid
+            self.scroll_row = self.scroll_row.max(self.frozen_rows);
+        } else if row < self.scroll_row {
             self.scroll_row = row;
-        } else if row >= self.scroll_row + visible_rows {
-            self.scroll_row = row - visible_rows + 1;
+        } else if scrollable_visible_rows > 0 && row >= self.scroll_row + scrollable_visible_rows {
+            self.scroll_row = row - scrollable_visible_rows + 1;
         }
 
-        // Horizontal scroll
-        if col < self.scroll_col {
+        // Horizontal scroll - frozen cols are always visible, only scroll for cols in scrollable region
+        if col < self.frozen_cols {
+            // Col is in frozen region - always visible, but ensure scroll_col is valid
+            self.scroll_col = self.scroll_col.max(self.frozen_cols);
+        } else if col < self.scroll_col {
             self.scroll_col = col;
-        } else if col >= self.scroll_col + visible_cols {
-            self.scroll_col = col - visible_cols + 1;
+        } else if scrollable_visible_cols > 0 && col >= self.scroll_col + scrollable_visible_cols {
+            self.scroll_col = col - scrollable_visible_cols + 1;
         }
+
+        // Ensure scroll positions don't go below freeze bounds
+        self.scroll_row = self.scroll_row.max(self.frozen_rows);
+        self.scroll_col = self.scroll_col.max(self.frozen_cols);
 
         cx.notify();
     }
@@ -1707,11 +1959,16 @@ impl Spreadsheet {
     pub fn scroll(&mut self, delta_rows: i32, delta_cols: i32, cx: &mut Context<Self>) {
         let visible_rows = self.visible_rows();
         let visible_cols = self.visible_cols();
+
+        // When freeze panes are active, scrollable region starts after frozen rows/cols
+        let min_scroll_row = self.frozen_rows;
+        let min_scroll_col = self.frozen_cols;
+
         let new_row = (self.scroll_row as i32 + delta_rows)
-            .max(0)
+            .max(min_scroll_row as i32)
             .min((NUM_ROWS.saturating_sub(visible_rows)) as i32) as usize;
         let new_col = (self.scroll_col as i32 + delta_cols)
-            .max(0)
+            .max(min_scroll_col as i32)
             .min((NUM_COLS.saturating_sub(visible_cols)) as i32) as usize;
 
         if new_row != self.scroll_row || new_col != self.scroll_col {
@@ -4249,13 +4506,56 @@ impl Spreadsheet {
         refs
     }
 
-    // Find in cells
+    // =========================================================================
+    // Find and Replace
+    // =========================================================================
+
+    /// Show Find dialog (Ctrl+F)
+    /// If already in Find mode, collapses to Find-only (hides Replace row)
     pub fn show_find(&mut self, cx: &mut Context<Self>) {
+        if self.mode == Mode::Find {
+            // Already open: collapse to Find-only mode, preserve inputs
+            self.find_replace_mode = false;
+            self.find_focus_replace = false;
+            cx.notify();
+            return;
+        }
+
+        // Fresh open: clear state
         self.lua_console.visible = false;
         self.mode = Mode::Find;
         self.find_input.clear();
+        self.replace_input.clear();
         self.find_results.clear();
         self.find_index = 0;
+        self.find_replace_mode = false;
+        self.find_focus_replace = false;
+        cx.notify();
+    }
+
+    /// Show Find and Replace dialog (Ctrl+H)
+    /// If already in Find mode, expands to show Replace row
+    pub fn show_find_replace(&mut self, cx: &mut Context<Self>) {
+        if self.mode == Mode::Find {
+            // Already open: expand to Replace mode, preserve inputs
+            self.find_replace_mode = true;
+            // Focus Replace field if Find field has content, else stay on Find
+            if !self.find_input.is_empty() {
+                self.find_focus_replace = true;
+            }
+            cx.notify();
+            return;
+        }
+
+        // Fresh open: clear state
+        self.lua_console.visible = false;
+        self.mode = Mode::Find;
+        self.find_input.clear();
+        self.replace_input.clear();
+        self.find_results.clear();
+        self.find_index = 0;
+        self.find_replace_mode = true;
+        self.find_focus_replace = false;
         cx.notify();
     }
 
@@ -4264,21 +4564,105 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Toggle focus between find and replace input fields
+    pub fn find_toggle_focus(&mut self, cx: &mut Context<Self>) {
+        if self.find_replace_mode {
+            self.find_focus_replace = !self.find_focus_replace;
+            cx.notify();
+        }
+    }
+
     pub fn find_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
         if self.mode == Mode::Find {
-            self.find_input.push(c);
-            self.perform_find(cx);
+            if self.find_focus_replace {
+                self.replace_input.push(c);
+            } else {
+                self.find_input.push(c);
+                self.perform_find(cx);
+            }
+            cx.notify();
         }
     }
 
     pub fn find_backspace(&mut self, cx: &mut Context<Self>) {
         if self.mode == Mode::Find {
-            self.find_input.pop();
-            self.perform_find(cx);
+            if self.find_focus_replace {
+                self.replace_input.pop();
+            } else {
+                self.find_input.pop();
+                self.perform_find(cx);
+            }
+            cx.notify();
         }
     }
 
+    /// Check if a string looks like a cell reference (A1, $A$1, Sheet1!A1, etc.)
+    fn is_ref_like(s: &str) -> bool {
+        let s = s.trim();
+        if s.is_empty() {
+            return false;
+        }
+        // Check for cell reference patterns: A1, $A1, A$1, $A$1, AA1, Sheet!A1
+        // Simple heuristic: starts with optional $ or letter, contains letters followed by digits
+        let s_upper = s.to_uppercase();
+        let chars: Vec<char> = s_upper.chars().collect();
+
+        // Skip sheet prefix (e.g., "Sheet1!")
+        let start_idx = if let Some(pos) = s_upper.find('!') {
+            pos + 1
+        } else {
+            0
+        };
+
+        if start_idx >= chars.len() {
+            return false;
+        }
+
+        // After sheet prefix, check for ref pattern: [$]?[A-Z]+[$]?[0-9]+
+        let mut i = start_idx;
+
+        // Skip leading $
+        if i < chars.len() && chars[i] == '$' {
+            i += 1;
+        }
+
+        // Must have at least one letter
+        let letter_start = i;
+        while i < chars.len() && chars[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        if i == letter_start {
+            return false;
+        }
+
+        // Skip optional $ before row number
+        if i < chars.len() && chars[i] == '$' {
+            i += 1;
+        }
+
+        // Must have at least one digit
+        let digit_start = i;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == digit_start {
+            return false;
+        }
+
+        // Allow range suffix (:A1)
+        if i < chars.len() && chars[i] == ':' {
+            return true;  // It's a range reference
+        }
+
+        // Should be at end or have non-alphanumeric next
+        i == chars.len() || !chars[i].is_alphanumeric()
+    }
+
+    /// Perform search and populate find_results with MatchHit entries.
+    /// Only searches in Text and Formula cells (not numbers/dates).
     fn perform_find(&mut self, cx: &mut Context<Self>) {
+        use visigrid_engine::cell::CellValue;
+
         self.find_results.clear();
         self.find_index = 0;
 
@@ -4289,21 +4673,54 @@ impl Spreadsheet {
         }
 
         let query = self.find_input.to_lowercase();
+        let sheet_idx = self.workbook.active_sheet_index();
 
-        // Search through all populated cells
-        let cell_positions: Vec<_> = self.sheet().cells_iter()
-            .map(|(&pos, _)| pos)
+        // Collect cell data to search
+        let cells_to_search: Vec<_> = self.sheet().cells_iter()
+            .filter_map(|(&(row, col), cell)| {
+                match &cell.value {
+                    CellValue::Text(text) => Some((row, col, MatchKind::Text, text.clone())),
+                    CellValue::Formula { source, .. } => Some((row, col, MatchKind::Formula, source.clone())),
+                    _ => None,  // Skip Empty, Number - they're not replaceable
+                }
+            })
             .collect();
 
-        for (row, col) in cell_positions {
-            let display = self.sheet().get_display(row, col);
-            if display.to_lowercase().contains(&query) {
-                self.find_results.push((row, col));
+        // Find all matches
+        for (row, col, kind, raw_text) in cells_to_search {
+            let raw_lower = raw_text.to_lowercase();
+
+            // Find all occurrences within this cell
+            let mut search_start = 0;
+            while let Some(rel_pos) = raw_lower[search_start..].find(&query) {
+                let start = search_start + rel_pos;
+                let end = start + query.len();
+
+                // For formulas, skip matches inside string literals
+                if kind == MatchKind::Formula && Self::is_inside_string_literal(&raw_text, start) {
+                    search_start = end;
+                    continue;
+                }
+
+                self.find_results.push(MatchHit {
+                    sheet: sheet_idx,
+                    row,
+                    col,
+                    kind,
+                    start,
+                    end,
+                });
+
+                search_start = end;
             }
         }
 
-        // Sort results by row, then column
-        self.find_results.sort();
+        // Sort results by row, then column, then offset
+        self.find_results.sort_by(|a, b| {
+            a.row.cmp(&b.row)
+                .then(a.col.cmp(&b.col))
+                .then(a.start.cmp(&b.start))
+        });
 
         if !self.find_results.is_empty() {
             self.jump_to_find_result(cx);
@@ -4316,6 +4733,22 @@ impl Spreadsheet {
             self.status_message = Some("No matches found".to_string());
         }
         cx.notify();
+    }
+
+    /// Check if a position is inside a string literal in a formula
+    fn is_inside_string_literal(formula: &str, pos: usize) -> bool {
+        let bytes = formula.as_bytes();
+        let mut in_string = false;
+        let mut i = 0;
+
+        while i < pos && i < bytes.len() {
+            if bytes[i] == b'"' {
+                in_string = !in_string;
+            }
+            i += 1;
+        }
+
+        in_string
     }
 
     pub fn find_next(&mut self, cx: &mut Context<Self>) {
@@ -4339,8 +4772,8 @@ impl Spreadsheet {
     }
 
     fn jump_to_find_result(&mut self, cx: &mut Context<Self>) {
-        if let Some(&(row, col)) = self.find_results.get(self.find_index) {
-            self.selected = (row, col);
+        if let Some(hit) = self.find_results.get(self.find_index) {
+            self.selected = (hit.row, hit.col);
             self.selection_end = None;
             self.ensure_visible(cx);
             self.status_message = Some(format!(
@@ -4349,6 +4782,194 @@ impl Spreadsheet {
                 self.find_results.len()
             ));
         }
+    }
+
+    /// Replace the current match and move to next
+    /// In Find-only mode, this just does FindNext
+    pub fn replace_next(&mut self, cx: &mut Context<Self>) {
+        // In Find-only mode, Enter does FindNext
+        if !self.find_replace_mode {
+            self.find_next(cx);
+            return;
+        }
+
+        if self.find_results.is_empty() {
+            return;
+        }
+
+        let hit = match self.find_results.get(self.find_index) {
+            Some(h) => h.clone(),
+            None => return,
+        };
+
+        // Get the raw value
+        let raw_value = self.sheet().get_raw(hit.row, hit.col);
+
+        // Perform the replacement
+        let new_value = if hit.kind == MatchKind::Formula && Self::is_ref_like(&self.find_input) {
+            // Token-aware replacement for ref-like patterns
+            self.replace_in_formula_token_aware(&raw_value, &self.find_input, &self.replace_input)
+        } else {
+            // Simple case-insensitive replacement
+            self.replace_case_insensitive(&raw_value, hit.start, hit.end, &self.replace_input)
+        };
+
+        // Record undo and apply
+        let sheet_index = self.sheet_index();
+        self.history.record_change(sheet_index, hit.row, hit.col, raw_value, new_value.clone());
+        self.sheet_mut().set_value(hit.row, hit.col, &new_value);
+        cx.notify();
+
+        // Recompute find results (offsets have changed)
+        self.perform_find(cx);
+
+        // Try to stay at similar position or advance
+        if self.find_index >= self.find_results.len() && !self.find_results.is_empty() {
+            self.find_index = 0;
+        }
+
+        if !self.find_results.is_empty() {
+            self.jump_to_find_result(cx);
+        }
+    }
+
+    /// Replace all matches at once
+    pub fn replace_all(&mut self, cx: &mut Context<Self>) {
+        use crate::history::CellChange;
+
+        if self.find_results.is_empty() || !self.find_replace_mode {
+            return;
+        }
+
+        // Take a snapshot of matches before mutation
+        let hits: Vec<MatchHit> = self.find_results.clone();
+        let total = hits.len();
+
+        // Group hits by cell (row, col) for batch replacement
+        let mut cells_to_replace: std::collections::HashMap<(usize, usize), Vec<MatchHit>> =
+            std::collections::HashMap::new();
+
+        for hit in hits {
+            cells_to_replace
+                .entry((hit.row, hit.col))
+                .or_default()
+                .push(hit);
+        }
+
+        // Collect all changes for batch undo
+        let mut changes: Vec<CellChange> = Vec::new();
+        let mut replaced_count = 0;
+
+        for ((row, col), mut cell_hits) in cells_to_replace {
+            // Sort hits by start position descending (replace from end to preserve offsets)
+            cell_hits.sort_by(|a, b| b.start.cmp(&a.start));
+
+            let raw_value = self.sheet().get_raw(row, col);
+            let mut new_value = raw_value.clone();
+
+            // Apply replacements in reverse order
+            for hit in cell_hits {
+                let kind = hit.kind;
+                if kind == MatchKind::Formula && Self::is_ref_like(&self.find_input) {
+                    // For ref-like patterns in formulas, use token-aware replacement
+                    new_value = self.replace_in_formula_token_aware(
+                        &new_value,
+                        &self.find_input,
+                        &self.replace_input,
+                    );
+                    replaced_count += 1;
+                    break;  // Token-aware replaces all at once
+                } else {
+                    // Simple replacement at specific offset
+                    new_value = self.replace_case_insensitive(
+                        &new_value,
+                        hit.start,
+                        hit.end,
+                        &self.replace_input,
+                    );
+                    replaced_count += 1;
+                }
+            }
+
+            // Record change for undo
+            changes.push(CellChange {
+                row,
+                col,
+                old_value: raw_value,
+                new_value: new_value.clone(),
+            });
+
+            self.sheet_mut().set_value(row, col, &new_value);
+        }
+
+        // Record all changes as single batch undo
+        let sheet_index = self.sheet_index();
+        self.history.record_batch(sheet_index, changes);
+
+        // Clear results and show status
+        self.find_results.clear();
+        self.find_index = 0;
+        self.status_message = Some(format!("Replaced {} of {} matches", replaced_count, total));
+        cx.notify();
+    }
+
+    /// Case-insensitive replacement at specific byte offsets
+    fn replace_case_insensitive(&self, text: &str, start: usize, end: usize, replacement: &str) -> String {
+        let mut result = String::with_capacity(text.len() + replacement.len());
+        result.push_str(&text[..start]);
+        result.push_str(replacement);
+        result.push_str(&text[end..]);
+        result
+    }
+
+    /// Token-aware replacement in formula for cell references
+    /// This preserves references that partially match (e.g., A1 vs A10)
+    fn replace_in_formula_token_aware(&self, formula: &str, find: &str, replace: &str) -> String {
+        let find_upper = find.to_uppercase();
+        let mut result = String::with_capacity(formula.len());
+        let chars: Vec<char> = formula.chars().collect();
+        let mut i = 0;
+        let mut in_string = false;
+
+        while i < chars.len() {
+            // Track string literals
+            if chars[i] == '"' {
+                in_string = !in_string;
+                result.push(chars[i]);
+                i += 1;
+                continue;
+            }
+
+            // Don't replace inside strings
+            if in_string {
+                result.push(chars[i]);
+                i += 1;
+                continue;
+            }
+
+            // Check for match at current position
+            let remaining: String = chars[i..].iter().collect();
+            let remaining_upper = remaining.to_uppercase();
+
+            if remaining_upper.starts_with(&find_upper) {
+                // Check word boundaries
+                let before_ok = i == 0 || !chars[i - 1].is_alphanumeric();
+                let after_idx = i + find.len();
+                let after_ok = after_idx >= chars.len() || !chars[after_idx].is_alphanumeric();
+
+                if before_ok && after_ok {
+                    // Replace with same case as replacement input
+                    result.push_str(replace);
+                    i += find.len();
+                    continue;
+                }
+            }
+
+            result.push(chars[i]);
+            i += 1;
+        }
+
+        result
     }
 
     // Command Palette

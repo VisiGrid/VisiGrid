@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::formula::parser::{self, Expr};
+use super::formula::parser::{self, ParsedExpr};
 
 /// Horizontal text alignment
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -71,7 +71,7 @@ pub enum CellValue {
     Text(String),
     Number(f64),
     #[serde(skip)]
-    Formula { source: String, ast: Option<Expr> },
+    Formula { source: String, ast: Option<ParsedExpr> },
 }
 
 impl Default for CellValue {

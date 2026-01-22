@@ -312,14 +312,14 @@ fn read_stdin(format: Format, delimiter: char, into_row: usize, into_col: usize)
 }
 
 fn parse_csv(content: &str, delimiter: u8, into_row: usize, into_col: usize) -> Result<visigrid_engine::sheet::Sheet, CliError> {
-    use visigrid_engine::sheet::Sheet;
+    use visigrid_engine::sheet::{Sheet, SheetId};
 
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(delimiter)
         .has_headers(false)
         .from_reader(content.as_bytes());
 
-    let mut sheet = Sheet::new(1000, 26);
+    let mut sheet = Sheet::new(SheetId(1), 1000, 26);
 
     for (row_idx, result) in reader.records().enumerate() {
         let record = result.map_err(|e| CliError::parse(format!("line {}: {}", row_idx + 1, e)))?;
@@ -334,12 +334,12 @@ fn parse_csv(content: &str, delimiter: u8, into_row: usize, into_col: usize) -> 
 }
 
 fn parse_json(content: &str, into_row: usize, into_col: usize) -> Result<visigrid_engine::sheet::Sheet, CliError> {
-    use visigrid_engine::sheet::Sheet;
+    use visigrid_engine::sheet::{Sheet, SheetId};
 
     let value: serde_json::Value = serde_json::from_str(content)
         .map_err(|e| CliError::parse(format!("JSON parse error: {}", e)))?;
 
-    let mut sheet = Sheet::new(1000, 26);
+    let mut sheet = Sheet::new(SheetId(1), 1000, 26);
 
     match value {
         serde_json::Value::Array(rows) => {
@@ -413,14 +413,14 @@ fn json_value_to_string(val: &serde_json::Value, row: usize, key: &str) -> Resul
 }
 
 fn parse_lines(content: &str, into_row: usize, into_col: usize) -> Result<visigrid_engine::sheet::Sheet, CliError> {
-    use visigrid_engine::sheet::Sheet;
+    use visigrid_engine::sheet::{Sheet, SheetId};
 
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
         return Err(CliError::parse("empty input"));
     }
 
-    let mut sheet = Sheet::new(1000, 26);
+    let mut sheet = Sheet::new(SheetId(1), 1000, 26);
     for (row, line) in lines.iter().enumerate() {
         if !line.is_empty() {
             sheet.set_value(into_row + row, into_col, line);
