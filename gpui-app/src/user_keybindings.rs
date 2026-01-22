@@ -272,6 +272,7 @@ fn create_binding(key: &str, action: &str) -> Option<KeyBinding> {
         "clipboard.copy" | "edit.copy" => Some(KeyBinding::new(key, Copy, context)),
         "clipboard.cut" | "edit.cut" => Some(KeyBinding::new(key, Cut, context)),
         "clipboard.paste" | "edit.paste" => Some(KeyBinding::new(key, Paste, context)),
+        "clipboard.pastevalues" | "edit.pastevalues" => Some(KeyBinding::new(key, PasteValues, context)),
 
         // File
         "file.new" => Some(KeyBinding::new(key, NewFile, context)),
@@ -345,7 +346,7 @@ pub fn available_actions() -> Vec<&'static str> {
         "selection.all", "selection.blanks", "selection.row", "selection.column",
         "selection.extendup", "selection.extenddown", "selection.extendleft", "selection.extendright",
         // Clipboard
-        "clipboard.copy", "clipboard.cut", "clipboard.paste",
+        "clipboard.copy", "clipboard.cut", "clipboard.paste", "clipboard.pastevalues",
         // File
         "file.new", "file.open", "file.save", "file.saveas",
         "file.exportcsv", "file.exporttsv", "file.exportjson",

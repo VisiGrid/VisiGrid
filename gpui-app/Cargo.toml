@@ -40,6 +40,7 @@ serde_json = { workspace = true }
 dirs = { workspace = true }
 regex = "1"
 open = "5"
+rand = "0.8"
 
 # Lua scripting (Pro only)
 mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }

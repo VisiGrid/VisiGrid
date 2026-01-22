@@ -34,6 +34,7 @@ pub enum FormatActionKind {
     NumberFormat,
     DecimalPlaces,  // Special: coalesces rapidly
     BackgroundColor,
+    Border,
 }
 
 /// An undoable action

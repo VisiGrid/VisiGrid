@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
+use crate::formatting::BorderApplyMode;
 use crate::mode::Menu;
 use crate::theme::TokenKey;
 
@@ -188,6 +189,7 @@ fn render_edit_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, bo
         .child(menu_item("Cut", Some("Ctrl+X"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.cut(cx); }))
         .child(menu_item("Copy", Some("Ctrl+C"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.copy(cx); }))
         .child(menu_item("Paste", Some("Ctrl+V"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.paste(cx); }))
+        .child(menu_item("Paste Values", Some("Ctrl+Shift+V"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.paste_values(cx); }))
         .child(menu_separator(border))
         .child(menu_item("Delete", Some("Del"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.delete_selection(cx); }))
         .child(menu_separator(border))
@@ -247,6 +249,11 @@ fn render_format_menu(text_primary: Hsla, text_muted: Hsla, text_disabled: Hsla,
         .child(color_menu_item("Purple", Some([204, 192, 218, 255]), text_primary, selection_bg, cx))
         .child(color_menu_item("Gray", Some([217, 217, 217, 255]), text_primary, selection_bg, cx))
         .child(color_menu_item("Cyan", Some([183, 222, 232, 255]), text_primary, selection_bg, cx))
+        .child(menu_separator(border))
+        .child(menu_label("Borders", text_muted))
+        .child(menu_item("All Borders", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.apply_borders(BorderApplyMode::All, cx); }))
+        .child(menu_item("Outline", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.apply_borders(BorderApplyMode::Outline, cx); }))
+        .child(menu_item("Clear Borders", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.apply_borders(BorderApplyMode::Clear, cx); }))
         .child(menu_separator(border))
         .child(menu_item_disabled("Row Height...", text_disabled))
         .child(menu_item_disabled("Column Width...", text_disabled))

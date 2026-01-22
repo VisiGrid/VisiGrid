@@ -51,6 +51,62 @@ pub enum NumberFormat {
     DateTime,  // Date + Time combined
 }
 
+/// Border style (line thickness)
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum BorderStyle {
+    #[default]
+    None,
+    Thin,      // 1px
+    Medium,    // 2px
+    Thick,     // 3px
+}
+
+/// Border specification for a single cell edge
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct CellBorder {
+    pub style: BorderStyle,
+    /// RGBA color. None = black. Stored but normalized to black in v0.2.2.
+    pub color: Option<[u8; 4]>,
+}
+
+impl CellBorder {
+    /// Returns true if this border should be rendered (has a visible style)
+    pub fn is_set(&self) -> bool {
+        self.style != BorderStyle::None
+    }
+
+    /// Creates a thin black border (the only style available in v0.2.2 UI)
+    pub fn thin() -> Self {
+        Self {
+            style: BorderStyle::Thin,
+            color: None,
+        }
+    }
+}
+
+/// Returns the winning border for a shared edge (precedence logic).
+/// border_a takes precedence if set, otherwise border_b.
+pub fn effective_border(border_a: CellBorder, border_b: CellBorder) -> CellBorder {
+    if border_a.style != BorderStyle::None {
+        border_a
+    } else {
+        border_b
+    }
+}
+
+/// Returns the border to actually draw (v0.2.2: normalize to Thin/black).
+/// Medium/Thick are stored but rendered as Thin to avoid overlay complexity.
+pub fn render_border(border: CellBorder) -> CellBorder {
+    if border.style != BorderStyle::None {
+        CellBorder {
+            style: BorderStyle::Thin,
+            color: None,
+        }
+    } else {
+        border
+    }
+}
+
 /// Cell formatting options
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CellFormat {
@@ -66,6 +122,18 @@ pub struct CellFormat {
     /// Background fill color as RGBA. None = transparent/default.
     #[serde(default)]
     pub background_color: Option<[u8; 4]>,
+    /// Top edge border
+    #[serde(default)]
+    pub border_top: CellBorder,
+    /// Right edge border
+    #[serde(default)]
+    pub border_right: CellBorder,
+    /// Bottom edge border
+    #[serde(default)]
+    pub border_bottom: CellBorder,
+    /// Left edge border
+    #[serde(default)]
+    pub border_left: CellBorder,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -555,5 +623,94 @@ mod tests {
         assert_eq!((year, month, day), (2024, 1, 1));
         // Fractional part preserved
         assert!((serial.fract() - 0.5).abs() < 0.0001);
+    }
+
+    // Border tests
+
+    #[test]
+    fn test_border_style_default_is_none() {
+        let style = BorderStyle::default();
+        assert_eq!(style, BorderStyle::None);
+    }
+
+    #[test]
+    fn test_cell_border_default_is_no_border() {
+        let border = CellBorder::default();
+        assert_eq!(border.style, BorderStyle::None);
+        assert_eq!(border.color, None);
+        assert!(!border.is_set());
+    }
+
+    #[test]
+    fn test_cell_border_thin() {
+        let border = CellBorder::thin();
+        assert_eq!(border.style, BorderStyle::Thin);
+        assert_eq!(border.color, None);
+        assert!(border.is_set());
+    }
+
+    #[test]
+    fn test_cell_format_border_defaults() {
+        let format = CellFormat::default();
+        assert!(!format.border_top.is_set());
+        assert!(!format.border_right.is_set());
+        assert!(!format.border_bottom.is_set());
+        assert!(!format.border_left.is_set());
+    }
+
+    #[test]
+    fn test_effective_border_precedence() {
+        let thin = CellBorder::thin();
+        let none = CellBorder::default();
+        let medium = CellBorder { style: BorderStyle::Medium, color: None };
+
+        // First border takes precedence if set
+        assert_eq!(effective_border(thin, none), thin);
+        assert_eq!(effective_border(thin, medium), thin);
+
+        // Falls back to second if first is None
+        assert_eq!(effective_border(none, thin), thin);
+        assert_eq!(effective_border(none, medium), medium);
+
+        // Both None returns None
+        assert_eq!(effective_border(none, none), none);
+    }
+
+    #[test]
+    fn test_render_border_normalizes_to_thin() {
+        let thin = CellBorder::thin();
+        let medium = CellBorder { style: BorderStyle::Medium, color: None };
+        let thick = CellBorder { style: BorderStyle::Thick, color: None };
+        let none = CellBorder::default();
+
+        // All non-None styles render as Thin/black
+        assert_eq!(render_border(thin), CellBorder { style: BorderStyle::Thin, color: None });
+        assert_eq!(render_border(medium), CellBorder { style: BorderStyle::Thin, color: None });
+        assert_eq!(render_border(thick), CellBorder { style: BorderStyle::Thin, color: None });
+
+        // None stays None
+        assert_eq!(render_border(none), CellBorder { style: BorderStyle::None, color: None });
+    }
+
+    #[test]
+    fn test_border_style_hashable() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(BorderStyle::None);
+        set.insert(BorderStyle::Thin);
+        set.insert(BorderStyle::Medium);
+        set.insert(BorderStyle::Thick);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn test_cell_border_hashable() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(CellBorder::default());
+        set.insert(CellBorder::thin());
+        set.insert(CellBorder { style: BorderStyle::Medium, color: None });
+        set.insert(CellBorder { style: BorderStyle::Thin, color: Some([255, 0, 0, 255]) });
+        assert_eq!(set.len(), 4);
     }
 }

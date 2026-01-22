@@ -4,7 +4,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
-use visigrid_engine::cell::{Alignment, CellFormat, DateStyle, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, CellBorder, CellFormat, DateStyle, NumberFormat, TextOverflow, VerticalAlignment};
 use visigrid_engine::sheet::{Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
@@ -272,6 +272,10 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             number_format,
             font_family: fmt_font_family,
             background_color: None,  // TODO: Add background_color column to database schema
+            border_top: CellBorder::default(),     // TODO: Add border columns to database schema
+            border_right: CellBorder::default(),
+            border_bottom: CellBorder::default(),
+            border_left: CellBorder::default(),
         };
         let has_formatting = format.bold || format.italic || format.underline || format.strikethrough
             || format.alignment != Alignment::Left

@@ -3,10 +3,21 @@
 //! This module contains all format setters (bold, italic, alignment, etc.)
 
 use gpui::*;
-use visigrid_engine::cell::{Alignment, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, CellBorder, NumberFormat, TextOverflow, VerticalAlignment};
 
 use crate::app::{Spreadsheet, TriState, SelectionFormatState};
 use crate::history::{CellFormatPatch, FormatActionKind};
+
+/// Border application mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderApplyMode {
+    /// Apply thin black borders to all 4 edges of each selected cell
+    All,
+    /// Apply thin black borders only to the outer perimeter of the selection
+    Outline,
+    /// Clear all borders from selected cells
+    Clear,
+}
 
 impl Spreadsheet {
     /// Compute format state for the current selection (tri-state resolution)
@@ -345,6 +356,149 @@ impl Spreadsheet {
         if count > 0 {
             let desc = if color.is_some() { "Background color" } else { "Clear background" };
             self.history.record_format(self.sheet_index(), patches, FormatActionKind::BackgroundColor, desc.to_string());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Apply borders to all selected cells with canonicalization.
+    ///
+    /// Canonicalization: UI commands set BOTH sides of every shared edge they touch
+    /// to prevent conflicting border states from normal use.
+    pub fn apply_borders(&mut self, mode: BorderApplyMode, cx: &mut Context<Self>) {
+        let thin = CellBorder::thin();
+        let none = CellBorder::default();
+        let mut patches = Vec::new();
+
+        // For each selection range, apply borders with proper canonicalization
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            match mode {
+                BorderApplyMode::All => {
+                    // Set all 4 edges on each cell to Thin
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            let before = self.sheet().get_format(row, col);
+                            self.sheet_mut().set_borders(row, col, thin, thin, thin, thin);
+                            let after = self.sheet().get_format(row, col);
+                            if before != after {
+                                patches.push(CellFormatPatch { row, col, before, after });
+                            }
+                        }
+                    }
+                    // Internal edges are already consistent since we set all 4 on every cell
+                }
+                BorderApplyMode::Outline => {
+                    // Set only perimeter edges, leave interior unchanged
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            let before = self.sheet().get_format(row, col);
+                            let mut changed = false;
+
+                            // Top edge: only if on top row of selection
+                            if row == min_row {
+                                self.sheet_mut().set_border_top(row, col, thin);
+                                changed = true;
+                            }
+                            // Bottom edge: only if on bottom row of selection
+                            if row == max_row {
+                                self.sheet_mut().set_border_bottom(row, col, thin);
+                                changed = true;
+                            }
+                            // Left edge: only if on left column of selection
+                            if col == min_col {
+                                self.sheet_mut().set_border_left(row, col, thin);
+                                changed = true;
+                            }
+                            // Right edge: only if on right column of selection
+                            if col == max_col {
+                                self.sheet_mut().set_border_right(row, col, thin);
+                                changed = true;
+                            }
+
+                            if changed {
+                                let after = self.sheet().get_format(row, col);
+                                if before != after {
+                                    patches.push(CellFormatPatch { row, col, before, after });
+                                }
+                            }
+                        }
+                    }
+                }
+                BorderApplyMode::Clear => {
+                    // Clear all 4 edges on each cell
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            let before = self.sheet().get_format(row, col);
+                            self.sheet_mut().set_borders(row, col, none, none, none, none);
+                            let after = self.sheet().get_format(row, col);
+                            if before != after {
+                                patches.push(CellFormatPatch { row, col, before, after });
+                            }
+                        }
+                    }
+
+                    // Also clear adjacent cells' inward-facing edges (canonicalization)
+                    // Clear top edge of cells above the selection
+                    if min_row > 0 {
+                        for col in min_col..=max_col {
+                            let adj_row = min_row - 1;
+                            let before = self.sheet().get_format(adj_row, col);
+                            self.sheet_mut().set_border_bottom(adj_row, col, none);
+                            let after = self.sheet().get_format(adj_row, col);
+                            if before != after {
+                                patches.push(CellFormatPatch { row: adj_row, col, before, after });
+                            }
+                        }
+                    }
+                    // Clear bottom edge of cells below the selection
+                    if max_row + 1 < self.sheet().rows {
+                        for col in min_col..=max_col {
+                            let adj_row = max_row + 1;
+                            let before = self.sheet().get_format(adj_row, col);
+                            self.sheet_mut().set_border_top(adj_row, col, none);
+                            let after = self.sheet().get_format(adj_row, col);
+                            if before != after {
+                                patches.push(CellFormatPatch { row: adj_row, col, before, after });
+                            }
+                        }
+                    }
+                    // Clear right edge of cells to the left of the selection
+                    if min_col > 0 {
+                        for row in min_row..=max_row {
+                            let adj_col = min_col - 1;
+                            let before = self.sheet().get_format(row, adj_col);
+                            self.sheet_mut().set_border_right(row, adj_col, none);
+                            let after = self.sheet().get_format(row, adj_col);
+                            if before != after {
+                                patches.push(CellFormatPatch { row, col: adj_col, before, after });
+                            }
+                        }
+                    }
+                    // Clear left edge of cells to the right of the selection
+                    if max_col + 1 < self.sheet().cols {
+                        for row in min_row..=max_row {
+                            let adj_col = max_col + 1;
+                            let before = self.sheet().get_format(row, adj_col);
+                            self.sheet_mut().set_border_left(row, adj_col, none);
+                            let after = self.sheet().get_format(row, adj_col);
+                            if before != after {
+                                patches.push(CellFormatPatch { row, col: adj_col, before, after });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let count = patches.len();
+        if count > 0 {
+            let desc = match mode {
+                BorderApplyMode::All => "All borders",
+                BorderApplyMode::Outline => "Outline",
+                BorderApplyMode::Clear => "Clear borders",
+            };
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Border, desc.to_string());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }

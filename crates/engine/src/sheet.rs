@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::cell::{Alignment, Cell, CellFormat, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment};
+use super::cell::{Alignment, Cell, CellBorder, CellFormat, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment};
 use super::formula::eval::{self, Array2D, CellLookup, EvalResult, LookupWithContext, Value};
 use super::formula::parser::bind_expr_same_sheet;
 
@@ -567,6 +567,43 @@ impl Sheet {
             .unwrap_or_default()
     }
 
+    /// Get the computed Value for a cell (typed, not formatted string).
+    /// Used for Paste Values to preserve types without display formatting.
+    pub fn get_computed_value(&self, row: usize, col: usize) -> Value {
+        // Check for spilled value first
+        if let Some(spill_value) = self.spill_values.get(&(row, col)) {
+            return spill_value.clone();
+        }
+
+        match self.cells.get(&(row, col)) {
+            Some(cell) => {
+                // Check for spill error
+                if cell.spill_error.is_some() {
+                    return Value::Error("#SPILL!".to_string());
+                }
+                // Evaluate the cell value
+                match &cell.value {
+                    CellValue::Empty => Value::Empty,
+                    CellValue::Text(s) => Value::Text(s.clone()),
+                    CellValue::Number(n) => Value::Number(*n),
+                    CellValue::Formula { ast: Some(ast), .. } => {
+                        let lookup = LookupWithContext::new(self, row, col);
+                        let bound_ast = bind_expr_same_sheet(ast);
+                        match eval::evaluate(&bound_ast, &lookup) {
+                            EvalResult::Number(n) => Value::Number(n),
+                            EvalResult::Text(s) => Value::Text(s),
+                            EvalResult::Boolean(b) => Value::Boolean(b),
+                            EvalResult::Error(e) => Value::Error(e),
+                            EvalResult::Array(arr) => arr.top_left().clone(),
+                        }
+                    }
+                    CellValue::Formula { ast: None, .. } => Value::Error("#ERR".to_string()),
+                }
+            }
+            None => Value::Empty,
+        }
+    }
+
     /// Get a reference to a cell (returns default empty cell if not found)
     pub fn get_cell(&self, row: usize, col: usize) -> Cell {
         self.cells
@@ -742,6 +779,47 @@ impl Sheet {
         self.cells
             .get(&(row, col))
             .and_then(|c| c.format.background_color)
+    }
+
+    /// Set all 4 borders on a cell at once
+    pub fn set_borders(
+        &mut self,
+        row: usize,
+        col: usize,
+        top: CellBorder,
+        right: CellBorder,
+        bottom: CellBorder,
+        left: CellBorder,
+    ) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.border_top = top;
+        cell.format.border_right = right;
+        cell.format.border_bottom = bottom;
+        cell.format.border_left = left;
+    }
+
+    /// Set the top border on a cell
+    pub fn set_border_top(&mut self, row: usize, col: usize, border: CellBorder) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.border_top = border;
+    }
+
+    /// Set the right border on a cell
+    pub fn set_border_right(&mut self, row: usize, col: usize, border: CellBorder) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.border_right = border;
+    }
+
+    /// Set the bottom border on a cell
+    pub fn set_border_bottom(&mut self, row: usize, col: usize, border: CellBorder) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.border_bottom = border;
+    }
+
+    /// Set the left border on a cell
+    pub fn set_border_left(&mut self, row: usize, col: usize, border: CellBorder) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.border_left = border;
     }
 
     /// Insert rows at the specified position, shifting existing rows down

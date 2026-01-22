@@ -111,45 +111,29 @@ What's built, what's next, and what's not planned.
 - XLSX export: colors written to `.xlsx` files (patternFill)
 - Note: XLSX import does not read fills (calamine library limitation)
 
----
+### Cell Borders (v0.2.2+)
+- All Borders, Outline Borders, Clear Borders presets
+- Canonicalized border storage (shared edges handled correctly)
+- Adjacency-based rendering (no doubled lines)
+- XLSX export preserves borders
+- See: [docs/features/borders-spec.md](docs/features/borders-spec.md)
+- **Deferred:** Border colors, Medium/Thick UI, per-edge controls, XLSX import
 
-## In Progress
-
-None currently.
+### Paste Values (v0.2.2+)
+- Ctrl+Shift+V pastes computed values instead of formulas
+- Internal clipboard stores typed `Value` objects (not display strings)
+- Clipboard metadata ID for reliable internal vs external detection
+- External clipboard: leading zeros preserved, `=` prefix becomes text
+- Edit mode: inserts top-left cell only, canonical text (no scientific notation)
+- See: [docs/features/paste-values-spec.md](docs/features/paste-values-spec.md)
+- **Deferred:** Paste Special dialog, Paste Formats, Paste Transpose
 
 ---
 
 ## Planned
 
-### 0.2.2 — Borders v1
-
-Simple borders that round-trip with XLSX. No complexity explosion.
-
-**Scope (intentionally limited):**
-- Presets only: None / All / Outline
-- Solid style, 1px width, black color
-- No per-edge customization in v1
-
-**Engine:**
-- [ ] Add `borders: CellBorders` to `CellFormat`
-- [ ] Store per-cell edge intents (top/right/bottom/left)
-- [ ] Deterministic conflict rule: if either cell defines edge, draw it
-
-**XLSX I/O:**
-- [ ] Export: write `<border>` elements
-- [ ] Import: read border styles
-
-**UI:**
-- [ ] 3-button preset picker (None / All / Outline)
-- [ ] Apply to selection with undo
-
-**Deferred to later:**
-- Per-edge width/style/color
-- Full border picker UI
-- Excel-perfect "last writer wins" (needs write-order tracking)
-
 ### Near-term
-- Paste Special (values, formulas, transpose, operations)
+- Paste Special expansion (formulas, transpose, operations)
 - Series Fill (smart pattern detection)
   - Numbers: 1, 2, 3 → 4, 5, 6
   - Dates: Jan 1 → Jan 2, Jan 3...

@@ -354,18 +354,33 @@ fn render_cell(
         if bottom { c = c.border_b_1(); }
         if left { c = c.border_l_1(); }
         c
-    } else if show_gridlines {
-        // Normal gridlines (only when enabled in settings)
-        // Don't draw gridlines toward selected cells (selection borders handle those edges)
-        let cell_right_selected = app.is_selected(row, col + 1);
-        let cell_below_selected = app.is_selected(row + 1, col);
-        let mut c = cell;
-        if !cell_right_selected { c = c.border_r_1(); }
-        if !cell_below_selected { c = c.border_b_1(); }
-        c
     } else {
-        // No gridlines - plain cell
-        cell
+        // Check for user-defined borders first
+        let (user_top, user_right, user_bottom, user_left) = app.cell_user_borders(row, col);
+        let has_user_border = user_top || user_right || user_bottom || user_left;
+
+        if has_user_border {
+            // Draw user-defined borders (black, 1px)
+            let border_color = rgb(0x000000);  // Black for user borders
+            let mut c = cell.border_color(border_color);
+            if user_top { c = c.border_t_1(); }
+            if user_right { c = c.border_r_1(); }
+            if user_bottom { c = c.border_b_1(); }
+            if user_left { c = c.border_l_1(); }
+            c
+        } else if show_gridlines {
+            // Normal gridlines (only when enabled in settings)
+            // Don't draw gridlines toward selected cells (selection borders handle those edges)
+            let cell_right_selected = app.is_selected(row, col + 1);
+            let cell_below_selected = app.is_selected(row + 1, col);
+            let mut c = cell;
+            if !cell_right_selected { c = c.border_r_1(); }
+            if !cell_below_selected { c = c.border_b_1(); }
+            c
+        } else {
+            // No gridlines and no user borders - plain cell
+            cell
+        }
     };
 
     cell = cell

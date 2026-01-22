@@ -29,6 +29,7 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, CELL_HEIGHT, MENU_BAR_HEIGHT, FORMULA_BAR_HEIGHT, CreateNameFocus};
 use crate::actions::*;
+use crate::formatting::BorderApplyMode;
 use crate::mode::{Mode, InspectorTab};
 use crate::theme::TokenKey;
 
@@ -305,6 +306,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &Paste, _, cx| {
             this.paste(cx);
+        }))
+        .on_action(cx.listener(|this, _: &PasteValues, _, cx| {
+            this.paste_values(cx);
         }))
         .on_action(cx.listener(|this, _: &DeleteCell, _, cx| {
             if !this.mode.is_editing() {
@@ -621,6 +625,16 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &BackgroundCyan, _, cx| {
             this.set_background_color(Some([183, 222, 232, 255]), cx);
+        }))
+        // Borders
+        .on_action(cx.listener(|this, _: &BordersAll, _, cx| {
+            this.apply_borders(BorderApplyMode::All, cx);
+        }))
+        .on_action(cx.listener(|this, _: &BordersOutline, _, cx| {
+            this.apply_borders(BorderApplyMode::Outline, cx);
+        }))
+        .on_action(cx.listener(|this, _: &BordersClear, _, cx| {
+            this.apply_borders(BorderApplyMode::Clear, cx);
         }))
         // Go To dialog
         .on_action(cx.listener(|this, _: &GoToCell, _, cx| {
@@ -1355,8 +1369,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         // Mouse wheel scrolling (or zoom with Ctrl/Cmd)
         .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
             // Check for zoom modifier (Ctrl on Linux/Windows, Cmd on macOS)
+            // macOS: use .platform (Cmd), others: use .control (Ctrl)
             #[cfg(target_os = "macos")]
-            let zoom_modifier = event.modifiers.command;
+            let zoom_modifier = event.modifiers.platform;
             #[cfg(not(target_os = "macos"))]
             let zoom_modifier = event.modifiers.control;
 

@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use calamine::{open_workbook_auto, Data, Reader, Sheets};
-use rust_xlsxwriter::{Format, FormatAlign, FormatUnderline, Workbook as XlsxWorkbook, Worksheet};
-use visigrid_engine::cell::{Alignment, CellFormat, CellValue, DateStyle, NumberFormat, VerticalAlignment};
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, FormatUnderline, Workbook as XlsxWorkbook, Worksheet};
+use visigrid_engine::cell::{Alignment, BorderStyle, CellFormat, CellValue, DateStyle, NumberFormat, VerticalAlignment};
 use visigrid_engine::formula::analyze::tally_unknown_functions;
 use visigrid_engine::formula::parser::parse as parse_formula;
 use visigrid_engine::sheet::{Sheet, SheetId};
@@ -857,7 +857,31 @@ fn build_excel_format(cell_format: &CellFormat) -> Format {
         format = format.set_background_color(color);
     }
 
+    // Cell borders
+    if cell_format.border_top.style != BorderStyle::None {
+        format = format.set_border_top(border_style_to_xlsx(cell_format.border_top.style));
+    }
+    if cell_format.border_right.style != BorderStyle::None {
+        format = format.set_border_right(border_style_to_xlsx(cell_format.border_right.style));
+    }
+    if cell_format.border_bottom.style != BorderStyle::None {
+        format = format.set_border_bottom(border_style_to_xlsx(cell_format.border_bottom.style));
+    }
+    if cell_format.border_left.style != BorderStyle::None {
+        format = format.set_border_left(border_style_to_xlsx(cell_format.border_left.style));
+    }
+
     format
+}
+
+/// Convert VisiGrid BorderStyle to rust_xlsxwriter FormatBorder
+fn border_style_to_xlsx(style: BorderStyle) -> FormatBorder {
+    match style {
+        BorderStyle::None => FormatBorder::None,
+        BorderStyle::Thin => FormatBorder::Thin,
+        BorderStyle::Medium => FormatBorder::Medium,
+        BorderStyle::Thick => FormatBorder::Thick,
+    }
 }
 
 /// Apply number format to an Excel Format
@@ -912,6 +936,10 @@ fn has_formatting(format: &CellFormat) -> bool {
         || format.number_format != NumberFormat::General
         || format.font_family.is_some()
         || format.background_color.is_some()
+        || format.border_top.style != BorderStyle::None
+        || format.border_right.style != BorderStyle::None
+        || format.border_bottom.style != BorderStyle::None
+        || format.border_left.style != BorderStyle::None
 }
 
 /// Apply layout settings (column widths, row heights, frozen panes) to worksheet
@@ -1117,6 +1145,39 @@ mod tests {
     }
 
     #[test]
+    fn test_export_with_borders() {
+        use visigrid_engine::cell::{CellBorder, CellFormat};
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+
+        // Create a 5x5 bordered table
+        let thin = CellBorder::thin();
+        for row in 0..5 {
+            for col in 0..5 {
+                sheet.set_value(row, col, &format!("R{}C{}", row, col));
+                let mut format = CellFormat::default();
+                format.border_top = thin;
+                format.border_right = thin;
+                format.border_bottom = thin;
+                format.border_left = thin;
+                sheet.set_format(row, col, format);
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("test_borders.xlsx");
+
+        let result = export(&workbook, &export_path, None).unwrap();
+        assert_eq!(result.cells_exported, 25);
+        assert!(export_path.exists());
+
+        // File should have meaningful size (borders add to XLSX complexity)
+        let metadata = std::fs::metadata(&export_path).unwrap();
+        assert!(metadata.len() > 100);
+    }
+
+    #[test]
     fn test_has_formatting() {
         use visigrid_engine::cell::CellFormat;
 
@@ -1133,6 +1194,12 @@ mod tests {
         let mut center_format = CellFormat::default();
         center_format.alignment = Alignment::Center;
         assert!(has_formatting(&center_format));
+
+        // Border has formatting
+        use visigrid_engine::cell::CellBorder;
+        let mut border_format = CellFormat::default();
+        border_format.border_top = CellBorder::thin();
+        assert!(has_formatting(&border_format));
     }
 
     // ========================================================================

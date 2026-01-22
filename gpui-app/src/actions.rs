@@ -90,6 +90,7 @@ actions!(clipboard, [
     Copy,
     Cut,
     Paste,
+    PasteValues,
 ]);
 
 // File actions
@@ -150,6 +151,10 @@ actions!(format, [
     BackgroundPurple,
     BackgroundGray,
     BackgroundCyan,
+    // Borders
+    BordersAll,      // Apply borders to all edges of selected cells
+    BordersOutline,  // Apply borders only to outer perimeter of selection
+    BordersClear,    // Clear all borders from selected cells
 ]);
 
 // Undo/Redo

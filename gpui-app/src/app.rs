@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use visigrid_engine::sheet::Sheet;
 use visigrid_engine::workbook::Workbook;
-use visigrid_engine::formula::eval::CellLookup;
+use visigrid_engine::formula::eval::{CellLookup, Value};
 use visigrid_engine::named_range::is_valid_name;
 
+use crate::formatting::BorderApplyMode;
 use crate::history::{History, CellChange, UndoAction};
 use crate::mode::Mode;
 use crate::search::{SearchEngine, SearchAction, CommandId, CommandSearchProvider, GoToSearchProvider, SearchItem};
@@ -89,6 +90,22 @@ pub enum FillDrag {
 }
 
 use visigrid_engine::cell::{Alignment, VerticalAlignment, TextOverflow, NumberFormat};
+
+/// Internal clipboard for copy/paste operations.
+/// Stores both raw formulas (for normal paste) and typed values (for paste values).
+#[derive(Debug, Clone)]
+pub struct InternalClipboard {
+    /// Tab-separated raw values (formulas/text) for normal paste + system clipboard
+    pub raw_tsv: String,
+    /// Typed computed values for Paste Values (2D grid aligned to copied rectangle)
+    pub values: Vec<Vec<Value>>,
+    /// Top-left cell position of the copied region (for reference adjustment)
+    pub source: (usize, usize),
+    /// Unique ID written to clipboard metadata for reliable internal detection.
+    /// On paste, we check if clipboard metadata contains this ID to distinguish
+    /// internal copies from external clipboard content (even if text matches).
+    pub id: u128,
+}
 
 /// Format state for a selection of cells
 #[derive(Debug, Clone)]
@@ -262,8 +279,7 @@ pub struct Spreadsheet {
     pub palette_previewing: bool,  // True if user has previewed (Shift+Enter)
 
     // Clipboard
-    pub clipboard: Option<String>,
-    pub clipboard_source: Option<(usize, usize)>,  // Top-left cell of copied region
+    pub internal_clipboard: Option<InternalClipboard>,
 
     // File state
     pub current_file: Option<PathBuf>,
@@ -520,8 +536,7 @@ impl Spreadsheet {
             palette_pre_selection_end: None,
             palette_pre_scroll: (0, 0),
             palette_previewing: false,
-            clipboard: None,
-            clipboard_source: None,
+            internal_clipboard: None,
             current_file: None,
             is_modified: false,
             recent_files: Vec::new(),
@@ -1000,6 +1015,7 @@ impl Spreadsheet {
             CommandId::Copy => self.copy(cx),
             CommandId::Cut => self.cut(cx),
             CommandId::Paste => self.paste(cx),
+            CommandId::PasteValues => self.paste_values(cx),
 
             // Formatting
             CommandId::ToggleBold => self.toggle_bold(cx),
@@ -1024,6 +1040,11 @@ impl Spreadsheet {
             CommandId::BackgroundPurple => self.set_background_color(Some([204, 192, 218, 255]), cx),
             CommandId::BackgroundGray => self.set_background_color(Some([217, 217, 217, 255]), cx),
             CommandId::BackgroundCyan => self.set_background_color(Some([183, 222, 232, 255]), cx),
+
+            // Borders
+            CommandId::BordersAll => self.apply_borders(BorderApplyMode::All, cx),
+            CommandId::BordersOutline => self.apply_borders(BorderApplyMode::Outline, cx),
+            CommandId::BordersClear => self.apply_borders(BorderApplyMode::Clear, cx),
 
             // File
             CommandId::NewFile => self.new_file(cx),
@@ -1651,6 +1672,57 @@ impl Spreadsheet {
         let bottom = true;
 
         (top, right, bottom, left)
+    }
+
+    /// Compute which user-defined borders to draw for a cell using adjacency logic.
+    ///
+    /// Returns (top, right, bottom, left) flags indicating which borders to draw.
+    /// Uses the precedence rule: right/bottom takes precedence over left/top of adjacent cell.
+    ///
+    /// - Own right and bottom: always draw if set
+    /// - Own top: only draw if cell above has no bottom border
+    /// - Own left: only draw if cell to left has no right border
+    pub fn cell_user_borders(&self, row: usize, col: usize) -> (bool, bool, bool, bool) {
+        let format = self.sheet().get_format(row, col);
+
+        // Right and bottom: always draw if set
+        let right = format.border_right.is_set();
+        let bottom = format.border_bottom.is_set();
+
+        // Top: only draw if cell above has no bottom border
+        let top = if format.border_top.is_set() {
+            if row > 0 {
+                let above_format = self.sheet().get_format(row - 1, col);
+                !above_format.border_bottom.is_set()
+            } else {
+                true // No cell above, draw top border
+            }
+        } else {
+            false
+        };
+
+        // Left: only draw if cell to left has no right border
+        let left = if format.border_left.is_set() {
+            if col > 0 {
+                let left_format = self.sheet().get_format(row, col - 1);
+                !left_format.border_right.is_set()
+            } else {
+                true // No cell to left, draw left border
+            }
+        } else {
+            false
+        };
+
+        (top, right, bottom, left)
+    }
+
+    /// Check if any user-defined border is set for this cell
+    pub fn has_user_borders(&self, row: usize, col: usize) -> bool {
+        let format = self.sheet().get_format(row, col);
+        format.border_top.is_set() ||
+        format.border_right.is_set() ||
+        format.border_bottom.is_set() ||
+        format.border_left.is_set()
     }
 
     /// Calculate visible rows based on window height
@@ -3122,13 +3194,14 @@ impl Spreadsheet {
     // Clipboard
     pub fn copy(&mut self, cx: &mut Context<Self>) {
         // If editing, copy selected text (or all if no selection)
+        // This is text-only copy, not cell copy - no internal clipboard needed
         if self.mode.is_editing() {
             let text = if let Some((start, end)) = self.edit_selection_range() {
                 self.edit_value.chars().skip(start).take(end - start).collect()
             } else {
                 self.edit_value.clone()
             };
-            self.clipboard = Some(text.clone());
+            self.internal_clipboard = None;  // Text copy, not cell copy
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             self.status_message = Some("Copied to clipboard".to_string());
             cx.notify();
@@ -3137,23 +3210,42 @@ impl Spreadsheet {
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
-        // Build tab-separated values for clipboard (copy formulas, not computed values)
-        let mut text = String::new();
+        // Build tab-separated raw values (formulas) for system clipboard and normal paste
+        let mut raw_tsv = String::new();
         for row in min_row..=max_row {
             for col in min_col..=max_col {
                 if col > min_col {
-                    text.push('\t');
+                    raw_tsv.push('\t');
                 }
-                text.push_str(&self.sheet().get_raw(row, col));
+                raw_tsv.push_str(&self.sheet().get_raw(row, col));
             }
             if row < max_row {
-                text.push('\n');
+                raw_tsv.push('\n');
             }
         }
 
-        self.clipboard = Some(text.clone());
-        self.clipboard_source = Some((min_row, min_col));  // Store source position for formula adjustment
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        // Build 2D grid of typed computed values for Paste Values
+        let mut values = Vec::new();
+        for row in min_row..=max_row {
+            let mut row_values = Vec::new();
+            for col in min_col..=max_col {
+                row_values.push(self.sheet().get_computed_value(row, col));
+            }
+            values.push(row_values);
+        }
+
+        // Generate unique nonce for clipboard matching
+        let id: u128 = rand::random();
+
+        self.internal_clipboard = Some(InternalClipboard {
+            raw_tsv: raw_tsv.clone(),
+            values,
+            source: (min_row, min_col),
+            id,
+        });
+        // Write clipboard with metadata ID for reliable internal detection
+        let id_json = format!("\"{}\"", id);
+        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(raw_tsv, id_json));
         self.status_message = Some("Copied to clipboard".to_string());
         cx.notify();
     }
@@ -3189,24 +3281,36 @@ impl Spreadsheet {
             return;
         }
 
-        // Try system clipboard first, track if it matches our internal clipboard
-        let (text, use_internal_source) = if let Some(item) = cx.read_from_clipboard() {
-            let system_text = item.text().map(|s| s.to_string());
-            // Check if system clipboard matches our internal clipboard
-            let matches_internal = system_text.as_ref() == self.clipboard.as_ref();
-            (system_text, matches_internal)
-        } else {
-            (self.clipboard.clone(), true)
-        };
+        // Read clipboard item to get both text and metadata
+        let clipboard_item = cx.read_from_clipboard();
+        let system_text = clipboard_item.as_ref().and_then(|item| item.text().map(|s| s.to_string()));
+        let metadata = clipboard_item.as_ref().and_then(|item| item.metadata().cloned());
+
+        // Check if clipboard matches our internal clipboard via metadata ID (primary)
+        // Fall back to normalized string comparison only if metadata absent (legacy)
+        let is_internal = self.internal_clipboard.as_ref().map_or(false, |ic| {
+            let expected_id = format!("\"{}\"", ic.id);
+            if let Some(ref m) = metadata {
+                m == &expected_id
+            } else {
+                // Legacy fallback: normalized string compare when metadata missing
+                system_text.as_ref().map_or(false, |st| {
+                    Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv)
+                })
+            }
+        });
+
+        // Get the text to paste (prefer system clipboard for interop)
+        let text = system_text.or_else(|| self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()));
 
         if let Some(text) = text {
             let (start_row, start_col) = self.selected;
             let mut changes = Vec::new();
 
-            // Calculate delta from source if we have internal clipboard source AND
-            // the pasted text matches our internal clipboard
-            let (delta_row, delta_col) = if use_internal_source {
-                if let Some((src_row, src_col)) = self.clipboard_source {
+            // Calculate delta from source if this is an internal paste
+            let (delta_row, delta_col) = if is_internal {
+                if let Some(ic) = &self.internal_clipboard {
+                    let (src_row, src_col) = ic.source;
                     (start_row as i32 - src_row as i32, start_col as i32 - src_col as i32)
                 } else {
                     (0, 0)
@@ -3223,8 +3327,8 @@ impl Spreadsheet {
                     if row < NUM_ROWS && col < NUM_COLS {
                         let old_value = self.sheet().get_raw(row, col);
 
-                        // Adjust formula references if this is a formula and we have source position
-                        let new_value = if value.starts_with('=') && use_internal_source && self.clipboard_source.is_some() {
+                        // Adjust formula references if this is a formula and we have internal source
+                        let new_value = if value.starts_with('=') && is_internal {
                             self.adjust_formula_refs(value, delta_row, delta_col)
                         } else {
                             value.to_string()
@@ -3248,12 +3352,17 @@ impl Spreadsheet {
         }
     }
 
+    /// Normalize clipboard text for comparison (handles line ending differences)
+    fn normalize_clipboard_text(text: &str) -> String {
+        text.replace("\r\n", "\n").trim_end().to_string()
+    }
+
     /// Paste clipboard text into the edit buffer (when in editing mode)
     pub fn paste_into_edit(&mut self, cx: &mut Context<Self>) {
         let text = if let Some(item) = cx.read_from_clipboard() {
             item.text().map(|s| s.to_string())
         } else {
-            self.clipboard.clone()
+            self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone())
         };
 
         if let Some(text) = text {
@@ -3277,6 +3386,220 @@ impl Spreadsheet {
                 self.update_autocomplete(cx);
 
                 self.status_message = Some(format!("Pasted: {}", text));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Paste Values: paste computed values only (no formulas).
+    /// Uses typed values from internal clipboard, or parses external clipboard with leading-zero guard.
+    pub fn paste_values(&mut self, cx: &mut Context<Self>) {
+        // If editing, paste canonical text into edit buffer (top-left cell only)
+        if self.mode.is_editing() {
+            self.paste_values_into_edit(cx);
+            return;
+        }
+
+        // Read clipboard item to get both text and metadata
+        let clipboard_item = cx.read_from_clipboard();
+        let system_text = clipboard_item.as_ref().and_then(|item| item.text().map(|s| s.to_string()));
+        let metadata = clipboard_item.as_ref().and_then(|item| item.metadata().cloned());
+
+        // Check if clipboard matches our internal clipboard via metadata ID (primary)
+        // Fall back to normalized string comparison only if metadata absent (legacy)
+        let is_internal = self.internal_clipboard.as_ref().map_or(false, |ic| {
+            let expected_id = format!("\"{}\"", ic.id);
+            if let Some(ref m) = metadata {
+                m == &expected_id
+            } else {
+                // Legacy fallback: normalized string compare when metadata missing
+                system_text.as_ref().map_or(false, |st| {
+                    Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv)
+                })
+            }
+        });
+
+        let (start_row, start_col) = self.selected;
+        let mut changes = Vec::new();
+
+        if is_internal {
+            // Use typed values from internal clipboard (clone to avoid borrow issues)
+            let values = self.internal_clipboard.as_ref().map(|ic| ic.values.clone());
+            if let Some(values) = values {
+                for (row_offset, row_values) in values.iter().enumerate() {
+                    for (col_offset, value) in row_values.iter().enumerate() {
+                        let row = start_row + row_offset;
+                        let col = start_col + col_offset;
+                        if row < NUM_ROWS && col < NUM_COLS {
+                            let old_value = self.sheet().get_raw(row, col);
+                            let new_value = Self::value_to_canonical_string(value);
+
+                            if old_value != new_value {
+                                changes.push(CellChange {
+                                    row, col, old_value, new_value: new_value.clone(),
+                                });
+                            }
+                            self.sheet_mut().set_value(row, col, &new_value);
+                        }
+                    }
+                }
+            }
+        } else if let Some(text) = system_text.or_else(|| self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone())) {
+            // Parse external clipboard with leading-zero guard
+            for (row_offset, line) in text.lines().enumerate() {
+                for (col_offset, cell_text) in line.split('\t').enumerate() {
+                    let row = start_row + row_offset;
+                    let col = start_col + col_offset;
+                    if row < NUM_ROWS && col < NUM_COLS {
+                        let old_value = self.sheet().get_raw(row, col);
+                        let parsed_value = Self::parse_external_value(cell_text);
+                        let new_value = Self::value_to_canonical_string(&parsed_value);
+
+                        if old_value != new_value {
+                            changes.push(CellChange {
+                                row, col, old_value, new_value: new_value.clone(),
+                            });
+                        }
+                        self.sheet_mut().set_value(row, col, &new_value);
+                    }
+                }
+            }
+        }
+
+        if !changes.is_empty() {
+            self.history.record_batch(self.sheet_index(), changes);
+            self.bump_cells_rev();
+            self.is_modified = true;
+        }
+        self.status_message = Some("Pasted values".to_string());
+        cx.notify();
+    }
+
+    /// Convert a typed Value to its canonical string representation for cell storage.
+    /// Guarantees: no scientific notation, deterministic output, -0.0 normalized to 0.
+    fn value_to_canonical_string(value: &Value) -> String {
+        match value {
+            Value::Empty => String::new(),
+            Value::Number(n) => {
+                // Handle non-finite values explicitly
+                if !n.is_finite() {
+                    if n.is_nan() { return "NaN".to_string(); }
+                    return if *n > 0.0 { "INF".to_string() } else { "-INF".to_string() };
+                }
+
+                // Normalize -0.0 to 0.0
+                let n0 = if *n == 0.0 { 0.0 } else { *n };
+
+                // Integer fast path: no decimal point needed
+                if n0.fract() == 0.0 && n0.abs() < 9e15 {
+                    format!("{:.0}", n0)
+                } else {
+                    // Fixed precision (15 decimals), trim trailing zeros, no scientific notation
+                    let mut s = format!("{:.15}", n0);
+                    while s.contains('.') && s.ends_with('0') { s.pop(); }
+                    if s.ends_with('.') { s.pop(); }
+                    s
+                }
+            }
+            Value::Text(s) => s.clone(),
+            Value::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+            Value::Error(e) => e.clone(),
+        }
+    }
+
+    /// Parse external clipboard text into a typed Value with leading-zero preservation.
+    fn parse_external_value(text: &str) -> Value {
+        let trimmed = text.trim();
+
+        if trimmed.is_empty() {
+            return Value::Empty;
+        }
+
+        // Check for formula prefix - treat as literal text (strip the =)
+        if trimmed.starts_with('=') {
+            return Value::Text(trimmed.to_string());
+        }
+
+        // Check for leading zeros that should be preserved as text
+        // e.g., "007", "00123" - but not "0" or "0.5"
+        if trimmed.starts_with('0') && trimmed.len() > 1 {
+            let second_char = trimmed.chars().nth(1).unwrap();
+            if second_char.is_ascii_digit() {
+                // Starts with 0 followed by digit -> preserve as text
+                return Value::Text(trimmed.to_string());
+            }
+        }
+
+        // Check for boolean
+        let upper = trimmed.to_uppercase();
+        if upper == "TRUE" {
+            return Value::Boolean(true);
+        }
+        if upper == "FALSE" {
+            return Value::Boolean(false);
+        }
+
+        // Try to parse as number
+        if let Ok(n) = trimmed.parse::<f64>() {
+            return Value::Number(n);
+        }
+
+        // Default to text
+        Value::Text(trimmed.to_string())
+    }
+
+    /// Paste values into edit buffer: use canonical text of top-left value only.
+    fn paste_values_into_edit(&mut self, cx: &mut Context<Self>) {
+        // Read clipboard item to get both text and metadata
+        let clipboard_item = cx.read_from_clipboard();
+        let system_text = clipboard_item.as_ref().and_then(|item| item.text().map(|s| s.to_string()));
+        let metadata = clipboard_item.as_ref().and_then(|item| item.metadata().cloned());
+
+        // Check if clipboard matches our internal clipboard via metadata ID (primary)
+        let is_internal = self.internal_clipboard.as_ref().map_or(false, |ic| {
+            let expected_id = format!("\"{}\"", ic.id);
+            if let Some(ref m) = metadata {
+                m == &expected_id
+            } else {
+                // Legacy fallback: normalized string compare when metadata missing
+                system_text.as_ref().map_or(false, |st| {
+                    Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv)
+                })
+            }
+        });
+
+        let text = if is_internal {
+            // Get top-left value from internal clipboard
+            self.internal_clipboard.as_ref().and_then(|ic| {
+                ic.values.first().and_then(|row| row.first()).map(|v| Self::value_to_canonical_string(v))
+            })
+        } else {
+            // Parse top-left cell from external clipboard
+            system_text.or_else(|| self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()))
+                .map(|text| {
+                    let first_cell = text.lines().next().unwrap_or("")
+                        .split('\t').next().unwrap_or("");
+                    let value = Self::parse_external_value(first_cell);
+                    Self::value_to_canonical_string(&value)
+                })
+        };
+
+        if let Some(text) = text {
+            if !text.is_empty() {
+                // Insert at cursor position
+                let char_count = self.edit_value.chars().count();
+                let cursor_pos = self.edit_cursor.min(char_count);
+
+                let byte_pos = self.edit_value.char_indices()
+                    .nth(cursor_pos)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.edit_value.len());
+
+                self.edit_value.insert_str(byte_pos, &text);
+                self.edit_cursor = cursor_pos + text.chars().count();
+
+                self.update_autocomplete(cx);
+                self.status_message = Some(format!("Pasted value: {}", text));
                 cx.notify();
             }
         }
@@ -7705,5 +8028,183 @@ impl Render for Spreadsheet {
         };
 
         views::render_spreadsheet(self, window, cx)
+    }
+}
+
+#[cfg(test)]
+mod paste_values_tests {
+    use super::Spreadsheet;
+    use visigrid_engine::formula::eval::Value;
+
+    // =========================================================================
+    // PASTE VALUES: External value parsing (leading-zero guard, booleans, etc.)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_external_value_leading_zero_preserved() {
+        // Leading zeros should be preserved as text
+        assert!(matches!(Spreadsheet::parse_external_value("007"), Value::Text(s) if s == "007"));
+        assert!(matches!(Spreadsheet::parse_external_value("00123"), Value::Text(s) if s == "00123"));
+        assert!(matches!(Spreadsheet::parse_external_value("000"), Value::Text(s) if s == "000"));
+    }
+
+    #[test]
+    fn test_parse_external_value_single_zero_is_number() {
+        // Single zero is a number, not text
+        assert!(matches!(Spreadsheet::parse_external_value("0"), Value::Number(n) if n == 0.0));
+    }
+
+    #[test]
+    fn test_parse_external_value_zero_decimal_is_number() {
+        // 0.5, 0.123 are numbers (the second char is '.')
+        assert!(matches!(Spreadsheet::parse_external_value("0.5"), Value::Number(n) if (n - 0.5).abs() < 0.001));
+        assert!(matches!(Spreadsheet::parse_external_value("0.123"), Value::Number(n) if (n - 0.123).abs() < 0.001));
+    }
+
+    #[test]
+    fn test_parse_external_value_boolean() {
+        // TRUE/FALSE (case insensitive) become booleans
+        assert!(matches!(Spreadsheet::parse_external_value("TRUE"), Value::Boolean(true)));
+        assert!(matches!(Spreadsheet::parse_external_value("FALSE"), Value::Boolean(false)));
+        assert!(matches!(Spreadsheet::parse_external_value("true"), Value::Boolean(true)));
+        assert!(matches!(Spreadsheet::parse_external_value("false"), Value::Boolean(false)));
+        assert!(matches!(Spreadsheet::parse_external_value("True"), Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_parse_external_value_number() {
+        // Regular numbers
+        assert!(matches!(Spreadsheet::parse_external_value("42"), Value::Number(n) if n == 42.0));
+        assert!(matches!(Spreadsheet::parse_external_value("-3.14"), Value::Number(n) if (n - (-3.14)).abs() < 0.001));
+        assert!(matches!(Spreadsheet::parse_external_value("1e6"), Value::Number(n) if n == 1_000_000.0));
+    }
+
+    #[test]
+    fn test_parse_external_value_text() {
+        // Regular text
+        assert!(matches!(Spreadsheet::parse_external_value("hello"), Value::Text(s) if s == "hello"));
+        assert!(matches!(Spreadsheet::parse_external_value("ABC"), Value::Text(s) if s == "ABC"));
+    }
+
+    #[test]
+    fn test_parse_external_value_empty() {
+        assert!(matches!(Spreadsheet::parse_external_value(""), Value::Empty));
+        assert!(matches!(Spreadsheet::parse_external_value("   "), Value::Empty));
+    }
+
+    #[test]
+    fn test_parse_external_value_formula_prefix_becomes_text() {
+        // Formula prefix is preserved as literal text (not executed)
+        assert!(matches!(Spreadsheet::parse_external_value("=SUM(A1:A10)"), Value::Text(s) if s == "=SUM(A1:A10)"));
+        assert!(matches!(Spreadsheet::parse_external_value("=A1+B1"), Value::Text(s) if s == "=A1+B1"));
+    }
+
+    #[test]
+    fn test_parse_external_value_whitespace_trimmed() {
+        // Whitespace should be trimmed
+        assert!(matches!(Spreadsheet::parse_external_value("  42  "), Value::Number(n) if n == 42.0));
+        assert!(matches!(Spreadsheet::parse_external_value("  hello  "), Value::Text(s) if s == "hello"));
+    }
+
+    // =========================================================================
+    // PASTE VALUES: Canonical string representation
+    // =========================================================================
+
+    #[test]
+    fn test_value_to_canonical_string_number() {
+        // Integers should not have decimal places
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(42.0)), "42");
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(0.0)), "0");
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(-100.0)), "-100");
+
+        // Decimals preserved
+        let result = Spreadsheet::value_to_canonical_string(&Value::Number(3.14159));
+        assert!(result.starts_with("3.14"));
+    }
+
+    #[test]
+    fn test_value_to_canonical_string_boolean() {
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Boolean(true)), "TRUE");
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Boolean(false)), "FALSE");
+    }
+
+    #[test]
+    fn test_value_to_canonical_string_text() {
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Text("hello".to_string())), "hello");
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Text("007".to_string())), "007");
+    }
+
+    #[test]
+    fn test_value_to_canonical_string_error() {
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Error("#VALUE!".to_string())), "#VALUE!");
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Error("#REF!".to_string())), "#REF!");
+    }
+
+    #[test]
+    fn test_value_to_canonical_string_empty() {
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Empty), "");
+    }
+
+    // =========================================================================
+    // CORRECTNESS: Exponent avoidance (never emit scientific notation)
+    // =========================================================================
+
+    #[test]
+    fn test_value_to_canonical_string_no_scientific_notation_large() {
+        // Large numbers must be full decimal, not scientific
+        assert_eq!(
+            Spreadsheet::value_to_canonical_string(&Value::Number(1e15)),
+            "1000000000000000"
+        );
+        assert_eq!(
+            Spreadsheet::value_to_canonical_string(&Value::Number(1234567890123456.0)),
+            "1234567890123456"
+        );
+    }
+
+    #[test]
+    fn test_value_to_canonical_string_no_scientific_notation_small() {
+        // Small decimals must be full decimal, not scientific
+        let result = Spreadsheet::value_to_canonical_string(&Value::Number(0.000001));
+        assert_eq!(result, "0.000001");
+        assert!(!result.contains('e') && !result.contains('E'), "must not contain exponent");
+
+        let result2 = Spreadsheet::value_to_canonical_string(&Value::Number(1e-6));
+        assert_eq!(result2, "0.000001");
+    }
+
+    #[test]
+    fn test_value_to_canonical_string_negative_zero_normalized() {
+        // -0.0 must become "0", not "-0"
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(-0.0)), "0");
+    }
+
+    #[test]
+    fn test_value_to_canonical_string_special_values() {
+        // NaN and Infinity get explicit string representations
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(f64::NAN)), "NaN");
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(f64::INFINITY)), "INF");
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(f64::NEG_INFINITY)), "-INF");
+    }
+
+    #[test]
+    fn test_value_to_canonical_string_trailing_zeros_trimmed() {
+        // Trailing zeros after decimal should be trimmed
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(12.5)), "12.5");
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(12.500)), "12.5");
+        assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(1.0)), "1");
+    }
+
+    // =========================================================================
+    // CORRECTNESS: Clipboard metadata ID matching
+    // =========================================================================
+
+    #[test]
+    fn test_clipboard_id_format() {
+        // Verify the ID format we write to clipboard metadata
+        let id: u128 = 12345678901234567890;
+        let expected = format!("\"{}\"", id);
+        assert_eq!(expected, "\"12345678901234567890\"");
+        // This is valid JSON string format
     }
 }

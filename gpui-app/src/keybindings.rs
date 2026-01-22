@@ -69,6 +69,7 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("ctrl-c", Copy, Some("Spreadsheet")),
         KeyBinding::new("ctrl-x", Cut, Some("Spreadsheet")),
         KeyBinding::new("ctrl-v", Paste, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-shift-v", PasteValues, Some("Spreadsheet")),
 
         // File
         KeyBinding::new("ctrl-n", NewFile, Some("Spreadsheet")),
