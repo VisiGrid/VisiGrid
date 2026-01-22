@@ -14,7 +14,10 @@ What's built, what's next, and what's not planned.
 - Selection, multi-selection, and range operations
 - Multi-edit (type once, apply to all selected cells with formula shifting)
 - Undo/redo
-- Clipboard (copy/cut/paste)
+- Clipboard (copy/cut/paste) with formula reference adjustment
+  - Relative references shift on paste (A1 → B1)
+  - Absolute references stay fixed ($A$1)
+  - Mixed references partial shift ($A1, A$1)
 - Fill down (Ctrl+D) and fill right (Ctrl+R)
 
 ### Navigation & Workflow
@@ -32,6 +35,10 @@ What's built, what's next, and what's not planned.
 - CSV/TSV import and export
 - JSON export
 - Excel import (.xlsx, .xls, .xlsb, .ods) with background processing
+- Excel export (.xlsx) with trust-hardening:
+  - Formula export with fallback to values for unsupported functions
+  - Large numbers (16+ digits) as text to preserve precision
+  - Export Report dialog shows exactly what changed
 
 ### Formula Engine (97 functions)
 - Math, logical, text, lookup, date/time, statistical, array
@@ -65,9 +72,9 @@ What's built, what's next, and what's not planned.
 - URL/path detection (Ctrl+Enter to open)
 
 ### Platform
-- macOS (Universal binary, signed and notarized)
+- macOS (Universal binary, signed and notarized, Homebrew)
 - Windows (x64)
-- Linux (x86_64, tar.gz and AppImage)
+- Linux (x86_64, tar.gz, AppImage, Homebrew, AUR)
 
 ### CLI (v0.1.8+)
 - Headless spreadsheet operations via `visigrid-cli`
@@ -106,7 +113,6 @@ What's built, what's next, and what's not planned.
 - Find and replace (Ctrl+H)
 - Cross-sheet references (=Sheet2!A1)
 - Zoom (Ctrl++/-)
-- XLSX export
 - Data validation (dropdowns, constraints)
 - Conditional formatting (basic rules)
 - Comments/notes on cells
