@@ -1,13 +1,19 @@
 //! Fill and transform operations for spreadsheet
 //!
-//! This module contains Fill Down, Fill Right, AutoSum, and transform operations.
+//! This module contains Fill Down, Fill Right, AutoSum, Fill Handle, and transform operations.
 
 use gpui::*;
 use regex::Regex;
 
-use crate::app::Spreadsheet;
+use crate::app::{Spreadsheet, FillDrag, FillAxis};
 use crate::history::CellChange;
 use crate::mode::Mode;
+
+/// Hit area size for fill handle (logical pixels, unscaled by zoom)
+pub const FILL_HANDLE_HIT_SIZE: f32 = 14.0;
+
+/// Visual size for fill handle (logical pixels, unscaled by zoom)
+pub const FILL_HANDLE_VISUAL_SIZE: f32 = 8.0;
 
 impl Spreadsheet {
     // Fill operations
@@ -395,5 +401,282 @@ impl Spreadsheet {
         };
         self.status_message = Some(msg);
         cx.notify();
+    }
+
+    // ========================================================================
+    // Fill Handle (drag corner to fill cells)
+    // ========================================================================
+
+    /// Check if fill handle drag is currently active
+    pub fn is_fill_dragging(&self) -> bool {
+        matches!(self.fill_drag, FillDrag::Dragging { .. })
+    }
+
+    /// Start fill handle drag from the active cell
+    pub fn start_fill_drag(&mut self, cx: &mut Context<Self>) {
+        // Only allow from single cell (v1 limitation)
+        if self.selection_end.is_some() || !self.additional_selections.is_empty() {
+            self.status_message = Some("Fill handle works from single cell".into());
+            cx.notify();
+            return;
+        }
+
+        let anchor = self.selected;
+        self.fill_drag = FillDrag::Dragging {
+            anchor,
+            current: anchor,
+            axis: None,
+        };
+        cx.notify();
+    }
+
+    /// Continue fill handle drag - update current position and axis lock
+    pub fn continue_fill_drag(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        if let FillDrag::Dragging { anchor, current, axis } = self.fill_drag {
+            // Skip if position unchanged
+            if (row, col) == current {
+                return;
+            }
+
+            let new_axis = if axis.is_some() {
+                // Axis already locked - keep it
+                axis
+            } else {
+                // Determine axis from movement direction
+                let delta_row = (row as i32 - anchor.0 as i32).abs();
+                let delta_col = (col as i32 - anchor.1 as i32).abs();
+
+                if delta_row >= 1 || delta_col >= 1 {
+                    // Lock axis based on primary direction
+                    if delta_row > delta_col {
+                        Some(FillAxis::Row)
+                    } else if delta_col > delta_row {
+                        Some(FillAxis::Col)
+                    } else {
+                        // Equal movement - prefer row (down) as default
+                        Some(FillAxis::Row)
+                    }
+                } else {
+                    None
+                }
+            };
+
+            // Constrain current position to locked axis
+            let constrained = match new_axis {
+                Some(FillAxis::Row) => (row, anchor.1),  // Lock to anchor column
+                Some(FillAxis::Col) => (anchor.0, col),  // Lock to anchor row
+                None => (row, col),
+            };
+
+            self.fill_drag = FillDrag::Dragging {
+                anchor,
+                current: constrained,
+                axis: new_axis,
+            };
+            cx.notify();
+        }
+    }
+
+    /// End fill handle drag - execute the fill operation
+    pub fn end_fill_drag(&mut self, cx: &mut Context<Self>) {
+        if let FillDrag::Dragging { anchor, current, axis } = self.fill_drag {
+            self.fill_drag = FillDrag::None;
+
+            // No-op if current == anchor
+            if current == anchor {
+                cx.notify();
+                return;
+            }
+
+            // Execute fill based on axis
+            match axis {
+                Some(FillAxis::Row) => {
+                    self.execute_fill_handle_vertical(anchor, current, cx);
+                }
+                Some(FillAxis::Col) => {
+                    self.execute_fill_handle_horizontal(anchor, current, cx);
+                }
+                None => {
+                    // No axis determined - shouldn't happen, but no-op
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Cancel fill handle drag without executing
+    pub fn cancel_fill_drag(&mut self, cx: &mut Context<Self>) {
+        if self.is_fill_dragging() {
+            self.fill_drag = FillDrag::None;
+            cx.notify();
+        }
+    }
+
+    /// Execute vertical fill (fill down or up)
+    fn execute_fill_handle_vertical(
+        &mut self,
+        anchor: (usize, usize),
+        end: (usize, usize),
+        cx: &mut Context<Self>,
+    ) {
+        let (anchor_row, col) = anchor;
+        let end_row = end.0;
+
+        if anchor_row == end_row {
+            return;
+        }
+
+        let source = self.sheet().get_raw(anchor_row, col);
+        let mut changes = Vec::new();
+
+        // Determine fill direction and range (excluding anchor)
+        let fill_range: Vec<usize> = if end_row > anchor_row {
+            // Fill down
+            ((anchor_row + 1)..=end_row).collect()
+        } else {
+            // Fill up
+            (end_row..anchor_row).collect()
+        };
+
+        for row in &fill_range {
+            let delta_row = *row as i32 - anchor_row as i32;
+            let old_value = self.sheet().get_raw(*row, col);
+            let new_value = if source.starts_with('=') {
+                self.adjust_formula_refs(&source, delta_row, 0)
+            } else {
+                source.clone()
+            };
+
+            if old_value != new_value {
+                changes.push(CellChange {
+                    row: *row,
+                    col,
+                    old_value,
+                    new_value: new_value.clone(),
+                });
+            }
+            self.sheet_mut().set_value(*row, col, &new_value);
+        }
+
+        let count = fill_range.len();
+        self.history.record_batch(self.sheet_index(), changes);
+        self.bump_cells_rev();
+        self.is_modified = true;
+
+        // Update selection to include filled range
+        self.selection_end = Some(end);
+
+        self.status_message = Some(format!("Filled {} cell{}", count, if count == 1 { "" } else { "s" }));
+        cx.notify();
+    }
+
+    /// Execute horizontal fill (fill right or left)
+    fn execute_fill_handle_horizontal(
+        &mut self,
+        anchor: (usize, usize),
+        end: (usize, usize),
+        cx: &mut Context<Self>,
+    ) {
+        let (row, anchor_col) = anchor;
+        let end_col = end.1;
+
+        if anchor_col == end_col {
+            return;
+        }
+
+        let source = self.sheet().get_raw(row, anchor_col);
+        let mut changes = Vec::new();
+
+        // Determine fill direction and range (excluding anchor)
+        let fill_range: Vec<usize> = if end_col > anchor_col {
+            // Fill right
+            ((anchor_col + 1)..=end_col).collect()
+        } else {
+            // Fill left
+            (end_col..anchor_col).collect()
+        };
+
+        for col in &fill_range {
+            let delta_col = *col as i32 - anchor_col as i32;
+            let old_value = self.sheet().get_raw(row, *col);
+            let new_value = if source.starts_with('=') {
+                self.adjust_formula_refs(&source, 0, delta_col)
+            } else {
+                source.clone()
+            };
+
+            if old_value != new_value {
+                changes.push(CellChange {
+                    row,
+                    col: *col,
+                    old_value,
+                    new_value: new_value.clone(),
+                });
+            }
+            self.sheet_mut().set_value(row, *col, &new_value);
+        }
+
+        let count = fill_range.len();
+        self.history.record_batch(self.sheet_index(), changes);
+        self.bump_cells_rev();
+        self.is_modified = true;
+
+        // Update selection to include filled range
+        self.selection_end = Some(end);
+
+        self.status_message = Some(format!("Filled {} cell{}", count, if count == 1 { "" } else { "s" }));
+        cx.notify();
+    }
+
+    /// Get the fill preview target range (for rendering overlay)
+    /// Returns None if not dragging or anchor == current
+    /// Returns (min_row, min_col, max_row, max_col) excluding the anchor cell
+    pub fn fill_drag_target_range(&self) -> Option<(usize, usize, usize, usize)> {
+        if let FillDrag::Dragging { anchor, current, axis } = self.fill_drag {
+            if current == anchor || axis.is_none() {
+                return None;
+            }
+
+            match axis {
+                Some(FillAxis::Row) => {
+                    let (anchor_row, col) = anchor;
+                    let end_row = current.0;
+                    if anchor_row == end_row {
+                        return None;
+                    }
+                    let min_row = anchor_row.min(end_row);
+                    let max_row = anchor_row.max(end_row);
+                    Some((min_row, col, max_row, col))
+                }
+                Some(FillAxis::Col) => {
+                    let (row, anchor_col) = anchor;
+                    let end_col = current.1;
+                    if anchor_col == end_col {
+                        return None;
+                    }
+                    let min_col = anchor_col.min(end_col);
+                    let max_col = anchor_col.max(end_col);
+                    Some((row, min_col, row, max_col))
+                }
+                None => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Check if a cell is in the fill preview range (excluding anchor)
+    pub fn is_fill_preview_cell(&self, row: usize, col: usize) -> bool {
+        if let FillDrag::Dragging { anchor, .. } = self.fill_drag {
+            // Never highlight anchor
+            if (row, col) == anchor {
+                return false;
+            }
+
+            if let Some((min_row, min_col, max_row, max_col)) = self.fill_drag_target_range() {
+                return row >= min_row && row <= max_row && col >= min_col && col <= max_col;
+            }
+        }
+        false
     }
 }

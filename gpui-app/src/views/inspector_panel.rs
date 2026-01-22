@@ -443,6 +443,8 @@ fn render_format_tab(
         .child(render_alignment_section(&state, text_primary, text_muted, accent, panel_border, cx))
         // Text style toggles
         .child(render_text_style_section(&state, text_primary, text_muted, accent, panel_border, cx))
+        // Background color section
+        .child(render_background_color_section(&state, text_primary, text_muted, accent, panel_border, cx))
         // Font section
         .child(render_font_section(&state, text_primary, text_muted, panel_border, cx))
 }
@@ -972,6 +974,60 @@ fn format_toggle_btn(
     // Add child and id last (id converts to Stateful<Div>)
     btn.child(if is_mixed { "—" } else { label })
         .id(SharedString::from(format!("format-btn-{}", label)))
+}
+
+fn render_background_color_section(
+    _state: &SelectionFormatState,
+    text_primary: Hsla,
+    _text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    // Color palette: None + 8 colors
+    let colors: &[(&str, Option<[u8; 4]>)] = &[
+        ("None", None),
+        ("Yellow", Some([255, 255, 0, 255])),
+        ("Green", Some([198, 239, 206, 255])),
+        ("Blue", Some([189, 215, 238, 255])),
+        ("Red", Some([255, 199, 206, 255])),
+        ("Orange", Some([255, 235, 156, 255])),
+        ("Purple", Some([204, 192, 218, 255])),
+        ("Gray", Some([217, 217, 217, 255])),
+        ("Cyan", Some([183, 222, 232, 255])),
+    ];
+
+    section("Background", panel_border, text_primary)
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .children(colors.iter().map(|(name, color)| {
+                    let color_value = *color;
+                    let swatch_bg = color.map(|[r, g, b, _]| {
+                        Hsla::from(gpui::Rgba {
+                            r: r as f32 / 255.0,
+                            g: g as f32 / 255.0,
+                            b: b as f32 / 255.0,
+                            a: 1.0,
+                        })
+                    }).unwrap_or(hsla(0.0, 0.0, 1.0, 1.0));
+
+                    div()
+                        .id(SharedString::from(format!("bg-color-{}", name)))
+                        .size(px(24.0))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(panel_border)
+                        .bg(swatch_bg)
+                        .cursor_pointer()
+                        .hover(|s| s.border_color(accent))
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                            this.set_background_color(color_value, cx);
+                        }))
+                }))
+        )
 }
 
 fn render_font_section(

@@ -848,6 +848,15 @@ fn build_excel_format(cell_format: &CellFormat) -> Format {
         format = format.set_text_wrap();
     }
 
+    // Background fill color
+    if let Some([r, g, b, _]) = cell_format.background_color {
+        // Excel uses ARGB, but rust_xlsxwriter uses RGB hex
+        let color = rust_xlsxwriter::Color::RGB(
+            ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+        );
+        format = format.set_background_color(color);
+    }
+
     format
 }
 
@@ -902,6 +911,7 @@ fn has_formatting(format: &CellFormat) -> bool {
         || format.vertical_alignment != VerticalAlignment::Middle
         || format.number_format != NumberFormat::General
         || format.font_family.is_some()
+        || format.background_color.is_some()
 }
 
 /// Apply layout settings (column widths, row heights, frozen panes) to worksheet

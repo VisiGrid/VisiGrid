@@ -2,6 +2,7 @@ use gpui::*;
 use gpui::StyledText;
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
+use crate::fill::{FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_SIZE};
 use crate::mode::Mode;
 use crate::settings::{user_settings, Setting};
 use crate::theme::TokenKey;
@@ -287,12 +288,26 @@ fn render_cell(
 
     let mut cell = div()
         .id(ElementId::Name(format!("cell-{}-{}", row, col).into()))
+        .relative()  // Enable absolute positioning for selection overlay
         .size_full()
         .flex()
         .px_1()
         .overflow_hidden()
-        .bg(cell_background(app, is_editing, is_active, is_selected, is_formula_ref))
+        .bg(cell_base_background(app, is_editing, format.background_color))
         .border_color(border_color);
+
+    // Add selection/formula-ref overlay (semi-transparent, layered on top of cell background)
+    // This allows custom background colors to show through the selection highlight
+    if !is_editing && (is_active || is_selected || is_formula_ref) {
+        if let Some(overlay_color) = selection_overlay_color(app, is_active, is_formula_ref) {
+            cell = cell.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(overlay_color)
+            );
+        }
+    }
 
     // Apply horizontal alignment
     cell = match format.alignment {
@@ -365,6 +380,10 @@ fn render_cell(
             if this.resizing_col.is_some() || this.resizing_row.is_some() {
                 return;
             }
+            // Don't handle clicks if fill handle drag was just started (child handler fired first)
+            if this.is_fill_dragging() {
+                return;
+            }
 
             // If clicking a spill receiver, redirect to the spill parent
             let (target_row, target_col) = if let Some((parent_row, parent_col)) = this.sheet().get_spill_parent(cell_row, cell_col) {
@@ -407,6 +426,11 @@ fn render_cell(
             if this.inspector_visible {
                 return;
             }
+            // Continue fill handle drag if active (priority over selection drag)
+            if this.is_fill_dragging() {
+                this.continue_fill_drag(cell_row, cell_col, cx);
+                return;
+            }
             // Continue drag selection if active
             if this.dragging_selection {
                 if this.mode.is_formula() {
@@ -419,6 +443,11 @@ fn render_cell(
         .on_mouse_up(MouseButton::Left, cx.listener(move |this, _, _, cx| {
             // Don't handle if inspector is visible
             if this.inspector_visible {
+                return;
+            }
+            // End fill handle drag if active (commits the fill)
+            if this.is_fill_dragging() {
+                this.end_fill_drag(cx);
                 return;
             }
             // End drag selection (works for both normal and formula mode)
@@ -579,27 +608,110 @@ fn render_cell(
         }
     }
 
-    // Wrap in relative container for absolute hint badge positioning
-    div()
+    // Check if this cell is in fill preview range
+    let is_fill_preview = app.is_fill_preview_cell(row, col);
+
+    // Apply fill preview styling (dashed-like effect via different border color)
+    if is_fill_preview {
+        let fill_preview_bg = app.token(TokenKey::SelectionBg).opacity(0.4);
+        let fill_preview_border = app.token(TokenKey::Accent);
+        cell = cell.bg(fill_preview_bg).border_1().border_color(fill_preview_border);
+    }
+
+    // Determine if we should show the fill handle on this cell
+    // Show fill handle when:
+    // - This is the active cell
+    // - Not editing
+    // - Not in hint mode
+    // - Single cell selected (no range or multi-selection)
+    // - Not already fill dragging
+    let show_fill_handle = is_active
+        && !is_editing
+        && app.mode != Mode::Hint
+        && app.selection_end.is_none()
+        && app.additional_selections.is_empty()
+        && !app.is_fill_dragging();
+
+    // Wrap in relative container for absolute positioning (hint badges, fill handle)
+    let mut wrapper = div()
         .relative()
         .flex_shrink_0()
         .w(px(col_width))
         .h_full()
-        .child(cell)
+        .child(cell);
+
+    // Add fill handle at bottom-right corner of active cell
+    if show_fill_handle {
+        let handle_color = app.token(TokenKey::SelectionBorder);
+        let zoom = app.metrics.zoom;
+        let visual_size = FILL_HANDLE_VISUAL_SIZE * zoom;
+        let hit_size = FILL_HANDLE_HIT_SIZE * zoom;
+        // Offset to center the hit area on the corner, with visual centered inside
+        let hit_offset = hit_size / 2.0;
+        let visual_offset = (hit_size - visual_size) / 2.0;
+
+        wrapper = wrapper.child(
+            div()
+                .id(ElementId::Name(format!("fill-handle-{}-{}", row, col).into()))
+                .absolute()
+                .bottom(px(-hit_offset))
+                .right(px(-hit_offset))
+                .w(px(hit_size))
+                .h(px(hit_size))
+                .cursor(CursorStyle::Crosshair)
+                // Mouse down on fill handle starts fill drag (preempts selection)
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _event: &MouseDownEvent, _, cx| {
+                    this.start_fill_drag(cx);
+                }))
+                // Visual handle (smaller, centered in hit area)
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(visual_offset))
+                        .left(px(visual_offset))
+                        .w(px(visual_size))
+                        .h(px(visual_size))
+                        .bg(handle_color)
+                )
+        );
+    }
+
+    wrapper
 }
 
-fn cell_background(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected: bool, is_formula_ref: bool) -> Hsla {
+/// Returns the base background color for a cell (ignoring selection state).
+/// Selection is rendered as a semi-transparent overlay on top.
+fn cell_base_background(
+    app: &Spreadsheet,
+    is_editing: bool,
+    custom_bg: Option<[u8; 4]>,
+) -> Hsla {
     if is_editing {
         app.token(TokenKey::EditorBg)
-    } else if is_formula_ref {
-        // Apply opacity so cell content remains visible through the highlight
-        app.token(TokenKey::RefHighlight1).opacity(0.25)
-    } else if is_active {
-        app.token(TokenKey::SelectionBg)
-    } else if is_selected {
-        app.token(TokenKey::SelectionBg)
+    } else if let Some([r, g, b, a]) = custom_bg {
+        // Custom background color from cell format (RGBA → Hsla)
+        Hsla::from(gpui::Rgba {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: a as f32 / 255.0,
+        })
     } else {
         app.token(TokenKey::CellBg)
+    }
+}
+
+/// Returns the selection overlay color (semi-transparent) for layering on top of cell background.
+fn selection_overlay_color(app: &Spreadsheet, is_active: bool, is_formula_ref: bool) -> Option<Hsla> {
+    if is_formula_ref {
+        // Formula reference highlight (semi-transparent)
+        Some(app.token(TokenKey::RefHighlight1).opacity(0.25))
+    } else if is_active {
+        // Active cell gets slightly stronger highlight
+        Some(app.token(TokenKey::SelectionBg).opacity(0.5))
+    } else {
+        // Selected cells get standard overlay
+        Some(app.token(TokenKey::SelectionBg).opacity(0.4))
     }
 }
 

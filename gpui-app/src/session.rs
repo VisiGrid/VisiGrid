@@ -692,6 +692,7 @@ mod tests {
                         inspector_visible: true,
                         inspector_tab: SerializableInspectorTab::Format,
                     },
+                    zoom_level: 1.0,
                 },
             ],
             focused_window: Some(0),

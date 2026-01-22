@@ -63,6 +63,9 @@ pub struct CellFormat {
     pub text_overflow: TextOverflow,
     pub number_format: NumberFormat,
     pub font_family: Option<String>,  // None = inherit from settings
+    /// Background fill color as RGBA. None = transparent/default.
+    #[serde(default)]
+    pub background_color: Option<[u8; 4]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

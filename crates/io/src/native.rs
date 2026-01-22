@@ -271,6 +271,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             text_overflow: TextOverflow::Clip,  // TODO: Add text_overflow column to database schema
             number_format,
             font_family: fmt_font_family,
+            background_color: None,  // TODO: Add background_color column to database schema
         };
         let has_formatting = format.bold || format.italic || format.underline || format.strikethrough
             || format.alignment != Alignment::Left

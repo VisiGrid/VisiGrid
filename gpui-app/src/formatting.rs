@@ -325,4 +325,29 @@ impl Spreadsheet {
         }
         cx.notify();
     }
+
+    /// Set background color on all selected cells
+    pub fn set_background_color(&mut self, color: Option<[u8; 4]>, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet().get_format(row, col);
+                    self.sheet_mut().set_background_color(row, col, color);
+                    let after = self.sheet().get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let desc = if color.is_some() { "Background color" } else { "Clear background" };
+            self.history.record_format(self.sheet_index(), patches, FormatActionKind::BackgroundColor, desc.to_string());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
 }

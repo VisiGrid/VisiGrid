@@ -66,6 +66,28 @@ pub enum CreateNameFocus {
     Description, // Description input field
 }
 
+/// Fill handle drag axis (locked after first significant movement)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillAxis {
+    Row,  // Filling vertically (down or up)
+    Col,  // Filling horizontally (right or left)
+}
+
+/// Fill handle drag state machine
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FillDrag {
+    #[default]
+    None,
+    Dragging {
+        /// The active cell when drag started (source of fill)
+        anchor: (usize, usize),
+        /// Current hover cell during drag
+        current: (usize, usize),
+        /// Axis lock (None until threshold crossed, then locked)
+        axis: Option<FillAxis>,
+    },
+}
+
 use visigrid_engine::cell::{Alignment, VerticalAlignment, TextOverflow, NumberFormat};
 
 /// Format state for a selection of cells
@@ -285,6 +307,9 @@ pub struct Spreadsheet {
 
     // Drag selection state
     pub dragging_selection: bool,          // Currently dragging to select cells
+
+    // Fill handle drag state
+    pub fill_drag: FillDrag,
 
     // Row/column header drag selection state
     pub dragging_row_header: bool,         // Currently dragging row headers
@@ -522,6 +547,7 @@ impl Spreadsheet {
             theme_picker_query: String::new(),
             theme_picker_selected: 0,
             dragging_selection: false,
+            fill_drag: FillDrag::None,
             dragging_row_header: false,
             dragging_col_header: false,
             row_header_anchor: None,
@@ -987,6 +1013,17 @@ impl Spreadsheet {
                 self.inspector_tab = crate::mode::InspectorTab::Format;
                 cx.notify();
             }
+
+            // Background colors
+            CommandId::ClearBackground => self.set_background_color(None, cx),
+            CommandId::BackgroundYellow => self.set_background_color(Some([255, 255, 0, 255]), cx),
+            CommandId::BackgroundGreen => self.set_background_color(Some([198, 239, 206, 255]), cx),
+            CommandId::BackgroundBlue => self.set_background_color(Some([189, 215, 238, 255]), cx),
+            CommandId::BackgroundRed => self.set_background_color(Some([255, 199, 206, 255]), cx),
+            CommandId::BackgroundOrange => self.set_background_color(Some([255, 235, 156, 255]), cx),
+            CommandId::BackgroundPurple => self.set_background_color(Some([204, 192, 218, 255]), cx),
+            CommandId::BackgroundGray => self.set_background_color(Some([217, 217, 217, 255]), cx),
+            CommandId::BackgroundCyan => self.set_background_color(Some([183, 222, 232, 255]), cx),
 
             // File
             CommandId::NewFile => self.new_file(cx),

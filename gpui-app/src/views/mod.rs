@@ -594,6 +594,34 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &FormatPercent, _, cx| {
             this.format_percent(cx);
         }))
+        // Background colors
+        .on_action(cx.listener(|this, _: &ClearBackground, _, cx| {
+            this.set_background_color(None, cx);
+        }))
+        .on_action(cx.listener(|this, _: &BackgroundYellow, _, cx| {
+            this.set_background_color(Some([255, 255, 0, 255]), cx);
+        }))
+        .on_action(cx.listener(|this, _: &BackgroundGreen, _, cx| {
+            this.set_background_color(Some([198, 239, 206, 255]), cx);
+        }))
+        .on_action(cx.listener(|this, _: &BackgroundBlue, _, cx| {
+            this.set_background_color(Some([189, 215, 238, 255]), cx);
+        }))
+        .on_action(cx.listener(|this, _: &BackgroundRed, _, cx| {
+            this.set_background_color(Some([255, 199, 206, 255]), cx);
+        }))
+        .on_action(cx.listener(|this, _: &BackgroundOrange, _, cx| {
+            this.set_background_color(Some([255, 235, 156, 255]), cx);
+        }))
+        .on_action(cx.listener(|this, _: &BackgroundPurple, _, cx| {
+            this.set_background_color(Some([204, 192, 218, 255]), cx);
+        }))
+        .on_action(cx.listener(|this, _: &BackgroundGray, _, cx| {
+            this.set_background_color(Some([217, 217, 217, 255]), cx);
+        }))
+        .on_action(cx.listener(|this, _: &BackgroundCyan, _, cx| {
+            this.set_background_color(Some([183, 222, 232, 255]), cx);
+        }))
         // Go To dialog
         .on_action(cx.listener(|this, _: &GoToCell, _, cx| {
             this.show_goto(cx);
@@ -715,6 +743,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 if event.keystroke.key == "escape" {
                     return;
                 }
+            }
+
+            // Cancel fill handle drag with Escape
+            if this.is_fill_dragging() && event.keystroke.key == "escape" {
+                this.cancel_fill_drag(cx);
+                return;
             }
 
             // Exit zen mode with Escape

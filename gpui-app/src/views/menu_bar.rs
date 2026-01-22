@@ -237,6 +237,17 @@ fn render_format_menu(text_primary: Hsla, text_muted: Hsla, text_disabled: Hsla,
         .child(menu_item("Font...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.show_font_picker(cx); }))
         .child(menu_item_disabled("Cells...", text_disabled))
         .child(menu_separator(border))
+        .child(menu_label("Background Color", text_muted))
+        .child(color_menu_item("None", None, text_primary, selection_bg, cx))
+        .child(color_menu_item("Yellow", Some([255, 255, 0, 255]), text_primary, selection_bg, cx))
+        .child(color_menu_item("Green", Some([198, 239, 206, 255]), text_primary, selection_bg, cx))
+        .child(color_menu_item("Blue", Some([189, 215, 238, 255]), text_primary, selection_bg, cx))
+        .child(color_menu_item("Red", Some([255, 199, 206, 255]), text_primary, selection_bg, cx))
+        .child(color_menu_item("Orange", Some([255, 235, 156, 255]), text_primary, selection_bg, cx))
+        .child(color_menu_item("Purple", Some([204, 192, 218, 255]), text_primary, selection_bg, cx))
+        .child(color_menu_item("Gray", Some([217, 217, 217, 255]), text_primary, selection_bg, cx))
+        .child(color_menu_item("Cyan", Some([183, 222, 232, 255]), text_primary, selection_bg, cx))
+        .child(menu_separator(border))
         .child(menu_item_disabled("Row Height...", text_disabled))
         .child(menu_item_disabled("Column Width...", text_disabled))
 }
@@ -331,4 +342,59 @@ fn menu_separator(border_color: Hsla) -> impl IntoElement {
         .mx_2()
         .my_1()
         .bg(border_color)
+}
+
+fn menu_label(label: &'static str, text_color: Hsla) -> impl IntoElement {
+    div()
+        .px_3()
+        .py(px(2.0))
+        .mx_1()
+        .text_size(px(10.0))
+        .text_color(text_color)
+        .child(label)
+}
+
+fn color_menu_item(
+    label: &'static str,
+    color: Option<[u8; 4]>,
+    text_color: Hsla,
+    hover_bg: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let swatch_color = color.map(|[r, g, b, _]| {
+        Hsla::from(gpui::Rgba {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: 1.0,
+        })
+    });
+
+    div()
+        .id(ElementId::Name(format!("color-{}", label).into()))
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py(px(4.0))
+        .mx_1()
+        .rounded_sm()
+        .text_size(px(12.0))
+        .text_color(text_color)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover_bg))
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            this.close_menu(cx);
+            this.set_background_color(color, cx);
+        }))
+        .child(
+            div()
+                .size(px(12.0))
+                .rounded_sm()
+                .border_1()
+                .border_color(hsla(0.0, 0.0, 0.5, 0.3))
+                .when_some(swatch_color, |d, c| d.bg(c))
+                .when(swatch_color.is_none(), |d| d.bg(hsla(0.0, 0.0, 1.0, 1.0)))
+        )
+        .child(label)
 }

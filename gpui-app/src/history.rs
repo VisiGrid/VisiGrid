@@ -33,6 +33,7 @@ pub enum FormatActionKind {
     TextOverflow,
     NumberFormat,
     DecimalPlaces,  // Special: coalesces rapidly
+    BackgroundColor,
 }
 
 /// An undoable action

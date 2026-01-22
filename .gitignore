@@ -31,3 +31,4 @@ visihub-site/
 # Distribution repos (managed separately)
 homebrew-tap/
 winget-manifests/
+crates/io/target/

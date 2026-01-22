@@ -1133,3 +1133,299 @@ fn test_touched_cells_completeness() {
         }
     }
 }
+
+// =========================================================================
+// FILL HANDLE: Core fill operations
+// =========================================================================
+
+/// Simulate fill handle drag down (from single anchor cell)
+fn fill_handle_down(sheet: &mut Sheet, anchor_row: usize, col: usize, end_row: usize) {
+    if end_row <= anchor_row {
+        return; // No-op or upward fill
+    }
+    let source = sheet.get_raw(anchor_row, col);
+    for row in (anchor_row + 1)..=end_row {
+        let delta_row = row as i32 - anchor_row as i32;
+        let new_value = if source.starts_with('=') {
+            adjust_formula_refs(&source, delta_row, 0)
+        } else {
+            source.clone()
+        };
+        sheet.set_value(row, col, &new_value);
+    }
+}
+
+/// Simulate fill handle drag up (from single anchor cell)
+fn fill_handle_up(sheet: &mut Sheet, anchor_row: usize, col: usize, end_row: usize) {
+    if end_row >= anchor_row {
+        return; // No-op or downward fill
+    }
+    let source = sheet.get_raw(anchor_row, col);
+    for row in end_row..anchor_row {
+        let delta_row = row as i32 - anchor_row as i32;
+        let new_value = if source.starts_with('=') {
+            adjust_formula_refs(&source, delta_row, 0)
+        } else {
+            source.clone()
+        };
+        sheet.set_value(row, col, &new_value);
+    }
+}
+
+/// Simulate fill handle drag right (from single anchor cell)
+fn fill_handle_right(sheet: &mut Sheet, row: usize, anchor_col: usize, end_col: usize) {
+    if end_col <= anchor_col {
+        return; // No-op or leftward fill
+    }
+    let source = sheet.get_raw(row, anchor_col);
+    for col in (anchor_col + 1)..=end_col {
+        let delta_col = col as i32 - anchor_col as i32;
+        let new_value = if source.starts_with('=') {
+            adjust_formula_refs(&source, 0, delta_col)
+        } else {
+            source.clone()
+        };
+        sheet.set_value(row, col, &new_value);
+    }
+}
+
+/// Simulate fill handle drag left (from single anchor cell)
+fn fill_handle_left(sheet: &mut Sheet, row: usize, anchor_col: usize, end_col: usize) {
+    if end_col >= anchor_col {
+        return; // No-op or rightward fill
+    }
+    let source = sheet.get_raw(row, anchor_col);
+    for col in end_col..anchor_col {
+        let delta_col = col as i32 - anchor_col as i32;
+        let new_value = if source.starts_with('=') {
+            adjust_formula_refs(&source, 0, delta_col)
+        } else {
+            source.clone()
+        };
+        sheet.set_value(row, col, &new_value);
+    }
+}
+
+#[test]
+fn test_fill_handle_drag_down_fills_a2_to_a5() {
+    // Drag down from A1 to A5 fills A2:A5
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // A1 = 10
+    sheet.set_value(0, 0, "10");
+
+    // Drag fill handle from A1 (row 0) to A5 (row 4)
+    fill_handle_down(&mut sheet, 0, 0, 4);
+
+    // Verify A2:A5 are filled with 10
+    assert_eq!(sheet.get_raw(1, 0), "10", "A2 should be 10");
+    assert_eq!(sheet.get_raw(2, 0), "10", "A3 should be 10");
+    assert_eq!(sheet.get_raw(3, 0), "10", "A4 should be 10");
+    assert_eq!(sheet.get_raw(4, 0), "10", "A5 should be 10");
+
+    // A1 unchanged
+    assert_eq!(sheet.get_raw(0, 0), "10", "A1 should still be 10");
+}
+
+#[test]
+fn test_fill_handle_drag_down_formula_adjustment() {
+    // Drag down from A1 to A5 with formula =B1
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // B1:B5 with values 1-5
+    sheet.set_value(0, 1, "1");  // B1
+    sheet.set_value(1, 1, "2");  // B2
+    sheet.set_value(2, 1, "3");  // B3
+    sheet.set_value(3, 1, "4");  // B4
+    sheet.set_value(4, 1, "5");  // B5
+
+    // A1 = =B1
+    sheet.set_value(0, 0, "=B1");
+
+    // Drag fill handle from A1 to A5
+    fill_handle_down(&mut sheet, 0, 0, 4);
+
+    // Verify formulas are adjusted
+    assert_eq!(sheet.get_raw(0, 0), "=B1", "A1 formula unchanged");
+    assert_eq!(sheet.get_raw(1, 0), "=B2", "A2 formula adjusted to =B2");
+    assert_eq!(sheet.get_raw(2, 0), "=B3", "A3 formula adjusted to =B3");
+    assert_eq!(sheet.get_raw(3, 0), "=B4", "A4 formula adjusted to =B4");
+    assert_eq!(sheet.get_raw(4, 0), "=B5", "A5 formula adjusted to =B5");
+
+    // Verify computed values
+    assert_eq!(sheet.get_display(0, 0), "1", "A1 displays 1");
+    assert_eq!(sheet.get_display(1, 0), "2", "A2 displays 2");
+    assert_eq!(sheet.get_display(2, 0), "3", "A3 displays 3");
+    assert_eq!(sheet.get_display(3, 0), "4", "A4 displays 4");
+    assert_eq!(sheet.get_display(4, 0), "5", "A5 displays 5");
+}
+
+#[test]
+fn test_fill_handle_drag_right_fills_b1_to_e1() {
+    // Drag right from A1 to E1 fills B1:E1
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // A1 = 42
+    sheet.set_value(0, 0, "42");
+
+    // Drag fill handle from A1 (col 0) to E1 (col 4)
+    fill_handle_right(&mut sheet, 0, 0, 4);
+
+    // Verify B1:E1 are filled with 42
+    assert_eq!(sheet.get_raw(0, 1), "42", "B1 should be 42");
+    assert_eq!(sheet.get_raw(0, 2), "42", "C1 should be 42");
+    assert_eq!(sheet.get_raw(0, 3), "42", "D1 should be 42");
+    assert_eq!(sheet.get_raw(0, 4), "42", "E1 should be 42");
+
+    // A1 unchanged
+    assert_eq!(sheet.get_raw(0, 0), "42", "A1 should still be 42");
+}
+
+#[test]
+fn test_fill_handle_drag_right_formula_adjustment() {
+    // Drag right from A1 to E1 with formula =A2
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // A2:E2 with values 10-50
+    sheet.set_value(1, 0, "10");  // A2
+    sheet.set_value(1, 1, "20");  // B2
+    sheet.set_value(1, 2, "30");  // C2
+    sheet.set_value(1, 3, "40");  // D2
+    sheet.set_value(1, 4, "50");  // E2
+
+    // A1 = =A2
+    sheet.set_value(0, 0, "=A2");
+
+    // Drag fill handle from A1 to E1
+    fill_handle_right(&mut sheet, 0, 0, 4);
+
+    // Verify formulas are adjusted
+    assert_eq!(sheet.get_raw(0, 0), "=A2", "A1 formula unchanged");
+    assert_eq!(sheet.get_raw(0, 1), "=B2", "B1 formula adjusted to =B2");
+    assert_eq!(sheet.get_raw(0, 2), "=C2", "C1 formula adjusted to =C2");
+    assert_eq!(sheet.get_raw(0, 3), "=D2", "D1 formula adjusted to =D2");
+    assert_eq!(sheet.get_raw(0, 4), "=E2", "E1 formula adjusted to =E2");
+
+    // Verify computed values
+    assert_eq!(sheet.get_display(0, 0), "10", "A1 displays 10");
+    assert_eq!(sheet.get_display(0, 1), "20", "B1 displays 20");
+    assert_eq!(sheet.get_display(0, 2), "30", "C1 displays 30");
+    assert_eq!(sheet.get_display(0, 3), "40", "D1 displays 40");
+    assert_eq!(sheet.get_display(0, 4), "50", "E1 displays 50");
+}
+
+#[test]
+fn test_fill_handle_drag_up_fills_a1_to_a4() {
+    // Drag up from A5 to A1 fills A1:A4 (excluding anchor A5)
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // A5 = 99
+    sheet.set_value(4, 0, "99");
+
+    // Drag fill handle from A5 (row 4) up to A1 (row 0)
+    fill_handle_up(&mut sheet, 4, 0, 0);
+
+    // Verify A1:A4 are filled with 99 (A5 is anchor, excluded)
+    assert_eq!(sheet.get_raw(0, 0), "99", "A1 should be 99");
+    assert_eq!(sheet.get_raw(1, 0), "99", "A2 should be 99");
+    assert_eq!(sheet.get_raw(2, 0), "99", "A3 should be 99");
+    assert_eq!(sheet.get_raw(3, 0), "99", "A4 should be 99");
+
+    // A5 (anchor) unchanged
+    assert_eq!(sheet.get_raw(4, 0), "99", "A5 should still be 99");
+}
+
+#[test]
+fn test_fill_handle_drag_up_formula_adjustment() {
+    // Drag up from A5 to A1 with formula =B5
+    // Formulas should get negative row delta
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // B1:B5 with values 1-5
+    sheet.set_value(0, 1, "1");  // B1
+    sheet.set_value(1, 1, "2");  // B2
+    sheet.set_value(2, 1, "3");  // B3
+    sheet.set_value(3, 1, "4");  // B4
+    sheet.set_value(4, 1, "5");  // B5
+
+    // A5 = =B5
+    sheet.set_value(4, 0, "=B5");
+
+    // Drag fill handle from A5 up to A1
+    fill_handle_up(&mut sheet, 4, 0, 0);
+
+    // Verify formulas are adjusted (delta is negative)
+    assert_eq!(sheet.get_raw(0, 0), "=B1", "A1 formula adjusted to =B1 (delta -4)");
+    assert_eq!(sheet.get_raw(1, 0), "=B2", "A2 formula adjusted to =B2 (delta -3)");
+    assert_eq!(sheet.get_raw(2, 0), "=B3", "A3 formula adjusted to =B3 (delta -2)");
+    assert_eq!(sheet.get_raw(3, 0), "=B4", "A4 formula adjusted to =B4 (delta -1)");
+    assert_eq!(sheet.get_raw(4, 0), "=B5", "A5 formula unchanged (anchor)");
+
+    // Verify computed values
+    assert_eq!(sheet.get_display(0, 0), "1", "A1 displays 1");
+    assert_eq!(sheet.get_display(1, 0), "2", "A2 displays 2");
+    assert_eq!(sheet.get_display(2, 0), "3", "A3 displays 3");
+    assert_eq!(sheet.get_display(3, 0), "4", "A4 displays 4");
+    assert_eq!(sheet.get_display(4, 0), "5", "A5 displays 5");
+}
+
+#[test]
+fn test_fill_handle_undo_single_entry() {
+    // Fill handle should record changes that can be undone in one step
+    use crate::history::{History, CellChange};
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    let mut history = History::new();
+
+    // A1 = 100
+    sheet.set_value(0, 0, "100");
+
+    // Simulate fill handle drag down from A1 to A5
+    // First, collect the changes
+    let mut changes = Vec::new();
+    let source = sheet.get_raw(0, 0);
+
+    for row in 1..=4 {
+        let old_value = sheet.get_raw(row, 0);
+        let new_value = source.clone();
+        if old_value != new_value {
+            changes.push(CellChange {
+                row,
+                col: 0,
+                old_value,
+                new_value: new_value.clone(),
+            });
+        }
+        sheet.set_value(row, 0, &new_value);
+    }
+
+    // Record as single batch
+    history.record_batch(0, changes);
+
+    // Verify fill occurred
+    assert_eq!(sheet.get_raw(1, 0), "100", "A2 filled");
+    assert_eq!(sheet.get_raw(2, 0), "100", "A3 filled");
+    assert_eq!(sheet.get_raw(3, 0), "100", "A4 filled");
+    assert_eq!(sheet.get_raw(4, 0), "100", "A5 filled");
+
+    // Single undo should revert all 4 cells
+    let entry = history.undo().expect("Should have undo entry");
+    match entry.action {
+        crate::history::UndoAction::Values { changes, .. } => {
+            assert_eq!(changes.len(), 4, "Undo should contain all 4 changes");
+            for change in &changes {
+                sheet.set_value(change.row, change.col, &change.old_value);
+            }
+        }
+        _ => panic!("Expected Values action"),
+    }
+
+    // Verify cells are reverted (originally empty)
+    assert_eq!(sheet.get_raw(1, 0), "", "A2 reverted to empty");
+    assert_eq!(sheet.get_raw(2, 0), "", "A3 reverted to empty");
+    assert_eq!(sheet.get_raw(3, 0), "", "A4 reverted to empty");
+    assert_eq!(sheet.get_raw(4, 0), "", "A5 reverted to empty");
+
+    // A1 unchanged
+    assert_eq!(sheet.get_raw(0, 0), "100", "A1 unchanged by undo");
+}

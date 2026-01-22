@@ -733,6 +733,17 @@ impl Sheet {
             .and_then(|c| c.format.font_family.clone())
     }
 
+    pub fn set_background_color(&mut self, row: usize, col: usize, color: Option<[u8; 4]>) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.background_color = color;
+    }
+
+    pub fn get_background_color(&self, row: usize, col: usize) -> Option<[u8; 4]> {
+        self.cells
+            .get(&(row, col))
+            .and_then(|c| c.format.background_color)
+    }
+
     /// Insert rows at the specified position, shifting existing rows down
     pub fn insert_rows(&mut self, at_row: usize, count: usize) {
         // Collect all cells that need to be shifted

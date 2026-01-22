@@ -46,7 +46,7 @@ What's built, what's next, and what's not planned.
   - Large numbers (16+ digits) as text to preserve precision
   - Export Report dialog shows exactly what changed
 
-### Formula Engine (104 functions)
+### Formula Engine (107 functions)
 - Math, logical, text, lookup, date/time, statistical, array
 - Dynamic arrays with spill behavior
 - SUMIF/SUMIFS, COUNTIF/COUNTIFS, AVERAGEIF/AVERAGEIFS
@@ -59,6 +59,7 @@ What's built, what's next, and what's not planned.
 ### Multi-Sheet & Organization
 - Multiple sheets per workbook
 - Sheet tabs (add, rename, delete, reorder)
+- Cross-sheet references (=Sheet2!A1)
 - Named ranges with full IDE support:
   - Create (Ctrl+Shift+N)
   - Go to definition (F12)
@@ -84,6 +85,9 @@ What's built, what's next, and what's not planned.
 - Windows (x64)
 - Linux (x86_64, tar.gz, AppImage, Homebrew, AUR)
 
+### View
+- Zoom (50%-200%, Ctrl+Shift+=/-, Ctrl+Mousewheel, persisted per session)
+
 ### CLI (v0.1.8+)
 - Headless spreadsheet operations via `visigrid-cli`
 - `calc`: Evaluate formulas against piped data (CSV, TSV, JSON, lines)
@@ -94,29 +98,64 @@ What's built, what's next, and what's not planned.
 - 3ms cold start, pipe-friendly, deterministic
 - See `visigrid-cli --help` for usage
 
+### Fill Handle (v0.2.1+)
+- Drag the corner handle on the active cell to fill down or right
+- Formula references adjust correctly (relative/absolute)
+- Axis locks automatically (vertical or horizontal, no diagonals)
+- Single undo step per fill operation
+
+### Cell Background Colors (v0.2.1+)
+- Apply background colors from Format menu or command palette
+- 9-color palette + clear
+- Live preview while cell is selected
+- XLSX export: colors written to `.xlsx` files (patternFill)
+- Note: XLSX import does not read fills (calamine library limitation)
+
 ---
 
 ## In Progress
 
-*No major features currently in progress.*
+None currently.
 
 ---
 
 ## Planned
 
+### 0.2.2 — Borders v1
+
+Simple borders that round-trip with XLSX. No complexity explosion.
+
+**Scope (intentionally limited):**
+- Presets only: None / All / Outline
+- Solid style, 1px width, black color
+- No per-edge customization in v1
+
+**Engine:**
+- [ ] Add `borders: CellBorders` to `CellFormat`
+- [ ] Store per-cell edge intents (top/right/bottom/left)
+- [ ] Deterministic conflict rule: if either cell defines edge, draw it
+
+**XLSX I/O:**
+- [ ] Export: write `<border>` elements
+- [ ] Import: read border styles
+
+**UI:**
+- [ ] 3-button preset picker (None / All / Outline)
+- [ ] Apply to selection with undo
+
+**Deferred to later:**
+- Per-edge width/style/color
+- Full border picker UI
+- Excel-perfect "last writer wins" (needs write-order tracking)
+
 ### Near-term
 - Paste Special (values, formulas, transpose, operations)
-- Fill Handle (drag corner to extend selection)
-  - Copy values and formulas with reference adjustment
-  - Double-click to auto-fill to last adjacent row
 - Series Fill (smart pattern detection)
   - Numbers: 1, 2, 3 → 4, 5, 6
   - Dates: Jan 1 → Jan 2, Jan 3...
   - Months: Jan, Feb → Mar, Apr...
   - Weekdays: Mon, Tue → Wed, Thu...
   - Custom step sizes
-- Cross-sheet references (=Sheet2!A1)
-- Zoom (Ctrl++/-)
 - Data validation (dropdowns, constraints)
 - Conditional formatting (basic rules)
 - Comments/notes on cells
@@ -167,6 +206,7 @@ Fixes we may contribute to dependencies:
 | Project | Issue | Details |
 |---------|-------|---------|
 | gpui/Zed | Linux font rendering | Bold, italic, per-cell fonts don't render. See [docs/font-rendering-issue.md](docs/font-rendering-issue.md) |
+| gpui/Zed | Nested submenu support | Cross-platform nested menus for context menus and menu bar. See [#19837](https://github.com/zed-industries/zed/issues/19837) |
 
 ---
 

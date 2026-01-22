@@ -140,6 +140,16 @@ actions!(format, [
     AlignRight,
     FormatCurrency,
     FormatPercent,
+    // Background colors
+    ClearBackground,
+    BackgroundYellow,
+    BackgroundGreen,
+    BackgroundBlue,
+    BackgroundRed,
+    BackgroundOrange,
+    BackgroundPurple,
+    BackgroundGray,
+    BackgroundCyan,
 ]);
 
 // Undo/Redo
