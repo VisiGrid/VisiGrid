@@ -120,6 +120,8 @@ pub struct History {
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
     max_entries: usize,
+    /// Save point for dirty detection: undo_stack length when document was saved
+    save_point: usize,
 }
 
 /// Coalescing window for rapid format changes (e.g., decimal +/-)
@@ -131,7 +133,24 @@ impl History {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             max_entries: 100,
+            save_point: 0,
         }
+    }
+
+    /// Mark current position as the save point (document is now "clean")
+    pub fn mark_saved(&mut self) {
+        self.save_point = self.undo_stack.len();
+    }
+
+    /// Check if document has unsaved changes (dirty).
+    /// Dirty = current history position differs from save point.
+    pub fn is_dirty(&self) -> bool {
+        self.undo_stack.len() != self.save_point
+    }
+
+    /// Get the save point (for debugging/testing)
+    pub fn save_point(&self) -> usize {
+        self.save_point
     }
 
     /// Record a single cell value change
@@ -223,10 +242,14 @@ impl History {
     fn push_entry(&mut self, entry: HistoryEntry) {
         self.undo_stack.push(entry);
         self.redo_stack.clear();
+        // Note: save_point may now be unreachable (undo→edit diverges from saved state).
+        // That's correct - is_dirty() will return true until next save.
 
-        // Limit history size
+        // Limit history size (remove oldest entries from front)
         if self.undo_stack.len() > self.max_entries {
             self.undo_stack.remove(0);
+            // Indices shifted down - adjust save_point (saturating to 0)
+            self.save_point = self.save_point.saturating_sub(1);
         }
     }
 
@@ -261,5 +284,6 @@ impl History {
     pub fn clear(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.save_point = 0;
     }
 }

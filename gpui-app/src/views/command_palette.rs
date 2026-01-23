@@ -8,9 +8,23 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 
 use crate::actions::{PaletteUp, PaletteDown, PaletteExecute, PalettePreview, PaletteCancel};
-use crate::app::Spreadsheet;
-use crate::search::SearchItem;
+use crate::app::{Spreadsheet, PaletteScope};
+use crate::search::{SearchItem, MenuCategory};
 use crate::theme::TokenKey;
+
+/// Get display name for a palette scope
+fn scope_name(scope: &PaletteScope) -> &'static str {
+    match scope {
+        PaletteScope::Menu(cat) => match cat {
+            MenuCategory::File => "File",
+            MenuCategory::Edit => "Edit",
+            MenuCategory::View => "View",
+            MenuCategory::Format => "Format",
+            MenuCategory::Data => "Data",
+            MenuCategory::Help => "Help",
+        }
+    }
+}
 
 /// Render the command palette overlay
 pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -22,6 +36,8 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let total_results = app.palette_total_results;
     let shown_results = results.len();
     let is_truncated = total_results > shown_results;
+    let scope = app.palette_scope.as_ref();
+    let has_scope = scope.is_some();
 
     // Theme colors
     let panel_bg = app.token(TokenKey::PanelBg);
@@ -91,12 +107,31 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                 .flex_1()
                                 .flex()
                                 .items_center()
+                                .gap_2()
+                                // Scope badge (when scoped via Alt accelerator)
+                                .when(has_scope, |d| {
+                                    let scope_text = scope.map(scope_name).unwrap_or("");
+                                    d.child(
+                                        div()
+                                            .px_2()
+                                            .py(px(2.0))
+                                            .bg(selection_bg)
+                                            .rounded_sm()
+                                            .text_size(px(11.0))
+                                            .text_color(text_primary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(format!("{} \u{25B8}", scope_text))  // "File ▸"
+                                    )
+                                })
+                                // Query text or placeholder
                                 .child(
                                     div()
                                         .text_color(if has_query { text_primary } else { text_disabled })
                                         .text_size(px(13.0))
                                         .child(if has_query {
                                             query.clone()
+                                        } else if has_scope {
+                                            format!("{} commands...", scope.map(scope_name).unwrap_or(""))
                                         } else {
                                             "Execute a command...".to_string()
                                         })
@@ -128,8 +163,8 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                         .overflow_hidden()
                         .py_1();
 
-                    // Show help hints when query is empty
-                    if !has_query {
+                    // Show help hints when query is empty and no scope active
+                    if !has_query && !has_scope {
                         list = list.child(
                             div()
                                 .px_4()

@@ -119,6 +119,21 @@ pub enum ModifierStyle {
     Ctrl,
 }
 
+/// Excel-style Alt menu accelerators (macOS only)
+///
+/// When enabled, Alt+F opens File commands, Alt+E opens Edit commands, etc.
+/// These open the Command Palette pre-scoped to the menu namespace.
+/// On Windows/Linux, this setting has no effect (native Alt menus exist).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AltAccelerators {
+    /// Alt accelerators disabled (default, preserves Option key for symbols)
+    #[default]
+    Disabled,
+    /// Alt accelerators enabled (Alt+F, Alt+E, etc. open scoped palette)
+    Enabled,
+}
+
 // ============================================================================
 // Editing behavior types
 // ============================================================================
@@ -165,6 +180,8 @@ pub enum TipId {
     NamedRanges,
     /// F12 rename symbol hint
     RenameF12,
+    /// "Set as default app" prompt in title bar
+    DefaultAppPrompt,
 }
 
 /// Collection of dismissed tips
@@ -172,7 +189,32 @@ pub enum TipId {
 pub struct DismissedTips {
     #[serde(default)]
     pub dismissed: HashSet<TipId>,
+
+    /// Per-extension default app prompt state.
+    /// Key is extension category: "csv", "xlsx", "tsv"
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub default_app_prompts: std::collections::HashMap<String, DefaultAppPromptExtState>,
 }
+
+/// Per-extension state for the default app prompt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DefaultAppPromptExtState {
+    /// User explicitly dismissed via ✕ button (permanent)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dismissed: bool,
+
+    /// Timestamp when prompt was last shown (Unix epoch seconds).
+    /// Used for cool-down when user ignores or clicks "Open Settings" but doesn't complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown_at: Option<u64>,
+
+    /// User successfully set VisiGrid as default (no need to prompt again)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_default: bool,
+}
+
+/// Cool-down period for default app prompt (7 days in seconds)
+pub const DEFAULT_APP_PROMPT_COOLDOWN_SECS: u64 = 7 * 24 * 60 * 60;
 
 impl DismissedTips {
     /// Check if a tip has been dismissed
@@ -188,5 +230,61 @@ impl DismissedTips {
     /// Reset all tips (show them again)
     pub fn reset_all(&mut self) {
         self.dismissed.clear();
+        self.default_app_prompts.clear();
+    }
+
+    /// Get the state for a specific extension's default app prompt.
+    pub fn get_default_app_prompt(&self, ext: &str) -> Option<&DefaultAppPromptExtState> {
+        self.default_app_prompts.get(ext)
+    }
+
+    /// Get mutable state for a specific extension's default app prompt.
+    pub fn get_default_app_prompt_mut(&mut self, ext: &str) -> &mut DefaultAppPromptExtState {
+        self.default_app_prompts.entry(ext.to_string()).or_default()
+    }
+
+    /// Check if default app prompt for an extension is permanently dismissed (✕ clicked).
+    pub fn is_default_app_prompt_dismissed(&self, ext: &str) -> bool {
+        self.default_app_prompts.get(ext).is_some_and(|s| s.dismissed)
+    }
+
+    /// Check if default app prompt for an extension is in cool-down period.
+    pub fn is_default_app_prompt_in_cooldown(&self, ext: &str) -> bool {
+        if let Some(state) = self.default_app_prompts.get(ext) {
+            if let Some(shown_at) = state.shown_at {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                return now < shown_at + DEFAULT_APP_PROMPT_COOLDOWN_SECS;
+            }
+        }
+        false
+    }
+
+    /// Check if we've recorded that VisiGrid is already default for this extension.
+    pub fn is_default_app_prompt_completed(&self, ext: &str) -> bool {
+        self.default_app_prompts.get(ext).is_some_and(|s| s.is_default)
+    }
+
+    /// Record that default app prompt was shown for an extension (for cool-down tracking).
+    pub fn mark_default_app_prompt_shown(&mut self, ext: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.get_default_app_prompt_mut(ext).shown_at = Some(now);
+    }
+
+    /// Permanently dismiss the default app prompt for an extension (user clicked ✕).
+    pub fn dismiss_default_app_prompt(&mut self, ext: &str) {
+        self.get_default_app_prompt_mut(ext).dismissed = true;
+    }
+
+    /// Mark that VisiGrid is now the default for this extension (success).
+    pub fn mark_default_app_completed(&mut self, ext: &str) {
+        let state = self.get_default_app_prompt_mut(ext);
+        state.is_default = true;
+        state.dismissed = true;  // Also dismiss so it doesn't come back
     }
 }

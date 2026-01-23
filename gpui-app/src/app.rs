@@ -9,7 +9,7 @@ use visigrid_engine::named_range::is_valid_name;
 use crate::formatting::BorderApplyMode;
 use crate::history::{History, CellChange, UndoAction};
 use crate::mode::Mode;
-use crate::search::{SearchEngine, SearchAction, CommandId, CommandSearchProvider, GoToSearchProvider, SearchItem};
+use crate::search::{SearchEngine, SearchAction, CommandId, CommandSearchProvider, GoToSearchProvider, SearchItem, MenuCategory};
 use crate::session::SessionManager;
 use crate::settings::{
     user_settings_path, open_settings_file, user_settings, update_user_settings,
@@ -23,6 +23,215 @@ use crate::formula_context::{tokenize_for_highlight, TokenType, char_to_byte};
 
 // Re-export from autocomplete module for external access
 pub use crate::autocomplete::{SignatureHelpInfo, FormulaErrorInfo};
+
+// ============================================================================
+// Global Book Counter (for "Book1", "Book2", etc.)
+// ============================================================================
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Session-level counter for new workbook names.
+/// Increments each time a new workbook is created: Book1, Book2, Book3...
+static NEXT_BOOK_NUMBER: AtomicU32 = AtomicU32::new(1);
+
+/// Generate the next book name (e.g., "Book1", "Book2", ...)
+pub fn next_book_name() -> String {
+    let n = NEXT_BOOK_NUMBER.fetch_add(1, Ordering::Relaxed);
+    format!("Book{}", n)
+}
+
+// ============================================================================
+// Palette Scope (for Alt accelerator filtering)
+// ============================================================================
+
+/// Palette scope for filtering Command Palette results.
+///
+/// This abstraction supports menu scoping now and can be extended
+/// for selection-scoped commands, contextual palettes, etc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteScope {
+    /// Filter to commands in a specific menu category (Alt accelerators)
+    Menu(MenuCategory),
+    // Future: Selection, Context, History, etc.
+}
+
+// ============================================================================
+// Document Identity (for title bar display)
+// ============================================================================
+
+/// Native file extension for VisiGrid documents
+pub const NATIVE_EXT: &str = "vgrid";
+
+/// Returns true if the extension is considered "native" (no provenance needed).
+/// Native formats: vgrid (our format), xlsx/xls (Excel, first-class support)
+pub fn is_native_ext(ext: &str) -> bool {
+    matches!(ext.to_lowercase().as_str(), "vgrid" | "xlsx" | "xls" | "xlsb" | "xlsm" | "sheet")
+}
+
+/// Extract display filename from path (full name with extension)
+fn display_filename(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Untitled")
+        .to_string()
+}
+
+/// Extract lowercase extension from path
+fn ext_lower(path: &std::path::Path) -> Option<String> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+}
+
+/// Source of the document (for provenance display).
+///
+/// Only used for non-native formats that were imported/converted.
+/// Native formats (vgrid, xlsx) have no provenance - they're first-class.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DocumentSource {
+    /// Imported from a non-native format (CSV, TSV, JSON)
+    /// These are converted on load and need "Save As" to persist as native.
+    Imported { filename: String },
+    /// Recovered from session restore (unsaved work from crash/quit)
+    Recovered,
+}
+
+/// Document metadata for title bar display.
+#[derive(Clone, Debug)]
+pub struct DocumentMeta {
+    /// Display name - FULL filename with extension (e.g., "budget.xlsx", not "budget")
+    /// For unsaved documents, this is "Book1", "Book2", etc. (no extension)
+    pub display_name: String,
+    /// Document has been saved at least once (to native format)
+    pub is_saved: bool,
+    /// Document is read-only
+    pub is_read_only: bool,
+    /// How the document was opened/created (only for non-native sources)
+    pub source: Option<DocumentSource>,
+    /// Full path if saved
+    pub path: Option<PathBuf>,
+}
+
+impl Default for DocumentMeta {
+    fn default() -> Self {
+        Self {
+            display_name: next_book_name(),
+            is_saved: false,
+            is_read_only: false,
+            source: None,
+            path: None,
+        }
+    }
+}
+
+impl DocumentMeta {
+    /// Generate the window title string for macOS (includes provenance)
+    pub fn title_string_full(&self, is_dirty: bool) -> String {
+        let mut title = self.display_name.clone();
+
+        // Dirty indicator
+        if is_dirty {
+            title.push_str(" \u{25CF}"); // ●
+        }
+
+        // Unsaved suffix (new document, never saved)
+        if !self.is_saved && self.source.is_none() {
+            title.push_str(" \u{2014} unsaved"); // —
+        }
+
+        // Provenance subtitle (only for imported/recovered)
+        if let Some(source) = &self.source {
+            match source {
+                DocumentSource::Imported { filename } => {
+                    title.push_str(&format!(" \u{2014} imported from {}", filename));
+                }
+                DocumentSource::Recovered => {
+                    title.push_str(" \u{2014} recovered session");
+                }
+            }
+        }
+
+        // Read-only indicator
+        if self.is_read_only {
+            title.push_str(" \u{2014} read-only");
+        }
+
+        title
+    }
+
+    /// Generate the window title string for Windows/Linux (compact, no provenance)
+    ///
+    /// Provenance is omitted because:
+    /// - Window titles get truncated aggressively on these platforms
+    /// - Long titles pollute task switchers (Alt+Tab, taskbar)
+    pub fn title_string_short(&self, is_dirty: bool) -> String {
+        let mut title = self.display_name.clone();
+
+        // Dirty indicator
+        if is_dirty {
+            title.push_str(" \u{25CF}"); // ●
+        }
+
+        // Unsaved suffix
+        if !self.is_saved && self.source.is_none() {
+            title.push_str(" \u{2014} unsaved");
+        }
+
+        // Read-only indicator (important enough to keep)
+        if self.is_read_only {
+            title.push_str(" \u{2014} read-only");
+        }
+
+        // App name suffix (Windows/Linux convention)
+        title.push_str(" \u{2014} VisiGrid");
+
+        title
+    }
+
+    /// Platform-appropriate title string
+    pub fn title_string(&self, is_dirty: bool) -> String {
+        #[cfg(target_os = "macos")]
+        { self.title_string_full(is_dirty) }
+
+        #[cfg(not(target_os = "macos"))]
+        { self.title_string_short(is_dirty) }
+    }
+
+    /// Primary title part: filename + dirty indicator + unsaved/read-only
+    /// Used for prominent display in custom titlebar
+    pub fn title_primary(&self, is_dirty: bool) -> String {
+        let mut title = self.display_name.clone();
+
+        if is_dirty {
+            title.push_str(" \u{25CF}"); // ●
+        }
+
+        if !self.is_saved && self.source.is_none() {
+            title.push_str(" — unsaved");
+        }
+
+        if self.is_read_only {
+            title.push_str(" — read-only");
+        }
+
+        title
+    }
+
+    /// Secondary title part: provenance/context info
+    /// Returns None if no provenance, Some("imported from X") otherwise
+    /// Used for quieter display in custom titlebar (no dash - hierarchy via size/color)
+    pub fn title_secondary(&self) -> Option<String> {
+        match &self.source {
+            Some(DocumentSource::Imported { filename }) => {
+                Some(format!("imported from {}", filename))
+            }
+            Some(DocumentSource::Recovered) => {
+                Some("recovered session".to_string())
+            }
+            None => None,
+        }
+    }
+}
 
 /// Tri-state value for properties across multiple cells
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +328,20 @@ pub enum FillDrag {
 }
 
 use visigrid_engine::cell::{Alignment, VerticalAlignment, TextOverflow, NumberFormat};
+
+/// State of the "set as default app" prompt in the title bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DefaultAppPromptState {
+    /// Not showing (hidden or not applicable)
+    #[default]
+    Hidden,
+    /// Showing the prompt for a specific file type
+    Showing,
+    /// User clicked "Make default" - show success briefly
+    Success,
+    /// User clicked but needs to finish in System Settings
+    NeedsSettings,
+}
 
 /// Internal clipboard for copy/paste operations.
 /// Stores both raw formulas (for normal paste) and typed values (for paste values).
@@ -298,6 +521,7 @@ pub struct Spreadsheet {
     // Command palette
     pub palette_query: String,
     pub palette_selected: usize,
+    pub palette_scope: Option<PaletteScope>,  // Menu scope for Alt accelerators
     search_engine: SearchEngine,
     palette_results: Vec<SearchItem>,
     pub palette_total_results: usize,  // Total matches before truncation
@@ -312,9 +536,14 @@ pub struct Spreadsheet {
 
     // File state
     pub current_file: Option<PathBuf>,
-    pub is_modified: bool,
+    pub is_modified: bool,  // Legacy - use is_dirty() for title bar
     pub recent_files: Vec<PathBuf>,  // Recently opened files (most recent first)
     pub recent_commands: Vec<CommandId>,  // Recently executed commands (most recent first)
+
+    // Document identity (for title bar)
+    pub document_meta: DocumentMeta,
+    cached_title: Option<String>,  // For debouncing title updates
+    pending_title_refresh: bool,   // Set true + notify() when title may have changed without window access
 
     // UI state
     pub focus_handle: FocusHandle,
@@ -489,6 +718,15 @@ pub struct Spreadsheet {
     // License dialog state
     pub license_input: String,
     pub license_error: Option<String>,
+
+    // Default app prompt state (macOS title bar chip)
+    pub default_app_prompt_state: DefaultAppPromptState,
+    pub default_app_prompt_file_type: Option<crate::default_app::SpreadsheetFileType>,
+    default_app_prompt_success_timer: Option<std::time::Instant>,
+    /// Timestamp when we entered NeedsSettings state (for backoff cutoff)
+    needs_settings_entered_at: Option<std::time::Instant>,
+    /// How many checks we've done in NeedsSettings (for exponential backoff)
+    needs_settings_check_count: u8,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -567,6 +805,7 @@ impl Spreadsheet {
             find_focus_replace: false,
             palette_query: String::new(),
             palette_selected: 0,
+            palette_scope: None,
             search_engine: Self::create_search_engine(),
             palette_results: Vec::new(),
             palette_total_results: 0,
@@ -579,6 +818,9 @@ impl Spreadsheet {
             is_modified: false,
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
+            document_meta: DocumentMeta::default(),
+            cached_title: None,
+            pending_title_refresh: false,
             focus_handle,
             console_focus_handle,
             status_message: None,
@@ -686,6 +928,12 @@ impl Spreadsheet {
 
             license_input: String::new(),
             license_error: None,
+
+            default_app_prompt_state: DefaultAppPromptState::Hidden,
+            default_app_prompt_file_type: None,
+            default_app_prompt_success_timer: None,
+            needs_settings_entered_at: None,
+            needs_settings_check_count: 0,
         }
     }
 
@@ -1145,6 +1393,10 @@ impl Spreadsheet {
             CommandId::PrevSheet => self.prev_sheet(cx),
             CommandId::AddSheet => self.add_sheet(cx),
         }
+
+        // Ensure title reflects any state changes from this command.
+        // The flag + cache debounce makes this cheap for non-state-changing commands.
+        self.request_title_refresh(cx);
     }
 
     // Menu methods
@@ -1233,6 +1485,88 @@ impl Spreadsheet {
         self.workbook.active_sheet_index()
     }
 
+    // =========================================================================
+    // Document identity and title bar
+    // =========================================================================
+
+    /// Returns true if document has unsaved changes.
+    /// Computed from history state, not tracked manually.
+    pub fn is_dirty(&self) -> bool {
+        self.history.is_dirty()
+    }
+
+    /// Update window title if it changed (debounced).
+    /// This is the ONLY way titles should update.
+    pub fn update_title_if_needed(&mut self, window: &mut Window) {
+        let title = self.document_meta.title_string(self.is_dirty());
+        if self.cached_title.as_deref() != Some(&title) {
+            window.set_window_title(&title);
+            self.cached_title = Some(title);
+        }
+    }
+
+    /// Invalidate the title cache (forces update on next update_title_if_needed call).
+    /// Use this when title-affecting state changes but you don't have window access.
+    /// Request a title refresh on the next UI pass.
+    /// Use when title-affecting state changes but you don't have window access.
+    pub fn request_title_refresh(&mut self, cx: &mut Context<Self>) {
+        self.cached_title = None;
+        self.pending_title_refresh = true;
+        cx.notify();
+    }
+
+    /// Finalize document state after loading a file
+    pub fn finalize_load(&mut self, path: &std::path::Path) {
+        let ext = ext_lower(path);
+        let filename = display_filename(path);
+        let is_native = ext.as_ref().map(|e| is_native_ext(e)).unwrap_or(false);
+
+        // Determine source and saved state based on file type
+        let (source, is_saved) = if is_native {
+            // Native formats - no provenance, considered "saved"
+            (None, true)
+        } else {
+            // Import formats - show provenance, not "saved" until Save As
+            (Some(DocumentSource::Imported { filename: filename.clone() }), false)
+        };
+
+        self.document_meta = DocumentMeta {
+            display_name: filename,
+            is_saved,
+            is_read_only: false,
+            source,
+            path: Some(path.to_path_buf()),
+        };
+
+        // Keep current_file in sync (legacy)
+        self.current_file = Some(path.to_path_buf());
+
+        // CRITICAL: Set save point AFTER load completes
+        // This ensures the document starts "clean" (not dirty)
+        self.history.mark_saved();
+    }
+
+    /// Finalize document state after saving
+    pub fn finalize_save(&mut self, path: &std::path::Path) {
+        let ext = ext_lower(path);
+        let becomes_native = ext.as_ref().map(|e| is_native_ext(e)).unwrap_or(false);
+
+        self.document_meta.display_name = display_filename(path);
+        self.document_meta.path = Some(path.to_path_buf());
+        self.history.mark_saved();
+
+        if becomes_native {
+            // Saving to native format clears import provenance
+            self.document_meta.source = None;
+            self.document_meta.is_saved = true;
+        }
+        // Note: Exporting to CSV/JSON does NOT clear provenance or mark as saved
+
+        // Keep legacy fields in sync
+        self.current_file = Some(path.to_path_buf());
+        self.is_modified = false;
+    }
+
     // Sheet navigation methods
     /// Move to the next sheet
     pub fn next_sheet(&mut self, cx: &mut Context<Self>) {
@@ -1299,7 +1633,7 @@ impl Spreadsheet {
             }
             self.renaming_sheet = None;
             self.sheet_rename_input.clear();
-            cx.notify();
+            self.request_title_refresh(cx);
         }
     }
 
@@ -1345,7 +1679,7 @@ impl Spreadsheet {
         if self.workbook.delete_sheet(index) {
             self.is_modified = true;
             self.sheet_context_menu = None;
-            cx.notify();
+            self.request_title_refresh(cx);
         } else {
             self.status_message = Some("Cannot delete the last sheet".to_string());
             self.sheet_context_menu = None;
@@ -3859,7 +4193,7 @@ impl Spreadsheet {
                 }
             }
             self.is_modified = true;
-            cx.notify();
+            self.request_title_refresh(cx);
         }
     }
 
@@ -4251,7 +4585,7 @@ impl Spreadsheet {
                 }
             }
             self.is_modified = true;
-            cx.notify();
+            self.request_title_refresh(cx);
         }
     }
 
@@ -5439,8 +5773,42 @@ impl Spreadsheet {
         self.mode = Mode::Command;
         self.palette_query.clear();
         self.palette_selected = 0;
+        self.palette_scope = None;  // Clear scope for normal palette
         self.update_palette_results();
         cx.notify();
+    }
+
+    /// Apply a menu scope filter (for Alt accelerators).
+    /// Works whether palette is already open or not.
+    pub fn apply_menu_scope(&mut self, category: MenuCategory, cx: &mut Context<Self>) {
+        // If palette not already open, save pre-state
+        if self.mode != Mode::Command {
+            self.lua_console.visible = false;
+            self.palette_pre_selection = self.selected;
+            self.palette_pre_selection_end = self.selection_end;
+            self.palette_pre_scroll = (self.scroll_row, self.scroll_col);
+            self.palette_previewing = false;
+        }
+
+        self.mode = Mode::Command;
+        self.palette_query.clear();
+        self.palette_selected = 0;
+        self.palette_scope = Some(PaletteScope::Menu(category));
+        self.update_palette_results();
+        cx.notify();
+    }
+
+    /// Clear palette scope (backspace with empty query).
+    /// Returns true if scope was cleared, false if no scope was active.
+    pub fn clear_palette_scope(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.palette_scope.is_some() {
+            self.palette_scope = None;
+            self.update_palette_results();
+            cx.notify();
+            true
+        } else {
+            false
+        }
     }
 
     /// Show cells that reference the given cell (Find References - Shift+F12)
@@ -5712,6 +6080,7 @@ impl Spreadsheet {
         self.mode = Mode::Navigation;
         self.palette_query.clear();
         self.palette_selected = 0;
+        self.palette_scope = None;  // Clear scope on close
         self.palette_results.clear();
         self.palette_previewing = false;
         cx.notify();
@@ -5758,7 +6127,11 @@ impl Spreadsheet {
         // Clone query string first to avoid borrow conflicts with cache refresh
         let query_str = self.palette_query.clone();
         let query = SearchQuery::parse(&query_str);
-        let mut results = self.search_engine.search(&query_str, 12);
+
+        // When scoped (Alt accelerators), search a larger pool before filtering
+        // This prevents false "no matches" when the top 12 happen to be non-scoped commands
+        let search_limit = if self.palette_scope.is_some() { 200 } else { 12 };
+        let mut results = self.search_engine.search(&query_str, search_limit);
 
         // Add recent files when there's no prefix (commands + recent files)
         if query.prefix.is_none() && !self.recent_files.is_empty() {
@@ -5800,6 +6173,21 @@ impl Spreadsheet {
             let provider = NamedRangeSearchProvider::new(entries);
             let named_results = provider.search(&query, 50);
             results.extend(named_results);
+        }
+
+        // Filter by palette scope if set (Alt accelerator menu filtering)
+        if let Some(scope) = &self.palette_scope {
+            match scope {
+                PaletteScope::Menu(category) => {
+                    results.retain(|item| {
+                        if let SearchAction::RunCommand(cmd) = &item.action {
+                            cmd.menu_category() == Some(*category)
+                        } else {
+                            false // Non-command items filtered out in menu scope
+                        }
+                    });
+                }
+            }
         }
 
         // Apply recency boost to commands (makes the palette feel "adaptive")
@@ -5883,20 +6271,34 @@ impl Spreadsheet {
     }
 
     pub fn palette_backspace(&mut self, cx: &mut Context<Self>) {
-        // Retain prefix character if it's the only thing left
-        // Prefixes: >, =, @, :, #
-        let query_len = self.palette_query.chars().count();
-        if query_len == 1 {
-            let first_char = self.palette_query.chars().next().unwrap();
-            if matches!(first_char, '>' | '=' | '@' | ':' | '#') {
-                // Don't remove the prefix - user stays in that search mode
-                return;
+        // Scope-aware backspace behavior:
+        // 1. If query non-empty → delete last char
+        // 2. If query empty + scope active → clear scope
+        // 3. If query empty + no scope → do nothing (Esc closes)
+
+        if !self.palette_query.is_empty() {
+            // Retain prefix character if it's the only thing left
+            // Prefixes: >, =, @, :, #, $
+            let query_len = self.palette_query.chars().count();
+            if query_len == 1 {
+                let first_char = self.palette_query.chars().next().unwrap();
+                if matches!(first_char, '>' | '=' | '@' | ':' | '#' | '$') {
+                    // Don't remove the prefix - user stays in that search mode
+                    return;
+                }
             }
+            self.palette_query.pop();
+            self.palette_selected = 0;  // Reset selection on filter change
+            self.update_palette_results();
+            cx.notify();
+        } else if self.palette_scope.is_some() {
+            // Query empty but scoped - clear scope, return to full palette
+            self.palette_scope = None;
+            self.palette_selected = 0;
+            self.update_palette_results();
+            cx.notify();
         }
-        self.palette_query.pop();
-        self.palette_selected = 0;  // Reset selection on filter change
-        self.update_palette_results();
-        cx.notify();
+        // Query empty and no scope - do nothing (Esc closes palette)
     }
 
     pub fn palette_execute(&mut self, cx: &mut Context<Self>) {
@@ -6527,6 +6929,384 @@ impl Spreadsheet {
             settings.reset_all_tips();
         });
         cx.notify();
+    }
+
+    // =========================================================================
+    // Default App Prompt (macOS title bar chip)
+    // =========================================================================
+
+    /// Get the extension key for the current file (for per-extension state).
+    fn get_prompt_ext_key(&self) -> Option<String> {
+        use crate::default_app::SpreadsheetFileType;
+
+        // Use cached file type if available
+        if let Some(ft) = self.default_app_prompt_file_type {
+            return Some(match ft {
+                SpreadsheetFileType::Excel => "xlsx",
+                SpreadsheetFileType::Csv => "csv",
+                SpreadsheetFileType::Tsv => "tsv",
+                SpreadsheetFileType::Native => "vgrid",
+            }.to_string());
+        }
+
+        // Derive from current file
+        let path = self.document_meta.path.as_ref()?;
+        let ext = path.extension().and_then(|e| e.to_str())?;
+        let file_type = SpreadsheetFileType::from_ext(ext)?;
+        Some(match file_type {
+            SpreadsheetFileType::Excel => "xlsx",
+            SpreadsheetFileType::Csv => "csv",
+            SpreadsheetFileType::Tsv => "tsv",
+            SpreadsheetFileType::Native => "vgrid",
+        }.to_string())
+    }
+
+    /// Check if the default app prompt should be shown.
+    ///
+    /// Returns true when ALL conditions are met:
+    /// - macOS only
+    /// - File successfully loaded (has path, no import errors showing)
+    /// - Not a temporary file
+    /// - File type is CSV/TSV/Excel (not native .vgrid)
+    /// - User hasn't dismissed the prompt for THIS extension
+    /// - Not in cool-down period for THIS extension (7 days after ignoring)
+    /// - Not already shown this session
+    /// - We haven't already marked this extension as completed
+    /// - VisiGrid isn't already the default for this file type
+    #[cfg(target_os = "macos")]
+    pub fn should_show_default_app_prompt(&self, cx: &gpui::App) -> bool {
+        use crate::default_app::{SpreadsheetFileType, is_default_handler, is_temporary_file, shown_this_session};
+
+        // If we're showing success/needs-settings feedback, show that instead
+        if self.default_app_prompt_state == DefaultAppPromptState::Success
+            || self.default_app_prompt_state == DefaultAppPromptState::NeedsSettings
+        {
+            return true;
+        }
+
+        // Must have a file open
+        let path = match &self.document_meta.path {
+            Some(p) => p,
+            None => return false,
+        };
+
+        // Skip if import report dialog is showing (don't prompt during error review)
+        if self.mode == Mode::ImportReport {
+            return false;
+        }
+
+        // Skip unsaved files (new documents)
+        if !self.document_meta.is_saved && self.document_meta.source.is_none() {
+            return false;
+        }
+
+        // Skip temporary files
+        if is_temporary_file(path) {
+            return false;
+        }
+
+        // Get file type from extension
+        let ext = path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let file_type = match SpreadsheetFileType::from_ext(ext) {
+            Some(ft) => ft,
+            None => return false,
+        };
+
+        // Skip native VisiGrid files
+        if file_type == SpreadsheetFileType::Native {
+            return false;
+        }
+
+        // Get extension key for per-extension state
+        let ext_key = match file_type {
+            SpreadsheetFileType::Excel => "xlsx",
+            SpreadsheetFileType::Csv => "csv",
+            SpreadsheetFileType::Tsv => "tsv",
+            SpreadsheetFileType::Native => return false,
+        };
+
+        let settings = user_settings(cx);
+
+        // Check if user has permanently dismissed for THIS extension
+        if settings.is_default_app_prompt_dismissed(ext_key) {
+            return false;
+        }
+
+        // Check if we've already completed setup for this extension
+        if settings.is_default_app_prompt_completed(ext_key) {
+            return false;
+        }
+
+        // Check cool-down period for THIS extension (7 days after ignoring)
+        if settings.is_default_app_prompt_in_cooldown(ext_key) {
+            return false;
+        }
+
+        // Don't spam within same session
+        if shown_this_session() {
+            return false;
+        }
+
+        // Check if VisiGrid is already the default (do last - can be slow)
+        if is_default_handler(file_type) {
+            return false;
+        }
+
+        true
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn should_show_default_app_prompt(&self, _cx: &gpui::App) -> bool {
+        false
+    }
+
+    /// Get the file type for the current prompt (for display).
+    #[cfg(target_os = "macos")]
+    pub fn get_prompt_file_type(&self) -> Option<crate::default_app::SpreadsheetFileType> {
+        use crate::default_app::SpreadsheetFileType;
+
+        // If we have a cached file type from when we showed the prompt, use that
+        if let Some(ft) = self.default_app_prompt_file_type {
+            return Some(ft);
+        }
+
+        // Otherwise derive from current file
+        let path = self.document_meta.path.as_ref()?;
+        let ext = path.extension().and_then(|e| e.to_str())?;
+        SpreadsheetFileType::from_ext(ext)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn get_prompt_file_type(&self) -> Option<crate::default_app::SpreadsheetFileType> {
+        None
+    }
+
+    /// Called when the prompt becomes visible - marks session and records timestamp.
+    pub fn on_default_app_prompt_shown(&mut self, cx: &mut Context<Self>) {
+        use crate::default_app::{mark_shown_this_session, SpreadsheetFileType};
+
+        // Cache the file type
+        if let Some(path) = &self.document_meta.path {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                self.default_app_prompt_file_type = SpreadsheetFileType::from_ext(ext);
+            }
+        }
+
+        // Mark shown this session
+        mark_shown_this_session();
+
+        // Record timestamp for cool-down for THIS extension (in case they ignore)
+        if let Some(ext_key) = self.get_prompt_ext_key() {
+            update_user_settings(cx, |settings| {
+                settings.mark_default_app_prompt_shown(&ext_key);
+            });
+        }
+
+        self.default_app_prompt_state = DefaultAppPromptState::Showing;
+    }
+
+    /// Set VisiGrid as the default handler for the current file type.
+    #[cfg(target_os = "macos")]
+    pub fn set_as_default_app(&mut self, cx: &mut Context<Self>) {
+        use crate::default_app::{set_as_default_handler, is_default_handler};
+
+        let file_type = match self.get_prompt_file_type() {
+            Some(ft) => ft,
+            None => return,
+        };
+
+        let ext_key = self.get_prompt_ext_key();
+
+        match set_as_default_handler(file_type) {
+            Ok(()) => {
+                // Check if it actually worked (duti succeeded)
+                if is_default_handler(file_type) {
+                    // Success! Show brief confirmation
+                    self.default_app_prompt_state = DefaultAppPromptState::Success;
+                    self.default_app_prompt_success_timer = Some(std::time::Instant::now());
+                    // Mark completed for this extension (permanent)
+                    if let Some(ext) = ext_key {
+                        update_user_settings(cx, |settings| {
+                            settings.mark_default_app_completed(&ext);
+                        });
+                    }
+                } else {
+                    // Needs manual completion in Settings
+                    // Note: Do NOT permanently dismiss - just cool-down
+                    // The cool-down timestamp is already set from when we showed the prompt
+                    self.default_app_prompt_state = DefaultAppPromptState::NeedsSettings;
+                    self.needs_settings_entered_at = Some(std::time::Instant::now());
+                    self.needs_settings_check_count = 0;
+                }
+            }
+            Err(_) => {
+                // Failed - needs Settings
+                // Note: Do NOT permanently dismiss - just cool-down
+                self.default_app_prompt_state = DefaultAppPromptState::NeedsSettings;
+                self.needs_settings_entered_at = Some(std::time::Instant::now());
+                self.needs_settings_check_count = 0;
+            }
+        }
+
+        cx.notify();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn set_as_default_app(&mut self, _cx: &mut Context<Self>) {}
+
+    /// Open System Settings to complete the default app setup.
+    #[cfg(target_os = "macos")]
+    pub fn open_default_app_settings(&mut self, cx: &mut Context<Self>) {
+        use std::process::Command;
+
+        let _ = Command::new("open")
+            .args(["x-apple.systempreferences:com.apple.ExtensionsPreferences"])
+            .spawn();
+
+        // Keep in NeedsSettings state (don't hide) so we can re-check on focus
+        // The prompt will be re-checked when the window regains focus
+        cx.notify();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn open_default_app_settings(&mut self, _cx: &mut Context<Self>) {}
+
+    /// Dismiss the default app prompt permanently for this extension (user clicked ✕).
+    pub fn dismiss_default_app_prompt(&mut self, cx: &mut Context<Self>) {
+        if let Some(ext_key) = self.get_prompt_ext_key() {
+            update_user_settings(cx, |settings| {
+                settings.dismiss_default_app_prompt(&ext_key);
+            });
+        }
+        self.default_app_prompt_state = DefaultAppPromptState::Hidden;
+        self.needs_settings_entered_at = None;
+        self.needs_settings_check_count = 0;
+        cx.notify();
+    }
+
+    /// Re-check default handler after returning from System Settings.
+    /// Called when window regains focus while in NeedsSettings state.
+    /// Note: This is now mostly handled by check_default_app_prompt_timer(),
+    /// but we keep this for explicit calls if needed.
+    #[cfg(target_os = "macos")]
+    pub fn recheck_default_app_handler(&mut self, cx: &mut Context<Self>) {
+        use crate::default_app::is_default_handler;
+
+        // Only re-check if we're in NeedsSettings state
+        if self.default_app_prompt_state != DefaultAppPromptState::NeedsSettings {
+            return;
+        }
+
+        let file_type = match self.get_prompt_file_type() {
+            Some(ft) => ft,
+            None => {
+                self.default_app_prompt_state = DefaultAppPromptState::Hidden;
+                self.needs_settings_entered_at = None;
+                self.needs_settings_check_count = 0;
+                cx.notify();
+                return;
+            }
+        };
+
+        // Check if they completed the setup in Settings
+        if is_default_handler(file_type) {
+            // Success! Show brief confirmation
+            self.default_app_prompt_state = DefaultAppPromptState::Success;
+            self.default_app_prompt_success_timer = Some(std::time::Instant::now());
+            self.needs_settings_entered_at = None;
+            self.needs_settings_check_count = 0;
+
+            // Mark completed for this extension
+            if let Some(ext_key) = self.get_prompt_ext_key() {
+                update_user_settings(cx, |settings| {
+                    settings.mark_default_app_completed(&ext_key);
+                });
+            }
+        } else {
+            // Still not default - hide for now (cool-down will handle re-show)
+            self.default_app_prompt_state = DefaultAppPromptState::Hidden;
+            self.needs_settings_entered_at = None;
+            self.needs_settings_check_count = 0;
+        }
+
+        cx.notify();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn recheck_default_app_handler(&mut self, _cx: &mut Context<Self>) {}
+
+    /// Check if success timer has expired and hide the prompt.
+    /// Also handles NeedsSettings state with exponential backoff:
+    /// - Check 1: at 3 seconds
+    /// - Check 2: at 8 seconds
+    /// - Check 3: at 20 seconds
+    /// - Then stop polling (rely on next file open or next session)
+    pub fn check_default_app_prompt_timer(&mut self, cx: &mut Context<Self>) {
+        if self.default_app_prompt_state == DefaultAppPromptState::Success {
+            if let Some(started) = self.default_app_prompt_success_timer {
+                if started.elapsed() > std::time::Duration::from_secs(2) {
+                    self.default_app_prompt_state = DefaultAppPromptState::Hidden;
+                    self.default_app_prompt_success_timer = None;
+                    cx.notify();
+                }
+            }
+        } else if self.default_app_prompt_state == DefaultAppPromptState::NeedsSettings {
+            #[cfg(target_os = "macos")]
+            {
+                use crate::default_app::is_default_handler;
+                use std::time::Instant;
+
+                // Exponential backoff schedule (seconds since entered_at):
+                // Check 0: 3s, Check 1: 8s, Check 2: 20s, then stop
+                const CHECK_SCHEDULE: [u64; 3] = [3, 8, 20];
+
+                let now = Instant::now();
+                let entered_at = match self.needs_settings_entered_at {
+                    Some(t) => t,
+                    None => return, // No timestamp means we shouldn't be polling
+                };
+
+                let elapsed_secs = now.duration_since(entered_at).as_secs();
+                let check_count = self.needs_settings_check_count as usize;
+
+                // Already exhausted all checks? Stop polling.
+                if check_count >= CHECK_SCHEDULE.len() {
+                    return;
+                }
+
+                // Not yet time for the next check?
+                let next_check_at = CHECK_SCHEDULE[check_count];
+                if elapsed_secs < next_check_at {
+                    return;
+                }
+
+                // Time for a check - increment counter first
+                self.needs_settings_check_count += 1;
+
+                // Re-check handler status
+                if let Some(file_type) = self.get_prompt_file_type() {
+                    if is_default_handler(file_type) {
+                        // User completed setup! Show success briefly
+                        self.default_app_prompt_state = DefaultAppPromptState::Success;
+                        self.default_app_prompt_success_timer = Some(now);
+                        self.needs_settings_entered_at = None;
+                        self.needs_settings_check_count = 0;
+
+                        // Mark completed for this extension
+                        if let Some(ext_key) = self.get_prompt_ext_key() {
+                            update_user_settings(cx, |settings| {
+                                settings.mark_default_app_completed(&ext_key);
+                            });
+                        }
+
+                        cx.notify();
+                    }
+                    // If not default yet, keep chip visible but stop polling after 3 checks
+                }
+            }
+        }
     }
 
     // =========================================================================
@@ -8078,6 +8858,12 @@ fn col_to_letter(col: usize) -> String {
 
 impl Render for Spreadsheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // One-shot title refresh (triggered by async operations without window access)
+        if self.pending_title_refresh {
+            self.pending_title_refresh = false;
+            self.update_title_if_needed(window);
+        }
+
         // Update window size if changed (handles resize)
         let current_size = window.viewport_size();
         if self.window_size != current_size {

@@ -4,13 +4,23 @@ use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
 
 /// Render the column header row (A, B, C, ...) with resize handles
+///
+/// With freeze panes active, renders:
+/// 1. Frozen column headers (0 to frozen_cols-1) - always visible
+/// 2. Divider line after frozen columns
+/// 3. Scrollable column headers (scroll_col to scroll_col + scrollable_visible_cols)
 pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let scroll_col = app.scroll_col;
     let visible_cols = app.visible_cols();
+    let frozen_cols = app.frozen_cols;
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
     let selection_bg = app.token(TokenKey::SelectionBg);
+    let divider_color = app.token(TokenKey::PanelBorder);
     let metrics = &app.metrics;
+
+    // Calculate scrollable region columns
+    let scrollable_visible_cols = visible_cols.saturating_sub(frozen_cols);
 
     div()
         .flex()
@@ -32,11 +42,29 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                     this.select_all(cx);
                 }))
         )
-        // Column headers with resize handles
+        // Frozen column headers (always visible, cols 0 to frozen_cols-1)
+        .when(frozen_cols > 0, |d| {
+            d.children(
+                (0..frozen_cols).map(|col| {
+                    let col_width = metrics.col_width(app.col_width(col));
+                    let is_selected = app.is_col_header_selected(col);
+                    render_column_header(app, col, col_width, is_selected, cx)
+                })
+            )
+        })
+        // Divider after frozen columns
+        .when(frozen_cols > 0, |d| {
+            d.child(
+                div()
+                    .w(px(1.0))
+                    .h_full()
+                    .bg(divider_color)
+            )
+        })
+        // Scrollable column headers (scroll_col to scroll_col + scrollable_visible_cols)
         .children(
-            (0..visible_cols).map(move |i| {
+            (0..scrollable_visible_cols).map(move |i| {
                 let col = scroll_col + i;
-                // Pass scaled width for rendering
                 let col_width = metrics.col_width(app.col_width(col));
                 let is_selected = app.is_col_header_selected(col);
                 render_column_header(app, col, col_width, is_selected, cx)

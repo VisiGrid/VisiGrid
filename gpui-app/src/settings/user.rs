@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::types::{DismissedTips, EnterBehavior, ModifierStyle, Setting};
+use super::types::{AltAccelerators, DismissedTips, EnterBehavior, ModifierStyle, Setting};
 
 /// User-level settings (global, persistent)
 ///
@@ -122,6 +122,12 @@ pub struct NavigationSettings {
     /// On Windows/Linux, this setting has no effect.
     #[serde(default = "default_modifier_style", skip_serializing_if = "Setting::is_inherit")]
     pub modifier_style: Setting<ModifierStyle>,
+
+    /// Excel-style Alt menu accelerators (macOS only)
+    /// When enabled, Alt+F opens File commands, Alt+E opens Edit, etc.
+    /// Requires restart to take effect.
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub alt_accelerators: Setting<AltAccelerators>,
 }
 
 fn default_tab_moves_right() -> Setting<bool> {
@@ -139,6 +145,7 @@ impl Default for NavigationSettings {
             keyboard_hints: Setting::Value(false),
             vim_mode: Setting::Value(false),
             modifier_style: Setting::Value(ModifierStyle::Platform),
+            alt_accelerators: Setting::Inherit,  // Disabled by default
         }
     }
 }

@@ -190,3 +190,20 @@ actions!(palette, [
     PalettePreview,   // Shift+Enter - preview without closing
     PaletteCancel,    // Escape - cancel and restore
 ]);
+
+// Alt accelerator actions (open Command Palette scoped to menu)
+// These are opt-in on macOS via settings. On Windows/Linux, native Alt menus exist.
+actions!(accelerators, [
+    AltFile,    // Alt+F - opens palette scoped to File commands
+    AltEdit,    // Alt+E - opens palette scoped to Edit commands
+    AltView,    // Alt+V - opens palette scoped to View commands
+    AltFormat,  // Alt+O - opens palette scoped to Format commands (legacy Excel)
+    AltData,    // Alt+D - opens palette scoped to Data commands
+    AltHelp,    // Alt+H - opens palette scoped to Home/Format (modern Excel 2010+)
+]);
+
+// Default app prompt actions (macOS title bar chip)
+actions!(default_app, [
+    SetDefaultApp,        // Set VisiGrid as default for current file type
+    DismissDefaultPrompt, // Dismiss the prompt (forever for this file type)
+]);

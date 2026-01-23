@@ -4,6 +4,7 @@
 mod actions;
 mod app;
 mod autocomplete;
+mod default_app;
 mod file_ops;
 mod fill;
 mod formatting;
@@ -37,6 +38,35 @@ use gpui::*;
 use app::Spreadsheet;
 use session::{SessionManager, dump_session, reset_session};
 use settings::init_settings_store;
+
+/// Build window options with platform-appropriate titlebar styling.
+///
+/// On macOS: Transparent titlebar that blends with app content, traffic lights
+/// positioned inward. The app renders its own draggable title bar area.
+///
+/// On Windows/Linux: Standard OS chrome.
+fn build_window_options(bounds: WindowBounds) -> WindowOptions {
+    #[cfg(target_os = "macos")]
+    {
+        WindowOptions {
+            window_bounds: Some(bounds),
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(9.0), px(9.0))),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        WindowOptions {
+            window_bounds: Some(bounds),
+            ..Default::default()
+        }
+    }
+}
 
 /// CLI flags
 struct CliArgs {
@@ -133,6 +163,30 @@ fn main() {
         keybindings::register(cx, modifier_style);
         user_keybindings::register_user_keybindings(cx);
 
+        // Register Alt+letter accelerators based on setting
+        // - Enabled (macOS only): Alt opens scoped Command Palette
+        // - Disabled: Alt opens dropdown menus (Excel 2003 style)
+        #[cfg(target_os = "macos")]
+        {
+            use settings::AltAccelerators;
+            let alt_accel = settings::user_settings(cx)
+                .navigation
+                .alt_accelerators
+                .as_value()
+                .copied()
+                .unwrap_or_default();
+
+            if alt_accel == AltAccelerators::Enabled {
+                keybindings::register_alt_accelerators(cx);
+            } else {
+                keybindings::register_menu_accelerators(cx);
+            }
+        }
+
+        // On Windows/Linux, always use menu accelerators (dropdown menus)
+        #[cfg(not(target_os = "macos"))]
+        keybindings::register_menu_accelerators(cx);
+
         // Set up quit handler (save session before quit)
         cx.on_action(|_: &actions::Quit, cx| {
             // Save session before quitting
@@ -174,10 +228,7 @@ fn main() {
                 };
 
                 let _ = cx.open_window(
-                    WindowOptions {
-                        window_bounds: Some(window_bounds),
-                        ..Default::default()
-                    },
+                    build_window_options(window_bounds),
                     move |window, cx| {
                         cx.new(|cx| {
                             let mut app = Spreadsheet::new(window, cx);
@@ -216,10 +267,7 @@ fn main() {
             };
 
             cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
+                build_window_options(WindowBounds::Windowed(bounds)),
                 move |window, cx| {
                     cx.new(|cx| {
                         let mut app = Spreadsheet::new(window, cx);
@@ -247,10 +295,7 @@ fn main() {
             };
 
             cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
+                build_window_options(WindowBounds::Windowed(bounds)),
                 |window, cx| cx.new(|cx| Spreadsheet::new(window, cx)),
             )
             .unwrap();

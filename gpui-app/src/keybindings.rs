@@ -135,14 +135,8 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "y"), Redo, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "z"), Redo, Some("Spreadsheet")),
 
-        // Menu accelerators (Alt+letter, Excel 2003 style)
-        KeyBinding::new("alt-f", OpenFileMenu, Some("Spreadsheet")),
-        KeyBinding::new("alt-e", OpenEditMenu, Some("Spreadsheet")),
-        KeyBinding::new("alt-v", OpenViewMenu, Some("Spreadsheet")),
-        KeyBinding::new("alt-i", OpenInsertMenu, Some("Spreadsheet")),
-        KeyBinding::new("alt-o", OpenFormatMenu, Some("Spreadsheet")),
-        KeyBinding::new("alt-d", OpenDataMenu, Some("Spreadsheet")),
-        KeyBinding::new("alt-h", OpenHelpMenu, Some("Spreadsheet")),
+        // Note: Alt+letter menu accelerators are registered separately via
+        // register_menu_accelerators() or register_alt_accelerators() based on setting
 
         // Sheet navigation
         KeyBinding::new(&kb(m, "pagedown"), NextSheet, Some("Spreadsheet")),
@@ -178,10 +172,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Ctrl+U starts edit on Mac (F2 is often brightness)
         bindings.push(KeyBinding::new("ctrl-u", StartEdit, Some("Spreadsheet")));
 
-        // On Mac, the Delete key (above Return) sends "backspace"
-        // Bind it to DeleteCell so users can delete selected cells with Delete key
-        // (BackspaceChar already handles edit mode, DeleteCell checks !is_editing())
-        bindings.push(KeyBinding::new("backspace", DeleteCell, Some("Spreadsheet")));
+        // Note: On Mac, the Delete key (above Return) sends "backspace"
+        // BackspaceChar handler now handles both edit mode (character delete)
+        // and navigation mode (clear cell contents), so no separate DeleteCell binding needed
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -194,4 +187,51 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
     }
 
     cx.bind_keys(bindings);
+}
+
+/// Register menu dropdown accelerators (Alt+letter opens dropdown menu)
+///
+/// This is the default behavior when Alt accelerators setting is disabled.
+/// Opens Excel 2003-style dropdown menus from the menu bar.
+pub fn register_menu_accelerators(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("alt-f", OpenFileMenu, Some("Spreadsheet")),
+        KeyBinding::new("alt-e", OpenEditMenu, Some("Spreadsheet")),
+        KeyBinding::new("alt-v", OpenViewMenu, Some("Spreadsheet")),
+        KeyBinding::new("alt-i", OpenInsertMenu, Some("Spreadsheet")),
+        KeyBinding::new("alt-o", OpenFormatMenu, Some("Spreadsheet")),
+        KeyBinding::new("alt-d", OpenDataMenu, Some("Spreadsheet")),
+        KeyBinding::new("alt-h", OpenHelpMenu, Some("Spreadsheet")),
+    ]);
+}
+
+/// Register Alt accelerator keybindings (opt-in, macOS only)
+///
+/// IMPORTANT: Alt is never stateful. We only bind complete chords (alt-f),
+/// never Alt keydown/keyup. This prevents ghost states and ensures
+/// Option key works normally for character composition when disabled.
+///
+/// These keybindings open the Command Palette scoped to a menu category:
+/// - Alt+F -> File commands
+/// - Alt+E -> Edit commands
+/// - Alt+V -> View commands
+/// - Alt+O -> Format commands (O like Excel)
+/// - Alt+D -> Data commands
+/// - Alt+H -> Home/Format commands (modern Excel 2010+)
+#[cfg(target_os = "macos")]
+pub fn register_alt_accelerators(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("alt-f", AltFile, Some("Spreadsheet")),
+        KeyBinding::new("alt-e", AltEdit, Some("Spreadsheet")),
+        KeyBinding::new("alt-v", AltView, Some("Spreadsheet")),
+        KeyBinding::new("alt-o", AltFormat, Some("Spreadsheet")),
+        KeyBinding::new("alt-d", AltData, Some("Spreadsheet")),
+        KeyBinding::new("alt-h", AltHelp, Some("Spreadsheet")),
+    ]);
+}
+
+/// Stub for non-macOS platforms (Alt accelerators not needed - native Alt menus exist)
+#[cfg(not(target_os = "macos"))]
+pub fn register_alt_accelerators(_cx: &mut App) {
+    // On Windows/Linux, native Alt menus exist, so this is a no-op
 }

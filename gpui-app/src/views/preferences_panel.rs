@@ -3,9 +3,9 @@
 //! A thin preferences UI that proves the settings architecture.
 //! Intentionally minimal: Appearance, Editing, Tips, Power.
 
-use gpui::{*, BorrowAppContext};
+use gpui::{*, BorrowAppContext, prelude::FluentBuilder};
 use crate::app::Spreadsheet;
-use crate::settings::{open_settings_file, Setting, EnterBehavior, SettingsStore};
+use crate::settings::{open_settings_file, Setting, EnterBehavior, ModifierStyle, AltAccelerators, SettingsStore};
 use crate::theme::TokenKey;
 
 /// Render the preferences panel overlay
@@ -38,6 +38,16 @@ pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
     let vim_mode = match &user_settings.navigation.vim_mode {
         Setting::Value(v) => *v,
         Setting::Inherit => false, // Default
+    };
+
+    let modifier_style = match &user_settings.navigation.modifier_style {
+        Setting::Value(v) => *v,
+        Setting::Inherit => ModifierStyle::Platform,
+    };
+
+    let alt_accelerators = match &user_settings.navigation.alt_accelerators {
+        Setting::Value(v) => *v,
+        Setting::Inherit => AltAccelerators::Disabled,
     };
 
     div()
@@ -305,6 +315,65 @@ pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                                                 .child("Navigate with h/j/k/l, press i to edit")
                                         )
                                 )
+                                // Modifier style row (macOS only)
+                                .when(cfg!(target_os = "macos"), |d: Div| {
+                                    d.child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .child(row_label("Shortcut key", text_muted))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_1()
+                                                            .child(modifier_option("Cmd", ModifierStyle::Platform, modifier_style, accent, text_primary, text_muted, cx))
+                                                            .child(modifier_option("Ctrl", ModifierStyle::Ctrl, modifier_style, accent, text_primary, text_muted, cx))
+                                                    )
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(text_muted.opacity(0.7))
+                                                    .child("Use Ctrl for Windows-style shortcuts")
+                                            )
+                                    )
+                                    // Alt accelerators toggle (within same macOS-only block)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .mt_2()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .child(row_label("Excel-style Option (Alt) shortcuts", text_muted))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_1()
+                                                            .child(alt_accel_option("Off", AltAccelerators::Disabled, alt_accelerators, accent, text_primary, text_muted, cx))
+                                                            .child(alt_accel_option("On", AltAccelerators::Enabled, alt_accelerators, accent, text_primary, text_muted, cx))
+                                                    )
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(text_muted.opacity(0.7))
+                                                    .child("Option+F for File, Option+E for Edit, etc.")
+                                            )
+                                    )
+                                })
                         )
                         // =========================================================
                         // Tips section
@@ -432,6 +501,78 @@ fn enter_option(
                 store.user_settings_mut().editing.enter_behavior = Setting::Value(behavior);
                 store.save();
             });
+            cx.notify();
+        }))
+        .child(label)
+}
+
+/// Modifier style option button (macOS only)
+fn modifier_option(
+    label: &'static str,
+    style: ModifierStyle,
+    current: ModifierStyle,
+    accent: Hsla,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let is_selected = current == style;
+    let bg = if is_selected { accent.opacity(0.2) } else { gpui::transparent_black() };
+    let text = if is_selected { text_primary } else { text_muted };
+
+    div()
+        .id(SharedString::from(format!("modifier-{}", label.to_lowercase())))
+        .px_2()
+        .py(px(3.0))
+        .rounded_sm()
+        .bg(bg)
+        .cursor_pointer()
+        .text_size(px(11.0))
+        .text_color(text)
+        .hover(|s| s.bg(accent.opacity(0.1)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.update_global::<SettingsStore, _>(|store, _| {
+                store.user_settings_mut().navigation.modifier_style = Setting::Value(style);
+                store.save();
+            });
+            // Notify user that restart is needed
+            this.status_message = Some("Restart VisiGrid to apply shortcut key change".to_string());
+            cx.notify();
+        }))
+        .child(label)
+}
+
+/// Alt accelerators option button (macOS only)
+fn alt_accel_option(
+    label: &'static str,
+    mode: AltAccelerators,
+    current: AltAccelerators,
+    accent: Hsla,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let is_selected = current == mode;
+    let bg = if is_selected { accent.opacity(0.2) } else { gpui::transparent_black() };
+    let text = if is_selected { text_primary } else { text_muted };
+
+    div()
+        .id(SharedString::from(format!("alt-accel-{}", label.to_lowercase())))
+        .px_2()
+        .py(px(3.0))
+        .rounded_sm()
+        .bg(bg)
+        .cursor_pointer()
+        .text_size(px(11.0))
+        .text_color(text)
+        .hover(|s| s.bg(accent.opacity(0.1)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.update_global::<SettingsStore, _>(|store, _| {
+                store.user_settings_mut().navigation.alt_accelerators = Setting::Value(mode);
+                store.save();
+            });
+            // Notify user that restart is needed
+            this.status_message = Some("Restart VisiGrid to apply shortcut change".to_string());
             cx.notify();
         }))
         .child(label)

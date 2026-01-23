@@ -159,6 +159,45 @@ What's built, what's next, and what's not planned.
 - See: [docs/features/formula-reference-highlighting-spec.md](docs/features/formula-reference-highlighting-spec.md)
 - **Deferred:** Marching ants animation (Phase 3)
 
+### macOS Transparent Titlebar (v0.2.4+)
+- Zed-style chrome blending with `appears_transparent: true`
+- Traffic lights positioned inward at (9, 9)
+- Custom titlebar with document identity:
+  - Primary: filename + dirty indicator (12px, full contrast)
+  - Secondary: provenance text (10px, muted, quieter)
+- 34px titlebar height (matches Zed)
+- Double-click to zoom (native macOS behavior)
+- Draggable title bar area via `WindowControlArea::Drag`
+- Subtle chrome scrim (8px gradient fade into content)
+- Hairline border separator (50% opacity)
+- macOS handles inactive window dimming natively
+- See: [gpui-app/docs/features/title-bar-and-menus.md](gpui-app/docs/features/title-bar-and-menus.md)
+
+### Alt Menu Accelerators (v0.2.4+, macOS)
+- Excel-style Alt+letter shortcuts open scoped Command Palette
+- Alt+F (File), Alt+E (Edit), Alt+V (View), Alt+O (Format), Alt+D (Data), Alt+H (Home/Format)
+- Opt-in via Preferences (disabled by default to preserve Option key)
+- Scope badge shown in palette header when filtered
+- Backspace clears scope when query is empty
+- Never intercepts keys during cell/formula editing
+- See: [gpui-app/docs/features/alt-accelerators.md](gpui-app/docs/features/alt-accelerators.md)
+
+### Default App Prompt (v0.2.4+, macOS)
+- "Make default" title bar chip for non-native file types
+- Scoped to specific file type: "Open .csv files with VisiGrid"
+- Right-aligned, Zed-style banner (muted, smaller than filename)
+- Guardrails prevent annoying behavior:
+  - Only after successful file load (not during import errors)
+  - Not for temp files, unsaved documents, or native .vgrid
+  - Session cool-down (once per session per file type)
+  - 7-day cool-down if user ignores (doesn't dismiss or act)
+  - Permanent dismiss via ✕
+- Post-click feedback:
+  - Success: "Default set" for 2 seconds
+  - Needs completion: "Finish in System Settings" + "Open"
+- Uses `duti` when available, falls back to System Settings
+- See: [gpui-app/docs/features/title-bar-and-menus.md](gpui-app/docs/features/title-bar-and-menus.md)
+
 ---
 
 ## Planned

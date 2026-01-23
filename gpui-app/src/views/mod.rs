@@ -27,7 +27,8 @@ mod tour;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, CELL_HEIGHT, MENU_BAR_HEIGHT, FORMULA_BAR_HEIGHT, CreateNameFocus};
+use crate::app::{Spreadsheet, CELL_HEIGHT, MENU_BAR_HEIGHT, FORMULA_BAR_HEIGHT, CreateNameFocus, PaletteScope};
+use crate::search::MenuCategory;
 use crate::actions::*;
 use crate::formatting::BorderApplyMode;
 use crate::mode::{Mode, InspectorTab};
@@ -273,8 +274,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         // File actions
-        .on_action(cx.listener(|this, _: &NewFile, _, cx| {
+        .on_action(cx.listener(|this, _: &NewFile, window, cx| {
             this.new_file(cx);
+            this.update_title_if_needed(window);
         }))
         .on_action(cx.listener(|this, _: &OpenFile, _, cx| {
             this.open_file(cx);
@@ -301,37 +303,45 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &Copy, _, cx| {
             this.copy(cx);
         }))
-        .on_action(cx.listener(|this, _: &Cut, _, cx| {
+        .on_action(cx.listener(|this, _: &Cut, window, cx| {
             this.cut(cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &Paste, _, cx| {
+        .on_action(cx.listener(|this, _: &Paste, window, cx| {
             this.paste(cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &PasteValues, _, cx| {
+        .on_action(cx.listener(|this, _: &PasteValues, window, cx| {
             this.paste_values(cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &DeleteCell, _, cx| {
+        .on_action(cx.listener(|this, _: &DeleteCell, window, cx| {
             if !this.mode.is_editing() {
                 this.delete_selection(cx);
+                this.update_title_if_needed(window);
             }
         }))
         // Insert/Delete rows/columns (Ctrl+= / Ctrl+-)
-        .on_action(cx.listener(|this, _: &InsertRowsOrCols, _, cx| {
+        .on_action(cx.listener(|this, _: &InsertRowsOrCols, window, cx| {
             if !this.mode.is_editing() {
                 this.insert_rows_or_cols(cx);
+                this.update_title_if_needed(window);
             }
         }))
-        .on_action(cx.listener(|this, _: &DeleteRowsOrCols, _, cx| {
+        .on_action(cx.listener(|this, _: &DeleteRowsOrCols, window, cx| {
             if !this.mode.is_editing() {
                 this.delete_rows_or_cols(cx);
+                this.update_title_if_needed(window);
             }
         }))
         // Undo/Redo
-        .on_action(cx.listener(|this, _: &Undo, _, cx| {
+        .on_action(cx.listener(|this, _: &Undo, window, cx| {
             this.undo(cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &Redo, _, cx| {
+        .on_action(cx.listener(|this, _: &Redo, window, cx| {
             this.redo(cx);
+            this.update_title_if_needed(window);
         }))
         // Editing actions
         .on_action(cx.listener(|this, _: &StartEdit, _, cx| {
@@ -348,6 +358,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             // If autocomplete is visible, Enter accepts the suggestion
             if this.autocomplete_visible {
                 this.autocomplete_accept(cx);
+                this.update_title_if_needed(window);
                 return;
             }
             // Handle Enter key based on current mode
@@ -356,10 +367,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 Mode::FontPicker => this.font_picker_execute(cx),
                 Mode::Command => this.palette_execute(cx),
                 Mode::GoTo => this.confirm_goto(cx),
-                _ => this.confirm_edit(cx),
+                _ => {
+                    this.confirm_edit(cx);
+                    this.update_title_if_needed(window);
+                }
             }
         }))
-        .on_action(cx.listener(|this, _: &ConfirmEditUp, _, cx| {
+        .on_action(cx.listener(|this, _: &ConfirmEditUp, window, cx| {
             // Lua console handles its own Shift+Enter (insert newline)
             if this.lua_console.visible {
                 this.lua_console.insert("\n");
@@ -371,7 +385,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 Mode::ThemePicker | Mode::FontPicker | Mode::Command | Mode::GoTo => {
                     // Shift+Enter does nothing special in these modes
                 }
-                _ => this.confirm_edit_up(cx),
+                _ => {
+                    this.confirm_edit_up(cx);
+                    this.update_title_if_needed(window);
+                }
             }
         }))
         .on_action(cx.listener(|this, _: &CancelEdit, window, cx| {
@@ -429,26 +446,29 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.cancel_edit(cx);
             }
         }))
-        .on_action(cx.listener(|this, _: &TabNext, _, cx| {
+        .on_action(cx.listener(|this, _: &TabNext, window, cx| {
             // If autocomplete is visible, Tab accepts the suggestion
             if this.autocomplete_visible {
                 this.autocomplete_accept(cx);
+                this.update_title_if_needed(window);
                 return;
             }
             if this.mode.is_editing() {
                 this.confirm_edit_and_move_right(cx);
+                this.update_title_if_needed(window);
             } else {
                 this.move_selection(0, 1, cx);
             }
         }))
-        .on_action(cx.listener(|this, _: &TabPrev, _, cx| {
+        .on_action(cx.listener(|this, _: &TabPrev, window, cx| {
             if this.mode.is_editing() {
                 this.confirm_edit_and_move_left(cx);
+                this.update_title_if_needed(window);
             } else {
                 this.move_selection(0, -1, cx);
             }
         }))
-        .on_action(cx.listener(|this, _: &BackspaceChar, _, cx| {
+        .on_action(cx.listener(|this, _: &BackspaceChar, window, cx| {
             // Lua console handles its own backspace
             if this.lua_console.visible {
                 this.lua_console.backspace();
@@ -461,8 +481,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.goto_backspace(cx);
             } else if this.mode == Mode::Find {
                 this.find_backspace(cx);
-            } else {
+            } else if this.mode.is_editing() {
                 this.backspace(cx);
+            } else {
+                // Navigation mode: backspace clears selected cells (like Delete key)
+                this.delete_selection(cx);
+                this.update_title_if_needed(window);
             }
         }))
         .on_action(cx.listener(|this, _: &DeleteChar, _, cx| {
@@ -474,11 +498,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
             this.delete_char(cx);
         }))
-        .on_action(cx.listener(|this, _: &FillDown, _, cx| {
+        .on_action(cx.listener(|this, _: &FillDown, window, cx| {
             this.fill_down(cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &FillRight, _, cx| {
+        .on_action(cx.listener(|this, _: &FillRight, window, cx| {
             this.fill_right(cx);
+            this.update_title_if_needed(window);
         }))
         .on_action(cx.listener(|this, _: &AutoSum, _, cx| {
             this.autosum(cx);
@@ -583,58 +609,75 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.confirm_edit_in_place(cx);
         }))
         // Formatting
-        .on_action(cx.listener(|this, _: &ToggleBold, _, cx| {
+        .on_action(cx.listener(|this, _: &ToggleBold, window, cx| {
             this.toggle_bold(cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &ToggleItalic, _, cx| {
+        .on_action(cx.listener(|this, _: &ToggleItalic, window, cx| {
             this.toggle_italic(cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &ToggleUnderline, _, cx| {
+        .on_action(cx.listener(|this, _: &ToggleUnderline, window, cx| {
             this.toggle_underline(cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &FormatCurrency, _, cx| {
+        .on_action(cx.listener(|this, _: &FormatCurrency, window, cx| {
             this.format_currency(cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &FormatPercent, _, cx| {
+        .on_action(cx.listener(|this, _: &FormatPercent, window, cx| {
             this.format_percent(cx);
+            this.update_title_if_needed(window);
         }))
         // Background colors
-        .on_action(cx.listener(|this, _: &ClearBackground, _, cx| {
+        .on_action(cx.listener(|this, _: &ClearBackground, window, cx| {
             this.set_background_color(None, cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &BackgroundYellow, _, cx| {
+        .on_action(cx.listener(|this, _: &BackgroundYellow, window, cx| {
             this.set_background_color(Some([255, 255, 0, 255]), cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &BackgroundGreen, _, cx| {
+        .on_action(cx.listener(|this, _: &BackgroundGreen, window, cx| {
             this.set_background_color(Some([198, 239, 206, 255]), cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &BackgroundBlue, _, cx| {
+        .on_action(cx.listener(|this, _: &BackgroundBlue, window, cx| {
             this.set_background_color(Some([189, 215, 238, 255]), cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &BackgroundRed, _, cx| {
+        .on_action(cx.listener(|this, _: &BackgroundRed, window, cx| {
             this.set_background_color(Some([255, 199, 206, 255]), cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &BackgroundOrange, _, cx| {
+        .on_action(cx.listener(|this, _: &BackgroundOrange, window, cx| {
             this.set_background_color(Some([255, 235, 156, 255]), cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &BackgroundPurple, _, cx| {
+        .on_action(cx.listener(|this, _: &BackgroundPurple, window, cx| {
             this.set_background_color(Some([204, 192, 218, 255]), cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &BackgroundGray, _, cx| {
+        .on_action(cx.listener(|this, _: &BackgroundGray, window, cx| {
             this.set_background_color(Some([217, 217, 217, 255]), cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &BackgroundCyan, _, cx| {
+        .on_action(cx.listener(|this, _: &BackgroundCyan, window, cx| {
             this.set_background_color(Some([183, 222, 232, 255]), cx);
+            this.update_title_if_needed(window);
         }))
         // Borders
-        .on_action(cx.listener(|this, _: &BordersAll, _, cx| {
+        .on_action(cx.listener(|this, _: &BordersAll, window, cx| {
             this.apply_borders(BorderApplyMode::All, cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &BordersOutline, _, cx| {
+        .on_action(cx.listener(|this, _: &BordersOutline, window, cx| {
             this.apply_borders(BorderApplyMode::Outline, cx);
+            this.update_title_if_needed(window);
         }))
-        .on_action(cx.listener(|this, _: &BordersClear, _, cx| {
+        .on_action(cx.listener(|this, _: &BordersClear, window, cx| {
             this.apply_borders(BorderApplyMode::Clear, cx);
+            this.update_title_if_needed(window);
         }))
         // Go To dialog
         .on_action(cx.listener(|this, _: &GoToCell, _, cx| {
@@ -732,6 +775,40 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &OpenHelpMenu, _, cx| {
             this.toggle_menu(crate::mode::Menu::Help, cx);
+        }))
+        // Alt accelerators (open Command Palette scoped to menu category)
+        // These only fire when enabled via settings and in Navigation/Command mode
+        .on_action(cx.listener(|this, _: &AltFile, _, cx| {
+            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+                this.apply_menu_scope(MenuCategory::File, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &AltEdit, _, cx| {
+            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+                this.apply_menu_scope(MenuCategory::Edit, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &AltView, _, cx| {
+            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+                this.apply_menu_scope(MenuCategory::View, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &AltFormat, _, cx| {
+            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+                this.apply_menu_scope(MenuCategory::Format, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &AltData, _, cx| {
+            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+                this.apply_menu_scope(MenuCategory::Data, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &AltHelp, _, cx| {
+            // Alt+H = Home (formatting) in modern Excel, not Help
+            // Help is accessible via F1 or Command Palette
+            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+                this.apply_menu_scope(MenuCategory::Format, cx);
+            }
         }))
         // Sheet navigation
         .on_action(cx.listener(|this, _: &NextSheet, _, cx| {
@@ -1474,10 +1551,239 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .flex_col()
         .size_full()
         .bg(app.token(TokenKey::AppBg))
+        // On macOS with transparent titlebar, render a draggable title bar area
+        // This allows window dragging and double-click to zoom
+        .when(cfg!(target_os = "macos"), |d| {
+            let titlebar_bg = app.token(TokenKey::PanelBg);
+            let panel_border = app.token(TokenKey::PanelBorder);
+
+            // Typography: Zed-style approach
+            // Primary text: default text color (let macOS handle inactive dimming)
+            // Secondary text: muted + slight fade for extra restraint
+            let primary_color = app.token(TokenKey::TextPrimary);
+            let secondary_color = app.token(TokenKey::TextMuted).opacity(0.85);
+
+            let title_primary = app.document_meta.title_primary(app.history.is_dirty());
+            let title_secondary = app.document_meta.title_secondary();
+
+            // Chrome scrim: subtle gradient fade from titlebar into content
+            let scrim_top = titlebar_bg.opacity(0.12);
+            let scrim_bottom = titlebar_bg.opacity(0.0);
+
+            // Check if we should show the default app prompt
+            // Also check timer for success state auto-hide
+            app.check_default_app_prompt_timer(cx);
+
+            let show_default_prompt = app.should_show_default_app_prompt(cx);
+            let prompt_state = app.default_app_prompt_state;
+            let prompt_file_type = app.get_prompt_file_type();
+
+            // Mark shown when transitioning from Hidden to visible
+            // This records timestamp for cool-down and prevents session spam
+            if show_default_prompt && prompt_state == crate::app::DefaultAppPromptState::Hidden {
+                app.on_default_app_prompt_shown(cx);
+            }
+
+            d.child(
+                div()
+                    .id("macos-title-bar")
+                    .w_full()
+                    .h(px(34.0))  // Match Zed's titlebar height
+                    .flex_shrink_0()
+                    .bg(titlebar_bg)
+                    .border_b_1()
+                    .border_color(panel_border.opacity(0.5))  // Subtle hairline
+                    .window_control_area(WindowControlArea::Drag)
+                    // Double-click to zoom (macOS native behavior)
+                    .on_click(|event, window, _cx| {
+                        if event.click_count() == 2 {
+                            window.titlebar_double_click();
+                        }
+                    })
+                    // Left padding for traffic lights
+                    .pl(px(72.0))
+                    .pr(px(12.0))  // Right padding for prompt chip
+                    .flex()
+                    .items_center()
+                    .justify_between()  // Push left content and right prompt apart
+                    // Left side: document title
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            // Primary: filename + dirty indicator
+                            .child(
+                                div()
+                                    .text_color(primary_color)
+                                    .text_size(px(12.0))  // Smaller, calmer
+                                    .child(title_primary)
+                            )
+                            // Secondary: provenance (quieter, extra small)
+                            .when_some(title_secondary, |el, secondary| {
+                                el.child(
+                                    div()
+                                        .text_color(secondary_color)
+                                        .text_size(px(10.0))  // XSmall like Zed
+                                        .child(secondary)
+                                )
+                            })
+                    )
+                    // Right side: default app prompt chip (state-based rendering)
+                    .when(show_default_prompt, |el| {
+                        use crate::app::DefaultAppPromptState;
+
+                        let border_color = panel_border.opacity(0.2);
+                        let muted = app.token(TokenKey::TextMuted);
+                        let chip_bg = titlebar_bg.opacity(0.5);  // Muted background like inactive tab
+
+                        // File type name for scoped messaging
+                        let file_type_name = prompt_file_type
+                            .map(|ft| ft.short_name())
+                            .unwrap_or(".csv files");
+
+                        match prompt_state {
+                            // Success state: brief confirmation then auto-hide
+                            DefaultAppPromptState::Success => {
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .px(px(8.0))
+                                        .py(px(3.0))
+                                        .rounded_sm()
+                                        .bg(chip_bg)
+                                        .border_1()
+                                        .border_color(border_color)
+                                        .child(
+                                            div()
+                                                .text_color(muted)
+                                                .text_size(px(10.0))
+                                                .child("Default set")
+                                        )
+                                )
+                            }
+
+                            // Needs Settings state: user must complete in System Settings
+                            DefaultAppPromptState::NeedsSettings => {
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .bg(chip_bg)
+                                        .border_1()
+                                        .border_color(border_color)
+                                        .child(
+                                            div()
+                                                .id("default-app-open-settings")
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(6.0))
+                                                .px(px(8.0))
+                                                .py(px(3.0))
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(panel_border.opacity(0.08)))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.open_default_app_settings(cx);
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .text_color(muted)
+                                                        .text_size(px(10.0))
+                                                        .child("Finish in System Settings")
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_color(muted.opacity(0.8))
+                                                        .text_size(px(10.0))
+                                                        .child("Open")
+                                                )
+                                        )
+                                )
+                            }
+
+                            // Normal showing state: prompt to set default
+                            _ => {
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .bg(chip_bg)
+                                        .border_1()
+                                        .border_color(border_color)
+                                        // Main clickable area
+                                        .child(
+                                            div()
+                                                .id("default-app-set")
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(6.0))
+                                                .px(px(8.0))
+                                                .py(px(3.0))
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(panel_border.opacity(0.08)))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.set_as_default_app(cx);
+                                                }))
+                                                // Label: "Open .csv files with VisiGrid"
+                                                .child(
+                                                    div()
+                                                        .text_color(muted.opacity(0.8))
+                                                        .text_size(px(10.0))
+                                                        .child(format!("Open {} with VisiGrid", file_type_name))
+                                                )
+                                                // Button: subtle outline style
+                                                .child(
+                                                    div()
+                                                        .text_color(muted)
+                                                        .text_size(px(10.0))
+                                                        .child("Make default")
+                                                )
+                                        )
+                                        // Close button (dismiss forever)
+                                        .child(
+                                            div()
+                                                .border_l_1()
+                                                .border_color(border_color)
+                                                .child(
+                                                    div()
+                                                        .id("default-app-dismiss")
+                                                        .px(px(6.0))
+                                                        .py(px(3.0))
+                                                        .cursor_pointer()
+                                                        .text_color(muted.opacity(0.4))  // Low contrast until hover
+                                                        .text_size(px(10.0))
+                                                        .hover(|s| s.bg(panel_border.opacity(0.08)).text_color(muted.opacity(0.8)))
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.dismiss_default_app_prompt(cx);
+                                                        }))
+                                                        .child("\u{2715}")  // ✕
+                                                )
+                                        )
+                                )
+                            }
+                        }
+                    })
+            )
+            // Chrome scrim: subtle top fade for visual separation
+            .child(
+                div()
+                    .w_full()
+                    .h(px(8.0))  // Slightly smaller scrim
+                    .flex_shrink_0()
+                    .bg(linear_gradient(
+                        180.0,
+                        linear_color_stop(scrim_top, 0.0),
+                        linear_color_stop(scrim_bottom, 1.0),
+                    ))
+            )
+        })
         // Hide in-app menu bar on macOS (uses native menu bar instead)
         // Also hide in zen mode
-        .when(!cfg!(target_os = "macos") && !zen_mode, |div| {
-            div.child(menu_bar::render_menu_bar(app, cx))
+        .when(!cfg!(target_os = "macos") && !zen_mode, |d| {
+            d.child(menu_bar::render_menu_bar(app, cx))
         })
         .when(!zen_mode, |div| {
             div.child(formula_bar::render_formula_bar(app, cx))

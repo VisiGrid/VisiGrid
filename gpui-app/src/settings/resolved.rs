@@ -188,6 +188,40 @@ impl UserSettings {
     pub fn reset_all_tips(&mut self) {
         self.tips.reset_all();
     }
+
+    // =========================================================================
+    // Per-extension default app prompt helpers
+    // =========================================================================
+
+    /// Check if default app prompt for an extension is permanently dismissed.
+    pub fn is_default_app_prompt_dismissed(&self, ext: &str) -> bool {
+        self.tips.is_default_app_prompt_dismissed(ext)
+    }
+
+    /// Check if default app prompt for an extension is in cool-down.
+    pub fn is_default_app_prompt_in_cooldown(&self, ext: &str) -> bool {
+        self.tips.is_default_app_prompt_in_cooldown(ext)
+    }
+
+    /// Check if we've already completed setup for this extension.
+    pub fn is_default_app_prompt_completed(&self, ext: &str) -> bool {
+        self.tips.is_default_app_prompt_completed(ext)
+    }
+
+    /// Record that default app prompt was shown for an extension.
+    pub fn mark_default_app_prompt_shown(&mut self, ext: &str) {
+        self.tips.mark_default_app_prompt_shown(ext);
+    }
+
+    /// Permanently dismiss the prompt for an extension (user clicked ✕).
+    pub fn dismiss_default_app_prompt(&mut self, ext: &str) {
+        self.tips.dismiss_default_app_prompt(ext);
+    }
+
+    /// Mark that VisiGrid is now the default for this extension.
+    pub fn mark_default_app_completed(&mut self, ext: &str) {
+        self.tips.mark_default_app_completed(ext);
+    }
 }
 
 // ============================================================================
@@ -259,6 +293,7 @@ mod tests {
                 keyboard_hints: Setting::Inherit,
                 vim_mode: Setting::Inherit,
                 modifier_style: Setting::Inherit,
+                alt_accelerators: Setting::Inherit,
             },
             tips: Default::default(),
         };

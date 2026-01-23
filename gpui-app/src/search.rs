@@ -10,6 +10,36 @@
 use std::path::PathBuf;
 
 // ============================================================================
+// Menu Categories (for Alt accelerator scoping)
+// ============================================================================
+
+/// Menu category for Alt accelerator filtering.
+/// Maps to the macOS menu bar structure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MenuCategory {
+    File,
+    Edit,
+    View,
+    Format,
+    Data,
+    Help,
+}
+
+impl MenuCategory {
+    /// Display name for the category
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::Edit => "Edit",
+            Self::View => "View",
+            Self::Format => "Format",
+            Self::Data => "Data",
+            Self::Help => "Help",
+        }
+    }
+}
+
+// ============================================================================
 // Command IDs (stable identifiers for all executable commands)
 // ============================================================================
 
@@ -337,6 +367,93 @@ impl CommandId {
             Self::PrevSheet,
             Self::AddSheet,
         ]
+    }
+
+    /// Returns the menu category for this command.
+    /// Returns None for commands not addressable via Alt accelerators.
+    ///
+    /// DESIGN NOTE: Scoped palettes intentionally hide commands without
+    /// a menu category. This is deliberate - Alt accelerators provide
+    /// structured access to menu commands only. Non-menu commands remain
+    /// accessible via the unscoped Command Palette.
+    pub fn menu_category(&self) -> Option<MenuCategory> {
+        match self {
+            // File menu
+            Self::NewFile
+            | Self::OpenFile
+            | Self::Save
+            | Self::SaveAs
+            | Self::ExportCsv
+            | Self::ExportTsv
+            | Self::ExportJson => Some(MenuCategory::File),
+
+            // Edit menu
+            Self::Undo
+            | Self::Redo
+            | Self::Cut
+            | Self::Copy
+            | Self::Paste
+            | Self::PasteValues
+            | Self::ClearCells
+            | Self::SelectAll
+            | Self::FindInCells
+            | Self::GoToCell => Some(MenuCategory::Edit),
+
+            // View menu
+            Self::ToggleInspector
+            | Self::ToggleZenMode
+            | Self::ZoomIn
+            | Self::ZoomOut
+            | Self::ZoomReset
+            | Self::FreezeTopRow
+            | Self::FreezeFirstColumn
+            | Self::FreezePanes
+            | Self::UnfreezePanes => Some(MenuCategory::View),
+
+            // Format menu
+            Self::ToggleBold
+            | Self::ToggleItalic
+            | Self::ToggleUnderline
+            | Self::FormatCurrency
+            | Self::FormatPercent
+            | Self::FormatCells
+            | Self::SelectFont
+            | Self::ClearBackground
+            | Self::BackgroundYellow
+            | Self::BackgroundGreen
+            | Self::BackgroundBlue
+            | Self::BackgroundRed
+            | Self::BackgroundOrange
+            | Self::BackgroundPurple
+            | Self::BackgroundGray
+            | Self::BackgroundCyan
+            | Self::BordersAll
+            | Self::BordersOutline
+            | Self::BordersClear => Some(MenuCategory::Format),
+
+            // Data menu
+            Self::FillDown
+            | Self::FillRight
+            | Self::TrimWhitespace
+            | Self::AutoSum => Some(MenuCategory::Data),
+
+            // Help menu
+            Self::ShowShortcuts
+            | Self::OpenKeybindings
+            | Self::ShowAbout
+            | Self::TourNamedRanges
+            | Self::ShowRefactorLog => Some(MenuCategory::Help),
+
+            // Commands not in any menu - intentionally excluded from Alt accelerators
+            // These remain accessible via the unscoped Command Palette
+            Self::GoToStart
+            | Self::SelectBlanks
+            | Self::ExtractNamedRange
+            | Self::SelectTheme
+            | Self::NextSheet
+            | Self::PrevSheet
+            | Self::AddSheet => None,
+        }
     }
 }
 

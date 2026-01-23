@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use visigrid_engine::workbook::Workbook;
 use visigrid_io::{csv, json, native, xlsx};
 
-use crate::app::Spreadsheet;
+use crate::app::{Spreadsheet, DocumentMeta};
 use crate::settings::{load_doc_settings, save_doc_settings, DocumentSettings};
 
 /// Delay before showing the import overlay (prevents flash for fast imports)
@@ -22,6 +22,11 @@ impl Spreadsheet {
         self.scroll_col = 0;
         self.history.clear();
         self.bump_cells_rev();  // Invalidate cell search cache
+
+        // Reset document meta for new document
+        self.document_meta = DocumentMeta::default();
+        self.request_title_refresh(cx);
+
         self.status_message = Some("New workbook created".to_string());
         cx.notify();
     }
@@ -78,8 +83,6 @@ impl Spreadsheet {
         match result {
             Ok(workbook) => {
                 self.workbook = workbook;
-                self.current_file = Some(path.clone());
-                self.is_modified = false;
                 self.import_result = None;
                 self.import_filename = None;
                 self.import_source_dir = None;
@@ -92,6 +95,10 @@ impl Spreadsheet {
                 self.history.clear();
                 self.bump_cells_rev();
                 self.add_recent_file(path);
+
+                // Set up document identity (this also sets current_file, is_modified, save_point)
+                self.finalize_load(path);
+                self.request_title_refresh(cx);
 
                 // Update session with new file path
                 self.update_session_cached(cx);
@@ -168,8 +175,6 @@ impl Spreadsheet {
                     Ok((workbook, mut result)) => {
                         // Atomic swap: replace entire workbook
                         this.workbook = workbook;
-                        this.current_file = None;  // Force Save As for .sheet
-                        this.is_modified = true;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
                         this.doc_settings = DocumentSettings::default();
@@ -181,6 +186,10 @@ impl Spreadsheet {
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);
 
+                        // Set up document identity (XLSX is native per spec)
+                        this.finalize_load(&path_for_recent);
+                        this.request_title_refresh(cx);
+
                         // Build status message with timing
                         let duration_str = if duration_ms >= 1000 {
                             format!("{:.2}s", duration_ms as f64 / 1000.0)
@@ -188,16 +197,11 @@ impl Spreadsheet {
                             format!("{}ms", duration_ms)
                         };
 
-                        let mut status = format!(
-                            "Imported {} in {} — Save As to keep changes",
+                        let status = format!(
+                            "Opened {} in {}",
                             filename_for_completion,
                             duration_str
                         );
-
-                        // Append warning hint if present
-                        if result.has_warnings() {
-                            status.push_str(" (see Import Report)");
-                        }
 
                         // Store the duration we measured (more accurate than import's internal timing
                         // since it includes workbook construction)
@@ -233,8 +237,6 @@ impl Spreadsheet {
                 let duration_ms = start_time.elapsed().as_millis();
 
                 self.workbook = workbook;
-                self.current_file = None;  // Force Save As for .sheet
-                self.is_modified = true;
                 self.import_filename = Some(filename.clone());
                 self.import_source_dir = source_dir;
                 self.doc_settings = DocumentSettings::default();
@@ -246,21 +248,21 @@ impl Spreadsheet {
                 self.bump_cells_rev();
                 self.add_recent_file(path);
 
+                // Set up document identity (XLSX is native per spec)
+                self.finalize_load(path);
+                self.request_title_refresh(cx);
+
                 let duration_str = if duration_ms >= 1000 {
                     format!("{:.2}s", duration_ms as f64 / 1000.0)
                 } else {
                     format!("{}ms", duration_ms)
                 };
 
-                let mut status = format!(
-                    "Imported {} in {} — Save As to keep changes",
+                let status = format!(
+                    "Opened {} in {}",
                     filename,
                     duration_str
                 );
-
-                if result.has_warnings() {
-                    status.push_str(" (see Import Report)");
-                }
 
                 result.import_duration_ms = duration_ms;
                 self.import_result = Some(result);
@@ -332,8 +334,9 @@ impl Spreadsheet {
 
         match result {
             Ok(()) => {
-                self.current_file = Some(path.clone());
-                self.is_modified = false;
+                // Update document identity (handles current_file, is_modified, save_point)
+                self.finalize_save(path);
+                self.request_title_refresh(cx);
 
                 // Save document settings to sidecar file
                 // (best-effort - don't fail the whole save if sidecar fails)
