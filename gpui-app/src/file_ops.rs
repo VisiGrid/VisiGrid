@@ -16,10 +16,10 @@ impl Spreadsheet {
         self.current_file = None;
         self.is_modified = false;
         self.doc_settings = DocumentSettings::default();  // Reset doc settings
-        self.selected = (0, 0);
-        self.selection_end = None;
-        self.scroll_row = 0;
-        self.scroll_col = 0;
+        self.view_state.selected = (0, 0);
+        self.view_state.selection_end = None;
+        self.view_state.scroll_row = 0;
+        self.view_state.scroll_col = 0;
         self.history.clear();
         self.bump_cells_rev();  // Invalidate cell search cache
 
@@ -88,10 +88,10 @@ impl Spreadsheet {
                 self.import_source_dir = None;
                 // Load document settings from sidecar file
                 self.doc_settings = load_doc_settings(path);
-                self.selected = (0, 0);
-                self.selection_end = None;
-                self.scroll_row = 0;
-                self.scroll_col = 0;
+                self.view_state.selected = (0, 0);
+                self.view_state.selection_end = None;
+                self.view_state.scroll_row = 0;
+                self.view_state.scroll_col = 0;
                 self.history.clear();
                 self.bump_cells_rev();
                 self.add_recent_file(path);
@@ -178,10 +178,10 @@ impl Spreadsheet {
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
                         this.doc_settings = DocumentSettings::default();
-                        this.selected = (0, 0);
-                        this.selection_end = None;
-                        this.scroll_row = 0;
-                        this.scroll_col = 0;
+                        this.view_state.selected = (0, 0);
+                        this.view_state.selection_end = None;
+                        this.view_state.scroll_row = 0;
+                        this.view_state.scroll_col = 0;
                         this.history.clear();
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);
@@ -240,10 +240,10 @@ impl Spreadsheet {
                 self.import_filename = Some(filename.clone());
                 self.import_source_dir = source_dir;
                 self.doc_settings = DocumentSettings::default();
-                self.selected = (0, 0);
-                self.selection_end = None;
-                self.scroll_row = 0;
-                self.scroll_col = 0;
+                self.view_state.selected = (0, 0);
+                self.view_state.selection_end = None;
+                self.view_state.scroll_row = 0;
+                self.view_state.scroll_col = 0;
                 self.history.clear();
                 self.bump_cells_rev();
                 self.add_recent_file(path);

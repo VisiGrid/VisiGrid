@@ -11,7 +11,7 @@ pub fn render_font_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     let has_query = !query.is_empty();
 
     // Get current font for selected cell
-    let (row, col) = app.selected;
+    let (row, col) = app.view_state.selected;
     let current_font = app.sheet().get_font_family(row, col);
     let current_font_display = current_font.clone().unwrap_or_else(|| "(Default)".to_string());
 

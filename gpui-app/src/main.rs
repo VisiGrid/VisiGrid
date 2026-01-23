@@ -28,6 +28,7 @@ mod session;
 mod settings;
 mod theme;
 mod views;
+pub mod workbook_view;
 
 #[cfg(test)]
 mod tests;

@@ -497,8 +497,8 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
     let sheet_index = app.sheet_index();
 
     // Compute selection bounds (normalize to start <= end)
-    let (anchor_row, anchor_col) = app.selected;
-    let (end_row, end_col) = app.selection_end.unwrap_or(app.selected);
+    let (anchor_row, anchor_col) = app.view_state.selected;
+    let (end_row, end_col) = app.view_state.selection_end.unwrap_or(app.view_state.selected);
     let selection = (
         anchor_row.min(end_row),
         anchor_col.min(end_col),

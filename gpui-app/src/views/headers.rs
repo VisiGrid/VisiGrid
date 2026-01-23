@@ -49,9 +49,9 @@ pub fn render_filter_button(
 /// 2. Divider line after frozen columns
 /// 3. Scrollable column headers (scroll_col to scroll_col + scrollable_visible_cols)
 pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    let scroll_col = app.scroll_col;
+    let scroll_col = app.view_state.scroll_col;
     let visible_cols = app.visible_cols();
-    let frozen_cols = app.frozen_cols;
+    let frozen_cols = app.view_state.frozen_cols;
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
     let selection_bg = app.token(TokenKey::SelectionBg);

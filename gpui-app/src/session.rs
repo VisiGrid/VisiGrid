@@ -541,13 +541,13 @@ impl Spreadsheet {
                     SheetSession {
                         name: sheet.name.clone(),
                         scroll: ScrollPosition {
-                            row: self.scroll_row,
-                            col: self.scroll_col,
+                            row: self.view_state.scroll_row,
+                            col: self.view_state.scroll_col,
                         },
                         selection: SelectionState {
-                            anchor: self.selected,
-                            end: self.selection_end,
-                            additional: self.additional_selections.clone(),
+                            anchor: self.view_state.selected,
+                            end: self.view_state.selection_end,
+                            additional: self.view_state.additional_selections.clone(),
                         },
                     }
                 } else {
@@ -579,7 +579,7 @@ impl Spreadsheet {
                 inspector_visible: self.inspector_visible,
                 inspector_tab: self.inspector_tab.into(),
             },
-            zoom_level: self.zoom_level,
+            zoom_level: self.view_state.zoom_level,
         }
     }
 
@@ -611,20 +611,20 @@ impl Spreadsheet {
             let max_row = sheet.rows;
             let max_col = sheet.cols;
 
-            self.scroll_row = sheet_session.scroll.row.min(max_row.saturating_sub(1));
-            self.scroll_col = sheet_session.scroll.col.min(max_col.saturating_sub(1));
+            self.view_state.scroll_row = sheet_session.scroll.row.min(max_row.saturating_sub(1));
+            self.view_state.scroll_col = sheet_session.scroll.col.min(max_col.saturating_sub(1));
 
-            self.selected = (
+            self.view_state.selected = (
                 sheet_session.selection.anchor.0.min(max_row.saturating_sub(1)),
                 sheet_session.selection.anchor.1.min(max_col.saturating_sub(1)),
             );
 
-            self.selection_end = sheet_session.selection.end.map(|(r, c)| {
+            self.view_state.selection_end = sheet_session.selection.end.map(|(r, c)| {
                 (r.min(max_row.saturating_sub(1)), c.min(max_col.saturating_sub(1)))
             });
 
             // Restore additional selections (clamped)
-            self.additional_selections = sheet_session.selection.additional
+            self.view_state.additional_selections = sheet_session.selection.additional
                 .iter()
                 .map(|(anchor, end)| {
                     let clamped_anchor = (
@@ -648,7 +648,7 @@ impl Spreadsheet {
         let zoom = session.zoom_level
             .max(ZOOM_STEPS[0])
             .min(ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
-        self.zoom_level = zoom;
+        self.view_state.zoom_level = zoom;
         self.metrics = GridMetrics::new(zoom);
     }
 }

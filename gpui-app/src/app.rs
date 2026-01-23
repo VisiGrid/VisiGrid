@@ -21,6 +21,7 @@ use crate::user_keybindings;
 use crate::views;
 use crate::links;
 use crate::formula_context::{tokenize_for_highlight, TokenType, char_to_byte};
+use crate::workbook_view::WorkbookViewState;
 
 // Re-export from autocomplete module for external access
 pub use crate::autocomplete::{SignatureHelpInfo, FormulaErrorInfo};
@@ -517,18 +518,9 @@ pub struct Spreadsheet {
     /// Currently checked items in the filter dropdown (indexes into unique values)
     pub filter_checked_items: std::collections::HashSet<usize>,
 
-    // Selection
-    pub selected: (usize, usize),                              // Anchor of active selection
-    pub selection_end: Option<(usize, usize)>,                 // End of active range selection
-    pub additional_selections: Vec<((usize, usize), Option<(usize, usize)>)>,  // Ctrl+Click ranges
-
-    // Viewport
-    pub scroll_row: usize,
-    pub scroll_col: usize,
-
-    // Freeze panes (structural context - headers stay in place while scrolling)
-    pub frozen_rows: usize,  // Number of rows frozen at top (0 = none)
-    pub frozen_cols: usize,  // Number of columns frozen at left (0 = none)
+    // View state (selection, scroll, zoom, freeze panes)
+    // This will become Entity<WorkbookView> in future phases for multi-tab support
+    pub view_state: WorkbookViewState,
 
     // Mode & editing
     pub mode: Mode,
@@ -658,8 +650,7 @@ pub struct Spreadsheet {
     // F1 context help (hold-to-peek)
     pub f1_help_visible: bool,
 
-    // Zoom
-    pub zoom_level: f32,
+    // Zoom (zoom_level is in view_state, metrics is derived)
     pub metrics: GridMetrics,
     zoom_wheel_accumulator: f32,  // For smooth wheel zoom debounce
 
@@ -822,13 +813,7 @@ impl Spreadsheet {
             filter_dropdown_col: None,
             filter_search_text: String::new(),
             filter_checked_items: std::collections::HashSet::new(),
-            selected: (0, 0),
-            selection_end: None,
-            additional_selections: Vec::new(),
-            scroll_row: 0,
-            scroll_col: 0,
-            frozen_rows: 0,
-            frozen_cols: 0,
+            view_state: WorkbookViewState::default(),
             mode: Mode::Navigation,
             edit_value: String::new(),
             edit_cursor: 0,
@@ -956,7 +941,6 @@ impl Spreadsheet {
 
             zen_mode: false,
             f1_help_visible: false,
-            zoom_level: DEFAULT_ZOOM,
             metrics: GridMetrics::default(),
             zoom_wheel_accumulator: 0.0,
             link_open_in_flight: false,
@@ -1057,7 +1041,7 @@ impl Spreadsheet {
         // Ensure filter range is set (use current selection if not)
         if self.filter_state.filter_range.is_none() {
             // Auto-detect range: from row 0 to last non-empty row in current column
-            let col = self.selected.1;
+            let col = self.view_state.selected.1;
             let max_row = self.find_last_data_row(col);
             if max_row == 0 {
                 self.status_message = Some("No data to sort".to_string());
@@ -1068,7 +1052,7 @@ impl Spreadsheet {
             self.filter_state.filter_range = Some((0, col, max_row, col));
         }
 
-        let col = self.selected.1;
+        let col = self.view_state.selected.1;
 
         // Create value_at closure (captures sheet for computed values)
         let sheet = self.sheet();
@@ -1139,7 +1123,7 @@ impl Spreadsheet {
             self.status_message = Some("AutoFilter disabled".to_string());
         } else {
             // Enable: set filter range based on selection or data region
-            let (row, col) = self.selected;
+            let (row, col) = self.view_state.selected;
             let max_row = self.find_last_data_row(col);
             let max_col = self.find_last_data_col(row);
 
@@ -1401,10 +1385,10 @@ impl Spreadsheet {
     pub fn set_zoom(&mut self, new_zoom: f32, cx: &mut Context<Self>) {
         // Clamp to valid range
         let clamped = new_zoom.max(ZOOM_STEPS[0]).min(ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
-        if (clamped - self.zoom_level).abs() < 0.001 {
+        if (clamped - self.view_state.zoom_level).abs() < 0.001 {
             return; // No change
         }
-        self.zoom_level = clamped;
+        self.view_state.zoom_level = clamped;
         self.metrics = GridMetrics::new(clamped);
         self.ensure_visible(cx);
         // Show status message
@@ -1415,14 +1399,14 @@ impl Spreadsheet {
 
     /// Zoom in to next step on the ladder
     pub fn zoom_in(&mut self, cx: &mut Context<Self>) {
-        if let Some(&next) = ZOOM_STEPS.iter().find(|&&z| z > self.zoom_level + 0.001) {
+        if let Some(&next) = ZOOM_STEPS.iter().find(|&&z| z > self.view_state.zoom_level + 0.001) {
             self.set_zoom(next, cx);
         }
     }
 
     /// Zoom out to previous step on the ladder
     pub fn zoom_out(&mut self, cx: &mut Context<Self>) {
-        if let Some(&prev) = ZOOM_STEPS.iter().rev().find(|&&z| z < self.zoom_level - 0.001) {
+        if let Some(&prev) = ZOOM_STEPS.iter().rev().find(|&&z| z < self.view_state.zoom_level - 0.001) {
             self.set_zoom(prev, cx);
         }
     }
@@ -1448,7 +1432,7 @@ impl Spreadsheet {
 
     /// Get zoom percentage for display (e.g., "100%")
     pub fn zoom_display(&self) -> String {
-        let percent = (self.zoom_level * 100.0).round() as i32;
+        let percent = (self.view_state.zoom_level * 100.0).round() as i32;
         format!("{}%", percent)
     }
 
@@ -1458,8 +1442,8 @@ impl Spreadsheet {
 
     /// Freeze the top row (row 0)
     pub fn freeze_top_row(&mut self, cx: &mut Context<Self>) {
-        self.frozen_rows = 1;
-        self.frozen_cols = 0;
+        self.view_state.frozen_rows = 1;
+        self.view_state.frozen_cols = 0;
         self.clamp_scroll_to_freeze(cx);
         self.status_message = Some("Frozen top row".to_string());
         cx.notify();
@@ -1467,8 +1451,8 @@ impl Spreadsheet {
 
     /// Freeze the first column (column A)
     pub fn freeze_first_column(&mut self, cx: &mut Context<Self>) {
-        self.frozen_rows = 0;
-        self.frozen_cols = 1;
+        self.view_state.frozen_rows = 0;
+        self.view_state.frozen_cols = 1;
         self.clamp_scroll_to_freeze(cx);
         self.status_message = Some("Frozen first column".to_string());
         cx.notify();
@@ -1477,15 +1461,15 @@ impl Spreadsheet {
     /// Freeze panes at the current selection
     /// Freezes all rows above and all columns to the left of the active cell
     pub fn freeze_panes(&mut self, cx: &mut Context<Self>) {
-        let (row, col) = self.selected;
+        let (row, col) = self.view_state.selected;
         if row == 0 && col == 0 {
             // Nothing to freeze - show message
             self.status_message = Some("Select a cell to freeze rows above and columns to the left".to_string());
             cx.notify();
             return;
         }
-        self.frozen_rows = row;
-        self.frozen_cols = col;
+        self.view_state.frozen_rows = row;
+        self.view_state.frozen_cols = col;
         self.clamp_scroll_to_freeze(cx);
         let msg = match (row, col) {
             (0, c) => format!("Frozen {} column{}", c, if c == 1 { "" } else { "s" }),
@@ -1498,13 +1482,13 @@ impl Spreadsheet {
 
     /// Remove all freeze panes
     pub fn unfreeze_panes(&mut self, cx: &mut Context<Self>) {
-        if self.frozen_rows == 0 && self.frozen_cols == 0 {
+        if self.view_state.frozen_rows == 0 && self.view_state.frozen_cols == 0 {
             self.status_message = Some("No frozen panes to unfreeze".to_string());
             cx.notify();
             return;
         }
-        self.frozen_rows = 0;
-        self.frozen_cols = 0;
+        self.view_state.frozen_rows = 0;
+        self.view_state.frozen_cols = 0;
         self.status_message = Some("Unfrozen all panes".to_string());
         cx.notify();
     }
@@ -1513,17 +1497,17 @@ impl Spreadsheet {
     fn clamp_scroll_to_freeze(&mut self, _cx: &mut Context<Self>) {
         // When freeze panes are active, scrollable region starts after frozen rows/cols
         // Ensure scroll position doesn't show frozen rows/cols in the scrollable area
-        if self.frozen_rows > 0 && self.scroll_row < self.frozen_rows {
-            self.scroll_row = self.frozen_rows;
+        if self.view_state.frozen_rows > 0 && self.view_state.scroll_row < self.view_state.frozen_rows {
+            self.view_state.scroll_row = self.view_state.frozen_rows;
         }
-        if self.frozen_cols > 0 && self.scroll_col < self.frozen_cols {
-            self.scroll_col = self.frozen_cols;
+        if self.view_state.frozen_cols > 0 && self.view_state.scroll_col < self.view_state.frozen_cols {
+            self.view_state.scroll_col = self.view_state.frozen_cols;
         }
     }
 
     /// Check if freeze panes are active
     pub fn has_frozen_panes(&self) -> bool {
-        self.frozen_rows > 0 || self.frozen_cols > 0
+        self.view_state.frozen_rows > 0 || self.view_state.frozen_cols > 0
     }
 
     /// Save document settings to sidecar if document has a path
@@ -1607,8 +1591,8 @@ impl Spreadsheet {
         match action {
             SearchAction::RunCommand(cmd) => self.dispatch_command(cmd, cx),
             SearchAction::JumpToCell { row, col } => {
-                self.selected = (row, col);
-                self.selection_end = None;
+                self.view_state.selected = (row, col);
+                self.view_state.selection_end = None;
                 self.ensure_cell_visible(row, col);
                 cx.notify();
             }
@@ -1623,7 +1607,7 @@ impl Spreadsheet {
                     self.edit_cursor += func_text.chars().count();
                 } else {
                     // Grid navigation: start formula edit with =FUNC(
-                    self.edit_original = self.sheet().get_raw(self.selected.0, self.selected.1);
+                    self.edit_original = self.sheet().get_raw(self.view_state.selected.0, self.view_state.selected.1);
                     self.edit_value = format!("={}(", name);
                     self.edit_cursor = self.edit_value.chars().count();
                     self.mode = Mode::Formula;
@@ -1689,10 +1673,10 @@ impl Spreadsheet {
             CommandId::GoToCell => self.show_goto(cx),
             CommandId::FindInCells => self.show_find(cx),
             CommandId::GoToStart => {
-                self.selected = (0, 0);
-                self.selection_end = None;
-                self.scroll_row = 0;
-                self.scroll_col = 0;
+                self.view_state.selected = (0, 0);
+                self.view_state.selection_end = None;
+                self.view_state.scroll_row = 0;
+                self.view_state.scroll_col = 0;
                 cx.notify();
             }
             CommandId::SelectAll => self.select_all(cx),
@@ -2029,10 +2013,10 @@ impl Spreadsheet {
 
     /// Clear selection state when switching sheets
     fn clear_selection_state(&mut self) {
-        self.selected = (0, 0);
-        self.selection_end = None;
-        self.scroll_row = 0;
-        self.scroll_col = 0;
+        self.view_state.selected = (0, 0);
+        self.view_state.selection_end = None;
+        self.view_state.scroll_row = 0;
+        self.view_state.scroll_col = 0;
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
@@ -2147,7 +2131,7 @@ impl Spreadsheet {
     /// Returns scaled (zoomed) position for rendering.
     pub fn col_x_offset(&self, target_col: usize) -> f32 {
         let mut x = 0.0;
-        for col in self.scroll_col..target_col {
+        for col in self.view_state.scroll_col..target_col {
             x += self.metrics.col_width(self.col_width(col));
         }
         x
@@ -2157,7 +2141,7 @@ impl Spreadsheet {
     /// Returns scaled (zoomed) position for rendering.
     pub fn row_y_offset(&self, target_row: usize) -> f32 {
         let mut y = 0.0;
-        for row in self.scroll_row..target_row {
+        for row in self.view_state.scroll_row..target_row {
             y += self.metrics.row_height(self.row_height(row));
         }
         y
@@ -2172,7 +2156,7 @@ impl Spreadsheet {
 
         let viewport_width = self.grid_layout.viewport_size.0;
         let mut current_x = 0.0;
-        for col in self.scroll_col..NUM_COLS {
+        for col in self.view_state.scroll_col..NUM_COLS {
             if current_x > viewport_width { break; }
             // Use scaled width for hit-testing in screen coordinates
             let width = self.metrics.col_width(self.col_width(col));
@@ -2193,15 +2177,15 @@ impl Spreadsheet {
 
         // O(1) fast path: uniform row heights (use scaled cell height)
         if self.row_heights.is_empty() {
-            let row = self.scroll_row + (y / self.metrics.cell_h).floor() as usize;
+            let row = self.view_state.scroll_row + (y / self.metrics.cell_h).floor() as usize;
             return Some(row.min(NUM_ROWS - 1));
         }
 
         // O(visible rows) slow path: variable heights, stop at viewport bottom
         let viewport_height = self.grid_layout.viewport_size.1;
         let mut current_y = 0.0;
-        let mut last_row = self.scroll_row;
-        for row in self.scroll_row..NUM_ROWS {
+        let mut last_row = self.view_state.scroll_row;
+        for row in self.view_state.scroll_row..NUM_ROWS {
             if current_y > viewport_height { break; }
             last_row = row;
             // Use scaled height for hit-testing in screen coordinates
@@ -2594,19 +2578,19 @@ impl Spreadsheet {
 
     // Cell reference (A1, B2, etc.)
     pub fn cell_ref(&self) -> String {
-        format!("{}{}", Self::col_letter(self.selected.1), self.selected.0 + 1)
+        format!("{}{}", Self::col_letter(self.view_state.selected.1), self.view_state.selected.0 + 1)
     }
 
     // Navigation
     pub fn move_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
-        let (row, col) = self.selected;
+        let (row, col) = self.view_state.selected;
         let new_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
         let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
-        self.selected = (new_row, new_col);
-        self.selection_end = None;  // Clear range selection
-        self.additional_selections.clear();  // Clear discontiguous selections
+        self.view_state.selected = (new_row, new_col);
+        self.view_state.selection_end = None;  // Clear range selection
+        self.view_state.additional_selections.clear();  // Clear discontiguous selections
 
         self.ensure_visible(cx);
     }
@@ -2614,10 +2598,10 @@ impl Spreadsheet {
     pub fn extend_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
-        let (row, col) = self.selection_end.unwrap_or(self.selected);
+        let (row, col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
         let new_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
         let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
-        self.selection_end = Some((new_row, new_col));
+        self.view_state.selection_end = Some((new_row, new_col));
 
         self.ensure_visible(cx);
     }
@@ -2687,7 +2671,7 @@ impl Spreadsheet {
     pub fn jump_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
-        let (mut row, mut col) = self.selected;
+        let (mut row, mut col) = self.view_state.selected;
         let current_empty = self.sheet().get_cell(row, col).value.raw_display().is_empty();
 
         // Check if next cell exists and what it contains
@@ -2730,8 +2714,8 @@ impl Spreadsheet {
             }
         }
 
-        self.selected = (row, col);
-        self.selection_end = None;
+        self.view_state.selected = (row, col);
+        self.view_state.selection_end = None;
         self.ensure_visible(cx);
     }
 
@@ -2740,7 +2724,7 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
 
         // Start from current selection end (or selected if no selection)
-        let (mut row, mut col) = self.selection_end.unwrap_or(self.selected);
+        let (mut row, mut col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
         let current_empty = self.sheet().get_cell(row, col).value.raw_display().is_empty();
 
         // Check if next cell exists and what it contains
@@ -2784,53 +2768,53 @@ impl Spreadsheet {
         }
 
         // Extend selection to this point (don't move selected, just selection_end)
-        self.selection_end = Some((row, col));
+        self.view_state.selection_end = Some((row, col));
         self.ensure_visible(cx);
     }
 
     pub fn ensure_visible(&mut self, cx: &mut Context<Self>) {
-        let (row, col) = self.selection_end.unwrap_or(self.selected);
+        let (row, col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
         let visible_rows = self.visible_rows();
         let visible_cols = self.visible_cols();
 
         // When freeze panes are active, calculate scrollable region
-        let scrollable_visible_rows = visible_rows.saturating_sub(self.frozen_rows);
-        let scrollable_visible_cols = visible_cols.saturating_sub(self.frozen_cols);
+        let scrollable_visible_rows = visible_rows.saturating_sub(self.view_state.frozen_rows);
+        let scrollable_visible_cols = visible_cols.saturating_sub(self.view_state.frozen_cols);
 
         // Vertical scroll - frozen rows are always visible, only scroll for rows in scrollable region
-        if row < self.frozen_rows {
+        if row < self.view_state.frozen_rows {
             // Row is in frozen region - always visible, but ensure scroll_row is valid
-            self.scroll_row = self.scroll_row.max(self.frozen_rows);
-        } else if row < self.scroll_row {
-            self.scroll_row = row;
-        } else if scrollable_visible_rows > 0 && row >= self.scroll_row + scrollable_visible_rows {
-            self.scroll_row = row - scrollable_visible_rows + 1;
+            self.view_state.scroll_row = self.view_state.scroll_row.max(self.view_state.frozen_rows);
+        } else if row < self.view_state.scroll_row {
+            self.view_state.scroll_row = row;
+        } else if scrollable_visible_rows > 0 && row >= self.view_state.scroll_row + scrollable_visible_rows {
+            self.view_state.scroll_row = row - scrollable_visible_rows + 1;
         }
 
         // Horizontal scroll - frozen cols are always visible, only scroll for cols in scrollable region
-        if col < self.frozen_cols {
+        if col < self.view_state.frozen_cols {
             // Col is in frozen region - always visible, but ensure scroll_col is valid
-            self.scroll_col = self.scroll_col.max(self.frozen_cols);
-        } else if col < self.scroll_col {
-            self.scroll_col = col;
-        } else if scrollable_visible_cols > 0 && col >= self.scroll_col + scrollable_visible_cols {
-            self.scroll_col = col - scrollable_visible_cols + 1;
+            self.view_state.scroll_col = self.view_state.scroll_col.max(self.view_state.frozen_cols);
+        } else if col < self.view_state.scroll_col {
+            self.view_state.scroll_col = col;
+        } else if scrollable_visible_cols > 0 && col >= self.view_state.scroll_col + scrollable_visible_cols {
+            self.view_state.scroll_col = col - scrollable_visible_cols + 1;
         }
 
         // Ensure scroll positions don't go below freeze bounds
-        self.scroll_row = self.scroll_row.max(self.frozen_rows);
-        self.scroll_col = self.scroll_col.max(self.frozen_cols);
+        self.view_state.scroll_row = self.view_state.scroll_row.max(self.view_state.frozen_rows);
+        self.view_state.scroll_col = self.view_state.scroll_col.max(self.view_state.frozen_cols);
 
         cx.notify();
     }
 
     pub fn select_cell(&mut self, row: usize, col: usize, extend: bool, cx: &mut Context<Self>) {
         if extend {
-            self.selection_end = Some((row, col));
+            self.view_state.selection_end = Some((row, col));
         } else {
-            self.selected = (row, col);
-            self.selection_end = None;
-            self.additional_selections.clear();  // Clear Ctrl+Click selections
+            self.view_state.selected = (row, col);
+            self.view_state.selection_end = None;
+            self.view_state.additional_selections.clear();  // Clear Ctrl+Click selections
         }
         cx.notify();
     }
@@ -2838,19 +2822,19 @@ impl Spreadsheet {
     /// Ctrl+Click to add/toggle cell in selection (discontiguous selection)
     pub fn ctrl_click_cell(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         // Save current selection to additional_selections
-        self.additional_selections.push((self.selected, self.selection_end));
+        self.view_state.additional_selections.push((self.view_state.selected, self.view_state.selection_end));
         // Start new selection at clicked cell
-        self.selected = (row, col);
-        self.selection_end = None;
+        self.view_state.selected = (row, col);
+        self.view_state.selection_end = None;
         cx.notify();
     }
 
     /// Start drag selection - called on mouse_down
     pub fn start_drag_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         self.dragging_selection = true;
-        self.selected = (row, col);
-        self.selection_end = None;
-        self.additional_selections.clear();  // Clear Ctrl+Click selections on new drag
+        self.view_state.selected = (row, col);
+        self.view_state.selection_end = None;
+        self.view_state.additional_selections.clear();  // Clear Ctrl+Click selections on new drag
         cx.notify();
     }
 
@@ -2858,10 +2842,10 @@ impl Spreadsheet {
     pub fn start_ctrl_drag_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         self.dragging_selection = true;
         // Save current selection to additional_selections
-        self.additional_selections.push((self.selected, self.selection_end));
+        self.view_state.additional_selections.push((self.view_state.selected, self.view_state.selection_end));
         // Start new selection at clicked cell
-        self.selected = (row, col);
-        self.selection_end = None;
+        self.view_state.selected = (row, col);
+        self.view_state.selection_end = None;
         cx.notify();
     }
 
@@ -2871,8 +2855,8 @@ impl Spreadsheet {
             return;
         }
         // Only update if the cell changed to avoid unnecessary redraws
-        if self.selection_end != Some((row, col)) {
-            self.selection_end = Some((row, col));
+        if self.view_state.selection_end != Some((row, col)) {
+            self.view_state.selection_end = Some((row, col));
             cx.notify();
         }
     }
@@ -2886,9 +2870,9 @@ impl Spreadsheet {
     }
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.selected = (0, 0);
-        self.selection_end = Some((NUM_ROWS - 1, NUM_COLS - 1));
-        self.additional_selections.clear();  // Clear discontiguous selections
+        self.view_state.selected = (0, 0);
+        self.view_state.selection_end = Some((NUM_ROWS - 1, NUM_COLS - 1));
+        self.view_state.additional_selections.clear();  // Clear discontiguous selections
         cx.notify();
     }
 
@@ -2898,19 +2882,19 @@ impl Spreadsheet {
         let visible_cols = self.visible_cols();
 
         // When freeze panes are active, scrollable region starts after frozen rows/cols
-        let min_scroll_row = self.frozen_rows;
-        let min_scroll_col = self.frozen_cols;
+        let min_scroll_row = self.view_state.frozen_rows;
+        let min_scroll_col = self.view_state.frozen_cols;
 
-        let new_row = (self.scroll_row as i32 + delta_rows)
+        let new_row = (self.view_state.scroll_row as i32 + delta_rows)
             .max(min_scroll_row as i32)
             .min((NUM_ROWS.saturating_sub(visible_rows)) as i32) as usize;
-        let new_col = (self.scroll_col as i32 + delta_cols)
+        let new_col = (self.view_state.scroll_col as i32 + delta_cols)
             .max(min_scroll_col as i32)
             .min((NUM_COLS.saturating_sub(visible_cols)) as i32) as usize;
 
-        if new_row != self.scroll_row || new_col != self.scroll_col {
-            self.scroll_row = new_row;
-            self.scroll_col = new_col;
+        if new_row != self.view_state.scroll_row || new_col != self.view_state.scroll_col {
+            self.view_state.scroll_row = new_row;
+            self.view_state.scroll_col = new_col;
             cx.notify();
         }
     }
@@ -2919,7 +2903,7 @@ impl Spreadsheet {
     pub fn start_edit(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
-        let (row, col) = self.selected;
+        let (row, col) = self.view_state.selected;
 
         // Block editing spill receivers - show message and redirect to parent
         if let Some((parent_row, parent_col)) = self.sheet().get_spill_parent(row, col) {
@@ -2947,7 +2931,7 @@ impl Spreadsheet {
     pub fn start_edit_clear(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
-        let (row, col) = self.selected;
+        let (row, col) = self.view_state.selected;
 
         // Block editing spill receivers - show message and redirect to parent
         if let Some((parent_row, parent_col)) = self.sheet().get_spill_parent(row, col) {
@@ -2985,7 +2969,7 @@ impl Spreadsheet {
             return;
         }
 
-        let (row, col) = self.selected;
+        let (row, col) = self.view_state.selected;
         let old_value = self.edit_original.clone();
 
         // Convert leading + to = for formulas (Excel compatibility)
@@ -3142,7 +3126,7 @@ impl Spreadsheet {
         }
 
         let is_formula = base_value.starts_with('=');
-        let primary_cell = self.selected;  // Base cell for formula reference shifting
+        let primary_cell = self.view_state.selected;  // Base cell for formula reference shifting
 
         // Collect all target cells from primary selection and additional_selections
         let mut target_cells: Vec<(usize, usize)> = Vec::new();
@@ -3156,7 +3140,7 @@ impl Spreadsheet {
         }
 
         // Additional selections (Ctrl+Click)
-        for (start, end) in &self.additional_selections {
+        for (start, end) in &self.view_state.additional_selections {
             let end = end.unwrap_or(*start);
             let min_r = start.0.min(end.0);
             let max_r = start.0.max(end.0);
@@ -3207,7 +3191,7 @@ impl Spreadsheet {
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
-        self.additional_selections.clear();  // Clear multi-selection after commit
+        self.view_state.additional_selections.clear();  // Clear multi-selection after commit
         self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
         // Clear formula highlighting state
@@ -3234,7 +3218,7 @@ impl Spreadsheet {
     /// - Formula references shift relative to primary cell
     /// - One undo step
     fn fill_selection_from_primary(&mut self, cx: &mut Context<Self>) {
-        let primary_cell = self.selected;
+        let primary_cell = self.view_state.selected;
         let base_value = self.sheet().get_raw(primary_cell.0, primary_cell.1);
 
         // If primary cell is empty, we still fill (clears the selection - Excel behavior)
@@ -3255,7 +3239,7 @@ impl Spreadsheet {
         }
 
         // Additional selections (Ctrl+Click)
-        for (start, end) in &self.additional_selections {
+        for (start, end) in &self.view_state.additional_selections {
             let end = end.unwrap_or(*start);
             let min_r = start.0.min(end.0);
             let max_r = start.0.max(end.0);
@@ -3317,7 +3301,7 @@ impl Spreadsheet {
             self.maybe_smoke_recalc();
         }
 
-        self.additional_selections.clear();
+        self.view_state.additional_selections.clear();
 
         // Status message with optional spill skip note
         let status = if skipped_spill > 0 {
@@ -3347,7 +3331,7 @@ impl Spreadsheet {
             return false;
         }
 
-        let (row, col) = self.selected;
+        let (row, col) = self.view_state.selected;
         let cell_value = self.sheet().get_display(row, col);
 
         if let Some(target) = links::detect_link(&cell_value) {
@@ -3389,7 +3373,7 @@ impl Spreadsheet {
 
     /// Detect link in current cell (for status bar hint)
     pub fn detected_link(&self) -> Option<links::LinkTarget> {
-        let (row, col) = self.selected;
+        let (row, col) = self.view_state.selected;
         let cell_value = self.sheet().get_display(row, col);
         links::detect_link(&cell_value)
     }
@@ -3401,7 +3385,7 @@ impl Spreadsheet {
             return;
         }
 
-        let (row, col) = self.selected;
+        let (row, col) = self.view_state.selected;
         let old_value = self.edit_original.clone();
 
         // Convert leading + to = for formulas (Excel compatibility)
@@ -3577,7 +3561,7 @@ impl Spreadsheet {
             self.update_autocomplete(cx);
         } else {
             // Start editing with this character
-            let (row, col) = self.selected;
+            let (row, col) = self.view_state.selected;
 
             // Block editing spill receivers
             if let Some((parent_row, parent_col)) = self.sheet().get_spill_parent(row, col) {
@@ -3634,7 +3618,7 @@ impl Spreadsheet {
             (new_row, new_col)
         } else {
             // Start new reference from the selected cell (editing cell)
-            let (sel_row, sel_col) = self.selected;
+            let (sel_row, sel_col) = self.view_state.selected;
             let new_row = (sel_row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
             let new_col = (sel_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
             (new_row, new_col)
@@ -3751,7 +3735,7 @@ impl Spreadsheet {
         let (start_row, start_col) = if let Some((row, col)) = self.formula_ref_cell {
             (row, col)
         } else {
-            self.selected
+            self.view_state.selected
         };
 
         let (new_row, new_col) = self.find_data_boundary(start_row, start_col, dr, dc);
@@ -3847,16 +3831,16 @@ impl Spreadsheet {
         let visible_cols = self.visible_cols();
 
         // Adjust scroll to keep cell visible
-        if row < self.scroll_row {
-            self.scroll_row = row;
-        } else if row >= self.scroll_row + visible_rows {
-            self.scroll_row = row.saturating_sub(visible_rows - 1);
+        if row < self.view_state.scroll_row {
+            self.view_state.scroll_row = row;
+        } else if row >= self.view_state.scroll_row + visible_rows {
+            self.view_state.scroll_row = row.saturating_sub(visible_rows - 1);
         }
 
-        if col < self.scroll_col {
-            self.scroll_col = col;
-        } else if col >= self.scroll_col + visible_cols {
-            self.scroll_col = col.saturating_sub(visible_cols - 1);
+        if col < self.view_state.scroll_col {
+            self.view_state.scroll_col = col;
+        } else if col >= self.view_state.scroll_col + visible_cols {
+            self.view_state.scroll_col = col.saturating_sub(visible_cols - 1);
         }
     }
 
@@ -4249,7 +4233,7 @@ impl Spreadsheet {
         let text = system_text.or_else(|| self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()));
 
         if let Some(text) = text {
-            let (start_row, start_col) = self.selected;
+            let (start_row, start_col) = self.view_state.selected;
             let mut changes = Vec::new();
 
             // Calculate delta from source if this is an internal paste
@@ -4365,7 +4349,7 @@ impl Spreadsheet {
             })
         });
 
-        let (start_row, start_col) = self.selected;
+        let (start_row, start_col) = self.view_state.selected;
         let mut changes = Vec::new();
 
         if use_internal_values {
@@ -5206,8 +5190,8 @@ impl Spreadsheet {
 
     // Selection helpers
     pub fn selection_range(&self) -> ((usize, usize), (usize, usize)) {
-        let start = self.selected;
-        let end = self.selection_end.unwrap_or(start);
+        let start = self.view_state.selected;
+        let end = self.view_state.selection_end.unwrap_or(start);
         let min_row = start.0.min(end.0);
         let max_row = start.0.max(end.0);
         let min_col = start.1.min(end.1);
@@ -5225,17 +5209,17 @@ impl Spreadsheet {
     /// is called in multiple undo/redo handlers - this is the invariant to enforce centrally.
     pub fn clamp_selection(&mut self) {
         // Clamp selected cell
-        self.selected.0 = self.selected.0.min(NUM_ROWS - 1);
-        self.selected.1 = self.selected.1.min(NUM_COLS - 1);
+        self.view_state.selected.0 = self.view_state.selected.0.min(NUM_ROWS - 1);
+        self.view_state.selected.1 = self.view_state.selected.1.min(NUM_COLS - 1);
 
         // Clamp selection_end if present
-        if let Some(ref mut end) = self.selection_end {
+        if let Some(ref mut end) = self.view_state.selection_end {
             end.0 = end.0.min(NUM_ROWS - 1);
             end.1 = end.1.min(NUM_COLS - 1);
         }
 
         // Clamp additional selections
-        for (start, end) in &mut self.additional_selections {
+        for (start, end) in &mut self.view_state.additional_selections {
             start.0 = start.0.min(NUM_ROWS - 1);
             start.1 = start.1.min(NUM_COLS - 1);
             if let Some(ref mut e) = end {
@@ -5249,13 +5233,13 @@ impl Spreadsheet {
     /// This includes range selections and Ctrl+Click additional selections.
     pub fn is_multi_selection(&self) -> bool {
         // Check if primary selection is a range (more than one cell)
-        if let Some(end) = self.selection_end {
-            if end != self.selected {
+        if let Some(end) = self.view_state.selection_end {
+            if end != self.view_state.selected {
                 return true;
             }
         }
         // Check if there are additional Ctrl+Click selections
-        if !self.additional_selections.is_empty() {
+        if !self.view_state.additional_selections.is_empty() {
             return true;
         }
         false
@@ -5268,7 +5252,7 @@ impl Spreadsheet {
             return true;
         }
         // Check additional selections (Ctrl+Click ranges)
-        for (start, end) in &self.additional_selections {
+        for (start, end) in &self.view_state.additional_selections {
             let end = end.unwrap_or(*start);
             let min_row = start.0.min(end.0);
             let max_row = start.0.max(end.0);
@@ -5290,7 +5274,7 @@ impl Spreadsheet {
             return None;
         }
         // Skip the active cell (it shows the real edit_value)
-        if (row, col) == self.selected {
+        if (row, col) == self.view_state.selected {
             return None;
         }
         // Only for selected cells
@@ -5299,8 +5283,8 @@ impl Spreadsheet {
         }
 
         // Compute delta from primary cell
-        let delta_row = row as i32 - self.selected.0 as i32;
-        let delta_col = col as i32 - self.selected.1 as i32;
+        let delta_row = row as i32 - self.view_state.selected.0 as i32;
+        let delta_col = col as i32 - self.view_state.selected.1 as i32;
 
         // If it's a formula, adjust references
         if self.edit_value.starts_with('=') {
@@ -5317,7 +5301,7 @@ impl Spreadsheet {
         // Add active selection
         ranges.push(self.selection_range());
         // Add additional selections
-        for (start, end) in &self.additional_selections {
+        for (start, end) in &self.view_state.additional_selections {
             let end = end.unwrap_or(*start);
             let min_row = start.0.min(end.0);
             let max_row = start.0.max(end.0);
@@ -5426,14 +5410,14 @@ impl Spreadsheet {
     /// Select entire row. If extend=true, extends from current anchor row.
     pub fn select_row(&mut self, row: usize, extend: bool, cx: &mut Context<Self>) {
         if extend {
-            // Extend from the current anchor (self.selected.0 before this call)
-            let anchor_row = self.selected.0;
-            self.selected = (anchor_row.min(row), 0);
-            self.selection_end = Some((anchor_row.max(row), NUM_COLS - 1));
+            // Extend from the current anchor (self.view_state.selected.0 before this call)
+            let anchor_row = self.view_state.selected.0;
+            self.view_state.selected = (anchor_row.min(row), 0);
+            self.view_state.selection_end = Some((anchor_row.max(row), NUM_COLS - 1));
         } else {
-            self.selected = (row, 0);
-            self.selection_end = Some((row, NUM_COLS - 1));
-            self.additional_selections.clear();
+            self.view_state.selected = (row, 0);
+            self.view_state.selection_end = Some((row, NUM_COLS - 1));
+            self.view_state.additional_selections.clear();
         }
         cx.notify();
     }
@@ -5441,13 +5425,13 @@ impl Spreadsheet {
     /// Select entire column. If extend=true, extends from current anchor col.
     pub fn select_col(&mut self, col: usize, extend: bool, cx: &mut Context<Self>) {
         if extend {
-            let anchor_col = self.selected.1;
-            self.selected = (0, anchor_col.min(col));
-            self.selection_end = Some((NUM_ROWS - 1, anchor_col.max(col)));
+            let anchor_col = self.view_state.selected.1;
+            self.view_state.selected = (0, anchor_col.min(col));
+            self.view_state.selection_end = Some((NUM_ROWS - 1, anchor_col.max(col)));
         } else {
-            self.selected = (0, col);
-            self.selection_end = Some((NUM_ROWS - 1, col));
-            self.additional_selections.clear();
+            self.view_state.selected = (0, col);
+            self.view_state.selection_end = Some((NUM_ROWS - 1, col));
+            self.view_state.additional_selections.clear();
         }
         cx.notify();
     }
@@ -5467,8 +5451,8 @@ impl Spreadsheet {
         let anchor = self.row_header_anchor.unwrap_or(row);
         let min_r = anchor.min(row);
         let max_r = anchor.max(row);
-        self.selected = (min_r, 0);
-        self.selection_end = Some((max_r, NUM_COLS - 1));
+        self.view_state.selected = (min_r, 0);
+        self.view_state.selection_end = Some((max_r, NUM_COLS - 1));
         cx.notify();
     }
 
@@ -5493,8 +5477,8 @@ impl Spreadsheet {
         let anchor = self.col_header_anchor.unwrap_or(col);
         let min_c = anchor.min(col);
         let max_c = anchor.max(col);
-        self.selected = (0, min_c);
-        self.selection_end = Some((NUM_ROWS - 1, max_c));
+        self.view_state.selected = (0, min_c);
+        self.view_state.selection_end = Some((NUM_ROWS - 1, max_c));
         cx.notify();
     }
 
@@ -5506,13 +5490,13 @@ impl Spreadsheet {
 
     /// Ctrl+click on row header - add row to additional selections
     pub fn ctrl_click_row(&mut self, row: usize, cx: &mut Context<Self>) {
-        self.additional_selections.push((self.selected, self.selection_end));
+        self.view_state.additional_selections.push((self.view_state.selected, self.view_state.selection_end));
         self.select_row(row, false, cx);
     }
 
     /// Ctrl+click on column header - add column to additional selections
     pub fn ctrl_click_col(&mut self, col: usize, cx: &mut Context<Self>) {
-        self.additional_selections.push((self.selected, self.selection_end));
+        self.view_state.additional_selections.push((self.view_state.selected, self.view_state.selection_end));
         self.select_col(col, false, cx);
     }
 
@@ -5521,7 +5505,7 @@ impl Spreadsheet {
     /// Insert rows or columns based on current selection (Ctrl+=)
     pub fn insert_rows_or_cols(&mut self, cx: &mut Context<Self>) {
         // v1: Only operate on primary selection, ignore additional selections
-        if !self.additional_selections.is_empty() {
+        if !self.view_state.additional_selections.is_empty() {
             self.status_message = Some("Insert not supported with multiple selections".to_string());
             cx.notify();
             return;
@@ -5547,7 +5531,7 @@ impl Spreadsheet {
     /// Delete rows or columns based on current selection (Ctrl+-)
     pub fn delete_rows_or_cols(&mut self, cx: &mut Context<Self>) {
         // v1: Only operate on primary selection, ignore additional selections
-        if !self.additional_selections.is_empty() {
+        if !self.view_state.additional_selections.is_empty() {
             self.status_message = Some("Delete not supported with multiple selections".to_string());
             cx.notify();
             return;
@@ -5664,12 +5648,12 @@ impl Spreadsheet {
         });
 
         // Move selection up if needed
-        if self.selected.0 >= at_row + count {
-            self.selected.0 -= count;
-        } else if self.selected.0 >= at_row {
-            self.selected.0 = at_row.saturating_sub(1);
+        if self.view_state.selected.0 >= at_row + count {
+            self.view_state.selected.0 -= count;
+        } else if self.view_state.selected.0 >= at_row {
+            self.view_state.selected.0 = at_row.saturating_sub(1);
         }
-        self.selection_end = None;
+        self.view_state.selection_end = None;
 
         self.bump_cells_rev();
         self.is_modified = true;
@@ -5771,12 +5755,12 @@ impl Spreadsheet {
         });
 
         // Move selection left if needed
-        if self.selected.1 >= at_col + count {
-            self.selected.1 -= count;
-        } else if self.selected.1 >= at_col {
-            self.selected.1 = at_col.saturating_sub(1);
+        if self.view_state.selected.1 >= at_col + count {
+            self.view_state.selected.1 -= count;
+        } else if self.view_state.selected.1 >= at_col {
+            self.view_state.selected.1 = at_col.saturating_sub(1);
         }
-        self.selection_end = None;
+        self.view_state.selection_end = None;
 
         self.bump_cells_rev();
         self.is_modified = true;
@@ -5801,8 +5785,8 @@ impl Spreadsheet {
     pub fn confirm_goto(&mut self, cx: &mut Context<Self>) {
         if let Some((row, col)) = Self::parse_cell_ref(&self.goto_input) {
             if row < NUM_ROWS && col < NUM_COLS {
-                self.selected = (row, col);
-                self.selection_end = None;
+                self.view_state.selected = (row, col);
+                self.view_state.selection_end = None;
                 self.ensure_visible(cx);
                 self.status_message = Some(format!("Jumped to {}", self.cell_ref()));
             } else {
@@ -6199,8 +6183,8 @@ impl Spreadsheet {
 
     fn jump_to_find_result(&mut self, cx: &mut Context<Self>) {
         if let Some(hit) = self.find_results.get(self.find_index) {
-            self.selected = (hit.row, hit.col);
-            self.selection_end = None;
+            self.view_state.selected = (hit.row, hit.col);
+            self.view_state.selection_end = None;
             self.ensure_visible(cx);
             self.status_message = Some(format!(
                 "Match {} of {}",
@@ -6410,9 +6394,9 @@ impl Spreadsheet {
     pub fn show_palette(&mut self, cx: &mut Context<Self>) {
         self.lua_console.visible = false;
         // Save pre-palette state for restore on Esc
-        self.palette_pre_selection = self.selected;
-        self.palette_pre_selection_end = self.selection_end;
-        self.palette_pre_scroll = (self.scroll_row, self.scroll_col);
+        self.palette_pre_selection = self.view_state.selected;
+        self.palette_pre_selection_end = self.view_state.selection_end;
+        self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
         self.palette_previewing = false;
 
         self.mode = Mode::Command;
@@ -6429,9 +6413,9 @@ impl Spreadsheet {
         // If palette not already open, save pre-state
         if self.mode != Mode::Command {
             self.lua_console.visible = false;
-            self.palette_pre_selection = self.selected;
-            self.palette_pre_selection_end = self.selection_end;
-            self.palette_pre_scroll = (self.scroll_row, self.scroll_col);
+            self.palette_pre_selection = self.view_state.selected;
+            self.palette_pre_selection_end = self.view_state.selection_end;
+            self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
             self.palette_previewing = false;
         }
 
@@ -6495,9 +6479,9 @@ impl Spreadsheet {
         references.sort_by_key(|r| (r.row, r.col));
 
         // Save pre-palette state for restore on Esc
-        self.palette_pre_selection = self.selected;
-        self.palette_pre_selection_end = self.selection_end;
-        self.palette_pre_scroll = (self.scroll_row, self.scroll_col);
+        self.palette_pre_selection = self.view_state.selected;
+        self.palette_pre_selection_end = self.view_state.selection_end;
+        self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
         self.palette_previewing = false;
 
         // Build results using the ReferencesProvider
@@ -6560,9 +6544,9 @@ impl Spreadsheet {
             .collect();
 
         // Save pre-palette state for restore on Esc
-        self.palette_pre_selection = self.selected;
-        self.palette_pre_selection_end = self.selection_end;
-        self.palette_pre_scroll = (self.scroll_row, self.scroll_col);
+        self.palette_pre_selection = self.view_state.selected;
+        self.palette_pre_selection_end = self.view_state.selection_end;
+        self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
         self.palette_previewing = false;
 
         // Build results using the PrecedentsProvider
@@ -6649,8 +6633,8 @@ impl Spreadsheet {
             self.mode = Mode::Navigation;
             self.edit_value.clear();
             self.edit_cursor = 0;
-            self.selected = (row, col);
-            self.selection_end = None;
+            self.view_state.selected = (row, col);
+            self.view_state.selection_end = None;
             self.ensure_cell_visible(row, col);
             self.status_message = Some(format!("'{}' → {}", name, ref_str));
             cx.notify();
@@ -6694,9 +6678,9 @@ impl Spreadsheet {
         references.sort_by_key(|r| (r.row, r.col));
 
         // Save pre-palette state
-        self.palette_pre_selection = self.selected;
-        self.palette_pre_selection_end = self.selection_end;
-        self.palette_pre_scroll = (self.scroll_row, self.scroll_col);
+        self.palette_pre_selection = self.view_state.selected;
+        self.palette_pre_selection_end = self.view_state.selection_end;
+        self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
         self.palette_previewing = false;
 
         // Build results
@@ -6716,10 +6700,10 @@ impl Spreadsheet {
     pub fn hide_palette(&mut self, cx: &mut Context<Self>) {
         // Restore pre-palette state (Esc behavior)
         if self.palette_previewing {
-            self.selected = self.palette_pre_selection;
-            self.selection_end = self.palette_pre_selection_end;
-            self.scroll_row = self.palette_pre_scroll.0;
-            self.scroll_col = self.palette_pre_scroll.1;
+            self.view_state.selected = self.palette_pre_selection;
+            self.view_state.selection_end = self.palette_pre_selection_end;
+            self.view_state.scroll_row = self.palette_pre_scroll.0;
+            self.view_state.scroll_col = self.palette_pre_scroll.1;
         }
 
         self.mode = Mode::Navigation;
@@ -6739,8 +6723,8 @@ impl Spreadsheet {
             // Preview based on action type
             match &item.action {
                 SearchAction::JumpToCell { row, col } => {
-                    self.selected = (*row, *col);
-                    self.selection_end = None;
+                    self.view_state.selected = (*row, *col);
+                    self.view_state.selection_end = None;
                     self.ensure_cell_visible(*row, *col);
                 }
                 SearchAction::RunCommand(cmd) => {
@@ -7319,7 +7303,7 @@ impl Spreadsheet {
             self.inspector_pinned = None;
         } else {
             // Pin: lock to current selection
-            self.inspector_pinned = Some(self.selected);
+            self.inspector_pinned = Some(self.view_state.selected);
         }
         cx.notify();
     }
@@ -7346,7 +7330,7 @@ impl Spreadsheet {
         } else {
             // Try to find a named range in the current cell's formula
             let sheet = self.workbook.active_sheet();
-            let (row, col) = self.selected;
+            let (row, col) = self.view_state.selected;
             let cell = sheet.get_cell(row, col);
             let formula_text = self.get_formula_source(&cell.value);
             if let Some(formula) = formula_text {
@@ -7512,7 +7496,7 @@ impl Spreadsheet {
         // Show if: not dismissed, no named ranges exist, has a range selection
         !user_settings(cx).is_tip_dismissed(TipId::NamedRanges)
             && self.workbook.list_named_ranges().is_empty()
-            && self.selection_end.is_some()
+            && self.view_state.selection_end.is_some()
     }
 
     /// Dismiss the name tooltip permanently
@@ -8123,7 +8107,7 @@ impl Spreadsheet {
     /// Show the extract named range modal
     pub fn show_extract_named_range(&mut self, cx: &mut Context<Self>) {
         // Get the current cell's formula
-        let (row, col) = self.selected;
+        let (row, col) = self.view_state.selected;
         let cell = self.sheet().get_cell(row, col);
         let formula_opt = self.get_formula_source(&cell.value);
 
@@ -8980,8 +8964,8 @@ impl Spreadsheet {
         };
 
         // Parse the selection and create the named range
-        let (anchor_row, anchor_col) = self.selected;
-        let (end_row, end_col) = self.selection_end.unwrap_or(self.selected);
+        let (anchor_row, anchor_col) = self.view_state.selected;
+        let (end_row, end_col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
         let (start_row, start_col, end_row, end_col) = (
             anchor_row.min(end_row),
             anchor_col.min(end_col),
@@ -9037,8 +9021,8 @@ impl Spreadsheet {
 
     /// Convert current selection to a reference string (e.g., "A1" or "A1:B10")
     fn selection_to_reference_string(&self) -> String {
-        let (anchor_row, anchor_col) = self.selected;
-        let (end_row, end_col) = self.selection_end.unwrap_or(self.selected);
+        let (anchor_row, anchor_col) = self.view_state.selected;
+        let (end_row, end_col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
         let (start_row, start_col, end_row, end_col) = (
             anchor_row.min(end_row),
             anchor_col.min(end_col),
@@ -9212,11 +9196,11 @@ impl Spreadsheet {
 
         if let Some((start_row, start_col, end_row, end_col, ref_str)) = target_info {
             // Select the whole range
-            self.selected = (start_row, start_col);
+            self.view_state.selected = (start_row, start_col);
             if start_row == end_row && start_col == end_col {
-                self.selection_end = None;
+                self.view_state.selection_end = None;
             } else {
-                self.selection_end = Some((end_row, end_col));
+                self.view_state.selection_end = Some((end_row, end_col));
             }
 
             // Center the view on the selection
@@ -9279,12 +9263,12 @@ impl Spreadsheet {
             let visible_rows = self.visible_rows();
             let visible_cols = self.visible_cols();
             self.hint_state.labels = crate::hints::generate_hints(
-                self.scroll_row,
-                self.scroll_col,
+                self.view_state.scroll_row,
+                self.view_state.scroll_col,
                 visible_rows,
                 visible_cols,
             );
-            self.hint_state.viewport = (self.scroll_row, self.scroll_col, visible_rows, visible_cols);
+            self.hint_state.viewport = (self.view_state.scroll_row, self.view_state.scroll_col, visible_rows, visible_cols);
             self.status_message = Some("Hint: type letters to jump".into());
         } else {
             // Command-only mode: no labels, just waiting for g-commands (gg, etc.)
@@ -9338,9 +9322,9 @@ impl Spreadsheet {
                     }
                     HintResolution::Jump(row, col) => {
                         self.hint_state.last_exit_reason = Some(HintExitReason::LabelJump);
-                        self.selected = (row, col);
-                        self.selection_end = None;
-                        self.additional_selections.clear();
+                        self.view_state.selected = (row, col);
+                        self.view_state.selection_end = None;
+                        self.view_state.additional_selections.clear();
                         self.ensure_cell_visible(row, col);
                         self.exit_hint_mode(cx);
                     }
@@ -9365,11 +9349,11 @@ impl Spreadsheet {
         match cmd {
             GCommand::GotoTop => {
                 // gg - Go to A1
-                self.selected = (0, 0);
-                self.selection_end = None;
-                self.additional_selections.clear();
-                self.scroll_row = 0;
-                self.scroll_col = 0;
+                self.view_state.selected = (0, 0);
+                self.view_state.selection_end = None;
+                self.view_state.additional_selections.clear();
+                self.view_state.scroll_row = 0;
+                self.view_state.scroll_col = 0;
                 self.status_message = Some("Jumped to A1".into());
                 cx.notify();
             }
@@ -9444,18 +9428,18 @@ impl Spreadsheet {
             }
             "0" => {
                 // Move to first column
-                self.selected = (self.selected.0, 0);
-                self.selection_end = None;
-                self.ensure_cell_visible(self.selected.0, 0);
+                self.view_state.selected = (self.view_state.selected.0, 0);
+                self.view_state.selection_end = None;
+                self.ensure_cell_visible(self.view_state.selected.0, 0);
                 cx.notify();
                 true
             }
             "$" => {
                 // Move to last column with data in current row (or last visible)
-                let row = self.selected.0;
+                let row = self.view_state.selected.0;
                 let last_col = self.find_last_data_col_in_row(row);
-                self.selected = (row, last_col);
-                self.selection_end = None;
+                self.view_state.selected = (row, last_col);
+                self.view_state.selection_end = None;
                 self.ensure_cell_visible(row, last_col);
                 cx.notify();
                 true
@@ -9548,7 +9532,7 @@ impl Render for Spreadsheet {
         // Update formula bar display cache (only when not editing)
         // This avoids re-parsing on every render
         if !self.mode.is_editing() {
-            let cell = self.selected;
+            let cell = self.view_state.selected;
             let formula = self.sheet().get_raw(cell.0, cell.1);
 
             // Only update cache if cell or formula changed

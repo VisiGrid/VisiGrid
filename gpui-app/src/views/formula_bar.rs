@@ -13,7 +13,7 @@ pub fn render_formula_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     let raw_value = if editing {
         app.edit_value.clone()
     } else {
-        app.sheet().get_raw(app.selected.0, app.selected.1)
+        app.sheet().get_raw(app.view_state.selected.0, app.view_state.selected.1)
     };
 
     // Theme colors
@@ -97,7 +97,7 @@ pub fn render_formula_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                         let raw_value = if this.mode.is_editing() {
                             &this.edit_value
                         } else {
-                            &this.sheet().get_raw(this.selected.0, this.selected.1)
+                            &this.sheet().get_raw(this.view_state.selected.0, this.view_state.selected.1)
                         };
                         this.hover_function = extract_first_function(raw_value);
                     } else {

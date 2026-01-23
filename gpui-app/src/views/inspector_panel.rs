@@ -19,7 +19,7 @@ pub fn render_inspector_panel(app: &mut Spreadsheet, cx: &mut Context<Spreadshee
     let accent = app.token(TokenKey::Accent);
 
     // Get the cell to inspect (pinned or selected)
-    let (row, col) = app.inspector_pinned.unwrap_or(app.selected);
+    let (row, col) = app.inspector_pinned.unwrap_or(app.view_state.selected);
     let cell_ref = app.cell_ref_at(row, col);
     let is_pinned = app.inspector_pinned.is_some();
     let current_tab = app.inspector_tab;

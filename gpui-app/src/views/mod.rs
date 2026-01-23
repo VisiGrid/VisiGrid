@@ -168,15 +168,15 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &MoveToStart, _, cx| {
-            this.selected = (0, 0);
-            this.scroll_row = 0;
-            this.scroll_col = 0;
+            this.view_state.selected = (0, 0);
+            this.view_state.scroll_row = 0;
+            this.view_state.scroll_col = 0;
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &MoveToEnd, _, cx| {
-            this.selected = (crate::app::NUM_ROWS - 1, crate::app::NUM_COLS - 1);
-            this.scroll_row = crate::app::NUM_ROWS.saturating_sub(this.visible_rows());
-            this.scroll_col = crate::app::NUM_COLS.saturating_sub(this.visible_cols());
+            this.view_state.selected = (crate::app::NUM_ROWS - 1, crate::app::NUM_COLS - 1);
+            this.view_state.scroll_row = crate::app::NUM_ROWS.saturating_sub(this.visible_rows());
+            this.view_state.scroll_col = crate::app::NUM_COLS.saturating_sub(this.visible_cols());
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &PageUp, _, cx| {
@@ -264,13 +264,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &SelectRow, _, cx| {
             if !this.mode.is_editing() {
-                let row = this.selected.0;
+                let row = this.view_state.selected.0;
                 this.select_row(row, false, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &SelectColumn, _, cx| {
             if !this.mode.is_editing() {
-                let col = this.selected.1;
+                let col = this.view_state.selected.1;
                 this.select_col(col, false, cx);
             }
         }))
@@ -602,9 +602,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.move_edit_cursor_home(cx);
             } else {
                 // Navigation mode: go to first column of current row
-                this.selected.1 = 0;
-                this.selection_end = None;
-                this.scroll_col = 0;
+                this.view_state.selected.1 = 0;
+                this.view_state.selection_end = None;
+                this.view_state.scroll_col = 0;
                 cx.notify();
             }
         }))
@@ -613,9 +613,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.move_edit_cursor_end(cx);
             } else {
                 // Navigation mode: go to last column of current row
-                this.selected.1 = crate::app::NUM_COLS - 1;
-                this.selection_end = None;
-                this.scroll_col = crate::app::NUM_COLS.saturating_sub(this.visible_cols());
+                this.view_state.selected.1 = crate::app::NUM_COLS - 1;
+                this.view_state.selection_end = None;
+                this.view_state.scroll_col = crate::app::NUM_COLS.saturating_sub(this.visible_cols());
                 cx.notify();
             }
         }))
@@ -735,7 +735,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
             }
             // Fall back to cell references
-            let (row, col) = this.selected;
+            let (row, col) = this.view_state.selected;
             this.show_references(row, col, cx);
         }))
         .on_action(cx.listener(|this, _: &GoToPrecedents, _, cx| {
@@ -747,7 +747,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
             }
             // Fall back to cell precedents
-            let (row, col) = this.selected;
+            let (row, col) = this.view_state.selected;
             this.show_precedents(row, col, cx);
         }))
         .on_action(cx.listener(|this, _: &RenameSymbol, _, cx| {
@@ -1935,9 +1935,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             let suggestions = app.autocomplete_suggestions();
             let selected = app.autocomplete_selected;
             // Calculate popup position below the active cell (scaled for zoom)
-            let popup_x = app.metrics.header_w + app.col_x_offset(app.selected.1);
+            let popup_x = app.metrics.header_w + app.col_x_offset(app.view_state.selected.1);
             let popup_y = MENU_BAR_HEIGHT + FORMULA_BAR_HEIGHT + app.metrics.header_h
-                + app.row_y_offset(app.selected.0) + app.metrics.row_height(app.row_height(app.selected.0));
+                + app.row_y_offset(app.view_state.selected.0) + app.metrics.row_height(app.row_height(app.view_state.selected.0));
             let panel_bg = app.token(TokenKey::PanelBg);
             let panel_border = app.token(TokenKey::PanelBorder);
             let text_primary = app.token(TokenKey::TextPrimary);
@@ -1959,9 +1959,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         // Formula signature help (rendered at top level)
         .when_some(app.signature_help(), |div, sig_info| {
             // Calculate popup position below the active cell (scaled for zoom)
-            let popup_x = app.metrics.header_w + app.col_x_offset(app.selected.1);
+            let popup_x = app.metrics.header_w + app.col_x_offset(app.view_state.selected.1);
             let popup_y = MENU_BAR_HEIGHT + FORMULA_BAR_HEIGHT + app.metrics.header_h
-                + app.row_y_offset(app.selected.0) + app.metrics.row_height(app.row_height(app.selected.0));
+                + app.row_y_offset(app.view_state.selected.0) + app.metrics.row_height(app.row_height(app.view_state.selected.0));
             let panel_bg = app.token(TokenKey::PanelBg);
             let panel_border = app.token(TokenKey::PanelBorder);
             let text_primary = app.token(TokenKey::TextPrimary);
@@ -1981,9 +1981,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         // Formula error banner (rendered at top level)
         .when_some(app.formula_error(), |div, error_info| {
             // Calculate popup position below the active cell (scaled for zoom)
-            let popup_x = app.metrics.header_w + app.col_x_offset(app.selected.1);
+            let popup_x = app.metrics.header_w + app.col_x_offset(app.view_state.selected.1);
             let popup_y = MENU_BAR_HEIGHT + FORMULA_BAR_HEIGHT + app.metrics.header_h
-                + app.row_y_offset(app.selected.0) + app.metrics.row_height(app.row_height(app.selected.0));
+                + app.row_y_offset(app.view_state.selected.0) + app.metrics.row_height(app.row_height(app.view_state.selected.0));
             let error_bg = app.token(TokenKey::ErrorBg);
             let error_color = app.token(TokenKey::Error);
             let panel_border = app.token(TokenKey::PanelBorder);
@@ -2311,7 +2311,7 @@ fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
         content
     } else {
         // Single cell inspector
-        let (row, col) = app.selected;
+        let (row, col) = app.view_state.selected;
         let cell_ref = app.cell_ref_at(row, col);
         let raw_value = app.sheet().get_raw(row, col);
         let display_value = app.sheet().get_display(row, col);
@@ -2657,11 +2657,11 @@ fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
     let top_offset = 24.0 + 32.0 + header_h; // menu + formula bar + column headers
 
     // X position: right edge of selection, offset from scroll
-    let col_offset = (max_col as f32 - app.scroll_col as f32 + 1.0) * cell_w;
+    let col_offset = (max_col as f32 - app.view_state.scroll_col as f32 + 1.0) * cell_w;
     let overlay_x = header_w + col_offset + 8.0; // 8px gap from selection
 
     // Y position: below the selection
-    let row_offset = (max_row as f32 - app.scroll_row as f32 + 1.0) * cell_h;
+    let row_offset = (max_row as f32 - app.view_state.scroll_row as f32 + 1.0) * cell_h;
     let overlay_y = top_offset + row_offset + 4.0; // 4px gap below selection
 
     // Clamp to reasonable bounds (don't go off screen)

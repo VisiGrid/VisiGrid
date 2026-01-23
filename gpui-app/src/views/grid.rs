@@ -18,15 +18,15 @@ use visigrid_engine::formula::eval::Value;
 /// 3. Frozen cols (left, scrolls vertically only)
 /// 4. Main grid (scrolls both directions)
 pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    let scroll_row = app.scroll_row;
-    let scroll_col = app.scroll_col;
-    let selected = app.selected;
+    let scroll_row = app.view_state.scroll_row;
+    let scroll_col = app.view_state.scroll_col;
+    let selected = app.view_state.selected;
     let editing = app.mode.is_editing();
     let edit_value = app.edit_value.clone();
     let total_visible_rows = app.visible_rows();
     let total_visible_cols = app.visible_cols();
-    let frozen_rows = app.frozen_rows;
-    let frozen_cols = app.frozen_cols;
+    let frozen_rows = app.view_state.frozen_rows;
+    let frozen_cols = app.view_state.frozen_cols;
 
     // Read show_gridlines from global settings
     let show_gridlines = match &user_settings(cx).appearance.show_gridlines {
@@ -663,7 +663,7 @@ fn render_cell(
     // - For range selection: show on cell at (max_row, max_col)
     // - No additional selections (Ctrl+Click multi-select)
     // - Not editing, not in hint mode, not already fill dragging
-    let is_fill_handle_cell = if app.selection_end.is_some() {
+    let is_fill_handle_cell = if app.view_state.selection_end.is_some() {
         // Range selection: fill handle goes on bottom-right corner
         let ((_min_row, _min_col), (max_row, max_col)) = app.selection_range();
         view_row == max_row && col == max_col
@@ -674,7 +674,7 @@ fn render_cell(
     let show_fill_handle = is_fill_handle_cell
         && !is_editing
         && app.mode != Mode::Hint
-        && app.additional_selections.is_empty()
+        && app.view_state.additional_selections.is_empty()
         && !app.is_fill_dragging();
 
     // Wrap in relative container for absolute positioning (hint badges, fill handle)

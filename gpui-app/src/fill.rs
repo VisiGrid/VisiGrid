@@ -132,7 +132,7 @@ impl Spreadsheet {
             return;
         }
 
-        let (row, col) = self.selected;
+        let (row, col) = self.view_state.selected;
 
         // Find contiguous numeric cells above
         let above_range = self.find_numeric_range_above(row, col);
@@ -412,16 +412,16 @@ impl Spreadsheet {
 
         // Set the first blank as the primary selection
         let first = blank_cells.remove(0);
-        self.selected = first;
-        self.selection_end = None;
+        self.view_state.selected = first;
+        self.view_state.selection_end = None;
 
         // Add remaining blanks as additional selections (single-cell each)
-        self.additional_selections.clear();
+        self.view_state.additional_selections.clear();
         for cell in blank_cells {
-            self.additional_selections.push((cell, None));
+            self.view_state.additional_selections.push((cell, None));
         }
 
-        let count = 1 + self.additional_selections.len();
+        let count = 1 + self.view_state.additional_selections.len();
         let msg = if count == 1 {
             "Selected 1 blank cell".to_string()
         } else {
@@ -443,13 +443,13 @@ impl Spreadsheet {
     /// Start fill handle drag from the active cell
     pub fn start_fill_drag(&mut self, cx: &mut Context<Self>) {
         // Only allow from single cell (v1 limitation)
-        if self.selection_end.is_some() || !self.additional_selections.is_empty() {
+        if self.view_state.selection_end.is_some() || !self.view_state.additional_selections.is_empty() {
             self.status_message = Some("Fill handle works from single cell".into());
             cx.notify();
             return;
         }
 
-        let anchor = self.selected;
+        let anchor = self.view_state.selected;
         self.fill_drag = FillDrag::Dragging {
             anchor,
             current: anchor,
@@ -595,7 +595,7 @@ impl Spreadsheet {
         self.maybe_smoke_recalc();
 
         // Update selection to include filled range
-        self.selection_end = Some(end);
+        self.view_state.selection_end = Some(end);
 
         self.status_message = Some(format!("Filled {} cell{}", count, if count == 1 { "" } else { "s" }));
         cx.notify();
@@ -656,7 +656,7 @@ impl Spreadsheet {
         self.maybe_smoke_recalc();
 
         // Update selection to include filled range
-        self.selection_end = Some(end);
+        self.view_state.selection_end = Some(end);
 
         self.status_message = Some(format!("Filled {} cell{}", count, if count == 1 { "" } else { "s" }));
         cx.notify();
