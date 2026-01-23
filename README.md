@@ -37,7 +37,7 @@ Get the latest release from the [Releases page](https://github.com/VisiGrid/Visi
 
 ## Build from source
 
-Requires [Rust](https://rustup.rs/) 1.75+.
+Requires [Rust](https://rustup.rs/) 1.80+.
 
 ```bash
 git clone https://github.com/VisiGrid/VisiGrid.git
