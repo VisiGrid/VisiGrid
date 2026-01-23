@@ -1,6 +1,7 @@
 mod about_dialog;
 pub mod command_palette;
 mod export_report_dialog;
+mod filter_dropdown;
 mod find_dialog;
 mod font_picker;
 mod formula_bar;
@@ -438,6 +439,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.hide_preferences(cx);
             } else if this.mode == Mode::License {
                 this.hide_license(cx);
+            } else if this.filter_dropdown_col.is_some() {
+                // Esc closes filter dropdown
+                this.close_filter_dropdown(cx);
             } else if this.inspector_visible && this.mode == Mode::Navigation {
                 // Esc closes inspector panel when in navigation mode
                 this.inspector_visible = false;
@@ -504,6 +508,22 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &FillRight, window, cx| {
             this.fill_right(cx);
+            this.update_title_if_needed(window);
+        }))
+        // Data operations (sort/filter)
+        .on_action(cx.listener(|this, _: &SortAscending, window, cx| {
+            this.sort_by_current_column(visigrid_engine::filter::SortDirection::Ascending, cx);
+            this.update_title_if_needed(window);
+        }))
+        .on_action(cx.listener(|this, _: &SortDescending, window, cx| {
+            this.sort_by_current_column(visigrid_engine::filter::SortDirection::Descending, cx);
+            this.update_title_if_needed(window);
+        }))
+        .on_action(cx.listener(|this, _: &ToggleAutoFilter, _, cx| {
+            this.toggle_auto_filter(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ClearSort, window, cx| {
+            this.clear_sort(cx);
             this.update_title_if_needed(window);
         }))
         .on_action(cx.listener(|this, _: &AutoSum, _, cx| {
@@ -833,6 +853,35 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.hide_sheet_context_menu(cx);
                 if event.keystroke.key == "escape" {
                     return;
+                }
+            }
+
+            // Handle filter dropdown keys
+            if this.filter_dropdown_col.is_some() {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.close_filter_dropdown(cx);
+                        return;
+                    }
+                    "enter" => {
+                        this.apply_filter_dropdown(cx);
+                        return;
+                    }
+                    "backspace" => {
+                        this.filter_search_text.pop();
+                        cx.notify();
+                        return;
+                    }
+                    _ => {
+                        // Type into search box
+                        if let Some(ch) = &event.keystroke.key_char {
+                            if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt {
+                                this.filter_search_text.push_str(ch);
+                                cx.notify();
+                                return;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1861,6 +1910,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         // Menu dropdown (only on non-macOS where we have in-app menu)
         .when(!cfg!(target_os = "macos") && app.open_menu.is_some(), |div| {
             div.child(menu_bar::render_menu_dropdown(app, cx))
+        })
+        // Filter dropdown popup
+        .when_some(filter_dropdown::render_filter_dropdown(app, cx), |div, dropdown| {
+            div.child(dropdown)
         })
         // Inspector panel (right-side drawer)
         .when(show_inspector, |div| {

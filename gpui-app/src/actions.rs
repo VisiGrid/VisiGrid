@@ -182,6 +182,14 @@ actions!(sheets, [
     AddSheet,
 ]);
 
+// Data actions (sort/filter)
+actions!(data, [
+    SortAscending,   // Sort current column ascending
+    SortDescending,  // Sort current column descending
+    ToggleAutoFilter, // Ctrl+Shift+F - enable/disable AutoFilter
+    ClearSort,       // Remove current sort (restore original order)
+]);
+
 // Command palette actions
 actions!(palette, [
     PaletteUp,

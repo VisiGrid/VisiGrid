@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 license = "MIT"
 
@@ -23,6 +23,7 @@ serde_json = "1"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
+ordered-float = "4"
 
 # Internal crates
 visigrid-engine = { path = "crates/engine" }

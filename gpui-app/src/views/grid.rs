@@ -8,6 +8,7 @@ use crate::settings::{user_settings, Setting};
 use crate::theme::TokenKey;
 use super::headers::render_row_header;
 use visigrid_engine::cell::{Alignment, VerticalAlignment};
+use visigrid_engine::formula::eval::Value;
 
 /// Render the main cell grid with freeze pane support
 ///
@@ -50,10 +51,14 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                     .flex()
                     .flex_col()
                     .children(
-                        (0..total_visible_rows).map(|visible_row| {
-                            let row = scroll_row + visible_row;
-                            render_row(
-                                row,
+                        (0..total_visible_rows).filter_map(|screen_row| {
+                            // Get the view_row and data_row for this screen position
+                            // This respects both sort order AND filter visibility
+                            let visible_index = scroll_row + screen_row;
+                            let (view_row, data_row) = app.nth_visible_row(visible_index)?;
+                            Some(render_row(
+                                view_row,
+                                data_row,
                                 scroll_col,
                                 total_visible_cols,
                                 selected,
@@ -63,7 +68,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                                 app,
                                 window,
                                 cx,
-                            )
+                            ))
                         })
                     )
             )
@@ -86,21 +91,23 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                     .flex()
                     .flex_shrink_0()
                     .children(
-                        (0..frozen_rows).map(|row| {
+                        (0..frozen_rows).map(|view_row| {
+                            // Frozen rows: view_row == data_row (headers don't sort)
+                            let data_row = app.view_to_data(view_row);
                             // Use scaled row height for rendering
-                            let row_height = metrics.row_height(app.row_height(row));
+                            let row_height = metrics.row_height(app.row_height(view_row));
                             div()
                                 .flex()
                                 .flex_shrink_0()
                                 .h(px(row_height))
                                 // Row header for frozen row
-                                .child(render_row_header(app, row, cx))
+                                .child(render_row_header(app, view_row, cx))
                                 // Frozen corner cells (cols 0..frozen_cols)
                                 .when(frozen_cols > 0, |d| {
                                     d.children(
                                         (0..frozen_cols).map(|col| {
                                             let col_width = metrics.col_width(app.col_width(col));
-                                            render_cell(row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                            render_cell(view_row, data_row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
                                         })
                                     )
                                 })
@@ -118,7 +125,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                                     (0..scrollable_visible_cols).map(|visible_col| {
                                         let col = scroll_col + visible_col;
                                         let col_width = metrics.col_width(app.col_width(col));
-                                        render_cell(row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                        render_cell(view_row, data_row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
                                     })
                                 )
                         })
@@ -142,21 +149,24 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                         .flex()
                         .flex_col()
                         .children(
-                            (0..scrollable_visible_rows).map(|visible_row| {
-                                let row = scroll_row + visible_row;
-                                let row_height = metrics.row_height(app.row_height(row));
-                                div()
+                            (0..scrollable_visible_rows).filter_map(|screen_row| {
+                                // Get the view_row and data_row for this screen position
+                                // Account for frozen rows + scroll position in visible index
+                                let visible_index = frozen_rows + scroll_row + screen_row;
+                                let (view_row, data_row) = app.nth_visible_row(visible_index)?;
+                                let row_height = metrics.row_height(app.row_height(view_row));
+                                Some(div()
                                     .flex()
                                     .flex_shrink_0()
                                     .h(px(row_height))
                                     // Row header
-                                    .child(render_row_header(app, row, cx))
+                                    .child(render_row_header(app, view_row, cx))
                                     // Frozen column cells (cols 0..frozen_cols)
                                     .when(frozen_cols > 0, |d| {
                                         d.children(
                                             (0..frozen_cols).map(|col| {
                                                 let col_width = metrics.col_width(app.col_width(col));
-                                                render_cell(row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                                render_cell(view_row, data_row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
                                             })
                                         )
                                     })
@@ -174,9 +184,9 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                                         (0..scrollable_visible_cols).map(|visible_col| {
                                             let col = scroll_col + visible_col;
                                             let col_width = metrics.col_width(app.col_width(col));
-                                            render_cell(row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                            render_cell(view_row, data_row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
                                         })
-                                    )
+                                    ))
                             })
                         )
                 )
@@ -185,7 +195,8 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
 }
 
 fn render_row(
-    row: usize,
+    view_row: usize,
+    data_row: usize,
     scroll_col: usize,
     visible_cols: usize,
     selected: (usize, usize),
@@ -196,25 +207,27 @@ fn render_row(
     window: &Window,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    // Use scaled dimensions for rendering
-    let row_height = app.metrics.row_height(app.row_height(row));
+    // Use scaled dimensions for rendering (use view_row for consistent row heights)
+    let row_height = app.metrics.row_height(app.row_height(view_row));
 
     div()
         .flex()
         .flex_shrink_0()
         .h(px(row_height))
-        .child(render_row_header(app, row, cx))
+        .child(render_row_header(app, view_row, cx))
         .children(
             (0..visible_cols).map(|visible_col| {
                 let col = scroll_col + visible_col;
                 let col_width = app.metrics.col_width(app.col_width(col));
-                render_cell(row, col, col_width, row_height, selected, editing, edit_value, show_gridlines, app, window, cx)
+                // view_row for selection/display, data_row for cell data access
+                render_cell(view_row, data_row, col, col_width, row_height, selected, editing, edit_value, show_gridlines, app, window, cx)
             })
         )
 }
 
 fn render_cell(
-    row: usize,
+    view_row: usize,
+    data_row: usize,
     col: usize,
     col_width: f32,
     _row_height: f32,
@@ -226,16 +239,17 @@ fn render_cell(
     window: &Window,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    let is_selected = app.is_selected(row, col);
-    let is_active = selected == (row, col);
+    // Selection uses view_row (what user sees/clicks)
+    let is_selected = app.is_selected(view_row, col);
+    let is_active = selected == (view_row, col);
     let is_editing = editing && is_active;
-    let is_formula_ref = app.is_formula_ref(row, col);
-    let formula_ref_color = app.formula_ref_color(row, col);  // Color index for multi-color refs
+    let is_formula_ref = app.is_formula_ref(view_row, col);
+    let formula_ref_color = app.formula_ref_color(view_row, col);  // Color index for multi-color refs
 
     // Check for hint mode and get hint label for this cell
     let hint_label = if app.mode == Mode::Hint {
         app.hint_state.labels.iter()
-            .find(|h| h.row == row && h.col == col)
+            .find(|h| h.row == view_row && h.col == col)
             .map(|h| {
                 let buffer = &app.hint_state.buffer;
                 let matches = h.label.starts_with(buffer);
@@ -246,24 +260,25 @@ fn render_cell(
         None
     };
 
-    // Spill state detection
-    let is_spill_parent = app.sheet().is_spill_parent(row, col);
-    let is_spill_receiver = app.sheet().is_spill_receiver(row, col);
-    let has_spill_error = app.sheet().has_spill_error(row, col);
+    // Spill state detection - uses data_row (storage)
+    let is_spill_parent = app.sheet().is_spill_parent(data_row, col);
+    let is_spill_receiver = app.sheet().is_spill_receiver(data_row, col);
+    let has_spill_error = app.sheet().has_spill_error(data_row, col);
 
     // Check for multi-edit preview (shows what each selected cell will receive)
-    let multi_edit_preview = app.multi_edit_preview(row, col);
+    let multi_edit_preview = app.multi_edit_preview(view_row, col);
     let is_multi_edit_preview = multi_edit_preview.is_some();
 
+    // Cell value: use data_row to access actual storage
     let value = if is_editing {
         edit_value.to_string()
     } else if let Some(preview) = multi_edit_preview {
         // Show the preview value for cells in multi-selection during editing
         preview
     } else if app.show_formulas() {
-        app.sheet().get_raw(row, col)
+        app.sheet().get_raw(data_row, col)
     } else {
-        let display = app.sheet().get_formatted_display(row, col);
+        let display = app.sheet().get_formatted_display(data_row, col);
         // Hide zero values if show_zeros is false
         if !app.show_zeros() && display == "0" {
             String::new()
@@ -272,8 +287,8 @@ fn render_cell(
         }
     };
 
-    let format = app.sheet().get_format(row, col);
-    let cell_row = row;
+    let format = app.sheet().get_format(data_row, col);
+    let cell_row = view_row;  // For UI interactions (click, selection)
     let cell_col = col;
 
     // Determine border color based on cell state (spill states take precedence over normal states)
@@ -288,7 +303,7 @@ fn render_cell(
     };
 
     let mut cell = div()
-        .id(ElementId::Name(format!("cell-{}-{}", row, col).into()))
+        .id(ElementId::Name(format!("cell-{}-{}", view_row, col).into()))
         .relative()  // Enable absolute positioning for selection overlay
         .size_full()
         .flex()
@@ -311,7 +326,15 @@ fn render_cell(
     }
 
     // Apply horizontal alignment
+    // General alignment: numbers right-align, text/empty left-aligns (Excel behavior)
     cell = match format.alignment {
+        Alignment::General => {
+            let computed = app.sheet().get_computed_value(data_row, col);
+            match computed {
+                Value::Number(_) => cell.justify_end(),
+                _ => cell.justify_start(),
+            }
+        }
         Alignment::Left => cell.justify_start(),
         Alignment::Center => cell.justify_center(),
         Alignment::Right => cell.justify_end(),
@@ -333,7 +356,7 @@ fn render_cell(
         cell.border_1()
     } else if is_selected {
         // Selected cells: only draw outer edges to avoid double borders
-        let (top, right, bottom, left) = app.selection_borders(row, col);
+        let (top, right, bottom, left) = app.selection_borders(view_row, col);
         let mut c = cell;
         if top { c = c.border_t_1(); }
         if right { c = c.border_r_1(); }
@@ -348,7 +371,7 @@ fn render_cell(
         cell.border_1()
     } else if is_formula_ref {
         // Get which borders to draw for this formula ref cell
-        let (top, right, bottom, left) = app.formula_ref_borders(row, col);
+        let (top, right, bottom, left) = app.formula_ref_borders(view_row, col);
         let mut c = cell;
         if top { c = c.border_t_1(); }
         if right { c = c.border_r_1(); }
@@ -356,8 +379,8 @@ fn render_cell(
         if left { c = c.border_l_1(); }
         c
     } else {
-        // Check for user-defined borders first
-        let (user_top, user_right, user_bottom, user_left) = app.cell_user_borders(row, col);
+        // Check for user-defined borders first (stored per data cell)
+        let (user_top, user_right, user_bottom, user_left) = app.cell_user_borders(data_row, col);
         let has_user_border = user_top || user_right || user_bottom || user_left;
 
         if has_user_border {
@@ -372,8 +395,8 @@ fn render_cell(
         } else if show_gridlines {
             // Normal gridlines (only when enabled in settings)
             // Don't draw gridlines toward selected cells (selection borders handle those edges)
-            let cell_right_selected = app.is_selected(row, col + 1);
-            let cell_below_selected = app.is_selected(row + 1, col);
+            let cell_right_selected = app.is_selected(view_row, col + 1);
+            let cell_below_selected = app.is_selected(view_row + 1, col);
             let mut c = cell;
             if !cell_right_selected { c = c.border_r_1(); }
             if !cell_below_selected { c = c.border_b_1(); }
@@ -388,8 +411,8 @@ fn render_cell(
         .text_color(cell_text_color(app, is_editing, is_selected, is_multi_edit_preview))
         .text_size(px(app.metrics.font_size))  // Scaled font size for zoom
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-            // Don't handle clicks if inspector is visible (like Excel's Ctrl+1 modal behavior)
-            if this.inspector_visible {
+            // Don't handle clicks if modal/overlay is visible
+            if this.inspector_visible || this.filter_dropdown_col.is_some() {
                 return;
             }
             // Don't handle clicks if we're resizing
@@ -438,8 +461,8 @@ fn render_cell(
             }
         }))
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
-            // Don't handle if inspector is visible
-            if this.inspector_visible {
+            // Don't handle if modal/overlay is visible
+            if this.inspector_visible || this.filter_dropdown_col.is_some() {
                 return;
             }
             // Continue fill handle drag if active (priority over selection drag)
@@ -457,8 +480,8 @@ fn render_cell(
             }
         }))
         .on_mouse_up(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            // Don't handle if inspector is visible
-            if this.inspector_visible {
+            // Don't handle if modal/overlay is visible
+            if this.inspector_visible || this.filter_dropdown_col.is_some() {
                 return;
             }
             // End fill handle drag if active (commits the fill)
@@ -625,7 +648,7 @@ fn render_cell(
     }
 
     // Check if this cell is in fill preview range
-    let is_fill_preview = app.is_fill_preview_cell(row, col);
+    let is_fill_preview = app.is_fill_preview_cell(view_row, col);
 
     // Apply fill preview styling (dashed-like effect via different border color)
     if is_fill_preview {
@@ -643,7 +666,7 @@ fn render_cell(
     let is_fill_handle_cell = if app.selection_end.is_some() {
         // Range selection: fill handle goes on bottom-right corner
         let ((_min_row, _min_col), (max_row, max_col)) = app.selection_range();
-        row == max_row && col == max_col
+        view_row == max_row && col == max_col
     } else {
         // Single cell: fill handle goes on active cell
         is_active
@@ -679,7 +702,7 @@ fn render_cell(
 
         wrapper = wrapper.child(
             div()
-                .id(ElementId::Name(format!("fill-handle-{}-{}", row, col).into()))
+                .id(ElementId::Name(format!("fill-handle-{}-{}", view_row, col).into()))
                 .absolute()
                 .bottom(px(-hit_offset))
                 .right(px(-hit_offset))

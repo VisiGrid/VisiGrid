@@ -13,6 +13,7 @@ visigrid-engine = { workspace = true }
 csv = "1"
 calamine = "0.26"
 rust_xlsxwriter = "0.79"
+encoding_rs = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

@@ -6,6 +6,7 @@ use super::formula::parser::{self, ParsedExpr};
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub enum Alignment {
     #[default]
+    General,  // Auto: numbers right-align, text left-aligns (Excel default)
     Left,
     Center,
     Right,
@@ -506,7 +507,7 @@ mod tests {
         assert!(!format.italic);
         assert!(!format.underline);
         assert!(!format.strikethrough);
-        assert_eq!(format.alignment, Alignment::Left);
+        assert_eq!(format.alignment, Alignment::General);
         assert_eq!(format.vertical_alignment, VerticalAlignment::Middle);
         assert_eq!(format.text_overflow, TextOverflow::Clip);
         assert_eq!(format.number_format, NumberFormat::General);

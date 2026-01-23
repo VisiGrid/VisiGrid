@@ -3742,6 +3742,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "ordered-float"
+version = "4.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "ordered-stream"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5921,7 +5930,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visigrid-cli"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "clap",
  "csv",
@@ -5934,7 +5943,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-config"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "dirs 5.0.1",
  "serde",
@@ -5944,22 +5953,23 @@ dependencies = [
 
 [[package]]
 name = "visigrid-core"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "visigrid-engine"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
+ "ordered-float",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "visigrid-gpui"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "core-text",
  "dirs 5.0.1",
@@ -5981,10 +5991,11 @@ dependencies = [
 
 [[package]]
 name = "visigrid-io"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "calamine",
  "csv",
+ "encoding_rs",
  "rusqlite",
  "rust_xlsxwriter",
  "serde",
@@ -5995,7 +6006,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-license"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "base64",
  "chrono",

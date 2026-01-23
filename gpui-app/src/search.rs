@@ -129,6 +129,12 @@ pub enum CommandId {
     NextSheet,
     PrevSheet,
     AddSheet,
+
+    // Data (sort/filter)
+    SortAscending,
+    SortDescending,
+    ToggleAutoFilter,
+    ClearSort,
 }
 
 impl CommandId {
@@ -196,6 +202,10 @@ impl CommandId {
             Self::NextSheet => "Next Sheet",
             Self::PrevSheet => "Previous Sheet",
             Self::AddSheet => "Add Sheet",
+            Self::SortAscending => "Sort Ascending (A→Z)",
+            Self::SortDescending => "Sort Descending (Z→A)",
+            Self::ToggleAutoFilter => "Toggle AutoFilter",
+            Self::ClearSort => "Clear Sort",
         }
     }
 
@@ -231,6 +241,7 @@ impl CommandId {
             Self::ZoomIn => Some("Ctrl+Shift+="),
             Self::ZoomOut => Some("Ctrl+Shift+-"),
             Self::ZoomReset => Some("Ctrl+0"),
+            Self::ToggleAutoFilter => Some("Ctrl+Shift+F"),
             _ => None,
         }
     }
@@ -299,6 +310,10 @@ impl CommandId {
             Self::NextSheet => "tab worksheet",
             Self::PrevSheet => "tab worksheet",
             Self::AddSheet => "new tab worksheet",
+            Self::SortAscending => "sort order ascending asc a-z smallest lowest",
+            Self::SortDescending => "sort order descending desc z-a largest highest",
+            Self::ToggleAutoFilter => "filter dropdown autofilter data",
+            Self::ClearSort => "unsort restore original order",
         }
     }
 
@@ -366,6 +381,10 @@ impl CommandId {
             Self::NextSheet,
             Self::PrevSheet,
             Self::AddSheet,
+            Self::SortAscending,
+            Self::SortDescending,
+            Self::ToggleAutoFilter,
+            Self::ClearSort,
         ]
     }
 
@@ -435,7 +454,11 @@ impl CommandId {
             Self::FillDown
             | Self::FillRight
             | Self::TrimWhitespace
-            | Self::AutoSum => Some(MenuCategory::Data),
+            | Self::AutoSum
+            | Self::SortAscending
+            | Self::SortDescending
+            | Self::ToggleAutoFilter
+            | Self::ClearSort => Some(MenuCategory::Data),
 
             // Help menu
             Self::ShowShortcuts

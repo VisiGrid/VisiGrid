@@ -143,6 +143,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "pageup"), PrevSheet, Some("Spreadsheet")),
         KeyBinding::new("shift-f11", AddSheet, Some("Spreadsheet")),
 
+        // Data operations (sort/filter)
+        KeyBinding::new(&kb_shift(m, "f"), ToggleAutoFilter, Some("Spreadsheet")),
+
         // Command palette (in CommandPalette context)
         KeyBinding::new("up", PaletteUp, Some("CommandPalette")),
         KeyBinding::new("down", PaletteDown, Some("CommandPalette")),

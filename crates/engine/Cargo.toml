@@ -8,3 +8,4 @@ description = "Spreadsheet engine - cells, sheets, formulas"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+ordered-float = { workspace = true }

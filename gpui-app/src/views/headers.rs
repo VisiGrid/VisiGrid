@@ -3,6 +3,45 @@ use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
 
+/// Render the filter dropdown button for a column header cell
+/// Shows only when AutoFilter is enabled and the column is in the filter range
+pub fn render_filter_button(
+    app: &Spreadsheet,
+    col: usize,
+    cx: &mut Context<Spreadsheet>,
+) -> Option<impl IntoElement> {
+    // Only show if AutoFilter is enabled and column is in filter range
+    if !app.filter_state.is_enabled() || !app.filter_state.contains_column(col) {
+        return None;
+    }
+
+    let has_active_filter = app.column_has_filter(col);
+    let accent = app.token(TokenKey::Accent);
+    let text_muted = app.token(TokenKey::TextMuted);
+
+    Some(
+        div()
+            .id(ElementId::NamedInteger("filter-btn".into(), col as u64))
+            .absolute()
+            .right(px(1.0))
+            .bottom(px(1.0))
+            .w(px(12.0))
+            .h(px(12.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .rounded_sm()
+            .text_size(px(8.0))
+            .when(has_active_filter, |d| d.text_color(accent).bg(accent.opacity(0.2)))
+            .when(!has_active_filter, |d| d.text_color(text_muted).hover(|s| s.bg(text_muted.opacity(0.2))))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.open_filter_dropdown(col, cx);
+            }))
+            .child("▼")
+    )
+}
+
 /// Render the column header row (A, B, C, ...) with resize handles
 ///
 /// With freeze panes active, renders:
@@ -104,6 +143,8 @@ fn render_column_header(
         .cursor_pointer()
         .hover(|s| s.bg(selection_bg.opacity(0.3)))
         .child(Spreadsheet::col_letter(col))
+        // Filter dropdown button (when AutoFilter is enabled)
+        .when_some(render_filter_button(app, col, cx), |d, btn| d.child(btn))
         // Click handler for column selection
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             // Check if click is in the resize handle area (last 6px of column)

@@ -152,6 +152,18 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                     )
                 })
                 .children(selection_stats)
+                // Filter indicator (when filtering is active)
+                .when(app.row_view.is_filtered(), |d| {
+                    let visible = app.row_view.visible_count();
+                    let total = app.row_view.row_count();
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .text_color(text_muted)
+                            .child(format!("{} of {} rows", visible, total))
+                    )
+                })
                 // Zoom indicator
                 .child(
                     div()

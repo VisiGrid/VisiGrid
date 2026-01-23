@@ -1,6 +1,7 @@
 // CSV/TSV import/export
 
 use std::path::Path;
+use std::io::Read;
 
 use visigrid_engine::sheet::{Sheet, SheetId};
 
@@ -12,23 +13,51 @@ pub fn import_tsv(path: &Path) -> Result<Sheet, String> {
     import_with_delimiter(path, b'\t')
 }
 
+/// Read file and convert to UTF-8 if needed (handles Windows-1252, Latin-1, etc.)
+fn read_file_as_utf8(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+
+    // Try UTF-8 first
+    if let Ok(s) = String::from_utf8(bytes.clone()) {
+        return Ok(s);
+    }
+
+    // Fall back to Windows-1252 (common for Excel-exported CSVs)
+    // This handles most non-UTF-8 files from Windows/Excel
+    let (decoded, _, _) = encoding_rs::WINDOWS_1252.decode(&bytes);
+    Ok(decoded.into_owned())
+}
+
 fn import_with_delimiter(path: &Path, delimiter: u8) -> Result<Sheet, String> {
+    // Read file with encoding conversion
+    let content = read_file_as_utf8(path)?;
+
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(delimiter)
         .has_headers(false)
-        .from_path(path)
-        .map_err(|e| e.to_string())?;
+        .from_reader(content.as_bytes());
 
-    let mut sheet = Sheet::new(SheetId(1), 1000, 26);
+    // Start with reasonable defaults, will track actual extent
+    let mut sheet = Sheet::new(SheetId(1), 65536, 256);
+    let mut max_row = 0usize;
+    let mut max_col = 0usize;
 
     for (row_idx, result) in reader.records().enumerate() {
         let record = result.map_err(|e| e.to_string())?;
         for (col_idx, field) in record.iter().enumerate() {
             if !field.is_empty() {
                 sheet.set_value(row_idx, col_idx, field);
+                max_col = max_col.max(col_idx);
             }
         }
+        max_row = row_idx;
     }
+
+    // Update sheet dimensions to actual data extent (for export efficiency)
+    sheet.rows = (max_row + 1).max(1000);
+    sheet.cols = (max_col + 1).max(26);
 
     Ok(sheet)
 }
