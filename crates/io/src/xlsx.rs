@@ -831,6 +831,7 @@ fn build_excel_format(cell_format: &CellFormat) -> Format {
 
     // Horizontal alignment
     format = match cell_format.alignment {
+        Alignment::General => format, // Excel default: numbers right, text left
         Alignment::Left => format.set_align(FormatAlign::Left),
         Alignment::Center => format.set_align(FormatAlign::Center),
         Alignment::Right => format.set_align(FormatAlign::Right),

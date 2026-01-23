@@ -174,11 +174,60 @@ jobs:
 
           Compress-Archive -Path $DistDir -DestinationPath "dist\VisiGrid-windows-x64.zip"
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          # Download Inno Setup
+          $InnoUrl = "https://jrsoftware.org/download.php/is.exe"
+          $InnoInstaller = "$env:TEMP\innosetup.exe"
+          Invoke-WebRequest -Uri $InnoUrl -OutFile $InnoInstaller
+
+          # Install silently
+          Start-Process -FilePath $InnoInstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+
+          # Add to PATH for this job
+          echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $Version = "${{ steps.version.outputs.version }}"
+
+          # Create dist directory if it doesn't exist
+          New-Item -ItemType Directory -Path "dist" -Force
+
+          # Run Inno Setup compiler
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DVersion=$Version "installer\VisiGrid.iss"
+
+          # Verify output
+          if (Test-Path "dist\VisiGrid-Setup-x64.exe") {
+            Write-Host "Installer created successfully"
+            Get-Item "dist\VisiGrid-Setup-x64.exe" | Select-Object Name, Length
+          } else {
+            Write-Error "Installer not found!"
+            exit 1
+          }
+
+      - name: Sign installer
+        continue-on-error: true
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          files-folder: dist
+          files-folder-filter: exe
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.exe
 
   build-macos:
     runs-on: macos-14
@@ -370,15 +419,22 @@ jobs:
             | Platform | Download |
             |----------|----------|
             | **macOS** (Universal) | `VisiGrid-macOS-universal.dmg` |
-            | **Windows** (x64) | `VisiGrid-windows-x64.zip` |
+            | **Windows** (x64) | `VisiGrid-Setup-x64.exe` (Recommended) |
             | **Linux** (x86_64) | `VisiGrid-linux-x86_64.tar.gz` |
             | **Linux** (AppImage) | `VisiGrid-x86_64.AppImage` |
+
+            <details>
+            <summary>Advanced Windows options</summary>
+
+            - `VisiGrid-windows-x64.zip` - Portable version (no installation)
+
+            </details>
 
             ### Installation
 
             **macOS**: Open the DMG and drag VisiGrid to Applications.
 
-            **Windows**: Extract the zip and run `visigrid.exe`.
+            **Windows**: Run the installer. Includes optional CLI tools and PATH integration.
 
             **Linux**: Extract the tarball and run `./install.sh`, or use the AppImage directly.
 

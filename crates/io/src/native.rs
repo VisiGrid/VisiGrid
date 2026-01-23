@@ -112,6 +112,7 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
 
                 // Convert alignment to integer
                 let alignment_int = match format.alignment {
+                    Alignment::General => 3,
                     Alignment::Left => 0,
                     Alignment::Center => 1,
                     Alignment::Right => 2,
@@ -356,6 +357,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
 
                 // Convert alignment to integer
                 let alignment_int = match format.alignment {
+                    Alignment::General => 3,
                     Alignment::Left => 0,
                     Alignment::Center => 1,
                     Alignment::Right => 2,

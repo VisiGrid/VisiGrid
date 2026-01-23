@@ -1,9 +1,10 @@
 # VisiGrid Windows Bundle Script
-# Creates portable zip and optional MSI installer
+# Creates portable zip, Inno Setup installer, and optional MSI installer
 
 param(
     [switch]$Debug,
     [switch]$Portable,
+    [switch]$Inno,
     [switch]$Msi,
     [switch]$All,
     [switch]$Help
@@ -36,6 +37,7 @@ if ($Help) {
     Write-Output "Options:"
     Write-Output "  -Debug      Build debug instead of release"
     Write-Output "  -Portable   Create portable zip archive"
+    Write-Output "  -Inno       Create Inno Setup installer (requires Inno Setup)"
     Write-Output "  -Msi        Create MSI installer (requires WiX)"
     Write-Output "  -All        Create all package formats"
     Write-Output "  -Help       Show this help message"
@@ -43,12 +45,13 @@ if ($Help) {
 }
 
 # Default to portable if nothing specified
-if (-not $Portable -and -not $Msi) {
+if (-not $Portable -and -not $Inno -and -not $Msi) {
     $Portable = $true
 }
 
 if ($All) {
     $Portable = $true
+    $Inno = $true
     $Msi = $true
 }
 
@@ -122,6 +125,47 @@ For more information, visit: https://visigrid.com
     Remove-Item -Recurse -Force $PortableDir
 
     Write-ColorOutput Green "Portable zip created: $ZipPath"
+}
+
+# Create Inno Setup installer
+if ($Inno) {
+    Write-Output ""
+    Write-ColorOutput Yellow "Creating Inno Setup installer..."
+
+    # Check for Inno Setup
+    $InnoPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    if (-not (Test-Path $InnoPath)) {
+        $InnoPath = Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+    }
+
+    if (-not $InnoPath -or -not (Test-Path $InnoPath)) {
+        Write-ColorOutput Red "Inno Setup not found!"
+        Write-Output "Please install Inno Setup from: https://jrsoftware.org/isdl.php"
+        Write-Output "Or add ISCC.exe to your PATH"
+    } else {
+        # Build CLI as well
+        Write-ColorOutput Yellow "Building CLI..."
+        cargo build $CargoFlags -p visigrid-cli
+
+        # Create dist directory for output
+        $DistDir = Join-Path $WorkspaceDir "dist"
+        New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
+
+        # Run Inno Setup compiler
+        $InstallerScript = Join-Path $WorkspaceDir "installer\VisiGrid.iss"
+        & $InnoPath /DVersion=$Version $InstallerScript
+
+        if ($LASTEXITCODE -eq 0) {
+            $InstallerPath = Join-Path $DistDir "VisiGrid-Setup-x64.exe"
+            if (Test-Path $InstallerPath) {
+                # Move to build directory
+                Move-Item $InstallerPath $BuildDir -Force
+                Write-ColorOutput Green "Installer created: $(Join-Path $BuildDir 'VisiGrid-Setup-x64.exe')"
+            }
+        } else {
+            Write-ColorOutput Red "Inno Setup compilation failed!"
+        }
+    }
 }
 
 # Create MSI installer
