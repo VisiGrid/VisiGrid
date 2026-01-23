@@ -279,6 +279,9 @@ impl Spreadsheet {
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
+        // Commit any pending edit so it's included in the save
+        self.commit_pending_edit();
+
         if let Some(path) = &self.current_file.clone() {
             self.save_to_path(path, cx);
         } else {
@@ -287,6 +290,9 @@ impl Spreadsheet {
     }
 
     pub fn save_as(&mut self, cx: &mut Context<Self>) {
+        // Commit any pending edit so it's included in the save
+        self.commit_pending_edit();
+
         // For directory: prefer current file location, then import source, then current dir
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
@@ -375,6 +381,9 @@ impl Spreadsheet {
     /// Export workbook to Excel (.xlsx) format
     /// This is a presentation snapshot - not a round-trip format.
     pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
+        // Commit any pending edit so it's included in the export
+        self.commit_pending_edit();
+
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
@@ -472,6 +481,9 @@ impl Spreadsheet {
     where
         F: Fn(&visigrid_engine::sheet::Sheet, &std::path::Path) -> Result<(), String> + Send + 'static,
     {
+        // Commit any pending edit so it's included in the export
+        self.commit_pending_edit();
+
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())

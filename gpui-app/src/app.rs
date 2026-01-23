@@ -796,7 +796,7 @@ impl Spreadsheet {
         Self {
             workbook,
             history: History::new(),
-            row_view: RowView::new(10000),  // Identity mapping, all visible
+            row_view: RowView::new(NUM_ROWS),  // Identity mapping, all visible
             filter_state: FilterState::default(),
             filter_dropdown_col: None,
             filter_search_text: String::new(),
@@ -1051,7 +1051,7 @@ impl Spreadsheet {
         };
 
         // Call engine's sort function
-        let (new_order, undo) = sort_by_column(
+        let (new_order, undo_item) = sort_by_column(
             &self.row_view,
             &self.filter_state,
             value_at,
@@ -1059,9 +1059,17 @@ impl Spreadsheet {
             direction,
         );
 
-        // Store undo state (row_order + sort_state)
-        // For now, we'll integrate with the existing undo system later
-        // TODO: Proper undo integration
+        // Record undo for sort operation
+        let previous_sort_state = undo_item.previous_sort_state.map(|s| {
+            (s.column, s.direction == visigrid_engine::filter::SortDirection::Ascending)
+        });
+        let is_ascending = direction == visigrid_engine::filter::SortDirection::Ascending;
+        self.history.record_named_range_action(crate::history::UndoAction::SortApplied {
+            previous_row_order: undo_item.previous_row_order,
+            previous_sort_state,
+            new_row_order: new_order.clone(),
+            new_sort_state: (col, is_ascending),
+        });
 
         // Apply the sort
         self.row_view.apply_sort(new_order);
@@ -1968,6 +1976,8 @@ impl Spreadsheet {
 
     /// Switch to a specific sheet by index
     pub fn goto_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
+        // Commit any pending edit before switching sheets
+        self.commit_pending_edit();
         if self.workbook.set_active_sheet(index) {
             self.clear_selection_state();
             cx.notify();
@@ -2932,6 +2942,48 @@ impl Spreadsheet {
 
     pub fn confirm_edit_up(&mut self, cx: &mut Context<Self>) {
         self.confirm_edit_and_move(-1, 0, cx);  // Shift+Enter moves up
+    }
+
+    /// Commit any pending edit without moving the cursor.
+    /// Call this before file operations (Save, Export) to ensure unsaved edits are captured.
+    pub fn commit_pending_edit(&mut self) {
+        if !self.mode.is_editing() {
+            return;
+        }
+
+        let (row, col) = self.selected;
+        let old_value = self.edit_original.clone();
+
+        // Convert leading + to = for formulas (Excel compatibility)
+        let mut new_value = if self.edit_value.starts_with('+') {
+            format!("={}", &self.edit_value[1..])
+        } else {
+            self.edit_value.clone()
+        };
+
+        // Auto-close unmatched parentheses (Excel compatibility)
+        if new_value.starts_with('=') {
+            let open_count = new_value.chars().filter(|&c| c == '(').count();
+            let close_count = new_value.chars().filter(|&c| c == ')').count();
+            if open_count > close_count {
+                for _ in 0..(open_count - close_count) {
+                    new_value.push(')');
+                }
+            }
+        }
+
+        self.history.record_change(self.sheet_index(), row, col, old_value, new_value.clone());
+        self.sheet_mut().set_value(row, col, &new_value);
+        self.mode = Mode::Navigation;
+        self.edit_value.clear();
+        self.edit_original.clear();
+        self.bump_cells_rev();
+        self.is_modified = true;
+        // Clear formula state
+        self.formula_ref_cell = None;
+        self.formula_ref_end = None;
+        self.formula_ref_start_cursor = 0;
+        self.formula_highlighted_refs.clear();
     }
 
     pub fn confirm_edit_and_move_right(&mut self, cx: &mut Context<Self>) {
@@ -4573,6 +4625,25 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: deleted {} column(s)", count));
                 }
+                UndoAction::SortApplied { previous_row_order, previous_sort_state, .. } => {
+                    // Restore previous row order
+                    self.row_view.apply_sort(previous_row_order);
+                    // Restore previous sort state
+                    self.filter_state.sort = previous_sort_state.map(|(col, is_ascending)| {
+                        visigrid_engine::filter::SortState {
+                            column: col,
+                            direction: if is_ascending {
+                                visigrid_engine::filter::SortDirection::Ascending
+                            } else {
+                                visigrid_engine::filter::SortDirection::Descending
+                            },
+                        }
+                    });
+                    self.filter_state.invalidate_all_caches();
+                    // Clamp selection to valid bounds after row order change
+                    self.clamp_selection();
+                    self.status_message = Some("Undo: sort".to_string());
+                }
             }
             self.is_modified = true;
             self.request_title_refresh(cx);
@@ -4710,6 +4781,21 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
+            UndoAction::SortApplied { previous_row_order, previous_sort_state, .. } => {
+                self.row_view.apply_sort(previous_row_order);
+                self.filter_state.sort = previous_sort_state.map(|(col, is_ascending)| {
+                    visigrid_engine::filter::SortState {
+                        column: col,
+                        direction: if is_ascending {
+                            visigrid_engine::filter::SortDirection::Ascending
+                        } else {
+                            visigrid_engine::filter::SortDirection::Descending
+                        },
+                    }
+                });
+                self.filter_state.invalidate_all_caches();
+                self.clamp_selection();
+            }
         }
     }
 
@@ -4827,6 +4913,20 @@ impl Spreadsheet {
                     self.col_widths.insert(c - count, w);
                 }
                 self.bump_cells_rev();
+            }
+            UndoAction::SortApplied { new_row_order, new_sort_state, .. } => {
+                self.row_view.apply_sort(new_row_order);
+                let (col, is_ascending) = new_sort_state;
+                self.filter_state.sort = Some(visigrid_engine::filter::SortState {
+                    column: col,
+                    direction: if is_ascending {
+                        visigrid_engine::filter::SortDirection::Ascending
+                    } else {
+                        visigrid_engine::filter::SortDirection::Descending
+                    },
+                });
+                self.filter_state.invalidate_all_caches();
+                self.clamp_selection();
             }
         }
     }
@@ -4965,6 +5065,23 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Redo: delete {} column(s)", count));
                 }
+                UndoAction::SortApplied { new_row_order, new_sort_state, .. } => {
+                    // Re-apply the sort
+                    self.row_view.apply_sort(new_row_order);
+                    let (col, is_ascending) = new_sort_state;
+                    self.filter_state.sort = Some(visigrid_engine::filter::SortState {
+                        column: col,
+                        direction: if is_ascending {
+                            visigrid_engine::filter::SortDirection::Ascending
+                        } else {
+                            visigrid_engine::filter::SortDirection::Descending
+                        },
+                    });
+                    self.filter_state.invalidate_all_caches();
+                    // Clamp selection to valid bounds after row order change
+                    self.clamp_selection();
+                    self.status_message = Some("Redo: sort".to_string());
+                }
             }
             self.is_modified = true;
             self.request_title_refresh(cx);
@@ -4980,6 +5097,36 @@ impl Spreadsheet {
         let min_col = start.1.min(end.1);
         let max_col = start.1.max(end.1);
         ((min_row, min_col), (max_row, max_col))
+    }
+
+    /// Clamp selection to valid bounds after operations that might invalidate it.
+    /// Preserves column where possible (user mental model), clamps row to valid range.
+    ///
+    /// TODO: Centralize view state normalization. Any operation that changes row order
+    /// or sheet dimensions (sort, filter, insert/delete rows, paste that expands) should
+    /// call a single `normalize_view_state()` that: clamps selection, clamps scroll offsets,
+    /// clears hover state if out of bounds, invalidates caches. Currently clamp_selection()
+    /// is called in multiple undo/redo handlers - this is the invariant to enforce centrally.
+    pub fn clamp_selection(&mut self) {
+        // Clamp selected cell
+        self.selected.0 = self.selected.0.min(NUM_ROWS - 1);
+        self.selected.1 = self.selected.1.min(NUM_COLS - 1);
+
+        // Clamp selection_end if present
+        if let Some(ref mut end) = self.selection_end {
+            end.0 = end.0.min(NUM_ROWS - 1);
+            end.1 = end.1.min(NUM_COLS - 1);
+        }
+
+        // Clamp additional selections
+        for (start, end) in &mut self.additional_selections {
+            start.0 = start.0.min(NUM_ROWS - 1);
+            start.1 = start.1.min(NUM_COLS - 1);
+            if let Some(ref mut e) = end {
+                e.0 = e.0.min(NUM_ROWS - 1);
+                e.1 = e.1.min(NUM_COLS - 1);
+            }
+        }
     }
 
     /// Returns true if more than one cell is selected.

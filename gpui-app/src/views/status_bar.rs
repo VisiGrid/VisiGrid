@@ -372,6 +372,9 @@ fn render_status_message(
     }
 }
 
+/// Maximum number of cells to analyze for statistics (prevents UI freeze on large selections)
+const MAX_STATS_CELLS: usize = 10_000;
+
 /// Calculate statistics for the current selection
 fn calculate_selection_stats(app: &Spreadsheet) -> Vec<Div> {
     let ((min_row, min_col), (max_row, max_col)) = app.selection_range();
@@ -382,6 +385,20 @@ fn calculate_selection_stats(app: &Spreadsheet) -> Vec<Div> {
     let is_multi_select = min_row != max_row || min_col != max_col;
     if !is_multi_select {
         return vec![];
+    }
+
+    // Calculate total cell count without iterating
+    let row_count = max_row - min_row + 1;
+    let col_count = max_col - min_col + 1;
+    let total_cells = row_count * col_count;
+
+    // For very large selections, just show the count to avoid freezing
+    // Show a clear message so users don't think stats are broken
+    if total_cells > MAX_STATS_CELLS {
+        return vec![
+            stat_item("Count", &format_large_number(total_cells), text_muted, text_primary),
+            stat_item("", &format!("(stats disabled for selections > {} cells)", format_large_number(MAX_STATS_CELLS)), text_muted, text_muted),
+        ];
     }
 
     // Collect numeric values from selection
@@ -417,6 +434,19 @@ fn calculate_selection_stats(app: &Spreadsheet) -> Vec<Div> {
         stat_item("Max", &format_number(max), text_muted, text_primary),
         stat_item("Count", &count.to_string(), text_muted, text_primary),
     ]
+}
+
+/// Format a large number with thousands separators for readability
+fn format_large_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }
 
 fn stat_item(label: &str, value: &str, label_color: Hsla, value_color: Hsla) -> Div {

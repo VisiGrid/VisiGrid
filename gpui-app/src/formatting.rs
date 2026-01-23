@@ -189,6 +189,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let align_name = match alignment {
+                Alignment::General => "General",
                 Alignment::Left => "Left",
                 Alignment::Center => "Center",
                 Alignment::Right => "Right",

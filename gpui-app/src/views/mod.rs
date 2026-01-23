@@ -770,9 +770,17 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &OpenKeybindings, _, cx| {
             this.open_keybindings(cx);
         }))
-        .on_action(cx.listener(|_this, _: &CloseWindow, window, _cx| {
+        .on_action(cx.listener(|this, _: &CloseWindow, window, _cx| {
+            // Commit any pending edit before closing
+            this.commit_pending_edit();
             // Close the current window (not quit the app)
             window.remove_window();
+        }))
+        .on_action(cx.listener(|this, _: &Quit, _, cx| {
+            // Commit any pending edit before quitting
+            this.commit_pending_edit();
+            // Propagate to global quit handler (saves session and quits)
+            cx.propagate();
         }))
         // Menu bar (Alt+letter accelerators)
         .on_action(cx.listener(|this, _: &OpenFileMenu, _, cx| {

@@ -108,6 +108,17 @@ pub enum UndoAction {
         /// Deleted column widths: (col, width)
         deleted_col_widths: Vec<(usize, f32)>,
     },
+    /// Sort applied (for undo: restore previous row order)
+    SortApplied {
+        /// Previous row order before sorting
+        previous_row_order: Vec<usize>,
+        /// Previous sort state (column and direction)
+        previous_sort_state: Option<(usize, bool)>, // (column, is_ascending)
+        /// New row order after sorting (for redo)
+        new_row_order: Vec<usize>,
+        /// New sort state (column and direction) for redo
+        new_sort_state: (usize, bool), // (column, is_ascending)
+    },
 }
 
 #[derive(Clone, Debug)]

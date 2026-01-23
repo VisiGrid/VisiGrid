@@ -185,6 +185,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Preferences shortcut
         bindings.push(KeyBinding::new(&kb(m, ","), ShowPreferences, Some("Spreadsheet")));
 
+        // Quit shortcut (Ctrl+Q on Windows/Linux)
+        bindings.push(KeyBinding::new("ctrl-q", Quit, Some("Spreadsheet")));
+
         // Ctrl+U for underline on non-Mac
         bindings.push(KeyBinding::new(&kb(m, "u"), ToggleUnderline, Some("Spreadsheet")));
     }
