@@ -58,7 +58,7 @@ impl Spreadsheet {
                         new_value: new_value.clone(),
                     });
                 }
-                self.sheet_mut().set_value(row, col, &new_value);
+                self.set_cell_value(row, col, &new_value);
             }
         }
 
@@ -109,7 +109,7 @@ impl Spreadsheet {
                         new_value: new_value.clone(),
                     });
                 }
-                self.sheet_mut().set_value(row, col, &new_value);
+                self.set_cell_value(row, col, &new_value);
             }
         }
 
@@ -363,7 +363,7 @@ impl Spreadsheet {
                         old_value,
                         new_value: new_value.clone(),
                     });
-                    self.sheet_mut().set_value(row, col, &new_value);
+                    self.set_cell_value(row, col, &new_value);
                     trimmed_count += 1;
                 }
             }
@@ -583,7 +583,7 @@ impl Spreadsheet {
                     new_value: new_value.clone(),
                 });
             }
-            self.sheet_mut().set_value(*row, col, &new_value);
+            self.set_cell_value(*row, col, &new_value);
         }
 
         let count = fill_range.len();
@@ -644,7 +644,7 @@ impl Spreadsheet {
                     new_value: new_value.clone(),
                 });
             }
-            self.sheet_mut().set_value(row, *col, &new_value);
+            self.set_cell_value(row, *col, &new_value);
         }
 
         let count = fill_range.len();

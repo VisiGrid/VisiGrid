@@ -51,17 +51,7 @@ static SMOKE_RECALC_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn is_smoke_recalc_enabled() -> bool {
     *SMOKE_RECALC_ENABLED.get_or_init(|| {
-        let val = std::env::var("VISIGRID_RECALC").ok();
-        let enabled = val.as_deref() == Some("full");
-        // Debug: write startup check to file (absolute path)
-        use std::io::Write;
-        let debug_path = dirs::home_dir()
-            .map(|p| p.join("smoke_debug.txt"))
-            .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\rdo\\smoke_debug.txt"));
-        if let Ok(mut f) = std::fs::File::create(&debug_path) {
-            let _ = writeln!(f, "VISIGRID_RECALC={:?}, enabled={}", val, enabled);
-        }
-        enabled
+        std::env::var("VISIGRID_RECALC").ok().as_deref() == Some("full")
     })
 }
 
@@ -1904,6 +1894,14 @@ impl Spreadsheet {
         self.workbook.active_sheet_index()
     }
 
+    /// Set a cell value and update the dependency graph.
+    /// This is the preferred way to set cell values - it ensures the dep graph stays in sync.
+    pub fn set_cell_value(&mut self, row: usize, col: usize, value: &str) {
+        let sheet_id = self.workbook.active_sheet_id();
+        self.workbook.active_sheet_mut().set_value(row, col, value);
+        self.workbook.update_cell_deps(sheet_id, row, col);
+    }
+
     // =========================================================================
     // Document identity and title bar
     // =========================================================================
@@ -3002,7 +3000,7 @@ impl Spreadsheet {
         }
 
         self.history.record_change(self.sheet_index(), row, col, old_value, new_value.clone());
-        self.sheet_mut().set_value(row, col, &new_value);
+        self.set_cell_value(row, col, &new_value);  // Use helper that updates dep graph
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
@@ -3031,17 +3029,23 @@ impl Spreadsheet {
         }
         self.in_smoke_recalc = true;
         let report = self.workbook.recompute_full_ordered();
-        // Write to file since Windows GUI apps don't have stderr
+        let log_line = report.log_line();
+
+        // On Linux/macOS: print to stderr (visible in terminal)
+        #[cfg(not(target_os = "windows"))]
+        eprintln!("{}", log_line);
+
+        // On all platforms: also write to file (Windows GUI apps don't have stderr)
         use std::io::Write;
         let log_path = dirs::home_dir()
             .map(|p| p.join("smoke.log"))
-            .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\rdo\\smoke.log"));
+            .unwrap_or_else(|| std::path::PathBuf::from("smoke.log"));
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
         {
-            let _ = writeln!(f, "{}", report.log_line());
+            let _ = writeln!(f, "{}", log_line);
         }
         self.in_smoke_recalc = false;
     }
@@ -3384,7 +3388,7 @@ impl Spreadsheet {
         }
 
         self.history.record_change(self.sheet_index(), row, col, old_value, new_value.clone());
-        self.sheet_mut().set_value(row, col, &new_value);
+        self.set_cell_value(row, col, &new_value);  // Use helper that updates dep graph
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
@@ -3396,6 +3400,9 @@ impl Spreadsheet {
         self.formula_ref_start_cursor = 0;
         // Clear formula highlighting state
         self.formula_highlighted_refs.clear();
+
+        // Smoke mode: trigger full ordered recompute for dogfooding
+        self.maybe_smoke_recalc();
 
         // Move after confirming
         self.move_selection(dr, dc, cx);
