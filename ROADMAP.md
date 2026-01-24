@@ -171,7 +171,7 @@ What's built, what's next, and what's not planned.
 - Subtle chrome scrim (8px gradient fade into content)
 - Hairline border separator (50% opacity)
 - macOS handles inactive window dimming natively
-- See: [gpui-app/docs/features/title-bar-and-menus.md](gpui-app/docs/features/title-bar-and-menus.md)
+- See: [docs/features/title-bar-and-menus.md](docs/features/title-bar-and-menus.md)
 
 ### Alt Menu Accelerators (v0.2.4+, macOS)
 - Excel-style Alt+letter shortcuts open scoped Command Palette
@@ -180,7 +180,7 @@ What's built, what's next, and what's not planned.
 - Scope badge shown in palette header when filtered
 - Backspace clears scope when query is empty
 - Never intercepts keys during cell/formula editing
-- See: [gpui-app/docs/features/alt-accelerators.md](gpui-app/docs/features/alt-accelerators.md)
+- See: [docs/features/alt-accelerators.md](docs/features/alt-accelerators.md)
 
 ### Default App Prompt (v0.2.4+, macOS)
 - "Make default" title bar chip for non-native file types
@@ -196,7 +196,7 @@ What's built, what's next, and what's not planned.
   - Success: "Default set" for 2 seconds
   - Needs completion: "Finish in System Settings" + "Open"
 - Uses `duti` when available, falls back to System Settings
-- See: [gpui-app/docs/features/title-bar-and-menus.md](gpui-app/docs/features/title-bar-and-menus.md)
+- See: [docs/features/title-bar-and-menus.md](docs/features/title-bar-and-menus.md)
 
 ---
 
@@ -221,6 +221,32 @@ What's built, what's next, and what's not planned.
 - Merged cells
 - Split view (Ctrl+\)
 - Problems panel (Ctrl+Shift+M) - all formula errors
+
+### Explainability Initiative
+
+Make causality, impact, and recomputation visible. VisiGrid becomes an **Explainable Spreadsheet**.
+
+See full spec: [docs/features/explainability-roadmap.md](docs/features/explainability-roadmap.md)
+
+**Phase 1 — Dependency Graph Foundation**
+- Persistent dependency graph (precedents/dependents in O(1))
+- Cross-sheet dependency tracking
+- Ordered recompute engine with cycle detection at edit-time
+- See: [docs/features/dependency-graph-spec.md](docs/features/dependency-graph-spec.md)
+
+**Phase 2 — Verified Mode**
+- User-facing toggle with status bar promise: "Verified ✓ — values are current"
+- Summary stats (recalc time, cells, depth)
+
+**Phase 3 — Inspector Extensions**
+- Dependency depth, recompute timestamps, evaluation traces
+- Mini DAG visualization (fan-in/fan-out)
+- Basic Inspector becomes free; deep explainability stays Pro
+
+**Phase 4+ — Provenance & Beyond**
+- Lua snippets for structural operations (fill, sort, transform)
+- Named ranges as first-class inspector entities
+- Blast radius preview before large operations
 
 ### Polish
 - Windows title bar integration (custom titlebar with integrated menu)
