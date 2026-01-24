@@ -83,6 +83,32 @@ pub fn collect_function_names<S>(expr: &Expr<S>) -> Vec<String> {
     names
 }
 
+/// Functions that have dynamic/runtime-dependent references.
+///
+/// These functions compute their target references at evaluation time,
+/// making static dependency analysis incomplete.
+const DYNAMIC_REF_FUNCTIONS: &[&str] = &[
+    "INDIRECT", // Converts text to cell reference
+    "OFFSET",   // Returns reference offset from a starting point
+];
+
+/// Check if a formula contains functions with dynamic references.
+///
+/// Returns true if the formula contains INDIRECT, OFFSET, or similar
+/// functions whose target cells cannot be determined statically.
+///
+/// Formulas with dynamic deps must be conservatively recomputed in
+/// full ordered mode since their dependencies are incomplete.
+pub fn has_dynamic_deps<S>(expr: &Expr<S>) -> bool {
+    let mut found = false;
+    walk_expr(expr, &mut |name| {
+        if !found && DYNAMIC_REF_FUNCTIONS.contains(&name) {
+            found = true;
+        }
+    });
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +182,35 @@ mod tests {
         assert!(names.contains(&"IF".to_string()));
         assert!(names.contains(&"XLOOKUP".to_string()));
         assert_eq!(names.len(), 3);
+    }
+
+    #[test]
+    fn test_has_dynamic_deps_indirect() {
+        let expr = parse("=INDIRECT(A1)").unwrap();
+        assert!(has_dynamic_deps(&expr));
+    }
+
+    #[test]
+    fn test_has_dynamic_deps_offset() {
+        let expr = parse("=OFFSET(A1, 1, 1)").unwrap();
+        assert!(has_dynamic_deps(&expr));
+    }
+
+    #[test]
+    fn test_has_dynamic_deps_nested() {
+        let expr = parse("=SUM(INDIRECT(A1))").unwrap();
+        assert!(has_dynamic_deps(&expr));
+    }
+
+    #[test]
+    fn test_has_dynamic_deps_none() {
+        let expr = parse("=SUM(A1:A10) + AVERAGE(B1:B10)").unwrap();
+        assert!(!has_dynamic_deps(&expr));
+    }
+
+    #[test]
+    fn test_has_dynamic_deps_cell_ref_only() {
+        let expr = parse("=A1+B1").unwrap();
+        assert!(!has_dynamic_deps(&expr));
     }
 }

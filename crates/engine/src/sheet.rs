@@ -153,7 +153,8 @@ pub struct Sheet {
     /// Normalized name for case-insensitive lookup (trimmed + lowercased)
     #[serde(default)]
     pub name_key: String,
-    cells: HashMap<(usize, usize), Cell>,
+    /// Cell storage - pub(crate) for workbook-level access during recompute
+    pub(crate) cells: HashMap<(usize, usize), Cell>,
     pub rows: usize,
     pub cols: usize,
     /// Spilled values from array formulas: (row, col) -> Value
@@ -273,6 +274,18 @@ impl Sheet {
 
         // If this is a formula, evaluate it and apply spill if it returns an array
         self.evaluate_and_spill(row, col);
+    }
+
+    /// Mark a cell as having a cycle error.
+    ///
+    /// Used when loading workbooks with circular references to mark
+    /// participating cells without crashing.
+    pub fn set_cycle_error(&mut self, row: usize, col: usize) {
+        // Store #CYCLE! as the cell value while preserving the formula source
+        // For now, we just set a text value - the original formula is lost
+        // A future improvement could preserve the formula for editing
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.value = CellValue::Text("#CYCLE!".to_string());
     }
 
     /// Evaluate a cell's formula and apply spill if it returns an array

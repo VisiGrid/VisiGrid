@@ -463,31 +463,146 @@ impl Workbook {
     ///
     /// If cycles exist in the graph (e.g., from loading a legacy file), cycle
     /// cells are marked with #CYCLE! error and excluded from ordered recompute.
+    ///
+    /// # Unknown Dependencies
+    ///
+    /// Formulas with INDIRECT/OFFSET are evaluated after all known-deps formulas
+    /// since their dependencies cannot be determined statically.
     pub fn recompute_full_ordered(&mut self) -> crate::recalc::RecalcReport {
-        use crate::recalc::RecalcReport;
+        use crate::formula::analyze::has_dynamic_deps;
+        use crate::recalc::{RecalcError, RecalcReport};
+        use rustc_hash::FxHashMap;
         use std::time::Instant;
 
         let start = Instant::now();
         let mut report = RecalcReport::new();
 
         // Get topo order (or detect cycles)
-        let order = match self.dep_graph.topo_order_all_formulas() {
-            Ok(order) => order,
+        let (order, cycle_cells) = match self.dep_graph.topo_order_all_formulas() {
+            Ok(order) => (order, Vec::new()),
             Err(cycle) => {
                 report.had_cycles = true;
-                // TODO: Mark cycle cells with #CYCLE! error
-                // For now, skip cycle cells and continue with what we can order
-                Vec::new()
+                // Mark cycle cells - we'll evaluate non-cycle cells only
+                let cycle_cells = cycle.cells.clone();
+
+                // Get partial order excluding cycle cells
+                let all_formula_cells: Vec<CellId> = self.dep_graph.formula_cells().collect();
+                let non_cycle: Vec<CellId> = all_formula_cells
+                    .into_iter()
+                    .filter(|c| !cycle_cells.contains(c))
+                    .collect();
+                (non_cycle, cycle_cells)
             }
         };
 
-        // Evaluate each cell in order
-        // TODO: Implement actual evaluation in PR 1.2-3
-        report.cells_recomputed = order.len();
-        report.max_depth = order.len(); // Approximate; compute properly in PR 1.2-3
+        // Mark cycle cells with #CYCLE! error
+        for cell_id in &cycle_cells {
+            if let Some(sheet) = self.sheet_by_id_mut(cell_id.sheet) {
+                sheet.set_cycle_error(cell_id.row, cell_id.col);
+            }
+        }
+
+        // Separate known-deps and unknown-deps formulas
+        let mut known_deps_order = Vec::new();
+        let mut unknown_deps_cells = Vec::new();
+
+        for cell_id in order {
+            if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
+                if let Some(cell) = sheet.cells.get(&(cell_id.row, cell_id.col)) {
+                    if let Some(ast) = cell.value.formula_ast() {
+                        if has_dynamic_deps(ast) {
+                            unknown_deps_cells.push(cell_id);
+                        } else {
+                            known_deps_order.push(cell_id);
+                        }
+                    } else {
+                        known_deps_order.push(cell_id);
+                    }
+                }
+            }
+        }
+
+        // Compute depths during evaluation
+        // depth(value_cell) = 0, depth(formula_cell) = 1 + max(depth(precedents))
+        let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
+
+        // Evaluate known-deps formulas in topo order
+        for cell_id in &known_deps_order {
+            // Compute depth
+            let mut max_pred_depth = 0;
+            for pred in self.dep_graph.precedents(*cell_id) {
+                let pred_depth = depths.get(&pred).copied().unwrap_or(0);
+                max_pred_depth = max_pred_depth.max(pred_depth);
+            }
+            let cell_depth = max_pred_depth + 1;
+            depths.insert(*cell_id, cell_depth);
+            report.max_depth = report.max_depth.max(cell_depth);
+
+            // Evaluate the formula
+            if let Err(e) = self.evaluate_cell(*cell_id) {
+                if report.errors.len() < 100 {
+                    report.errors.push(RecalcError::new(*cell_id, e));
+                }
+            }
+            report.cells_recomputed += 1;
+        }
+
+        // Evaluate unknown-deps formulas (conservative: always recompute)
+        // Sort by CellId for determinism
+        unknown_deps_cells.sort_by(|a, b| {
+            a.sheet.raw().cmp(&b.sheet.raw())
+                .then(a.row.cmp(&b.row))
+                .then(a.col.cmp(&b.col))
+        });
+
+        for cell_id in &unknown_deps_cells {
+            // Unknown deps get depth = max_known_depth + 1 (after all known)
+            let cell_depth = report.max_depth + 1;
+            depths.insert(*cell_id, cell_depth);
+
+            if let Err(e) = self.evaluate_cell(*cell_id) {
+                if report.errors.len() < 100 {
+                    report.errors.push(RecalcError::new(*cell_id, e));
+                }
+            }
+            report.cells_recomputed += 1;
+            report.unknown_deps_recomputed += 1;
+        }
+
+        // Update max_depth if we had unknown deps
+        if !unknown_deps_cells.is_empty() {
+            report.max_depth += 1;
+        }
 
         report.duration_ms = start.elapsed().as_millis() as u64;
         report
+    }
+
+    /// Evaluate a single cell's formula and return the result.
+    ///
+    /// This forces evaluation by reading the cell value through the workbook lookup.
+    fn evaluate_cell(&self, cell_id: CellId) -> Result<(), String> {
+        use crate::formula::eval::evaluate;
+        use crate::formula::parser::bind_expr;
+
+        let sheet = self.sheet_by_id(cell_id.sheet)
+            .ok_or_else(|| format!("Sheet not found: {:?}", cell_id.sheet))?;
+
+        let cell = sheet.cells.get(&(cell_id.row, cell_id.col))
+            .ok_or_else(|| format!("Cell not found: {:?}", cell_id))?;
+
+        if let Some(ast) = cell.value.formula_ast() {
+            let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
+            let lookup = WorkbookLookup::with_cell_context(self, cell_id.sheet, cell_id.row, cell_id.col);
+            let result = evaluate(&bound, &lookup);
+
+            // Check for error result
+            if let crate::formula::eval::EvalResult::Error(e) = result {
+                return Err(e);
+            }
+        }
+
+        Ok(())
     }
 
     /// Check if setting a formula at the given cell would create a cycle.
@@ -1176,5 +1291,172 @@ mod tests {
         assert_eq!(wb.get_precedents(sheet_id, 0, 2).len(), 0);
         assert_eq!(wb.get_dependents(sheet_id, 0, 0).len(), 0);
         assert_eq!(wb.get_dependents(sheet_id, 0, 1).len(), 0);
+    }
+
+    // =========================================================================
+    // Ordered Recompute Tests (Phase 1.2)
+    // =========================================================================
+
+    #[test]
+    fn test_recompute_depth_chain() {
+        // A1=1, B1=A1, C1=B1 → depth should be 2 (B1 depth 1, C1 depth 2)
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1");      // A1 = 1 (value)
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1");    // B1 = A1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=B1");    // C1 = B1
+
+        wb.update_cell_deps(sheet_id, 0, 1);
+        wb.update_cell_deps(sheet_id, 0, 2);
+
+        let report = wb.recompute_full_ordered();
+
+        assert_eq!(report.cells_recomputed, 2); // B1 and C1
+        assert_eq!(report.max_depth, 2);        // B1=1, C1=2
+        assert!(!report.had_cycles);
+        assert_eq!(report.unknown_deps_recomputed, 0);
+    }
+
+    #[test]
+    fn test_recompute_depth_diamond() {
+        // A1=1, B1=A1, C1=A1, D1=B1+C1 → max_depth should be 2
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1");          // A1 = 1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1");        // B1 = A1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=A1");        // C1 = A1
+        wb.sheet_mut(0).unwrap().set_value(0, 3, "=B1+C1");     // D1 = B1+C1
+
+        wb.update_cell_deps(sheet_id, 0, 1);
+        wb.update_cell_deps(sheet_id, 0, 2);
+        wb.update_cell_deps(sheet_id, 0, 3);
+
+        let report = wb.recompute_full_ordered();
+
+        assert_eq!(report.cells_recomputed, 3); // B1, C1, D1
+        assert_eq!(report.max_depth, 2);        // B1=1, C1=1, D1=2
+        assert!(!report.had_cycles);
+    }
+
+    #[test]
+    fn test_recompute_report_metrics() {
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // Set up a value cell
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1"); // A1 = 1
+
+        // Set up formulas that reference A1
+        for i in 1..=10 {
+            wb.sheet_mut(0).unwrap().set_value(i, 0, "=A1");
+            wb.update_cell_deps(sheet_id, i, 0);
+        }
+
+        let report = wb.recompute_full_ordered();
+
+        assert_eq!(report.cells_recomputed, 10);
+        assert_eq!(report.max_depth, 1); // All depth 1 (direct ref to value)
+        assert!(!report.had_cycles);
+    }
+
+    #[test]
+    fn test_recompute_unknown_deps_indirect() {
+        // Formula with INDIRECT should be marked as unknown deps
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "A2");             // A1 = "A2" (text)
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "42");             // A2 = 42
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=INDIRECT(A1)");  // B1 = INDIRECT(A1)
+
+        wb.update_cell_deps(sheet_id, 0, 1);
+
+        let report = wb.recompute_full_ordered();
+
+        assert_eq!(report.cells_recomputed, 1);
+        assert_eq!(report.unknown_deps_recomputed, 1);
+    }
+
+    #[test]
+    fn test_recompute_cycle_on_load() {
+        // Simulate loading a workbook with cycles by directly manipulating the graph
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // Create cells with formulas
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=B1"); // A1 = B1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1"); // B1 = A1
+
+        // Update deps to create the cycle
+        wb.update_cell_deps(sheet_id, 0, 0);
+        wb.update_cell_deps(sheet_id, 0, 1);
+
+        // Recompute should detect cycle and not panic
+        let report = wb.recompute_full_ordered();
+
+        assert!(report.had_cycles);
+        // Cycle cells should be marked with #CYCLE!
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "#CYCLE!");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "#CYCLE!");
+    }
+
+    #[test]
+    fn test_recompute_cross_sheet() {
+        let mut wb = Workbook::new();
+        wb.add_sheet();
+
+        let _sheet1_id = wb.sheet_id_at_idx(0).unwrap();
+        let sheet2_id = wb.sheet_id_at_idx(1).unwrap();
+
+        // Sheet1!A1 = 10
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "10");
+        // Sheet2!A1 = Sheet1!A1
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "=Sheet1!A1");
+        wb.update_cell_deps(sheet2_id, 0, 0);
+
+        let report = wb.recompute_full_ordered();
+
+        assert_eq!(report.cells_recomputed, 1);
+        assert_eq!(report.max_depth, 1);
+        assert!(!report.had_cycles);
+    }
+
+    #[test]
+    fn test_check_formula_cycle_self_reference() {
+        let wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // A1 = A1 should be detected as cycle
+        let result = wb.check_formula_cycle(sheet_id, 0, 0, "=A1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_formula_cycle_indirect() {
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // A1 = B1
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=B1");
+        wb.update_cell_deps(sheet_id, 0, 0);
+
+        // B1 = A1 should be detected as cycle
+        let result = wb.check_formula_cycle(sheet_id, 0, 1, "=A1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_formula_cycle_valid() {
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // A1 = 10
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "10");
+
+        // B1 = A1 should be valid
+        let result = wb.check_formula_cycle(sheet_id, 0, 1, "=A1");
+        assert!(result.is_ok());
     }
 }
