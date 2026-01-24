@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use crate::cell::CellValue;
@@ -20,10 +19,6 @@ pub struct Workbook {
     next_sheet_id: u64,
     #[serde(default)]
     named_ranges: NamedRangeStore,
-    /// Tracks which cells reference each sheet (for efficient deletion patching)
-    /// Key: sheet being referenced, Value: set of (source_sheet_id, row, col)
-    #[serde(skip)]
-    sheet_referrers: std::collections::HashMap<SheetId, HashSet<(SheetId, usize, usize)>>,
 
     /// Dependency graph for formula cells.
     /// Rebuilt on load, updated incrementally on cell changes.
@@ -50,7 +45,6 @@ impl Workbook {
             active_sheet: 0,
             next_sheet_id: 2, // Next ID will be 2
             named_ranges: NamedRangeStore::new(),
-            sheet_referrers: std::collections::HashMap::new(),
             dep_graph: DepGraph::new(),
         }
     }
@@ -283,7 +277,6 @@ impl Workbook {
             active_sheet,
             next_sheet_id: max_id + 1,
             named_ranges: NamedRangeStore::new(),
-            sheet_referrers: std::collections::HashMap::new(),
             dep_graph: DepGraph::new(),
         }
     }
@@ -297,7 +290,6 @@ impl Workbook {
             active_sheet,
             next_sheet_id,
             named_ranges: NamedRangeStore::new(),
-            sheet_referrers: std::collections::HashMap::new(),
             dep_graph: DepGraph::new(),
         }
     }
