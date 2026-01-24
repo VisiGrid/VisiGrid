@@ -119,6 +119,7 @@ actions!(view, [
     ToggleLuaConsole, // Ctrl+Shift+L - Lua scripting REPL
     ToggleFormulaView,
     ToggleShowZeros,
+    ToggleVerifiedMode, // Toggle verified/deterministic recalc mode
     ZoomIn,
     ZoomOut,
     ZoomReset,

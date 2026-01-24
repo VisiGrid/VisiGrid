@@ -152,6 +152,10 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                     )
                 })
                 .children(selection_stats)
+                // Verified mode indicator
+                .when(app.verified_mode, |d| {
+                    d.child(render_verified_indicator(app, cx))
+                })
                 // Filter indicator (when filtering is active)
                 .when(app.row_view.is_filtered(), |d| {
                     let visible = app.row_view.visible_count();
@@ -474,4 +478,64 @@ fn format_number(n: f64) -> String {
     } else {
         format!("{:.2}", n)
     }
+}
+
+/// Render the verified mode indicator with hover tooltip
+fn render_verified_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let success_color = app.token(TokenKey::Ok);
+    let error_color = app.token(TokenKey::Error);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+
+    // Determine status based on last recalc report
+    let (status_text, status_color, has_issues) = if let Some(report) = &app.last_recalc_report {
+        if report.had_cycles || !report.errors.is_empty() {
+            ("Verified ⚠", error_color, true)
+        } else {
+            ("Verified ✓", success_color, false)
+        }
+    } else {
+        ("Verified ✓", success_color, false)
+    };
+
+    // Build tooltip content
+    let tooltip_content = if let Some(report) = &app.last_recalc_report {
+        format!(
+            "{}ms · {} cells · depth {}{}",
+            report.duration_ms,
+            report.cells_recomputed,
+            report.max_depth,
+            if report.unknown_deps_recomputed > 0 {
+                format!(" · {} dynamic", report.unknown_deps_recomputed)
+            } else {
+                String::new()
+            }
+        )
+    } else {
+        "Values are current".to_string()
+    };
+
+    div()
+        .id("verified-indicator")
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_px()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_color(status_color)
+        .hover(move |s| s.bg(panel_border))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.toggle_verified_mode(cx);
+        }))
+        .child(status_text)
+        // Show tooltip on hover with recalc stats
+        .child(
+            div()
+                .text_color(text_muted)
+                .text_xs()
+                .child(format!("({})", tooltip_content))
+        )
 }

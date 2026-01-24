@@ -756,6 +756,10 @@ pub struct Spreadsheet {
 
     // Smoke mode recalc guard (prevents reentrant recalc)
     in_smoke_recalc: bool,
+
+    // Phase 2: Verified Mode - deterministic ordered recalc with visible status
+    pub verified_mode: bool,
+    pub last_recalc_report: Option<visigrid_engine::recalc::RecalcReport>,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -970,6 +974,9 @@ impl Spreadsheet {
             needs_settings_check_count: 0,
 
             in_smoke_recalc: false,
+
+            verified_mode: false,
+            last_recalc_report: None,
         }
     }
 
@@ -3016,38 +3023,66 @@ impl Spreadsheet {
         self.maybe_smoke_recalc();
     }
 
-    /// Run full ordered recompute if VISIGRID_RECALC=full is set.
+    /// Run full ordered recompute if enabled (smoke mode or verified mode).
     ///
-    /// Phase 1.5: Headless dogfooding mode. Logs recalc metrics to file
-    /// for catching "works in tests, breaks in reality" bugs.
-    ///
-    /// Writes to `smoke.log` in the current directory (Windows GUI apps
-    /// don't have stderr connected to console).
+    /// - Smoke mode (VISIGRID_RECALC=full): Logs to file for dogfooding
+    /// - Verified mode: Updates last_recalc_report for status bar display
     pub(crate) fn maybe_smoke_recalc(&mut self) {
-        if !is_smoke_recalc_enabled() || self.in_smoke_recalc {
+        let smoke_enabled = is_smoke_recalc_enabled();
+
+        // Skip if neither mode is active or we're already in a recalc
+        if (!smoke_enabled && !self.verified_mode) || self.in_smoke_recalc {
             return;
         }
+
         self.in_smoke_recalc = true;
         let report = self.workbook.recompute_full_ordered();
-        let log_line = report.log_line();
 
-        // On Linux/macOS: print to stderr (visible in terminal)
-        #[cfg(not(target_os = "windows"))]
-        eprintln!("{}", log_line);
-
-        // On all platforms: also write to file (Windows GUI apps don't have stderr)
-        use std::io::Write;
-        let log_path = dirs::home_dir()
-            .map(|p| p.join("smoke.log"))
-            .unwrap_or_else(|| std::path::PathBuf::from("smoke.log"));
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            let _ = writeln!(f, "{}", log_line);
+        // Store report for verified mode status bar
+        if self.verified_mode {
+            self.last_recalc_report = Some(report.clone());
         }
+
+        // Smoke mode logging
+        if smoke_enabled {
+            let log_line = report.log_line();
+
+            // On Linux/macOS: print to stderr (visible in terminal)
+            #[cfg(not(target_os = "windows"))]
+            eprintln!("{}", log_line);
+
+            // On all platforms: also write to file (Windows GUI apps don't have stderr)
+            use std::io::Write;
+            let log_path = dirs::home_dir()
+                .map(|p| p.join("smoke.log"))
+                .unwrap_or_else(|| std::path::PathBuf::from("smoke.log"));
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                let _ = writeln!(f, "{}", log_line);
+            }
+        }
+
         self.in_smoke_recalc = false;
+    }
+
+    /// Toggle verified mode on/off.
+    pub fn toggle_verified_mode(&mut self, cx: &mut Context<Self>) {
+        self.verified_mode = !self.verified_mode;
+        if self.verified_mode {
+            // Run initial recalc when enabling
+            self.in_smoke_recalc = true;
+            let report = self.workbook.recompute_full_ordered();
+            self.last_recalc_report = Some(report);
+            self.in_smoke_recalc = false;
+            self.status_message = Some("Verified mode enabled".to_string());
+        } else {
+            self.last_recalc_report = None;
+            self.status_message = Some("Verified mode disabled".to_string());
+        }
+        cx.notify();
     }
 
     pub fn confirm_edit_and_move_right(&mut self, cx: &mut Context<Self>) {

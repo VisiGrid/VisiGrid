@@ -115,6 +115,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "1"), ShowFormatPanel, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "m"), ToggleProblems, Some("Spreadsheet")),
         KeyBinding::new("f11", ToggleZenMode, Some("Spreadsheet")),
+        KeyBinding::new("f9", ToggleVerifiedMode, Some("Spreadsheet")),  // Toggle verified mode
         KeyBinding::new(&kb_shift(m, "l"), ToggleLuaConsole, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "`"), ToggleFormulaView, Some("Spreadsheet")),
 

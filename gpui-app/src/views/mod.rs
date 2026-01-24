@@ -546,6 +546,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.zen_mode = !this.zen_mode;
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &ToggleVerifiedMode, _, cx| {
+            this.toggle_verified_mode(cx);
+        }))
         // Zoom
         .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
             this.zoom_in(cx);
