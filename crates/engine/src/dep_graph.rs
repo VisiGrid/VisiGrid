@@ -14,6 +14,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cell_id::CellId;
+use crate::recalc::CycleReport;
 
 /// Persistent dependency graph for formula cells.
 ///
@@ -204,6 +205,158 @@ impl DepGraph {
 
         self.preds = new_preds;
         self.succs = new_succs;
+    }
+
+    // =========================================================================
+    // Topological Ordering + Cycle Detection (Phase 1.2)
+    // =========================================================================
+
+    /// Returns all formula cells in the graph.
+    ///
+    /// A cell is a "formula cell" if it has precedents (appears in preds keys).
+    pub fn formula_cells(&self) -> impl Iterator<Item = CellId> + '_ {
+        self.preds.keys().copied()
+    }
+
+    /// Compute topological order of all formula cells.
+    ///
+    /// Returns cells in dependency order: precedents before dependents.
+    /// Uses Kahn's algorithm with stable ordering for determinism.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(order)` - Valid topological order
+    /// - `Err(CycleReport)` - Graph contains cycles
+    ///
+    /// # Algorithm
+    ///
+    /// Only considers edges between formula cells. Value-only cells (cells with
+    /// no formula) are not included in the ordering since they don't need
+    /// recomputation.
+    pub fn topo_order_all_formulas(&self) -> Result<Vec<CellId>, CycleReport> {
+        // Collect all formula cells
+        let formula_cells: FxHashSet<CellId> = self.preds.keys().copied().collect();
+
+        if formula_cells.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Compute in-degree for each formula cell
+        // Only count edges from precedents that are ALSO formula cells
+        let mut in_degree: FxHashMap<CellId, usize> = FxHashMap::default();
+
+        for &cell in &formula_cells {
+            let count = self
+                .preds
+                .get(&cell)
+                .map(|preds| preds.iter().filter(|p| formula_cells.contains(p)).count())
+                .unwrap_or(0);
+            in_degree.insert(cell, count);
+        }
+
+        // Initialize queue with zero in-degree cells
+        // Sort for deterministic order
+        let mut queue: Vec<CellId> = in_degree
+            .iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(&cell, _)| cell)
+            .collect();
+        queue.sort_by(|a, b| {
+            a.sheet
+                .raw()
+                .cmp(&b.sheet.raw())
+                .then(a.row.cmp(&b.row))
+                .then(a.col.cmp(&b.col))
+        });
+
+        let mut result = Vec::with_capacity(formula_cells.len());
+
+        while let Some(cell) = queue.pop() {
+            result.push(cell);
+
+            // For each dependent that is a formula cell
+            if let Some(deps) = self.succs.get(&cell) {
+                let mut new_zero_degree = Vec::new();
+
+                for &dep in deps {
+                    if formula_cells.contains(&dep) {
+                        if let Some(deg) = in_degree.get_mut(&dep) {
+                            *deg = deg.saturating_sub(1);
+                            if *deg == 0 {
+                                new_zero_degree.push(dep);
+                            }
+                        }
+                    }
+                }
+
+                // Sort new zero-degree cells for deterministic order
+                new_zero_degree.sort_by(|a, b| {
+                    a.sheet
+                        .raw()
+                        .cmp(&b.sheet.raw())
+                        .then(a.row.cmp(&b.row))
+                        .then(a.col.cmp(&b.col))
+                });
+                // Add in reverse order so smallest is popped first
+                for cell in new_zero_degree.into_iter().rev() {
+                    queue.push(cell);
+                }
+            }
+        }
+
+        // If not all cells are in result, we have a cycle
+        if result.len() < formula_cells.len() {
+            // Find cells involved in cycle
+            let cycle_cells: Vec<CellId> = formula_cells
+                .iter()
+                .filter(|c| !result.contains(c))
+                .copied()
+                .collect();
+            return Err(CycleReport::cycle(cycle_cells));
+        }
+
+        Ok(result)
+    }
+
+    /// Check if adding edges from `cell` to `new_preds` would create a cycle.
+    ///
+    /// Does not modify the graph. Returns `Some(CycleReport)` if a cycle would
+    /// be introduced, `None` otherwise.
+    ///
+    /// # Algorithm
+    ///
+    /// A cycle is created if any of `new_preds` can reach `cell` by following
+    /// dependent edges. We do a DFS from `cell` following successors and check
+    /// if we can reach any of `new_preds`.
+    pub fn would_create_cycle(&self, cell: CellId, new_preds: &[CellId]) -> Option<CycleReport> {
+        // Self-reference check
+        if new_preds.contains(&cell) {
+            return Some(CycleReport::self_reference(cell));
+        }
+
+        // DFS from cell following dependents to see if we reach any new_pred
+        let new_preds_set: FxHashSet<CellId> = new_preds.iter().copied().collect();
+        let mut visited = FxHashSet::default();
+        let mut stack = vec![cell];
+
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+
+            if let Some(deps) = self.succs.get(&current) {
+                for &dep in deps {
+                    if new_preds_set.contains(&dep) {
+                        // Found a path from cell to one of its would-be precedents
+                        // This means new_pred -> ... -> cell -> new_pred (cycle!)
+                        return Some(CycleReport::cycle(vec![dep, cell]));
+                    }
+                    stack.push(dep);
+                }
+            }
+        }
+
+        None
     }
 
     /// Check all invariants. Panics if any are violated.

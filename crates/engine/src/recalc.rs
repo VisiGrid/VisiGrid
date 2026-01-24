@@ -1,0 +1,193 @@
+//! Recalculation types and reporting.
+//!
+//! This module defines the types used for ordered formula recomputation
+//! and cycle detection.
+
+use crate::cell_id::CellId;
+
+/// Report from a full ordered recompute operation.
+///
+/// This is the backbone for Phase 1.5 logging and Phase 2 status bar.
+#[derive(Debug, Clone, Default)]
+pub struct RecalcReport {
+    /// Time taken for full recompute in milliseconds.
+    pub duration_ms: u64,
+
+    /// Number of formula cells that were recomputed.
+    pub cells_recomputed: usize,
+
+    /// Maximum dependency depth encountered.
+    /// A formula with no dependencies has depth 1.
+    /// A formula depending on another formula has depth = max(precedent depths) + 1.
+    pub max_depth: usize,
+
+    /// True if cycles were detected during recompute.
+    /// Cycle cells are marked with #CYCLE! error.
+    pub had_cycles: bool,
+
+    /// Number of cells with unknown dependencies (INDIRECT/OFFSET)
+    /// that were conservatively recomputed.
+    pub unknown_deps_recomputed: usize,
+
+    /// Errors encountered during recompute (truncated to first 100).
+    pub errors: Vec<RecalcError>,
+}
+
+impl RecalcReport {
+    /// Create a new empty report.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Format as a concise one-line summary for logging.
+    pub fn summary(&self) -> String {
+        format!(
+            "{} cells in {}ms, depth={}, cycles={}, unknown={}",
+            self.cells_recomputed,
+            self.duration_ms,
+            self.max_depth,
+            self.had_cycles,
+            self.unknown_deps_recomputed
+        )
+    }
+}
+
+/// An error that occurred during recomputation of a specific cell.
+#[derive(Debug, Clone)]
+pub struct RecalcError {
+    /// The cell where the error occurred.
+    pub cell: CellId,
+
+    /// Description of the error.
+    pub error: String,
+}
+
+impl RecalcError {
+    /// Create a new recalc error.
+    pub fn new(cell: CellId, error: impl Into<String>) -> Self {
+        Self {
+            cell,
+            error: error.into(),
+        }
+    }
+}
+
+/// Report when cycle detection finds a circular reference.
+#[derive(Debug, Clone)]
+pub struct CycleReport {
+    /// Cells participating in the cycle.
+    /// May be a subset for large cycles.
+    pub cells: Vec<CellId>,
+
+    /// Human-readable description of the cycle.
+    pub message: String,
+}
+
+impl CycleReport {
+    /// Create a new cycle report.
+    pub fn new(cells: Vec<CellId>, message: impl Into<String>) -> Self {
+        Self {
+            cells,
+            message: message.into(),
+        }
+    }
+
+    /// Create a cycle report for a self-referencing cell.
+    pub fn self_reference(cell: CellId) -> Self {
+        Self {
+            cells: vec![cell],
+            message: format!("Cell {} references itself", cell),
+        }
+    }
+
+    /// Create a cycle report for a multi-cell cycle.
+    pub fn cycle(cells: Vec<CellId>) -> Self {
+        let cell_list: Vec<String> = cells.iter().map(|c| c.to_string()).collect();
+        let message = if cells.len() <= 5 {
+            format!("Circular reference: {}", cell_list.join(" → "))
+        } else {
+            format!(
+                "Circular reference involving {} cells: {} → ... → {}",
+                cells.len(),
+                cell_list[0],
+                cell_list.last().unwrap()
+            )
+        };
+        Self { cells, message }
+    }
+}
+
+impl std::fmt::Display for CycleReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for CycleReport {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sheet::SheetId;
+
+    fn cell(sheet: u64, row: usize, col: usize) -> CellId {
+        CellId::new(SheetId::from_raw(sheet), row, col)
+    }
+
+    #[test]
+    fn test_recalc_report_default() {
+        let report = RecalcReport::default();
+        assert_eq!(report.duration_ms, 0);
+        assert_eq!(report.cells_recomputed, 0);
+        assert_eq!(report.max_depth, 0);
+        assert!(!report.had_cycles);
+        assert_eq!(report.unknown_deps_recomputed, 0);
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn test_recalc_report_summary() {
+        let report = RecalcReport {
+            duration_ms: 42,
+            cells_recomputed: 100,
+            max_depth: 5,
+            had_cycles: false,
+            unknown_deps_recomputed: 2,
+            errors: vec![],
+        };
+        assert_eq!(
+            report.summary(),
+            "100 cells in 42ms, depth=5, cycles=false, unknown=2"
+        );
+    }
+
+    #[test]
+    fn test_cycle_report_self_reference() {
+        let a1 = cell(1, 0, 0);
+        let report = CycleReport::self_reference(a1);
+        assert_eq!(report.cells.len(), 1);
+        assert!(report.message.contains("references itself"));
+    }
+
+    #[test]
+    fn test_cycle_report_small_cycle() {
+        let cells = vec![cell(1, 0, 0), cell(1, 0, 1), cell(1, 0, 2)];
+        let report = CycleReport::cycle(cells);
+        assert!(report.message.contains("→"));
+        assert!(!report.message.contains("..."));
+    }
+
+    #[test]
+    fn test_cycle_report_large_cycle() {
+        let cells: Vec<CellId> = (0..10).map(|i| cell(1, i, 0)).collect();
+        let report = CycleReport::cycle(cells);
+        assert!(report.message.contains("..."));
+        assert!(report.message.contains("10 cells"));
+    }
+
+    #[test]
+    fn test_cycle_report_display() {
+        let report = CycleReport::new(vec![cell(1, 0, 0)], "Test error");
+        assert_eq!(format!("{}", report), "Test error");
+    }
+}

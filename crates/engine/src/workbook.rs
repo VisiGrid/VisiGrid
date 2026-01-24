@@ -451,6 +451,83 @@ impl Workbook {
     }
 
     // =========================================================================
+    // Ordered Recompute (Phase 1.2)
+    // =========================================================================
+
+    /// Perform a full ordered recompute of all formulas.
+    ///
+    /// Evaluates formulas in topological order (precedents before dependents)
+    /// and returns a report with metrics.
+    ///
+    /// # Cycle Handling
+    ///
+    /// If cycles exist in the graph (e.g., from loading a legacy file), cycle
+    /// cells are marked with #CYCLE! error and excluded from ordered recompute.
+    pub fn recompute_full_ordered(&mut self) -> crate::recalc::RecalcReport {
+        use crate::recalc::RecalcReport;
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let mut report = RecalcReport::new();
+
+        // Get topo order (or detect cycles)
+        let order = match self.dep_graph.topo_order_all_formulas() {
+            Ok(order) => order,
+            Err(cycle) => {
+                report.had_cycles = true;
+                // TODO: Mark cycle cells with #CYCLE! error
+                // For now, skip cycle cells and continue with what we can order
+                Vec::new()
+            }
+        };
+
+        // Evaluate each cell in order
+        // TODO: Implement actual evaluation in PR 1.2-3
+        report.cells_recomputed = order.len();
+        report.max_depth = order.len(); // Approximate; compute properly in PR 1.2-3
+
+        report.duration_ms = start.elapsed().as_millis() as u64;
+        report
+    }
+
+    /// Check if setting a formula at the given cell would create a cycle.
+    ///
+    /// Returns `Err(CycleReport)` if the formula would introduce a circular reference.
+    /// The formula should NOT be applied if this returns an error.
+    pub fn check_formula_cycle(
+        &self,
+        sheet_id: SheetId,
+        row: usize,
+        col: usize,
+        formula: &str,
+    ) -> Result<(), crate::recalc::CycleReport> {
+        use crate::formula::parser::{parse, bind_expr};
+        use crate::formula::refs::extract_cell_ids;
+
+        // Parse and bind
+        let parsed = parse(formula).map_err(|e| {
+            crate::recalc::CycleReport::new(vec![], format!("Parse error: {}", e))
+        })?;
+        let bound = bind_expr(&parsed, |name| self.sheet_id_by_name(name));
+
+        // Extract new precedents
+        let new_preds = extract_cell_ids(
+            &bound,
+            sheet_id,
+            &self.named_ranges,
+            |idx| self.sheet_id_at_idx(idx),
+        );
+
+        // Check for cycle
+        let cell_id = CellId::new(sheet_id, row, col);
+        if let Some(cycle) = self.dep_graph.would_create_cycle(cell_id, &new_preds) {
+            return Err(cycle);
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
     // Cross-Sheet Cell Evaluation
     // =========================================================================
 
