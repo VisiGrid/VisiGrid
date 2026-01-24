@@ -534,7 +534,14 @@ pub fn is_pro_plus() -> bool {
 /// Check if a specific feature is enabled
 ///
 /// Feature names: "lua", "fast_large_files", "inspector", "plugins", "advanced_transforms"
+///
+/// Dev bypass: Set VISIGRID_PRO=1 to enable all Pro features for testing.
 pub fn is_feature_enabled(feature: &str) -> bool {
+    // Dev bypass for testing (works in any build)
+    if std::env::var("VISIGRID_PRO").map(|v| v == "1").unwrap_or(false) {
+        return true;
+    }
+
     // In OSS builds, this always returns false (compile-time gating takes precedence)
     #[cfg(not(feature = "commercial"))]
     {

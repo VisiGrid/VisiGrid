@@ -241,32 +241,10 @@ fn render_inspector_tab(
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> AnyElement {
-    // Pro feature gate for Inspector tab
-    if !visigrid_license::is_feature_enabled("inspector") {
-        return div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .p_4()
-            .child(
-                div()
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(text_primary)
-                    .child("Inspector requires VisiGrid Pro")
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(text_muted)
-                    .text_center()
-                    .child("View cell dependencies, formula analysis, and debugging info.")
-            )
-            .into_any_element();
-    }
+    // Basic Inspector is now FREE - only advanced explainability features are Pro
+    // Free: Identity, Inputs list, Outputs list, Spill info
+    // Pro: Verification Certificate, Impact Summary, Mini DAG, Trust Metrics
+    let is_pro = visigrid_license::is_feature_enabled("inspector");
 
     let raw_value = app.sheet().get_raw(row, col);
     let display_value = app.sheet().get_display(row, col);
@@ -308,26 +286,183 @@ fn render_inspector_tab(
     let has_spill_info = is_spill_parent || is_spill_receiver;
     let has_no_deps = precedents.is_empty() && dependents.is_empty() && !is_formula && !has_spill_info;
 
+    // Get verification data for Pro features
+    let recalc_info = if is_pro && app.verified_mode {
+        if let Some(report) = &app.last_recalc_report {
+            let sheet_id = app.sheet().id;
+            let cell_id = CellId::new(sheet_id, row, col);
+            report.get_cell_info(&cell_id).cloned()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let mut content = div()
         .p_3()
         .flex()
         .flex_col()
-        .gap_4()
-        // Identity section
-        .child(
-            section("Identity", panel_border, text_primary)
-                .child(info_row("Address", &cell_address, text_muted, text_primary))
-                .child(info_row("Type", cell_type, text_muted, text_primary))
-                .when(is_formula, |el| {
-                    el.child(info_row_multiline("Formula", &raw_value, text_muted, text_primary))
-                })
-                .child(info_row_multiline(
-                    if is_formula { "Result" } else { "Value" },
-                    if display_value.is_empty() { "(empty)" } else { &display_value },
-                    text_muted,
-                    text_primary,
-                ))
-        );
+        .gap_4();
+
+    // ========== PRO: TRUST BLOCK (the certificate) ==========
+    if is_pro && app.verified_mode && is_formula {
+        let verification_section = if let Some(ref info) = recalc_info {
+            // Complexity label based on depth
+            let complexity_label = if info.has_unknown_deps {
+                "Dynamic calculation"
+            } else if info.depth == 1 {
+                "Simple calculation"
+            } else if info.depth <= 3 {
+                "Multi-step calculation"
+            } else if info.depth <= 6 {
+                "Complex calculation"
+            } else {
+                "Complex system"
+            };
+
+            // Visual treatment by complexity (accent intensity)
+            // Orange warning color as Hsla for opacity support
+            let warning_color: Hsla = rgb(0xFFA500).into();
+            let (block_bg, block_border, show_warning) = if info.has_unknown_deps {
+                // Dynamic refs: warning tone
+                (warning_color.opacity(0.08), warning_color.opacity(0.3), true)
+            } else if info.depth >= 7 {
+                // Complex system: warning tone
+                (warning_color.opacity(0.08), warning_color.opacity(0.3), true)
+            } else if info.depth >= 4 {
+                // Complex: stronger emphasis
+                (accent.opacity(0.12), accent.opacity(0.4), false)
+            } else if info.depth >= 2 {
+                // Multi-step: slight accent
+                (accent.opacity(0.08), accent.opacity(0.3), false)
+            } else {
+                // Simple: calm, compact
+                (accent.opacity(0.05), accent.opacity(0.2), false)
+            };
+
+            // Guarantee as bullet points
+            let guarantee = if info.has_unknown_deps {
+                "Fully recomputed • Dynamic refs"
+            } else {
+                "Fully recomputed • Cycle-free"
+            };
+
+            // Stats line
+            let stats = format!(
+                "{}ms • Depth {} • Position {} of {}",
+                app.last_recalc_report.as_ref().map(|r| r.duration_ms).unwrap_or(0),
+                info.depth,
+                info.eval_order + 1,
+                app.last_recalc_report.as_ref().map(|r| r.cells_recomputed).unwrap_or(0)
+            );
+
+            div()
+                .p_3()
+                .rounded(px(6.0))
+                .bg(block_bg)
+                .border_1()
+                .border_color(block_border)
+                .flex()
+                .flex_col()
+                .gap_1()
+                // Line 1: ✓ VERIFIED (or ⚠ for warnings)
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(if show_warning { warning_color } else { accent })
+                        .child(if show_warning { "⚠ VERIFIED" } else { "✓ VERIFIED" })
+                )
+                // Line 2: Complexity label
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(text_primary)
+                        .child(complexity_label)
+                )
+                // Line 3: Guarantee points (blank line effect via margin)
+                .child(
+                    div()
+                        .mt_1()
+                        .text_size(px(11.0))
+                        .text_color(text_muted)
+                        .child(guarantee)
+                )
+                // Line 4: Stats
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(text_muted.opacity(0.7))
+                        .child(stats)
+                )
+        } else {
+            // Formula not in last recalc (possibly new or in cycle)
+            div()
+                .p_3()
+                .rounded(px(6.0))
+                .bg(text_muted.opacity(0.08))
+                .border_1()
+                .border_color(text_muted.opacity(0.3))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(text_muted)
+                        .child("Not in last verification")
+                )
+        };
+        content = content.child(verification_section);
+    }
+
+    // ========== PRO: IMPACT (what propagates if this changes) ==========
+    if is_pro && app.verified_mode && !dependents.is_empty() {
+        let direct_dependents = dependents.len();
+
+        // Language that implies risk without being scary
+        let impact_text = if direct_dependents == 1 {
+            "Changes here propagate to 1 downstream value".to_string()
+        } else {
+            format!("Changes here propagate to {} downstream values", direct_dependents)
+        };
+
+        let impact_section = div()
+            .py_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(text_muted)
+                    .child("Impact")
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(text_primary)
+                    .child(impact_text)
+            );
+
+        content = content.child(impact_section);
+    }
+
+    // ========== IDENTITY SECTION (Free) ==========
+    content = content.child(
+        section("Identity", panel_border, text_primary)
+            .child(info_row("Address", &cell_address, text_muted, text_primary))
+            .child(info_row("Type", cell_type, text_muted, text_primary))
+            .when(is_formula, |el| {
+                el.child(info_row_multiline("Formula", &raw_value, text_muted, text_primary))
+            })
+            .child(info_row_multiline(
+                if is_formula { "Result" } else { "Value" },
+                if display_value.is_empty() { "(empty)" } else { &display_value },
+                text_muted,
+                text_primary,
+            ))
+    );
 
     // Spill info (if applicable)
     if has_spill_info {
@@ -352,8 +487,8 @@ fn render_inspector_tab(
         content = content.child(spill_section);
     }
 
-    // Mini DAG visualization (only if cell has dependencies)
-    if !precedents.is_empty() || !dependents.is_empty() {
+    // Mini DAG visualization (Pro feature)
+    if is_pro && (!precedents.is_empty() || !dependents.is_empty()) {
         content = content.child(render_mini_dag(
             app,
             &cell_address,
@@ -367,9 +502,9 @@ fn render_inspector_tab(
         ));
     }
 
-    // Precedents section
+    // Inputs section (formerly Precedents)
     if !precedents.is_empty() {
-        let mut prec_section = section("Precedents (depends on)", panel_border, text_primary);
+        let mut prec_section = section("Inputs", panel_border, text_primary);
         for (r, c) in precedents.iter().take(10) {
             prec_section = prec_section.child(clickable_cell_row(
                 "",
@@ -392,9 +527,9 @@ fn render_inspector_tab(
         content = content.child(prec_section);
     }
 
-    // Dependents section
+    // Outputs section (formerly Dependents)
     if !dependents.is_empty() {
-        let mut dep_section = section("Dependents (used by)", panel_border, text_primary);
+        let mut dep_section = section("Outputs", panel_border, text_primary);
         for (r, c) in dependents.iter().take(10) {
             dep_section = dep_section.child(clickable_cell_row(
                 "",
@@ -417,14 +552,14 @@ fn render_inspector_tab(
         content = content.child(dep_section);
     }
 
-    // Recalc Info section (only when verified mode is enabled)
-    if app.verified_mode {
+    // Proof section (Pro feature, only when verified mode is enabled)
+    if is_pro && app.verified_mode {
         if let Some(report) = &app.last_recalc_report {
             let sheet_id = app.sheet().id;
             let cell_id = CellId::new(sheet_id, row, col);
 
             if let Some(info) = report.get_cell_info(&cell_id) {
-                let mut recalc_section = section("Recalc Info", panel_border, text_primary);
+                let mut recalc_section = section("Proof", panel_border, text_primary);
 
                 // Depth
                 recalc_section = recalc_section.child(info_row(
@@ -487,24 +622,33 @@ fn render_inspector_tab(
             } else if is_formula {
                 // Formula cell but not in recalc report (might be cycle or new)
                 content = content.child(
-                    section("Recalc Info", panel_border, text_primary)
+                    section("Proof", panel_border, text_primary)
                         .child(
                             div()
                                 .text_size(px(11.0))
                                 .text_color(text_muted)
-                                .child("Not in last recalc (possibly in cycle)")
+                                .child("Not in last verification")
                         )
                 );
             }
         }
-    } else if is_formula {
-        // Hint to enable verified mode
+    } else if is_pro && is_formula {
+        // Hint to enable verified mode (Pro users only)
         content = content.child(
             div()
                 .py_2()
                 .text_size(px(10.0))
                 .text_color(text_muted)
-                .child("Enable Verified Mode (F9) for recalc info")
+                .child("Enable Verified Mode (F9) for proof")
+        );
+    } else if !is_pro && is_formula && (!precedents.is_empty() || !dependents.is_empty()) {
+        // Upsell for Free users with formulas
+        content = content.child(
+            div()
+                .py_2()
+                .text_size(px(10.0))
+                .text_color(text_muted)
+                .child("Upgrade to Pro for trust verification")
         );
     }
 
@@ -553,7 +697,7 @@ fn render_mini_dag(
                             .text_size(px(9.0))
                             .text_color(text_muted)
                             .mr_1()
-                            .child("in:")
+                            .child("inputs")
                     )
                     .children(prec_cells.into_iter().map(|(r, c)| {
                         dag_cell_chip(app, *r, *c, text_muted, accent, cx)
@@ -633,7 +777,7 @@ fn render_mini_dag(
                             .text_size(px(9.0))
                             .text_color(text_muted)
                             .mr_1()
-                            .child("out:")
+                            .child("outputs")
                     )
                     .children(dep_cells.into_iter().map(|(r, c)| {
                         dag_cell_chip(app, *r, *c, text_muted, accent, cx)

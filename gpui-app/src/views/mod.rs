@@ -2344,144 +2344,160 @@ fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
         };
 
         if is_formula {
-            // Formula cell: full inspector view
+            // Formula cell: value-first status card design
+            // Goal: reassurance + confidence, not explanation
+
+            // Get depth for complexity label (only when verified mode is on)
+            let depth = if app.verified_mode {
+                if let Some(report) = &app.last_recalc_report {
+                    use visigrid_engine::cell_id::CellId;
+                    let sheet_id = app.sheet().id;
+                    let cell_id = CellId::new(sheet_id, row, col);
+                    report.get_cell_info(&cell_id).map(|info| info.depth)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let complexity_label = match depth {
+                Some(1) => "Simple formula".to_string(),
+                Some(2) => "2 layers deep".to_string(),
+                Some(d) if d <= 4 => format!("{} layers deep", d),
+                Some(d) => format!("Complex ({} layers)", d),
+                None => "Formula".to_string(),
+            };
+
+            // Softer divider color (reduced opacity)
+            let divider = panel_border.opacity(0.5);
+
             let mut content = div()
                 .flex()
                 .flex_col()
-                // Header: "Inspector: {cell}"
+                // Header: cell ref + context-aware verified badge
                 .child(
                     div()
                         .px_3()
-                        .py(px(10.0))
+                        .py(px(8.0))
                         .border_b_1()
-                        .border_color(panel_border)
+                        .border_color(divider)
+                        .flex()
+                        .items_center()
+                        .justify_between()
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(px(12.0))
                                 .text_color(text_muted)
-                                .child(format!("Inspector: {}", cell_ref))
+                                .child(cell_ref.clone())
                         )
+                        // No verification badges in F1 Peek - that's Pro Inspector territory
+                        // F1 = "what is this cell", Pro Inspector = "why you can trust this"
                 )
-                // Formula section
+                // VALUE - the hero (large, prominent)
                 .child(
                     div()
                         .px_3()
-                        .py(px(8.0))
+                        .py(px(12.0))
                         .border_b_1()
-                        .border_color(panel_border)
+                        .border_color(divider)
                         .child(
                             div()
-                                .text_size(px(11.0))
-                                .text_color(text_disabled)
-                                .child("Formula")
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(text_primary)
-                                .child(raw_value)
-                        )
-                )
-                // Value section
-                .child(
-                    div()
-                        .px_3()
-                        .py(px(8.0))
-                        .border_b_1()
-                        .border_color(panel_border)
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(text_disabled)
-                                .child("Value")
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
+                                .text_size(px(18.0))
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(text_primary)
                                 .child(if display_value.is_empty() { "(empty)".to_string() } else { display_value.clone() })
                         )
-                );
-
-            // Precedents section (Depends on)
-            if !precedents.is_empty() {
-                let prec_cells: Vec<_> = precedents.iter().take(8).map(|(r, c)| {
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(accent)
-                        .child(app.cell_ref_at(*r, *c))
-                }).collect();
-
-                content = content.child(
-                    div()
-                        .px_3()
-                        .py(px(8.0))
-                        .border_b_1()
-                        .border_color(panel_border)
                         .child(
                             div()
                                 .text_size(px(11.0))
                                 .text_color(text_disabled)
-                                .mb(px(4.0))
-                                .child(format!("Depends on ({}):", precedents.len()))
+                                .mt(px(2.0))
+                                .child(complexity_label)
+                        )
+                )
+                // Formula (secondary, smaller)
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(divider)
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
+                                .child(raw_value.clone())
+                        )
+                );
+
+            // Uses (precedents) - human language
+            if !precedents.is_empty() {
+                let prec_refs: Vec<String> = precedents.iter().take(6).map(|(r, c)| {
+                    app.cell_ref_at(*r, *c)
+                }).collect();
+                let prec_text = if precedents.len() > 6 {
+                    format!("{} +{} more", prec_refs.join(", "), precedents.len() - 6)
+                } else {
+                    prec_refs.join(", ")
+                };
+
+                content = content.child(
+                    div()
+                        .px_3()
+                        .py(px(6.0))
+                        .border_b_1()
+                        .border_color(divider)
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_disabled)
+                                .child("Uses")
                         )
                         .child(
                             div()
-                                .flex()
-                                .flex_wrap()
-                                .gap(px(8.0))
-                                .children(prec_cells)
+                                .text_size(px(11.0))
+                                .text_color(accent)
+                                .child(prec_text)
                         )
-                        .when(precedents.len() > 8, |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(text_muted)
-                                    .mt(px(4.0))
-                                    .child(format!("+ {} more", precedents.len() - 8))
-                            )
-                        })
                 );
             }
 
-            // Dependents section (Used by)
+            // Feeds (dependents) - human language
             if !dependents.is_empty() {
-                let dep_cells: Vec<_> = dependents.iter().take(8).map(|(r, c)| {
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(accent)
-                        .child(app.cell_ref_at(*r, *c))
+                let dep_refs: Vec<String> = dependents.iter().take(6).map(|(r, c)| {
+                    app.cell_ref_at(*r, *c)
                 }).collect();
+                let dep_text = if dependents.len() > 6 {
+                    format!("{} +{} more", dep_refs.join(", "), dependents.len() - 6)
+                } else {
+                    dep_refs.join(", ")
+                };
 
                 content = content.child(
                     div()
                         .px_3()
-                        .py(px(8.0))
+                        .py(px(6.0))
                         .border_b_1()
-                        .border_color(panel_border)
+                        .border_color(divider)
+                        .flex()
+                        .items_center()
+                        .gap_2()
                         .child(
                             div()
                                 .text_size(px(11.0))
                                 .text_color(text_disabled)
-                                .mb(px(4.0))
-                                .child(format!("Used by ({}):", dependents.len()))
+                                .child("Feeds")
                         )
                         .child(
                             div()
-                                .flex()
-                                .flex_wrap()
-                                .gap(px(8.0))
-                                .children(dep_cells)
+                                .text_size(px(11.0))
+                                .text_color(accent)
+                                .child(dep_text)
                         )
-                        .when(dependents.len() > 8, |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(text_muted)
-                                    .mt(px(4.0))
-                                    .child(format!("+ {} more", dependents.len() - 8))
-                            )
-                        })
                 );
             }
 
@@ -2491,7 +2507,7 @@ fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
                     div()
                         .px(px(8.0))
                         .py(px(3.0))
-                        .bg(panel_border)
+                        .bg(divider)
                         .rounded(px(4.0))
                         .text_size(px(11.0))
                         .text_color(text_primary)
@@ -2520,76 +2536,105 @@ fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
 
             content
         } else {
-            // Simple value cell: compact view
+            // Simple value cell: value-first compact card
+            let type_label = if raw_value.is_empty() {
+                "Empty cell"
+            } else if raw_value.parse::<f64>().is_ok() {
+                "Number"
+            } else if raw_value == "TRUE" || raw_value == "FALSE" {
+                "Boolean"
+            } else {
+                "Text"
+            };
+
+            // Softer divider for value cells too
+            let divider = panel_border.opacity(0.5);
+
             let mut content = div()
                 .flex()
                 .flex_col()
-                // Header: just cell ref
+                // Header: cell ref
                 .child(
                     div()
                         .px_3()
-                        .py(px(10.0))
+                        .py(px(8.0))
                         .border_b_1()
-                        .border_color(panel_border)
+                        .border_color(divider)
                         .child(
                             div()
-                                .text_size(px(14.0))
-                                .text_color(text_primary)
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
                                 .child(cell_ref)
                         )
                 )
-                // Value
+                // VALUE - the hero
                 .child(
                     div()
                         .px_3()
-                        .py(px(8.0))
+                        .py(px(12.0))
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(px(18.0))
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(text_primary)
                                 .child(if display_value.is_empty() { "(empty)".to_string() } else { display_value })
                         )
-                );
-
-            // Used by section
-            if !dependents.is_empty() {
-                let dep_cells: Vec<_> = dependents.iter().take(8).map(|(r, c)| {
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(accent)
-                        .child(app.cell_ref_at(*r, *c))
-                }).collect();
-
-                content = content.child(
-                    div()
-                        .px_3()
-                        .py(px(8.0))
-                        .border_t_1()
-                        .border_color(panel_border)
                         .child(
                             div()
                                 .text_size(px(11.0))
                                 .text_color(text_disabled)
-                                .mb(px(4.0))
-                                .child(format!("Used by ({}):", dependents.len()))
+                                .mt(px(2.0))
+                                .child(type_label)
+                        )
+                );
+
+            // Feeds (dependents) - only if this value is used elsewhere
+            if !dependents.is_empty() {
+                let dep_refs: Vec<String> = dependents.iter().take(6).map(|(r, c)| {
+                    app.cell_ref_at(*r, *c)
+                }).collect();
+                let dep_text = if dependents.len() > 6 {
+                    format!("{} +{} more", dep_refs.join(", "), dependents.len() - 6)
+                } else {
+                    dep_refs.join(", ")
+                };
+
+                content = content.child(
+                    div()
+                        .px_3()
+                        .py(px(6.0))
+                        .border_t_1()
+                        .border_color(divider)
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_disabled)
+                                .child("Feeds")
                         )
                         .child(
                             div()
-                                .flex()
-                                .flex_wrap()
-                                .gap(px(8.0))
-                                .children(dep_cells)
+                                .text_size(px(11.0))
+                                .text_color(accent)
+                                .child(dep_text)
                         )
-                        .when(dependents.len() > 8, |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(text_muted)
-                                    .mt(px(4.0))
-                                    .child(format!("+ {} more", dependents.len() - 8))
-                            )
-                        })
+                );
+            } else if raw_value.is_empty() {
+                // Empty cell with no dependents - positive framing
+                content = content.child(
+                    div()
+                        .px_3()
+                        .py(px(6.0))
+                        .border_t_1()
+                        .border_color(divider)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_disabled)
+                                .child("Independent cell")
+                        )
                 );
             }
 
