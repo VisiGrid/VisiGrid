@@ -1,0 +1,563 @@
+//! Dependency graph for formula cells.
+//!
+//! Tracks precedents (cells a formula depends on) and dependents (cells that
+//! depend on a given cell) for efficient queries and future recomputation.
+//!
+//! # Edge Direction
+//!
+//! ```text
+//! A → B  means  "B depends on A"  (A is a precedent of B)
+//! ```
+//!
+//! This makes "what breaks if I change X?" trivial: follow outgoing edges.
+
+use rustc_hash::{FxHashMap, FxHashSet};
+
+use crate::cell_id::CellId;
+
+/// Persistent dependency graph for formula cells.
+///
+/// Maintains bidirectional adjacency for O(1) lookups:
+/// - `preds[B]` = cells that B depends on (precedents)
+/// - `succs[A]` = cells that depend on A (dependents)
+///
+/// # Invariants
+///
+/// 1. **Bidirectional consistency:** If A ∈ preds[B] then B ∈ succs[A], and vice versa.
+/// 2. **No dangling entries:** Empty sets are removed, not stored.
+/// 3. **No duplicate edges:** Set semantics enforced by FxHashSet.
+/// 4. **Atomic updates:** `replace_edges` is the only mutator that touches both maps.
+#[derive(Default, Debug, Clone)]
+pub struct DepGraph {
+    /// Precedents: for each formula cell B, the cells A it depends on.
+    /// B -> {A1, A2, ...}
+    preds: FxHashMap<CellId, FxHashSet<CellId>>,
+
+    /// Dependents: for each referenced cell A, the formula cells B that depend on it.
+    /// A -> {B1, B2, ...}
+    succs: FxHashMap<CellId, FxHashSet<CellId>>,
+}
+
+impl DepGraph {
+    /// Create an empty dependency graph.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the cells this formula cell depends on (precedents).
+    ///
+    /// These are the incoming edges to the cell.
+    pub fn precedents(&self, cell: CellId) -> impl Iterator<Item = CellId> + '_ {
+        self.preds
+            .get(&cell)
+            .into_iter()
+            .flat_map(|s| s.iter().copied())
+    }
+
+    /// Returns the cells that depend on this cell (dependents).
+    ///
+    /// These are the outgoing edges from the cell.
+    pub fn dependents(&self, cell: CellId) -> impl Iterator<Item = CellId> + '_ {
+        self.succs
+            .get(&cell)
+            .into_iter()
+            .flat_map(|s| s.iter().copied())
+    }
+
+    /// Returns true if this cell has formula dependencies tracked in the graph.
+    pub fn is_formula_cell(&self, cell: CellId) -> bool {
+        self.preds.contains_key(&cell)
+    }
+
+    /// Returns the number of formula cells (cells with precedents) in the graph.
+    pub fn formula_cell_count(&self) -> usize {
+        self.preds.len()
+    }
+
+    /// Returns the number of cells that are referenced by at least one formula.
+    pub fn referenced_cell_count(&self) -> usize {
+        self.succs.len()
+    }
+
+    /// Replace all edges for a formula cell atomically.
+    ///
+    /// This is the primary mutation API. It:
+    /// 1. Removes the cell from all its old precedents' successor sets
+    /// 2. Clears the cell's precedent set
+    /// 3. Adds the cell to all new precedents' successor sets
+    /// 4. Sets the cell's new precedent set
+    ///
+    /// Pass an empty set to clear all edges for this cell.
+    pub fn replace_edges(&mut self, formula_cell: CellId, new_preds: FxHashSet<CellId>) {
+        // Step 1: Remove old edges
+        if let Some(old_preds) = self.preds.remove(&formula_cell) {
+            for pred in old_preds {
+                if let Some(deps) = self.succs.get_mut(&pred) {
+                    deps.remove(&formula_cell);
+                    // Clean up empty entries (invariant: no dangling)
+                    if deps.is_empty() {
+                        self.succs.remove(&pred);
+                    }
+                }
+            }
+        }
+
+        // Step 2: If no new precedents, we're done (cell is not a formula or has no refs)
+        if new_preds.is_empty() {
+            return;
+        }
+
+        // Step 3: Add new edges
+        for pred in &new_preds {
+            self.succs.entry(*pred).or_default().insert(formula_cell);
+        }
+
+        // Step 4: Store new precedents
+        self.preds.insert(formula_cell, new_preds);
+    }
+
+    /// Clear all edges for a cell (formula removed or cell deleted).
+    ///
+    /// Convenience wrapper around `replace_edges` with an empty set.
+    pub fn clear_cell(&mut self, cell: CellId) {
+        self.replace_edges(cell, FxHashSet::default());
+    }
+
+    /// Remove all edges involving cells from a specific sheet.
+    ///
+    /// Called when a sheet is deleted.
+    pub fn remove_sheet(&mut self, sheet: crate::sheet::SheetId) {
+        // Collect cells to remove (can't mutate while iterating)
+        let cells_to_remove: Vec<CellId> = self
+            .preds
+            .keys()
+            .filter(|c| c.sheet == sheet)
+            .copied()
+            .collect();
+
+        // Clear each formula cell from this sheet
+        for cell in cells_to_remove {
+            self.clear_cell(cell);
+        }
+
+        // Also remove any cells from this sheet that are only in succs
+        // (cells that are referenced but don't have formulas)
+        let referenced_to_remove: Vec<CellId> = self
+            .succs
+            .keys()
+            .filter(|c| c.sheet == sheet)
+            .copied()
+            .collect();
+
+        for cell in referenced_to_remove {
+            if let Some(dependents) = self.succs.remove(&cell) {
+                // Remove this cell from the preds of all its dependents
+                for dep in dependents {
+                    if let Some(preds) = self.preds.get_mut(&dep) {
+                        preds.remove(&cell);
+                        // Clean up empty preds (invariant: no empty sets stored)
+                        if preds.is_empty() {
+                            self.preds.remove(&dep);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply a coordinate mapping to all cells in the graph.
+    ///
+    /// Used for row/column insert/delete operations. The mapping function
+    /// returns `Some(new_id)` if the cell moves, or `None` if it's deleted.
+    ///
+    /// This rebuilds the graph with remapped coordinates.
+    pub fn apply_mapping<F>(&mut self, map: F)
+    where
+        F: Fn(CellId) -> Option<CellId>,
+    {
+        // Build new maps with remapped IDs
+        let mut new_preds: FxHashMap<CellId, FxHashSet<CellId>> = FxHashMap::default();
+        let mut new_succs: FxHashMap<CellId, FxHashSet<CellId>> = FxHashMap::default();
+
+        for (formula_cell, preds) in &self.preds {
+            // Map the formula cell
+            let Some(new_formula_cell) = map(*formula_cell) else {
+                continue; // Formula cell was deleted
+            };
+
+            // Map all precedents, keeping only those that survive
+            let mapped_preds: FxHashSet<CellId> = preds
+                .iter()
+                .filter_map(|p| map(*p))
+                .collect();
+
+            if mapped_preds.is_empty() {
+                continue; // All precedents were deleted
+            }
+
+            // Add to new maps
+            for pred in &mapped_preds {
+                new_succs.entry(*pred).or_default().insert(new_formula_cell);
+            }
+            new_preds.insert(new_formula_cell, mapped_preds);
+        }
+
+        self.preds = new_preds;
+        self.succs = new_succs;
+    }
+
+    /// Check all invariants. Panics if any are violated.
+    ///
+    /// Only available in test builds.
+    #[cfg(test)]
+    pub fn assert_consistent(&self) {
+        // Invariant 1: Bidirectional consistency (preds → succs)
+        for (formula_cell, preds) in &self.preds {
+            for pred in preds {
+                assert!(
+                    self.succs.get(pred).map_or(false, |s| s.contains(formula_cell)),
+                    "Missing succ edge: {:?} should have {:?} in dependents",
+                    pred,
+                    formula_cell
+                );
+            }
+        }
+
+        // Invariant 1: Bidirectional consistency (succs → preds)
+        for (cell, dependents) in &self.succs {
+            for dep in dependents {
+                assert!(
+                    self.preds.get(dep).map_or(false, |s| s.contains(cell)),
+                    "Missing pred edge: {:?} should have {:?} in precedents",
+                    dep,
+                    cell
+                );
+            }
+        }
+
+        // Invariant 2: No empty sets stored
+        for (cell, preds) in &self.preds {
+            assert!(
+                !preds.is_empty(),
+                "Empty preds set stored for {:?}",
+                cell
+            );
+        }
+        for (cell, succs) in &self.succs {
+            assert!(
+                !succs.is_empty(),
+                "Empty succs set stored for {:?}",
+                cell
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sheet::SheetId;
+
+    fn cell(sheet: u64, row: usize, col: usize) -> CellId {
+        CellId::new(SheetId::from_raw(sheet), row, col)
+    }
+
+    fn set(cells: &[CellId]) -> FxHashSet<CellId> {
+        cells.iter().copied().collect()
+    }
+
+    #[test]
+    fn test_empty_graph() {
+        let graph = DepGraph::new();
+
+        assert_eq!(graph.formula_cell_count(), 0);
+        assert_eq!(graph.referenced_cell_count(), 0);
+        assert!(!graph.is_formula_cell(cell(1, 0, 0)));
+        assert_eq!(graph.precedents(cell(1, 0, 0)).count(), 0);
+        assert_eq!(graph.dependents(cell(1, 0, 0)).count(), 0);
+
+        graph.assert_consistent();
+    }
+
+    #[test]
+    fn test_single_edge() {
+        // B1 = A1
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let b1 = cell(1, 0, 1);
+
+        graph.replace_edges(b1, set(&[a1]));
+        graph.assert_consistent();
+
+        // B1 depends on A1
+        assert!(graph.is_formula_cell(b1));
+        assert!(!graph.is_formula_cell(a1));
+
+        let preds: Vec<_> = graph.precedents(b1).collect();
+        assert_eq!(preds, vec![a1]);
+
+        let deps: Vec<_> = graph.dependents(a1).collect();
+        assert_eq!(deps, vec![b1]);
+
+        assert_eq!(graph.formula_cell_count(), 1);
+        assert_eq!(graph.referenced_cell_count(), 1);
+    }
+
+    #[test]
+    fn test_multiple_precedents() {
+        // C1 = A1 + B1
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let b1 = cell(1, 0, 1);
+        let c1 = cell(1, 0, 2);
+
+        graph.replace_edges(c1, set(&[a1, b1]));
+        graph.assert_consistent();
+
+        let mut preds: Vec<_> = graph.precedents(c1).collect();
+        preds.sort_by_key(|c| c.col);
+        assert_eq!(preds, vec![a1, b1]);
+
+        assert_eq!(graph.dependents(a1).collect::<Vec<_>>(), vec![c1]);
+        assert_eq!(graph.dependents(b1).collect::<Vec<_>>(), vec![c1]);
+    }
+
+    #[test]
+    fn test_multiple_dependents() {
+        // B1 = A1, C1 = A1
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let b1 = cell(1, 0, 1);
+        let c1 = cell(1, 0, 2);
+
+        graph.replace_edges(b1, set(&[a1]));
+        graph.replace_edges(c1, set(&[a1]));
+        graph.assert_consistent();
+
+        let mut deps: Vec<_> = graph.dependents(a1).collect();
+        deps.sort_by_key(|c| c.col);
+        assert_eq!(deps, vec![b1, c1]);
+
+        assert_eq!(graph.formula_cell_count(), 2);
+        assert_eq!(graph.referenced_cell_count(), 1);
+    }
+
+    #[test]
+    fn test_rewiring() {
+        // B1 = A1, then change to B1 = A2
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let a2 = cell(1, 1, 0);
+        let b1 = cell(1, 0, 1);
+
+        graph.replace_edges(b1, set(&[a1]));
+        graph.assert_consistent();
+
+        assert_eq!(graph.precedents(b1).collect::<Vec<_>>(), vec![a1]);
+        assert_eq!(graph.dependents(a1).collect::<Vec<_>>(), vec![b1]);
+
+        // Rewire: B1 now depends on A2 instead
+        graph.replace_edges(b1, set(&[a2]));
+        graph.assert_consistent();
+
+        assert_eq!(graph.precedents(b1).collect::<Vec<_>>(), vec![a2]);
+        assert_eq!(graph.dependents(a2).collect::<Vec<_>>(), vec![b1]);
+
+        // A1 should have no dependents now
+        assert_eq!(graph.dependents(a1).count(), 0);
+        // And A1 should not be in succs at all (sparse)
+        assert!(!graph.succs.contains_key(&a1));
+    }
+
+    #[test]
+    fn test_unwiring() {
+        // B1 = A1, then clear B1
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let b1 = cell(1, 0, 1);
+
+        graph.replace_edges(b1, set(&[a1]));
+        graph.assert_consistent();
+
+        graph.clear_cell(b1);
+        graph.assert_consistent();
+
+        assert!(!graph.is_formula_cell(b1));
+        assert_eq!(graph.precedents(b1).count(), 0);
+        assert_eq!(graph.dependents(a1).count(), 0);
+        assert_eq!(graph.formula_cell_count(), 0);
+        assert_eq!(graph.referenced_cell_count(), 0);
+    }
+
+    #[test]
+    fn test_cross_sheet_edge() {
+        // Sheet2!A1 = Sheet1!B1
+        let mut graph = DepGraph::new();
+        let sheet1_b1 = cell(1, 0, 1);
+        let sheet2_a1 = cell(2, 0, 0);
+
+        graph.replace_edges(sheet2_a1, set(&[sheet1_b1]));
+        graph.assert_consistent();
+
+        assert!(graph.is_formula_cell(sheet2_a1));
+        assert_eq!(graph.precedents(sheet2_a1).collect::<Vec<_>>(), vec![sheet1_b1]);
+        assert_eq!(graph.dependents(sheet1_b1).collect::<Vec<_>>(), vec![sheet2_a1]);
+    }
+
+    #[test]
+    fn test_diamond_dependency() {
+        //     A1
+        //    /  \
+        //   B1   C1
+        //    \  /
+        //     D1
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let b1 = cell(1, 0, 1);
+        let c1 = cell(1, 0, 2);
+        let d1 = cell(1, 0, 3);
+
+        graph.replace_edges(b1, set(&[a1]));
+        graph.replace_edges(c1, set(&[a1]));
+        graph.replace_edges(d1, set(&[b1, c1]));
+        graph.assert_consistent();
+
+        // D1 depends on B1 and C1
+        let mut d1_preds: Vec<_> = graph.precedents(d1).collect();
+        d1_preds.sort_by_key(|c| c.col);
+        assert_eq!(d1_preds, vec![b1, c1]);
+
+        // A1 has B1 and C1 as dependents
+        let mut a1_deps: Vec<_> = graph.dependents(a1).collect();
+        a1_deps.sort_by_key(|c| c.col);
+        assert_eq!(a1_deps, vec![b1, c1]);
+
+        assert_eq!(graph.formula_cell_count(), 3); // B1, C1, D1
+        assert_eq!(graph.referenced_cell_count(), 3); // A1, B1, C1
+    }
+
+    #[test]
+    fn test_self_reference() {
+        // A1 = A1 + 1 (cycle, but graph allows it - cycle detection is Phase 1.2)
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+
+        graph.replace_edges(a1, set(&[a1]));
+        graph.assert_consistent();
+
+        assert!(graph.is_formula_cell(a1));
+        assert_eq!(graph.precedents(a1).collect::<Vec<_>>(), vec![a1]);
+        assert_eq!(graph.dependents(a1).collect::<Vec<_>>(), vec![a1]);
+    }
+
+    #[test]
+    fn test_remove_sheet() {
+        // Sheet1: B1 = A1
+        // Sheet2: A1 = Sheet1!B1
+        let mut graph = DepGraph::new();
+        let s1_a1 = cell(1, 0, 0);
+        let s1_b1 = cell(1, 0, 1);
+        let s2_a1 = cell(2, 0, 0);
+
+        graph.replace_edges(s1_b1, set(&[s1_a1]));
+        graph.replace_edges(s2_a1, set(&[s1_b1]));
+        graph.assert_consistent();
+
+        assert_eq!(graph.formula_cell_count(), 2);
+
+        // Delete Sheet1
+        graph.remove_sheet(SheetId::from_raw(1));
+        graph.assert_consistent();
+
+        // Sheet1 cells should be gone
+        assert!(!graph.is_formula_cell(s1_b1));
+        assert_eq!(graph.dependents(s1_a1).count(), 0);
+
+        // Sheet2!A1's precedent was on Sheet1, so it now has no precedents
+        // and is removed from the graph (empty preds cleaned up)
+        assert!(!graph.is_formula_cell(s2_a1));
+        assert_eq!(graph.formula_cell_count(), 0);
+        assert_eq!(graph.referenced_cell_count(), 0);
+    }
+
+    #[test]
+    fn test_apply_mapping_shift_rows() {
+        // B1 = A1, B2 = A2
+        // Insert row at 1, so row 0 stays, row 1+ shifts down
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let a2 = cell(1, 1, 0);
+        let b1 = cell(1, 0, 1);
+        let b2 = cell(1, 1, 1);
+
+        graph.replace_edges(b1, set(&[a1]));
+        graph.replace_edges(b2, set(&[a2]));
+        graph.assert_consistent();
+
+        // Insert row at index 1: rows >= 1 shift by +1
+        graph.apply_mapping(|c| {
+            if c.sheet.raw() != 1 {
+                return Some(c);
+            }
+            if c.row >= 1 {
+                Some(CellId::new(c.sheet, c.row + 1, c.col))
+            } else {
+                Some(c)
+            }
+        });
+        graph.assert_consistent();
+
+        // B1 = A1 should be unchanged
+        assert!(graph.is_formula_cell(b1));
+        assert_eq!(graph.precedents(b1).collect::<Vec<_>>(), vec![a1]);
+
+        // B2 = A2 should now be B3 = A3
+        let a3 = cell(1, 2, 0);
+        let b3 = cell(1, 2, 1);
+        assert!(!graph.is_formula_cell(b2)); // Old position gone
+        assert!(graph.is_formula_cell(b3));  // New position exists
+        assert_eq!(graph.precedents(b3).collect::<Vec<_>>(), vec![a3]);
+    }
+
+    #[test]
+    fn test_apply_mapping_delete_row() {
+        // B1 = A1, B2 = A2
+        // Delete row 0
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let a2 = cell(1, 1, 0);
+        let b1 = cell(1, 0, 1);
+        let b2 = cell(1, 1, 1);
+
+        graph.replace_edges(b1, set(&[a1]));
+        graph.replace_edges(b2, set(&[a2]));
+        graph.assert_consistent();
+
+        // Delete row 0: row 0 → None, rows > 0 shift by -1
+        graph.apply_mapping(|c| {
+            if c.sheet.raw() != 1 {
+                return Some(c);
+            }
+            if c.row == 0 {
+                None // Deleted
+            } else {
+                Some(CellId::new(c.sheet, c.row - 1, c.col))
+            }
+        });
+        graph.assert_consistent();
+
+        // Original B1 (row 0) was deleted, original B2 (row 1) shifted to row 0
+        // So position (0,1) now contains the shifted B2 formula
+        // Original b2 position (row 1) should be empty
+        assert!(!graph.is_formula_cell(b2)); // Old row 1 position is gone
+
+        // The shifted formula is now at row 0
+        let new_a1 = cell(1, 0, 0); // What was A2 is now at row 0
+        let new_b1 = cell(1, 0, 1); // What was B2 is now at row 0
+        assert!(graph.is_formula_cell(new_b1));
+        assert_eq!(graph.precedents(new_b1).collect::<Vec<_>>(), vec![new_a1]);
+
+        // Only one formula cell should exist now
+        assert_eq!(graph.formula_cell_count(), 1);
+    }
+}
