@@ -423,6 +423,14 @@ impl CellValue {
             _ => 0.0,
         }
     }
+
+    /// Get the parsed AST for formula cells, if available.
+    pub fn formula_ast(&self) -> Option<&parser::ParsedExpr> {
+        match self {
+            CellValue::Formula { ast, .. } => ast.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 /// Spill information for a cell that is the source of array spill

@@ -1,8 +1,14 @@
 use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
+use crate::cell::CellValue;
+use crate::cell_id::CellId;
+use crate::dep_graph::DepGraph;
 use crate::sheet::{Sheet, SheetId, normalize_sheet_name, is_valid_sheet_name};
 use crate::named_range::{NamedRange, NamedRangeStore};
 use crate::formula::eval::{CellLookup, NamedRangeResolution, Value};
+use crate::formula::parser::bind_expr;
+use crate::formula::refs::extract_cell_ids;
 
 /// A workbook containing multiple sheets
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +24,11 @@ pub struct Workbook {
     /// Key: sheet being referenced, Value: set of (source_sheet_id, row, col)
     #[serde(skip)]
     sheet_referrers: std::collections::HashMap<SheetId, HashSet<(SheetId, usize, usize)>>,
+
+    /// Dependency graph for formula cells.
+    /// Rebuilt on load, updated incrementally on cell changes.
+    #[serde(skip)]
+    dep_graph: DepGraph,
 }
 
 fn default_next_sheet_id() -> u64 {
@@ -40,6 +51,7 @@ impl Workbook {
             next_sheet_id: 2, // Next ID will be 2
             named_ranges: NamedRangeStore::new(),
             sheet_referrers: std::collections::HashMap::new(),
+            dep_graph: DepGraph::new(),
         }
     }
 
@@ -261,6 +273,7 @@ impl Workbook {
 
     /// Create a workbook from sheets (for deserialization)
     /// Note: next_sheet_id should be set separately via set_next_sheet_id if loading from file
+    /// Call `rebuild_dep_graph()` after loading to populate the dependency graph.
     pub fn from_sheets(sheets: Vec<Sheet>, active: usize) -> Self {
         let active_sheet = active.min(sheets.len().saturating_sub(1));
         // Calculate next_sheet_id as max existing id + 1
@@ -271,10 +284,12 @@ impl Workbook {
             next_sheet_id: max_id + 1,
             named_ranges: NamedRangeStore::new(),
             sheet_referrers: std::collections::HashMap::new(),
+            dep_graph: DepGraph::new(),
         }
     }
 
     /// Create a workbook from sheets with explicit next_sheet_id (for full deserialization)
+    /// Call `rebuild_dep_graph()` after loading to populate the dependency graph.
     pub fn from_sheets_with_meta(sheets: Vec<Sheet>, active: usize, next_sheet_id: u64) -> Self {
         let active_sheet = active.min(sheets.len().saturating_sub(1));
         Self {
@@ -283,6 +298,7 @@ impl Workbook {
             next_sheet_id,
             named_ranges: NamedRangeStore::new(),
             sheet_referrers: std::collections::HashMap::new(),
+            dep_graph: DepGraph::new(),
         }
     }
 
@@ -349,6 +365,97 @@ impl Workbook {
     /// List all named ranges
     pub fn list_named_ranges(&self) -> Vec<&NamedRange> {
         self.named_ranges.list()
+    }
+
+    // =========================================================================
+    // Dependency Graph
+    // =========================================================================
+
+    /// Get a reference to the dependency graph.
+    pub fn dep_graph(&self) -> &DepGraph {
+        &self.dep_graph
+    }
+
+    /// Rebuild the dependency graph from scratch.
+    ///
+    /// Call this after loading a workbook to populate the graph.
+    /// Iterates all formula cells and extracts their references.
+    pub fn rebuild_dep_graph(&mut self) {
+        self.dep_graph = DepGraph::new();
+
+        // Iterate all sheets and cells
+        for sheet in &self.sheets {
+            let sheet_id = sheet.id;
+
+            for ((row, col), cell) in sheet.cells_iter() {
+                if let CellValue::Formula { ast: Some(ast), .. } = &cell.value {
+                    // Bind the AST with cross-sheet resolution
+                    let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
+
+                    // Extract cell references
+                    let refs = extract_cell_ids(
+                        &bound,
+                        sheet_id,
+                        &self.named_ranges,
+                        |idx| self.sheet_id_at_idx(idx),
+                    );
+
+                    if !refs.is_empty() {
+                        let formula_cell = CellId::new(sheet_id, *row, *col);
+                        let preds: FxHashSet<CellId> = refs.into_iter().collect();
+                        self.dep_graph.replace_edges(formula_cell, preds);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update the dependency graph for a specific cell.
+    ///
+    /// Call this after setting a cell value (formula or otherwise).
+    /// If the cell has a formula, extracts and updates its dependencies.
+    /// If the cell is not a formula (or empty), clears any existing dependencies.
+    pub fn update_cell_deps(&mut self, sheet_id: SheetId, row: usize, col: usize) {
+        let cell_id = CellId::new(sheet_id, row, col);
+
+        // Get the cell's formula AST if it exists (clone to avoid borrow issues)
+        let ast = self.sheet_by_id(sheet_id)
+            .and_then(|sheet| sheet.get_cell(row, col).value.formula_ast().cloned());
+
+        if let Some(ast) = ast {
+            // Bind and extract references
+            let bound = bind_expr(&ast, |name| self.sheet_id_by_name(name));
+            let refs = extract_cell_ids(
+                &bound,
+                sheet_id,
+                &self.named_ranges,
+                |idx| self.sheet_id_at_idx(idx),
+            );
+
+            let preds: FxHashSet<CellId> = refs.into_iter().collect();
+            self.dep_graph.replace_edges(cell_id, preds);
+        } else {
+            // Not a formula, clear any existing edges
+            self.dep_graph.clear_cell(cell_id);
+        }
+    }
+
+    /// Clear dependencies for a cell (e.g., when the cell is deleted or cleared).
+    pub fn clear_cell_deps(&mut self, sheet_id: SheetId, row: usize, col: usize) {
+        let cell_id = CellId::new(sheet_id, row, col);
+        self.dep_graph.clear_cell(cell_id);
+    }
+
+    /// Get the precedents (cells this formula depends on) for a cell.
+    pub fn get_precedents(&self, sheet_id: SheetId, row: usize, col: usize) -> Vec<CellId> {
+        let cell_id = CellId::new(sheet_id, row, col);
+        self.dep_graph.precedents(cell_id).collect()
+    }
+
+    /// Get the dependents (cells that depend on this cell) for a cell.
+    pub fn get_dependents(&self, sheet_id: SheetId, row: usize, col: usize) -> Vec<CellId> {
+        let cell_id = CellId::new(sheet_id, row, col);
+        self.dep_graph.dependents(cell_id).collect()
     }
 
     // =========================================================================
@@ -802,5 +909,203 @@ mod tests {
         let lookup = WorkbookLookup::new(&wb, sheet1_id);
         let result = evaluate(&bound, &lookup);
         assert_eq!(result.to_text(), "42");
+    }
+
+    // =========================================================================
+    // Dependency Graph Tests
+    // =========================================================================
+
+    #[test]
+    fn test_dep_graph_simple_formula() {
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // Set up data cells
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "10"); // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "20"); // B1
+
+        // Set a formula that references A1 and B1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=A1+B1"); // C1
+
+        // Update deps for the formula cell
+        wb.update_cell_deps(sheet_id, 0, 2);
+
+        // Check precedents of C1
+        let preds = wb.get_precedents(sheet_id, 0, 2);
+        assert_eq!(preds.len(), 2);
+
+        let a1 = CellId::new(sheet_id, 0, 0);
+        let b1 = CellId::new(sheet_id, 0, 1);
+        assert!(preds.contains(&a1));
+        assert!(preds.contains(&b1));
+
+        // Check dependents of A1
+        let deps = wb.get_dependents(sheet_id, 0, 0);
+        assert_eq!(deps.len(), 1);
+        let c1 = CellId::new(sheet_id, 0, 2);
+        assert!(deps.contains(&c1));
+    }
+
+    #[test]
+    fn test_dep_graph_update_formula() {
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // Set initial formula =A1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=A1"); // C1
+        wb.update_cell_deps(sheet_id, 0, 2);
+
+        let preds = wb.get_precedents(sheet_id, 0, 2);
+        assert_eq!(preds.len(), 1);
+        let a1 = CellId::new(sheet_id, 0, 0);
+        assert!(preds.contains(&a1));
+
+        // Update formula to =B1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=B1"); // C1
+        wb.update_cell_deps(sheet_id, 0, 2);
+
+        // Now C1 should depend on B1, not A1
+        let preds = wb.get_precedents(sheet_id, 0, 2);
+        assert_eq!(preds.len(), 1);
+        let b1 = CellId::new(sheet_id, 0, 1);
+        assert!(preds.contains(&b1));
+
+        // A1 should have no dependents now
+        let deps = wb.get_dependents(sheet_id, 0, 0);
+        assert_eq!(deps.len(), 0);
+    }
+
+    #[test]
+    fn test_dep_graph_clear_deps() {
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // Set formula
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=A1"); // C1
+        wb.update_cell_deps(sheet_id, 0, 2);
+
+        // Verify deps exist
+        let preds = wb.get_precedents(sheet_id, 0, 2);
+        assert_eq!(preds.len(), 1);
+
+        // Clear deps
+        wb.clear_cell_deps(sheet_id, 0, 2);
+
+        // Deps should be gone
+        let preds = wb.get_precedents(sheet_id, 0, 2);
+        assert_eq!(preds.len(), 0);
+
+        // A1 should have no dependents
+        let deps = wb.get_dependents(sheet_id, 0, 0);
+        assert_eq!(deps.len(), 0);
+    }
+
+    #[test]
+    fn test_dep_graph_range_expansion() {
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // Set formula with range
+        wb.sheet_mut(0).unwrap().set_value(5, 0, "=SUM(A1:A5)"); // A6
+        wb.update_cell_deps(sheet_id, 5, 0);
+
+        // Should have 5 precedents (A1:A5)
+        let preds = wb.get_precedents(sheet_id, 5, 0);
+        assert_eq!(preds.len(), 5);
+
+        // Each cell A1-A5 should have A6 as dependent
+        for row in 0..5 {
+            let deps = wb.get_dependents(sheet_id, row, 0);
+            assert_eq!(deps.len(), 1);
+            let a6 = CellId::new(sheet_id, 5, 0);
+            assert!(deps.contains(&a6));
+        }
+    }
+
+    #[test]
+    fn test_dep_graph_cross_sheet_refs() {
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2
+
+        let sheet1_id = wb.sheet_id_at_idx(0).unwrap();
+        let sheet2_id = wb.sheet_id_at_idx(1).unwrap();
+
+        // Set value on Sheet2
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "100"); // Sheet2!A1
+
+        // Set formula on Sheet1 referencing Sheet2
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=Sheet2!A1"); // Sheet1!A1
+        wb.update_cell_deps(sheet1_id, 0, 0);
+
+        // Check precedents - should reference Sheet2!A1
+        let preds = wb.get_precedents(sheet1_id, 0, 0);
+        assert_eq!(preds.len(), 1);
+        let sheet2_a1 = CellId::new(sheet2_id, 0, 0);
+        assert!(preds.contains(&sheet2_a1));
+
+        // Check dependents of Sheet2!A1 - should be Sheet1!A1
+        let deps = wb.get_dependents(sheet2_id, 0, 0);
+        assert_eq!(deps.len(), 1);
+        let sheet1_a1 = CellId::new(sheet1_id, 0, 0);
+        assert!(deps.contains(&sheet1_a1));
+    }
+
+    #[test]
+    fn test_dep_graph_rebuild() {
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // Set up some formulas without updating deps
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "10");       // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1*2");    // B1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=B1+A1");   // C1
+
+        // Initially no deps tracked
+        assert_eq!(wb.get_precedents(sheet_id, 0, 1).len(), 0);
+        assert_eq!(wb.get_precedents(sheet_id, 0, 2).len(), 0);
+
+        // Rebuild the graph
+        wb.rebuild_dep_graph();
+
+        // Now B1 should have A1 as precedent
+        let preds_b1 = wb.get_precedents(sheet_id, 0, 1);
+        assert_eq!(preds_b1.len(), 1);
+        let a1 = CellId::new(sheet_id, 0, 0);
+        assert!(preds_b1.contains(&a1));
+
+        // C1 should have A1 and B1 as precedents
+        let preds_c1 = wb.get_precedents(sheet_id, 0, 2);
+        assert_eq!(preds_c1.len(), 2);
+        let b1 = CellId::new(sheet_id, 0, 1);
+        assert!(preds_c1.contains(&a1));
+        assert!(preds_c1.contains(&b1));
+
+        // A1 should have B1 and C1 as dependents
+        let deps_a1 = wb.get_dependents(sheet_id, 0, 0);
+        assert_eq!(deps_a1.len(), 2);
+        let c1 = CellId::new(sheet_id, 0, 2);
+        assert!(deps_a1.contains(&b1));
+        assert!(deps_a1.contains(&c1));
+    }
+
+    #[test]
+    fn test_dep_graph_clear_on_non_formula() {
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // Set formula
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=A1+B1"); // C1
+        wb.update_cell_deps(sheet_id, 0, 2);
+
+        assert_eq!(wb.get_precedents(sheet_id, 0, 2).len(), 2);
+
+        // Replace with a plain value
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "42"); // C1
+        wb.update_cell_deps(sheet_id, 0, 2);
+
+        // Deps should be cleared
+        assert_eq!(wb.get_precedents(sheet_id, 0, 2).len(), 0);
+        assert_eq!(wb.get_dependents(sheet_id, 0, 0).len(), 0);
+        assert_eq!(wb.get_dependents(sheet_id, 0, 1).len(), 0);
     }
 }
