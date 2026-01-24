@@ -30,6 +30,7 @@ pub use crate::autocomplete::{SignatureHelpInfo, FormulaErrorInfo};
 // ============================================================================
 
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 /// Session-level counter for new workbook names.
 /// Increments each time a new workbook is created: Book1, Book2, Book3...
@@ -39,6 +40,21 @@ static NEXT_BOOK_NUMBER: AtomicU32 = AtomicU32::new(1);
 pub fn next_book_name() -> String {
     let n = NEXT_BOOK_NUMBER.fetch_add(1, Ordering::Relaxed);
     format!("Book{}", n)
+}
+
+// ============================================================================
+// Smoke Mode Recalc (Phase 1.5 - headless dogfooding)
+// ============================================================================
+
+/// Check if smoke recalc is enabled via VISIGRID_RECALC=full env var.
+static SMOKE_RECALC_ENABLED: OnceLock<bool> = OnceLock::new();
+
+fn is_smoke_recalc_enabled() -> bool {
+    *SMOKE_RECALC_ENABLED.get_or_init(|| {
+        std::env::var("VISIGRID_RECALC")
+            .map(|v| v == "full")
+            .unwrap_or(false)
+    })
 }
 
 // ============================================================================
@@ -739,6 +755,9 @@ pub struct Spreadsheet {
     needs_settings_entered_at: Option<std::time::Instant>,
     /// How many checks we've done in NeedsSettings (for exponential backoff)
     needs_settings_check_count: u8,
+
+    // Smoke mode recalc guard (prevents reentrant recalc)
+    in_smoke_recalc: bool,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -951,6 +970,8 @@ impl Spreadsheet {
             default_app_prompt_success_timer: None,
             needs_settings_entered_at: None,
             needs_settings_check_count: 0,
+
+            in_smoke_recalc: false,
         }
     }
 
@@ -2984,6 +3005,23 @@ impl Spreadsheet {
         self.formula_ref_end = None;
         self.formula_ref_start_cursor = 0;
         self.formula_highlighted_refs.clear();
+
+        // Smoke mode: trigger full ordered recompute for dogfooding
+        self.maybe_smoke_recalc();
+    }
+
+    /// Run full ordered recompute if VISIGRID_RECALC=full is set.
+    ///
+    /// Phase 1.5: Headless dogfooding mode. Logs recalc metrics to stderr
+    /// for catching "works in tests, breaks in reality" bugs.
+    fn maybe_smoke_recalc(&mut self) {
+        if !is_smoke_recalc_enabled() || self.in_smoke_recalc {
+            return;
+        }
+        self.in_smoke_recalc = true;
+        let report = self.workbook.recompute_full_ordered();
+        eprintln!("{}", report.log_line());
+        self.in_smoke_recalc = false;
     }
 
     pub fn confirm_edit_and_move_right(&mut self, cx: &mut Context<Self>) {
@@ -3118,6 +3156,10 @@ impl Spreadsheet {
         if cell_count > 1 {
             self.status_message = Some(format!("Edited {} cells", cell_count));
         }
+
+        // Smoke mode: trigger full ordered recompute for dogfooding
+        self.maybe_smoke_recalc();
+
         cx.notify();
     }
 
@@ -3209,6 +3251,9 @@ impl Spreadsheet {
             self.history.record_batch(self.sheet_index(), changes);
             self.bump_cells_rev();
             self.is_modified = true;
+
+            // Smoke mode: trigger full ordered recompute for dogfooding
+            self.maybe_smoke_recalc();
         }
 
         self.additional_selections.clear();
@@ -4184,6 +4229,10 @@ impl Spreadsheet {
             self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
             self.status_message = Some("Pasted from clipboard".to_string());
+
+            // Smoke mode: trigger full ordered recompute for dogfooding
+            self.maybe_smoke_recalc();
+
             cx.notify();
         }
     }
@@ -4303,6 +4352,9 @@ impl Spreadsheet {
             self.history.record_batch(self.sheet_index(), changes);
             self.bump_cells_rev();
             self.is_modified = true;
+
+            // Smoke mode: trigger full ordered recompute for dogfooding
+            self.maybe_smoke_recalc();
         }
         self.status_message = Some("Pasted values".to_string());
         cx.notify();

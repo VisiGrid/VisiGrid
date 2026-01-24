@@ -50,6 +50,21 @@ impl RecalcReport {
             self.unknown_deps_recomputed
         )
     }
+
+    /// Format as a one-line log entry for smoke mode.
+    ///
+    /// Format: `[recalc/full] 14ms  628 cells  depth=7  unknown=3  cycles=0  errors=0`
+    pub fn log_line(&self) -> String {
+        format!(
+            "[recalc/full] {:>4}ms  {} cells  depth={}  unknown={}  cycles={}  errors={}",
+            self.duration_ms,
+            self.cells_recomputed,
+            self.max_depth,
+            self.unknown_deps_recomputed,
+            if self.had_cycles { 1 } else { 0 },
+            self.errors.len()
+        )
+    }
 }
 
 /// An error that occurred during recomputation of a specific cell.
@@ -158,6 +173,38 @@ mod tests {
         assert_eq!(
             report.summary(),
             "100 cells in 42ms, depth=5, cycles=false, unknown=2"
+        );
+    }
+
+    #[test]
+    fn test_recalc_report_log_line() {
+        let report = RecalcReport {
+            duration_ms: 14,
+            cells_recomputed: 628,
+            max_depth: 7,
+            had_cycles: false,
+            unknown_deps_recomputed: 3,
+            errors: vec![],
+        };
+        assert_eq!(
+            report.log_line(),
+            "[recalc/full]   14ms  628 cells  depth=7  unknown=3  cycles=0  errors=0"
+        );
+    }
+
+    #[test]
+    fn test_recalc_report_log_line_with_cycles() {
+        let report = RecalcReport {
+            duration_ms: 5,
+            cells_recomputed: 10,
+            max_depth: 2,
+            had_cycles: true,
+            unknown_deps_recomputed: 0,
+            errors: vec![RecalcError::new(cell(1, 0, 0), "test error")],
+        };
+        assert_eq!(
+            report.log_line(),
+            "[recalc/full]    5ms  10 cells  depth=2  unknown=0  cycles=1  errors=1"
         );
     }
 

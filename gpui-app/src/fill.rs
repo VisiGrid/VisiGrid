@@ -66,6 +66,9 @@ impl Spreadsheet {
         self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
 
+        // Smoke mode: trigger full ordered recompute for dogfooding
+        self.maybe_smoke_recalc();
+
         self.status_message = Some("Filled down".into());
         cx.notify();
     }
@@ -113,6 +116,10 @@ impl Spreadsheet {
         self.history.record_batch(self.sheet_index(), changes);
         self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
+
+        // Smoke mode: trigger full ordered recompute for dogfooding
+        self.maybe_smoke_recalc();
+
         self.status_message = Some("Filled right".into());
         cx.notify();
     }
@@ -584,6 +591,9 @@ impl Spreadsheet {
         self.bump_cells_rev();
         self.is_modified = true;
 
+        // Smoke mode: trigger full ordered recompute for dogfooding
+        self.maybe_smoke_recalc();
+
         // Update selection to include filled range
         self.selection_end = Some(end);
 
@@ -641,6 +651,9 @@ impl Spreadsheet {
         self.history.record_batch(self.sheet_index(), changes);
         self.bump_cells_rev();
         self.is_modified = true;
+
+        // Smoke mode: trigger full ordered recompute for dogfooding
+        self.maybe_smoke_recalc();
 
         // Update selection to include filled range
         self.selection_end = Some(end);
