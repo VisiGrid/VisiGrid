@@ -261,12 +261,13 @@ impl DepGraph {
             .filter(|(_, &deg)| deg == 0)
             .map(|(&cell, _)| cell)
             .collect();
+        // Sort in DESCENDING order so smallest is at end (popped first)
         queue.sort_by(|a, b| {
-            a.sheet
+            b.sheet
                 .raw()
-                .cmp(&b.sheet.raw())
-                .then(a.row.cmp(&b.row))
-                .then(a.col.cmp(&b.col))
+                .cmp(&a.sheet.raw())
+                .then(b.row.cmp(&a.row))
+                .then(b.col.cmp(&a.col))
         });
 
         let mut result = Vec::with_capacity(formula_cells.len());
@@ -712,5 +713,241 @@ mod tests {
 
         // Only one formula cell should exist now
         assert_eq!(graph.formula_cell_count(), 1);
+    }
+
+    // =========================================================================
+    // Topo Order + Cycle Detection Tests (Phase 1.2)
+    // =========================================================================
+
+    #[test]
+    fn test_topo_empty_graph() {
+        let graph = DepGraph::new();
+        let order = graph.topo_order_all_formulas().unwrap();
+        assert!(order.is_empty());
+    }
+
+    #[test]
+    fn test_topo_single_formula() {
+        // B1 = A1 (A1 is a value cell, B1 is formula)
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let b1 = cell(1, 0, 1);
+
+        graph.replace_edges(b1, set(&[a1]));
+
+        let order = graph.topo_order_all_formulas().unwrap();
+        assert_eq!(order, vec![b1]); // Only formula cell
+    }
+
+    #[test]
+    fn test_topo_chain() {
+        // A → B → C → D (chain of formulas, A is value)
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1);
+        let c = cell(1, 0, 2);
+        let d = cell(1, 0, 3);
+
+        graph.replace_edges(b, set(&[a]));
+        graph.replace_edges(c, set(&[b]));
+        graph.replace_edges(d, set(&[c]));
+
+        let order = graph.topo_order_all_formulas().unwrap();
+        assert_eq!(order, vec![b, c, d]);
+    }
+
+    #[test]
+    fn test_topo_diamond() {
+        // A → B, A → C, B → D, C → D
+        //     A (value)
+        //    / \
+        //   B   C  (formulas)
+        //    \ /
+        //     D    (formula)
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1);
+        let c = cell(1, 0, 2);
+        let d = cell(1, 0, 3);
+
+        graph.replace_edges(b, set(&[a]));
+        graph.replace_edges(c, set(&[a]));
+        graph.replace_edges(d, set(&[b, c]));
+
+        let order = graph.topo_order_all_formulas().unwrap();
+
+        // B and C can be in either order, but both must come before D
+        assert!(order.len() == 3);
+        let d_pos = order.iter().position(|&x| x == d).unwrap();
+        let b_pos = order.iter().position(|&x| x == b).unwrap();
+        let c_pos = order.iter().position(|&x| x == c).unwrap();
+        assert!(b_pos < d_pos);
+        assert!(c_pos < d_pos);
+    }
+
+    #[test]
+    fn test_topo_wide_fanout() {
+        // A → {B1, B2, B3, B4, B5} (A is value)
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+
+        for col in 1..=5 {
+            let b = cell(1, 0, col);
+            graph.replace_edges(b, set(&[a]));
+        }
+
+        let order = graph.topo_order_all_formulas().unwrap();
+        assert_eq!(order.len(), 5);
+    }
+
+    #[test]
+    fn test_topo_cross_sheet() {
+        // Sheet1!A1 → Sheet2!B1 → Sheet1!C1
+        let mut graph = DepGraph::new();
+        let s1_a1 = cell(1, 0, 0); // value
+        let s2_b1 = cell(2, 0, 1); // formula
+        let s1_c1 = cell(1, 0, 2); // formula
+
+        graph.replace_edges(s2_b1, set(&[s1_a1]));
+        graph.replace_edges(s1_c1, set(&[s2_b1]));
+
+        let order = graph.topo_order_all_formulas().unwrap();
+        assert_eq!(order, vec![s2_b1, s1_c1]);
+    }
+
+    #[test]
+    fn test_topo_stable_order() {
+        // Multiple independent formulas should have deterministic order
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b1 = cell(1, 0, 1);
+        let b2 = cell(1, 0, 2);
+        let b3 = cell(1, 0, 3);
+
+        graph.replace_edges(b3, set(&[a]));
+        graph.replace_edges(b1, set(&[a]));
+        graph.replace_edges(b2, set(&[a]));
+
+        // Run multiple times, should always get same order
+        let order1 = graph.topo_order_all_formulas().unwrap();
+        let order2 = graph.topo_order_all_formulas().unwrap();
+        let order3 = graph.topo_order_all_formulas().unwrap();
+
+        assert_eq!(order1, order2);
+        assert_eq!(order2, order3);
+
+        // Order should be by (sheet, row, col)
+        assert_eq!(order1, vec![b1, b2, b3]);
+    }
+
+    #[test]
+    fn test_cycle_self_reference() {
+        // A1 = A1 (self reference)
+        let graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+
+        let result = graph.would_create_cycle(a1, &[a1]);
+        assert!(result.is_some());
+
+        let cycle = result.unwrap();
+        assert!(cycle.message.contains("references itself"));
+    }
+
+    #[test]
+    fn test_cycle_two_cell() {
+        // A1 = B1, then B1 = A1 (creates cycle)
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let b1 = cell(1, 0, 1);
+
+        graph.replace_edges(a1, set(&[b1]));
+
+        // Now trying to make B1 depend on A1 should detect cycle
+        let result = graph.would_create_cycle(b1, &[a1]);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_cycle_indirect() {
+        // A → B → C, then C → A (creates cycle)
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1);
+        let c = cell(1, 0, 2);
+
+        graph.replace_edges(b, set(&[a]));
+        graph.replace_edges(c, set(&[b]));
+
+        // Trying to make A depend on C should detect cycle
+        let result = graph.would_create_cycle(a, &[c]);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_cycle_detection_in_topo() {
+        // Create a graph with an existing cycle
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1);
+
+        // Force a cycle by directly manipulating (simulating corrupted file)
+        graph.replace_edges(a, set(&[b]));
+        graph.replace_edges(b, set(&[a]));
+
+        let result = graph.topo_order_all_formulas();
+        assert!(result.is_err());
+
+        let cycle = result.unwrap_err();
+        assert!(!cycle.cells.is_empty());
+    }
+
+    #[test]
+    fn test_no_cycle_valid_graph() {
+        // A → B → C (valid, no cycle)
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1);
+        let c = cell(1, 0, 2);
+
+        graph.replace_edges(b, set(&[a]));
+        graph.replace_edges(c, set(&[b]));
+
+        // Adding D → C should be fine
+        let d = cell(1, 0, 3);
+        let result = graph.would_create_cycle(d, &[c]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_topo_depth_order() {
+        // Verify that cells are ordered by dependency depth
+        // A (value) → B → C → D → E
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1);
+        let c = cell(1, 0, 2);
+        let d = cell(1, 0, 3);
+        let e = cell(1, 0, 4);
+
+        graph.replace_edges(b, set(&[a]));
+        graph.replace_edges(c, set(&[b]));
+        graph.replace_edges(d, set(&[c]));
+        graph.replace_edges(e, set(&[d]));
+
+        let order = graph.topo_order_all_formulas().unwrap();
+
+        // Each cell must come before its dependents
+        for i in 0..order.len() {
+            for j in (i + 1)..order.len() {
+                // Cell at i should not depend on cell at j
+                let cell_i = order[i];
+                let cell_j = order[j];
+                assert!(
+                    !graph.preds.get(&cell_i).map_or(false, |p| p.contains(&cell_j)),
+                    "{:?} at position {} depends on {:?} at position {}",
+                    cell_i, i, cell_j, j
+                );
+            }
+        }
     }
 }
