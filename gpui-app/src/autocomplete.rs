@@ -66,6 +66,12 @@ impl Spreadsheet {
             return;
         }
 
+        // Don't reopen autocomplete if suppressed (user is navigating refs)
+        if self.autocomplete_suppressed {
+            self.autocomplete_visible = false;
+            return;
+        }
+
         let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
         let suggestions = self.autocomplete_suggestions();
 

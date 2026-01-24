@@ -137,17 +137,28 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
 
     // Only highlight formulas (starting with '=')
     if !raw_value.starts_with('=') {
-        // Plain text - just show with cursor if editing
-        let display = if editing {
-            let cursor_pos = app.edit_cursor;
-            let chars: Vec<char> = raw_value.chars().collect();
-            let before: String = chars.iter().take(cursor_pos).collect();
-            let after: String = chars.iter().skip(cursor_pos).collect();
-            format!("{}|{}", before, after)
-        } else {
-            raw_value.to_string()
-        };
-        return div().text_color(text_primary).child(display).into_any_element();
+        // Plain text - caret drawn as overlay, not injected
+        return div()
+            .relative()
+            .text_color(text_primary)
+            .child(raw_value.to_string())
+            .when(editing && app.caret_visible && app.edit_selection_anchor.is_none(), |d| {
+                // Draw caret overlay
+                let cursor_pos = app.edit_cursor;
+                let text_before: String = raw_value.chars().take(cursor_pos).collect();
+                let char_width = 7.5; // Approximate character width
+                let caret_x = text_before.chars().count() as f32 * char_width;
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(caret_x))
+                        .top(px(2.0))
+                        .w(px(1.5))
+                        .h(px(16.0))
+                        .bg(text_primary)
+                )
+            })
+            .into_any_element();
     }
 
     // Get syntax highlighting tokens
@@ -210,40 +221,29 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
     let mut last_end_char = 0usize;  // Char index
     let mut last_end_byte = 0usize;  // Byte index
 
-    // Handle cursor insertion for editing mode (cursor_pos is in char indices)
+    // Caret is drawn as overlay, not injected into text
+    // This preserves token spans for syntax highlighting
     let cursor_pos = if editing { app.edit_cursor } else { usize::MAX };
+    let show_caret = editing && app.caret_visible && app.edit_selection_anchor.is_none();
 
-    // Build display text with cursor inserted
-    let display_text: String = if editing {
-        let chars: Vec<char> = raw_value.chars().collect();
-        let before: String = chars.iter().take(cursor_pos).collect();
-        let after: String = chars.iter().skip(cursor_pos).collect();
-        format!("{}|{}", before, after)
-    } else {
-        raw_value.to_string()
-    };
+    // Use raw buffer - caret drawn separately
+    let display_text: String = raw_value.to_string();
 
     let raw_char_count = raw_value.chars().count();
 
     // Process tokens and build runs
     // Token ranges are in char indices
+    // Caret is drawn as overlay, so no cursor adjustments needed
     for (range, token_type) in &tokens {
         // Fill gap before this token (if any) with default color
         if range.start > last_end_char {
-            // Convert char indices to byte indices for slicing
             let gap_start_byte = last_end_byte;
             let gap_end_byte = char_to_byte(raw_value, range.start);
             let gap_text = &raw_value[gap_start_byte..gap_end_byte];
-            let gap_len = gap_text.len();  // byte length
-            // Adjust for cursor if it falls in this gap (char comparison)
-            let adjusted_len = if editing && cursor_pos >= last_end_char && cursor_pos < range.start {
-                gap_len + 1 // +1 for cursor character '|'
-            } else {
-                gap_len
-            };
-            if adjusted_len > 0 {
+            let gap_len = gap_text.len();
+            if gap_len > 0 {
                 runs.push(TextRun {
-                    len: adjusted_len,
+                    len: gap_len,
                     font: Font::default(),
                     color: text_primary,
                     background_color: None,
@@ -254,23 +254,14 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
         }
 
         // Add this token's text run
-        // Convert char indices to byte indices for slicing
         let token_start_byte = char_to_byte(raw_value, range.start);
         let token_end_byte = char_to_byte(raw_value, range.end);
         let token_text = &raw_value[token_start_byte..token_end_byte];
-        let token_len = token_text.len();  // byte length
-        // Adjust for cursor if it falls in this token (char comparison)
-        let adjusted_len = if editing && cursor_pos >= range.start && cursor_pos < range.end {
-            token_len + 1 // +1 for cursor character '|'
-        } else if editing && cursor_pos == range.end {
-            token_len // Cursor is right after this token
-        } else {
-            token_len
-        };
+        let token_len = token_text.len();
 
-        if adjusted_len > 0 {
+        if token_len > 0 {
             runs.push(TextRun {
-                len: adjusted_len,
+                len: token_len,
                 font: Font::default(),
                 color: get_color(token_type, range),
                 background_color: None,
@@ -286,15 +277,10 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
     // Handle remaining text after last token
     if last_end_char < raw_char_count {
         let remaining = &raw_value[last_end_byte..];
-        let remaining_len = remaining.len();  // byte length
-        let adjusted_len = if editing && cursor_pos >= last_end_char {
-            remaining_len + 1
-        } else {
-            remaining_len
-        };
-        if adjusted_len > 0 {
+        let remaining_len = remaining.len();
+        if remaining_len > 0 {
             runs.push(TextRun {
-                len: adjusted_len,
+                len: remaining_len,
                 font: Font::default(),
                 color: text_primary,
                 background_color: None,
@@ -302,19 +288,9 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
                 strikethrough: None,
             });
         }
-    } else if editing && cursor_pos >= last_end_char {
-        // Cursor is at the very end
-        runs.push(TextRun {
-            len: 1,
-            font: Font::default(),
-            color: text_primary,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        });
     }
 
-    // Ensure runs cover the entire display text (byte comparison)
+    // Ensure runs cover the entire display text
     let total_run_len: usize = runs.iter().map(|r| r.len).sum();
     if total_run_len < display_text.len() {
         runs.push(TextRun {
@@ -327,8 +303,32 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
         });
     }
 
+    // Build the styled text element
     let shared_text: SharedString = display_text.into();
-    StyledText::new(shared_text).with_runs(runs).into_any_element()
+    let styled = StyledText::new(shared_text).with_runs(runs);
+
+    // Wrap in relative div and add caret overlay if needed
+    if show_caret {
+        let text_before: String = raw_value.chars().take(cursor_pos).collect();
+        let char_width = 7.5; // Approximate character width
+        let caret_x = text_before.chars().count() as f32 * char_width;
+
+        div()
+            .relative()
+            .child(styled)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(caret_x))
+                    .top(px(2.0))
+                    .w(px(1.5))
+                    .h(px(16.0))
+                    .bg(text_primary)
+            )
+            .into_any_element()
+    } else {
+        styled.into_any_element()
+    }
 }
 
 /// Render the autocomplete dropdown popup

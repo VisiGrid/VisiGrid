@@ -245,6 +245,7 @@ fn render_cell(
     let is_editing = editing && is_active;
     let is_formula_ref = app.is_formula_ref(view_row, col);
     let formula_ref_color = app.formula_ref_color(view_row, col);  // Color index for multi-color refs
+    let is_active_ref_target = app.is_active_ref_target(view_row, col);  // Live ref navigation target
 
     // Check for hint mode and get hint label for this cell
     let hint_label = if app.mode == Mode::Hint {
@@ -291,13 +292,17 @@ fn render_cell(
     let cell_row = view_row;  // For UI interactions (click, selection)
     let cell_col = col;
 
-    // Determine border color based on cell state (spill states take precedence over normal states)
+    // Determine border color based on cell state
+    // Precedence: selection > ref_target > spill states > formula refs > gridlines
     let border_color = if has_spill_error {
         app.token(TokenKey::SpillBlockedBorder)
     } else if is_spill_parent {
         app.token(TokenKey::SpillBorder)
     } else if is_spill_receiver {
         app.token(TokenKey::SpillReceiverBorder)
+    } else if is_active_ref_target && !is_selected && !is_active {
+        // Ref target gets accent color ONLY if not also selected (selection wins)
+        app.token(TokenKey::Accent)
     } else {
         cell_border(app, is_editing, is_active, is_selected, formula_ref_color)
     };
@@ -362,6 +367,16 @@ fn render_cell(
         if right { c = c.border_r_1(); }
         if bottom { c = c.border_b_1(); }
         if left { c = c.border_l_1(); }
+        c
+    } else if is_active_ref_target {
+        // Active ref target: bright 2px border so user knows exactly where arrow keys are pointing
+        // (only if not also selected - selection takes precedence and was handled above)
+        let (top, right, bottom, left) = app.ref_target_borders(view_row, col);
+        let mut c = cell;
+        if top { c = c.border_t_2(); }
+        if right { c = c.border_r_2(); }
+        if bottom { c = c.border_b_2(); }
+        if left { c = c.border_l_2(); }
         c
     } else if has_spill_error || is_spill_parent {
         // 2px solid border for spill parent and blocked cells
@@ -493,36 +508,20 @@ fn render_cell(
             this.end_drag_selection(cx);
         }));
 
-    // Build the text content with cursor and selection highlight
+    // Build the text content with selection highlight (caret drawn as overlay)
     if is_editing {
         let cursor_pos = app.edit_cursor;
         let chars: Vec<char> = value.chars().collect();
         let selection = app.edit_selection_range();
 
-        // Build display string with cursor
-        let before_cursor: String = chars.iter().take(cursor_pos).collect();
-        let after_cursor: String = chars.iter().skip(cursor_pos).collect();
-        let display_text: SharedString = format!("{}|{}", before_cursor, after_cursor).into();
+        // Use raw buffer - caret is drawn as overlay, not injected into text
+        let display_text: SharedString = value.into();
 
         // Create styled text with selection highlighting
         if let Some((sel_start, sel_end)) = selection {
-            // Calculate display positions accounting for cursor character '|'
-            // Cursor is inserted at cursor_pos, so positions after cursor shift by 1
-            let (disp_sel_start, disp_sel_end) = if cursor_pos <= sel_start {
-                // Cursor before or at selection start - selection shifts right by 1
-                (sel_start + 1, sel_end + 1)
-            } else if cursor_pos >= sel_end {
-                // Cursor at or after selection end - selection unchanged
-                (sel_start, sel_end)
-            } else {
-                // Cursor inside selection (shouldn't happen with our selection model)
-                (sel_start, sel_end + 1)
-            };
-
-            // Convert char positions to byte positions for the display string
-            let display_chars: Vec<char> = display_text.chars().collect();
-            let byte_sel_start = display_chars.iter().take(disp_sel_start).collect::<String>().len();
-            let byte_sel_end = display_chars.iter().take(disp_sel_end).collect::<String>().len();
+            // Convert char positions to byte positions
+            let byte_sel_start = chars.iter().take(sel_start).collect::<String>().len();
+            let byte_sel_end = chars.iter().take(sel_end).collect::<String>().len();
             let total_bytes = display_text.len();
 
             let normal_color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
@@ -569,8 +568,29 @@ fn render_cell(
 
             cell = cell.child(StyledText::new(display_text).with_runs(runs));
         } else {
-            // No selection - plain text with cursor
+            // No selection - plain text (caret drawn separately as overlay)
             cell = cell.child(display_text);
+
+            // Draw caret as overlay rect when visible
+            if app.caret_visible {
+                // Calculate caret x position by measuring text before cursor
+                let text_before_cursor: String = chars.iter().take(cursor_pos).collect();
+                // Approximate width: ~7px per character at default font size, scaled
+                let char_width = app.metrics.font_size * 0.6;
+                let caret_x = text_before_cursor.chars().count() as f32 * char_width + 4.0; // +4 for padding
+                let caret_color = app.token(TokenKey::TextPrimary);
+                let line_height = app.metrics.row_height(app.row_height(view_row)) - 4.0;
+
+                cell = cell.child(
+                    div()
+                        .absolute()
+                        .left(px(caret_x))
+                        .top(px(2.0))
+                        .w(px(1.5))
+                        .h(px(line_height))
+                        .bg(caret_color)
+                );
+            }
         }
     } else {
         // Not editing - show value with formatting using StyledText

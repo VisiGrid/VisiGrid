@@ -528,6 +528,12 @@ pub struct Spreadsheet {
     pub edit_cursor: usize,  // Cursor position within edit_value
     pub edit_selection_anchor: Option<usize>,  // Selection start (None = no selection)
     pub edit_original: String,
+
+    // Caret blink state
+    pub caret_visible: bool,
+    pub caret_last_activity: std::time::Instant,
+    caret_blink_task: Option<gpui::Task<()>>,
+
     pub goto_input: String,
     pub find_input: String,
     pub find_results: Vec<MatchHit>,
@@ -629,6 +635,7 @@ pub struct Spreadsheet {
 
     // Formula autocomplete state
     pub autocomplete_visible: bool,
+    pub autocomplete_suppressed: bool,  // Prevents autocomplete from reopening until text edit
     pub autocomplete_selected: usize,
     pub autocomplete_replace_range: std::ops::Range<usize>,
 
@@ -819,6 +826,9 @@ impl Spreadsheet {
             edit_cursor: 0,
             edit_selection_anchor: None,
             edit_original: String::new(),
+            caret_visible: true,
+            caret_last_activity: std::time::Instant::now(),
+            caret_blink_task: None,
             goto_input: String::new(),
             find_input: String::new(),
             find_results: Vec::new(),
@@ -879,6 +889,7 @@ impl Spreadsheet {
             formula_bar_cache_formula: String::new(),
             formula_bar_cache_refs: Vec::new(),
             autocomplete_visible: false,
+            autocomplete_suppressed: false,
             autocomplete_selected: 0,
             autocomplete_replace_range: 0..0,
             hover_function: None,
@@ -2331,6 +2342,42 @@ impl Spreadsheet {
         self.edit_value.starts_with('=') || self.edit_value.starts_with('+')
     }
 
+    /// Check if a cell is the active reference navigation target (formula_ref_cell).
+    /// This is distinct from parsed formula refs - it's where arrow keys are pointing RIGHT NOW.
+    /// Used for rendering a bright "target" indicator during formula reference navigation.
+    pub fn is_active_ref_target(&self, row: usize, col: usize) -> bool {
+        if !self.mode.is_formula() {
+            return false;
+        }
+
+        if let Some(rect) = self.ref_target_rect() {
+            crate::ref_target::contains(&rect, row, col)
+        } else {
+            false
+        }
+    }
+
+    /// Get the normalized rectangle for the current ref target, if any.
+    fn ref_target_rect(&self) -> Option<crate::ref_target::Rect> {
+        let (ref_row, ref_col) = self.formula_ref_cell?;
+        let (end_row, end_col) = self.formula_ref_end.unwrap_or((ref_row, ref_col));
+        Some(crate::ref_target::normalize_rect((ref_row, ref_col), (end_row, end_col)))
+    }
+
+    /// Get the border edges to draw for the active ref target (like selection_borders but for ref target)
+    pub fn ref_target_borders(&self, row: usize, col: usize) -> (bool, bool, bool, bool) {
+        if !self.mode.is_formula() {
+            return (false, false, false, false);
+        }
+
+        let Some(rect) = self.ref_target_rect() else {
+            return (false, false, false, false);
+        };
+
+        let edges = crate::ref_target::borders(&rect, row, col);
+        (edges.top, edges.right, edges.bottom, edges.left)
+    }
+
     /// Check if a cell is within any formula reference (for highlighting)
     /// This includes both the live pointing reference AND parsed refs from existing formulas
     pub fn is_formula_ref(&self, row: usize, col: usize) -> bool {
@@ -2925,6 +2972,7 @@ impl Spreadsheet {
         }
 
         self.mode = Mode::Edit;
+        self.start_caret_blink(cx);
         cx.notify();
     }
 
@@ -2946,6 +2994,7 @@ impl Spreadsheet {
         self.edit_cursor = 0;
         self.formula_highlighted_refs.clear();  // No formula to highlight
         self.mode = Mode::Edit;
+        self.start_caret_blink(cx);
         cx.notify();
     }
 
@@ -3196,6 +3245,8 @@ impl Spreadsheet {
         self.is_modified = true;
         // Clear formula highlighting state
         self.formula_highlighted_refs.clear();
+        // Stop caret blinking
+        self.stop_caret_blink();
 
         let cell_count = target_cells.len();
         if cell_count > 1 {
@@ -3419,6 +3470,8 @@ impl Spreadsheet {
         self.formula_ref_start_cursor = 0;
         // Clear formula highlighting state
         self.formula_highlighted_refs.clear();
+        // Stop caret blinking
+        self.stop_caret_blink();
 
         // Smoke mode: trigger full ordered recompute for dogfooding
         self.maybe_smoke_recalc();
@@ -3441,8 +3494,83 @@ impl Spreadsheet {
             // Clear autocomplete state
             self.autocomplete_visible = false;
             self.autocomplete_selected = 0;
+            // Stop caret blinking
+            self.stop_caret_blink();
             cx.notify();
         }
+    }
+
+    // ========================================================================
+    // Caret Blinking
+    // ========================================================================
+
+    /// Start the caret blink timer. Called when entering edit mode.
+    pub fn start_caret_blink(&mut self, cx: &mut Context<Self>) {
+        use std::time::Duration;
+
+        self.caret_visible = true;
+        self.caret_last_activity = std::time::Instant::now();
+
+        // Cancel any existing blink task
+        self.caret_blink_task = None;
+
+        // Spawn repeating blink task
+        let task = cx.spawn(async move |this, cx| {
+            let blink_interval = Duration::from_millis(530);
+            let idle_delay = Duration::from_millis(500);
+
+            loop {
+                // Wait for blink interval
+                smol::Timer::after(blink_interval).await;
+
+                // Update caret visibility
+                let should_continue = this.update(cx, |this, cx| {
+                    // Don't blink if not editing
+                    if !this.mode.is_editing() {
+                        return false;
+                    }
+
+                    // Don't blink if there's a text selection
+                    if this.edit_selection_anchor.is_some() {
+                        this.caret_visible = true;
+                        cx.notify();
+                        return true;
+                    }
+
+                    // Don't blink during active typing (wait for idle)
+                    if this.caret_last_activity.elapsed() < idle_delay {
+                        this.caret_visible = true;
+                        cx.notify();
+                        return true;
+                    }
+
+                    // Toggle visibility
+                    this.caret_visible = !this.caret_visible;
+                    cx.notify();
+                    true
+                });
+
+                match should_continue {
+                    Ok(true) => continue,
+                    _ => break,
+                }
+            }
+        });
+
+        self.caret_blink_task = Some(task);
+    }
+
+    /// Stop the caret blink timer. Called when leaving edit mode.
+    pub fn stop_caret_blink(&mut self) {
+        self.caret_blink_task = None;
+        self.caret_visible = true;
+    }
+
+    /// Reset caret activity timestamp. Called on text edits and cursor moves.
+    /// Keeps caret visible and resets the idle timer.
+    pub fn reset_caret_activity(&mut self) {
+        self.caret_visible = true;
+        self.caret_last_activity = std::time::Instant::now();
     }
 
     /// Delete selected text and return true if there was a selection
@@ -3468,6 +3596,14 @@ impl Spreadsheet {
 
     pub fn backspace(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() {
+            // Text edit: clear ref_target and suppression so autocomplete can reopen
+            if self.mode.is_formula() {
+                self.formula_ref_cell = None;
+                self.formula_ref_end = None;
+            }
+            self.autocomplete_suppressed = false;
+            self.reset_caret_activity();
+
             // If there's a selection, delete it
             if self.delete_edit_selection() {
                 // Update highlighted refs for formulas
@@ -3502,12 +3638,21 @@ impl Spreadsheet {
 
     pub fn delete_char(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() {
+            // Text edit: clear ref_target and suppression so autocomplete can reopen
+            if self.mode.is_formula() {
+                self.formula_ref_cell = None;
+                self.formula_ref_end = None;
+            }
+            self.autocomplete_suppressed = false;
+            self.reset_caret_activity();
+
             // If there's a selection, delete it
             if self.delete_edit_selection() {
                 // Update highlighted refs for formulas
                 if self.is_formula_content() {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
+                self.update_autocomplete(cx);
                 cx.notify();
                 return;
             }
@@ -3527,6 +3672,7 @@ impl Spreadsheet {
                 if self.is_formula_content() {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
+                self.update_autocomplete(cx);
                 cx.notify();
             }
         }
@@ -3538,6 +3684,10 @@ impl Spreadsheet {
             if self.mode.is_formula() && self.formula_ref_cell.is_some() {
                 if Self::is_formula_operator(c) {
                     self.finalize_formula_reference();
+                } else {
+                    // Non-operator character: clear ref_target since we're typing, not navigating
+                    self.formula_ref_cell = None;
+                    self.formula_ref_end = None;
                 }
             }
 
@@ -3556,6 +3706,12 @@ impl Spreadsheet {
             if self.is_formula_content() {
                 self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
             }
+
+            // Text edit: clear suppression so autocomplete can reopen
+            self.autocomplete_suppressed = false;
+
+            // Reset caret blink (keep visible while typing)
+            self.reset_caret_activity();
 
             // Update autocomplete for formulas
             self.update_autocomplete(cx);
@@ -3584,6 +3740,9 @@ impl Spreadsheet {
                 self.mode = Mode::Edit;
             }
 
+            // Start caret blinking
+            self.start_caret_blink(cx);
+
             // Update autocomplete for formulas
             self.update_autocomplete(cx);
         }
@@ -3610,6 +3769,10 @@ impl Spreadsheet {
         if !self.mode.is_formula() {
             return;
         }
+
+        // Close autocomplete when entering ref navigation (not editing text anymore)
+        self.autocomplete_visible = false;
+        self.autocomplete_suppressed = true;
 
         let (new_row, new_col) = if let Some((row, col)) = self.formula_ref_cell {
             // Move existing reference
@@ -3641,6 +3804,10 @@ impl Spreadsheet {
             return;
         }
 
+        // Close autocomplete when entering ref navigation
+        self.autocomplete_visible = false;
+        self.autocomplete_suppressed = true;
+
         // Need an existing reference to extend
         let (anchor_row, anchor_col) = match self.formula_ref_cell {
             Some(cell) => cell,
@@ -3671,6 +3838,10 @@ impl Spreadsheet {
         if !self.mode.is_formula() {
             return;
         }
+
+        // Close autocomplete when inserting ref via click
+        self.autocomplete_visible = false;
+        self.autocomplete_suppressed = true;
 
         let is_new = self.formula_ref_cell.is_none();
         self.formula_ref_cell = Some((row, col));
@@ -3704,6 +3875,10 @@ impl Spreadsheet {
             return;
         }
 
+        // Close autocomplete when entering ref navigation
+        self.autocomplete_visible = false;
+        self.autocomplete_suppressed = true;
+
         // Need an existing reference to extend (or start one)
         let (anchor_row, anchor_col) = match self.formula_ref_cell {
             Some(cell) => cell,
@@ -3732,6 +3907,10 @@ impl Spreadsheet {
             return;
         }
 
+        // Close autocomplete when entering ref navigation
+        self.autocomplete_visible = false;
+        self.autocomplete_suppressed = true;
+
         let (start_row, start_col) = if let Some((row, col)) = self.formula_ref_cell {
             (row, col)
         } else {
@@ -3754,6 +3933,10 @@ impl Spreadsheet {
         if !self.mode.is_formula() {
             return;
         }
+
+        // Close autocomplete when starting drag ref selection
+        self.autocomplete_visible = false;
+        self.autocomplete_suppressed = true;
 
         let is_new = self.formula_ref_cell.is_none();
         self.formula_ref_cell = Some((row, col));
@@ -3849,6 +4032,7 @@ impl Spreadsheet {
         if self.mode.is_editing() && self.edit_cursor > 0 {
             self.edit_cursor -= 1;
             self.edit_selection_anchor = None;  // Clear selection
+            self.reset_caret_activity();
             cx.notify();
         }
     }
@@ -3859,6 +4043,7 @@ impl Spreadsheet {
             if self.edit_cursor < char_count {
                 self.edit_cursor += 1;
                 self.edit_selection_anchor = None;  // Clear selection
+                self.reset_caret_activity();
                 cx.notify();
             }
         }
@@ -3868,6 +4053,7 @@ impl Spreadsheet {
         if self.mode.is_editing() && self.edit_cursor > 0 {
             self.edit_cursor = 0;
             self.edit_selection_anchor = None;  // Clear selection
+            self.reset_caret_activity();
             cx.notify();
         }
     }
@@ -3878,6 +4064,7 @@ impl Spreadsheet {
             if self.edit_cursor < char_count {
                 self.edit_cursor = char_count;
                 self.edit_selection_anchor = None;  // Clear selection
+                self.reset_caret_activity();
                 cx.notify();
             }
         }
@@ -3971,6 +4158,7 @@ impl Spreadsheet {
         if self.mode.is_editing() {
             self.edit_cursor = self.find_word_boundary_left(self.edit_cursor);
             self.edit_selection_anchor = None;
+            self.reset_caret_activity();
             cx.notify();
         }
     }
@@ -3979,6 +4167,7 @@ impl Spreadsheet {
         if self.mode.is_editing() {
             self.edit_cursor = self.find_word_boundary_right(self.edit_cursor);
             self.edit_selection_anchor = None;
+            self.reset_caret_activity();
             cx.notify();
         }
     }

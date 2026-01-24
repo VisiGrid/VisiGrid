@@ -5981,6 +5981,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "smol",
  "tempfile",
  "visigrid-config",
  "visigrid-core",
