@@ -51,9 +51,17 @@ static SMOKE_RECALC_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn is_smoke_recalc_enabled() -> bool {
     *SMOKE_RECALC_ENABLED.get_or_init(|| {
-        std::env::var("VISIGRID_RECALC")
-            .map(|v| v == "full")
-            .unwrap_or(false)
+        let val = std::env::var("VISIGRID_RECALC").ok();
+        let enabled = val.as_deref() == Some("full");
+        // Debug: write startup check to file (absolute path)
+        use std::io::Write;
+        let debug_path = dirs::home_dir()
+            .map(|p| p.join("smoke_debug.txt"))
+            .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\rdo\\smoke_debug.txt"));
+        if let Ok(mut f) = std::fs::File::create(&debug_path) {
+            let _ = writeln!(f, "VISIGRID_RECALC={:?}, enabled={}", val, enabled);
+        }
+        enabled
     })
 }
 
@@ -3012,15 +3020,29 @@ impl Spreadsheet {
 
     /// Run full ordered recompute if VISIGRID_RECALC=full is set.
     ///
-    /// Phase 1.5: Headless dogfooding mode. Logs recalc metrics to stderr
+    /// Phase 1.5: Headless dogfooding mode. Logs recalc metrics to file
     /// for catching "works in tests, breaks in reality" bugs.
-    fn maybe_smoke_recalc(&mut self) {
+    ///
+    /// Writes to `smoke.log` in the current directory (Windows GUI apps
+    /// don't have stderr connected to console).
+    pub(crate) fn maybe_smoke_recalc(&mut self) {
         if !is_smoke_recalc_enabled() || self.in_smoke_recalc {
             return;
         }
         self.in_smoke_recalc = true;
         let report = self.workbook.recompute_full_ordered();
-        eprintln!("{}", report.log_line());
+        // Write to file since Windows GUI apps don't have stderr
+        use std::io::Write;
+        let log_path = dirs::home_dir()
+            .map(|p| p.join("smoke.log"))
+            .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\rdo\\smoke.log"));
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let _ = writeln!(f, "{}", report.log_line());
+        }
         self.in_smoke_recalc = false;
     }
 
