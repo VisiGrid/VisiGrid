@@ -470,7 +470,7 @@ impl Workbook {
     /// since their dependencies cannot be determined statically.
     pub fn recompute_full_ordered(&mut self) -> crate::recalc::RecalcReport {
         use crate::formula::analyze::has_dynamic_deps;
-        use crate::recalc::{RecalcError, RecalcReport};
+        use crate::recalc::{CellRecalcInfo, RecalcError, RecalcReport};
         use rustc_hash::FxHashMap;
         use std::time::Instant;
 
@@ -526,6 +526,9 @@ impl Workbook {
         // depth(value_cell) = 0, depth(formula_cell) = 1 + max(depth(precedents))
         let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
 
+        // Track evaluation order for explainability
+        let mut eval_order: usize = 0;
+
         // Evaluate known-deps formulas in topo order
         for cell_id in &known_deps_order {
             // Compute depth
@@ -544,6 +547,14 @@ impl Workbook {
                     report.errors.push(RecalcError::new(*cell_id, e));
                 }
             }
+
+            // Track per-cell recalc info for Inspector explainability
+            report.cell_info.insert(
+                *cell_id,
+                CellRecalcInfo::new(cell_depth, eval_order, false),
+            );
+            eval_order += 1;
+
             report.cells_recomputed += 1;
         }
 
@@ -565,6 +576,14 @@ impl Workbook {
                     report.errors.push(RecalcError::new(*cell_id, e));
                 }
             }
+
+            // Track per-cell recalc info (mark as having unknown deps)
+            report.cell_info.insert(
+                *cell_id,
+                CellRecalcInfo::new(cell_depth, eval_order, true),
+            );
+            eval_order += 1;
+
             report.cells_recomputed += 1;
             report.unknown_deps_recomputed += 1;
         }

@@ -4,6 +4,43 @@
 //! and cycle detection.
 
 use crate::cell_id::CellId;
+use rustc_hash::FxHashMap;
+use std::time::SystemTime;
+
+/// Per-cell recalculation metadata.
+///
+/// Tracks when and how a cell was last recomputed.
+/// Used by the Inspector to show explainability info.
+#[derive(Debug, Clone)]
+pub struct CellRecalcInfo {
+    /// Dependency depth of this cell.
+    /// A formula with no formula dependencies has depth 1.
+    /// A formula depending on another formula has depth = max(precedent depths) + 1.
+    /// Value cells (non-formulas) have depth 0.
+    pub depth: usize,
+
+    /// Position in the evaluation order (0-indexed).
+    /// Lower numbers are evaluated before higher numbers.
+    pub eval_order: usize,
+
+    /// When this cell was last recomputed.
+    pub recompute_time: SystemTime,
+
+    /// Whether this cell has dynamic/unknown dependencies (INDIRECT, OFFSET).
+    pub has_unknown_deps: bool,
+}
+
+impl CellRecalcInfo {
+    /// Create a new cell recalc info.
+    pub fn new(depth: usize, eval_order: usize, has_unknown_deps: bool) -> Self {
+        Self {
+            depth,
+            eval_order,
+            recompute_time: SystemTime::now(),
+            has_unknown_deps,
+        }
+    }
+}
 
 /// Report from a full ordered recompute operation.
 ///
@@ -31,6 +68,10 @@ pub struct RecalcReport {
 
     /// Errors encountered during recompute (truncated to first 100).
     pub errors: Vec<RecalcError>,
+
+    /// Per-cell recalc metadata for Inspector explainability.
+    /// Maps CellId -> CellRecalcInfo for all cells that were recomputed.
+    pub cell_info: FxHashMap<CellId, CellRecalcInfo>,
 }
 
 impl RecalcReport {
@@ -64,6 +105,40 @@ impl RecalcReport {
             if self.had_cycles { 1 } else { 0 },
             self.errors.len()
         )
+    }
+
+    /// Get recalc info for a specific cell.
+    pub fn get_cell_info(&self, cell: &CellId) -> Option<&CellRecalcInfo> {
+        self.cell_info.get(cell)
+    }
+
+    /// Get cells that were evaluated immediately before/after a given cell.
+    /// Returns (prev_cell, next_cell) where either may be None if at boundary.
+    pub fn get_adjacent_cells(&self, cell: &CellId) -> (Option<CellId>, Option<CellId>) {
+        let Some(info) = self.cell_info.get(cell) else {
+            return (None, None);
+        };
+        let order = info.eval_order;
+
+        let mut prev: Option<CellId> = None;
+        let mut next: Option<CellId> = None;
+
+        for (c, i) in &self.cell_info {
+            if i.eval_order + 1 == order {
+                prev = Some(*c);
+            } else if i.eval_order == order + 1 {
+                next = Some(*c);
+            }
+        }
+
+        (prev, next)
+    }
+
+    /// Get all cells sorted by evaluation order.
+    pub fn cells_by_eval_order(&self) -> Vec<(CellId, &CellRecalcInfo)> {
+        let mut cells: Vec<_> = self.cell_info.iter().map(|(c, i)| (*c, i)).collect();
+        cells.sort_by_key(|(_, i)| i.eval_order);
+        cells
     }
 }
 

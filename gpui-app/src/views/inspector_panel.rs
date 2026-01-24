@@ -5,6 +5,7 @@ use crate::mode::InspectorTab;
 use crate::theme::TokenKey;
 use visigrid_engine::formula::parser::{parse, extract_cell_refs};
 use visigrid_engine::cell::{Alignment, VerticalAlignment, TextOverflow, NumberFormat, DateStyle};
+use visigrid_engine::cell_id::CellId;
 
 pub const PANEL_WIDTH: f32 = 280.0;
 
@@ -351,6 +352,21 @@ fn render_inspector_tab(
         content = content.child(spill_section);
     }
 
+    // Mini DAG visualization (only if cell has dependencies)
+    if !precedents.is_empty() || !dependents.is_empty() {
+        content = content.child(render_mini_dag(
+            app,
+            &cell_address,
+            &precedents,
+            &dependents,
+            text_primary,
+            text_muted,
+            accent,
+            panel_border,
+            cx,
+        ));
+    }
+
     // Precedents section
     if !precedents.is_empty() {
         let mut prec_section = section("Precedents (depends on)", panel_border, text_primary);
@@ -401,6 +417,97 @@ fn render_inspector_tab(
         content = content.child(dep_section);
     }
 
+    // Recalc Info section (only when verified mode is enabled)
+    if app.verified_mode {
+        if let Some(report) = &app.last_recalc_report {
+            let sheet_id = app.sheet().id;
+            let cell_id = CellId::new(sheet_id, row, col);
+
+            if let Some(info) = report.get_cell_info(&cell_id) {
+                let mut recalc_section = section("Recalc Info", panel_border, text_primary);
+
+                // Depth
+                recalc_section = recalc_section.child(info_row(
+                    "Depth",
+                    &format!("{}", info.depth),
+                    text_muted,
+                    text_primary,
+                ));
+
+                // Evaluation order
+                recalc_section = recalc_section.child(info_row(
+                    "Eval Order",
+                    &format!("#{} of {}", info.eval_order + 1, report.cells_recomputed),
+                    text_muted,
+                    text_primary,
+                ));
+
+                // Has unknown deps indicator
+                if info.has_unknown_deps {
+                    recalc_section = recalc_section.child(info_row(
+                        "Dynamic Refs",
+                        "Yes (INDIRECT/OFFSET)",
+                        text_muted,
+                        text_primary,
+                    ));
+                }
+
+                // Adjacent cells (evaluated before/after)
+                let (prev_cell, next_cell) = report.get_adjacent_cells(&cell_id);
+
+                if let Some(prev) = prev_cell {
+                    if prev.sheet == sheet_id {
+                        recalc_section = recalc_section.child(clickable_cell_row(
+                            "After",
+                            &app.cell_ref_at(prev.row, prev.col),
+                            prev.row,
+                            prev.col,
+                            text_muted,
+                            accent,
+                            cx,
+                        ));
+                    }
+                }
+
+                if let Some(next) = next_cell {
+                    if next.sheet == sheet_id {
+                        recalc_section = recalc_section.child(clickable_cell_row(
+                            "Before",
+                            &app.cell_ref_at(next.row, next.col),
+                            next.row,
+                            next.col,
+                            text_muted,
+                            accent,
+                            cx,
+                        ));
+                    }
+                }
+
+                content = content.child(recalc_section);
+            } else if is_formula {
+                // Formula cell but not in recalc report (might be cycle or new)
+                content = content.child(
+                    section("Recalc Info", panel_border, text_primary)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_muted)
+                                .child("Not in last recalc (possibly in cycle)")
+                        )
+                );
+            }
+        }
+    } else if is_formula {
+        // Hint to enable verified mode
+        content = content.child(
+            div()
+                .py_2()
+                .text_size(px(10.0))
+                .text_color(text_muted)
+                .child("Enable Verified Mode (F9) for recalc info")
+        );
+    }
+
     // Empty state for non-formula cells with no dependencies
     if has_no_deps {
         content = content.child(
@@ -413,6 +520,160 @@ fn render_inspector_tab(
     }
 
     content.into_any_element()
+}
+
+/// Render a mini DAG visualization showing precedents → cell → dependents flow
+fn render_mini_dag(
+    app: &Spreadsheet,
+    cell_address: &str,
+    precedents: &[(usize, usize)],
+    dependents: &[(usize, usize)],
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let max_show = 4; // Max cells to show in each row
+
+    section("Dependency Graph", panel_border, text_primary)
+        // Fan-in (precedents) row
+        .when(!precedents.is_empty(), |el| {
+            let prec_cells: Vec<_> = precedents.iter().take(max_show).collect();
+            let extra_count = precedents.len().saturating_sub(max_show);
+
+            el.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_size(px(9.0))
+                            .text_color(text_muted)
+                            .mr_1()
+                            .child("in:")
+                    )
+                    .children(prec_cells.into_iter().map(|(r, c)| {
+                        dag_cell_chip(app, *r, *c, text_muted, accent, cx)
+                    }))
+                    .when(extra_count > 0, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(9.0))
+                                .text_color(text_muted)
+                                .child(SharedString::from(format!("+{}", extra_count)))
+                        )
+                    })
+            )
+        })
+        // Arrow down
+        .when(!precedents.is_empty(), |el| {
+            el.child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .py_px()
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(text_muted)
+                            .child("↓")
+                    )
+            )
+        })
+        // Current cell (highlighted)
+        .child(
+            div()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded(px(4.0))
+                        .bg(accent.opacity(0.2))
+                        .border_1()
+                        .border_color(accent)
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(text_primary)
+                        .child(SharedString::from(cell_address.to_string()))
+                )
+        )
+        // Arrow down
+        .when(!dependents.is_empty(), |el| {
+            el.child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .py_px()
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(text_muted)
+                            .child("↓")
+                    )
+            )
+        })
+        // Fan-out (dependents) row
+        .when(!dependents.is_empty(), |el| {
+            let dep_cells: Vec<_> = dependents.iter().take(max_show).collect();
+            let extra_count = dependents.len().saturating_sub(max_show);
+
+            el.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_size(px(9.0))
+                            .text_color(text_muted)
+                            .mr_1()
+                            .child("out:")
+                    )
+                    .children(dep_cells.into_iter().map(|(r, c)| {
+                        dag_cell_chip(app, *r, *c, text_muted, accent, cx)
+                    }))
+                    .when(extra_count > 0, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(9.0))
+                                .text_color(text_muted)
+                                .child(SharedString::from(format!("+{}", extra_count)))
+                        )
+                    })
+            )
+        })
+}
+
+/// A small clickable cell chip for the DAG visualization
+fn dag_cell_chip(
+    app: &Spreadsheet,
+    row: usize,
+    col: usize,
+    text_muted: Hsla,
+    accent: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let cell_ref = app.cell_ref_at(row, col);
+
+    div()
+        .id(SharedString::from(format!("dag-chip-{}-{}", row, col)))
+        .px_1()
+        .rounded(px(3.0))
+        .bg(text_muted.opacity(0.1))
+        .text_size(px(10.0))
+        .text_color(accent)
+        .cursor_pointer()
+        .hover(|s| s.bg(accent.opacity(0.2)))
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            this.select_cell(row, col, false, cx);
+        }))
+        .child(SharedString::from(cell_ref))
 }
 
 fn render_format_tab(
