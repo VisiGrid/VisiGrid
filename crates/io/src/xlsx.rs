@@ -394,7 +394,11 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
     // Record import duration
     result.import_duration_ms = start_time.elapsed().as_millis();
 
-    let workbook = Workbook::from_sheets(sheets, 0);
+    let mut workbook = Workbook::from_sheets(sheets, 0);
+
+    // Rebuild dependency graph after loading all data
+    workbook.rebuild_dep_graph();
+
     Ok((workbook, result))
 }
 

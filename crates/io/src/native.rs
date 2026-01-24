@@ -502,6 +502,9 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
         }
     }
 
+    // Rebuild dependency graph after loading all data
+    workbook.rebuild_dep_graph();
+
     Ok(workbook)
 }
 

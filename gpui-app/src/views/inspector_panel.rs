@@ -1678,21 +1678,17 @@ pub fn get_precedents(formula: &str) -> Vec<(usize, usize)> {
 }
 
 // Get dependents (cells that reference the given cell)
+// Uses the workbook's dependency graph for O(1) lookup instead of O(n) scan.
 pub fn get_dependents(app: &Spreadsheet, row: usize, col: usize) -> Vec<(usize, usize)> {
-    let mut dependents = Vec::new();
+    let sheet_id = app.sheet().id;
+    let deps = app.workbook.get_dependents(sheet_id, row, col);
 
-    // Iterate through all cells with formulas and check if they reference this cell
-    for ((cell_row, cell_col), cell) in app.sheet().cells_iter() {
-        let raw = cell.value.raw_display();
-        if raw.starts_with('=') {
-            if let Ok(expr) = parse(&raw) {
-                let refs = extract_cell_refs(&expr);
-                if refs.contains(&(row, col)) {
-                    dependents.push((*cell_row, *cell_col));
-                }
-            }
-        }
-    }
+    // Filter to same-sheet cells and convert to (row, col)
+    let mut dependents: Vec<(usize, usize)> = deps
+        .into_iter()
+        .filter(|cell_id| cell_id.sheet == sheet_id)
+        .map(|cell_id| (cell_id.row, cell_id.col))
+        .collect();
 
     dependents.sort();
     dependents
