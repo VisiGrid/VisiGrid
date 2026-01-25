@@ -131,6 +131,7 @@ pub enum SerializableInspectorTab {
     Inspector,
     Format,
     Names,
+    History,
 }
 
 impl From<InspectorTab> for SerializableInspectorTab {
@@ -139,6 +140,7 @@ impl From<InspectorTab> for SerializableInspectorTab {
             InspectorTab::Inspector => SerializableInspectorTab::Inspector,
             InspectorTab::Format => SerializableInspectorTab::Format,
             InspectorTab::Names => SerializableInspectorTab::Names,
+            InspectorTab::History => SerializableInspectorTab::History,
         }
     }
 }
@@ -149,6 +151,7 @@ impl From<SerializableInspectorTab> for InspectorTab {
             SerializableInspectorTab::Inspector => InspectorTab::Inspector,
             SerializableInspectorTab::Format => InspectorTab::Format,
             SerializableInspectorTab::Names => InspectorTab::Names,
+            SerializableInspectorTab::History => InspectorTab::History,
         }
     }
 }

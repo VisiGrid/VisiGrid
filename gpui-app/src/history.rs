@@ -5,6 +5,26 @@ use visigrid_engine::named_range::NamedRange;
 use visigrid_engine::provenance::Provenance;
 use std::time::Instant;
 
+/// Display-ready entry for the History panel.
+/// Pre-computed strings so render doesn't rebuild them.
+#[derive(Clone, Debug)]
+pub struct HistoryDisplayEntry {
+    /// Stable ID for list keying (index in combined undo+redo view)
+    pub id: u64,
+    /// Primary label (e.g., "Paste", "Fill Down", "Edit cell")
+    pub label: String,
+    /// Scope description (e.g., "Sheet1!B2:D4", "47 cells")
+    pub scope: String,
+    /// When this action occurred
+    pub timestamp: Instant,
+    /// Lua snippet if provenance exists
+    pub lua: Option<String>,
+    /// Whether this entry has provenance
+    pub is_provenanced: bool,
+    /// Whether this entry can be undone (vs already undone/redoable)
+    pub is_undoable: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct CellChange {
     pub row: usize,
@@ -192,11 +212,16 @@ impl UndoAction {
 
 #[derive(Clone, Debug)]
 pub struct HistoryEntry {
+    /// Stable ID for this entry (monotonic, survives undo/redo moves)
+    pub id: u64,
     pub action: UndoAction,
     pub timestamp: Instant,
     /// Lua provenance for multi-cell operations (Phase 4)
     pub provenance: Option<Provenance>,
 }
+
+/// Coalescing window for rapid format changes (e.g., decimal +/-)
+const COALESCE_WINDOW_MS: u128 = 500;
 
 pub struct History {
     undo_stack: Vec<HistoryEntry>,
@@ -204,10 +229,15 @@ pub struct History {
     max_entries: usize,
     /// Save point for dirty detection: undo_stack length when document was saved
     save_point: usize,
+    /// Monotonic counter for stable entry IDs
+    next_id: u64,
 }
 
-/// Coalescing window for rapid format changes (e.g., decimal +/-)
-const COALESCE_WINDOW_MS: u128 = 500;
+impl Default for History {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl History {
     pub fn new() -> Self {
@@ -216,7 +246,14 @@ impl History {
             redo_stack: Vec::new(),
             max_entries: 100,
             save_point: 0,
+            next_id: 1,
         }
+    }
+
+    fn next_entry_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 
     /// Mark current position as the save point (document is now "clean")
@@ -241,7 +278,9 @@ impl History {
             return;
         }
 
+        let id = self.next_entry_id();
         let entry = HistoryEntry {
+            id,
             action: UndoAction::Values {
                 sheet_index,
                 changes: vec![CellChange { row, col, old_value, new_value }],
@@ -263,7 +302,9 @@ impl History {
             return;
         }
 
+        let id = self.next_entry_id();
         let entry = HistoryEntry {
+            id,
             action: UndoAction::Values { sheet_index, changes },
             timestamp: Instant::now(),
             provenance,
@@ -303,7 +344,9 @@ impl History {
         }
 
         // No coalescing, create new entry
+        let id = self.next_entry_id();
         let entry = HistoryEntry {
+            id,
             action: UndoAction::Format { sheet_index, patches, kind, description },
             timestamp: now,
             provenance: None,  // Format changes don't need Lua provenance
@@ -318,7 +361,9 @@ impl History {
 
     /// Record any action with optional Lua provenance
     pub fn record_action_with_provenance(&mut self, action: UndoAction, provenance: Option<Provenance>) {
+        let id = self.next_entry_id();
         let entry = HistoryEntry {
+            id,
             action,
             timestamp: Instant::now(),
             provenance,
@@ -397,6 +442,59 @@ impl History {
         entries
     }
 
+    /// Get pre-computed display entries for History panel.
+    /// Labels/scope/lua are computed once here, not in render.
+    /// Uses stable entry.id for keying (survives undo/redo moves).
+    pub fn display_entries(&self) -> Vec<HistoryDisplayEntry> {
+        let mut entries = Vec::new();
+
+        // Undo stack entries (most recent first) - these can be undone
+        for entry in self.undo_stack.iter().rev() {
+            entries.push(Self::to_display_entry(entry, true));
+        }
+
+        // Redo stack entries (already undone) - these can be redone
+        for entry in self.redo_stack.iter().rev() {
+            entries.push(Self::to_display_entry(entry, false));
+        }
+
+        // Invariant check: IDs should be unique
+        #[cfg(debug_assertions)]
+        {
+            let mut seen_ids = std::collections::HashSet::new();
+            for entry in &entries {
+                debug_assert!(
+                    seen_ids.insert(entry.id),
+                    "Duplicate history entry ID: {}",
+                    entry.id
+                );
+            }
+        }
+
+        entries
+    }
+
+    /// Convert a HistoryEntry to a HistoryDisplayEntry.
+    /// Uses entry.id for stable keying across undo/redo operations.
+    fn to_display_entry(entry: &HistoryEntry, is_undoable: bool) -> HistoryDisplayEntry {
+        let (label, scope, lua, is_provenanced) = if let Some(ref prov) = entry.provenance {
+            (prov.label.clone(), prov.scope.clone(), Some(prov.lua.clone()), true)
+        } else {
+            // Fallback to UndoAction::label()
+            (entry.action.label(), String::new(), None, false)
+        };
+
+        HistoryDisplayEntry {
+            id: entry.id,  // Use stable entry ID, not position
+            label,
+            scope,
+            timestamp: entry.timestamp,
+            lua,
+            is_provenanced,
+            is_undoable,
+        }
+    }
+
     /// Get the number of entries in the undo stack.
     pub fn undo_count(&self) -> usize {
         self.undo_stack.len()
@@ -411,5 +509,6 @@ impl History {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.save_point = 0;
+        self.next_id = 1;
     }
 }

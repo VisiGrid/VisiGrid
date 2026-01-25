@@ -48,6 +48,7 @@ pub enum InspectorTab {
     Inspector,  // Cell info, precedents, dependents
     Format,     // Formatting options (Ctrl+1)
     Names,      // Named ranges management
+    History,    // Undo history with Lua provenance (Ctrl+H)
 }
 
 impl Mode {

@@ -111,6 +111,7 @@ actions!(file, [
 actions!(view, [
     ToggleCommandPalette,
     ToggleInspector,
+    ShowHistoryPanel,  // Ctrl+H - opens inspector with History tab
     ShowFormatPanel,  // Ctrl+1 - opens inspector with Format tab
     ShowPreferences,  // Cmd+, on macOS - currently routes to theme picker
     OpenKeybindings,  // Open keybindings.json for editing

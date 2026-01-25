@@ -645,6 +645,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.inspector_tab = InspectorTab::Format;
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &ShowHistoryPanel, _, cx| {
+            this.inspector_visible = true;
+            this.inspector_tab = InspectorTab::History;
+            cx.notify();
+        }))
         // Edit mode cursor movement
         .on_action(cx.listener(|this, _: &EditCursorLeft, window, cx| {
             this.move_edit_cursor_left(cx);

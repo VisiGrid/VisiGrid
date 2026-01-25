@@ -117,6 +117,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // View
         KeyBinding::new(&kb_shift(m, "p"), ToggleCommandPalette, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "i"), ToggleInspector, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "y"), ShowHistoryPanel, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "1"), ShowFormatPanel, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "m"), ToggleProblems, Some("Spreadsheet")),
         KeyBinding::new("f11", ToggleZenMode, Some("Spreadsheet")),

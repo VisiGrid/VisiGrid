@@ -208,6 +208,26 @@ fn render_tab_bar(
                 }))
                 .child("Names")
         )
+        .child(
+            div()
+                .id("inspector-tab-history")
+                .flex_1()
+                .px_3()
+                .py_2()
+                .text_size(px(12.0))
+                .text_color(if current_tab == InspectorTab::History { text_primary } else { text_muted })
+                .font_weight(if current_tab == InspectorTab::History { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                .bg(if current_tab == InspectorTab::History { selection_bg.opacity(0.3) } else { gpui::transparent_black() })
+                .border_b_2()
+                .border_color(if current_tab == InspectorTab::History { text_primary } else { gpui::transparent_black() })
+                .cursor_pointer()
+                .hover(|s| s.bg(panel_border.opacity(0.5)))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.inspector_tab = InspectorTab::History;
+                    cx.notify();
+                }))
+                .child("History")
+        )
 }
 
 fn render_content(
@@ -221,9 +241,15 @@ fn render_content(
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    // Pre-build the names tab content while we have &mut access for usage cache
+    // Pre-build tabs that need &mut access
     let names_content = if current_tab == InspectorTab::Names {
         Some(render_names_tab(app, text_primary, text_muted, accent, panel_border, cx))
+    } else {
+        None
+    };
+
+    let history_content = if current_tab == InspectorTab::History {
+        Some(render_history_tab(app, text_primary, text_muted, accent, panel_border, cx))
     } else {
         None
     };
@@ -235,6 +261,7 @@ fn render_content(
             InspectorTab::Inspector => render_inspector_tab(app, row, col, text_primary, text_muted, accent, panel_border, cx),
             InspectorTab::Format => render_format_tab(app, row, col, text_primary, text_muted, panel_border, accent, cx).into_any_element(),
             InspectorTab::Names => names_content.unwrap().into_any_element(),
+            InspectorTab::History => history_content.unwrap().into_any_element(),
         })
 }
 
@@ -2411,5 +2438,333 @@ fn format_relative_time(time: std::time::SystemTime) -> String {
             }
         }
         Err(_) => "unknown".to_string(),
+    }
+}
+
+// ============================================================================
+// History Tab
+// ============================================================================
+
+fn render_history_tab(
+    app: &mut Spreadsheet,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    use crate::history::HistoryDisplayEntry;
+
+    let all_entries = app.history.display_entries();
+    let filter_query = app.history_filter_query.clone();
+    let selected_id = app.selected_history_id;
+    let is_pro = visigrid_license::is_feature_enabled("inspector");
+
+    // Filter entries by label/scope (case-insensitive substring)
+    let entries: Vec<HistoryDisplayEntry> = if filter_query.is_empty() {
+        all_entries
+    } else {
+        let q = filter_query.to_lowercase();
+        all_entries
+            .into_iter()
+            .filter(|e| {
+                e.label.to_lowercase().contains(&q) || e.scope.to_lowercase().contains(&q)
+            })
+            .collect()
+    };
+
+    // Find selected entry for detail view
+    let selected_entry: Option<HistoryDisplayEntry> = selected_id
+        .and_then(|id| entries.iter().find(|e| e.id == id).cloned());
+
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        // Filter input
+        .child(
+            div()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(panel_border)
+                .child(
+                    div()
+                        .id("history-filter-input")
+                        .px_2()
+                        .py_1()
+                        .w_full()
+                        .bg(panel_border.opacity(0.3))
+                        .rounded_sm()
+                        .text_size(px(12.0))
+                        .text_color(text_primary)
+                        .child(if filter_query.is_empty() {
+                            div().text_color(text_muted).child("Filter...")
+                        } else {
+                            div().child(filter_query.clone())
+                        })
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            // Simple: click to clear filter (full text input would require more work)
+                            this.history_filter_query.clear();
+                            cx.notify();
+                        }))
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                            if let Some(ch) = &event.keystroke.key_char {
+                                this.history_filter_query.push_str(ch);
+                                cx.notify();
+                            } else if event.keystroke.key == "backspace" && !this.history_filter_query.is_empty() {
+                                this.history_filter_query.pop();
+                                cx.notify();
+                            } else if event.keystroke.key == "escape" {
+                                this.history_filter_query.clear();
+                                cx.notify();
+                            }
+                        }))
+                )
+        )
+        .child(
+            // Entry list
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .children(entries.iter().map(|entry| {
+                            render_history_entry(entry, selected_id, text_primary, text_muted, panel_border, cx)
+                        }))
+                        .when(entries.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .p_4()
+                                    .text_size(px(12.0))
+                                    .text_color(text_muted)
+                                    .child(if filter_query.is_empty() {
+                                        "No history yet"
+                                    } else {
+                                        "No matches"
+                                    })
+                            )
+                        })
+                )
+        )
+        // Detail panel for selected entry
+        .when(selected_entry.is_some(), |el| {
+            let entry = selected_entry.unwrap();
+            el.child(render_history_detail(&entry, is_pro, text_primary, text_muted, accent, panel_border, cx))
+        })
+}
+
+fn render_history_entry(
+    entry: &crate::history::HistoryDisplayEntry,
+    selected_id: Option<u64>,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let is_selected = selected_id == Some(entry.id);
+    let entry_id = entry.id;
+    let is_undoable = entry.is_undoable;
+
+    // Format relative time
+    let time_str = format_instant_relative(entry.timestamp);
+
+    div()
+        .id(SharedString::from(format!("history-entry-{}", entry.id)))
+        .px_3()
+        .py_2()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .cursor_pointer()
+        .bg(if is_selected { panel_border.opacity(0.5) } else { gpui::transparent_black() })
+        .border_b_1()
+        .border_color(panel_border.opacity(0.3))
+        .hover(|s| s.bg(panel_border.opacity(0.3)))
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            // Toggle selection
+            if this.selected_history_id == Some(entry_id) {
+                this.selected_history_id = None;
+            } else {
+                this.selected_history_id = Some(entry_id);
+            }
+            cx.notify();
+        }))
+        // Top row: label + time
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if is_undoable { text_primary } else { text_muted })
+                                .child(SharedString::from(entry.label.clone()))
+                        )
+                        .when(!is_undoable, |el| {
+                            el.child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(text_muted)
+                                    .child("(undone)")
+                            )
+                        })
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(text_muted)
+                        .child(SharedString::from(time_str))
+                )
+        )
+        // Bottom row: scope (if present)
+        .when(!entry.scope.is_empty(), |el| {
+            el.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(text_muted)
+                    .child(SharedString::from(entry.scope.clone()))
+            )
+        })
+}
+
+fn render_history_detail(
+    entry: &crate::history::HistoryDisplayEntry,
+    is_pro: bool,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let lua_code = entry.lua.clone();
+    let has_lua = lua_code.is_some();
+
+    div()
+        .border_t_1()
+        .border_color(panel_border)
+        .flex()
+        .flex_col()
+        .max_h(px(200.0))
+        .overflow_hidden()
+        // Header
+        .child(
+            div()
+                .px_3()
+                .py_2()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(text_muted)
+                        .child("Provenance")
+                )
+                .when(has_lua && is_pro, |el| {
+                    let lua_for_copy = lua_code.clone().unwrap();
+                    el.child(
+                        div()
+                            .id("copy-lua-button")
+                            .px_2()
+                            .py_1()
+                            .text_size(px(10.0))
+                            .text_color(accent)
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(accent.opacity(0.1)))
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(lua_for_copy.clone()));
+                                this.status_message = Some("Copied Lua to clipboard".to_string());
+                                cx.notify();
+                            }))
+                            .child("Copy")
+                    )
+                })
+        )
+        // Content
+        .child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .px_3()
+                .pb_2()
+                .child(
+                    if !entry.is_provenanced {
+                        // No provenance fallback
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(text_muted)
+                            .child("No provenance for this action")
+                            .into_any_element()
+                    } else if !is_pro {
+                        // Pro upsell
+                        div()
+                            .p_2()
+                            .rounded_md()
+                            .bg(panel_border.opacity(0.3))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(text_primary)
+                                    .child("View Lua provenance with Pro")
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(text_muted)
+                                    .child("See the exact operation as executable Lua code")
+                            )
+                            .into_any_element()
+                    } else {
+                        // Lua code block
+                        div()
+                            .p_2()
+                            .rounded_md()
+                            .bg(rgb(0x1a1a1a))
+                            .border_1()
+                            .border_color(panel_border)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_family("monospace")
+                                    .text_color(text_primary)
+                                    .child(SharedString::from(lua_code.unwrap_or_default()))
+                            )
+                            .into_any_element()
+                    }
+                )
+        )
+}
+
+/// Format an Instant as relative time (e.g., "12s ago", "5m ago")
+fn format_instant_relative(instant: std::time::Instant) -> String {
+    let elapsed = instant.elapsed();
+    let secs = elapsed.as_secs();
+
+    if secs < 2 {
+        "just now".to_string()
+    } else if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
     }
 }
