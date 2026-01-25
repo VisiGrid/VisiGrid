@@ -10,6 +10,14 @@ Users can:
 - Predict what changes will affect
 - Defend their work to others
 
+## Proof Artifacts
+
+Explainability produces portable artifacts.
+
+If VisiGrid can claim something (impact, trace, provenance), it must be representable as a copyable, durable artifact (text or code) without screenshots.
+
+This justifies History/Lua and keeps us from drifting into "pretty UI only."
+
 ## PR Kill-Question
 
 Before merging any PR, ask:
@@ -50,6 +58,12 @@ These will never be in VisiGrid:
 
 - **Dynamic refs** (`INDIRECT`, `OFFSET`) have unknown dependencies at parse time. Graph edges may be incomplete. Impact is marked as "unbounded" for these cells.
 - **Cycles** are detected at edit-time, not evaluation-time. Error on entry, not silent `#VALUE` later.
+
+## No Fake Precision
+
+When dependencies are unknown (dynamic refs), VisiGrid must say "unbounded" or "unknown" rather than guessing counts or impact.
+
+This protects trust when implementing validation, imports, plugins, or any feature that introduces uncertainty.
 
 ---
 

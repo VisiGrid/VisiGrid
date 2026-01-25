@@ -2,44 +2,32 @@
 
 ## 0.2.9
 
-*This release positions VisiGrid as the Explainable Spreadsheet.*
+VisiGrid now completes the explainability loop: you can verify results, inspect structure, and export the intent behind changes.
 
-### Named Range Intelligence (Pro)
+### Provenance History (Pro)
 
-Named ranges now integrate with the Inspector and Quick Open.
+VisiGrid records *why* the grid changed — not just *that* it changed.
 
-- **Detail panel**: Select a named range in the Names tab to see value preview, usage count, depth, and verification status.
-- **Quick Open**: Press `Ctrl+P` to see named ranges alongside commands (or type `$` to filter to names only).
-- **DAG trace**: Single-click a named range to highlight its cells and precedents in the grid. Double-click to jump.
+- **History tab** shows a git-log-style list of high-level actions (Paste, Fill, Sort, Clear, Multi-edit).
+- **Select an entry** to view a canonical, read-only Lua snippet describing the action in deterministic A1 notation.
+- **Copy the Lua snippet** to share, document, or audit how a sheet was produced.
+- **Filter history** by label or scope.
 
-### README Refresh
-
-The README now leads with VisiGrid's category claim: **The Explainable Spreadsheet**. Updated feature lists emphasize trust, causality, and provenance over generic spreadsheet features.
-
-### Demo Workbook
-
-New `fixtures/explainability-demo.csv` demonstrates dependency chains, Verified Mode, and the Inspector in action.
-
-## 0.2.8
-
-*This release completes VisiGrid's explainability loop: verified values, visible dependencies, and provable changes.*
-
-### Explainability: Provenance History (Pro)
-
-VisiGrid now records *why* the grid changed — not just *that* it changed.
-
-- **New History tab** shows a git-log-style list of your latest actions (Paste, Fill, Sort, Clear, Multi-edit).
-- **Selecting an entry** reveals a read-only Lua snippet that describes the action in deterministic A1 notation.
-- **Copy the Lua snippet** to share, document, or audit how the sheet was produced.
-- **Filter box** to quickly find relevant actions by label or scope.
-
-**Pro feature:** Lua provenance + Copy. Free users see the list and can upgrade to view/export provenance.
+**Pro feature:** View + Copy Lua provenance. Free users see the history list and can upgrade to export provenance.
 
 **Shortcut:** `Ctrl+Shift+Y` opens History.
 
-### Also in this release
+### Named Range Intelligence (Pro)
 
-- Theme refresh
+Named ranges are now first-class model entry points.
+
+- **Named range details** show value preview, depth, verified status, and usage count.
+- **Quick Open** (`Ctrl+P`) includes named ranges by default.
+- **One-click tracing** highlights dependencies for the selected named range.
+
+### Also
+
+- Theme refresh (contrast + readability improvements)
 - Formula bar enhancements
 
 ## 0.2.7
