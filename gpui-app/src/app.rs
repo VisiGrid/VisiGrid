@@ -635,6 +635,7 @@ pub struct Spreadsheet {
     pub inspector_trace_path: Option<Vec<visigrid_engine::cell_id::CellId>>,  // Path trace highlight (Phase 3.5b)
     pub inspector_trace_incomplete: bool,  // True if trace has dynamic refs or was truncated
     pub names_filter_query: String,  // Filter query for Names tab
+    pub selected_named_range: Option<String>,  // Selected named range in Names tab (Phase 5)
     pub selected_history_id: Option<u64>,  // Selected entry in History tab (Phase 4.3)
     pub history_filter_query: String,  // Filter query for History tab (Phase 4.3)
 
@@ -915,6 +916,7 @@ impl Spreadsheet {
             inspector_trace_path: None,
             inspector_trace_incomplete: false,
             names_filter_query: String::new(),
+            selected_named_range: None,
             selected_history_id: None,
             history_filter_query: String::new(),
             theme,

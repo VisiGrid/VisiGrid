@@ -1136,6 +1136,17 @@ fn render_names_tab(
     let has_names = !all_names.is_empty();
     let has_filtered_results = !named_ranges.is_empty();
     let name_count = all_names.len();
+    let selected_name = app.selected_named_range.clone();
+    let is_pro = visigrid_license::is_feature_enabled("inspector");
+
+    // Get detail info for selected named range (Pro feature)
+    let selected_detail = if is_pro {
+        selected_name.as_ref().and_then(|name| {
+            get_named_range_detail(app, name)
+        })
+    } else {
+        None
+    };
 
     // Build the list content based on state
     let list_content = if !has_names {
@@ -1188,6 +1199,9 @@ fn render_names_tab(
             // Show description under reference if it exists
             let has_description = description.is_some();
 
+            let is_selected = selected_name.as_ref() == Some(&name);
+            let name_for_select = nr.name.clone();
+
             list = list.child(
                 div()
                     .id(SharedString::from(format!("named-range-{}", name)))
@@ -1199,9 +1213,22 @@ fn render_names_tab(
                     .py_1()
                     .rounded_sm()
                     .cursor_pointer()
+                    .bg(if is_selected { accent.opacity(0.15) } else { gpui::transparent_black() })
                     .hover(|s| s.bg(panel_border.opacity(0.3)))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                        this.jump_to_named_range(&name_for_jump, cx);
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        if event.click_count == 2 {
+                            // Double-click: jump to range
+                            this.jump_to_named_range(&name_for_jump, cx);
+                        } else {
+                            // Single-click: toggle selection and trace
+                            if this.selected_named_range.as_ref() == Some(&name_for_select) {
+                                this.selected_named_range = None;
+                                this.clear_named_range_trace(cx);
+                            } else {
+                                this.selected_named_range = Some(name_for_select.clone());
+                                this.trace_named_range(&name_for_select, cx);
+                            }
+                        }
                     }))
                     .child(
                         div()
@@ -1377,6 +1404,26 @@ fn render_names_tab(
         )
         // Named ranges list
         .child(list_content)
+        // Detail panel for selected named range (Pro feature)
+        .when(selected_detail.is_some(), |el| {
+            let detail = selected_detail.as_ref().unwrap();
+            el.child(render_named_range_detail(detail, text_primary, text_muted, accent, panel_border))
+        })
+        // Pro upsell when not licensed and has selection
+        .when(!is_pro && selected_name.is_some(), |el| {
+            el.child(
+                div()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(panel_border)
+                    .p_2()
+                    .bg(panel_border.opacity(0.2))
+                    .rounded_sm()
+                    .text_size(px(10.0))
+                    .text_color(text_muted)
+                    .child("Pro: View value preview, depth, and verification status")
+            )
+        })
         // Keyboard hint
         .child(
             div()
@@ -1385,8 +1432,260 @@ fn render_names_tab(
                 .border_color(panel_border)
                 .text_size(px(9.0))
                 .text_color(text_muted.opacity(0.7))
-                .child("Ctrl+Shift+N: Create | Ctrl+Shift+R: Rename")
+                .child("Click: select | Double-click: jump | Ctrl+Shift+N: Create")
         )
+}
+
+/// Detail info for a named range (Phase 5)
+#[derive(Clone, Debug)]
+struct NamedRangeDetail {
+    name: String,
+    reference: String,
+    description: Option<String>,
+    /// Value preview (first cell value, or summary for ranges)
+    value_preview: String,
+    /// Number of cells in the range
+    cell_count: usize,
+    /// Usage count (formulas referencing this name)
+    usage_count: usize,
+    /// Dependency depth (max depth of cells in range)
+    depth: Option<usize>,
+    /// Whether verified mode is on and this range is verified
+    is_verified: bool,
+    /// Has dynamic refs (INDIRECT/OFFSET) that make verification uncertain
+    has_dynamic_refs: bool,
+}
+
+/// Get detail info for a named range
+fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRangeDetail> {
+    use visigrid_engine::named_range::NamedRangeTarget;
+    use visigrid_engine::cell_id::CellId;
+
+    // Extract all data from named range first (immutable borrow)
+    let (reference, description, cells, cell_count) = {
+        let nr = app.workbook.get_named_range(name)?;
+        let reference = nr.reference_string();
+        let description = nr.description.clone();
+
+        let (cells, cell_count): (Vec<(usize, usize)>, usize) = match &nr.target {
+            NamedRangeTarget::Cell { row, col, .. } => {
+                (vec![(*row, *col)], 1)
+            }
+            NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => {
+                let mut cells = Vec::new();
+                for r in *start_row..=*end_row {
+                    for c in *start_col..=*end_col {
+                        cells.push((r, c));
+                    }
+                }
+                let count = cells.len();
+                (cells, count)
+            }
+        };
+
+        (reference, description, cells, cell_count)
+    };
+
+    // Now we can call mutable methods
+    let usage_count = app.get_named_range_usage_count(name);
+
+    // Value preview: first cell value (or summary for multi-cell ranges)
+    let value_preview = if cell_count == 1 {
+        let (row, col) = cells[0];
+        app.sheet().get_display(row, col)
+    } else {
+        let first_val = app.sheet().get_display(cells[0].0, cells[0].1);
+        if first_val.is_empty() {
+            format!("{} cells", cell_count)
+        } else {
+            format!("{} ... ({} cells)", first_val, cell_count)
+        }
+    };
+
+    // Get depth and verification from recalc report (if available)
+    let (depth, is_verified, has_dynamic_refs) = if app.verified_mode {
+        if let Some(report) = &app.last_recalc_report {
+            let sheet_id = app.sheet().id;
+            let mut max_depth = 0usize;
+            let mut all_verified = true;
+            let mut any_dynamic = false;
+
+            for (row, col) in &cells {
+                let cell_id = CellId::new(sheet_id, *row, *col);
+                if let Some(info) = report.get_cell_info(&cell_id) {
+                    max_depth = max_depth.max(info.depth);
+                    if info.has_unknown_deps {
+                        any_dynamic = true;
+                    }
+                } else {
+                    // Cell not in report means it wasn't recomputed (constant)
+                }
+            }
+
+            (Some(max_depth), all_verified && !any_dynamic, any_dynamic)
+        } else {
+            (None, false, false)
+        }
+    } else {
+        (None, false, false)
+    };
+
+    Some(NamedRangeDetail {
+        name: name.to_string(),
+        reference,
+        description,
+        value_preview,
+        cell_count,
+        usage_count,
+        depth,
+        is_verified: app.verified_mode && is_verified,
+        has_dynamic_refs,
+    })
+}
+
+/// Render detail panel for a selected named range
+fn render_named_range_detail(
+    detail: &NamedRangeDetail,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+) -> impl IntoElement {
+    div()
+        .pt_2()
+        .mt_2()
+        .border_t_1()
+        .border_color(panel_border)
+        .flex()
+        .flex_col()
+        .gap_2()
+        // Header: name with verified badge
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(text_primary)
+                        .child(SharedString::from(detail.name.clone()))
+                )
+                .when(detail.is_verified, |el| {
+                    el.child(
+                        div()
+                            .px_1()
+                            .py(px(1.0))
+                            .bg(accent.opacity(0.2))
+                            .rounded(px(4.0))
+                            .text_size(px(8.0))
+                            .text_color(accent)
+                            .child("Verified")
+                    )
+                })
+                .when(detail.has_dynamic_refs, |el| {
+                    el.child(
+                        div()
+                            .px_1()
+                            .py(px(1.0))
+                            .bg(hsla(0.08, 0.8, 0.5, 0.2))
+                            .rounded(px(4.0))
+                            .text_size(px(8.0))
+                            .text_color(hsla(0.08, 0.8, 0.5, 1.0))
+                            .child("Dynamic")
+                    )
+                })
+        )
+        // Value preview
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_size(px(9.0))
+                        .text_color(text_muted)
+                        .child("Value")
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(text_primary)
+                        .overflow_hidden()
+                        .child(SharedString::from(
+                            if detail.value_preview.is_empty() {
+                                "(empty)".to_string()
+                            } else {
+                                detail.value_preview.clone()
+                            }
+                        ))
+                )
+        )
+        // Metrics row: depth, usage
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(9.0))
+                                .text_color(text_muted)
+                                .child("Depth")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_primary)
+                                .child(SharedString::from(
+                                    detail.depth.map(|d| d.to_string()).unwrap_or_else(|| "—".to_string())
+                                ))
+                        )
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(9.0))
+                                .text_color(text_muted)
+                                .child("Used by")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_primary)
+                                .child(SharedString::from(format!("{} formulas", detail.usage_count)))
+                        )
+                )
+        )
+        // Description (if present)
+        .when(detail.description.is_some(), |el| {
+            el.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(px(9.0))
+                            .text_color(text_muted)
+                            .child("Description")
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(text_muted.opacity(0.8))
+                            .child(SharedString::from(detail.description.clone().unwrap_or_default()))
+                    )
+            )
+        })
 }
 
 fn render_selection_summary(

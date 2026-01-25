@@ -376,19 +376,8 @@ impl Spreadsheet {
             results.extend(recent_results);
         }
 
-        // Add cell search with @ prefix (uses generation-based cache for freshness)
-        if query.prefix == Some('@') {
-            // Ensure cache is fresh (rebuilds only if cells_rev changed)
-            self.ensure_cell_search_cache_fresh();
-
-            // Search over cached entries
-            let provider = CellSearchProvider::new(self.cell_search_cache.entries.clone());
-            let cell_results = provider.search(&query, 50);
-            results.extend(cell_results);
-        }
-
-        // Add named range search with $ prefix
-        if query.prefix == Some('$') {
+        // Add named ranges when no prefix (Quick Open behavior) or with $ prefix
+        if query.prefix.is_none() || query.prefix == Some('$') {
             let entries: Vec<NamedRangeEntry> = self.workbook.list_named_ranges()
                 .into_iter()
                 .map(|nr| {
@@ -406,9 +395,24 @@ impl Spreadsheet {
                 })
                 .collect();
 
-            let provider = NamedRangeSearchProvider::new(entries);
-            let named_results = provider.search(&query, 50);
-            results.extend(named_results);
+            if !entries.is_empty() {
+                let provider = NamedRangeSearchProvider::new(entries);
+                // Limit named ranges in default view to avoid overwhelming commands
+                let limit = if query.prefix == Some('$') { 50 } else { 5 };
+                let named_results = provider.search(&query, limit);
+                results.extend(named_results);
+            }
+        }
+
+        // Add cell search with @ prefix (uses generation-based cache for freshness)
+        if query.prefix == Some('@') {
+            // Ensure cache is fresh (rebuilds only if cells_rev changed)
+            self.ensure_cell_search_cache_fresh();
+
+            // Search over cached entries
+            let provider = CellSearchProvider::new(self.cell_search_cache.entries.clone());
+            let cell_results = provider.search(&query, 50);
+            results.extend(cell_results);
         }
 
         // Filter by palette scope if set (Alt accelerator menu filtering)

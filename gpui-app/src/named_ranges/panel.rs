@@ -207,4 +207,80 @@ impl Spreadsheet {
         ranges.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         ranges
     }
+
+    /// Trace a named range's dependencies (highlight cells and their precedents in grid)
+    pub fn trace_named_range(&mut self, name: &str, cx: &mut Context<Self>) {
+        use visigrid_engine::named_range::NamedRangeTarget;
+        use visigrid_engine::cell_id::CellId;
+
+        let range_info = self.workbook.get_named_range(name).map(|nr| {
+            let sheet_index = match &nr.target {
+                NamedRangeTarget::Cell { sheet, .. } => *sheet,
+                NamedRangeTarget::Range { sheet, .. } => *sheet,
+            };
+            let cells: Vec<(usize, usize)> = match &nr.target {
+                NamedRangeTarget::Cell { row, col, .. } => vec![(*row, *col)],
+                NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => {
+                    let mut cells = Vec::new();
+                    for r in *start_row..=*end_row {
+                        for c in *start_col..=*end_col {
+                            cells.push((r, c));
+                        }
+                    }
+                    cells
+                }
+            };
+            (sheet_index, cells)
+        });
+
+        if let Some((sheet_index, cells)) = range_info {
+            // Get the sheet ID for CellId construction
+            let sheet_id = self.workbook.sheets().get(sheet_index)
+                .map(|s| s.id)
+                .unwrap_or_else(|| self.sheet().id);
+
+            // Build trace path: cells in the range + their precedents
+            let mut trace_cells: Vec<CellId> = cells.iter()
+                .map(|(r, c)| CellId::new(sheet_id, *r, *c))
+                .collect();
+
+            // Add precedents of each cell (limited to avoid huge traces)
+            let max_precedents = 50;
+            let mut precedent_count = 0;
+
+            for (row, col) in &cells {
+                if precedent_count >= max_precedents {
+                    break;
+                }
+
+                let raw = self.sheet().get_raw(*row, *col);
+                if raw.starts_with('=') {
+                    // Get precedents from dependency graph
+                    let precedents = self.workbook.get_precedents(sheet_id, *row, *col);
+                    for prec in precedents {
+                        if !trace_cells.contains(&prec) {
+                            trace_cells.push(prec);
+                            precedent_count += 1;
+                            if precedent_count >= max_precedents {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.inspector_trace_path = Some(trace_cells);
+            self.inspector_trace_incomplete = precedent_count >= max_precedents;
+            cx.notify();
+        }
+    }
+
+    /// Clear trace when named range is deselected
+    pub fn clear_named_range_trace(&mut self, cx: &mut Context<Self>) {
+        if self.selected_named_range.is_some() {
+            self.inspector_trace_path = None;
+            self.inspector_trace_incomplete = false;
+        }
+        cx.notify();
+    }
 }
