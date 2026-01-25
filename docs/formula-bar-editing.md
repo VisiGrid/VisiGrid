@@ -4,6 +4,12 @@ Make the formula bar a real editor surface with mouse interaction and proper pop
 
 ## Recent Changes
 
+**Phase 3 Complete** (popup anchoring + hover fix):
+- Updated `render_popup_overlay()` in `grid.rs` to use `active_editor`
+- When `FormulaBar`: popup anchors to top of grid (below formula bar)
+- When `Cell`: popup anchors to active cell (existing behavior)
+- Removed intrusive hover documentation popup from formula bar (was blocking interaction)
+
 **Phase 2 Complete** (drag selection + auto-scroll):
 - Added `formula_bar_drag_anchor: Option<usize>` for tracking drag state
 - Mouse handlers: `on_mouse_down`, `on_mouse_move`, `on_mouse_up`
@@ -22,7 +28,8 @@ Make the formula bar a real editor surface with mouse interaction and proper pop
 - Caret positioning works (fixed in recent commit)
 - **Phase 1 DONE**: Click-to-place caret with scroll support
 - **Phase 2 DONE**: Drag-to-select with auto-scroll near edges
-- **TODO**: Proper popup anchoring (Phase 3)
+- **Phase 3 DONE**: Popup anchors to formula bar when editing there
+- **Phase 4 DONE**: Enhanced selection (double-click, shift-click, word navigation)
 
 ---
 
@@ -32,8 +39,8 @@ Make the formula bar a real editor surface with mouse interaction and proper pop
 |-------|--------|-------------|
 | Phase 1 | ✅ Done | Click caret placement + scroll |
 | Phase 2 | ✅ Done | Drag selection + auto-scroll |
-| Phase 3 | ⏳ Next | Fix popup blocking |
-| Phase 4 | 📋 Planned | Enhanced selection (double-click, shift-click) |
+| Phase 3 | ✅ Done | Fix popup blocking |
+| Phase 4 | ✅ Done | Enhanced selection (double-click, shift-click, word nav) |
 
 ---
 
@@ -314,20 +321,41 @@ Using 4px per mousemove with 10px edge margin. Clamped to valid scroll range.
 
 3. ✅ Selection rendered as background rect overlay (before text, after scroll offset)
 
-### Phase 3: Fix Popup Blocking
+### Phase 3: Fix Popup Blocking ✅ DONE
 
-1. Use `active_editor` to determine anchor
-2. Hard constraint: popup below forbidden_rect.bottom() when overlap detected
-3. Reset `active_editor` to `Cell` on Esc/Enter/click-outside
+1. ✅ Use `active_editor` to determine popup anchor:
+   - `FormulaBar`: anchor to top of grid (y=gap, x aligned with formula bar text)
+   - `Cell`: anchor to active cell (existing behavior)
 
-### Phase 4: Enhanced Selection (Nice to Have)
+2. ✅ Updated `render_popup_overlay()` in `grid.rs`:
+   ```rust
+   match app.active_editor {
+       EditorSurface::FormulaBar => {
+           // x: align with formula bar text area (converted to grid coords)
+           // y: top of grid with small gap
+       }
+       EditorSurface::Cell => {
+           // existing logic: below cell, flip above if no room
+       }
+   }
+   ```
 
-- Double-click: select word
-- Triple-click: select all
-- Shift+Click: extend selection
-- Ctrl/Cmd+A: select all (in formula bar context)
-- Alt+Arrow: word jump
-- ~~Auto-scroll while dragging~~ (done in Phase 2)
+3. ✅ `active_editor` already resets to `Cell` on Esc/Enter (in cancel_edit, confirm_edit)
+
+4. ✅ Removed intrusive hover documentation popup:
+   - Was triggered by hovering over formula bar (before clicking to edit)
+   - Blocked interaction and was visually distracting
+   - Function docs still available via autocomplete/signature help while editing
+
+### Phase 4: Enhanced Selection ✅ DONE
+
+1. ✅ Double-click: select word
+2. ✅ Triple-click: select all
+3. ✅ Shift+Click: extend selection
+4. ✅ Alt+Arrow: word jump (EditWordLeft, EditWordRight)
+5. ✅ Alt+Shift+Arrow: extend selection by word (EditSelectWordLeft, EditSelectWordRight)
+6. ~~Auto-scroll while dragging~~ (done in Phase 2)
+7. Ctrl/Cmd+A: select all (already works via existing SelectAll action)
 
 ---
 
@@ -335,9 +363,11 @@ Using 4px per mousemove with 10px edge margin. Clamped to valid scroll range.
 
 | File | Changes | Status |
 |------|---------|--------|
-| `app.rs` | `EditorSurface`, centralized layout constants, scroll/cache state, `formula_bar_text_rect`, `formula_bar_drag_anchor`, `byte_index_for_x()`, `rebuild_formula_bar_cache()` | ✅ Done |
-| `views/formula_bar.rs` | Mouse handlers (down/move/up), selection rendering, auto-scroll, scroll offset rendering | ✅ Done |
-| `views/mod.rs` | Popup placement based on `active_editor` | ⏳ Phase 3 |
+| `app.rs` | `EditorSurface`, centralized layout constants, scroll/cache state, `formula_bar_text_rect`, `formula_bar_drag_anchor`, `byte_index_for_x()`, `rebuild_formula_bar_cache()`, word boundary helpers (`word_bounds_at`, `prev_word_start`, `next_word_end`) | ✅ Done |
+| `views/formula_bar.rs` | Mouse handlers (down/move/up), selection rendering, auto-scroll, removed hover docs trigger, double/triple-click + shift-click | ✅ Done |
+| `views/grid.rs` | `render_popup_overlay()` uses `active_editor` for anchor positioning | ✅ Done |
+| `views/mod.rs` | Action handlers for `EditWordLeft`, `EditWordRight`, `EditSelectWordLeft`, `EditSelectWordRight` | ✅ Done |
+| `keybindings.rs` | Alt+Arrow word navigation keybindings | ✅ Done |
 
 ---
 
@@ -357,12 +387,13 @@ Using 4px per mousemove with 10px edge margin. Clamped to valid scroll range.
 - [ ] Backspace/Delete removes selection (uses existing logic)
 - [ ] Copy/Cut/Paste work with selection (uses existing logic)
 
-### Phase 3
-- [ ] Popup appears below formula bar when `active_editor == FormulaBar`
-- [ ] Popup visible + click formula bar → formula bar receives click
-- [ ] Popup never overlaps formula bar input area
-- [ ] Esc resets `active_editor` to `Cell`
-- [ ] Enter resets `active_editor` to `Cell`
+### Phase 3 ✅
+- [x] Popup appears below formula bar when `active_editor == FormulaBar`
+- [x] Popup never overlaps formula bar input area (it's in grid container)
+- [x] Esc resets `active_editor` to `Cell`
+- [x] Enter resets `active_editor` to `Cell`
+- [x] Hover over formula bar no longer triggers intrusive docs popup
+- [x] Formula bar receives clicks without popup interference
 
 ### Regression
 - [ ] Cell editor still works correctly

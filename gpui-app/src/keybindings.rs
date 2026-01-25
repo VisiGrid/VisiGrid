@@ -79,6 +79,11 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Edit mode cursor (Home/End only - left/right handled in MoveLeft/MoveRight)
         KeyBinding::new("home", EditCursorHome, Some("Spreadsheet")),
         KeyBinding::new("end", EditCursorEnd, Some("Spreadsheet")),
+        // Edit mode word navigation (Alt+Arrow on macOS, Ctrl+Arrow elsewhere)
+        KeyBinding::new("alt-left", EditWordLeft, Some("Spreadsheet")),
+        KeyBinding::new("alt-right", EditWordRight, Some("Spreadsheet")),
+        KeyBinding::new("alt-shift-left", EditSelectWordLeft, Some("Spreadsheet")),
+        KeyBinding::new("alt-shift-right", EditSelectWordRight, Some("Spreadsheet")),
         // F4 reference cycling (Excel behavior)
         KeyBinding::new("f4", CycleReference, Some("Spreadsheet")),
         // Alt+= AutoSum (Excel behavior)

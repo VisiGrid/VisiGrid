@@ -106,10 +106,41 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                     let x = x.clamp(0.0, this.formula_bar_text_width);
                     let byte_index = this.byte_index_for_x(x);
 
-                    // Set cursor and start drag selection
-                    this.edit_cursor = byte_index;
-                    this.edit_selection_anchor = Some(byte_index);  // Anchor for selection
-                    this.formula_bar_drag_anchor = Some(byte_index);  // Track drag state
+                    // Handle click count for word/line selection
+                    match event.click_count {
+                        2 => {
+                            // Double-click: select word
+                            let (word_start, word_end) = this.word_bounds_at(byte_index);
+                            this.edit_selection_anchor = Some(word_start);
+                            this.edit_cursor = word_end;
+                            this.formula_bar_drag_anchor = None;  // No drag on double-click
+                        }
+                        3 => {
+                            // Triple-click: select all
+                            this.edit_selection_anchor = Some(0);
+                            this.edit_cursor = this.edit_value.len();
+                            this.formula_bar_drag_anchor = None;  // No drag on triple-click
+                        }
+                        _ => {
+                            // Single click (or more than triple)
+                            if event.modifiers.shift && this.edit_selection_anchor.is_some() {
+                                // Shift+click: extend selection from anchor to click
+                                this.edit_cursor = byte_index;
+                                // Keep existing anchor, don't start drag
+                                this.formula_bar_drag_anchor = None;
+                            } else if event.modifiers.shift {
+                                // Shift+click with no anchor: select from cursor to click
+                                this.edit_selection_anchor = Some(this.edit_cursor);
+                                this.edit_cursor = byte_index;
+                                this.formula_bar_drag_anchor = None;
+                            } else {
+                                // Normal click: place cursor and start drag
+                                this.edit_cursor = byte_index;
+                                this.edit_selection_anchor = Some(byte_index);
+                                this.formula_bar_drag_anchor = Some(byte_index);
+                            }
+                        }
+                    }
 
                     // Mark as editing in formula bar
                     this.active_editor = EditorSurface::FormulaBar;
@@ -177,20 +208,9 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
 
                     cx.notify();
                 }))
-                .on_hover(cx.listener(move |this, hovering, _, cx| {
-                    if *hovering {
-                        // Extract first function from formula for hover docs
-                        let raw_value = if this.mode.is_editing() {
-                            &this.edit_value
-                        } else {
-                            &this.sheet().get_raw(this.view_state.selected.0, this.view_state.selected.1)
-                        };
-                        this.hover_function = extract_first_function(raw_value);
-                    } else {
-                        this.hover_function = None;
-                    }
-                    cx.notify();
-                }))
+                // Note: Removed on_hover handler for hover_function docs.
+                // The popup was intrusive and blocked interaction with the formula bar.
+                // Function docs are available via autocomplete and signature help while editing.
                 .child(formula_content)
         )
         // Note: Autocomplete, signature help, and error popups are rendered at the top level

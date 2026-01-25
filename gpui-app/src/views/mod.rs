@@ -637,6 +637,47 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 cx.notify();
             }
         }))
+        // Edit mode word navigation (Alt+Arrow)
+        .on_action(cx.listener(|this, _: &EditWordLeft, window, cx| {
+            if this.mode.is_editing() {
+                this.edit_selection_anchor = None;
+                this.edit_cursor = this.prev_word_start(this.edit_cursor);
+                this.update_edit_scroll(window);
+                this.ensure_formula_bar_caret_visible(window);
+                cx.notify();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &EditWordRight, window, cx| {
+            if this.mode.is_editing() {
+                this.edit_selection_anchor = None;
+                this.edit_cursor = this.next_word_end(this.edit_cursor);
+                this.update_edit_scroll(window);
+                this.ensure_formula_bar_caret_visible(window);
+                cx.notify();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &EditSelectWordLeft, window, cx| {
+            if this.mode.is_editing() {
+                if this.edit_selection_anchor.is_none() {
+                    this.edit_selection_anchor = Some(this.edit_cursor);
+                }
+                this.edit_cursor = this.prev_word_start(this.edit_cursor);
+                this.update_edit_scroll(window);
+                this.ensure_formula_bar_caret_visible(window);
+                cx.notify();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &EditSelectWordRight, window, cx| {
+            if this.mode.is_editing() {
+                if this.edit_selection_anchor.is_none() {
+                    this.edit_selection_anchor = Some(this.edit_cursor);
+                }
+                this.edit_cursor = this.next_word_end(this.edit_cursor);
+                this.update_edit_scroll(window);
+                this.ensure_formula_bar_caret_visible(window);
+                cx.notify();
+            }
+        }))
         // F4 reference cycling
         .on_action(cx.listener(|this, _: &CycleReference, _, cx| {
             this.cycle_reference(cx);

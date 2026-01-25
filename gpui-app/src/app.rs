@@ -16,7 +16,7 @@ use crate::settings::{
     user_settings_path, open_settings_file, user_settings, update_user_settings,
     observe_settings, Setting, TipId,
 };
-use crate::theme::{Theme, TokenKey, visigrid_theme, builtin_themes, get_theme};
+use crate::theme::{Theme, TokenKey, default_theme, builtin_themes, get_theme};
 use crate::user_keybindings;
 use crate::views;
 use crate::links;
@@ -857,7 +857,7 @@ impl Spreadsheet {
         let theme = user_settings(cx).appearance.theme_id
             .as_value()
             .and_then(|id| get_theme(id))
-            .unwrap_or_else(visigrid_theme);
+            .unwrap_or_else(default_theme);
 
         // Subscribe to global settings changes - trigger re-render when settings change
         let settings_subscription = observe_settings(cx, |cx| {
@@ -4575,6 +4575,94 @@ impl Spreadsheet {
         } else {
             right
         }
+    }
+
+    /// Find word boundaries around a byte position in edit_value.
+    /// Returns (word_start, word_end) as byte indices.
+    pub fn word_bounds_at(&self, byte_pos: usize) -> (usize, usize) {
+        let text = &self.edit_value;
+        if text.is_empty() {
+            return (0, 0);
+        }
+
+        let byte_pos = byte_pos.min(text.len());
+
+        // Find start of word (scan backwards)
+        let mut start = byte_pos;
+        for (i, c) in text[..byte_pos].char_indices().rev() {
+            if !c.is_alphanumeric() && c != '_' {
+                start = i + c.len_utf8();
+                break;
+            }
+            start = i;
+        }
+
+        // Find end of word (scan forwards)
+        let mut end = byte_pos;
+        for (i, c) in text[byte_pos..].char_indices() {
+            if !c.is_alphanumeric() && c != '_' {
+                end = byte_pos + i;
+                break;
+            }
+            end = byte_pos + i + c.len_utf8();
+        }
+
+        (start, end)
+    }
+
+    /// Find the start of the previous word from byte position.
+    pub fn prev_word_start(&self, byte_pos: usize) -> usize {
+        let text = &self.edit_value;
+        if text.is_empty() || byte_pos == 0 {
+            return 0;
+        }
+
+        let byte_pos = byte_pos.min(text.len());
+
+        // Skip whitespace/punctuation backwards
+        let mut pos = byte_pos;
+        for (i, c) in text[..byte_pos].char_indices().rev() {
+            if c.is_alphanumeric() || c == '_' {
+                pos = i + c.len_utf8();
+                break;
+            }
+            pos = i;
+        }
+
+        // Now find start of word
+        for (i, c) in text[..pos].char_indices().rev() {
+            if !c.is_alphanumeric() && c != '_' {
+                return i + c.len_utf8();
+            }
+        }
+        0
+    }
+
+    /// Find the end of the next word from byte position.
+    pub fn next_word_end(&self, byte_pos: usize) -> usize {
+        let text = &self.edit_value;
+        let len = text.len();
+        if text.is_empty() || byte_pos >= len {
+            return len;
+        }
+
+        // Skip whitespace/punctuation forwards
+        let mut pos = byte_pos;
+        for (i, c) in text[byte_pos..].char_indices() {
+            if c.is_alphanumeric() || c == '_' {
+                pos = byte_pos + i;
+                break;
+            }
+            pos = byte_pos + i + c.len_utf8();
+        }
+
+        // Now find end of word
+        for (i, c) in text[pos..].char_indices() {
+            if !c.is_alphanumeric() && c != '_' {
+                return pos + i;
+            }
+        }
+        len
     }
 
     /// Ensure formula bar caret is visible by adjusting formula_bar_scroll_x.

@@ -899,10 +899,10 @@ fn cell_text_color(app: &Spreadsheet, is_editing: bool, is_selected: bool, is_mu
 
 /// Render the popup overlay layer for autocomplete, signature help, and error banners.
 /// Popups are positioned relative to the active cell rect in grid coordinates (post-scroll).
-/// cell_rect() returns viewport-relative coordinates (starts from scroll_row/scroll_col).
-/// This is the correct approach - no menu/formula bar offset math needed.
+/// When editing in formula bar, popup anchors to top of grid (just below formula bar).
 fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    let cell_rect = app.active_cell_rect();
+    use crate::app::EditorSurface;
+
     let (viewport_w, viewport_h) = app.viewport_rect();
     let popup_gap = 4.0;
 
@@ -910,26 +910,47 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
     let popup_max_width = 320.0;
     let popup_max_height = 280.0; // Cap height for flip calculation
 
-    // X position: align with cell left, clamped to viewport bounds
-    let popup_x = cell_rect.x
-        .max(0.0)
-        .min((viewport_w - popup_max_width).max(0.0));
+    // Determine anchor based on active editor surface
+    let (popup_x, popup_y) = match app.active_editor {
+        EditorSurface::FormulaBar => {
+            // Editing in formula bar: anchor to top of grid (just below formula bar)
+            // X: align roughly with formula bar text area (converted to grid coords)
+            // Formula bar text starts at FORMULA_BAR_TEXT_LEFT (98px), grid starts at HEADER_WIDTH (50px)
+            let x = (crate::app::FORMULA_BAR_TEXT_LEFT - crate::app::HEADER_WIDTH)
+                .max(0.0)
+                .min((viewport_w - popup_max_width).max(0.0));
+            // Y: top of grid with small gap
+            let y = popup_gap;
+            (x, y)
+        }
+        EditorSurface::Cell => {
+            // Editing in cell: anchor to active cell (existing behavior)
+            let cell_rect = app.active_cell_rect();
 
-    // Y position: prefer below cell, flip above if no room
-    let y_below = cell_rect.bottom() + popup_gap;
-    let y_above = cell_rect.y - popup_gap - popup_max_height;
-    let popup_y_raw = if y_below + popup_max_height <= viewport_h {
-        y_below
-    } else if y_above >= 0.0 {
-        y_above
-    } else {
-        y_below // No room either way, just show below
+            // X position: align with cell left, clamped to viewport bounds
+            let x = cell_rect.x
+                .max(0.0)
+                .min((viewport_w - popup_max_width).max(0.0));
+
+            // Y position: prefer below cell, flip above if no room
+            let y_below = cell_rect.bottom() + popup_gap;
+            let y_above = cell_rect.y - popup_gap - popup_max_height;
+            let y_raw = if y_below + popup_max_height <= viewport_h {
+                y_below
+            } else if y_above >= 0.0 {
+                y_above
+            } else {
+                y_below // No room either way, just show below
+            };
+
+            // Final clamp to prevent offscreen rendering
+            let y = y_raw
+                .max(0.0)
+                .min((viewport_h - popup_max_height).max(0.0));
+
+            (x, y)
+        }
     };
-
-    // Final clamp to prevent offscreen rendering
-    let popup_y = popup_y_raw
-        .max(0.0)
-        .min((viewport_h - popup_max_height).max(0.0));
 
     // Get theme colors
     let panel_bg = app.token(TokenKey::PanelBg);

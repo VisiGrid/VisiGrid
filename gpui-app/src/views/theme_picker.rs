@@ -193,7 +193,7 @@ fn render_theme_item(
     accent: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    let theme_id = theme.meta.id;
+    let _theme_id = theme.meta.id;
     let theme_name = theme.meta.name;
     let theme_appearance = format!("{:?}", theme.meta.appearance);
 
