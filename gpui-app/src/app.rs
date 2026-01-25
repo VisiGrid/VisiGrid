@@ -476,6 +476,32 @@ pub struct GridLayout {
     pub viewport_size: (f32, f32),
 }
 
+/// A cell's bounding rectangle in grid-relative coordinates.
+/// Used for positioning popups and overlays relative to cells.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CellRect {
+    /// Left edge X position (relative to grid origin)
+    pub x: f32,
+    /// Top edge Y position (relative to grid origin)
+    pub y: f32,
+    /// Cell width
+    pub width: f32,
+    /// Cell height
+    pub height: f32,
+}
+
+impl CellRect {
+    /// Bottom edge Y position
+    pub fn bottom(&self) -> f32 {
+        self.y + self.height
+    }
+
+    /// Right edge X position
+    pub fn right(&self) -> f32 {
+        self.x + self.width
+    }
+}
+
 /// The kind of cell content for a find match
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatchKind {
@@ -525,9 +551,11 @@ pub struct Spreadsheet {
     // Mode & editing
     pub mode: Mode,
     pub edit_value: String,
-    pub edit_cursor: usize,  // Cursor position within edit_value
+    pub edit_cursor: usize,  // Cursor position within edit_value (byte offset, 0..=len)
     pub edit_selection_anchor: Option<usize>,  // Selection start (None = no selection)
     pub edit_original: String,
+    pub edit_scroll_x: f32,  // Horizontal scroll offset for in-cell editor (<=0, updated by ensure_caret_visible)
+    edit_scroll_dirty: bool, // True when caret/text changed; triggers ensure_caret_visible once
 
     // Caret blink state
     pub caret_visible: bool,
@@ -826,6 +854,8 @@ impl Spreadsheet {
             edit_cursor: 0,
             edit_selection_anchor: None,
             edit_original: String::new(),
+            edit_scroll_x: 0.0,
+            edit_scroll_dirty: false,
             caret_visible: true,
             caret_last_activity: std::time::Instant::now(),
             caret_blink_task: None,
@@ -1610,17 +1640,18 @@ impl Spreadsheet {
             SearchAction::InsertFormula { name, signature } => {
                 // Context-aware insertion
                 if self.mode.is_formula() || (self.mode.is_editing() && self.edit_value.starts_with('=')) {
-                    // Already editing a formula: insert function name at cursor
+                    // Already editing a formula: insert function name at cursor (byte-indexed)
                     let func_text = format!("{}(", name);
-                    let before: String = self.edit_value.chars().take(self.edit_cursor).collect();
-                    let after: String = self.edit_value.chars().skip(self.edit_cursor).collect();
+                    let cursor_byte = self.edit_cursor.min(self.edit_value.len());
+                    let before = &self.edit_value[..cursor_byte];
+                    let after = &self.edit_value[cursor_byte..];
                     self.edit_value = format!("{}{}{}", before, func_text, after);
-                    self.edit_cursor += func_text.chars().count();
+                    self.edit_cursor += func_text.len();  // Byte length
                 } else {
                     // Grid navigation: start formula edit with =FUNC(
                     self.edit_original = self.sheet().get_raw(self.view_state.selected.0, self.view_state.selected.1);
                     self.edit_value = format!("={}(", name);
-                    self.edit_cursor = self.edit_value.chars().count();
+                    self.edit_cursor = self.edit_value.len();  // Byte offset at end
                     self.mode = Mode::Formula;
                 }
                 // Show signature in status for reference
@@ -2156,6 +2187,30 @@ impl Spreadsheet {
             y += self.metrics.row_height(self.row_height(row));
         }
         y
+    }
+
+    /// Get the bounding rect of a cell in grid-relative coordinates.
+    /// This is the single source of truth for cell position within the grid viewport.
+    /// Used for positioning popups, overlays, and other elements relative to cells.
+    pub fn cell_rect(&self, row: usize, col: usize) -> CellRect {
+        CellRect {
+            x: self.col_x_offset(col),
+            y: self.row_y_offset(row),
+            width: self.metrics.col_width(self.col_width(col)),
+            height: self.metrics.row_height(self.row_height(row)),
+        }
+    }
+
+    /// Get the bounding rect of the currently selected (active) cell in grid-relative coordinates.
+    pub fn active_cell_rect(&self) -> CellRect {
+        let (row, col) = self.view_state.selected;
+        self.cell_rect(row, col)
+    }
+
+    /// Get the viewport rect for the grid body (for clamp/flip calculations).
+    /// Returns (width, height) of the visible grid area.
+    pub fn viewport_rect(&self) -> (f32, f32) {
+        self.grid_layout.viewport_size
     }
 
     /// Convert window X position to column index.
@@ -2962,7 +3017,17 @@ impl Spreadsheet {
 
         self.edit_original = self.sheet().get_raw(row, col);
         self.edit_value = self.edit_original.clone();
-        self.edit_cursor = self.edit_value.len();  // Cursor at end
+        self.edit_cursor = self.edit_value.len();  // Cursor at end (byte offset)
+        self.edit_scroll_x = 0.0;
+        self.edit_scroll_dirty = true;  // Trigger scroll update to show caret
+        self.edit_selection_anchor = None;
+
+        // Debug assert: cursor must be valid
+        debug_assert!(
+            self.edit_cursor <= self.edit_value.len(),
+            "edit_cursor {} exceeds edit_value.len() {}",
+            self.edit_cursor, self.edit_value.len()
+        );
 
         // Parse and highlight formula references if editing a formula
         if self.edit_value.starts_with('=') || self.edit_value.starts_with('+') {
@@ -2992,6 +3057,9 @@ impl Spreadsheet {
         self.edit_original = self.sheet().get_raw(row, col);
         self.edit_value = String::new();
         self.edit_cursor = 0;
+        self.edit_scroll_x = 0.0;
+        self.edit_scroll_dirty = true;  // Trigger scroll update
+        self.edit_selection_anchor = None;
         self.formula_highlighted_refs.clear();  // No formula to highlight
         self.mode = Mode::Edit;
         self.start_caret_blink(cx);
@@ -3575,18 +3643,12 @@ impl Spreadsheet {
 
     /// Delete selected text and return true if there was a selection
     fn delete_edit_selection(&mut self) -> bool {
-        if let Some((start, end)) = self.edit_selection_range() {
-            // Convert char positions to byte positions
-            let start_byte = self.edit_value.char_indices()
-                .nth(start)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let end_byte = self.edit_value.char_indices()
-                .nth(end)
-                .map(|(i, _)| i)
-                .unwrap_or(self.edit_value.len());
+        if let Some((start_byte, end_byte)) = self.edit_selection_range() {
+            // start_byte and end_byte are already byte offsets
+            let start_byte = start_byte.min(self.edit_value.len());
+            let end_byte = end_byte.min(self.edit_value.len());
             self.edit_value.replace_range(start_byte..end_byte, "");
-            self.edit_cursor = start;
+            self.edit_cursor = start_byte;
             self.edit_selection_anchor = None;
             true
         } else {
@@ -3610,26 +3672,22 @@ impl Spreadsheet {
                 if self.is_formula_content() {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
+                self.edit_scroll_dirty = true;
                 self.update_autocomplete(cx);
                 cx.notify();
                 return;
             }
-            // Otherwise delete char before cursor
+            // Otherwise delete char before cursor (byte-indexed)
             if self.edit_cursor > 0 {
-                let byte_idx = self.edit_value.char_indices()
-                    .nth(self.edit_cursor - 1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                let next_byte_idx = self.edit_value.char_indices()
-                    .nth(self.edit_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.edit_value.len());
-                self.edit_value.replace_range(byte_idx..next_byte_idx, "");
-                self.edit_cursor -= 1;
+                let prev_byte = self.prev_char_boundary(self.edit_cursor);
+                let curr_byte = self.edit_cursor.min(self.edit_value.len());
+                self.edit_value.replace_range(prev_byte..curr_byte, "");
+                self.edit_cursor = prev_byte;
                 // Update highlighted refs for formulas
                 if self.is_formula_content() {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
+                self.edit_scroll_dirty = true;
                 self.update_autocomplete(cx);
                 cx.notify();
             }
@@ -3652,26 +3710,23 @@ impl Spreadsheet {
                 if self.is_formula_content() {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
+                self.edit_scroll_dirty = true;
                 self.update_autocomplete(cx);
                 cx.notify();
                 return;
             }
-            // Otherwise delete char at cursor
-            let char_count = self.edit_value.chars().count();
-            if self.edit_cursor < char_count {
-                let byte_idx = self.edit_value.char_indices()
-                    .nth(self.edit_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.edit_value.len());
-                let next_byte_idx = self.edit_value.char_indices()
-                    .nth(self.edit_cursor + 1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.edit_value.len());
-                self.edit_value.replace_range(byte_idx..next_byte_idx, "");
+            // Otherwise delete char at cursor (byte-indexed)
+            let len = self.edit_value.len();
+            if self.edit_cursor < len {
+                let curr_byte = self.edit_cursor;
+                let next_byte = self.next_char_boundary(curr_byte);
+                self.edit_value.replace_range(curr_byte..next_byte, "");
+                // Cursor stays at same byte position (deleted forward)
                 // Update highlighted refs for formulas
                 if self.is_formula_content() {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
+                self.edit_scroll_dirty = true;
                 self.update_autocomplete(cx);
                 cx.notify();
             }
@@ -3694,13 +3749,10 @@ impl Spreadsheet {
             // Delete selection if any (replaces selected text)
             self.delete_edit_selection();
 
-            // Find byte index for cursor position
-            let byte_idx = self.edit_value.char_indices()
-                .nth(self.edit_cursor)
-                .map(|(i, _)| i)
-                .unwrap_or(self.edit_value.len());
+            // Insert at cursor byte position
+            let byte_idx = self.edit_cursor.min(self.edit_value.len());
             self.edit_value.insert(byte_idx, c);
-            self.edit_cursor += 1;
+            self.edit_cursor = byte_idx + c.len_utf8();  // Advance by byte length of char
 
             // Update highlighted refs for formulas
             if self.is_formula_content() {
@@ -3712,6 +3764,9 @@ impl Spreadsheet {
 
             // Reset caret blink (keep visible while typing)
             self.reset_caret_activity();
+
+            // Mark scroll dirty
+            self.edit_scroll_dirty = true;
 
             // Update autocomplete for formulas
             self.update_autocomplete(cx);
@@ -3729,7 +3784,7 @@ impl Spreadsheet {
 
             self.edit_original = self.sheet().get_raw(row, col);
             self.edit_value = c.to_string();
-            self.edit_cursor = 1;
+            self.edit_cursor = c.len_utf8();  // Byte offset after first char
 
             // Enter Formula mode if starting with = or +
             if c == '=' || c == '+' {
@@ -3739,6 +3794,9 @@ impl Spreadsheet {
             } else {
                 self.mode = Mode::Edit;
             }
+
+            // Mark scroll dirty
+            self.edit_scroll_dirty = true;
 
             // Start caret blinking
             self.start_caret_blink(cx);
@@ -3979,33 +4037,21 @@ impl Spreadsheet {
         };
 
         if is_new {
-            // Insert new reference at cursor
-            let byte_idx = self.edit_value.char_indices()
-                .nth(self.edit_cursor)
-                .map(|(i, _)| i)
-                .unwrap_or(self.edit_value.len());
-
+            // Insert new reference at cursor (byte-indexed)
+            let byte_idx = self.edit_cursor.min(self.edit_value.len());
             self.formula_ref_start_cursor = self.edit_cursor;
             self.edit_value.insert_str(byte_idx, &ref_text);
-            self.edit_cursor += ref_text.chars().count();
+            self.edit_cursor += ref_text.len();  // Byte length
         } else {
             // Replace existing reference (from formula_ref_start_cursor to edit_cursor)
-            let start_cursor = self.formula_ref_start_cursor;
-            let end_cursor = self.edit_cursor;
-
-            // Convert cursor positions to byte positions
-            let start_byte = self.edit_value.char_indices()
-                .nth(start_cursor)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let end_byte = self.edit_value.char_indices()
-                .nth(end_cursor)
-                .map(|(i, _)| i)
-                .unwrap_or(self.edit_value.len());
+            // Both are already byte offsets
+            let start_byte = self.formula_ref_start_cursor.min(self.edit_value.len());
+            let end_byte = self.edit_cursor.min(self.edit_value.len());
 
             self.edit_value.replace_range(start_byte..end_byte, &ref_text);
-            self.edit_cursor = start_cursor + ref_text.chars().count();
+            self.edit_cursor = start_byte + ref_text.len();  // Byte length
         }
+        self.edit_scroll_dirty = true;
     }
 
     /// Ensure a cell is visible (scroll if necessary)
@@ -4027,11 +4073,12 @@ impl Spreadsheet {
         }
     }
 
-    // Cursor movement in edit mode
+    // Cursor movement in edit mode (byte-indexed)
     pub fn move_edit_cursor_left(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() && self.edit_cursor > 0 {
-            self.edit_cursor -= 1;
+            self.edit_cursor = self.prev_char_boundary(self.edit_cursor);
             self.edit_selection_anchor = None;  // Clear selection
+            self.edit_scroll_dirty = true;
             self.reset_caret_activity();
             cx.notify();
         }
@@ -4039,10 +4086,11 @@ impl Spreadsheet {
 
     pub fn move_edit_cursor_right(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() {
-            let char_count = self.edit_value.chars().count();
-            if self.edit_cursor < char_count {
-                self.edit_cursor += 1;
+            let len = self.edit_value.len();
+            if self.edit_cursor < len {
+                self.edit_cursor = self.next_char_boundary(self.edit_cursor);
                 self.edit_selection_anchor = None;  // Clear selection
+                self.edit_scroll_dirty = true;
                 self.reset_caret_activity();
                 cx.notify();
             }
@@ -4053,6 +4101,7 @@ impl Spreadsheet {
         if self.mode.is_editing() && self.edit_cursor > 0 {
             self.edit_cursor = 0;
             self.edit_selection_anchor = None;  // Clear selection
+            self.edit_scroll_dirty = true;
             self.reset_caret_activity();
             cx.notify();
         }
@@ -4060,35 +4109,38 @@ impl Spreadsheet {
 
     pub fn move_edit_cursor_end(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() {
-            let char_count = self.edit_value.chars().count();
-            if self.edit_cursor < char_count {
-                self.edit_cursor = char_count;
+            let len = self.edit_value.len();
+            if self.edit_cursor < len {
+                self.edit_cursor = len;  // Byte offset at end
                 self.edit_selection_anchor = None;  // Clear selection
+                self.edit_scroll_dirty = true;
                 self.reset_caret_activity();
                 cx.notify();
             }
         }
     }
 
-    // Selection variants (Shift+Arrow)
+    // Selection variants (Shift+Arrow) - byte-indexed
     pub fn select_edit_cursor_left(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() && self.edit_cursor > 0 {
             if self.edit_selection_anchor.is_none() {
                 self.edit_selection_anchor = Some(self.edit_cursor);
             }
-            self.edit_cursor -= 1;
+            self.edit_cursor = self.prev_char_boundary(self.edit_cursor);
+            self.edit_scroll_dirty = true;
             cx.notify();
         }
     }
 
     pub fn select_edit_cursor_right(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() {
-            let char_count = self.edit_value.chars().count();
-            if self.edit_cursor < char_count {
+            let len = self.edit_value.len();
+            if self.edit_cursor < len {
                 if self.edit_selection_anchor.is_none() {
                     self.edit_selection_anchor = Some(self.edit_cursor);
                 }
-                self.edit_cursor += 1;
+                self.edit_cursor = self.next_char_boundary(self.edit_cursor);
+                self.edit_scroll_dirty = true;
                 cx.notify();
             }
         }
@@ -4100,55 +4152,123 @@ impl Spreadsheet {
                 self.edit_selection_anchor = Some(self.edit_cursor);
             }
             self.edit_cursor = 0;
+            self.edit_scroll_dirty = true;
             cx.notify();
         }
     }
 
     pub fn select_edit_cursor_end(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() {
-            let char_count = self.edit_value.chars().count();
-            if self.edit_cursor < char_count {
+            let len = self.edit_value.len();
+            if self.edit_cursor < len {
                 if self.edit_selection_anchor.is_none() {
                     self.edit_selection_anchor = Some(self.edit_cursor);
                 }
-                self.edit_cursor = char_count;
+                self.edit_cursor = len;  // Byte offset at end
+                self.edit_scroll_dirty = true;
                 cx.notify();
             }
         }
     }
 
-    // Word navigation helpers
-    fn find_word_boundary_left(&self, from: usize) -> usize {
-        if from == 0 {
+    // Byte-safe cursor navigation helpers
+    // All cursor positions are byte offsets into the UTF-8 buffer
+    //
+    // NOTE: These helpers step by UTF-8 char boundaries, NOT grapheme clusters.
+    // This means:
+    // - é (e + combining accent U+0301) takes 2 cursor steps
+    // - Some emoji (👨‍👩‍👧) are multiple codepoints and take multiple steps
+    // This is acceptable for v1 - grapheme segmentation adds complexity.
+    // TODO: Consider unicode-segmentation crate if users complain about emoji/combining marks.
+
+    /// Find the previous char boundary (move cursor left by one character)
+    fn prev_char_boundary(&self, byte_idx: usize) -> usize {
+        if byte_idx == 0 {
             return 0;
         }
-        let chars: Vec<char> = self.edit_value.chars().collect();
-        let mut pos = from - 1;
-        // Skip whitespace/punctuation
-        while pos > 0 && !chars[pos].is_alphanumeric() {
-            pos -= 1;
+        let text = &self.edit_value;
+        let mut idx = byte_idx - 1;
+        while idx > 0 && !text.is_char_boundary(idx) {
+            idx -= 1;
         }
-        // Skip word characters
-        while pos > 0 && chars[pos - 1].is_alphanumeric() {
-            pos -= 1;
+        idx
+    }
+
+    /// Find the next char boundary (move cursor right by one character)
+    fn next_char_boundary(&self, byte_idx: usize) -> usize {
+        let text = &self.edit_value;
+        let len = text.len();
+        if byte_idx >= len {
+            return len;
+        }
+        let mut idx = byte_idx + 1;
+        while idx < len && !text.is_char_boundary(idx) {
+            idx += 1;
+        }
+        idx
+    }
+
+    /// Get the char at a byte position (for word boundary detection)
+    fn char_at_byte(&self, byte_idx: usize) -> Option<char> {
+        self.edit_value[byte_idx..].chars().next()
+    }
+
+    // Word navigation helpers (byte-indexed)
+    fn find_word_boundary_left(&self, from_byte: usize) -> usize {
+        if from_byte == 0 {
+            return 0;
+        }
+        let mut pos = self.prev_char_boundary(from_byte);
+
+        // Skip whitespace/punctuation going left
+        while pos > 0 {
+            if let Some(c) = self.char_at_byte(pos) {
+                if c.is_alphanumeric() {
+                    break;
+                }
+            }
+            pos = self.prev_char_boundary(pos);
+        }
+
+        // Skip word characters going left
+        while pos > 0 {
+            let prev = self.prev_char_boundary(pos);
+            if let Some(c) = self.char_at_byte(prev) {
+                if !c.is_alphanumeric() {
+                    break;
+                }
+            }
+            pos = prev;
         }
         pos
     }
 
-    fn find_word_boundary_right(&self, from: usize) -> usize {
-        let chars: Vec<char> = self.edit_value.chars().collect();
-        let len = chars.len();
-        if from >= len {
+    fn find_word_boundary_right(&self, from_byte: usize) -> usize {
+        let text = &self.edit_value;
+        let len = text.len();
+        if from_byte >= len {
             return len;
         }
-        let mut pos = from;
-        // Skip current word characters
-        while pos < len && chars[pos].is_alphanumeric() {
-            pos += 1;
+        let mut pos = from_byte;
+
+        // Skip current word characters going right
+        while pos < len {
+            if let Some(c) = self.char_at_byte(pos) {
+                if !c.is_alphanumeric() {
+                    break;
+                }
+            }
+            pos = self.next_char_boundary(pos);
         }
-        // Skip whitespace/punctuation
-        while pos < len && !chars[pos].is_alphanumeric() {
-            pos += 1;
+
+        // Skip whitespace/punctuation going right
+        while pos < len {
+            if let Some(c) = self.char_at_byte(pos) {
+                if c.is_alphanumeric() {
+                    break;
+                }
+            }
+            pos = self.next_char_boundary(pos);
         }
         pos
     }
@@ -4158,6 +4278,7 @@ impl Spreadsheet {
         if self.mode.is_editing() {
             self.edit_cursor = self.find_word_boundary_left(self.edit_cursor);
             self.edit_selection_anchor = None;
+            self.edit_scroll_dirty = true;
             self.reset_caret_activity();
             cx.notify();
         }
@@ -4167,6 +4288,7 @@ impl Spreadsheet {
         if self.mode.is_editing() {
             self.edit_cursor = self.find_word_boundary_right(self.edit_cursor);
             self.edit_selection_anchor = None;
+            self.edit_scroll_dirty = true;
             self.reset_caret_activity();
             cx.notify();
         }
@@ -4179,6 +4301,7 @@ impl Spreadsheet {
                 self.edit_selection_anchor = Some(self.edit_cursor);
             }
             self.edit_cursor = self.find_word_boundary_left(self.edit_cursor);
+            self.edit_scroll_dirty = true;
             cx.notify();
         }
     }
@@ -4189,22 +4312,124 @@ impl Spreadsheet {
                 self.edit_selection_anchor = Some(self.edit_cursor);
             }
             self.edit_cursor = self.find_word_boundary_right(self.edit_cursor);
+            self.edit_scroll_dirty = true;
             cx.notify();
         }
     }
 
-    // Get current selection range (start, end) or None
+    // Get current selection range (start, end) as byte offsets, or None
+    // Returns normalized (min, max) range. Both endpoints are guaranteed to be
+    // valid char boundaries if created via movement helpers.
     pub fn edit_selection_range(&self) -> Option<(usize, usize)> {
         self.edit_selection_anchor.map(|anchor| {
-            (anchor.min(self.edit_cursor), anchor.max(self.edit_cursor))
+            let start = anchor.min(self.edit_cursor);
+            let end = anchor.max(self.edit_cursor);
+            // Debug assert: verify both are valid char boundaries
+            debug_assert!(
+                self.edit_value.is_char_boundary(start) && self.edit_value.is_char_boundary(end),
+                "Selection range ({}, {}) contains invalid char boundary in {:?}",
+                start, end, self.edit_value
+            );
+            (start, end)
         })
     }
 
-    // Select all text in edit mode
+    /// Call after any caret/text change to update scroll if needed.
+    /// Only does work if edit_scroll_dirty is set.
+    pub fn update_edit_scroll(&mut self, window: &Window) {
+        if !self.edit_scroll_dirty || !self.mode.is_editing() {
+            return;
+        }
+        self.edit_scroll_dirty = false;
+
+        let (_, col) = self.view_state.selected;
+        let col_width = self.metrics.col_width(self.col_width(col));
+        self.ensure_caret_visible(window, col_width);
+    }
+
+    /// Update edit_scroll_x to ensure the caret is visible within the cell.
+    /// Only adjusts scroll when caret would go out of view - otherwise preserves position.
+    /// This gives smooth "only when necessary" scrolling like Excel.
+    fn ensure_caret_visible(&mut self, window: &Window, col_width: f32) {
+        let text = &self.edit_value;
+        let total_bytes = text.len();
+        let cursor_byte = self.edit_cursor.min(total_bytes);
+
+        // Measurements
+        let padding = 4.0; // px_1 padding on each side
+        let inner_w = col_width - (padding * 2.0);
+
+        // Early exit: empty text or text fits in cell
+        if total_bytes == 0 {
+            self.edit_scroll_x = 0.0;
+            return;
+        }
+
+        // Shape text to get accurate measurements
+        let shape_text: SharedString = text.clone().into();
+        let shape_len = shape_text.len();
+
+        let shaped = window.text_system().shape_line(
+            shape_text,
+            px(self.metrics.font_size),
+            &[TextRun {
+                len: shape_len,
+                font: Font::default(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+
+        let caret_x: f32 = shaped.x_for_index(cursor_byte).into();
+        let text_w: f32 = shaped.x_for_index(total_bytes).into();
+
+        // Text fits in cell - no scrolling needed
+        if text_w <= inner_w {
+            self.edit_scroll_x = 0.0;
+            return;
+        }
+
+        // Current visual caret position (relative to cell inner area)
+        let margin = 10.0; // Keep caret this far from edges
+        let visual_caret = caret_x + self.edit_scroll_x;
+
+        // Only adjust scroll if caret would be outside visible region
+        if visual_caret < margin {
+            // Caret off left edge - scroll right (make scroll_x less negative)
+            self.edit_scroll_x = margin - caret_x;
+        } else if visual_caret > inner_w - margin {
+            // Caret off right edge - scroll left (make scroll_x more negative)
+            self.edit_scroll_x = (inner_w - margin) - caret_x;
+        }
+        // else: caret is visible, don't change scroll
+
+        // Clamp scroll to valid range
+        let min_scroll = inner_w - text_w;
+        self.edit_scroll_x = self.edit_scroll_x.min(0.0).max(min_scroll);
+
+        // Debug asserts to catch sign mistakes
+        debug_assert!(
+            self.edit_scroll_x <= 0.01,
+            "edit_scroll_x {} should be <= 0",
+            self.edit_scroll_x
+        );
+        debug_assert!(
+            self.edit_scroll_x >= min_scroll - 0.01,
+            "edit_scroll_x {} below min_scroll {}",
+            self.edit_scroll_x,
+            min_scroll
+        );
+    }
+
+    // Select all text in edit mode (byte-indexed)
     pub fn select_all_edit(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() {
             self.edit_selection_anchor = Some(0);
-            self.edit_cursor = self.edit_value.chars().count();
+            self.edit_cursor = self.edit_value.len();  // Byte offset at end
+            self.edit_scroll_dirty = true;
             cx.notify();
         }
     }
@@ -4218,11 +4443,8 @@ impl Spreadsheet {
         // Cell reference pattern: optional $ + column letters + optional $ + row numbers
         let re = regex::Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
 
-        // Find cursor byte position
-        let cursor_byte = self.edit_value.char_indices()
-            .nth(self.edit_cursor)
-            .map(|(i, _)| i)
-            .unwrap_or(self.edit_value.len());
+        // edit_cursor is already a byte offset
+        let cursor_byte = self.edit_cursor.min(self.edit_value.len());
 
         // Find reference at or near cursor
         let mut best_match: Option<(usize, usize, regex::Captures)> = None;
@@ -4285,22 +4507,20 @@ impl Spreadsheet {
                 _ => unreachable!(),
             };
 
-            // Replace the reference in edit_value
-            let old_ref_chars = end - start;  // For ASCII cell refs, byte len == char count
+            // Replace the reference in edit_value (all byte-indexed)
+            let old_ref_bytes = end - start;
             self.edit_value.replace_range(start..end, &new_ref);
-            let new_ref_chars = new_ref.chars().count();
+            let new_ref_bytes = new_ref.len();
 
             // Adjust cursor if it was after or within the replaced region
-            let start_char = self.edit_value[..start].chars().count();
-
-            if self.edit_cursor > start_char {
+            if self.edit_cursor > start {
                 // Cursor was within or after the reference
-                if self.edit_cursor <= start_char + old_ref_chars {
+                if self.edit_cursor <= start + old_ref_bytes {
                     // Cursor was within reference - move to end of new reference
-                    self.edit_cursor = start_char + new_ref_chars;
+                    self.edit_cursor = start + new_ref_bytes;
                 } else {
                     // Cursor was after reference - adjust by length difference
-                    let diff = new_ref_chars as i32 - old_ref_chars as i32;
+                    let diff = new_ref_bytes as i32 - old_ref_bytes as i32;
                     self.edit_cursor = (self.edit_cursor as i32 + diff) as usize;
                 }
             }
@@ -4314,8 +4534,11 @@ impl Spreadsheet {
         // If editing, copy selected text (or all if no selection)
         // This is text-only copy, not cell copy - no internal clipboard needed
         if self.mode.is_editing() {
-            let text = if let Some((start, end)) = self.edit_selection_range() {
-                self.edit_value.chars().skip(start).take(end - start).collect()
+            let text = if let Some((start_byte, end_byte)) = self.edit_selection_range() {
+                // Byte-indexed selection
+                let start = start_byte.min(self.edit_value.len());
+                let end = end_byte.min(self.edit_value.len());
+                self.edit_value[start..end].to_string()
             } else {
                 self.edit_value.clone()
             };
@@ -4491,22 +4714,15 @@ impl Spreadsheet {
             // Only take first line if multi-line, and trim whitespace
             let text = text.lines().next().unwrap_or("").trim();
             if !text.is_empty() {
-                // Insert at cursor position
-                let char_count = self.edit_value.chars().count();
-                let cursor_pos = self.edit_cursor.min(char_count);
-
-                // Convert cursor char position to byte position
-                let byte_pos = self.edit_value.char_indices()
-                    .nth(cursor_pos)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.edit_value.len());
-
+                // Insert at cursor byte position
+                let byte_pos = self.edit_cursor.min(self.edit_value.len());
                 self.edit_value.insert_str(byte_pos, text);
-                self.edit_cursor = cursor_pos + text.chars().count();
+                self.edit_cursor = byte_pos + text.len();  // Advance by byte length
 
                 // Update autocomplete for formulas
                 self.update_autocomplete(cx);
 
+                self.edit_scroll_dirty = true;
                 self.status_message = Some(format!("Pasted: {}", text));
                 cx.notify();
             }
@@ -4701,19 +4917,13 @@ impl Spreadsheet {
 
         if let Some(text) = text {
             if !text.is_empty() {
-                // Insert at cursor position
-                let char_count = self.edit_value.chars().count();
-                let cursor_pos = self.edit_cursor.min(char_count);
-
-                let byte_pos = self.edit_value.char_indices()
-                    .nth(cursor_pos)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.edit_value.len());
-
+                // Insert at cursor byte position
+                let byte_pos = self.edit_cursor.min(self.edit_value.len());
                 self.edit_value.insert_str(byte_pos, &text);
-                self.edit_cursor = cursor_pos + text.chars().count();
+                self.edit_cursor = byte_pos + text.len();  // Advance by byte length
 
                 self.update_autocomplete(cx);
+                self.edit_scroll_dirty = true;
                 self.status_message = Some(format!("Pasted value: {}", text));
                 cx.notify();
             }
@@ -6760,7 +6970,9 @@ impl Spreadsheet {
         }
 
         let chars: Vec<char> = self.edit_value.chars().collect();
-        let cursor = self.edit_cursor.min(chars.len());
+        // Convert byte offset to char index
+        let cursor_byte = self.edit_cursor.min(self.edit_value.len());
+        let cursor = self.edit_value[..cursor_byte].chars().count();
 
         // Find the start of the identifier (scan backwards)
         let mut start = cursor;
@@ -9686,6 +9898,11 @@ impl Render for Spreadsheet {
         let current_size = window.viewport_size();
         if self.window_size != current_size {
             self.window_size = current_size;
+            // Re-validate edit scroll on resize (caret may now be offscreen)
+            if self.mode.is_editing() {
+                self.edit_scroll_dirty = true;
+                self.update_edit_scroll(window);
+            }
         }
 
         // Cache window bounds for session snapshot (updated each render)

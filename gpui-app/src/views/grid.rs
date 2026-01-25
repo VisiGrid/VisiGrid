@@ -7,6 +7,7 @@ use crate::mode::Mode;
 use crate::settings::{user_settings, Setting};
 use crate::theme::TokenKey;
 use super::headers::render_row_header;
+use super::formula_bar;
 use visigrid_engine::cell::{Alignment, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
 
@@ -46,6 +47,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
         return div()
             .flex_1()
             .overflow_hidden()
+            .relative()  // Enable absolute positioning for popup overlay
             .child(
                 div()
                     .flex()
@@ -72,6 +74,8 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                         })
                     )
             )
+            // Popup overlay layer - positioned relative to grid, not window chrome
+            .child(render_popup_overlay(app, cx))
             .into_any_element();
     }
 
@@ -82,6 +86,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
     div()
         .flex_1()
         .overflow_hidden()
+        .relative()  // Enable absolute positioning for popup overlay
         .flex()
         .flex_col()
         // Top section: frozen corner + frozen rows
@@ -191,6 +196,8 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                         )
                 )
         )
+        // Popup overlay layer - positioned relative to grid, not window chrome
+        .child(render_popup_overlay(app, cx))
         .into_any_element()
 }
 
@@ -331,25 +338,36 @@ fn render_cell(
     }
 
     // Apply horizontal alignment
+    // When editing, always left-align so caret positioning works correctly
     // General alignment: numbers right-align, text/empty left-aligns (Excel behavior)
-    cell = match format.alignment {
-        Alignment::General => {
-            let computed = app.sheet().get_computed_value(data_row, col);
-            match computed {
-                Value::Number(_) => cell.justify_end(),
-                _ => cell.justify_start(),
+    cell = if is_editing {
+        // Editing: always left-align for correct caret positioning
+        cell.justify_start()
+    } else {
+        match format.alignment {
+            Alignment::General => {
+                let computed = app.sheet().get_computed_value(data_row, col);
+                match computed {
+                    Value::Number(_) => cell.justify_end(),
+                    _ => cell.justify_start(),
+                }
             }
+            Alignment::Left => cell.justify_start(),
+            Alignment::Center => cell.justify_center(),
+            Alignment::Right => cell.justify_end(),
         }
-        Alignment::Left => cell.justify_start(),
-        Alignment::Center => cell.justify_center(),
-        Alignment::Right => cell.justify_end(),
     };
 
     // Apply vertical alignment
-    cell = match format.vertical_alignment {
-        VerticalAlignment::Top => cell.items_start(),
-        VerticalAlignment::Middle => cell.items_center(),
-        VerticalAlignment::Bottom => cell.items_end(),
+    // When editing, always top-align so caret positioning (fixed top offset) works correctly
+    cell = if is_editing {
+        cell.items_start()
+    } else {
+        match format.vertical_alignment {
+            VerticalAlignment::Top => cell.items_start(),
+            VerticalAlignment::Middle => cell.items_center(),
+            VerticalAlignment::Bottom => cell.items_end(),
+        }
     };
 
     // Only right+bottom borders for normal cells (thinner gridlines)
@@ -510,19 +528,52 @@ fn render_cell(
 
     // Build the text content with selection highlight (caret drawn as overlay)
     if is_editing {
-        let cursor_pos = app.edit_cursor;
-        let chars: Vec<char> = value.chars().collect();
+        // edit_cursor and selection range are already byte offsets
+        let cursor_byte = app.edit_cursor;
         let selection = app.edit_selection_range();
 
         // Use raw buffer - caret is drawn as overlay, not injected into text
         let display_text: SharedString = value.into();
+        let total_bytes = display_text.len();
+        let byte_index = cursor_byte.min(total_bytes);
+
+        // Shape text to get caret position for rendering
+        // For empty text, use a space as surrogate for baseline metrics
+        let text_len = display_text.len();
+        let shape_text: SharedString = if text_len == 0 {
+            " ".into()
+        } else {
+            display_text.clone()
+        };
+        let shape_len = shape_text.len();
+        let shaped = window.text_system().shape_line(
+            shape_text,
+            px(app.metrics.font_size),
+            &[TextRun {
+                len: shape_len,
+                font: Font::default(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+
+        // Use persisted scroll offset (computed by ensure_caret_visible in render_grid)
+        let padding = 4.0;
+        let scroll_x = app.edit_scroll_x;
+        let caret_x: f32 = if total_bytes == 0 {
+            0.0
+        } else {
+            shaped.x_for_index(byte_index).into()
+        };
 
         // Create styled text with selection highlighting
-        if let Some((sel_start, sel_end)) = selection {
-            // Convert char positions to byte positions
-            let byte_sel_start = chars.iter().take(sel_start).collect::<String>().len();
-            let byte_sel_end = chars.iter().take(sel_end).collect::<String>().len();
-            let total_bytes = display_text.len();
+        let text_element = if let Some((sel_start_byte, sel_end_byte)) = selection {
+            // Selection positions are already byte offsets
+            let byte_sel_start = sel_start_byte.min(total_bytes);
+            let byte_sel_end = sel_end_byte.min(total_bytes);
 
             let normal_color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
             let selection_bg = app.token(TokenKey::EditorSelectionBg);
@@ -566,31 +617,48 @@ fn render_cell(
                 });
             }
 
-            cell = cell.child(StyledText::new(display_text).with_runs(runs));
+            // Debug assert: run lengths must sum to text length (prevents caret drift)
+            debug_assert_eq!(
+                runs.iter().map(|r| r.len).sum::<usize>(),
+                total_bytes,
+                "TextRun lengths don't match text length"
+            );
+
+            StyledText::new(display_text).with_runs(runs).into_any_element()
         } else {
-            // No selection - plain text (caret drawn separately as overlay)
-            cell = cell.child(display_text);
+            // No selection - plain text
+            display_text.into_any_element()
+        };
 
-            // Draw caret as overlay rect when visible
-            if app.caret_visible {
-                // Calculate caret x position by measuring text before cursor
-                let text_before_cursor: String = chars.iter().take(cursor_pos).collect();
-                // Approximate width: ~7px per character at default font size, scaled
-                let char_width = app.metrics.font_size * 0.6;
-                let caret_x = text_before_cursor.chars().count() as f32 * char_width + 4.0; // +4 for padding
-                let caret_color = app.token(TokenKey::TextPrimary);
-                let line_height = app.metrics.row_height(app.row_height(view_row)) - 4.0;
+        // Wrap text in scrolling container (positioned with scroll offset)
+        cell = cell.child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(padding + scroll_x))
+                .flex()
+                .items_center()
+                .child(text_element)
+        );
 
-                cell = cell.child(
-                    div()
-                        .absolute()
-                        .left(px(caret_x))
-                        .top(px(2.0))
-                        .w(px(1.5))
-                        .h(px(line_height))
-                        .bg(caret_color)
-                );
-            }
+        // Draw caret as overlay rect when visible
+        if app.caret_visible && selection.is_none() {
+            let caret_color = app.token(TokenKey::TextPrimary);
+            let line_height = app.metrics.row_height(app.row_height(view_row)) - 4.0;
+
+            // Caret position accounts for scroll offset
+            let visual_caret_x = padding + caret_x + scroll_x;
+
+            cell = cell.child(
+                div()
+                    .absolute()
+                    .left(px(visual_caret_x))
+                    .top(px(2.0))
+                    .w(px(1.5))
+                    .h(px(line_height))
+                    .bg(caret_color)
+            );
         }
     } else {
         // Not editing - show value with formatting using StyledText
@@ -827,4 +895,94 @@ fn cell_text_color(app: &Spreadsheet, is_editing: bool, is_selected: bool, is_mu
     } else {
         app.token(TokenKey::CellText)
     }
+}
+
+/// Render the popup overlay layer for autocomplete, signature help, and error banners.
+/// Popups are positioned relative to the active cell rect in grid coordinates (post-scroll).
+/// cell_rect() returns viewport-relative coordinates (starts from scroll_row/scroll_col).
+/// This is the correct approach - no menu/formula bar offset math needed.
+fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let cell_rect = app.active_cell_rect();
+    let (viewport_w, viewport_h) = app.viewport_rect();
+    let popup_gap = 4.0;
+
+    // Popup dimensions (capped for consistent flip behavior)
+    let popup_max_width = 320.0;
+    let popup_max_height = 280.0; // Cap height for flip calculation
+
+    // X position: align with cell left, clamped to viewport bounds
+    let popup_x = cell_rect.x
+        .max(0.0)
+        .min((viewport_w - popup_max_width).max(0.0));
+
+    // Y position: prefer below cell, flip above if no room
+    let y_below = cell_rect.bottom() + popup_gap;
+    let y_above = cell_rect.y - popup_gap - popup_max_height;
+    let popup_y_raw = if y_below + popup_max_height <= viewport_h {
+        y_below
+    } else if y_above >= 0.0 {
+        y_above
+    } else {
+        y_below // No room either way, just show below
+    };
+
+    // Final clamp to prevent offscreen rendering
+    let popup_y = popup_y_raw
+        .max(0.0)
+        .min((viewport_h - popup_max_height).max(0.0));
+
+    // Get theme colors
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let selection_bg = app.token(TokenKey::SelectionBg);
+    let accent = app.token(TokenKey::Accent);
+    let error_bg = app.token(TokenKey::ErrorBg);
+    let error_color = app.token(TokenKey::Error);
+
+    div()
+        .absolute()
+        .inset_0()
+        // Formula autocomplete popup
+        .when(app.autocomplete_visible, |div| {
+            let suggestions = app.autocomplete_suggestions();
+            let selected = app.autocomplete_selected;
+            div.child(formula_bar::render_autocomplete_popup(
+                &suggestions,
+                selected,
+                popup_x,
+                popup_y,
+                panel_bg,
+                panel_border,
+                text_primary,
+                text_muted,
+                selection_bg,
+                cx,
+            ))
+        })
+        // Formula signature help popup
+        .when_some(app.signature_help(), |div, sig_info| {
+            div.child(formula_bar::render_signature_help(
+                &sig_info,
+                popup_x,
+                popup_y,
+                panel_bg,
+                panel_border,
+                text_primary,
+                text_muted,
+                accent,
+            ))
+        })
+        // Formula error banner
+        .when_some(app.formula_error(), |div, error_info| {
+            div.child(formula_bar::render_error_banner(
+                &error_info,
+                popup_x,
+                popup_y,
+                error_bg,
+                error_color,
+                panel_border,
+            ))
+        })
 }

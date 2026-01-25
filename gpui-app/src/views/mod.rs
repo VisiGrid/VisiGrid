@@ -28,7 +28,7 @@ mod tour;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, CELL_HEIGHT, MENU_BAR_HEIGHT, FORMULA_BAR_HEIGHT, CreateNameFocus, PaletteScope};
+use crate::app::{Spreadsheet, CELL_HEIGHT, CreateNameFocus};
 use crate::search::MenuCategory;
 use crate::actions::*;
 use crate::formatting::BorderApplyMode;
@@ -105,7 +105,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 _ => this.move_selection(1, 0, cx),
             }
         }))
-        .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
+        .on_action(cx.listener(|this, _: &MoveLeft, window, cx| {
             // Lua console: cursor left
             if this.lua_console.visible {
                 this.lua_console.cursor_left();
@@ -119,8 +119,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 this.move_selection(0, -1, cx);
             }
+            this.update_edit_scroll(window);
         }))
-        .on_action(cx.listener(|this, _: &MoveRight, _, cx| {
+        .on_action(cx.listener(|this, _: &MoveRight, window, cx| {
             // Lua console: cursor right
             if this.lua_console.visible {
                 this.lua_console.cursor_right();
@@ -134,6 +135,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 this.move_selection(0, 1, cx);
             }
+            this.update_edit_scroll(window);
         }))
         .on_action(cx.listener(|this, _: &JumpUp, _, cx| {
             if this.mode.is_formula() {
@@ -149,7 +151,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.jump_selection(1, 0, cx);
             }
         }))
-        .on_action(cx.listener(|this, _: &JumpLeft, _, cx| {
+        .on_action(cx.listener(|this, _: &JumpLeft, window, cx| {
             if this.mode.is_formula() {
                 this.formula_jump_ref(0, -1, cx);
             } else if this.mode == Mode::Edit {
@@ -157,8 +159,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 this.jump_selection(0, -1, cx);
             }
+            this.update_edit_scroll(window);
         }))
-        .on_action(cx.listener(|this, _: &JumpRight, _, cx| {
+        .on_action(cx.listener(|this, _: &JumpRight, window, cx| {
             if this.mode.is_formula() {
                 this.formula_jump_ref(0, 1, cx);
             } else if this.mode == Mode::Edit {
@@ -166,6 +169,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 this.jump_selection(0, 1, cx);
             }
+            this.update_edit_scroll(window);
         }))
         .on_action(cx.listener(|this, _: &MoveToStart, _, cx| {
             this.view_state.selected = (0, 0);
@@ -200,7 +204,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.extend_selection(1, 0, cx);
             }
         }))
-        .on_action(cx.listener(|this, _: &ExtendLeft, _, cx| {
+        .on_action(cx.listener(|this, _: &ExtendLeft, window, cx| {
             if this.mode.is_formula() {
                 this.formula_extend_ref(0, -1, cx);
             } else if this.mode == Mode::Edit {
@@ -208,8 +212,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 this.extend_selection(0, -1, cx);
             }
+            this.update_edit_scroll(window);
         }))
-        .on_action(cx.listener(|this, _: &ExtendRight, _, cx| {
+        .on_action(cx.listener(|this, _: &ExtendRight, window, cx| {
             if this.mode.is_formula() {
                 this.formula_extend_ref(0, 1, cx);
             } else if this.mode == Mode::Edit {
@@ -217,6 +222,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 this.extend_selection(0, 1, cx);
             }
+            this.update_edit_scroll(window);
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpUp, _, cx| {
             if this.mode.is_formula() {
@@ -232,7 +238,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.extend_jump_selection(1, 0, cx);
             }
         }))
-        .on_action(cx.listener(|this, _: &ExtendJumpLeft, _, cx| {
+        .on_action(cx.listener(|this, _: &ExtendJumpLeft, window, cx| {
             if this.mode.is_formula() {
                 this.formula_extend_jump_ref(0, -1, cx);
             } else if this.mode == Mode::Edit {
@@ -240,8 +246,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 this.extend_jump_selection(0, -1, cx);
             }
+            this.update_edit_scroll(window);
         }))
-        .on_action(cx.listener(|this, _: &ExtendJumpRight, _, cx| {
+        .on_action(cx.listener(|this, _: &ExtendJumpRight, window, cx| {
             if this.mode.is_formula() {
                 this.formula_extend_jump_ref(0, 1, cx);
             } else if this.mode == Mode::Edit {
@@ -249,13 +256,15 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 this.extend_jump_selection(0, 1, cx);
             }
+            this.update_edit_scroll(window);
         }))
-        .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
+        .on_action(cx.listener(|this, _: &SelectAll, window, cx| {
             if this.mode == Mode::Edit {
                 this.select_all_edit(cx);
             } else {
                 this.select_all(cx);
             }
+            this.update_edit_scroll(window);
         }))
         .on_action(cx.listener(|this, _: &SelectBlanks, _, cx| {
             if !this.mode.is_editing() {
@@ -310,10 +319,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &Paste, window, cx| {
             this.paste(cx);
+            this.update_edit_scroll(window);
             this.update_title_if_needed(window);
         }))
         .on_action(cx.listener(|this, _: &PasteValues, window, cx| {
             this.paste_values(cx);
+            this.update_edit_scroll(window);
             this.update_title_if_needed(window);
         }))
         .on_action(cx.listener(|this, _: &DeleteCell, window, cx| {
@@ -345,8 +356,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.update_title_if_needed(window);
         }))
         // Editing actions
-        .on_action(cx.listener(|this, _: &StartEdit, _, cx| {
+        .on_action(cx.listener(|this, _: &StartEdit, window, cx| {
             this.start_edit(cx);
+            this.update_edit_scroll(window);
             // On macOS, show tip about enabling F2 (catches Ctrl+U and menu-driven edit)
             this.maybe_show_f2_tip(cx);
         }))
@@ -487,13 +499,14 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.find_backspace(cx);
             } else if this.mode.is_editing() {
                 this.backspace(cx);
+                this.update_edit_scroll(window);
             } else {
                 // Navigation mode: backspace clears selected cells (like Delete key)
                 this.delete_selection(cx);
                 this.update_title_if_needed(window);
             }
         }))
-        .on_action(cx.listener(|this, _: &DeleteChar, _, cx| {
+        .on_action(cx.listener(|this, _: &DeleteChar, window, cx| {
             // Lua console handles its own delete
             if this.lua_console.visible {
                 this.lua_console.delete();
@@ -501,6 +514,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 return;
             }
             this.delete_char(cx);
+            this.update_edit_scroll(window);
         }))
         .on_action(cx.listener(|this, _: &FillDown, window, cx| {
             this.fill_down(cx);
@@ -591,15 +605,18 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             cx.notify();
         }))
         // Edit mode cursor movement
-        .on_action(cx.listener(|this, _: &EditCursorLeft, _, cx| {
+        .on_action(cx.listener(|this, _: &EditCursorLeft, window, cx| {
             this.move_edit_cursor_left(cx);
+            this.update_edit_scroll(window);
         }))
-        .on_action(cx.listener(|this, _: &EditCursorRight, _, cx| {
+        .on_action(cx.listener(|this, _: &EditCursorRight, window, cx| {
             this.move_edit_cursor_right(cx);
+            this.update_edit_scroll(window);
         }))
-        .on_action(cx.listener(|this, _: &EditCursorHome, _, cx| {
+        .on_action(cx.listener(|this, _: &EditCursorHome, window, cx| {
             if this.mode.is_editing() {
                 this.move_edit_cursor_home(cx);
+                this.update_edit_scroll(window);
             } else {
                 // Navigation mode: go to first column of current row
                 this.view_state.selected.1 = 0;
@@ -608,9 +625,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 cx.notify();
             }
         }))
-        .on_action(cx.listener(|this, _: &EditCursorEnd, _, cx| {
+        .on_action(cx.listener(|this, _: &EditCursorEnd, window, cx| {
             if this.mode.is_editing() {
                 this.move_edit_cursor_end(cx);
+                this.update_edit_scroll(window);
             } else {
                 // Navigation mode: go to last column of current row
                 this.view_state.selected.1 = crate::app::NUM_COLS - 1;
@@ -1504,6 +1522,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                                 for c in printable_chars.chars() {
                                     this.insert_char(c, cx);
                                 }
+                                this.update_edit_scroll(window);
                             }
                         }
                     }
@@ -1846,7 +1865,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             d.child(menu_bar::render_menu_bar(app, cx))
         })
         .when(!zen_mode, |div| {
-            div.child(formula_bar::render_formula_bar(app, cx))
+            div.child(formula_bar::render_formula_bar(app, window, cx))
         })
         .child(headers::render_column_headers(app, cx))
         .child(grid::render_grid(app, window, cx))
@@ -1930,65 +1949,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(show_inspector, |div| {
             div.child(inspector_panel::render_inspector_panel(app, cx))
         })
-        // Formula autocomplete popup (rendered at top level to avoid clipping)
-        .when(app.autocomplete_visible, |div| {
-            let suggestions = app.autocomplete_suggestions();
-            let selected = app.autocomplete_selected;
-            // Calculate popup position below the active cell (scaled for zoom)
-            let popup_x = app.metrics.header_w + app.col_x_offset(app.view_state.selected.1);
-            let popup_y = MENU_BAR_HEIGHT + FORMULA_BAR_HEIGHT + app.metrics.header_h
-                + app.row_y_offset(app.view_state.selected.0) + app.metrics.row_height(app.row_height(app.view_state.selected.0));
-            let panel_bg = app.token(TokenKey::PanelBg);
-            let panel_border = app.token(TokenKey::PanelBorder);
-            let text_primary = app.token(TokenKey::TextPrimary);
-            let text_muted = app.token(TokenKey::TextMuted);
-            let selection_bg = app.token(TokenKey::SelectionBg);
-            div.child(formula_bar::render_autocomplete_popup(
-                &suggestions,
-                selected,
-                popup_x,
-                popup_y,
-                panel_bg,
-                panel_border,
-                text_primary,
-                text_muted,
-                selection_bg,
-                cx,
-            ))
-        })
-        // Formula signature help (rendered at top level)
-        .when_some(app.signature_help(), |div, sig_info| {
-            // Calculate popup position below the active cell (scaled for zoom)
-            let popup_x = app.metrics.header_w + app.col_x_offset(app.view_state.selected.1);
-            let popup_y = MENU_BAR_HEIGHT + FORMULA_BAR_HEIGHT + app.metrics.header_h
-                + app.row_y_offset(app.view_state.selected.0) + app.metrics.row_height(app.row_height(app.view_state.selected.0));
-            let panel_bg = app.token(TokenKey::PanelBg);
-            let panel_border = app.token(TokenKey::PanelBorder);
-            let text_primary = app.token(TokenKey::TextPrimary);
-            let text_muted = app.token(TokenKey::TextMuted);
-            let accent = app.token(TokenKey::Accent);
-            div.child(formula_bar::render_signature_help(
-                &sig_info,
-                popup_x,
-                popup_y,
-                panel_bg,
-                panel_border,
-                text_primary,
-                text_muted,
-                accent,
-            ))
-        })
-        // Formula error banner (rendered at top level)
-        .when_some(app.formula_error(), |div, error_info| {
-            // Calculate popup position below the active cell (scaled for zoom)
-            let popup_x = app.metrics.header_w + app.col_x_offset(app.view_state.selected.1);
-            let popup_y = MENU_BAR_HEIGHT + FORMULA_BAR_HEIGHT + app.metrics.header_h
-                + app.row_y_offset(app.view_state.selected.0) + app.metrics.row_height(app.row_height(app.view_state.selected.0));
-            let error_bg = app.token(TokenKey::ErrorBg);
-            let error_color = app.token(TokenKey::Error);
-            let panel_border = app.token(TokenKey::PanelBorder);
-            div.child(formula_bar::render_error_banner(&error_info, popup_x, popup_y, error_bg, error_color, panel_border))
-        })
+        // NOTE: Autocomplete, signature help, and error banner popups are now rendered
+        // in the grid overlay layer (grid.rs::render_popup_overlay) where they can be
+        // positioned relative to the cell rect without menu/formula bar offset math.
         // Hover documentation popup (when not editing and hovering over formula bar)
         .when_some(app.hover_function.filter(|_| !app.mode.is_editing() && !app.autocomplete_visible), |div, func| {
             let panel_bg = app.token(TokenKey::PanelBg);

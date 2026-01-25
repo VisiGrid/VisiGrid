@@ -5,7 +5,7 @@ use crate::theme::TokenKey;
 use crate::formula_context::{tokenize_for_highlight, TokenType, char_to_byte};
 
 /// Render the formula bar (cell reference + formula/value input)
-pub fn render_formula_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let cell_ref = app.cell_ref();
     let editing = app.mode.is_editing();
 
@@ -31,7 +31,7 @@ pub fn render_formula_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     };
 
     // Build the formula display content
-    let formula_content = build_formula_content(app, &raw_value, editing);
+    let formula_content = build_formula_content(app, window, &raw_value, editing);
 
     div()
         .relative()
@@ -132,22 +132,42 @@ fn extract_first_function(formula: &str) -> Option<&'static crate::formula_conte
 }
 
 /// Build the formula content with syntax highlighting
-fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> AnyElement {
+fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, editing: bool) -> AnyElement {
     let text_primary = app.token(TokenKey::TextPrimary);
 
     // Only highlight formulas (starting with '=')
     if !raw_value.starts_with('=') {
         // Plain text - caret drawn as overlay, not injected
+        let text_str = raw_value.to_string();
+        let text_shared: SharedString = text_str.clone().into();
+
         return div()
             .relative()
             .text_color(text_primary)
-            .child(raw_value.to_string())
+            .child(text_str)
             .when(editing && app.caret_visible && app.edit_selection_anchor.is_none(), |d| {
-                // Draw caret overlay
-                let cursor_pos = app.edit_cursor;
-                let text_before: String = raw_value.chars().take(cursor_pos).collect();
-                let char_width = 7.5; // Approximate character width
-                let caret_x = text_before.chars().count() as f32 * char_width;
+                // Draw caret overlay with proper text measurement
+                // edit_cursor is already a byte offset
+                let byte_index = app.edit_cursor.min(text_shared.len());
+
+                // Shape the text to get accurate character positions
+                let text_len = text_shared.len();
+                let shaped = window.text_system().shape_line(
+                    text_shared.clone(),
+                    px(14.0), // Match .text_sm() which is typically 14px
+                    &[TextRun {
+                        len: text_len,
+                        font: Font::default(),
+                        color: Hsla::default(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                );
+
+                let caret_x: f32 = shaped.x_for_index(byte_index).into();
+
                 d.child(
                     div()
                         .absolute()
@@ -223,7 +243,8 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
 
     // Caret is drawn as overlay, not injected into text
     // This preserves token spans for syntax highlighting
-    let cursor_pos = if editing { app.edit_cursor } else { usize::MAX };
+    // edit_cursor is a byte offset
+    let cursor_byte = if editing { app.edit_cursor } else { usize::MAX };
     let show_caret = editing && app.caret_visible && app.edit_selection_anchor.is_none();
 
     // Use raw buffer - caret drawn separately
@@ -303,15 +324,35 @@ fn build_formula_content(app: &Spreadsheet, raw_value: &str, editing: bool) -> A
         });
     }
 
+    // Debug assert: run lengths must sum to text length (prevents caret drift)
+    debug_assert_eq!(
+        runs.iter().map(|r| r.len).sum::<usize>(),
+        display_text.len(),
+        "TextRun lengths don't match text length"
+    );
+
     // Build the styled text element
-    let shared_text: SharedString = display_text.into();
-    let styled = StyledText::new(shared_text).with_runs(runs);
+    let shared_text: SharedString = display_text.clone().into();
+    let styled = StyledText::new(shared_text.clone()).with_runs(runs.clone());
 
     // Wrap in relative div and add caret overlay if needed
     if show_caret {
-        let text_before: String = raw_value.chars().take(cursor_pos).collect();
-        let char_width = 7.5; // Approximate character width
-        let caret_x = text_before.chars().count() as f32 * char_width;
+        // edit_cursor is already a byte offset
+        let byte_index = cursor_byte.min(display_text.len());
+
+        // Debug asserts to catch string/cursor mismatches
+        debug_assert!(app.edit_cursor <= display_text.len(), "cursor {} > text.len {}", app.edit_cursor, display_text.len());
+        debug_assert!(display_text.is_char_boundary(byte_index), "cursor not on char boundary");
+
+        // Shape with the SAME runs as StyledText to ensure positions match
+        let shaped = window.text_system().shape_line(
+            shared_text,
+            px(14.0), // Match .text_sm() which is typically 14px
+            &runs,
+            None,
+        );
+
+        let caret_x: f32 = shaped.x_for_index(byte_index).into();
 
         div()
             .relative()
