@@ -36,6 +36,7 @@ mod ref_target;
 mod search;
 mod session;
 mod settings;
+mod sheet_ops;
 mod theme;
 mod undo_redo;
 mod views;
