@@ -7,6 +7,7 @@ mod autocomplete;
 mod clipboard;
 mod command_palette;
 mod default_app;
+mod default_app_prompt;
 mod dialogs;
 mod editing;
 mod file_ops;
