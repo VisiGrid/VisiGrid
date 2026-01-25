@@ -321,6 +321,14 @@ pub enum CreateNameFocus {
     Description, // Description input field
 }
 
+/// Which editor surface is active (for popup anchoring and input routing)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EditorSurface {
+    #[default]
+    Cell,       // Editing in the cell itself
+    FormulaBar, // Editing in the formula bar
+}
+
 /// Fill handle drag axis (locked after first significant movement)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillAxis {
@@ -421,6 +429,13 @@ pub const MENU_BAR_HEIGHT: f32 = 28.0;
 pub const FORMULA_BAR_HEIGHT: f32 = 28.0;
 pub const COLUMN_HEADER_HEIGHT: f32 = 24.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
+
+// Formula bar layout (single source of truth for hit-testing + rendering)
+pub const FORMULA_BAR_CELL_REF_WIDTH: f32 = 60.0;
+pub const FORMULA_BAR_FX_WIDTH: f32 = 30.0;
+pub const FORMULA_BAR_PADDING: f32 = 8.0;  // px_2
+/// X offset where text content starts (cell ref + fx button + padding)
+pub const FORMULA_BAR_TEXT_LEFT: f32 = FORMULA_BAR_CELL_REF_WIDTH + FORMULA_BAR_FX_WIDTH + FORMULA_BAR_PADDING;
 
 // Zoom configuration
 pub const ZOOM_STEPS: &[f32] = &[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
@@ -660,6 +675,16 @@ pub struct Spreadsheet {
     pub formula_bar_cache_cell: Option<(usize, usize)>,
     pub formula_bar_cache_formula: String,
     pub formula_bar_cache_refs: Vec<FormulaRef>,
+
+    // Formula bar editing state (click-to-place caret, drag-to-select)
+    pub active_editor: EditorSurface,
+    pub formula_bar_scroll_x: f32,
+    pub formula_bar_text_rect: gpui::Bounds<gpui::Pixels>,  // Text area rect in window coords (for hit-testing)
+    formula_bar_cache_dirty: bool,
+    formula_bar_char_boundaries: Vec<usize>,  // Byte offsets: [0, 1, 2, ..., len]
+    formula_bar_boundary_xs: Vec<f32>,        // X positions aligned to boundaries
+    pub formula_bar_text_width: f32,
+    pub formula_bar_drag_anchor: Option<usize>,  // None = not dragging, Some(byte) = drag start anchor
 
     // Formula autocomplete state
     pub autocomplete_visible: bool,
@@ -918,6 +943,14 @@ impl Spreadsheet {
             formula_bar_cache_cell: None,
             formula_bar_cache_formula: String::new(),
             formula_bar_cache_refs: Vec::new(),
+            active_editor: EditorSurface::Cell,
+            formula_bar_scroll_x: 0.0,
+            formula_bar_text_rect: gpui::Bounds::default(),
+            formula_bar_cache_dirty: false,
+            formula_bar_char_boundaries: Vec::new(),
+            formula_bar_boundary_xs: Vec::new(),
+            formula_bar_text_width: 0.0,
+            formula_bar_drag_anchor: None,
             autocomplete_visible: false,
             autocomplete_suppressed: false,
             autocomplete_selected: 0,
@@ -3020,6 +3053,9 @@ impl Spreadsheet {
         self.edit_cursor = self.edit_value.len();  // Cursor at end (byte offset)
         self.edit_scroll_x = 0.0;
         self.edit_scroll_dirty = true;  // Trigger scroll update to show caret
+        self.formula_bar_cache_dirty = true;  // Rebuild hit-test cache
+        self.formula_bar_scroll_x = 0.0;
+        self.active_editor = EditorSurface::Cell;  // Default to cell editor
         self.edit_selection_anchor = None;
 
         // Debug assert: cursor must be valid
@@ -3059,6 +3095,9 @@ impl Spreadsheet {
         self.edit_cursor = 0;
         self.edit_scroll_x = 0.0;
         self.edit_scroll_dirty = true;  // Trigger scroll update
+        self.formula_bar_cache_dirty = true;  // Rebuild hit-test cache
+        self.formula_bar_scroll_x = 0.0;
+        self.active_editor = EditorSurface::Cell;  // Default to cell editor
         self.edit_selection_anchor = None;
         self.formula_highlighted_refs.clear();  // No formula to highlight
         self.mode = Mode::Edit;
@@ -3313,6 +3352,8 @@ impl Spreadsheet {
         self.is_modified = true;
         // Clear formula highlighting state
         self.formula_highlighted_refs.clear();
+        // Reset editor surface
+        self.active_editor = EditorSurface::Cell;
         // Stop caret blinking
         self.stop_caret_blink();
 
@@ -3538,6 +3579,8 @@ impl Spreadsheet {
         self.formula_ref_start_cursor = 0;
         // Clear formula highlighting state
         self.formula_highlighted_refs.clear();
+        // Reset editor surface
+        self.active_editor = EditorSurface::Cell;
         // Stop caret blinking
         self.stop_caret_blink();
 
@@ -3562,6 +3605,8 @@ impl Spreadsheet {
             // Clear autocomplete state
             self.autocomplete_visible = false;
             self.autocomplete_selected = 0;
+            // Reset editor surface
+            self.active_editor = EditorSurface::Cell;
             // Stop caret blinking
             self.stop_caret_blink();
             cx.notify();
@@ -3673,6 +3718,7 @@ impl Spreadsheet {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
                 self.edit_scroll_dirty = true;
+                self.formula_bar_cache_dirty = true;
                 self.update_autocomplete(cx);
                 cx.notify();
                 return;
@@ -3688,6 +3734,7 @@ impl Spreadsheet {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
                 self.edit_scroll_dirty = true;
+                self.formula_bar_cache_dirty = true;
                 self.update_autocomplete(cx);
                 cx.notify();
             }
@@ -3711,6 +3758,7 @@ impl Spreadsheet {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
                 self.edit_scroll_dirty = true;
+                self.formula_bar_cache_dirty = true;
                 self.update_autocomplete(cx);
                 cx.notify();
                 return;
@@ -3727,6 +3775,7 @@ impl Spreadsheet {
                     self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
                 }
                 self.edit_scroll_dirty = true;
+                self.formula_bar_cache_dirty = true;
                 self.update_autocomplete(cx);
                 cx.notify();
             }
@@ -3765,8 +3814,9 @@ impl Spreadsheet {
             // Reset caret blink (keep visible while typing)
             self.reset_caret_activity();
 
-            // Mark scroll dirty
+            // Mark scroll/cache dirty
             self.edit_scroll_dirty = true;
+            self.formula_bar_cache_dirty = true;
 
             // Update autocomplete for formulas
             self.update_autocomplete(cx);
@@ -3795,8 +3845,11 @@ impl Spreadsheet {
                 self.mode = Mode::Edit;
             }
 
-            // Mark scroll dirty
+            // Mark scroll/cache dirty
             self.edit_scroll_dirty = true;
+            self.formula_bar_cache_dirty = true;
+            self.formula_bar_scroll_x = 0.0;
+            self.active_editor = EditorSurface::Cell;
 
             // Start caret blinking
             self.start_caret_blink(cx);
@@ -4422,6 +4475,159 @@ impl Spreadsheet {
             self.edit_scroll_x,
             min_scroll
         );
+    }
+
+    // =========================================================================
+    // Formula bar editing (click-to-place caret, drag-to-select)
+    // =========================================================================
+
+    /// Rebuild the formula bar hit-testing cache (char boundaries + x positions).
+    /// Call this when edit_value changes.
+    pub fn rebuild_formula_bar_cache(&mut self, window: &Window) {
+        let text = &self.edit_value;
+
+        // Build char boundaries (byte offsets)
+        let mut boundaries = vec![0];
+        let mut byte_idx = 0;
+        for c in text.chars() {
+            byte_idx += c.len_utf8();
+            boundaries.push(byte_idx);
+        }
+
+        // Shape once to get x positions (use same font as formula bar render)
+        const FORMULA_BAR_FONT_SIZE: f32 = 14.0;
+        let text_len = text.len();
+
+        if text_len == 0 {
+            self.formula_bar_char_boundaries = boundaries;
+            self.formula_bar_boundary_xs = vec![0.0];
+            self.formula_bar_text_width = 0.0;
+            self.formula_bar_cache_dirty = false;
+            return;
+        }
+
+        let shape_text: SharedString = text.clone().into();
+        let shaped = window.text_system().shape_line(
+            shape_text,
+            px(FORMULA_BAR_FONT_SIZE),
+            &[TextRun {
+                len: text_len,
+                font: Font::default(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+
+        // Cache x positions for each boundary
+        let boundary_xs: Vec<f32> = boundaries
+            .iter()
+            .map(|&idx| shaped.x_for_index(idx).into())
+            .collect();
+
+        // Debug assert: xs should be monotonic
+        debug_assert!(
+            boundary_xs.windows(2).all(|w| w[0] <= w[1] + 0.01),
+            "boundary_xs not monotonic - text shaping issue"
+        );
+
+        self.formula_bar_text_width = *boundary_xs.last().unwrap_or(&0.0);
+        self.formula_bar_char_boundaries = boundaries;
+        self.formula_bar_boundary_xs = boundary_xs;
+        self.formula_bar_cache_dirty = false;
+    }
+
+    /// Rebuild formula bar cache if dirty.
+    /// Call this before hit-testing (mouse clicks).
+    pub fn maybe_rebuild_formula_bar_cache(&mut self, window: &Window) {
+        if self.formula_bar_cache_dirty {
+            self.rebuild_formula_bar_cache(window);
+        }
+    }
+
+    /// Convert mouse x position to byte index in edit_value.
+    /// Uses cached boundary positions for fast hit-testing.
+    pub fn byte_index_for_x(&self, x: f32) -> usize {
+        let boundaries = &self.formula_bar_char_boundaries;
+        let xs = &self.formula_bar_boundary_xs;
+
+        if boundaries.is_empty() || xs.is_empty() {
+            return 0;
+        }
+
+        // Find first boundary whose x >= click_x using partition_point
+        let i = xs.partition_point(|&bx| bx < x);
+
+        let right_idx = i.min(boundaries.len() - 1);
+        let left_idx = i.saturating_sub(1);
+
+        let right = boundaries[right_idx];
+        let left = boundaries[left_idx];
+
+        let xr = xs[right_idx];
+        let xl = xs[left_idx];
+
+        // Return whichever boundary is closer (sticky correct)
+        if (x - xl).abs() <= (xr - x).abs() {
+            left
+        } else {
+            right
+        }
+    }
+
+    /// Ensure formula bar caret is visible by adjusting formula_bar_scroll_x.
+    pub fn ensure_formula_bar_caret_visible(&mut self, window: &Window) {
+        // Rebuild cache if dirty
+        if self.formula_bar_cache_dirty {
+            self.rebuild_formula_bar_cache(window);
+        }
+
+        let text = &self.edit_value;
+        if text.is_empty() {
+            self.formula_bar_scroll_x = 0.0;
+            return;
+        }
+
+        // Formula bar visible width (approximate - full width minus cell ref and fx button)
+        // This will be refined when we have actual layout info
+        let visible_width = 400.0; // Conservative estimate
+        let margin = 10.0;
+
+        // Find caret x position from cache
+        let cursor_byte = self.edit_cursor.min(text.len());
+        let boundaries = &self.formula_bar_char_boundaries;
+        let xs = &self.formula_bar_boundary_xs;
+
+        // Find boundary index for cursor
+        let boundary_idx = boundaries
+            .iter()
+            .position(|&b| b >= cursor_byte)
+            .unwrap_or(boundaries.len().saturating_sub(1));
+
+        let caret_x = xs.get(boundary_idx).copied().unwrap_or(0.0);
+        let text_width = self.formula_bar_text_width;
+
+        // Text fits - no scrolling needed
+        if text_width <= visible_width {
+            self.formula_bar_scroll_x = 0.0;
+            return;
+        }
+
+        // Current visual caret position
+        let visual_caret = caret_x + self.formula_bar_scroll_x;
+
+        // Adjust scroll if caret outside visible region
+        if visual_caret < margin {
+            self.formula_bar_scroll_x = margin - caret_x;
+        } else if visual_caret > visible_width - margin {
+            self.formula_bar_scroll_x = (visible_width - margin) - caret_x;
+        }
+
+        // Clamp scroll to valid range
+        let min_scroll = visible_width - text_width;
+        self.formula_bar_scroll_x = self.formula_bar_scroll_x.min(0.0).max(min_scroll);
     }
 
     // Select all text in edit mode (byte-indexed)
@@ -9933,6 +10139,15 @@ impl Render for Spreadsheet {
         self.grid_layout = GridLayout {
             grid_body_origin: (grid_body_x, grid_body_y),
             viewport_size: (grid_viewport_width, grid_viewport_height),
+        };
+
+        // Update formula bar text rect for click-to-place-caret hit-testing
+        // Uses centralized constants: FORMULA_BAR_TEXT_LEFT, FORMULA_BAR_PADDING
+        let formula_bar_input_left = FORMULA_BAR_CELL_REF_WIDTH + FORMULA_BAR_FX_WIDTH;
+        let formula_bar_text_width = (window_width - formula_bar_input_left - FORMULA_BAR_PADDING * 2.0 - right_panel_width).max(0.0);
+        self.formula_bar_text_rect = gpui::Bounds {
+            origin: gpui::point(gpui::px(FORMULA_BAR_TEXT_LEFT), gpui::px(menu_height)),
+            size: gpui::size(gpui::px(formula_bar_text_width), gpui::px(formula_bar_height)),
         };
 
         // Update formula bar display cache (only when not editing)

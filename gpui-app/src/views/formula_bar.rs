@@ -1,6 +1,9 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, CELL_HEIGHT, REF_COLORS};
+use crate::app::{
+    Spreadsheet, CELL_HEIGHT, REF_COLORS, EditorSurface,
+    FORMULA_BAR_CELL_REF_WIDTH, FORMULA_BAR_FX_WIDTH,
+};
 use crate::theme::TokenKey;
 use crate::formula_context::{tokenize_for_highlight, TokenType, char_to_byte};
 
@@ -30,8 +33,9 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
         (app_bg, text_primary)
     };
 
-    // Build the formula display content
-    let formula_content = build_formula_content(app, window, &raw_value, editing);
+    // Build the formula display content with scroll offset
+    let scroll_x = app.formula_bar_scroll_x;
+    let formula_content = build_formula_content(app, window, &raw_value, editing, scroll_x, selection_bg);
 
     div()
         .relative()
@@ -45,7 +49,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
         // Cell reference label
         .child(
             div()
-                .w(px(60.0))
+                .w(px(FORMULA_BAR_CELL_REF_WIDTH))
                 .h_full()
                 .flex()
                 .items_center()
@@ -61,7 +65,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
         // Function button (fx)
         .child(
             div()
-                .w(px(30.0))
+                .w(px(FORMULA_BAR_FX_WIDTH))
                 .h_full()
                 .flex()
                 .items_center()
@@ -85,11 +89,93 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 .text_sm()
                 .overflow_hidden()
                 .cursor_text()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    // Click to start editing if not already editing
+                // formula_bar_text_rect is calculated during render in app.rs
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    // Start editing if not already
                     if !this.mode.is_editing() {
                         this.start_edit(cx);
                     }
+
+                    // Rebuild cache if needed for hit-testing
+                    this.maybe_rebuild_formula_bar_cache(window);
+
+                    // Calculate click position relative to text area start (in window coords)
+                    let click_x: f32 = event.position.x.into();
+                    let text_left: f32 = this.formula_bar_text_rect.origin.x.into();
+                    let x = click_x - text_left - this.formula_bar_scroll_x;
+                    let x = x.clamp(0.0, this.formula_bar_text_width);
+                    let byte_index = this.byte_index_for_x(x);
+
+                    // Set cursor and start drag selection
+                    this.edit_cursor = byte_index;
+                    this.edit_selection_anchor = Some(byte_index);  // Anchor for selection
+                    this.formula_bar_drag_anchor = Some(byte_index);  // Track drag state
+
+                    // Mark as editing in formula bar
+                    this.active_editor = EditorSurface::FormulaBar;
+
+                    // Ensure caret is visible
+                    this.ensure_formula_bar_caret_visible(window);
+                    this.reset_caret_activity();
+
+                    cx.notify();
+                }))
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                    // Only process if we're dragging (mousedown set the anchor)
+                    if this.formula_bar_drag_anchor.is_none() {
+                        return;
+                    }
+
+                    // Rebuild cache if needed
+                    this.maybe_rebuild_formula_bar_cache(window);
+
+                    // Calculate position relative to text area
+                    let mouse_x: f32 = event.position.x.into();
+                    let text_left: f32 = this.formula_bar_text_rect.origin.x.into();
+                    let visible_width: f32 = this.formula_bar_text_rect.size.width.into();
+                    let text_content_width = this.formula_bar_text_width;
+                    let text_right = text_left + visible_width;
+
+                    // Auto-scroll if near edges
+                    let edge_margin = 10.0;
+                    let scroll_speed = 4.0;
+                    if mouse_x < text_left + edge_margin {
+                        // Near left edge - scroll to show content on the left
+                        this.formula_bar_scroll_x = (this.formula_bar_scroll_x + scroll_speed).min(0.0);
+                    } else if mouse_x > text_right - edge_margin {
+                        // Near right edge - scroll to show content on the right
+                        // Clamp so text end aligns with visible area end (no blank space)
+                        let min_scroll = if text_content_width > visible_width {
+                            -(text_content_width - visible_width)
+                        } else {
+                            0.0
+                        };
+                        this.formula_bar_scroll_x = (this.formula_bar_scroll_x - scroll_speed).max(min_scroll);
+                    }
+
+                    // Calculate x position in text coordinates
+                    let x = mouse_x - text_left - this.formula_bar_scroll_x;
+                    let x = x.clamp(0.0, text_content_width);
+                    let byte_index = this.byte_index_for_x(x);
+
+                    // Update cursor (selection extends from anchor to cursor)
+                    this.edit_cursor = byte_index;
+                    this.reset_caret_activity();
+
+                    cx.notify();
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    // End drag
+                    this.formula_bar_drag_anchor = None;
+
+                    // If cursor == anchor, clear selection (it was just a click, not a drag)
+                    if let Some(anchor) = this.edit_selection_anchor {
+                        if anchor == this.edit_cursor {
+                            this.edit_selection_anchor = None;
+                        }
+                    }
+
+                    cx.notify();
                 }))
                 .on_hover(cx.listener(move |this, hovering, _, cx| {
                     if *hovering {
@@ -132,46 +218,82 @@ fn extract_first_function(formula: &str) -> Option<&'static crate::formula_conte
 }
 
 /// Build the formula content with syntax highlighting
-fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, editing: bool) -> AnyElement {
+fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, editing: bool, scroll_x: f32, selection_bg: Hsla) -> AnyElement {
     let text_primary = app.token(TokenKey::TextPrimary);
+
+    // Check if we have a selection to render
+    let has_selection = editing && app.edit_selection_anchor.is_some();
+    let selection_range = if has_selection {
+        let anchor = app.edit_selection_anchor.unwrap();
+        let cursor = app.edit_cursor;
+        Some((anchor.min(cursor), anchor.max(cursor)))
+    } else {
+        None
+    };
 
     // Only highlight formulas (starting with '=')
     if !raw_value.starts_with('=') {
-        // Plain text - caret drawn as overlay, not injected
+        // Plain text - caret/selection drawn as overlay, not injected
         let text_str = raw_value.to_string();
         let text_shared: SharedString = text_str.clone().into();
+        let text_len = text_shared.len();
+
+        // Shape text once for both selection and caret positioning
+        let shaped = window.text_system().shape_line(
+            text_shared.clone(),
+            px(14.0), // Match .text_sm() which is typically 14px
+            &[TextRun {
+                len: text_len,
+                font: Font::default(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
 
         return div()
             .relative()
-            .text_color(text_primary)
-            .child(text_str)
-            .when(editing && app.caret_visible && app.edit_selection_anchor.is_none(), |d| {
-                // Draw caret overlay with proper text measurement
-                // edit_cursor is already a byte offset
-                let byte_index = app.edit_cursor.min(text_shared.len());
-
-                // Shape the text to get accurate character positions
-                let text_len = text_shared.len();
-                let shaped = window.text_system().shape_line(
-                    text_shared.clone(),
-                    px(14.0), // Match .text_sm() which is typically 14px
-                    &[TextRun {
-                        len: text_len,
-                        font: Font::default(),
-                        color: Hsla::default(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                );
-
-                let caret_x: f32 = shaped.x_for_index(byte_index).into();
+            .overflow_hidden()
+            // Selection background (rendered first, behind text)
+            .when_some(selection_range, |d, (sel_start, sel_end)| {
+                let sel_start = sel_start.min(text_len);
+                let sel_end = sel_end.min(text_len);
+                let sel_start_x: f32 = shaped.x_for_index(sel_start).into();
+                let sel_end_x: f32 = shaped.x_for_index(sel_end).into();
+                let visual_start_x = sel_start_x + scroll_x;
+                let visual_end_x = sel_end_x + scroll_x;
+                let sel_width = (visual_end_x - visual_start_x).max(0.0);
 
                 d.child(
                     div()
                         .absolute()
-                        .left(px(caret_x))
+                        .left(px(visual_start_x))
+                        .top(px(2.0))
+                        .w(px(sel_width))
+                        .h(px(16.0))
+                        .bg(selection_bg)
+                )
+            })
+            .child(
+                // Scrollable text container
+                div()
+                    .relative()
+                    .left(px(scroll_x))
+                    .text_color(text_primary)
+                    .child(text_str)
+            )
+            .when(editing && app.caret_visible && !has_selection, |d| {
+                // Draw caret overlay (only when no selection)
+                let byte_index = app.edit_cursor.min(text_len);
+                let caret_x: f32 = shaped.x_for_index(byte_index).into();
+                let visual_caret_x = caret_x + scroll_x;
+
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(visual_caret_x))
                         .top(px(2.0))
                         .w(px(1.5))
                         .h(px(16.0))
@@ -334,42 +456,67 @@ fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, ed
     // Build the styled text element
     let shared_text: SharedString = display_text.clone().into();
     let styled = StyledText::new(shared_text.clone()).with_runs(runs.clone());
+    let text_len = display_text.len();
 
-    // Wrap in relative div and add caret overlay if needed
-    if show_caret {
-        // edit_cursor is already a byte offset
-        let byte_index = cursor_byte.min(display_text.len());
+    // Shape text once for both selection and caret positioning
+    let shaped = window.text_system().shape_line(
+        shared_text,
+        px(14.0), // Match .text_sm() which is typically 14px
+        &runs,
+        None,
+    );
 
-        // Debug asserts to catch string/cursor mismatches
-        debug_assert!(app.edit_cursor <= display_text.len(), "cursor {} > text.len {}", app.edit_cursor, display_text.len());
-        debug_assert!(display_text.is_char_boundary(byte_index), "cursor not on char boundary");
+    // Render with selection background and/or caret overlay
+    div()
+        .relative()
+        .overflow_hidden()
+        // Selection background (rendered first, behind text)
+        .when_some(selection_range, |d, (sel_start, sel_end)| {
+            let sel_start = sel_start.min(text_len);
+            let sel_end = sel_end.min(text_len);
+            let sel_start_x: f32 = shaped.x_for_index(sel_start).into();
+            let sel_end_x: f32 = shaped.x_for_index(sel_end).into();
+            let visual_start_x = sel_start_x + scroll_x;
+            let visual_end_x = sel_end_x + scroll_x;
+            let sel_width = (visual_end_x - visual_start_x).max(0.0);
 
-        // Shape with the SAME runs as StyledText to ensure positions match
-        let shaped = window.text_system().shape_line(
-            shared_text,
-            px(14.0), // Match .text_sm() which is typically 14px
-            &runs,
-            None,
-        );
-
-        let caret_x: f32 = shaped.x_for_index(byte_index).into();
-
-        div()
-            .relative()
-            .child(styled)
-            .child(
+            d.child(
                 div()
                     .absolute()
-                    .left(px(caret_x))
+                    .left(px(visual_start_x))
+                    .top(px(2.0))
+                    .w(px(sel_width))
+                    .h(px(16.0))
+                    .bg(selection_bg)
+            )
+        })
+        .child(
+            // Scrollable text container
+            div()
+                .relative()
+                .left(px(scroll_x))
+                .child(styled)
+        )
+        .when(show_caret, |d| {
+            // Draw caret overlay (only when no selection)
+            let byte_index = cursor_byte.min(text_len);
+            debug_assert!(app.edit_cursor <= text_len, "cursor {} > text.len {}", app.edit_cursor, text_len);
+            debug_assert!(display_text.is_char_boundary(byte_index), "cursor not on char boundary");
+
+            let caret_x: f32 = shaped.x_for_index(byte_index).into();
+            let visual_caret_x = caret_x + scroll_x;
+
+            d.child(
+                div()
+                    .absolute()
+                    .left(px(visual_caret_x))
                     .top(px(2.0))
                     .w(px(1.5))
                     .h(px(16.0))
                     .bg(text_primary)
             )
-            .into_any_element()
-    } else {
-        styled.into_any_element()
-    }
+        })
+        .into_any_element()
 }
 
 /// Render the autocomplete dropdown popup
