@@ -38,6 +38,7 @@ mod search;
 mod session;
 mod settings;
 mod sheet_ops;
+mod sort_filter;
 mod theme;
 mod undo_redo;
 mod views;
