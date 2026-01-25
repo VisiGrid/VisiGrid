@@ -75,6 +75,7 @@ pub enum PaletteScope {
 // ============================================================================
 
 /// Native file extension for VisiGrid documents
+#[allow(dead_code)]
 pub const NATIVE_EXT: &str = "vgrid";
 
 /// Returns true if the extension is considered "native" (no provenance needed).

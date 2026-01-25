@@ -431,6 +431,7 @@ pub struct PrecisionWarning {
 }
 
 /// Excel has 15-digit precision. Numbers with more significant digits lose precision.
+#[allow(dead_code)]
 const EXCEL_MAX_SAFE_DIGITS: usize = 15;
 
 /// Check if a number exceeds Excel's safe precision (15 significant digits)

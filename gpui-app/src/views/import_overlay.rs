@@ -9,7 +9,7 @@ use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
 
 /// Render the import overlay
-pub fn render_import_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+pub fn render_import_overlay(app: &Spreadsheet, _cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let panel_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);

@@ -2733,7 +2733,7 @@ fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
 
     // Position overlay near the selection
     // Calculate position based on selection and scroll
-    let ((min_row, min_col), (max_row, max_col)) = app.selection_range();
+    let ((_min_row, _min_col), (max_row, max_col)) = app.selection_range();
 
     // Calculate pixel position of selection end (bottom-right of selection)
     // Account for: header width, scroll position, cell dimensions

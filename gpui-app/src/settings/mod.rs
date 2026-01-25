@@ -18,8 +18,9 @@ mod persistence;
 mod store;
 
 pub use types::*;
-pub use user::*;
 pub use document::*;
-pub use resolved::*;
 pub use persistence::*;
 pub use store::*;
+
+// Note: user and resolved modules are only used internally within settings
+// Their types are accessed via the store interface (user_settings, etc.)

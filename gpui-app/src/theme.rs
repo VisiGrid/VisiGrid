@@ -277,7 +277,7 @@ pub fn ledger_dark_theme() -> Theme {
     let bg_darkest = rgb(0x0d1016);   // Editor bg (active surface)
     let bg_dark = rgb(0x0f1115);      // App/Grid background
     let bg_panel = rgb(0x141821);     // Panels
-    let bg_header = rgb(0x171c26);    // Headers
+    let _bg_header = rgb(0x171c26);    // Headers
     let grid_subtle = rgb(0x1c2330);  // Subtle gridlines
     let grid_bold = rgb(0x273042);    // Bold gridlines / borders
 
@@ -542,7 +542,7 @@ pub fn ledger_light_theme() -> Theme {
 
     // Borders - more visible than Catppuccin (precision)
     let border = rgb(0xd1d5dc);
-    let grid_line = rgb(0xe5e7eb);
+    let _grid_line = rgb(0xe5e7eb);
 
     // Conservative blue accent
     let accent = rgb(0x2563eb);        // Blue-600
@@ -784,13 +784,13 @@ pub fn catppuccin_theme() -> Theme {
     let overlay0 = rgb(0x9ca0b0);  // Muted
     let text = rgb(0x4c4f69);      // Primary text
     let subtext0 = rgb(0x6c6f85);  // Secondary text
-    let subtext1 = rgb(0x5c5f77);  // Tertiary text
+    let _subtext1 = rgb(0x5c5f77);  // Tertiary text
 
     // Accent colors (Latte variants - slightly more saturated for light bg)
     let blue = rgb(0x1e66f5);
     let lavender = rgb(0x7287fd);
     let sapphire = rgb(0x209fb5);
-    let teal = rgb(0x179299);
+    let _teal = rgb(0x179299);
     let green = rgb(0x40a02b);
     let yellow = rgb(0xdf8e1d);
     let peach = rgb(0xfe640b);

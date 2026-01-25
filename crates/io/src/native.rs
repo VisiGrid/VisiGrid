@@ -510,7 +510,7 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
             }
 
             // Add to workbook (using the internal method)
-            workbook.named_ranges_mut().set(named_range);
+            let _ = workbook.named_ranges_mut().set(named_range);
         }
     }
 

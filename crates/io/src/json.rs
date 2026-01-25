@@ -4,7 +4,7 @@ use std::path::Path;
 use std::fs::File;
 use std::io::BufWriter;
 
-use visigrid_engine::sheet::{Sheet, SheetId};
+use visigrid_engine::sheet::Sheet;
 
 /// Export sheet as JSON array of arrays
 /// Each row is an array of cell values (strings)

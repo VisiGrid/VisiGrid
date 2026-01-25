@@ -3,10 +3,9 @@
 //! Shows an upgrade prompt instead of the full Lua REPL.
 
 use gpui::*;
-use gpui::prelude::FluentBuilder;
 
 use crate::app::Spreadsheet;
-use crate::scripting::{OutputEntry, OutputKind, MIN_CONSOLE_HEIGHT, MAX_CONSOLE_HEIGHT};
+use crate::scripting::{OutputEntry, OutputKind};
 use crate::theme::TokenKey;
 
 /// Render the Lua console panel (upgrade prompt in Free edition)

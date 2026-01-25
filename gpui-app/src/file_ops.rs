@@ -423,7 +423,7 @@ impl Spreadsheet {
         let suggested_name = format!("{}.xlsx", base_name);
 
         // Build layout information for each sheet
-        let layouts = self.build_export_layouts();
+        let _layouts = self.build_export_layouts();
 
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {

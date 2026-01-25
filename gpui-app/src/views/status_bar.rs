@@ -52,7 +52,7 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
     let context_menu_sheet = app.sheet_context_menu;
 
     // Theme colors
-    let status_bg = app.token(TokenKey::StatusBg);
+    let _status_bg = app.token(TokenKey::StatusBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_muted = app.token(TokenKey::TextMuted);
     let text_primary = app.token(TokenKey::TextPrimary);
@@ -489,11 +489,11 @@ fn render_verified_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
     let success_color = app.token(TokenKey::Ok);
     let error_color = app.token(TokenKey::Error);
     let text_muted = app.token(TokenKey::TextMuted);
-    let panel_bg = app.token(TokenKey::PanelBg);
+    let _panel_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
 
     // Determine status based on last recalc report
-    let (status_text, status_color, has_issues) = if let Some(report) = &app.last_recalc_report {
+    let (status_text, status_color, _has_issues) = if let Some(report) = &app.last_recalc_report {
         if report.had_cycles || !report.errors.is_empty() {
             ("Verified ⚠", error_color, true)
         } else {
