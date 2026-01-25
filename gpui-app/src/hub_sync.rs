@@ -983,10 +983,9 @@ impl Spreadsheet {
 
     /// Show link to VisiHub dialog
     pub fn hub_show_link_dialog(&mut self, cx: &mut Context<Self>) {
-        // Must be signed in first
+        // Must be signed in first - start sign-in flow if not
         if load_auth().is_none() {
-            self.status_message = Some("Sign in to VisiHub first".to_string());
-            cx.notify();
+            self.hub_sign_in(cx);
             return;
         }
 
