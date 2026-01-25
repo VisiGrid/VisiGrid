@@ -18,6 +18,7 @@ mod formula_refs;
 mod grid_ops;
 mod hints;
 mod history;
+mod keyboard_hints;
 mod hub;
 mod hub_sync;
 mod keybindings;

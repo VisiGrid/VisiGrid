@@ -2,7 +2,7 @@
 
 use gpui::*;
 use visigrid_engine::named_range::is_valid_name;
-use crate::app::{Spreadsheet, CreateNameFocus, col_to_letter};
+use crate::app::{Spreadsheet, CreateNameFocus};
 use crate::mode::Mode;
 
 impl Spreadsheet {
@@ -170,12 +170,12 @@ impl Spreadsheet {
             anchor_col.max(end_col),
         );
 
-        let start_ref = format!("{}{}", col_to_letter(start_col), start_row + 1);
+        let start_ref = format!("{}{}", Self::col_to_letter(start_col), start_row + 1);
 
         if start_row == end_row && start_col == end_col {
             start_ref
         } else {
-            format!("{}:{}{}", start_ref, col_to_letter(end_col), end_row + 1)
+            format!("{}:{}{}", start_ref, Self::col_to_letter(end_col), end_row + 1)
         }
     }
 }
