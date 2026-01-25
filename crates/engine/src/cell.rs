@@ -369,6 +369,11 @@ impl CellValue {
         }
     }
 
+    /// Check if this cell contains a cycle error (#CYCLE!).
+    pub fn is_cycle_error(&self) -> bool {
+        matches!(self, CellValue::Text(s) if s == "#CYCLE!")
+    }
+
     /// Format a number according to the specified format
     pub fn format_number(n: f64, format: &NumberFormat) -> String {
         match format {

@@ -253,6 +253,19 @@ fn render_cell(
     let is_formula_ref = app.is_formula_ref(view_row, col);
     let formula_ref_color = app.formula_ref_color(view_row, col);  // Color index for multi-color refs
     let is_active_ref_target = app.is_active_ref_target(view_row, col);  // Live ref navigation target
+    let is_inspector_hover = app.inspector_hover_cell == Some((view_row, col));  // Hover highlight from inspector
+
+    // Check if cell is in trace path (Phase 3.5b)
+    let sheet_id = app.sheet().id;
+    let trace_position = app.inspector_trace_path.as_ref().and_then(|path| {
+        path.iter().position(|cell| {
+            cell.sheet == sheet_id && cell.row == view_row && cell.col == col
+        }).map(|pos| {
+            let is_start = pos == 0;
+            let is_end = pos == path.len() - 1;
+            (is_start, is_end)
+        })
+    });
 
     // Check for hint mode and get hint label for this cell
     let hint_label = if app.mode == Mode::Hint {
@@ -333,6 +346,40 @@ fn render_cell(
                     .absolute()
                     .inset_0()
                     .bg(overlay_color)
+            );
+        }
+    }
+
+    // Inspector hover highlight (when hovering over a cell reference in the inspector panel)
+    if is_inspector_hover && !is_selected && !is_active {
+        let hover_color = app.token(TokenKey::Accent).opacity(0.3);
+        cell = cell.child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(hover_color)
+                .border_2()
+                .border_color(app.token(TokenKey::Accent))
+        );
+    }
+
+    // Trace path highlight (Phase 3.5b - when a trace is active)
+    if let Some((is_start, is_end)) = trace_position {
+        if !is_selected && !is_active {
+            let accent = app.token(TokenKey::Accent);
+            // Start/end cells get stronger emphasis
+            let (bg_opacity, border_width) = if is_start || is_end {
+                (0.25, px(2.0))
+            } else {
+                (0.12, px(1.0))
+            };
+            cell = cell.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(accent.opacity(bg_opacity))
+                    .border(border_width)
+                    .border_color(accent.opacity(0.6))
             );
         }
     }

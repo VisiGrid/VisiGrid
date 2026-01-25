@@ -4,6 +4,7 @@ pub mod dep_graph;
 pub mod filter;
 pub mod formula;
 pub mod named_range;
+pub mod provenance;
 pub mod recalc;
 pub mod sheet;
 pub mod workbook;

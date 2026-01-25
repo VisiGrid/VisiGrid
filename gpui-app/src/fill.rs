@@ -8,6 +8,7 @@ use regex::Regex;
 use crate::app::{Spreadsheet, FillDrag, FillAxis};
 use crate::history::CellChange;
 use crate::mode::Mode;
+use visigrid_engine::provenance::{MutationOp, FillDirection, FillMode};
 
 /// Hit area size for fill handle (logical pixels, unscaled by zoom)
 pub const FILL_HANDLE_HIT_SIZE: f32 = 14.0;
@@ -62,12 +63,28 @@ impl Spreadsheet {
             }
         }
 
-        self.history.record_batch(self.sheet_index(), changes);
-        self.bump_cells_rev();  // Invalidate cell search cache
-        self.is_modified = true;
+        if !changes.is_empty() {
+            let provenance = MutationOp::Fill {
+                sheet: self.sheet().id,
+                src_start_row: min_row,
+                src_start_col: min_col,
+                src_end_row: min_row,
+                src_end_col: max_col,
+                dst_start_row: min_row + 1,
+                dst_start_col: min_col,
+                dst_end_row: max_row,
+                dst_end_col: max_col,
+                direction: FillDirection::Down,
+                mode: FillMode::Both,
+            }.to_provenance(&self.sheet().name);
 
-        // Smoke mode: trigger full ordered recompute for dogfooding
-        self.maybe_smoke_recalc();
+            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+            self.bump_cells_rev();  // Invalidate cell search cache
+            self.is_modified = true;
+
+            // Smoke mode: trigger full ordered recompute for dogfooding
+            self.maybe_smoke_recalc();
+        }
 
         self.status_message = Some("Filled down".into());
         cx.notify();
@@ -113,12 +130,28 @@ impl Spreadsheet {
             }
         }
 
-        self.history.record_batch(self.sheet_index(), changes);
-        self.bump_cells_rev();  // Invalidate cell search cache
-        self.is_modified = true;
+        if !changes.is_empty() {
+            let provenance = MutationOp::Fill {
+                sheet: self.sheet().id,
+                src_start_row: min_row,
+                src_start_col: min_col,
+                src_end_row: max_row,
+                src_end_col: min_col,
+                dst_start_row: min_row,
+                dst_start_col: min_col + 1,
+                dst_end_row: max_row,
+                dst_end_col: max_col,
+                direction: FillDirection::Right,
+                mode: FillMode::Both,
+            }.to_provenance(&self.sheet().name);
 
-        // Smoke mode: trigger full ordered recompute for dogfooding
-        self.maybe_smoke_recalc();
+            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+            self.bump_cells_rev();  // Invalidate cell search cache
+            self.is_modified = true;
+
+            // Smoke mode: trigger full ordered recompute for dogfooding
+            self.maybe_smoke_recalc();
+        }
 
         self.status_message = Some("Filled right".into());
         cx.notify();
@@ -587,12 +620,35 @@ impl Spreadsheet {
         }
 
         let count = fill_range.len();
-        self.history.record_batch(self.sheet_index(), changes);
-        self.bump_cells_rev();
-        self.is_modified = true;
+        if !changes.is_empty() {
+            let direction = if end_row > anchor_row { FillDirection::Down } else { FillDirection::Up };
+            let (dst_start, dst_end) = if end_row > anchor_row {
+                (anchor_row + 1, end_row)
+            } else {
+                (end_row, anchor_row - 1)
+            };
 
-        // Smoke mode: trigger full ordered recompute for dogfooding
-        self.maybe_smoke_recalc();
+            let provenance = MutationOp::Fill {
+                sheet: self.sheet().id,
+                src_start_row: anchor_row,
+                src_start_col: col,
+                src_end_row: anchor_row,
+                src_end_col: col,
+                dst_start_row: dst_start,
+                dst_start_col: col,
+                dst_end_row: dst_end,
+                dst_end_col: col,
+                direction,
+                mode: FillMode::Both,
+            }.to_provenance(&self.sheet().name);
+
+            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+            self.bump_cells_rev();
+            self.is_modified = true;
+
+            // Smoke mode: trigger full ordered recompute for dogfooding
+            self.maybe_smoke_recalc();
+        }
 
         // Update selection to include filled range
         self.view_state.selection_end = Some(end);
@@ -648,12 +704,35 @@ impl Spreadsheet {
         }
 
         let count = fill_range.len();
-        self.history.record_batch(self.sheet_index(), changes);
-        self.bump_cells_rev();
-        self.is_modified = true;
+        if !changes.is_empty() {
+            let direction = if end_col > anchor_col { FillDirection::Right } else { FillDirection::Left };
+            let (dst_start, dst_end) = if end_col > anchor_col {
+                (anchor_col + 1, end_col)
+            } else {
+                (end_col, anchor_col - 1)
+            };
 
-        // Smoke mode: trigger full ordered recompute for dogfooding
-        self.maybe_smoke_recalc();
+            let provenance = MutationOp::Fill {
+                sheet: self.sheet().id,
+                src_start_row: row,
+                src_start_col: anchor_col,
+                src_end_row: row,
+                src_end_col: anchor_col,
+                dst_start_row: row,
+                dst_start_col: dst_start,
+                dst_end_row: row,
+                dst_end_col: dst_end,
+                direction,
+                mode: FillMode::Both,
+            }.to_provenance(&self.sheet().name);
+
+            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+            self.bump_cells_rev();
+            self.is_modified = true;
+
+            // Smoke mode: trigger full ordered recompute for dogfooding
+            self.maybe_smoke_recalc();
+        }
 
         // Update selection to include filled range
         self.view_state.selection_end = Some(end);

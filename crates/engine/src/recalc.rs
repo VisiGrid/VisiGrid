@@ -244,6 +244,7 @@ mod tests {
             had_cycles: false,
             unknown_deps_recomputed: 2,
             errors: vec![],
+            cell_info: Default::default(),
         };
         assert_eq!(
             report.summary(),
@@ -260,6 +261,7 @@ mod tests {
             had_cycles: false,
             unknown_deps_recomputed: 3,
             errors: vec![],
+            cell_info: Default::default(),
         };
         assert_eq!(
             report.log_line(),
@@ -276,6 +278,7 @@ mod tests {
             had_cycles: true,
             unknown_deps_recomputed: 0,
             errors: vec![RecalcError::new(cell(1, 0, 0), "test error")],
+            cell_info: Default::default(),
         };
         assert_eq!(
             report.log_line(),

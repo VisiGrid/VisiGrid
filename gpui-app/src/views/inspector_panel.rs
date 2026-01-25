@@ -41,6 +41,13 @@ pub fn render_inspector_panel(app: &mut Spreadsheet, cx: &mut Context<Spreadshee
         .on_mouse_down(MouseButton::Left, |_, _, _| {
             // Absorb click - don't propagate to grid
         })
+        // Clear hover highlight when mouse leaves inspector panel
+        .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            if this.inspector_hover_cell.is_some() {
+                this.inspector_hover_cell = None;
+                cx.notify();
+            }
+        }))
         // Header with title and close button
         .child(render_header(&cell_ref, is_pinned, text_primary, text_muted, panel_border, cx))
         // Tab bar
@@ -415,37 +422,219 @@ fn render_inspector_tab(
         content = content.child(verification_section);
     }
 
-    // ========== PRO: IMPACT (what propagates if this changes) ==========
-    if is_pro && app.verified_mode && !dependents.is_empty() {
-        let direct_dependents = dependents.len();
+    // ========== PRO: TRUST HEADER (Phase 3.5 — Impact + Risk Semantics) ==========
+    // This is the "certificate" feel — shows impact and any trust issues
+    if is_pro {
+        let sheet_id = app.sheet().id;
+        let impact = app.workbook.compute_impact(sheet_id, row, col);
 
-        // Language that implies risk without being scary
-        let impact_text = if direct_dependents == 1 {
-            "Changes here propagate to 1 downstream value".to_string()
-        } else {
-            format!("Changes here propagate to {} downstream values", direct_dependents)
-        };
+        // Cycle detection: use recalc report as source of truth when available
+        // 1. Check if this cell itself is #CYCLE!
+        // 2. Check if any upstream cell has #CYCLE! (via graph traversal)
+        // 3. If verified mode, check recalc report's had_cycles flag
+        let cell_is_cycle = display_value == "#CYCLE!";
+        let upstream_has_cycle = app.workbook.has_cycle_in_upstream(sheet_id, row, col);
+        let report_had_cycles = app.verified_mode
+            && app.last_recalc_report.as_ref().map(|r| r.had_cycles).unwrap_or(false);
 
-        let impact_section = div()
-            .py_2()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(text_muted)
-                    .child("Impact")
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(text_primary)
-                    .child(impact_text)
-            );
+        // Determine risk state
+        let has_dynamic = impact.has_unknown_in_chain;
+        // Cell is affected by cycle if: it IS a cycle, its inputs have cycles, or workbook has cycles affecting it
+        let has_cycle = cell_is_cycle || upstream_has_cycle || (report_had_cycles && upstream_has_cycle);
+        let is_verifiable = !has_cycle;
 
-        content = content.child(impact_section);
+        // Only show impact header if there are dependents or it's a formula
+        let show_impact = impact.affected_cells > 0 || is_formula;
+
+        if show_impact {
+            // Warning color for risk states
+            let warning_color: Hsla = rgb(0xFFA500).into();
+            let error_color: Hsla = rgb(0xE53935).into();
+
+            // Impact line text
+            let impact_text = if impact.is_unbounded {
+                "unbounded (dynamic refs)".to_string()
+            } else if impact.affected_cells == 0 {
+                "no downstream cells".to_string()
+            } else if impact.affected_cells == 1 {
+                format!("affects 1 cell • max depth {}", impact.max_depth)
+            } else {
+                format!("affects {} cells • max depth {}", impact.affected_cells, impact.max_depth)
+            };
+
+            // Build badges
+            let mut badges: Vec<(&str, Hsla)> = Vec::new();
+            if has_dynamic {
+                badges.push(("Dynamic", warning_color));
+            }
+            if has_cycle {
+                badges.push(("Cycle", error_color));
+            }
+            if !is_verifiable {
+                badges.push(("Not verifiable", error_color));
+            }
+
+            let header_border = if !is_verifiable {
+                error_color.opacity(0.3)
+            } else if has_dynamic {
+                warning_color.opacity(0.3)
+            } else {
+                accent.opacity(0.2)
+            };
+
+            let header_bg = if !is_verifiable {
+                error_color.opacity(0.05)
+            } else if has_dynamic {
+                warning_color.opacity(0.05)
+            } else {
+                accent.opacity(0.03)
+            };
+
+            let impact_section = div()
+                .p_2()
+                .rounded(px(4.0))
+                .bg(header_bg)
+                .border_1()
+                .border_color(header_border)
+                .flex()
+                .flex_col()
+                .gap_1()
+                // Impact line
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(text_muted)
+                                .child("Impact:")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(if impact.is_unbounded { warning_color } else { text_primary })
+                                .child(SharedString::from(impact_text))
+                        )
+                )
+                // Risk badges (if any)
+                .when(!badges.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .mt_1()
+                            .children(badges.into_iter().map(|(label, color)| {
+                                div()
+                                    .px_2()
+                                    .py(px(2.0))
+                                    .rounded(px(3.0))
+                                    .bg(color.opacity(0.15))
+                                    .border_1()
+                                    .border_color(color.opacity(0.4))
+                                    .text_size(px(9.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(color)
+                                    .child(label)
+                            }))
+                    )
+                });
+
+            content = content.child(impact_section);
+        }
+    }
+
+    // ========== PRO: TRACE PATH (Phase 3.5b) ==========
+    // Show the current trace path when active
+    if is_pro {
+        if let Some(ref trace_path) = app.inspector_trace_path {
+            if !trace_path.is_empty() {
+                let sheet_id = app.sheet().id;
+                let warning_color: Hsla = rgb(0xFFA500).into();
+
+                // Build path string: A1 → B1 → C1 → ...
+                let path_str: String = trace_path
+                    .iter()
+                    .filter(|cell| cell.sheet == sheet_id)
+                    .map(|cell| app.cell_ref_at(cell.row, cell.col))
+                    .collect::<Vec<_>>()
+                    .join(" → ");
+
+                // Truncate if too long
+                let display_path = if path_str.len() > 60 {
+                    let first = &trace_path[0];
+                    let last = &trace_path[trace_path.len() - 1];
+                    format!(
+                        "{} → ... → {} ({} cells)",
+                        app.cell_ref_at(first.row, first.col),
+                        app.cell_ref_at(last.row, last.col),
+                        trace_path.len()
+                    )
+                } else {
+                    path_str
+                };
+
+                let trace_section = div()
+                    .p_2()
+                    .rounded(px(4.0))
+                    .bg(accent.opacity(0.08))
+                    .border_1()
+                    .border_color(accent.opacity(0.3))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(text_muted)
+                                    .child("Trace")
+                            )
+                            .child(
+                                div()
+                                    .id("trace-clear-btn")
+                                    .px_1()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .text_size(px(9.0))
+                                    .text_color(text_muted)
+                                    .hover(|s| s.bg(panel_border.opacity(0.5)))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                        this.clear_trace_path(cx);
+                                    }))
+                                    .child("Clear")
+                            )
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(text_primary)
+                            .child(SharedString::from(display_path))
+                    )
+                    .when(app.inspector_trace_incomplete, |el| {
+                        el.child(
+                            div()
+                                .mt_1()
+                                .px_2()
+                                .py(px(2.0))
+                                .rounded(px(3.0))
+                                .bg(warning_color.opacity(0.15))
+                                .text_size(px(9.0))
+                                .text_color(warning_color)
+                                .child("Trace incomplete (dynamic refs)")
+                        )
+                    });
+
+                content = content.child(trace_section);
+            }
+        }
     }
 
     // ========== IDENTITY SECTION (Free) ==========
@@ -502,15 +691,24 @@ fn render_inspector_tab(
         ));
     }
 
-    // Inputs section (formerly Precedents)
+    // Inputs section (formerly Precedents) - click triggers trace
     if !precedents.is_empty() {
-        let mut prec_section = section("Inputs", panel_border, text_primary);
+        let mut prec_section = section("Inputs", panel_border, text_primary)
+            .child(
+                div()
+                    .text_size(px(9.0))
+                    .text_color(text_muted.opacity(0.7))
+                    .mb_1()
+                    .child("Click to trace path")
+            );
         for (r, c) in precedents.iter().take(10) {
-            prec_section = prec_section.child(clickable_cell_row(
-                "",
+            prec_section = prec_section.child(traceable_cell_row(
                 &app.cell_ref_at(*r, *c),
                 *r,
                 *c,
+                row,  // inspected cell
+                col,
+                true,  // is_input
                 text_muted,
                 accent,
                 cx,
@@ -527,15 +725,24 @@ fn render_inspector_tab(
         content = content.child(prec_section);
     }
 
-    // Outputs section (formerly Dependents)
+    // Outputs section (formerly Dependents) - click triggers trace
     if !dependents.is_empty() {
-        let mut dep_section = section("Outputs", panel_border, text_primary);
+        let mut dep_section = section("Outputs", panel_border, text_primary)
+            .child(
+                div()
+                    .text_size(px(9.0))
+                    .text_color(text_muted.opacity(0.7))
+                    .mb_1()
+                    .child("Click to trace path")
+            );
         for (r, c) in dependents.iter().take(10) {
-            dep_section = dep_section.child(clickable_cell_row(
-                "",
+            dep_section = dep_section.child(traceable_cell_row(
                 &app.cell_ref_at(*r, *c),
                 *r,
                 *c,
+                row,  // inspected cell
+                col,
+                false,  // is_output
                 text_muted,
                 accent,
                 cx,
@@ -573,6 +780,15 @@ fn render_inspector_tab(
                 recalc_section = recalc_section.child(info_row(
                     "Eval Order",
                     &format!("#{} of {}", info.eval_order + 1, report.cells_recomputed),
+                    text_muted,
+                    text_primary,
+                ));
+
+                // Recompute timestamp (relative time)
+                let timestamp = format_relative_time(info.recompute_time);
+                recalc_section = recalc_section.child(info_row(
+                    "Recomputed",
+                    &timestamp,
                     text_muted,
                     text_primary,
                 ));
@@ -816,6 +1032,18 @@ fn dag_cell_chip(
         .hover(|s| s.bg(accent.opacity(0.2)))
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
             this.select_cell(row, col, false, cx);
+        }))
+        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+            if this.inspector_hover_cell != Some((row, col)) {
+                this.inspector_hover_cell = Some((row, col));
+                cx.notify();
+            }
+        }))
+        .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            if this.inspector_hover_cell.is_some() {
+                this.inspector_hover_cell = None;
+                cx.notify();
+            }
         }))
         .child(SharedString::from(cell_ref))
 }
@@ -2026,7 +2254,7 @@ fn info_row_multiline(label: &'static str, value: &str, label_color: Hsla, value
         )
 }
 
-// Helper: Clickable cell reference
+// Helper: Clickable cell reference with hover-to-highlight
 fn clickable_cell_row(
     label: &'static str,
     cell_ref: &str,
@@ -2050,6 +2278,18 @@ fn clickable_cell_row(
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
             this.select_cell(row, col, false, cx);
             this.ensure_visible(cx);
+        }))
+        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+            if this.inspector_hover_cell != Some((row, col)) {
+                this.inspector_hover_cell = Some((row, col));
+                cx.notify();
+            }
+        }))
+        .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            if this.inspector_hover_cell.is_some() {
+                this.inspector_hover_cell = None;
+                cx.notify();
+            }
         }));
 
     if !label.is_empty() {
@@ -2068,6 +2308,62 @@ fn clickable_cell_row(
             .text_color(accent)
             .child(cell_ref_owned)
     )
+}
+
+/// Cell row that triggers path trace on click (Phase 3.5b).
+/// `is_input` determines trace direction:
+/// - true: trace from clicked cell TO inspected cell (input → selected)
+/// - false: trace from inspected cell TO clicked cell (selected → output)
+fn traceable_cell_row(
+    cell_ref: &str,
+    clicked_row: usize,
+    clicked_col: usize,
+    inspected_row: usize,
+    inspected_col: usize,
+    is_input: bool,
+    label_color: Hsla,
+    accent: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let cell_ref_owned: SharedString = cell_ref.to_string().into();
+
+    div()
+        .id(SharedString::from(format!("trace-{}-{}", clicked_row, clicked_col)))
+        .flex()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .hover(|s| s.bg(label_color.opacity(0.1)))
+        .rounded_sm()
+        .px_1()
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            // Trigger trace instead of navigation
+            if is_input {
+                // Input: trace from input → inspected cell
+                this.set_trace_path(clicked_row, clicked_col, inspected_row, inspected_col, true, cx);
+            } else {
+                // Output: trace from inspected cell → output
+                this.set_trace_path(inspected_row, inspected_col, clicked_row, clicked_col, true, cx);
+            }
+        }))
+        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+            if this.inspector_hover_cell != Some((clicked_row, clicked_col)) {
+                this.inspector_hover_cell = Some((clicked_row, clicked_col));
+                cx.notify();
+            }
+        }))
+        .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            if this.inspector_hover_cell.is_some() {
+                this.inspector_hover_cell = None;
+                cx.notify();
+            }
+        }))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(accent)
+                .child(cell_ref_owned)
+        )
 }
 
 // Get precedents from a formula string
@@ -2097,4 +2393,23 @@ pub fn get_dependents(app: &Spreadsheet, row: usize, col: usize) -> Vec<(usize, 
 
     dependents.sort();
     dependents
+}
+
+/// Format a SystemTime as a relative time string (e.g., "2s ago", "just now")
+fn format_relative_time(time: std::time::SystemTime) -> String {
+    match time.elapsed() {
+        Ok(elapsed) => {
+            let secs = elapsed.as_secs();
+            if secs < 2 {
+                "just now".to_string()
+            } else if secs < 60 {
+                format!("{}s ago", secs)
+            } else if secs < 3600 {
+                format!("{}m ago", secs / 60)
+            } else {
+                format!("{}h ago", secs / 3600)
+            }
+        }
+        Err(_) => "unknown".to_string(),
+    }
 }

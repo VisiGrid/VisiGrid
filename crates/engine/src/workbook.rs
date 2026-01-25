@@ -1,4 +1,4 @@
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellValue;
 use crate::cell_id::CellId;
@@ -8,6 +8,33 @@ use crate::named_range::{NamedRange, NamedRangeStore};
 use crate::formula::eval::{CellLookup, NamedRangeResolution, Value};
 use crate::formula::parser::bind_expr;
 use crate::formula::refs::extract_cell_ids;
+
+/// Impact analysis for a cell change (Phase 3.5a).
+///
+/// Describes what would happen if the cell's value changed.
+#[derive(Debug, Clone, Default)]
+pub struct ImpactInfo {
+    /// Number of cells that would be affected (transitive dependents).
+    pub affected_cells: usize,
+    /// Maximum depth in the dependency chain.
+    pub max_depth: usize,
+    /// True if any cell in the chain has unknown/dynamic dependencies.
+    pub has_unknown_in_chain: bool,
+    /// True if impact cannot be bounded (due to dynamic refs).
+    pub is_unbounded: bool,
+}
+
+/// Result of a path trace operation (Phase 3.5b).
+#[derive(Debug, Clone, Default)]
+pub struct PathTraceResult {
+    /// The path from source to target (inclusive).
+    /// Empty if no path exists.
+    pub path: Vec<CellId>,
+    /// True if any cell in the path has dynamic refs (INDIRECT/OFFSET).
+    pub has_dynamic_refs: bool,
+    /// True if the search was truncated due to caps.
+    pub truncated: bool,
+}
 
 /// A workbook containing multiple sheets
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -448,6 +475,224 @@ impl Workbook {
     pub fn get_dependents(&self, sheet_id: SheetId, row: usize, col: usize) -> Vec<CellId> {
         let cell_id = CellId::new(sheet_id, row, col);
         self.dep_graph.dependents(cell_id).collect()
+    }
+
+    // =========================================================================
+    // Impact Analysis (Phase 3.5)
+    // =========================================================================
+
+    /// Compute the impact of changing a cell.
+    ///
+    /// Returns the blast radius (number of cells affected), maximum depth in
+    /// the dependency chain, and whether any cell in the chain has unknown deps.
+    pub fn compute_impact(&self, sheet_id: SheetId, row: usize, col: usize) -> ImpactInfo {
+        use crate::formula::analyze::has_dynamic_deps;
+
+        let cell_id = CellId::new(sheet_id, row, col);
+        let mut visited = FxHashSet::default();
+        let mut queue = vec![cell_id];
+        let mut has_unknown_in_chain = false;
+
+        // Check if the source cell itself has unknown deps
+        if let Some(sheet) = self.sheet_by_id(sheet_id) {
+            if let Some(cell) = sheet.cells.get(&(row, col)) {
+                if let Some(ast) = cell.value.formula_ast() {
+                    if has_dynamic_deps(ast) {
+                        has_unknown_in_chain = true;
+                    }
+                }
+            }
+        }
+
+        // BFS to find all transitive dependents
+        let mut depth = 0;
+        while !queue.is_empty() {
+            let level_size = queue.len();
+            for _ in 0..level_size {
+                let current = queue.remove(0);
+                if visited.contains(&current) {
+                    continue;
+                }
+                visited.insert(current);
+
+                // Check for unknown deps in this cell
+                if !has_unknown_in_chain {
+                    if let Some(sheet) = self.sheet_by_id(current.sheet) {
+                        if let Some(cell) = sheet.cells.get(&(current.row, current.col)) {
+                            if let Some(ast) = cell.value.formula_ast() {
+                                if has_dynamic_deps(ast) {
+                                    has_unknown_in_chain = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Add dependents to queue
+                for dep in self.dep_graph.dependents(current) {
+                    if !visited.contains(&dep) {
+                        queue.push(dep);
+                    }
+                }
+            }
+            if !queue.is_empty() {
+                depth += 1;
+            }
+        }
+
+        // Subtract 1 from visited count (don't count the source cell itself)
+        let affected_count = visited.len().saturating_sub(1);
+
+        ImpactInfo {
+            affected_cells: affected_count,
+            max_depth: depth,
+            has_unknown_in_chain,
+            is_unbounded: has_unknown_in_chain,
+        }
+    }
+
+    /// Check if any upstream cell (precedent chain) is in a cycle.
+    ///
+    /// Returns true if this cell's value cannot be trusted because it depends
+    /// on a circular reference somewhere in its precedent chain.
+    pub fn has_cycle_in_upstream(&self, sheet_id: SheetId, row: usize, col: usize) -> bool {
+        let cell_id = CellId::new(sheet_id, row, col);
+        let mut visited = FxHashSet::default();
+        let mut queue = vec![cell_id];
+
+        // BFS through precedents
+        while let Some(current) = queue.pop() {
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.insert(current);
+
+            // Check if this cell has a cycle error
+            if let Some(sheet) = self.sheet_by_id(current.sheet) {
+                if let Some(cell) = sheet.cells.get(&(current.row, current.col)) {
+                    if cell.value.is_cycle_error() {
+                        return true;
+                    }
+                }
+            }
+
+            // Add precedents to queue
+            for prec in self.dep_graph.precedents(current) {
+                if !visited.contains(&prec) {
+                    queue.push(prec);
+                }
+            }
+        }
+
+        false
+    }
+
+    // =========================================================================
+    // Path Trace (Phase 3.5b)
+    // =========================================================================
+
+    /// Find the shortest path between two cells in the dependency graph.
+    ///
+    /// Direction determines traversal:
+    /// - `forward=true`: traverse dependents (from input toward outputs)
+    /// - `forward=false`: traverse precedents (from output toward inputs)
+    ///
+    /// Returns the shortest path with deterministic ordering (ties broken by
+    /// SheetId, row, col). Includes caps to prevent UI stalls.
+    pub fn find_path(&self, from: CellId, to: CellId, forward: bool) -> PathTraceResult {
+        use crate::formula::analyze::has_dynamic_deps;
+
+        const MAX_VISITED: usize = 50_000;
+        const MAX_DEPTH: usize = 500;
+
+        let mut visited: FxHashSet<CellId> = FxHashSet::default();
+        let mut prev: FxHashMap<CellId, CellId> = FxHashMap::default();
+        let mut queue = std::collections::VecDeque::new();
+        let mut has_dynamic_refs = false;
+        let mut truncated = false;
+
+        // Check if source has dynamic refs
+        if let Some(sheet) = self.sheet_by_id(from.sheet) {
+            if let Some(cell) = sheet.cells.get(&(from.row, from.col)) {
+                if let Some(ast) = cell.value.formula_ast() {
+                    if has_dynamic_deps(ast) {
+                        has_dynamic_refs = true;
+                    }
+                }
+            }
+        }
+
+        queue.push_back((from, 0usize));
+        visited.insert(from);
+
+        while let Some((current, current_depth)) = queue.pop_front() {
+            // Check caps
+            if visited.len() > MAX_VISITED || current_depth > MAX_DEPTH {
+                truncated = true;
+                break;
+            }
+
+            // Found target?
+            if current == to {
+                // Reconstruct path
+                let mut path = vec![to];
+                let mut node = to;
+                while let Some(&p) = prev.get(&node) {
+                    path.push(p);
+                    node = p;
+                }
+                path.reverse();
+                return PathTraceResult {
+                    path,
+                    has_dynamic_refs,
+                    truncated: false,
+                };
+            }
+
+            // Get neighbors based on direction
+            let neighbors: Vec<CellId> = if forward {
+                self.dep_graph.dependents(current).collect()
+            } else {
+                self.dep_graph.precedents(current).collect()
+            };
+
+            // Sort for determinism: (sheet, row, col)
+            let mut sorted_neighbors = neighbors;
+            sorted_neighbors.sort_by(|a, b| {
+                (a.sheet.0, a.row, a.col).cmp(&(b.sheet.0, b.row, b.col))
+            });
+
+            for neighbor in sorted_neighbors {
+                if visited.contains(&neighbor) {
+                    continue;
+                }
+
+                visited.insert(neighbor);
+                prev.insert(neighbor, current);
+
+                // Check for dynamic refs
+                if !has_dynamic_refs {
+                    if let Some(sheet) = self.sheet_by_id(neighbor.sheet) {
+                        if let Some(cell) = sheet.cells.get(&(neighbor.row, neighbor.col)) {
+                            if let Some(ast) = cell.value.formula_ast() {
+                                if has_dynamic_deps(ast) {
+                                    has_dynamic_refs = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                queue.push_back((neighbor, current_depth + 1));
+            }
+        }
+
+        // No path found or truncated
+        PathTraceResult {
+            path: vec![],
+            has_dynamic_refs,
+            truncated,
+        }
     }
 
     // =========================================================================

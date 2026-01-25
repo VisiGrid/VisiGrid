@@ -2,6 +2,7 @@
 
 use visigrid_engine::cell::CellFormat;
 use visigrid_engine::named_range::NamedRange;
+use visigrid_engine::provenance::Provenance;
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
@@ -121,10 +122,80 @@ pub enum UndoAction {
     },
 }
 
+impl UndoAction {
+    /// Generate a human-readable label for this action.
+    pub fn label(&self) -> String {
+        match self {
+            UndoAction::Values { changes, .. } => {
+                if changes.len() == 1 {
+                    "Edit cell".to_string()
+                } else {
+                    format!("Edit {} cells", changes.len())
+                }
+            }
+            UndoAction::Format { description, patches, .. } => {
+                if patches.len() == 1 {
+                    description.clone()
+                } else {
+                    format!("{} ({} cells)", description, patches.len())
+                }
+            }
+            UndoAction::NamedRangeDeleted { named_range } => {
+                format!("Delete range '{}'", named_range.name)
+            }
+            UndoAction::NamedRangeCreated { name } => {
+                format!("Create range '{}'", name)
+            }
+            UndoAction::NamedRangeRenamed { old_name, new_name } => {
+                format!("Rename '{}' to '{}'", old_name, new_name)
+            }
+            UndoAction::NamedRangeDescriptionChanged { name, .. } => {
+                format!("Change '{}' description", name)
+            }
+            UndoAction::Group { description, .. } => {
+                description.clone()
+            }
+            UndoAction::RowsInserted { count, .. } => {
+                if *count == 1 {
+                    "Insert row".to_string()
+                } else {
+                    format!("Insert {} rows", count)
+                }
+            }
+            UndoAction::RowsDeleted { count, .. } => {
+                if *count == 1 {
+                    "Delete row".to_string()
+                } else {
+                    format!("Delete {} rows", count)
+                }
+            }
+            UndoAction::ColsInserted { count, .. } => {
+                if *count == 1 {
+                    "Insert column".to_string()
+                } else {
+                    format!("Insert {} columns", count)
+                }
+            }
+            UndoAction::ColsDeleted { count, .. } => {
+                if *count == 1 {
+                    "Delete column".to_string()
+                } else {
+                    format!("Delete {} columns", count)
+                }
+            }
+            UndoAction::SortApplied { .. } => {
+                "Sort".to_string()
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HistoryEntry {
     pub action: UndoAction,
     pub timestamp: Instant,
+    /// Lua provenance for multi-cell operations (Phase 4)
+    pub provenance: Option<Provenance>,
 }
 
 pub struct History {
@@ -176,12 +247,18 @@ impl History {
                 changes: vec![CellChange { row, col, old_value, new_value }],
             },
             timestamp: Instant::now(),
+            provenance: None,  // Single cell edits don't need Lua provenance
         };
         self.push_entry(entry);
     }
 
     /// Record multiple cell value changes as a single undoable operation
     pub fn record_batch(&mut self, sheet_index: usize, changes: Vec<CellChange>) {
+        self.record_batch_with_provenance(sheet_index, changes, None);
+    }
+
+    /// Record multiple cell value changes with optional Lua provenance
+    pub fn record_batch_with_provenance(&mut self, sheet_index: usize, changes: Vec<CellChange>, provenance: Option<Provenance>) {
         if changes.is_empty() {
             return;
         }
@@ -189,6 +266,7 @@ impl History {
         let entry = HistoryEntry {
             action: UndoAction::Values { sheet_index, changes },
             timestamp: Instant::now(),
+            provenance,
         };
         self.push_entry(entry);
     }
@@ -228,15 +306,22 @@ impl History {
         let entry = HistoryEntry {
             action: UndoAction::Format { sheet_index, patches, kind, description },
             timestamp: now,
+            provenance: None,  // Format changes don't need Lua provenance
         };
         self.push_entry(entry);
     }
 
     /// Record a named range action (create, delete, rename)
     pub fn record_named_range_action(&mut self, action: UndoAction) {
+        self.record_action_with_provenance(action, None);
+    }
+
+    /// Record any action with optional Lua provenance
+    pub fn record_action_with_provenance(&mut self, action: UndoAction, provenance: Option<Provenance>) {
         let entry = HistoryEntry {
             action,
             timestamp: Instant::now(),
+            provenance,
         };
         self.push_entry(entry);
     }
@@ -290,6 +375,36 @@ impl History {
 
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
+    }
+
+    /// Get entries for history panel display (most recent first).
+    /// Returns (entry, is_undoable) tuples - undoable entries are in undo stack.
+    pub fn entries_for_display(&self) -> Vec<(&HistoryEntry, bool)> {
+        // Combine: redo stack (top = most recently undone) + undo stack (top = most recent)
+        // Display order: most recent action first
+        let mut entries: Vec<(&HistoryEntry, bool)> = Vec::new();
+
+        // Undo stack entries (can be undone)
+        for entry in self.undo_stack.iter().rev() {
+            entries.push((entry, true));
+        }
+
+        // Redo stack entries (already undone, can be redone)
+        for entry in self.redo_stack.iter().rev() {
+            entries.push((entry, false));
+        }
+
+        entries
+    }
+
+    /// Get the number of entries in the undo stack.
+    pub fn undo_count(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    /// Get the number of entries in the redo stack.
+    pub fn redo_count(&self) -> usize {
+        self.redo_stack.len()
     }
 
     pub fn clear(&mut self) {
