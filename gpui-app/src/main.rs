@@ -34,6 +34,7 @@ mod search;
 mod session;
 mod settings;
 mod theme;
+mod undo_redo;
 mod views;
 pub mod workbook_view;
 
