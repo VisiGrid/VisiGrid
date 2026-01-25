@@ -24,6 +24,9 @@ pub enum Mode {
     Preferences,       // User preferences dialog (Cmd+,)
     Hint,              // Keyboard hints visible (Vimium-style jump mode)
     License,           // Enter/view license dialog
+    HubPasteToken,     // VisiHub: Paste device token (fallback auth)
+    HubLink,           // VisiHub: Link workbook to dataset
+    HubPublishConfirm, // VisiHub: Confirm publish when diverged
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -68,6 +71,6 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::Preferences | Mode::License)
+        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm)
     }
 }

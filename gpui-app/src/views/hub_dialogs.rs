@@ -1,0 +1,644 @@
+// VisiHub dialogs: Paste Token and Link to Dataset
+
+use gpui::*;
+use gpui::prelude::FluentBuilder;
+use crate::app::Spreadsheet;
+use crate::theme::TokenKey;
+
+/// Render the paste token dialog (fallback auth flow)
+pub fn render_paste_token_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
+    let app_bg = app.token(TokenKey::AppBg);
+    let warning_color = hsla(0.08, 0.9, 0.55, 1.0); // Orange for security warning
+
+    let token_value = app.hub_token_input.clone();
+    let has_token = !token_value.is_empty();
+
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(0.0, 0.0, 0.0, 0.5))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.hub_cancel_sign_in(cx);
+        }))
+        .child(
+            div()
+                .id("paste-token-dialog")
+                .w(px(420.0))
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .rounded_lg()
+                .shadow_xl()
+                .overflow_hidden()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .p_6()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        // Title
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(18.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(text_primary)
+                                        .child("Sign in to VisiHub")
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .text_color(text_muted)
+                                        .child("A browser window should have opened. Complete sign in there, then paste your token below.")
+                                )
+                        )
+                        // Security warning
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .bg(hsla(0.08, 0.9, 0.55, 0.15)) // Orange tint background
+                                .border_1()
+                                .border_color(warning_color)
+                                .rounded_md()
+                                .text_size(px(12.0))
+                                .text_color(warning_color)
+                                .child("⚠ Only paste tokens from visihub.app")
+                        )
+                        // Token input
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(text_muted)
+                                        .child("Device Token")
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .h(px(36.0))
+                                        .px_3()
+                                        .bg(app_bg)
+                                        .border_1()
+                                        .border_color(panel_border)
+                                        .rounded_md()
+                                        .flex()
+                                        .items_center()
+                                        .text_color(text_primary)
+                                        .text_size(px(13.0))
+                                        .child(if token_value.is_empty() {
+                                            div().text_color(text_muted).child("Paste token here...|")
+                                        } else {
+                                            // Mask entire token like a password field
+                                            div().child(format!("{}|", mask_token_full(&token_value)))
+                                        })
+                                )
+                        )
+                        // Buttons
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .justify_end()
+                                .child(
+                                    div()
+                                        .id("cancel-sign-in")
+                                        .px_4()
+                                        .py_2()
+                                        .border_1()
+                                        .border_color(panel_border)
+                                        .rounded_md()
+                                        .text_color(text_muted)
+                                        .text_size(px(13.0))
+                                        .cursor_pointer()
+                                        .hover(move |s| s.bg(panel_border))
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                            this.hub_cancel_sign_in(cx);
+                                        }))
+                                        .child("Cancel")
+                                )
+                                .child(
+                                    div()
+                                        .id("confirm-sign-in")
+                                        .px_4()
+                                        .py_2()
+                                        .bg(if has_token { accent } else { hsla(0.0, 0.0, 0.3, 1.0) })
+                                        .rounded_md()
+                                        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+                                        .text_size(px(13.0))
+                                        .cursor(if has_token { CursorStyle::PointingHand } else { CursorStyle::Arrow })
+                                        .when(has_token, |d| {
+                                            d.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                                this.hub_complete_sign_in(cx);
+                                            }))
+                                        })
+                                        .child("Sign In")
+                                )
+                        )
+                        // Help text
+                        .child(
+                            div()
+                                .pt_2()
+                                .border_t_1()
+                                .border_color(panel_border)
+                                .text_size(px(11.0))
+                                .text_color(text_muted)
+                                .child("If the browser didn't open, visit visihub.app/desktop/authorize")
+                        )
+                )
+        )
+}
+
+/// Render the link to dataset dialog
+pub fn render_link_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
+    let selection_bg = app.token(TokenKey::SelectionBg);
+    let app_bg = app.token(TokenKey::AppBg);
+
+    let loading = app.hub_link_loading;
+    let repos = app.hub_repos.clone();
+    let selected_repo = app.hub_selected_repo;
+    let datasets = app.hub_datasets.clone();
+    let selected_dataset = app.hub_selected_dataset;
+    let new_dataset_name = app.hub_new_dataset_name.clone();
+
+    let can_link = selected_repo.is_some() && selected_dataset.is_some();
+    let can_create = selected_repo.is_some() && !new_dataset_name.trim().is_empty();
+
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(0.0, 0.0, 0.0, 0.5))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.hub_cancel_link(cx);
+        }))
+        .child(
+            div()
+                .id("link-dialog")
+                .w(px(480.0))
+                .max_h(px(500.0))
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .rounded_lg()
+                .shadow_xl()
+                .overflow_hidden()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .p_6()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        // Title
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(18.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(text_primary)
+                                        .child("Link to VisiHub")
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .text_color(text_muted)
+                                        .child("Select a repository and dataset to link this workbook.")
+                                )
+                        )
+                        // Loading indicator
+                        .when(loading, |el| {
+                            el.child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(text_muted)
+                                    .child("Loading...")
+                            )
+                        })
+                        // Repository list
+                        .when(!loading && !repos.is_empty(), |el| {
+                            el.child(render_repo_list(&repos, selected_repo, panel_bg, panel_border, text_primary, text_muted, selection_bg, cx))
+                        })
+                        // Dataset list (when repo selected)
+                        .when(selected_repo.is_some() && !loading, |el| {
+                            el.child(render_dataset_list(&datasets, selected_dataset, panel_bg, panel_border, text_primary, text_muted, selection_bg, cx))
+                        })
+                        // Create new dataset
+                        .when(selected_repo.is_some() && !loading, |el| {
+                            el.child(render_create_dataset(&new_dataset_name, can_create, panel_border, text_muted, text_primary, app_bg, accent, cx))
+                        })
+                        // Mode info
+                        .child(
+                            div()
+                                .pt_2()
+                                .border_t_1()
+                                .border_color(panel_border)
+                                .text_size(px(11.0))
+                                .text_color(text_muted)
+                                .child("Mode: Pull only (receive updates)")
+                        )
+                        // Buttons
+                        .child(render_link_buttons(can_link, panel_border, text_muted, accent, cx))
+                )
+        )
+}
+
+fn render_repo_list(
+    repos: &[crate::hub::RepoInfo],
+    selected_repo: Option<usize>,
+    panel_bg: Hsla,
+    panel_border: Hsla,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    selection_bg: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(text_muted)
+                .child("Repository")
+        )
+        .child(
+            div()
+                .max_h(px(120.0))
+                .overflow_hidden()
+                .border_1()
+                .border_color(panel_border)
+                .rounded_md()
+                .children(
+                    repos.iter().enumerate().map(|(idx, repo)| {
+                        let is_selected = selected_repo == Some(idx);
+                        let bg = if is_selected { selection_bg } else { panel_bg };
+                        let text_col = if is_selected { text_primary } else { text_muted };
+                        let display = format!("{}/{}", repo.owner, repo.slug);
+
+                        div()
+                            .id(ElementId::Name(format!("repo-{}", idx).into()))
+                            .px_3()
+                            .py_2()
+                            .bg(bg)
+                            .text_color(text_col)
+                            .text_size(px(13.0))
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(selection_bg))
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                                this.hub_select_repo(idx, cx);
+                            }))
+                            .child(display)
+                    })
+                )
+        )
+}
+
+fn render_dataset_list(
+    datasets: &[crate::hub::DatasetInfo],
+    selected_dataset: Option<usize>,
+    panel_bg: Hsla,
+    panel_border: Hsla,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    selection_bg: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(text_muted)
+                .child("Dataset")
+        )
+        .when(datasets.is_empty(), |d| {
+            d.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(text_muted)
+                    .italic()
+                    .child("No datasets yet. Create one below.")
+            )
+        })
+        .when(!datasets.is_empty(), |d| {
+            d.child(
+                div()
+                    .max_h(px(120.0))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(panel_border)
+                    .rounded_md()
+                    .children(
+                        datasets.iter().enumerate().map(|(idx, dataset)| {
+                            let is_selected = selected_dataset == Some(idx);
+                            let bg = if is_selected { selection_bg } else { panel_bg };
+                            let text_col = if is_selected { text_primary } else { text_muted };
+                            let name = dataset.name.clone();
+
+                            div()
+                                .id(ElementId::Name(format!("dataset-{}", idx).into()))
+                                .px_3()
+                                .py_2()
+                                .bg(bg)
+                                .text_color(text_col)
+                                .text_size(px(13.0))
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(selection_bg))
+                                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                                    this.hub_select_dataset(idx, cx);
+                                }))
+                                .child(name)
+                        })
+                    )
+            )
+        })
+}
+
+fn render_create_dataset(
+    new_dataset_name: &str,
+    can_create: bool,
+    panel_border: Hsla,
+    text_muted: Hsla,
+    text_primary: Hsla,
+    app_bg: Hsla,
+    accent: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let name = new_dataset_name.to_string();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(text_muted)
+                .child("Or create new dataset")
+        )
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(32.0))
+                        .px_3()
+                        .bg(app_bg)
+                        .border_1()
+                        .border_color(panel_border)
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .text_color(text_primary)
+                        .text_size(px(13.0))
+                        .child(if name.is_empty() {
+                            div().text_color(text_muted).child("Dataset name...|")
+                        } else {
+                            div().child(format!("{}|", name))
+                        })
+                )
+                .child(
+                    div()
+                        .id("create-dataset-btn")
+                        .px_4()
+                        .py_2()
+                        .bg(if can_create { accent } else { hsla(0.0, 0.0, 0.3, 1.0) })
+                        .rounded_md()
+                        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+                        .text_size(px(13.0))
+                        .cursor(if can_create { CursorStyle::PointingHand } else { CursorStyle::Arrow })
+                        .when(can_create, |d| {
+                            d.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.hub_create_and_link(cx);
+                            }))
+                        })
+                        .child("Create")
+                )
+        )
+}
+
+fn render_link_buttons(
+    can_link: bool,
+    panel_border: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .gap_2()
+        .justify_end()
+        .child(
+            div()
+                .id("cancel-link")
+                .px_4()
+                .py_2()
+                .border_1()
+                .border_color(panel_border)
+                .rounded_md()
+                .text_color(text_muted)
+                .text_size(px(13.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(panel_border))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.hub_cancel_link(cx);
+                }))
+                .child("Cancel")
+        )
+        .child(
+            div()
+                .id("confirm-link")
+                .px_4()
+                .py_2()
+                .bg(if can_link { accent } else { hsla(0.0, 0.0, 0.3, 1.0) })
+                .rounded_md()
+                .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+                .text_size(px(13.0))
+                .cursor(if can_link { CursorStyle::PointingHand } else { CursorStyle::Arrow })
+                .when(can_link, |d| {
+                    d.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        this.hub_confirm_link(cx);
+                    }))
+                })
+                .child("Link")
+        )
+}
+
+/// Mask a token for display (show first 8 chars + ...)
+#[allow(dead_code)]
+fn mask_token(token: &str) -> String {
+    if token.len() <= 8 {
+        token.to_string()
+    } else {
+        format!("{}...", &token[..8])
+    }
+}
+
+/// Mask entire token like a password field (all dots)
+fn mask_token_full(token: &str) -> String {
+    "•".repeat(token.len().min(32)) // Cap at 32 dots for visual sanity
+}
+
+/// Render the publish confirmation dialog (shown when diverged)
+pub fn render_publish_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let warning_color = hsla(0.08, 0.9, 0.55, 1.0); // Orange
+    let danger_color = hsla(0.0, 0.7, 0.5, 1.0); // Red-ish
+
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(0.0, 0.0, 0.0, 0.5))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.hub_cancel_publish_confirm(cx);
+        }))
+        .child(
+            div()
+                .id("publish-confirm-dialog")
+                .w(px(400.0))
+                .bg(panel_bg)
+                .border_1()
+                .border_color(warning_color)
+                .rounded_lg()
+                .shadow_xl()
+                .overflow_hidden()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .p_6()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        // Warning icon and title
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .text_size(px(24.0))
+                                        .text_color(warning_color)
+                                        .child("⚠")
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(18.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(text_primary)
+                                        .child("Remote has changed")
+                                )
+                        )
+                        // Body text
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(text_muted)
+                                .child("VisiHub has a newer version of this workbook. Publishing now will replace the remote version.")
+                        )
+                        // Buttons
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .justify_end()
+                                .child(
+                                    div()
+                                        .id("cancel-publish")
+                                        .px_4()
+                                        .py_2()
+                                        .border_1()
+                                        .border_color(panel_border)
+                                        .rounded_md()
+                                        .text_color(text_muted)
+                                        .text_size(px(13.0))
+                                        .cursor_pointer()
+                                        .hover(move |s| s.bg(panel_border))
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                            this.hub_cancel_publish_confirm(cx);
+                                        }))
+                                        .child("Cancel")
+                                )
+                                .child(
+                                    div()
+                                        .id("open-remote-copy")
+                                        .px_4()
+                                        .py_2()
+                                        .bg(panel_border)
+                                        .rounded_md()
+                                        .text_color(text_primary)
+                                        .text_size(px(13.0))
+                                        .cursor_pointer()
+                                        .hover(move |s| s.bg(hsla(0.0, 0.0, 0.4, 1.0)))
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                            this.hub_cancel_publish_confirm(cx);
+                                            this.hub_open_remote_as_copy(cx);
+                                        }))
+                                        .child("Open Remote as Copy")
+                                )
+                                .child(
+                                    div()
+                                        .id("publish-anyway")
+                                        .px_4()
+                                        .py_2()
+                                        .bg(danger_color)
+                                        .rounded_md()
+                                        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+                                        .text_size(px(13.0))
+                                        .cursor_pointer()
+                                        .hover(move |s| s.bg(hsla(0.0, 0.8, 0.4, 1.0)))
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                            this.hub_confirm_publish_anyway(cx);
+                                        }))
+                                        .child("Publish Anyway")
+                                )
+                        )
+                )
+        )
+}

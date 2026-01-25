@@ -8,8 +8,8 @@ pub mod client;
 pub mod types;
 
 pub use auth::{AuthCredentials, load_auth, save_auth, delete_auth, is_authenticated};
-pub use client::{HubClient, HubError, UserInfo, hash_file, hash_bytes};
-pub use types::{HubStatus, RemoteStatus, compute_status};
+pub use client::{HubClient, HubError, UserInfo, RepoInfo, DatasetInfo, hash_file, hash_bytes, hashes_match};
+pub use types::{HubStatus, HubActivity, RemoteStatus, compute_status};
 
 // Re-export HubLink from io crate for convenience
 pub use visigrid_io::native::{HubLink, load_hub_link, save_hub_link, delete_hub_link};

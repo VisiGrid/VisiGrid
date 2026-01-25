@@ -141,6 +141,188 @@ impl HubClient {
             .map(|b| b.to_vec())
             .map_err(|e| HubError::Network(e.to_string()))
     }
+
+    /// List available repos.
+    /// GET /api/desktop/repos
+    pub async fn list_repos(&self) -> Result<Vec<RepoInfo>, HubError> {
+        let url = format!("{}/api/desktop/repos", self.api_base);
+
+        let response = self.http
+            .get(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| HubError::Network(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(HubError::Http(status, body));
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| HubError::Parse(e.to_string()))?;
+
+        let repos = json.as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|r| {
+                Some(RepoInfo {
+                    owner: r["owner"].as_str()?.to_string(),
+                    slug: r["slug"].as_str()?.to_string(),
+                    name: r["name"].as_str()?.to_string(),
+                })
+            })
+            .collect();
+
+        Ok(repos)
+    }
+
+    /// List datasets in a repo.
+    /// GET /api/desktop/repos/:owner/:slug/datasets
+    pub async fn list_datasets(&self, owner: &str, slug: &str) -> Result<Vec<DatasetInfo>, HubError> {
+        let url = format!("{}/api/desktop/repos/{}/{}/datasets", self.api_base, owner, slug);
+
+        let response = self.http
+            .get(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| HubError::Network(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(HubError::Http(status, body));
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| HubError::Parse(e.to_string()))?;
+
+        let datasets = json.as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|d| {
+                Some(DatasetInfo {
+                    id: d["id"].as_str()?.to_string(),
+                    name: d["name"].as_str()?.to_string(),
+                })
+            })
+            .collect();
+
+        Ok(datasets)
+    }
+
+    /// Create a new dataset in a repo.
+    /// POST /api/desktop/repos/:owner/:slug/datasets
+    pub async fn create_dataset(&self, owner: &str, slug: &str, name: &str) -> Result<String, HubError> {
+        let url = format!("{}/api/desktop/repos/{}/{}/datasets", self.api_base, owner, slug);
+
+        let response = self.http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .map_err(|e| HubError::Network(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(HubError::Http(status, body));
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| HubError::Parse(e.to_string()))?;
+
+        json["dataset_id"].as_str()
+            .map(String::from)
+            .ok_or_else(|| HubError::Parse("Missing dataset_id in response".to_string()))
+    }
+
+    /// Create a new revision for publishing.
+    /// POST /api/desktop/datasets/:id/revisions
+    /// Returns (revision_id, upload_url)
+    pub async fn create_revision(
+        &self,
+        dataset_id: &str,
+        content_hash: &str,
+        byte_size: u64,
+    ) -> Result<(String, String), HubError> {
+        let url = format!("{}/api/desktop/datasets/{}/revisions", self.api_base, dataset_id);
+
+        let response = self.http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({
+                "content_hash": content_hash,
+                "byte_size": byte_size
+            }))
+            .send()
+            .await
+            .map_err(|e| HubError::Network(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(HubError::Http(status, body));
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| HubError::Parse(e.to_string()))?;
+
+        let revision_id = json["revision_id"].as_str()
+            .ok_or_else(|| HubError::Parse("Missing revision_id".to_string()))?
+            .to_string();
+
+        let upload_url = json["upload_url"].as_str()
+            .ok_or_else(|| HubError::Parse("Missing upload_url".to_string()))?
+            .to_string();
+
+        Ok((revision_id, upload_url))
+    }
+
+    /// Upload file bytes to signed URL.
+    /// PUT to the signed R2 URL.
+    pub async fn upload_to_signed_url(&self, upload_url: &str, data: Vec<u8>) -> Result<(), HubError> {
+        let response = self.http
+            .put(upload_url)
+            .header("Content-Type", "application/octet-stream")
+            .body(data)
+            .send()
+            .await
+            .map_err(|e| HubError::Network(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(HubError::Http(status, body));
+        }
+
+        Ok(())
+    }
+
+    /// Complete a revision after upload.
+    /// POST /api/desktop/revisions/:id/complete
+    pub async fn complete_revision(&self, revision_id: &str, content_hash: &str) -> Result<(), HubError> {
+        let url = format!("{}/api/desktop/revisions/{}/complete", self.api_base, revision_id);
+
+        let response = self.http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "content_hash": content_hash }))
+            .send()
+            .await
+            .map_err(|e| HubError::Network(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(HubError::Http(status, body));
+        }
+
+        Ok(())
+    }
 }
 
 /// User info from /api/desktop/me
@@ -151,16 +333,40 @@ pub struct UserInfo {
     pub plan: String,
 }
 
-/// Compute blake3 hash of a file
+/// Repository info from /api/desktop/repos
+#[derive(Debug, Clone)]
+pub struct RepoInfo {
+    pub owner: String,
+    pub slug: String,
+    pub name: String,
+}
+
+/// Dataset info from /api/desktop/repos/:owner/:slug/datasets
+#[derive(Debug, Clone)]
+pub struct DatasetInfo {
+    pub id: String,
+    pub name: String,
+}
+
+/// Compute blake3 hash of a file (with algorithm prefix for future-proofing)
 pub fn hash_file(path: &Path) -> Result<String, HubError> {
     let contents = std::fs::read(path)
         .map_err(|e| HubError::Io(e.to_string()))?;
-    Ok(blake3::hash(&contents).to_hex().to_string())
+    Ok(format!("blake3:{}", blake3::hash(&contents).to_hex()))
 }
 
-/// Compute blake3 hash of bytes
+/// Compute blake3 hash of bytes (with algorithm prefix for future-proofing)
 pub fn hash_bytes(data: &[u8]) -> String {
-    blake3::hash(data).to_hex().to_string()
+    format!("blake3:{}", blake3::hash(data).to_hex())
+}
+
+/// Check if two hashes match (handles prefix comparison)
+pub fn hashes_match(a: &str, b: &str) -> bool {
+    // Strip prefix if present for comparison
+    fn normalize(s: &str) -> &str {
+        s.strip_prefix("blake3:").unwrap_or(s)
+    }
+    normalize(a) == normalize(b)
 }
 
 #[cfg(test)]
@@ -175,6 +381,21 @@ mod tests {
 
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
-        assert_eq!(hash1.len(), 64); // blake3 hex is 64 chars
+        assert!(hash1.starts_with("blake3:"));
+        assert_eq!(hash1.len(), 7 + 64); // "blake3:" prefix + 64 char hex
+    }
+
+    #[test]
+    fn test_hashes_match() {
+        // Same hash, same format
+        assert!(hashes_match("blake3:abc123", "blake3:abc123"));
+
+        // Same hash, different formats (with and without prefix)
+        assert!(hashes_match("blake3:abc123", "abc123"));
+        assert!(hashes_match("abc123", "blake3:abc123"));
+
+        // Different hashes
+        assert!(!hashes_match("blake3:abc123", "blake3:def456"));
+        assert!(!hashes_match("abc123", "def456"));
     }
 }

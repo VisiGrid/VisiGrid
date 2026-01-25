@@ -574,6 +574,21 @@ fn render_hub_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
         .map(|link| link.display_name())
         .unwrap_or_default();
 
+    // When syncing, show the current activity instead of generic "Syncing..."
+    let status_label = if app.hub_status == HubStatus::Syncing {
+        app.hub_activity
+            .map(|a| a.label())
+            .unwrap_or(app.hub_status.label())
+    } else {
+        app.hub_status.label()
+    };
+
+    // Build tooltip with linked_at timestamp
+    let tooltip_suffix = app.hub_link
+        .as_ref()
+        .map(|link| format!(" · Linked {}", &link.linked_at[..10])) // Just date portion
+        .unwrap_or_default();
+
     // Click action depends on status
     let status = app.hub_status;
 
@@ -603,6 +618,6 @@ fn render_hub_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
             div()
                 .text_color(text_muted)
                 .text_xs()
-                .child(format!("{} · {}", display_name, app.hub_status.label()))
+                .child(format!("{} · {}{}", display_name, status_label, tooltip_suffix))
         )
 }

@@ -2,6 +2,40 @@
 
 use visigrid_io::native::HubLink;
 
+/// Internal activity state for debugging and status messages.
+/// Used alongside HubStatus::Syncing to provide granular feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubActivity {
+    /// Fetching remote status
+    Checking,
+    /// Downloading revision bytes
+    Downloading,
+    /// Verifying content hash
+    Verifying,
+    /// Writing file to disk
+    Writing,
+    /// Reloading workbook
+    Reloading,
+    /// Uploading file to cloud storage (Phase 3)
+    Uploading,
+    /// Finalizing revision after upload (Phase 3)
+    Finalizing,
+}
+
+impl HubActivity {
+    pub fn label(&self) -> &'static str {
+        match self {
+            HubActivity::Checking => "Checking...",
+            HubActivity::Downloading => "Downloading...",
+            HubActivity::Verifying => "Verifying...",
+            HubActivity::Writing => "Writing...",
+            HubActivity::Reloading => "Reloading...",
+            HubActivity::Uploading => "Uploading...",
+            HubActivity::Finalizing => "Finalizing...",
+        }
+    }
+}
+
 /// Status of the VisiHub sync for a workbook.
 ///
 /// This is derived from comparing local state (HubLink in .sheet) with

@@ -1,5 +1,6 @@
 mod about_dialog;
 pub mod command_palette;
+mod hub_dialogs;
 mod export_report_dialog;
 mod filter_dropdown;
 mod find_dialog;
@@ -54,6 +55,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_export_report = app.mode == Mode::ExportReport;
     let show_preferences = app.mode == Mode::Preferences;
     let show_license = app.mode == Mode::License;
+    let show_hub_paste_token = app.mode == Mode::HubPasteToken;
+    let show_hub_link = app.mode == Mode::HubLink;
+    let show_hub_publish_confirm = app.mode == Mode::HubPublishConfirm;
     let show_import_overlay = app.import_overlay_visible;
     let show_name_tooltip = app.should_show_name_tooltip(cx) && app.mode == Mode::Navigation;
     let show_f2_tip = app.should_show_f2_tip(cx);  // Show immediately on trigger, not gated on mode
@@ -322,6 +326,21 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &HubUnlink, _, cx| {
             this.hub_unlink(cx);
         }))
+        .on_action(cx.listener(|this, _: &HubDiagnostics, _, cx| {
+            this.hub_diagnostics(cx);
+        }))
+        .on_action(cx.listener(|this, _: &HubSignIn, _, cx| {
+            this.hub_sign_in(cx);
+        }))
+        .on_action(cx.listener(|this, _: &HubSignOut, _, cx| {
+            this.hub_sign_out(cx);
+        }))
+        .on_action(cx.listener(|this, _: &HubLink, _, cx| {
+            this.hub_show_link_dialog(cx);
+        }))
+        .on_action(cx.listener(|this, _: &HubPublish, _, cx| {
+            this.hub_publish(cx);
+        }))
         // Clipboard actions
         .on_action(cx.listener(|this, _: &Copy, _, cx| {
             this.copy(cx);
@@ -331,6 +350,15 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.update_title_if_needed(window);
         }))
         .on_action(cx.listener(|this, _: &Paste, window, cx| {
+            // Special handling for HubPasteToken mode - paste into token input
+            if this.mode == Mode::HubPasteToken {
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        this.hub_token_paste(&text, cx);
+                    }
+                }
+                return;
+            }
             this.paste(cx);
             this.update_edit_scroll(window);
             this.update_title_if_needed(window);
@@ -1550,6 +1578,31 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
             }
 
+            // Handle HubPasteToken mode
+            if this.mode == Mode::HubPasteToken {
+                if event.keystroke.key == "escape" {
+                    this.hub_cancel_sign_in(cx);
+                    return;
+                } else if event.keystroke.key == "enter" {
+                    this.hub_complete_sign_in(cx);
+                    return;
+                } else if event.keystroke.key == "backspace" {
+                    this.hub_token_backspace(cx);
+                    return;
+                }
+            }
+
+            // Handle HubLink mode
+            if this.mode == Mode::HubLink {
+                if event.keystroke.key == "escape" {
+                    this.hub_cancel_link(cx);
+                    return;
+                } else if event.keystroke.key == "backspace" {
+                    this.hub_dataset_backspace(cx);
+                    return;
+                }
+            }
+
             if let Some(key_char) = &event.keystroke.key_char {
                 if !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.alt
@@ -1570,6 +1623,16 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                             Mode::Find => {
                                 for c in printable_chars.chars() {
                                     this.find_insert_char(c, cx);
+                                }
+                            }
+                            Mode::HubPasteToken => {
+                                for c in printable_chars.chars() {
+                                    this.hub_token_insert_char(c, cx);
+                                }
+                            }
+                            Mode::HubLink => {
+                                for c in printable_chars.chars() {
+                                    this.hub_dataset_insert_char(c, cx);
                                 }
                             }
                             _ => {
@@ -1951,6 +2014,15 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_license, |div| {
             div.child(license_dialog::render_license_dialog(app, cx))
+        })
+        .when(show_hub_paste_token, |div| {
+            div.child(hub_dialogs::render_paste_token_dialog(app, cx))
+        })
+        .when(show_hub_link, |div| {
+            div.child(hub_dialogs::render_link_dialog(app, cx))
+        })
+        .when(show_hub_publish_confirm, |div| {
+            div.child(hub_dialogs::render_publish_confirm_dialog(app, cx))
         })
         .when(show_import_report, |div| {
             div.child(import_report_dialog::render_import_report_dialog(app, cx))

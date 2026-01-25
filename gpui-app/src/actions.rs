@@ -222,8 +222,10 @@ actions!(hub, [
     HubCheckStatus,       // Check sync status with VisiHub
     HubPull,              // Pull latest version from VisiHub (only if local is clean)
     HubOpenRemoteAsCopy,  // Open remote version as a new file (always safe)
+    HubPublish,           // Publish local changes to VisiHub (explicit only, never automatic)
     HubLink,              // Link current file to a VisiHub dataset
     HubUnlink,            // Remove VisiHub link from current file
     HubSignIn,            // Sign in to VisiHub (opens browser)
     HubSignOut,           // Sign out from VisiHub
+    HubDiagnostics,       // Show hub sync diagnostics (state, errors, etc.)
 ]);

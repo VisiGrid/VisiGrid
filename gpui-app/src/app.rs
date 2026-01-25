@@ -6,6 +6,7 @@ use visigrid_engine::workbook::Workbook;
 use visigrid_engine::formula::eval::{CellLookup, Value};
 use visigrid_engine::named_range::is_valid_name;
 use visigrid_engine::filter::{RowView, FilterState};
+use visigrid_engine::provenance::{MutationOp, PasteMode, FillDirection, FillMode, ClearMode, SortKey};
 
 use crate::formatting::BorderApplyMode;
 use crate::history::{History, CellChange, UndoAction};
@@ -97,6 +98,65 @@ fn ext_lower(path: &std::path::Path) -> Option<String> {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase())
+}
+
+/// Generate an ISO 8601 timestamp for the current time.
+/// Format: "2024-01-15T14:30:00Z" (simplified UTC timestamp)
+fn iso_timestamp_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+
+    let secs = duration.as_secs();
+
+    // Calculate date/time components from unix timestamp
+    // This is a simplified calculation that works for dates 1970-2099
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Calculate year, month, day from days since epoch
+    // Using a simplified algorithm
+    let mut year = 1970;
+    let mut remaining_days = days as i64;
+
+    loop {
+        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_months = if is_leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1;
+    for &days_in_month in &days_in_months {
+        if remaining_days < days_in_month as i64 {
+            break;
+        }
+        remaining_days -= days_in_month as i64;
+        month += 1;
+    }
+    let day = remaining_days + 1;
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            year, month, day, hours, minutes, seconds)
 }
 
 /// Generate a unique copy path for VisiHub downloads.
@@ -735,6 +795,9 @@ pub struct Spreadsheet {
     pub inspector_visible: bool,
     pub inspector_tab: crate::mode::InspectorTab,
     pub inspector_pinned: Option<(usize, usize)>,  // Pinned cell (None = follows selection)
+    pub inspector_hover_cell: Option<(usize, usize)>,  // Cell being hovered in inspector (for grid highlight)
+    pub inspector_trace_path: Option<Vec<visigrid_engine::cell_id::CellId>>,  // Path trace highlight (Phase 3.5b)
+    pub inspector_trace_incomplete: bool,  // True if trace has dynamic refs or was truncated
     pub names_filter_query: String,  // Filter query for Names tab
 
     // Zen mode (distraction-free editing)
@@ -848,8 +911,19 @@ pub struct Spreadsheet {
     // VisiHub sync state
     pub hub_link: Option<crate::hub::HubLink>,
     pub hub_status: crate::hub::HubStatus,
+    pub hub_activity: Option<crate::hub::HubActivity>,
     pub hub_last_check: Option<std::time::Instant>,
+    pub hub_last_error: Option<String>,
     hub_check_in_progress: bool,
+
+    // VisiHub auth/link dialog state
+    pub hub_token_input: String,
+    pub hub_repos: Vec<crate::hub::RepoInfo>,
+    pub hub_selected_repo: Option<usize>,
+    pub hub_datasets: Vec<crate::hub::DatasetInfo>,
+    pub hub_selected_dataset: Option<usize>,
+    pub hub_new_dataset_name: String,
+    pub hub_link_loading: bool,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -999,6 +1073,9 @@ impl Spreadsheet {
             inspector_visible: false,
             inspector_tab: crate::mode::InspectorTab::default(),
             inspector_pinned: None,
+            inspector_hover_cell: None,
+            inspector_trace_path: None,
+            inspector_trace_incomplete: false,
             names_filter_query: String::new(),
             theme,
             theme_preview: None,
@@ -1077,8 +1154,18 @@ impl Spreadsheet {
 
             hub_link: None,
             hub_status: crate::hub::HubStatus::Unlinked,
+            hub_activity: None,
             hub_last_check: None,
+            hub_last_error: None,
             hub_check_in_progress: false,
+
+            hub_token_input: String::new(),
+            hub_repos: Vec::new(),
+            hub_selected_repo: None,
+            hub_datasets: Vec::new(),
+            hub_selected_dataset: None,
+            hub_new_dataset_name: String::new(),
+            hub_link_loading: false,
         }
     }
 
@@ -1192,12 +1279,28 @@ impl Spreadsheet {
             (s.column, s.direction == visigrid_engine::filter::SortDirection::Ascending)
         });
         let is_ascending = direction == visigrid_engine::filter::SortDirection::Ascending;
-        self.history.record_named_range_action(crate::history::UndoAction::SortApplied {
+
+        // Build provenance
+        let provenance = if let Some((start_row, start_col, end_row, end_col)) = self.filter_state.filter_range {
+            Some(MutationOp::Sort {
+                sheet: self.sheet().id,
+                range_start_row: start_row,
+                range_start_col: start_col,
+                range_end_row: end_row,
+                range_end_col: end_col,
+                keys: vec![SortKey { col, ascending: is_ascending }],
+                has_header: false,  // TODO: detect header row
+            }.to_provenance(&self.sheet().name))
+        } else {
+            None
+        };
+
+        self.history.record_action_with_provenance(crate::history::UndoAction::SortApplied {
             previous_row_order: undo_item.previous_row_order,
             previous_sort_state,
             new_row_order: new_order.clone(),
             new_sort_state: (col, is_ascending),
-        });
+        }, provenance);
 
         // Apply the sort
         self.row_view.apply_sort(new_order);
@@ -1915,8 +2018,13 @@ impl Spreadsheet {
             // VisiHub sync
             CommandId::HubCheckStatus => self.hub_check_status(cx),
             CommandId::HubPull => self.hub_pull(cx),
+            CommandId::HubPublish => self.hub_publish(cx),
             CommandId::HubOpenRemoteAsCopy => self.hub_open_remote_as_copy(cx),
             CommandId::HubUnlink => self.hub_unlink(cx),
+            CommandId::HubDiagnostics => self.hub_diagnostics(cx),
+            CommandId::HubSignIn => self.hub_sign_in(cx),
+            CommandId::HubSignOut => self.hub_sign_out(cx),
+            CommandId::HubLinkDialog => self.hub_show_link_dialog(cx),
         }
 
         // Ensure title reflects any state changes from this command.
@@ -3000,6 +3108,11 @@ impl Spreadsheet {
             self.view_state.selected = (row, col);
             self.view_state.selection_end = None;
             self.view_state.additional_selections.clear();  // Clear Ctrl+Click selections
+            // Clear trace path when selection changes (unless inspector is pinned)
+            if self.inspector_pinned.is_none() && self.inspector_trace_path.is_some() {
+                self.inspector_trace_path = None;
+                self.inspector_trace_incomplete = false;
+            }
         }
         cx.notify();
     }
@@ -3282,7 +3395,7 @@ impl Spreadsheet {
     /// Check hub status for the current file.
     /// Loads hub_link from file if needed, then queries VisiHub API.
     pub fn hub_check_status(&mut self, cx: &mut Context<Self>) {
-        use crate::hub::{HubStatus, HubClient, compute_status, hash_file};
+        use crate::hub::{HubStatus, HubActivity, HubClient, compute_status, hash_file};
 
         // Prevent concurrent checks
         if self.hub_check_in_progress {
@@ -3292,6 +3405,7 @@ impl Spreadsheet {
         // Need a saved file to check
         let Some(path) = self.current_file.clone() else {
             self.hub_status = HubStatus::Unlinked;
+            self.hub_activity = None;
             cx.notify();
             return;
         };
@@ -3304,11 +3418,13 @@ impl Spreadsheet {
                 }
                 Ok(None) => {
                     self.hub_status = HubStatus::Unlinked;
+                    self.hub_activity = None;
                     cx.notify();
                     return;
                 }
                 Err(e) => {
                     self.status_message = Some(format!("Failed to load hub link: {}", e));
+                    self.hub_last_error = Some(e.to_string());
                     cx.notify();
                     return;
                 }
@@ -3322,6 +3438,8 @@ impl Spreadsheet {
             Ok(c) => c,
             Err(_) => {
                 self.hub_status = HubStatus::Offline;
+                self.hub_activity = None;
+                self.hub_last_error = Some("Not authenticated".to_string());
                 self.status_message = Some("Not signed in to VisiHub".to_string());
                 cx.notify();
                 return;
@@ -3331,9 +3449,11 @@ impl Spreadsheet {
         // Compute local content hash
         let local_hash = hash_file(&path).ok();
 
-        // Mark as syncing
+        // Mark as syncing with Checking activity
         self.hub_status = HubStatus::Syncing;
+        self.hub_activity = Some(HubActivity::Checking);
         self.hub_check_in_progress = true;
+        self.hub_last_error = None;
         cx.notify();
 
         let dataset_id = hub_link.dataset_id.clone();
@@ -3345,6 +3465,7 @@ impl Spreadsheet {
             let _ = this.update(cx, |this, cx| {
                 this.hub_check_in_progress = false;
                 this.hub_last_check = Some(std::time::Instant::now());
+                this.hub_activity = None;
 
                 match result {
                     Ok(remote) => {
@@ -3354,6 +3475,7 @@ impl Spreadsheet {
                             Some(&remote),
                             None,
                         );
+                        this.hub_last_error = None;
                     }
                     Err(e) => {
                         let error_str = e.to_string();
@@ -3363,6 +3485,7 @@ impl Spreadsheet {
                             None,
                             Some(&error_str),
                         );
+                        this.hub_last_error = Some(error_str.clone());
                         this.status_message = Some(format!("VisiHub: {}", error_str));
                     }
                 }
@@ -3374,7 +3497,7 @@ impl Spreadsheet {
     /// Open remote version as a copy (always safe, never overwrites).
     /// Downloads the latest revision and saves to a new file.
     pub fn hub_open_remote_as_copy(&mut self, cx: &mut Context<Self>) {
-        use crate::hub::{HubStatus, HubClient, hash_bytes};
+        use crate::hub::{HubStatus, HubActivity, HubClient, hash_bytes, hashes_match};
 
         let Some(path) = self.current_file.clone() else {
             self.status_message = Some("No file open".to_string());
@@ -3391,6 +3514,7 @@ impl Spreadsheet {
         let client = match HubClient::from_saved_auth() {
             Ok(c) => c,
             Err(_) => {
+                self.hub_last_error = Some("Not authenticated".to_string());
                 self.status_message = Some("Not signed in to VisiHub".to_string());
                 cx.notify();
                 return;
@@ -3398,7 +3522,8 @@ impl Spreadsheet {
         };
 
         self.hub_status = HubStatus::Syncing;
-        self.status_message = Some("Downloading from VisiHub...".to_string());
+        self.hub_activity = Some(HubActivity::Checking);
+        self.hub_last_error = None;
         cx.notify();
 
         let dataset_id = hub_link.dataset_id.clone();
@@ -3410,6 +3535,8 @@ impl Spreadsheet {
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.hub_status = HubStatus::Offline;
+                        this.hub_activity = None;
+                        this.hub_last_error = Some(e.to_string());
                         this.status_message = Some(format!("Failed to get status: {}", e));
                         cx.notify();
                     });
@@ -3419,6 +3546,7 @@ impl Spreadsheet {
 
             let Some(revision_id) = status.current_revision_id.clone() else {
                 let _ = this.update(cx, |this, cx| {
+                    this.hub_activity = None;
                     this.status_message = Some("No revisions available".to_string());
                     cx.notify();
                 });
@@ -3427,12 +3555,20 @@ impl Spreadsheet {
 
             let expected_hash = status.content_hash.clone();
 
+            // Update activity to downloading
+            let _ = this.update(cx, |this, cx| {
+                this.hub_activity = Some(HubActivity::Downloading);
+                cx.notify();
+            });
+
             // Download the revision
             let content = match client.download_revision(&revision_id).await {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.hub_status = HubStatus::Offline;
+                        this.hub_activity = None;
+                        this.hub_last_error = Some(e.to_string());
                         this.status_message = Some(format!("Download failed: {}", e));
                         cx.notify();
                     });
@@ -3440,12 +3576,20 @@ impl Spreadsheet {
                 }
             };
 
+            // Update activity to verifying
+            let _ = this.update(cx, |this, cx| {
+                this.hub_activity = Some(HubActivity::Verifying);
+                cx.notify();
+            });
+
             // Integrity check: verify hash matches
             let actual_hash = hash_bytes(&content);
             if let Some(expected) = &expected_hash {
-                if &actual_hash != expected {
+                if !hashes_match(&actual_hash, expected) {
                     let _ = this.update(cx, |this, cx| {
                         this.hub_status = HubStatus::Offline;
+                        this.hub_activity = None;
+                        this.hub_last_error = Some("Hash mismatch".to_string());
                         this.status_message = Some("Download failed integrity check. Please retry.".to_string());
                         cx.notify();
                     });
@@ -3453,12 +3597,20 @@ impl Spreadsheet {
                 }
             }
 
+            // Update activity to writing
+            let _ = this.update(cx, |this, cx| {
+                this.hub_activity = Some(HubActivity::Writing);
+                cx.notify();
+            });
+
             // Generate copy path: "{stem} (from VisiHub).sheet"
             let copy_path = generate_copy_path(&path);
 
             // Write to copy path
             if let Err(e) = std::fs::write(&copy_path, &content) {
                 let _ = this.update(cx, |this, cx| {
+                    this.hub_activity = None;
+                    this.hub_last_error = Some(e.to_string());
                     this.status_message = Some(format!("Write failed: {}", e));
                     cx.notify();
                 });
@@ -3478,6 +3630,12 @@ impl Spreadsheet {
                 });
             }
 
+            // Update activity to reloading
+            let _ = this.update(cx, |this, cx| {
+                this.hub_activity = Some(HubActivity::Reloading);
+                cx.notify();
+            });
+
             // Load the copy as the new workbook
             let _ = this.update(cx, |this, cx| {
                 match visigrid_io::native::load_workbook(&copy_path) {
@@ -3486,6 +3644,8 @@ impl Spreadsheet {
                         this.current_file = Some(copy_path.clone());
                         this.hub_link = Some(updated_link);
                         this.hub_status = HubStatus::Idle;
+                        this.hub_activity = None;
+                        this.hub_last_error = None;
                         this.is_modified = false;
                         this.history.clear();
                         this.document_meta.display_name = copy_path
@@ -3499,6 +3659,8 @@ impl Spreadsheet {
                         this.status_message = Some("Opened remote copy from VisiHub".to_string());
                     }
                     Err(e) => {
+                        this.hub_activity = None;
+                        this.hub_last_error = Some(e.to_string());
                         this.status_message = Some(format!("Failed to open: {}", e));
                     }
                 }
@@ -3511,7 +3673,7 @@ impl Spreadsheet {
     /// Only allowed when local is clean (no uncommitted changes).
     /// If local is dirty, use hub_open_remote_as_copy() instead.
     pub fn hub_pull(&mut self, cx: &mut Context<Self>) {
-        use crate::hub::{HubStatus, HubClient, hash_bytes, hash_file};
+        use crate::hub::{HubStatus, HubActivity, HubClient, hash_bytes, hash_file, hashes_match};
 
         if !self.hub_status.can_pull() {
             self.status_message = Some("No updates available".to_string());
@@ -3532,6 +3694,7 @@ impl Spreadsheet {
         let current_hash = match hash_file(&path) {
             Ok(h) => h,
             Err(e) => {
+                self.hub_last_error = Some(e.to_string());
                 self.status_message = Some(format!("Cannot verify local state: {}", e));
                 cx.notify();
                 return;
@@ -3540,7 +3703,7 @@ impl Spreadsheet {
 
         let local_is_clean = hub_link.local_head_hash
             .as_ref()
-            .map(|h| h == &current_hash)
+            .map(|h| hashes_match(h, &current_hash))
             .unwrap_or(false);
 
         if !local_is_clean {
@@ -3555,6 +3718,7 @@ impl Spreadsheet {
         let client = match HubClient::from_saved_auth() {
             Ok(c) => c,
             Err(_) => {
+                self.hub_last_error = Some("Not authenticated".to_string());
                 self.status_message = Some("Not signed in to VisiHub".to_string());
                 cx.notify();
                 return;
@@ -3562,7 +3726,8 @@ impl Spreadsheet {
         };
 
         self.hub_status = HubStatus::Syncing;
-        self.status_message = Some("Updating from VisiHub...".to_string());
+        self.hub_activity = Some(HubActivity::Checking);
+        self.hub_last_error = None;
         cx.notify();
 
         let dataset_id = hub_link.dataset_id.clone();
@@ -3574,6 +3739,8 @@ impl Spreadsheet {
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.hub_status = HubStatus::Offline;
+                        this.hub_activity = None;
+                        this.hub_last_error = Some(e.to_string());
                         this.status_message = Some(format!("Failed to get status: {}", e));
                         cx.notify();
                     });
@@ -3583,6 +3750,7 @@ impl Spreadsheet {
 
             let Some(revision_id) = status.current_revision_id.clone() else {
                 let _ = this.update(cx, |this, cx| {
+                    this.hub_activity = None;
                     this.status_message = Some("No revisions available".to_string());
                     cx.notify();
                 });
@@ -3591,12 +3759,20 @@ impl Spreadsheet {
 
             let expected_hash = status.content_hash.clone();
 
+            // Update activity to downloading
+            let _ = this.update(cx, |this, cx| {
+                this.hub_activity = Some(HubActivity::Downloading);
+                cx.notify();
+            });
+
             // Download the revision
             let content = match client.download_revision(&revision_id).await {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.hub_status = HubStatus::Offline;
+                        this.hub_activity = None;
+                        this.hub_last_error = Some(e.to_string());
                         this.status_message = Some(format!("Download failed: {}", e));
                         cx.notify();
                     });
@@ -3604,12 +3780,20 @@ impl Spreadsheet {
                 }
             };
 
+            // Update activity to verifying
+            let _ = this.update(cx, |this, cx| {
+                this.hub_activity = Some(HubActivity::Verifying);
+                cx.notify();
+            });
+
             // Integrity check: verify hash matches
             let actual_hash = hash_bytes(&content);
             if let Some(expected) = &expected_hash {
-                if &actual_hash != expected {
+                if !hashes_match(&actual_hash, expected) {
                     let _ = this.update(cx, |this, cx| {
                         this.hub_status = HubStatus::Offline;
+                        this.hub_activity = None;
+                        this.hub_last_error = Some("Hash mismatch".to_string());
                         this.status_message = Some("Download failed integrity check. Please retry.".to_string());
                         cx.notify();
                     });
@@ -3617,10 +3801,18 @@ impl Spreadsheet {
                 }
             }
 
+            // Update activity to writing
+            let _ = this.update(cx, |this, cx| {
+                this.hub_activity = Some(HubActivity::Writing);
+                cx.notify();
+            });
+
             // Write to temp file first, then atomic rename
             let temp_path = path.with_extension("sheet.tmp");
             if let Err(e) = std::fs::write(&temp_path, &content) {
                 let _ = this.update(cx, |this, cx| {
+                    this.hub_activity = None;
+                    this.hub_last_error = Some(e.to_string());
                     this.status_message = Some(format!("Write failed: {}", e));
                     cx.notify();
                 });
@@ -3631,6 +3823,8 @@ impl Spreadsheet {
             if let Err(e) = std::fs::rename(&temp_path, &path) {
                 let _ = std::fs::remove_file(&temp_path);
                 let _ = this.update(cx, |this, cx| {
+                    this.hub_activity = None;
+                    this.hub_last_error = Some(e.to_string());
                     this.status_message = Some(format!("Save failed: {}", e));
                     cx.notify();
                 });
@@ -3644,11 +3838,18 @@ impl Spreadsheet {
 
             if let Err(e) = crate::hub::save_hub_link(&path, &updated_link) {
                 let _ = this.update(cx, |this, cx| {
+                    this.hub_last_error = Some(e.to_string());
                     this.status_message = Some(format!("Failed to update link: {}", e));
                     cx.notify();
                 });
                 return;
             }
+
+            // Update activity to reloading
+            let _ = this.update(cx, |this, cx| {
+                this.hub_activity = Some(HubActivity::Reloading);
+                cx.notify();
+            });
 
             // Reload the workbook
             let _ = this.update(cx, |this, cx| {
@@ -3657,14 +3858,184 @@ impl Spreadsheet {
                         this.workbook = workbook;
                         this.hub_link = Some(updated_link);
                         this.hub_status = HubStatus::Idle;
+                        this.hub_activity = None;
+                        this.hub_last_error = None;
                         this.is_modified = false;
                         this.history.clear();
                         this.status_message = Some("Updated from VisiHub".to_string());
                     }
                     Err(e) => {
+                        this.hub_activity = None;
+                        this.hub_last_error = Some(e.to_string());
                         this.status_message = Some(format!("Failed to reload: {}", e));
                     }
                 }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Publish local changes to VisiHub.
+    /// This is an explicit action, never automatic.
+    /// If diverged, shows confirmation dialog first.
+    pub fn hub_publish(&mut self, cx: &mut Context<Self>) {
+        use crate::hub::HubStatus;
+
+        // Precondition: Must have a saved file
+        if self.current_file.is_none() {
+            self.status_message = Some("Save file first".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Precondition: Must be linked
+        if self.hub_link.is_none() {
+            self.status_message = Some("Link to VisiHub first".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Precondition: Must be signed in
+        if crate::hub::load_auth().is_none() {
+            self.status_message = Some("Sign in to VisiHub first".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Check if we're in Diverged state - show confirmation dialog
+        if self.hub_status == HubStatus::Diverged {
+            self.mode = crate::mode::Mode::HubPublishConfirm;
+            cx.notify();
+            return;
+        }
+
+        // Not diverged - proceed with publish
+        self.hub_publish_internal(cx);
+    }
+
+    /// Internal publish implementation (called after confirmation if diverged)
+    fn hub_publish_internal(&mut self, cx: &mut Context<Self>) {
+        use crate::hub::{HubStatus, HubActivity, HubClient, hash_file};
+
+        let Some(path) = self.current_file.clone() else {
+            return;
+        };
+
+        let Some(hub_link) = self.hub_link.clone() else {
+            return;
+        };
+
+        let client = match HubClient::from_saved_auth() {
+            Ok(c) => c,
+            Err(_) => {
+                self.hub_last_error = Some("Not authenticated".to_string());
+                self.status_message = Some("Sign in to VisiHub first".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        // Read file and check size
+        let file_bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.hub_last_error = Some(e.to_string());
+                self.status_message = Some(format!("Cannot read file: {}", e));
+                cx.notify();
+                return;
+            }
+        };
+
+        const MAX_SIZE: u64 = 200 * 1024 * 1024; // 200 MB
+        if file_bytes.len() as u64 > MAX_SIZE {
+            self.status_message = Some("File too large for cloud sync (max 200 MB)".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Compute content hash
+        let content_hash = hash_file(&path).unwrap_or_default();
+        let byte_size = file_bytes.len() as u64;
+
+        // Start publish flow
+        self.hub_status = HubStatus::Syncing;
+        self.hub_activity = Some(HubActivity::Uploading);
+        self.hub_last_error = None;
+        cx.notify();
+
+        let dataset_id = hub_link.dataset_id.clone();
+
+        cx.spawn(async move |this, cx| {
+            // Step 1: Create revision (get upload URL)
+            let (revision_id, upload_url) = match client.create_revision(&dataset_id, &content_hash, byte_size).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_status = if error_msg.contains("403") || error_msg.contains("Forbidden") {
+                            HubStatus::Forbidden
+                        } else {
+                            HubStatus::Offline
+                        };
+                        this.hub_activity = None;
+                        this.hub_last_error = Some(error_msg.clone());
+                        if error_msg.contains("403") || error_msg.contains("Forbidden") {
+                            this.status_message = Some("You don't have permission to publish".to_string());
+                        } else {
+                            this.status_message = Some(format!("Failed to create revision: {}", error_msg));
+                        }
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            // Step 2: Upload to signed URL
+            if let Err(e) = client.upload_to_signed_url(&upload_url, file_bytes).await {
+                let _ = this.update(cx, |this, cx| {
+                    this.hub_status = HubStatus::Offline;
+                    this.hub_activity = None;
+                    this.hub_last_error = Some(e.to_string());
+                    this.status_message = Some(format!("Upload failed: {}", e));
+                    cx.notify();
+                });
+                return;
+            }
+
+            // Update activity to Finalizing
+            let _ = this.update(cx, |this, cx| {
+                this.hub_activity = Some(HubActivity::Finalizing);
+                cx.notify();
+            });
+
+            // Step 3: Complete revision
+            if let Err(e) = client.complete_revision(&revision_id, &content_hash).await {
+                let _ = this.update(cx, |this, cx| {
+                    this.hub_status = HubStatus::Offline;
+                    this.hub_activity = None;
+                    this.hub_last_error = Some(e.to_string());
+                    this.status_message = Some(format!("Failed to finalize: {}", e));
+                    cx.notify();
+                });
+                return;
+            }
+
+            // SUCCESS: Update HubLink with new head
+            let _ = this.update(cx, |this, cx| {
+                if let Some(ref mut link) = this.hub_link {
+                    link.local_head_id = Some(revision_id.clone());
+                    link.local_head_hash = Some(content_hash.clone());
+
+                    // Save updated link to file
+                    if let Some(path) = &this.current_file {
+                        let _ = crate::hub::save_hub_link(path, link);
+                    }
+                }
+
+                this.hub_status = HubStatus::Idle;
+                this.hub_activity = None;
+                this.hub_last_error = None;
+                this.status_message = Some("Published to VisiHub".to_string());
                 cx.notify();
             });
         }).detach();
@@ -3677,13 +4048,504 @@ impl Spreadsheet {
         };
 
         if let Err(e) = crate::hub::delete_hub_link(path) {
+            self.hub_last_error = Some(e.to_string());
             self.status_message = Some(format!("Failed to unlink: {}", e));
         } else {
             self.hub_link = None;
             self.hub_status = crate::hub::HubStatus::Unlinked;
+            self.hub_activity = None;
+            self.hub_last_error = None;
             self.status_message = Some("Unlinked from VisiHub".to_string());
         }
         cx.notify();
+    }
+
+    /// Show hub sync diagnostics (debugging aid)
+    pub fn hub_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let mut lines = vec!["=== VisiHub Diagnostics ===".to_string()];
+        lines.push("Sync is manual. Nothing uploads automatically.".to_string());
+        lines.push(String::new());
+
+        // Auth status
+        if let Some(creds) = crate::hub::load_auth() {
+            let user = creds.user_slug.as_deref().unwrap_or("unknown");
+            lines.push(format!("Signed in as: @{}", user));
+        } else {
+            lines.push("Not signed in".to_string());
+        }
+
+        // Status
+        lines.push(format!("Status: {:?}", self.hub_status));
+        if let Some(activity) = self.hub_activity {
+            lines.push(format!("Activity: {:?}", activity));
+        }
+
+        // Link info
+        if let Some(link) = &self.hub_link {
+            lines.push(format!("Dataset: {}/{}/{}", link.repo_owner, link.repo_slug, link.dataset_id));
+            lines.push(format!("API: {}", link.api_base));
+            lines.push(format!("Linked at: {}", link.linked_at));
+            lines.push(format!("Link mode: {}", link.link_mode));
+            if let Some(head_id) = &link.local_head_id {
+                lines.push(format!("Local head ID: {}", head_id));
+            }
+            if let Some(head_hash) = &link.local_head_hash {
+                lines.push(format!("Local head hash: {}", head_hash));
+            }
+        } else {
+            lines.push("Not linked".to_string());
+        }
+
+        // Timing
+        if let Some(last_check) = self.hub_last_check {
+            let elapsed = last_check.elapsed();
+            lines.push(format!("Last check: {:.1}s ago", elapsed.as_secs_f64()));
+        }
+
+        // Errors
+        if let Some(err) = &self.hub_last_error {
+            lines.push(format!("Last error: {}", err));
+        }
+
+        // Current file
+        if let Some(path) = &self.current_file {
+            lines.push(format!("File: {}", path.display()));
+            // Try to compute current hash
+            if let Ok(hash) = crate::hub::hash_file(path) {
+                lines.push(format!("Current hash: {}", hash));
+            }
+        }
+
+        self.status_message = Some(lines.join("\n"));
+        cx.notify();
+    }
+
+    /// Start VisiHub sign in flow.
+    /// Opens browser to authorize, then shows paste token dialog as fallback.
+    pub fn hub_sign_in(&mut self, cx: &mut Context<Self>) {
+        // If already signed in, just show status
+        if let Some(creds) = crate::hub::load_auth() {
+            let user = creds.user_slug.as_deref().unwrap_or("unknown");
+            self.status_message = Some(format!("Already signed in as @{}", user));
+            cx.notify();
+            return;
+        }
+
+        // Open browser to authorize
+        let auth_url = "https://visihub.app/desktop/authorize";
+        if let Err(e) = open::that(auth_url) {
+            self.status_message = Some(format!("Failed to open browser: {}", e));
+            cx.notify();
+            return;
+        }
+
+        // Show paste token dialog as fallback
+        self.hub_token_input.clear();
+        self.mode = crate::mode::Mode::HubPasteToken;
+        self.status_message = Some("Opening browser... Paste token below if callback fails.".to_string());
+        cx.notify();
+    }
+
+    /// Complete sign in with pasted token
+    pub fn hub_complete_sign_in(&mut self, cx: &mut Context<Self>) {
+        let token = self.hub_token_input.trim().to_string();
+        if token.is_empty() {
+            self.status_message = Some("Token cannot be empty".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Create credentials and verify with API
+        let creds = crate::hub::AuthCredentials::new(
+            token.clone(),
+            "https://api.visihub.app".to_string(),
+        );
+
+        // Verify token by fetching user info
+        let client = crate::hub::HubClient::new(creds.clone());
+
+        cx.spawn(async move |this, cx| {
+            match client.verify_token().await {
+                Ok(user_info) => {
+                    // Save credentials with user info
+                    let mut full_creds = creds;
+                    full_creds.user_slug = Some(user_info.slug.clone());
+                    full_creds.email = Some(user_info.email.clone());
+
+                    if let Err(e) = crate::hub::save_auth(&full_creds) {
+                        let _ = this.update(cx, |this, cx| {
+                            this.status_message = Some(format!("Failed to save credentials: {}", e));
+                            cx.notify();
+                        });
+                        return;
+                    }
+
+                    let email = user_info.email.clone();
+                    let slug = user_info.slug.clone();
+                    let _ = this.update(cx, |this, cx| {
+                        this.mode = crate::mode::Mode::Navigation;
+                        this.hub_token_input.clear();
+                        // Show verified identity with email for trust
+                        this.status_message = Some(format!("Signed in as @{} ({})", slug, email));
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        // Better error message mentioning API base
+                        this.status_message = Some(format!(
+                            "Token could not be verified with api.visihub.app. Check you copied the full token. ({})",
+                            e
+                        ));
+                        cx.notify();
+                    });
+                }
+            }
+        }).detach();
+    }
+
+    /// Cancel sign in dialog
+    pub fn hub_cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        self.mode = crate::mode::Mode::Navigation;
+        self.hub_token_input.clear();
+        self.status_message = None;
+        cx.notify();
+    }
+
+    /// Insert character into hub token input
+    pub fn hub_token_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        if self.mode == crate::mode::Mode::HubPasteToken {
+            self.hub_token_input.push(c);
+            cx.notify();
+        }
+    }
+
+    /// Backspace in hub token input
+    pub fn hub_token_backspace(&mut self, cx: &mut Context<Self>) {
+        if self.mode == crate::mode::Mode::HubPasteToken {
+            self.hub_token_input.pop();
+            cx.notify();
+        }
+    }
+
+    /// Paste text into hub token input
+    pub fn hub_token_paste(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.mode == crate::mode::Mode::HubPasteToken {
+            // Clear and paste - tokens are usually pasted entirely
+            self.hub_token_input = text.trim().to_string();
+            cx.notify();
+        }
+    }
+
+    /// Insert character into new dataset name
+    pub fn hub_dataset_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        if self.mode == crate::mode::Mode::HubLink {
+            self.hub_new_dataset_name.push(c);
+            cx.notify();
+        }
+    }
+
+    /// Backspace in new dataset name
+    pub fn hub_dataset_backspace(&mut self, cx: &mut Context<Self>) {
+        if self.mode == crate::mode::Mode::HubLink {
+            self.hub_new_dataset_name.pop();
+            cx.notify();
+        }
+    }
+
+    /// Sign out from VisiHub
+    pub fn hub_sign_out(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = crate::hub::delete_auth() {
+            self.status_message = Some(format!("Failed to sign out: {}", e));
+        } else {
+            self.status_message = Some("Signed out from VisiHub".to_string());
+        }
+        cx.notify();
+    }
+
+    /// Show link to VisiHub dialog
+    pub fn hub_show_link_dialog(&mut self, cx: &mut Context<Self>) {
+        // Must be signed in first
+        if crate::hub::load_auth().is_none() {
+            self.status_message = Some("Sign in to VisiHub first".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Must have a saved file
+        if self.current_file.is_none() {
+            self.status_message = Some("Save the file first".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Already linked?
+        if self.hub_link.is_some() {
+            self.status_message = Some("Already linked. Unlink first to change.".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Reset dialog state and load repos
+        self.hub_repos.clear();
+        self.hub_selected_repo = None;
+        self.hub_datasets.clear();
+        self.hub_selected_dataset = None;
+        self.hub_new_dataset_name.clear();
+        self.hub_link_loading = true;
+        self.mode = crate::mode::Mode::HubLink;
+        cx.notify();
+
+        // Fetch repos from API
+        self.hub_fetch_repos(cx);
+    }
+
+    /// Fetch available repos from VisiHub
+    fn hub_fetch_repos(&mut self, cx: &mut Context<Self>) {
+        let client = match crate::hub::HubClient::from_saved_auth() {
+            Ok(c) => c,
+            Err(_) => {
+                self.hub_link_loading = false;
+                self.status_message = Some("Not signed in".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        cx.spawn(async move |this, cx| {
+            match client.list_repos().await {
+                Ok(repos) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_repos = repos;
+                        this.hub_link_loading = false;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_link_loading = false;
+                        this.status_message = Some(format!("Failed to load repos: {}", e));
+                        cx.notify();
+                    });
+                }
+            }
+        }).detach();
+    }
+
+    /// Select a repo in the link dialog
+    pub fn hub_select_repo(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.hub_repos.len() {
+            return;
+        }
+
+        self.hub_selected_repo = Some(index);
+        self.hub_datasets.clear();
+        self.hub_selected_dataset = None;
+        self.hub_link_loading = true;
+        cx.notify();
+
+        // Fetch datasets for this repo
+        let repo = self.hub_repos[index].clone();
+        self.hub_fetch_datasets(&repo.owner, &repo.slug, cx);
+    }
+
+    /// Fetch datasets for a repo
+    fn hub_fetch_datasets(&mut self, owner: &str, slug: &str, cx: &mut Context<Self>) {
+        let client = match crate::hub::HubClient::from_saved_auth() {
+            Ok(c) => c,
+            Err(_) => {
+                self.hub_link_loading = false;
+                cx.notify();
+                return;
+            }
+        };
+
+        let owner = owner.to_string();
+        let slug = slug.to_string();
+
+        cx.spawn(async move |this, cx| {
+            match client.list_datasets(&owner, &slug).await {
+                Ok(datasets) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_datasets = datasets;
+                        this.hub_link_loading = false;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_link_loading = false;
+                        this.status_message = Some(format!("Failed to load datasets: {}", e));
+                        cx.notify();
+                    });
+                }
+            }
+        }).detach();
+    }
+
+    /// Select a dataset in the link dialog
+    pub fn hub_select_dataset(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.hub_datasets.len() {
+            return;
+        }
+        self.hub_selected_dataset = Some(index);
+        cx.notify();
+    }
+
+    /// Confirm linking to selected dataset
+    pub fn hub_confirm_link(&mut self, cx: &mut Context<Self>) {
+        let Some(repo_idx) = self.hub_selected_repo else {
+            self.status_message = Some("Select a repository".to_string());
+            cx.notify();
+            return;
+        };
+
+        let Some(dataset_idx) = self.hub_selected_dataset else {
+            self.status_message = Some("Select a dataset".to_string());
+            cx.notify();
+            return;
+        };
+
+        let Some(path) = self.current_file.clone() else {
+            return;
+        };
+
+        let repo = &self.hub_repos[repo_idx];
+        let dataset = &self.hub_datasets[dataset_idx];
+
+        // Create HubLink
+        let link = crate::hub::HubLink {
+            repo_owner: repo.owner.clone(),
+            repo_slug: repo.slug.clone(),
+            dataset_id: dataset.id.clone(),
+            local_head_id: None,  // Will be set after first status check
+            local_head_hash: None,
+            link_mode: "pull".to_string(),
+            linked_at: iso_timestamp_now(),
+            api_base: "https://api.visihub.app".to_string(),
+        };
+
+        // Save to file
+        if let Err(e) = crate::hub::save_hub_link(&path, &link) {
+            self.status_message = Some(format!("Failed to save link: {}", e));
+            cx.notify();
+            return;
+        }
+
+        // Update state
+        let dataset_name = dataset.name.clone();
+        self.hub_link = Some(link);
+        self.mode = crate::mode::Mode::Navigation;
+        // Toast with full context: @owner/repo · dataset_name
+        self.status_message = Some(format!("Linked to @{}/{} · {}", repo.owner, repo.slug, dataset_name));
+        cx.notify();
+
+        // Immediately check status to set baseline
+        self.hub_check_status(cx);
+    }
+
+    /// Create a new dataset and link to it
+    pub fn hub_create_and_link(&mut self, cx: &mut Context<Self>) {
+        let Some(repo_idx) = self.hub_selected_repo else {
+            self.status_message = Some("Select a repository first".to_string());
+            cx.notify();
+            return;
+        };
+
+        let name = self.hub_new_dataset_name.trim().to_string();
+        if name.is_empty() {
+            self.status_message = Some("Enter a dataset name".to_string());
+            cx.notify();
+            return;
+        }
+
+        let Some(path) = self.current_file.clone() else {
+            return;
+        };
+
+        let repo = self.hub_repos[repo_idx].clone();
+        self.hub_link_loading = true;
+        cx.notify();
+
+        let client = match crate::hub::HubClient::from_saved_auth() {
+            Ok(c) => c,
+            Err(_) => {
+                self.hub_link_loading = false;
+                self.status_message = Some("Not signed in".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        cx.spawn(async move |this, cx| {
+            match client.create_dataset(&repo.owner, &repo.slug, &name).await {
+                Ok(dataset_id) => {
+                    // Create and save link
+                    let link = crate::hub::HubLink {
+                        repo_owner: repo.owner.clone(),
+                        repo_slug: repo.slug.clone(),
+                        dataset_id,
+                        local_head_id: None,
+                        local_head_hash: None,
+                        link_mode: "pull".to_string(),
+                        linked_at: iso_timestamp_now(),
+                        api_base: "https://api.visihub.app".to_string(),
+                    };
+
+                    if let Err(e) = crate::hub::save_hub_link(&path, &link) {
+                        let _ = this.update(cx, |this, cx| {
+                            this.hub_link_loading = false;
+                            this.status_message = Some(format!("Failed to save link: {}", e));
+                            cx.notify();
+                        });
+                        return;
+                    }
+
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_link = Some(link);
+                        this.hub_link_loading = false;
+                        this.mode = crate::mode::Mode::Navigation;
+                        // Toast with full context: @owner/repo · dataset_name
+                        this.status_message = Some(format!("Linked to @{}/{} · {}", repo.owner, repo.slug, name));
+                        // Check status to establish baseline
+                        this.hub_check_status(cx);
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_link_loading = false;
+                        this.status_message = Some(format!("Failed to create dataset: {}", e));
+                        cx.notify();
+                    });
+                }
+            }
+        }).detach();
+    }
+
+    /// Cancel link dialog
+    pub fn hub_cancel_link(&mut self, cx: &mut Context<Self>) {
+        self.mode = crate::mode::Mode::Navigation;
+        self.hub_repos.clear();
+        self.hub_datasets.clear();
+        self.hub_selected_repo = None;
+        self.hub_selected_dataset = None;
+        self.hub_new_dataset_name.clear();
+        self.hub_link_loading = false;
+        cx.notify();
+    }
+
+    /// Cancel publish confirm dialog
+    pub fn hub_cancel_publish_confirm(&mut self, cx: &mut Context<Self>) {
+        self.mode = crate::mode::Mode::Navigation;
+        cx.notify();
+    }
+
+    /// Confirm publish even when diverged (force publish)
+    pub fn hub_confirm_publish_anyway(&mut self, cx: &mut Context<Self>) {
+        self.mode = crate::mode::Mode::Navigation;
+        cx.notify();
+        // Proceed with actual publish (bypasses diverged check)
+        self.hub_publish_internal(cx);
     }
 
     pub fn confirm_edit_and_move_right(&mut self, cx: &mut Context<Self>) {
@@ -3804,7 +4666,17 @@ impl Spreadsheet {
             self.sheet_mut().set_value(*row, *col, &new_value);
         }
 
-        self.history.record_batch(self.sheet_index(), changes);
+        // Only attach provenance if multiple cells edited
+        let provenance = if target_cells.len() > 1 {
+            Some(MutationOp::MultiEdit {
+                sheet: self.sheet().id,
+                cells: target_cells.clone(),
+                value: base_value.clone(),
+            }.to_provenance(&self.sheet().name))
+        } else {
+            None
+        };
+        self.history.record_batch_with_provenance(self.sheet_index(), changes, provenance);
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
@@ -3914,7 +4786,12 @@ impl Spreadsheet {
         }
 
         if !changes.is_empty() {
-            self.history.record_batch(self.sheet_index(), changes);
+            let provenance = MutationOp::MultiEdit {
+                sheet: self.sheet().id,
+                cells: target_cells.clone(),
+                value: base_value.clone(),
+            }.to_provenance(&self.sheet().name);
+            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 
@@ -5415,8 +6292,10 @@ impl Spreadsheet {
                 (0, 0)  // External clipboard - no adjustment
             };
 
-            // Parse tab-separated values
+            // Parse tab-separated values and build values grid for provenance
+            let mut values_grid: Vec<Vec<String>> = Vec::new();
             for (row_offset, line) in text.lines().enumerate() {
+                let mut row_values: Vec<String> = Vec::new();
                 for (col_offset, value) in line.split('\t').enumerate() {
                     let row = start_row + row_offset;
                     let col = start_col + col_offset;
@@ -5430,6 +6309,8 @@ impl Spreadsheet {
                             value.to_string()
                         };
 
+                        row_values.push(new_value.clone());
+
                         if old_value != new_value {
                             changes.push(CellChange {
                                 row, col, old_value, new_value: new_value.clone(),
@@ -5438,11 +6319,25 @@ impl Spreadsheet {
                         self.sheet_mut().set_value(row, col, &new_value);
                     }
                 }
+                if !row_values.is_empty() {
+                    values_grid.push(row_values);
+                }
             }
 
-            self.history.record_batch(self.sheet_index(), changes);
-            self.bump_cells_rev();  // Invalidate cell search cache
-            self.is_modified = true;
+            // Record with provenance (only if changes were made)
+            if !changes.is_empty() {
+                let provenance = MutationOp::Paste {
+                    sheet: self.sheet().id,
+                    dst_row: start_row,
+                    dst_col: start_col,
+                    values: values_grid,
+                    mode: PasteMode::Both,  // Regular paste includes formulas
+                }.to_provenance(&self.sheet().name);
+
+                self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+                self.bump_cells_rev();  // Invalidate cell search cache
+                self.is_modified = true;
+            }
             self.status_message = Some("Pasted from clipboard".to_string());
 
             // Smoke mode: trigger full ordered recompute for dogfooding
@@ -5511,18 +6406,22 @@ impl Spreadsheet {
 
         let (start_row, start_col) = self.view_state.selected;
         let mut changes = Vec::new();
+        let mut values_grid: Vec<Vec<String>> = Vec::new();
 
         if use_internal_values {
             // Use typed values from internal clipboard (clone to avoid borrow issues)
             let values = self.internal_clipboard.as_ref().map(|ic| ic.values.clone());
             if let Some(values) = values {
                 for (row_offset, row_values) in values.iter().enumerate() {
+                    let mut grid_row: Vec<String> = Vec::new();
                     for (col_offset, value) in row_values.iter().enumerate() {
                         let row = start_row + row_offset;
                         let col = start_col + col_offset;
                         if row < NUM_ROWS && col < NUM_COLS {
                             let old_value = self.sheet().get_raw(row, col);
                             let new_value = Self::value_to_canonical_string(value);
+
+                            grid_row.push(new_value.clone());
 
                             if old_value != new_value {
                                 changes.push(CellChange {
@@ -5532,11 +6431,15 @@ impl Spreadsheet {
                             self.sheet_mut().set_value(row, col, &new_value);
                         }
                     }
+                    if !grid_row.is_empty() {
+                        values_grid.push(grid_row);
+                    }
                 }
             }
         } else if let Some(text) = system_text {
             // Parse external clipboard with leading-zero guard
             for (row_offset, line) in text.lines().enumerate() {
+                let mut grid_row: Vec<String> = Vec::new();
                 for (col_offset, cell_text) in line.split('\t').enumerate() {
                     let row = start_row + row_offset;
                     let col = start_col + col_offset;
@@ -5544,6 +6447,8 @@ impl Spreadsheet {
                         let old_value = self.sheet().get_raw(row, col);
                         let parsed_value = Self::parse_external_value(cell_text);
                         let new_value = Self::value_to_canonical_string(&parsed_value);
+
+                        grid_row.push(new_value.clone());
 
                         if old_value != new_value {
                             changes.push(CellChange {
@@ -5553,11 +6458,22 @@ impl Spreadsheet {
                         self.sheet_mut().set_value(row, col, &new_value);
                     }
                 }
+                if !grid_row.is_empty() {
+                    values_grid.push(grid_row);
+                }
             }
         }
 
         if !changes.is_empty() {
-            self.history.record_batch(self.sheet_index(), changes);
+            let provenance = MutationOp::Paste {
+                sheet: self.sheet().id,
+                dst_row: start_row,
+                dst_col: start_col,
+                values: values_grid,
+                mode: PasteMode::Values,
+            }.to_provenance(&self.sheet().name);
+
+            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 
@@ -5713,7 +6629,21 @@ impl Spreadsheet {
 
         let had_changes = !changes.is_empty();
         if had_changes {
-            self.history.record_batch(self.sheet_index(), changes);
+            // Only attach provenance for single contiguous selection
+            let provenance = if self.view_state.additional_selections.is_empty() {
+                let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+                Some(MutationOp::Clear {
+                    sheet: self.sheet().id,
+                    start_row: min_row,
+                    start_col: min_col,
+                    end_row: max_row,
+                    end_col: max_col,
+                    mode: ClearMode::All,
+                }.to_provenance(&self.sheet().name))
+            } else {
+                None  // Discontiguous selection - no provenance
+            };
+            self.history.record_batch_with_provenance(self.sheet_index(), changes, provenance);
             self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
         }
@@ -8462,6 +9392,41 @@ impl Spreadsheet {
             self.inspector_pinned = Some(self.view_state.selected);
         }
         cx.notify();
+    }
+
+    /// Set a path trace from clicked input/output to the inspected cell.
+    /// `from` is the clicked cell, `to` is the inspected cell.
+    /// `forward` is true when tracing from input toward inspected cell.
+    pub fn set_trace_path(&mut self, from_row: usize, from_col: usize, to_row: usize, to_col: usize, forward: bool, cx: &mut Context<Self>) {
+        use visigrid_engine::cell_id::CellId;
+
+        let sheet_id = self.sheet().id;
+        let from = CellId::new(sheet_id, from_row, from_col);
+        let to = CellId::new(sheet_id, to_row, to_col);
+
+        let result = self.workbook.find_path(from, to, forward);
+
+        if result.path.is_empty() {
+            // No path found - clear any existing trace
+            self.inspector_trace_path = None;
+            self.inspector_trace_incomplete = result.truncated;
+            if result.truncated {
+                self.status_message = Some("Trace too large — refine by starting closer".to_string());
+            }
+        } else {
+            self.inspector_trace_path = Some(result.path);
+            self.inspector_trace_incomplete = result.has_dynamic_refs || result.truncated;
+        }
+        cx.notify();
+    }
+
+    /// Clear the current trace path.
+    pub fn clear_trace_path(&mut self, cx: &mut Context<Self>) {
+        if self.inspector_trace_path.is_some() {
+            self.inspector_trace_path = None;
+            self.inspector_trace_incomplete = false;
+            cx.notify();
+        }
     }
 
     // =========================================================================

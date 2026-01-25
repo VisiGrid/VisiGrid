@@ -139,8 +139,13 @@ pub enum CommandId {
     // VisiHub sync
     HubCheckStatus,
     HubPull,
+    HubPublish,
     HubOpenRemoteAsCopy,
     HubUnlink,
+    HubDiagnostics,
+    HubSignIn,
+    HubSignOut,
+    HubLinkDialog,
 }
 
 impl CommandId {
@@ -214,8 +219,13 @@ impl CommandId {
             Self::ClearSort => "Clear Sort",
             Self::HubCheckStatus => "VisiHub: Check Status",
             Self::HubPull => "VisiHub: Update from Remote",
+            Self::HubPublish => "VisiHub: Publish",
             Self::HubOpenRemoteAsCopy => "VisiHub: Open Remote as Copy",
             Self::HubUnlink => "VisiHub: Unlink",
+            Self::HubDiagnostics => "VisiHub: Show Diagnostics",
+            Self::HubSignIn => "VisiHub: Sign In",
+            Self::HubSignOut => "VisiHub: Sign Out",
+            Self::HubLinkDialog => "VisiHub: Link to Dataset...",
         }
     }
 
@@ -326,8 +336,13 @@ impl CommandId {
             Self::ClearSort => "unsort restore original order",
             Self::HubCheckStatus => "visihub cloud sync status check refresh",
             Self::HubPull => "visihub cloud sync update pull",
+            Self::HubPublish => "visihub cloud sync publish upload push commit",
             Self::HubOpenRemoteAsCopy => "visihub cloud sync open copy download safe",
             Self::HubUnlink => "visihub cloud sync unlink disconnect remove",
+            Self::HubDiagnostics => "visihub cloud sync diagnostics debug state error",
+            Self::HubSignIn => "visihub cloud sync sign in login authenticate token",
+            Self::HubSignOut => "visihub cloud sync sign out logout disconnect",
+            Self::HubLinkDialog => "visihub cloud sync link connect dataset repository",
         }
     }
 
@@ -401,8 +416,13 @@ impl CommandId {
             Self::ClearSort,
             Self::HubCheckStatus,
             Self::HubPull,
+            Self::HubPublish,
             Self::HubOpenRemoteAsCopy,
             Self::HubUnlink,
+            Self::HubDiagnostics,
+            Self::HubSignIn,
+            Self::HubSignOut,
+            Self::HubLinkDialog,
         ]
     }
 
@@ -425,8 +445,13 @@ impl CommandId {
             | Self::ExportJson
             | Self::HubCheckStatus
             | Self::HubPull
+            | Self::HubPublish
             | Self::HubOpenRemoteAsCopy
-            | Self::HubUnlink => Some(MenuCategory::File),
+            | Self::HubUnlink
+            | Self::HubDiagnostics
+            | Self::HubSignIn
+            | Self::HubSignOut
+            | Self::HubLinkDialog => Some(MenuCategory::File),
 
             // Edit menu
             Self::Undo
