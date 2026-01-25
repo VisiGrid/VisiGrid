@@ -100,6 +100,27 @@ impl Spreadsheet {
                 self.finalize_load(path);
                 self.request_title_refresh(cx);
 
+                // Load VisiHub link if present (for .sheet files)
+                if ext_lower == "sheet" {
+                    match crate::hub::load_hub_link(path) {
+                        Ok(Some(link)) => {
+                            self.hub_link = Some(link);
+                            self.hub_status = crate::hub::HubStatus::Idle; // Will check on first sync
+                        }
+                        Ok(None) => {
+                            self.hub_link = None;
+                            self.hub_status = crate::hub::HubStatus::Unlinked;
+                        }
+                        Err(_) => {
+                            self.hub_link = None;
+                            self.hub_status = crate::hub::HubStatus::Unlinked;
+                        }
+                    }
+                } else {
+                    self.hub_link = None;
+                    self.hub_status = crate::hub::HubStatus::Unlinked;
+                }
+
                 // Update session with new file path
                 self.update_session_cached(cx);
 

@@ -99,6 +99,39 @@ fn ext_lower(path: &std::path::Path) -> Option<String> {
         .map(|s| s.to_lowercase())
 }
 
+/// Generate a unique copy path for VisiHub downloads.
+/// Format: "{stem} (from VisiHub).sheet", with (2), (3), etc. if exists.
+fn generate_copy_path(original: &std::path::Path) -> std::path::PathBuf {
+    let parent = original.parent().unwrap_or(std::path::Path::new("."));
+    let stem = original.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("workbook");
+
+    // Try base name first
+    let base_name = format!("{} (from VisiHub).sheet", stem);
+    let mut candidate = parent.join(&base_name);
+
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    // Find next available number
+    for i in 2..=100 {
+        let numbered_name = format!("{} (from VisiHub) ({}).sheet", stem, i);
+        candidate = parent.join(&numbered_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // Fallback with timestamp (should never happen)
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    parent.join(format!("{} (from VisiHub) {}.sheet", stem, ts))
+}
+
 /// Source of the document (for provenance display).
 ///
 /// Only used for non-native formats that were imported/converted.
@@ -811,6 +844,12 @@ pub struct Spreadsheet {
     // Phase 2: Verified Mode - deterministic ordered recalc with visible status
     pub verified_mode: bool,
     pub last_recalc_report: Option<visigrid_engine::recalc::RecalcReport>,
+
+    // VisiHub sync state
+    pub hub_link: Option<crate::hub::HubLink>,
+    pub hub_status: crate::hub::HubStatus,
+    pub hub_last_check: Option<std::time::Instant>,
+    hub_check_in_progress: bool,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -1035,6 +1074,11 @@ impl Spreadsheet {
 
             verified_mode: false,
             last_recalc_report: None,
+
+            hub_link: None,
+            hub_status: crate::hub::HubStatus::Unlinked,
+            hub_last_check: None,
+            hub_check_in_progress: false,
         }
     }
 
@@ -1867,6 +1911,12 @@ impl Spreadsheet {
             }
             CommandId::ToggleAutoFilter => self.toggle_auto_filter(cx),
             CommandId::ClearSort => self.clear_sort(cx),
+
+            // VisiHub sync
+            CommandId::HubCheckStatus => self.hub_check_status(cx),
+            CommandId::HubPull => self.hub_pull(cx),
+            CommandId::HubOpenRemoteAsCopy => self.hub_open_remote_as_copy(cx),
+            CommandId::HubUnlink => self.hub_unlink(cx),
         }
 
         // Ensure title reflects any state changes from this command.
@@ -3221,6 +3271,417 @@ impl Spreadsheet {
         } else {
             self.last_recalc_report = None;
             self.status_message = Some("Verified mode disabled".to_string());
+        }
+        cx.notify();
+    }
+
+    // ========================================================================
+    // VisiHub Sync
+    // ========================================================================
+
+    /// Check hub status for the current file.
+    /// Loads hub_link from file if needed, then queries VisiHub API.
+    pub fn hub_check_status(&mut self, cx: &mut Context<Self>) {
+        use crate::hub::{HubStatus, HubClient, compute_status, hash_file};
+
+        // Prevent concurrent checks
+        if self.hub_check_in_progress {
+            return;
+        }
+
+        // Need a saved file to check
+        let Some(path) = self.current_file.clone() else {
+            self.hub_status = HubStatus::Unlinked;
+            cx.notify();
+            return;
+        };
+
+        // Load hub link from file if not cached
+        if self.hub_link.is_none() {
+            match crate::hub::load_hub_link(&path) {
+                Ok(Some(link)) => {
+                    self.hub_link = Some(link);
+                }
+                Ok(None) => {
+                    self.hub_status = HubStatus::Unlinked;
+                    cx.notify();
+                    return;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to load hub link: {}", e));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
+        let hub_link = self.hub_link.clone().unwrap();
+
+        // Check if authenticated
+        let client = match HubClient::from_saved_auth() {
+            Ok(c) => c,
+            Err(_) => {
+                self.hub_status = HubStatus::Offline;
+                self.status_message = Some("Not signed in to VisiHub".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        // Compute local content hash
+        let local_hash = hash_file(&path).ok();
+
+        // Mark as syncing
+        self.hub_status = HubStatus::Syncing;
+        self.hub_check_in_progress = true;
+        cx.notify();
+
+        let dataset_id = hub_link.dataset_id.clone();
+
+        // Spawn async task to check remote status
+        cx.spawn(async move |this, cx| {
+            let result = client.get_dataset_status(&dataset_id).await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.hub_check_in_progress = false;
+                this.hub_last_check = Some(std::time::Instant::now());
+
+                match result {
+                    Ok(remote) => {
+                        this.hub_status = compute_status(
+                            this.hub_link.as_ref(),
+                            local_hash.as_deref(),
+                            Some(&remote),
+                            None,
+                        );
+                    }
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        this.hub_status = compute_status(
+                            this.hub_link.as_ref(),
+                            local_hash.as_deref(),
+                            None,
+                            Some(&error_str),
+                        );
+                        this.status_message = Some(format!("VisiHub: {}", error_str));
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Open remote version as a copy (always safe, never overwrites).
+    /// Downloads the latest revision and saves to a new file.
+    pub fn hub_open_remote_as_copy(&mut self, cx: &mut Context<Self>) {
+        use crate::hub::{HubStatus, HubClient, hash_bytes};
+
+        let Some(path) = self.current_file.clone() else {
+            self.status_message = Some("No file open".to_string());
+            cx.notify();
+            return;
+        };
+
+        let Some(hub_link) = self.hub_link.clone() else {
+            self.status_message = Some("Not linked to VisiHub".to_string());
+            cx.notify();
+            return;
+        };
+
+        let client = match HubClient::from_saved_auth() {
+            Ok(c) => c,
+            Err(_) => {
+                self.status_message = Some("Not signed in to VisiHub".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        self.hub_status = HubStatus::Syncing;
+        self.status_message = Some("Downloading from VisiHub...".to_string());
+        cx.notify();
+
+        let dataset_id = hub_link.dataset_id.clone();
+
+        cx.spawn(async move |this, cx| {
+            // Get current revision info
+            let status = match client.get_dataset_status(&dataset_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_status = HubStatus::Offline;
+                        this.status_message = Some(format!("Failed to get status: {}", e));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let Some(revision_id) = status.current_revision_id.clone() else {
+                let _ = this.update(cx, |this, cx| {
+                    this.status_message = Some("No revisions available".to_string());
+                    cx.notify();
+                });
+                return;
+            };
+
+            let expected_hash = status.content_hash.clone();
+
+            // Download the revision
+            let content = match client.download_revision(&revision_id).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_status = HubStatus::Offline;
+                        this.status_message = Some(format!("Download failed: {}", e));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            // Integrity check: verify hash matches
+            let actual_hash = hash_bytes(&content);
+            if let Some(expected) = &expected_hash {
+                if &actual_hash != expected {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_status = HubStatus::Offline;
+                        this.status_message = Some("Download failed integrity check. Please retry.".to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+            }
+
+            // Generate copy path: "{stem} (from VisiHub).sheet"
+            let copy_path = generate_copy_path(&path);
+
+            // Write to copy path
+            if let Err(e) = std::fs::write(&copy_path, &content) {
+                let _ = this.update(cx, |this, cx| {
+                    this.status_message = Some(format!("Write failed: {}", e));
+                    cx.notify();
+                });
+                return;
+            }
+
+            // Update hub_link in the NEW file with current head
+            let mut updated_link = hub_link.clone();
+            updated_link.local_head_id = Some(revision_id.clone());
+            updated_link.local_head_hash = Some(actual_hash);
+
+            if let Err(e) = crate::hub::save_hub_link(&copy_path, &updated_link) {
+                // Non-fatal: file is saved, just link state is stale
+                let _ = this.update(cx, |this, cx| {
+                    this.status_message = Some(format!("Warning: could not update link: {}", e));
+                    cx.notify();
+                });
+            }
+
+            // Load the copy as the new workbook
+            let _ = this.update(cx, |this, cx| {
+                match visigrid_io::native::load_workbook(&copy_path) {
+                    Ok(workbook) => {
+                        this.workbook = workbook;
+                        this.current_file = Some(copy_path.clone());
+                        this.hub_link = Some(updated_link);
+                        this.hub_status = HubStatus::Idle;
+                        this.is_modified = false;
+                        this.history.clear();
+                        this.document_meta.display_name = copy_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Untitled")
+                            .to_string();
+                        this.document_meta.is_saved = true;
+                        this.document_meta.path = Some(copy_path);
+                        this.request_title_refresh(cx);
+                        this.status_message = Some("Opened remote copy from VisiHub".to_string());
+                    }
+                    Err(e) => {
+                        this.status_message = Some(format!("Failed to open: {}", e));
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Pull latest version from VisiHub (update in place).
+    /// Only allowed when local is clean (no uncommitted changes).
+    /// If local is dirty, use hub_open_remote_as_copy() instead.
+    pub fn hub_pull(&mut self, cx: &mut Context<Self>) {
+        use crate::hub::{HubStatus, HubClient, hash_bytes, hash_file};
+
+        if !self.hub_status.can_pull() {
+            self.status_message = Some("No updates available".to_string());
+            cx.notify();
+            return;
+        }
+
+        let Some(path) = self.current_file.clone() else {
+            return;
+        };
+
+        let Some(hub_link) = self.hub_link.clone() else {
+            return;
+        };
+
+        // SAFETY CHECK: Never overwrite dirty local changes
+        // Compute current file hash and compare to local_head_hash
+        let current_hash = match hash_file(&path) {
+            Ok(h) => h,
+            Err(e) => {
+                self.status_message = Some(format!("Cannot verify local state: {}", e));
+                cx.notify();
+                return;
+            }
+        };
+
+        let local_is_clean = hub_link.local_head_hash
+            .as_ref()
+            .map(|h| h == &current_hash)
+            .unwrap_or(false);
+
+        if !local_is_clean {
+            // Local has changes - redirect to safe copy flow
+            self.status_message = Some("Local changes detected. Opening remote as copy...".to_string());
+            cx.notify();
+            self.hub_open_remote_as_copy(cx);
+            return;
+        }
+
+        // Local is clean - safe to update in place
+        let client = match HubClient::from_saved_auth() {
+            Ok(c) => c,
+            Err(_) => {
+                self.status_message = Some("Not signed in to VisiHub".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        self.hub_status = HubStatus::Syncing;
+        self.status_message = Some("Updating from VisiHub...".to_string());
+        cx.notify();
+
+        let dataset_id = hub_link.dataset_id.clone();
+
+        cx.spawn(async move |this, cx| {
+            // Get current revision info
+            let status = match client.get_dataset_status(&dataset_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_status = HubStatus::Offline;
+                        this.status_message = Some(format!("Failed to get status: {}", e));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let Some(revision_id) = status.current_revision_id.clone() else {
+                let _ = this.update(cx, |this, cx| {
+                    this.status_message = Some("No revisions available".to_string());
+                    cx.notify();
+                });
+                return;
+            };
+
+            let expected_hash = status.content_hash.clone();
+
+            // Download the revision
+            let content = match client.download_revision(&revision_id).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_status = HubStatus::Offline;
+                        this.status_message = Some(format!("Download failed: {}", e));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            // Integrity check: verify hash matches
+            let actual_hash = hash_bytes(&content);
+            if let Some(expected) = &expected_hash {
+                if &actual_hash != expected {
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub_status = HubStatus::Offline;
+                        this.status_message = Some("Download failed integrity check. Please retry.".to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+            }
+
+            // Write to temp file first, then atomic rename
+            let temp_path = path.with_extension("sheet.tmp");
+            if let Err(e) = std::fs::write(&temp_path, &content) {
+                let _ = this.update(cx, |this, cx| {
+                    this.status_message = Some(format!("Write failed: {}", e));
+                    cx.notify();
+                });
+                return;
+            }
+
+            // Atomic rename
+            if let Err(e) = std::fs::rename(&temp_path, &path) {
+                let _ = std::fs::remove_file(&temp_path);
+                let _ = this.update(cx, |this, cx| {
+                    this.status_message = Some(format!("Save failed: {}", e));
+                    cx.notify();
+                });
+                return;
+            }
+
+            // Update hub link with new head
+            let mut updated_link = hub_link.clone();
+            updated_link.local_head_id = Some(revision_id.clone());
+            updated_link.local_head_hash = Some(actual_hash);
+
+            if let Err(e) = crate::hub::save_hub_link(&path, &updated_link) {
+                let _ = this.update(cx, |this, cx| {
+                    this.status_message = Some(format!("Failed to update link: {}", e));
+                    cx.notify();
+                });
+                return;
+            }
+
+            // Reload the workbook
+            let _ = this.update(cx, |this, cx| {
+                match visigrid_io::native::load_workbook(&path) {
+                    Ok(workbook) => {
+                        this.workbook = workbook;
+                        this.hub_link = Some(updated_link);
+                        this.hub_status = HubStatus::Idle;
+                        this.is_modified = false;
+                        this.history.clear();
+                        this.status_message = Some("Updated from VisiHub".to_string());
+                    }
+                    Err(e) => {
+                        this.status_message = Some(format!("Failed to reload: {}", e));
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Unlink current file from VisiHub
+    pub fn hub_unlink(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = &self.current_file else {
+            return;
+        };
+
+        if let Err(e) = crate::hub::delete_hub_link(path) {
+            self.status_message = Some(format!("Failed to unlink: {}", e));
+        } else {
+            self.hub_link = None;
+            self.hub_status = crate::hub::HubStatus::Unlinked;
+            self.status_message = Some("Unlinked from VisiHub".to_string());
         }
         cx.notify();
     }

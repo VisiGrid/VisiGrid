@@ -41,6 +41,18 @@ CREATE TABLE IF NOT EXISTS named_ranges (
     end_col INTEGER,               -- NULL for cell type
     description TEXT
 );
+
+CREATE TABLE IF NOT EXISTS hub_link (
+    id INTEGER PRIMARY KEY CHECK (id = 1),  -- singleton row
+    repo_owner TEXT NOT NULL,
+    repo_slug TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
+    local_head_id TEXT,
+    local_head_hash TEXT,
+    link_mode TEXT DEFAULT 'pull',
+    linked_at TEXT NOT NULL,
+    api_base TEXT DEFAULT 'https://api.visihub.app'
+);
 "#;
 
 // Value type constants
@@ -506,6 +518,143 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
     workbook.rebuild_dep_graph();
 
     Ok(workbook)
+}
+
+/// VisiHub link information stored in .sheet files
+#[derive(Debug, Clone, PartialEq)]
+pub struct HubLink {
+    pub repo_owner: String,
+    pub repo_slug: String,
+    pub dataset_id: String,
+    pub local_head_id: Option<String>,
+    pub local_head_hash: Option<String>,
+    pub link_mode: String,  // "pull" or "publish"
+    pub linked_at: String,  // ISO 8601 timestamp
+    pub api_base: String,
+}
+
+impl HubLink {
+    pub fn new(repo_owner: String, repo_slug: String, dataset_id: String) -> Self {
+        Self {
+            repo_owner,
+            repo_slug,
+            dataset_id,
+            local_head_id: None,
+            local_head_hash: None,
+            link_mode: "pull".to_string(),
+            linked_at: chrono_now_iso8601(),
+            api_base: "https://api.visihub.app".to_string(),
+        }
+    }
+
+    /// Returns the display name for the linked repo (e.g., "@alice/budget")
+    pub fn display_name(&self) -> String {
+        format!("@{}/{}", self.repo_owner, self.repo_slug)
+    }
+}
+
+fn chrono_now_iso8601() -> String {
+    // Simple ISO 8601 timestamp without external dependency
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    // Convert to basic ISO format (not perfect but good enough)
+    format!("{}", secs)
+}
+
+/// Load hub_link from a .sheet file (if present)
+pub fn load_hub_link(path: &Path) -> Result<Option<HubLink>, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Check if hub_link table exists
+    let has_hub_link = conn
+        .prepare("SELECT id FROM hub_link LIMIT 1")
+        .is_ok();
+
+    if !has_hub_link {
+        return Ok(None);
+    }
+
+    let result = conn.query_row(
+        "SELECT repo_owner, repo_slug, dataset_id, local_head_id, local_head_hash, link_mode, linked_at, api_base FROM hub_link WHERE id = 1",
+        [],
+        |row| {
+            Ok(HubLink {
+                repo_owner: row.get(0)?,
+                repo_slug: row.get(1)?,
+                dataset_id: row.get(2)?,
+                local_head_id: row.get(3)?,
+                local_head_hash: row.get(4)?,
+                link_mode: row.get::<_, Option<String>>(5)?.unwrap_or_else(|| "pull".to_string()),
+                linked_at: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                api_base: row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "https://api.visihub.app".to_string()),
+            })
+        },
+    );
+
+    match result {
+        Ok(link) => Ok(Some(link)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Save hub_link to a .sheet file (creates table if needed)
+pub fn save_hub_link(path: &Path, link: &HubLink) -> Result<(), String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Ensure table exists
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS hub_link (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            repo_owner TEXT NOT NULL,
+            repo_slug TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
+            local_head_id TEXT,
+            local_head_hash TEXT,
+            link_mode TEXT DEFAULT 'pull',
+            linked_at TEXT NOT NULL,
+            api_base TEXT DEFAULT 'https://api.visihub.app'
+        )",
+        [],
+    ).map_err(|e| e.to_string())?;
+
+    // Upsert the singleton row
+    conn.execute(
+        "INSERT OR REPLACE INTO hub_link (id, repo_owner, repo_slug, dataset_id, local_head_id, local_head_hash, link_mode, linked_at, api_base)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            &link.repo_owner,
+            &link.repo_slug,
+            &link.dataset_id,
+            &link.local_head_id,
+            &link.local_head_hash,
+            &link.link_mode,
+            &link.linked_at,
+            &link.api_base,
+        ],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Remove hub_link from a .sheet file (unlink)
+pub fn delete_hub_link(path: &Path) -> Result<(), String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Check if table exists first
+    let has_hub_link = conn
+        .prepare("SELECT id FROM hub_link LIMIT 1")
+        .is_ok();
+
+    if has_hub_link {
+        conn.execute("DELETE FROM hub_link WHERE id = 1", [])
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

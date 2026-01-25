@@ -135,6 +135,12 @@ pub enum CommandId {
     SortDescending,
     ToggleAutoFilter,
     ClearSort,
+
+    // VisiHub sync
+    HubCheckStatus,
+    HubPull,
+    HubOpenRemoteAsCopy,
+    HubUnlink,
 }
 
 impl CommandId {
@@ -206,6 +212,10 @@ impl CommandId {
             Self::SortDescending => "Sort Descending (Z→A)",
             Self::ToggleAutoFilter => "Toggle AutoFilter",
             Self::ClearSort => "Clear Sort",
+            Self::HubCheckStatus => "VisiHub: Check Status",
+            Self::HubPull => "VisiHub: Update from Remote",
+            Self::HubOpenRemoteAsCopy => "VisiHub: Open Remote as Copy",
+            Self::HubUnlink => "VisiHub: Unlink",
         }
     }
 
@@ -314,6 +324,10 @@ impl CommandId {
             Self::SortDescending => "sort order descending desc z-a largest highest",
             Self::ToggleAutoFilter => "filter dropdown autofilter data",
             Self::ClearSort => "unsort restore original order",
+            Self::HubCheckStatus => "visihub cloud sync status check refresh",
+            Self::HubPull => "visihub cloud sync update pull",
+            Self::HubOpenRemoteAsCopy => "visihub cloud sync open copy download safe",
+            Self::HubUnlink => "visihub cloud sync unlink disconnect remove",
         }
     }
 
@@ -385,6 +399,10 @@ impl CommandId {
             Self::SortDescending,
             Self::ToggleAutoFilter,
             Self::ClearSort,
+            Self::HubCheckStatus,
+            Self::HubPull,
+            Self::HubOpenRemoteAsCopy,
+            Self::HubUnlink,
         ]
     }
 
@@ -404,7 +422,11 @@ impl CommandId {
             | Self::SaveAs
             | Self::ExportCsv
             | Self::ExportTsv
-            | Self::ExportJson => Some(MenuCategory::File),
+            | Self::ExportJson
+            | Self::HubCheckStatus
+            | Self::HubPull
+            | Self::HubOpenRemoteAsCopy
+            | Self::HubUnlink => Some(MenuCategory::File),
 
             // Edit menu
             Self::Undo

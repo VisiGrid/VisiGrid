@@ -309,6 +309,19 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &ExportXlsx, _, cx| {
             this.export_xlsx(cx);
         }))
+        // VisiHub sync actions
+        .on_action(cx.listener(|this, _: &HubCheckStatus, _, cx| {
+            this.hub_check_status(cx);
+        }))
+        .on_action(cx.listener(|this, _: &HubPull, _, cx| {
+            this.hub_pull(cx);
+        }))
+        .on_action(cx.listener(|this, _: &HubOpenRemoteAsCopy, _, cx| {
+            this.hub_open_remote_as_copy(cx);
+        }))
+        .on_action(cx.listener(|this, _: &HubUnlink, _, cx| {
+            this.hub_unlink(cx);
+        }))
         // Clipboard actions
         .on_action(cx.listener(|this, _: &Copy, _, cx| {
             this.copy(cx);

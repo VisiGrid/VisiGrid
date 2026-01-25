@@ -11,6 +11,7 @@ mod formatting;
 mod formula_context;
 mod hints;
 mod history;
+mod hub;
 mod keybindings;
 mod links;
 #[cfg(target_os = "macos")]

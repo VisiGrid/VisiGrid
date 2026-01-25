@@ -152,6 +152,10 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                     )
                 })
                 .children(selection_stats)
+                // Hub sync status indicator
+                .when(app.hub_status.is_linked(), |d| {
+                    d.child(render_hub_indicator(app, cx))
+                })
                 // Verified mode indicator
                 .when(app.verified_mode, |d| {
                     d.child(render_verified_indicator(app, cx))
@@ -537,5 +541,68 @@ fn render_verified_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                 .text_color(text_muted)
                 .text_xs()
                 .child(format!("({})", tooltip_content))
+        )
+}
+
+/// Render the VisiHub sync status indicator
+fn render_hub_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    use crate::hub::HubStatus;
+
+    let text_muted = app.token(TokenKey::TextMuted);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let accent = app.token(TokenKey::Accent);
+    let success_color = app.token(TokenKey::Ok);
+    let warning_color = app.token(TokenKey::Warn);
+    let error_color = app.token(TokenKey::Error);
+
+    // Determine icon and color based on status
+    // Phase 1: Ahead/Diverged shown with muted colors (no publish capability)
+    let (icon, color) = match app.hub_status {
+        HubStatus::Unlinked => ("", text_muted), // Shouldn't render if unlinked
+        HubStatus::Idle => ("☁ ✓", success_color),
+        HubStatus::Ahead => ("☁ ●", text_muted),      // Muted: no publish in Phase 1
+        HubStatus::Behind => ("☁ ↓", accent),
+        HubStatus::Diverged => ("☁ ●↓", warning_color), // Both local changes and update
+        HubStatus::Syncing => ("☁ ⟳", text_muted),
+        HubStatus::Offline => ("☁ ✗", text_muted),
+        HubStatus::Forbidden => ("☁ 🔒", error_color),
+    };
+
+    // Display name from hub link
+    let display_name = app.hub_link
+        .as_ref()
+        .map(|link| link.display_name())
+        .unwrap_or_default();
+
+    // Click action depends on status
+    let status = app.hub_status;
+
+    div()
+        .id("hub-indicator")
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_px()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_color(color)
+        .hover(move |s| s.bg(panel_border))
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            // Behind: pull (will auto-redirect to copy if dirty)
+            // Ahead/Diverged: open remote as copy (safe action)
+            // Other: just check status
+            match status {
+                HubStatus::Behind => this.hub_pull(cx),
+                HubStatus::Ahead | HubStatus::Diverged => this.hub_open_remote_as_copy(cx),
+                _ => this.hub_check_status(cx),
+            }
+        }))
+        .child(icon)
+        .child(
+            div()
+                .text_color(text_muted)
+                .text_xs()
+                .child(format!("{} · {}", display_name, app.hub_status.label()))
         )
 }
