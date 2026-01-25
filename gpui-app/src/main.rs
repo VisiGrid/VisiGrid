@@ -12,7 +12,9 @@ mod formula_context;
 mod hints;
 mod history;
 mod hub;
+mod hub_sync;
 mod keybindings;
+mod text_editing;
 mod links;
 #[cfg(target_os = "macos")]
 mod menus;
