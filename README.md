@@ -1,29 +1,41 @@
 # VisiGrid
 
-A fast, local-first spreadsheet for serious data work.
+**The Explainable Spreadsheet.**
 
-VisiGrid prioritizes speed, correctness, and keyboard-driven workflows over cloud lock-in and opaque automation.
+VisiGrid is the spreadsheet where you can prove why a value exists and how it got there. Every formula has a dependency graph. Every change has provenance. Every recompute is deterministic and verifiable.
 
 Built as a native desktop app in Rust, powered by [GPUI](https://gpui.rs)—the GPU-accelerated UI framework behind [Zed](https://zed.dev)—for instant startup, smooth scrolling, and low-latency interaction.
+
+## What Makes It Explainable
+
+- **Verified Mode**: Toggle F9 to guarantee all values are current. No hidden stale cells.
+- **Cell Inspector**: See precedents, dependents, evaluation order, and recompute timestamps.
+- **Path Tracing**: Click any input to see exactly how data flows to outputs.
+- **Provenance History**: Every paste, fill, and sort generates replayable Lua code.
+- **Cycle Detection**: Circular dependencies caught at edit-time, not buried in #VALUE errors.
 
 ## Principles
 
 - **Local-first**: Your data lives on your machine. No accounts required.
 - **Native performance**: GPU-accelerated rendering. Smooth at any scale.
-- **Serious workflows**: Built for analysts, engineers, and operators.
+- **Explainable by default**: Trust is free. Causality is visible.
 - **No lock-in**: Export freely. Files are standard formats, not hosted documents.
 
 ## Features (Free)
 
-- Core grid, selection, and editing
-- Multi-selection and multi-edit
-- Command palette
-- Formula autocomplete and error reporting
-- Fast search and navigation
-- Export data freely (CSV, TSV, JSON)
+**Trust:**
+- Verified Mode (F9) with status bar assertion
+- Cycle detection at edit-time
+- Basic Inspector: type, value, 1-hop dependency counts
+
+**Core:**
+- Full grid, selection, multi-selection, and editing
+- 107 formula functions with autocomplete
+- Command palette and keyboard-driven navigation
+- Export to CSV, TSV, JSON, XLSX
 - Cross-platform: macOS, Windows, Linux
 
-Some advanced features are under active development. See the [roadmap](ROADMAP.md) for details.
+See the [roadmap](ROADMAP.md) for what's next.
 
 ## Download
 
@@ -56,14 +68,15 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 ## VisiGrid Pro
 
-For power users who want leverage: speed, scale, and automation.
+For power users who need to explain and defend their work.
 
 - Everything in Free, plus:
-- Large-file performance optimizations
+- **Deep Inspector**: DAG visualization, path tracing, evaluation timestamps
+- **Provenance History**: View Lua code for every operation (Ctrl+Shift+Y)
+- **Named Range Intelligence**: Usage tracking, dependency traces
 - Advanced transforms (clean, split, dedupe, fill)
-- Inspector tools (dependencies, diagnostics)
-- Scripting and automation (Lua)
-- Plugin runtime
+- Scripting and automation (Lua console)
+- Large-file performance optimizations
 
 **$12/month · $99/year · $249 perpetual**
 

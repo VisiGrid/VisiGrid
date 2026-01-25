@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.9
+
+*This release positions VisiGrid as the Explainable Spreadsheet.*
+
+### Named Range Intelligence (Pro)
+
+Named ranges now integrate with the Inspector and Quick Open.
+
+- **Detail panel**: Select a named range in the Names tab to see value preview, usage count, depth, and verification status.
+- **Quick Open**: Press `Ctrl+P` to see named ranges alongside commands (or type `$` to filter to names only).
+- **DAG trace**: Single-click a named range to highlight its cells and precedents in the grid. Double-click to jump.
+
+### README Refresh
+
+The README now leads with VisiGrid's category claim: **The Explainable Spreadsheet**. Updated feature lists emphasize trust, causality, and provenance over generic spreadsheet features.
+
+### Demo Workbook
+
+New `fixtures/explainability-demo.csv` demonstrates dependency chains, Verified Mode, and the Inspector in action.
+
 ## 0.2.8
 
 *This release completes VisiGrid's explainability loop: verified values, visible dependencies, and provable changes.*
