@@ -7,6 +7,7 @@ mod autocomplete;
 mod default_app;
 mod file_ops;
 mod fill;
+mod find_replace;
 mod formatting;
 mod formula_context;
 mod hints;
