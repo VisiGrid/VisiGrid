@@ -11,6 +11,8 @@ on:
 
 jobs:
   update-winget:
+    # Disabled until Microsoft approves VisiGrid for winget-pkgs
+    if: false
     runs-on: windows-latest
     steps:
       - name: Get version
