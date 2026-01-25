@@ -602,8 +602,15 @@ impl Spreadsheet {
         }
 
         // Precondition: Must be linked
-        if self.hub_link.is_none() {
+        let Some(ref hub_link) = self.hub_link else {
             self.status_message = Some("Link to VisiHub first".to_string());
+            cx.notify();
+            return;
+        };
+
+        // Precondition: Must be in publish mode (not pull-only)
+        if hub_link.link_mode == "pull" {
+            self.status_message = Some("This workbook is linked in Pull-only mode. Use 'VisiHub: Link to Dataset' to change to Pull & Publish.".to_string());
             cx.notify();
             return;
         }
