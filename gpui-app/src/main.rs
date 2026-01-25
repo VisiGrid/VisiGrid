@@ -25,6 +25,7 @@ mod links;
 mod menus;
 mod user_keybindings;
 mod mode;
+mod navigation;
 #[cfg(feature = "pro")]
 mod scripting;
 #[cfg(not(feature = "pro"))]
