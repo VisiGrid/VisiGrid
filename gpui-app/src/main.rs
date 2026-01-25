@@ -5,6 +5,7 @@ mod actions;
 mod app;
 mod autocomplete;
 mod clipboard;
+mod command_palette;
 mod default_app;
 mod file_ops;
 mod fill;
