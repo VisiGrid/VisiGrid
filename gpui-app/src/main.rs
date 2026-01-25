@@ -15,6 +15,7 @@ mod find_replace;
 mod formatting;
 mod formula_context;
 mod formula_refs;
+mod grid_ops;
 mod hints;
 mod history;
 mod hub;
