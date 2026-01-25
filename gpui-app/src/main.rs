@@ -29,6 +29,7 @@ mod scripting;
 mod scripting_stub;
 #[cfg(not(feature = "pro"))]
 use scripting_stub as scripting;
+mod named_ranges;
 mod ref_target;
 mod search;
 mod session;
