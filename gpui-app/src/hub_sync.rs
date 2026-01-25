@@ -850,7 +850,7 @@ impl Spreadsheet {
         }
 
         // Open browser to authorize
-        let auth_url = "https://visihub.app/desktop/authorize";
+        let auth_url = "https://app.visihub.app/desktop/authorize";
         if let Err(e) = open::that(auth_url) {
             self.status_message = Some(format!("Failed to open browser: {}", e));
             cx.notify();
