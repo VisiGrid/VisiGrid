@@ -440,6 +440,20 @@ impl SessionManager {
         mgr
     }
 
+    /// Create a fresh session manager for testing (does NOT load from disk)
+    #[cfg(test)]
+    pub fn new_empty_for_test(debounce: Duration) -> Self {
+        Self {
+            session: Session {
+                version: SESSION_VERSION,
+                ..Default::default()
+            },
+            dirty: false,
+            dirty_since: None,
+            debounce,
+        }
+    }
+
     /// Get the current session (read-only)
     pub fn session(&self) -> &Session {
         &self.session
@@ -920,7 +934,8 @@ mod tests {
 
     #[test]
     fn test_session_manager_clear() {
-        let mut mgr = SessionManager::with_debounce(Duration::from_secs(5));
+        // Use test-only constructor that doesn't load from disk
+        let mut mgr = SessionManager::new_empty_for_test(Duration::from_secs(5));
 
         // Add some state
         mgr.session_mut().windows.push(WindowSession::default());

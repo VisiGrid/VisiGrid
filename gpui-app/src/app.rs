@@ -1555,12 +1555,32 @@ impl Spreadsheet {
         self.view_state.selection_end = None;
         self.ensure_visible(cx);
 
+        // Get failure reason for status message
+        let reason_str = self.invalid_cells.get(&(row, col))
+            .map(|r| Self::failure_reason_short(*r))
+            .unwrap_or_default();
+
         self.status_message = Some(format!(
-            "Invalid cell {} of {} — F8 next, Shift+F8 prev",
+            "Invalid {} of {}: {} — F8 next, Shift+F8 prev",
             self.validation_failure_index + 1,
-            self.validation_failures.len()
+            self.validation_failures.len(),
+            reason_str
         ));
         cx.notify();
+    }
+
+    /// Short human-readable description of validation failure reason.
+    fn failure_reason_short(reason: visigrid_engine::validation::ValidationFailureReason) -> String {
+        use visigrid_engine::validation::ValidationFailureReason;
+        match reason {
+            ValidationFailureReason::InvalidValue => "Value doesn't match rule".to_string(),
+            ValidationFailureReason::ConstraintBlank => "Constraint cell is blank".to_string(),
+            ValidationFailureReason::ConstraintNotNumeric => "Constraint is not numeric".to_string(),
+            ValidationFailureReason::InvalidReference => "Invalid reference".to_string(),
+            ValidationFailureReason::FormulaNotSupported => "Formula constraint not supported".to_string(),
+            ValidationFailureReason::ListEmpty => "List is empty".to_string(),
+            ValidationFailureReason::NotInList => "Not in list".to_string(),
+        }
     }
 
     /// Jump to the previous invalid cell (Shift+F8).
@@ -1584,10 +1604,16 @@ impl Spreadsheet {
         self.view_state.selection_end = None;
         self.ensure_visible(cx);
 
+        // Get failure reason for status message
+        let reason_str = self.invalid_cells.get(&(row, col))
+            .map(|r| Self::failure_reason_short(*r))
+            .unwrap_or_default();
+
         self.status_message = Some(format!(
-            "Invalid cell {} of {} — F8 next, Shift+F8 prev",
+            "Invalid {} of {}: {} — F8 next, Shift+F8 prev",
             self.validation_failure_index + 1,
-            self.validation_failures.len()
+            self.validation_failures.len(),
+            reason_str
         ));
         cx.notify();
     }
@@ -1972,6 +1998,13 @@ impl Spreadsheet {
             }
             CommandId::ToggleAutoFilter => self.toggle_auto_filter(cx),
             CommandId::ClearSort => self.clear_sort(cx),
+
+            // Data (validation)
+            CommandId::ValidationDialog => self.show_validation_dialog(cx),
+            CommandId::ExcludeFromValidation => self.exclude_from_validation(cx),
+            CommandId::ClearValidationExclusions => self.clear_validation_exclusions(cx),
+            CommandId::CircleInvalidData => self.circle_invalid_data(cx),
+            CommandId::ClearInvalidCircles => self.clear_invalid_circles(cx),
 
             // VisiHub sync
             CommandId::HubCheckStatus => self.hub_check_status(cx),

@@ -264,6 +264,8 @@ fn render_data_menu(text_primary: Hsla, text_muted: Hsla, text_disabled: Hsla, s
         .flex()
         .flex_col()
         .child(menu_item("Validation...", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.show_validation_dialog(cx); }))
+        .child(menu_item("Exclude from Validation", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.exclude_from_validation(cx); }))
+        .child(menu_item("Clear Validation Exclusions", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.clear_validation_exclusions(cx); }))
         .child(menu_separator(border))
         .child(menu_item("Fill Down", Some("Ctrl+D"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.fill_down(cx); }))
         .child(menu_item("Fill Right", Some("Ctrl+R"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.fill_right(cx); }))

@@ -12,7 +12,7 @@
 //! should normalize their list items.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -699,10 +699,19 @@ impl Ord for CellRange {
 ///
 /// Uses a BTreeMap for deterministic ordering. When looking up a validation rule
 /// for a cell, we find the first rule whose range contains the cell.
+///
+/// ## Exclusions
+///
+/// Cells can be excluded from validation entirely. Exclusions take precedence
+/// over all rules - if a cell is in an exclusion range, no validation applies.
+/// This enables "apply rule to column except these rows" workflows.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ValidationStore {
     /// Map from cell range to validation rule.
     rules: BTreeMap<CellRange, ValidationRule>,
+    /// Ranges excluded from validation (exclusions beat any rule).
+    #[serde(default)]
+    exclusions: BTreeSet<CellRange>,
 }
 
 impl ValidationStore {
@@ -732,8 +741,17 @@ impl ValidationStore {
 
     /// Get the validation rule that applies to a cell.
     ///
+    /// Returns `None` if:
+    /// - The cell is in an exclusion range (exclusions beat all rules)
+    /// - No rule covers the cell
+    ///
     /// If multiple rules cover the cell, returns the first one (by range order).
     pub fn get(&self, row: usize, col: usize) -> Option<&ValidationRule> {
+        // Exclusions take precedence - if cell is excluded, no validation applies
+        if self.is_excluded(row, col) {
+            return None;
+        }
+
         for (range, rule) in &self.rules {
             if range.contains(row, col) {
                 return Some(rule);
@@ -742,7 +760,7 @@ impl ValidationStore {
         None
     }
 
-    /// Check if any validation rule applies to a cell.
+    /// Check if any validation rule applies to a cell (respects exclusions).
     pub fn has_validation(&self, row: usize, col: usize) -> bool {
         self.get(row, col).is_some()
     }
@@ -762,9 +780,71 @@ impl ValidationStore {
         self.rules.is_empty()
     }
 
-    /// Clear all validation rules.
+    /// Clear all validation rules (does not clear exclusions).
     pub fn clear(&mut self) {
         self.rules.clear();
+    }
+
+    // ========================================================================
+    // Exclusion management
+    // ========================================================================
+
+    /// Exclude a range from validation.
+    ///
+    /// Cells in excluded ranges are not validated regardless of any rules.
+    pub fn exclude(&mut self, range: CellRange) {
+        self.exclusions.insert(range);
+    }
+
+    /// Remove an exclusion for an exact range.
+    ///
+    /// Returns true if the exclusion existed and was removed.
+    pub fn remove_exclusion(&mut self, range: &CellRange) -> bool {
+        self.exclusions.remove(range)
+    }
+
+    /// Clear all exclusions that overlap with the given range.
+    pub fn clear_exclusions_in_range(&mut self, range: &CellRange) {
+        self.exclusions.retain(|r| !r.overlaps(range));
+    }
+
+    /// Check if a cell is in an exclusion range.
+    pub fn is_excluded(&self, row: usize, col: usize) -> bool {
+        for range in &self.exclusions {
+            if range.contains(row, col) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get all exclusion ranges that overlap with a given range.
+    pub fn exclusions_in_range(&self, range: &CellRange) -> Vec<CellRange> {
+        self.exclusions
+            .iter()
+            .filter(|r| r.overlaps(range))
+            .copied()
+            .collect()
+    }
+
+    /// Iterate over all exclusion ranges.
+    pub fn exclusions_iter(&self) -> impl Iterator<Item = &CellRange> {
+        self.exclusions.iter()
+    }
+
+    /// Number of exclusion ranges.
+    pub fn exclusions_len(&self) -> usize {
+        self.exclusions.len()
+    }
+
+    /// Check if there are no exclusions.
+    pub fn exclusions_is_empty(&self) -> bool {
+        self.exclusions.is_empty()
+    }
+
+    /// Clear all exclusions.
+    pub fn clear_exclusions(&mut self) {
+        self.exclusions.clear();
     }
 }
 
@@ -1115,5 +1195,95 @@ mod tests {
 
         assert!(eval_numeric_constraint(42.0, ComparisonOperator::NotEqualTo, 0.0, None));
         assert!(!eval_numeric_constraint(0.0, ComparisonOperator::NotEqualTo, 0.0, None));
+    }
+
+    // ========================================================================
+    // Exclusion tests
+    // ========================================================================
+
+    #[test]
+    fn test_exclusion_beats_rule() {
+        let mut store = ValidationStore::new();
+
+        // Set up: A1:A100 has a validation rule
+        let rule_range = CellRange::new(0, 0, 99, 0);
+        store.set(rule_range, ValidationRule::new(ValidationType::AnyValue));
+
+        // A50 should have validation
+        assert!(store.get(49, 0).is_some(), "A50 should have validation");
+
+        // Exclude A40:A60
+        let exclusion_range = CellRange::new(39, 0, 59, 0);
+        store.exclude(exclusion_range);
+
+        // A50 (in exclusion) should now have NO validation
+        assert!(store.get(49, 0).is_none(), "A50 should have NO validation (excluded)");
+        assert!(store.is_excluded(49, 0), "A50 should be marked as excluded");
+
+        // A30 (outside exclusion) still has validation
+        assert!(store.get(29, 0).is_some(), "A30 should still have validation");
+        assert!(!store.is_excluded(29, 0), "A30 should not be excluded");
+
+        // A70 (outside exclusion) still has validation
+        assert!(store.get(69, 0).is_some(), "A70 should still have validation");
+    }
+
+    #[test]
+    fn test_exclusion_undo() {
+        let mut store = ValidationStore::new();
+
+        // Set up: A1:A100 has a validation rule
+        let rule_range = CellRange::new(0, 0, 99, 0);
+        store.set(rule_range, ValidationRule::new(ValidationType::AnyValue));
+
+        // Exclude A10:A20
+        let exclusion_range = CellRange::new(9, 0, 19, 0);
+        store.exclude(exclusion_range);
+
+        assert!(store.is_excluded(14, 0), "A15 should be excluded");
+        assert!(store.get(14, 0).is_none(), "A15 should have no validation");
+
+        // Undo: remove the exclusion
+        store.remove_exclusion(&exclusion_range);
+
+        assert!(!store.is_excluded(14, 0), "A15 should not be excluded after undo");
+        assert!(store.get(14, 0).is_some(), "A15 should have validation again after undo");
+    }
+
+    #[test]
+    fn test_clear_exclusions_in_range() {
+        let mut store = ValidationStore::new();
+
+        // Add multiple exclusions
+        store.exclude(CellRange::new(0, 0, 9, 0));    // A1:A10
+        store.exclude(CellRange::new(20, 0, 29, 0));  // A21:A30
+        store.exclude(CellRange::new(40, 0, 49, 0));  // A41:A50
+
+        assert_eq!(store.exclusions_len(), 3);
+
+        // Clear exclusions that overlap A5:A25
+        store.clear_exclusions_in_range(&CellRange::new(4, 0, 24, 0));
+
+        // First two exclusions should be gone (they overlap A5:A25)
+        assert_eq!(store.exclusions_len(), 1);
+        assert!(!store.is_excluded(4, 0), "A5 should not be excluded");
+        assert!(!store.is_excluded(24, 0), "A25 should not be excluded");
+        assert!(store.is_excluded(44, 0), "A45 should still be excluded");
+    }
+
+    #[test]
+    fn test_exclusion_serialization() {
+        let mut store = ValidationStore::new();
+        store.set(CellRange::new(0, 0, 9, 0), ValidationRule::new(ValidationType::AnyValue));
+        store.exclude(CellRange::new(3, 0, 5, 0));
+
+        let json = serde_json::to_string(&store).unwrap();
+        let parsed: ValidationStore = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.exclusions_len(), 1);
+        assert!(parsed.is_excluded(4, 0));
+        assert!(parsed.get(4, 0).is_none());
+        assert!(parsed.get(0, 0).is_some());
     }
 }

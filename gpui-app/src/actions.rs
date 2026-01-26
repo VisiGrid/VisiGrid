@@ -195,6 +195,8 @@ actions!(data, [
     ClearSort,       // Remove current sort (restore original order)
     ShowDataValidation,  // Data → Validation... dialog
     OpenValidationDropdown,  // Alt+Down - open validation dropdown for current cell
+    ExcludeFromValidation,   // Exclude selection from validation
+    ClearValidationExclusions, // Clear exclusions in selection
 ]);
 
 // Command palette actions

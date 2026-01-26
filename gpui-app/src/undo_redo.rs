@@ -189,6 +189,55 @@ impl Spreadsheet {
                     self.clamp_selection();
                     self.status_message = Some("Undo: sort".to_string());
                 }
+                UndoAction::ValidationSet { sheet_index, range, previous_rules, .. } => {
+                    // Undo: clear the new rule, restore previous rules
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        // Clear the rule that was set
+                        sheet.validations.clear_range(&range);
+                        // Restore previous rules that were overwritten
+                        for (rule_range, rule) in previous_rules {
+                            sheet.validations.set(rule_range, rule);
+                        }
+                    }
+                    self.bump_cells_rev();
+                    // Recompute invalid markers for affected range
+                    self.revalidate_range(&range);
+                    self.status_message = Some("Undo: set validation".to_string());
+                }
+                UndoAction::ValidationCleared { sheet_index, range, cleared_rules } => {
+                    // Undo: restore the cleared rules
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        for (rule_range, rule) in cleared_rules {
+                            sheet.validations.set(rule_range, rule);
+                        }
+                    }
+                    self.bump_cells_rev();
+                    // Recompute invalid markers for affected range
+                    self.revalidate_range(&range);
+                    self.status_message = Some(format!("Undo: clear validation ({} cells)", range.cell_count()));
+                }
+                UndoAction::ValidationExcluded { sheet_index, range } => {
+                    // Undo: remove the exclusion
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.validations.remove_exclusion(&range);
+                    }
+                    self.bump_cells_rev();
+                    // Recompute invalid markers (cells may now be validated again)
+                    self.revalidate_range(&range);
+                    self.status_message = Some(format!("Undo: exclude from validation ({} cells)", range.cell_count()));
+                }
+                UndoAction::ValidationExclusionCleared { sheet_index, range, cleared_exclusions } => {
+                    // Undo: restore the cleared exclusions
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        for exclusion_range in cleared_exclusions {
+                            sheet.validations.exclude(exclusion_range);
+                        }
+                    }
+                    self.bump_cells_rev();
+                    // Recompute invalid markers (cells may be excluded again)
+                    self.revalidate_range(&range);
+                    self.status_message = Some(format!("Undo: clear exclusions ({} cells)", range.cell_count()));
+                }
             }
             self.is_modified = true;
             self.request_title_refresh(cx);
@@ -341,6 +390,45 @@ impl Spreadsheet {
                 self.filter_state.invalidate_all_caches();
                 self.clamp_selection();
             }
+            UndoAction::ValidationSet { sheet_index, range, previous_rules, .. } => {
+                // Undo: clear the new rule, restore previous rules
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.validations.clear_range(&range);
+                    for (rule_range, rule) in previous_rules {
+                        sheet.validations.set(rule_range, rule);
+                    }
+                }
+                self.bump_cells_rev();
+                self.revalidate_range(&range);
+            }
+            UndoAction::ValidationCleared { sheet_index, range, cleared_rules } => {
+                // Undo: restore the cleared rules
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    for (rule_range, rule) in cleared_rules {
+                        sheet.validations.set(rule_range, rule);
+                    }
+                }
+                self.bump_cells_rev();
+                self.revalidate_range(&range);
+            }
+            UndoAction::ValidationExcluded { sheet_index, range } => {
+                // Undo: remove the exclusion
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.validations.remove_exclusion(&range);
+                }
+                self.bump_cells_rev();
+                self.revalidate_range(&range);
+            }
+            UndoAction::ValidationExclusionCleared { sheet_index, range, cleared_exclusions } => {
+                // Undo: restore the cleared exclusions
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    for exclusion_range in cleared_exclusions {
+                        sheet.validations.exclude(exclusion_range);
+                    }
+                }
+                self.bump_cells_rev();
+                self.revalidate_range(&range);
+            }
         }
     }
 
@@ -472,6 +560,39 @@ impl Spreadsheet {
                 });
                 self.filter_state.invalidate_all_caches();
                 self.clamp_selection();
+            }
+            UndoAction::ValidationSet { sheet_index, range, new_rule, .. } => {
+                // Redo: full replace pipeline - clear overlaps then set rule
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.validations.clear_range(&range);
+                    sheet.validations.set(range, new_rule);
+                }
+                self.bump_cells_rev();
+                self.revalidate_range(&range);
+            }
+            UndoAction::ValidationCleared { sheet_index, range, .. } => {
+                // Redo: clear the validations again
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.validations.clear_range(&range);
+                }
+                self.bump_cells_rev();
+                self.clear_invalid_markers_in_range(&range);
+            }
+            UndoAction::ValidationExcluded { sheet_index, range } => {
+                // Redo: re-add the exclusion
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.validations.exclude(range);
+                }
+                self.bump_cells_rev();
+                self.clear_invalid_markers_in_range(&range);
+            }
+            UndoAction::ValidationExclusionCleared { sheet_index, range, .. } => {
+                // Redo: clear exclusions again
+                if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                    sheet.validations.clear_exclusions_in_range(&range);
+                }
+                self.bump_cells_rev();
+                self.revalidate_range(&range);
             }
         }
     }
@@ -627,9 +748,98 @@ impl Spreadsheet {
                     self.clamp_selection();
                     self.status_message = Some("Redo: sort".to_string());
                 }
+                UndoAction::ValidationSet { sheet_index, range, new_rule, .. } => {
+                    // Redo: full replace pipeline - clear overlaps then set rule
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.validations.clear_range(&range);
+                        sheet.validations.set(range.clone(), new_rule);
+                    }
+                    self.bump_cells_rev();
+                    // Recompute invalid markers for affected range
+                    self.revalidate_range(&range);
+                    self.status_message = Some(format!("Redo: set validation ({} cells)", range.cell_count()));
+                }
+                UndoAction::ValidationCleared { sheet_index, range, .. } => {
+                    // Redo: clear the validations again
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.validations.clear_range(&range);
+                    }
+                    self.bump_cells_rev();
+                    // Clear invalid markers in the range (no validation = no invalid)
+                    self.clear_invalid_markers_in_range(&range);
+                    self.status_message = Some(format!("Redo: clear validation ({} cells)", range.cell_count()));
+                }
+                UndoAction::ValidationExcluded { sheet_index, range } => {
+                    // Redo: re-add the exclusion
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.validations.exclude(range.clone());
+                    }
+                    self.bump_cells_rev();
+                    // Clear invalid markers (excluded cells are not validated)
+                    self.clear_invalid_markers_in_range(&range);
+                    self.status_message = Some(format!("Redo: exclude from validation ({} cells)", range.cell_count()));
+                }
+                UndoAction::ValidationExclusionCleared { sheet_index, range, .. } => {
+                    // Redo: clear exclusions again
+                    if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+                        sheet.validations.clear_exclusions_in_range(&range);
+                    }
+                    self.bump_cells_rev();
+                    // Recompute invalid markers (cells may now be validated)
+                    self.revalidate_range(&range);
+                    self.status_message = Some(format!("Redo: clear exclusions ({} cells)", range.cell_count()));
+                }
             }
             self.is_modified = true;
             self.request_title_refresh(cx);
+        }
+    }
+
+    /// Recompute invalid markers for a range after validation changes.
+    /// Called after undo/redo to keep markers consistent with current validation state.
+    fn revalidate_range(&mut self, range: &visigrid_engine::validation::CellRange) {
+        use visigrid_engine::validation::ValidationResult;
+        use visigrid_engine::workbook::Workbook;
+
+        let sheet_index = self.sheet_index();
+
+        // Clear existing markers in range first
+        for row in range.start_row..=range.end_row {
+            for col in range.start_col..=range.end_col {
+                self.invalid_cells.remove(&(row, col));
+                self.validation_failures.retain(|&(r, c)| r != row || c != col);
+            }
+        }
+
+        // Revalidate cells in range
+        for row in range.start_row..=range.end_row {
+            for col in range.start_col..=range.end_col {
+                let display_value = self.sheet().get_display(row, col);
+                if display_value.is_empty() {
+                    continue;
+                }
+                let result = self.workbook.validate_cell_input(sheet_index, row, col, &display_value);
+                if let ValidationResult::Invalid { reason, .. } = result {
+                    let failure_reason = Workbook::classify_failure_reason(&reason);
+                    self.invalid_cells.insert((row, col), failure_reason);
+                    if !self.validation_failures.contains(&(row, col)) {
+                        self.validation_failures.push((row, col));
+                    }
+                }
+            }
+        }
+
+        // Re-sort failures in row-major order
+        self.validation_failures.sort_by_key(|&(r, c)| (r, c));
+    }
+
+    /// Clear invalid markers in a range (used when validation is removed).
+    fn clear_invalid_markers_in_range(&mut self, range: &visigrid_engine::validation::CellRange) {
+        for row in range.start_row..=range.end_row {
+            for col in range.start_col..=range.end_col {
+                self.invalid_cells.remove(&(row, col));
+                self.validation_failures.retain(|&(r, c)| r != row || c != col);
+            }
         }
     }
 }

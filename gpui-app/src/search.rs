@@ -136,6 +136,13 @@ pub enum CommandId {
     ToggleAutoFilter,
     ClearSort,
 
+    // Data (validation)
+    ValidationDialog,
+    ExcludeFromValidation,
+    ClearValidationExclusions,
+    CircleInvalidData,
+    ClearInvalidCircles,
+
     // VisiHub sync
     HubCheckStatus,
     HubPull,
@@ -217,6 +224,11 @@ impl CommandId {
             Self::SortDescending => "Sort Descending (Z→A)",
             Self::ToggleAutoFilter => "Toggle AutoFilter",
             Self::ClearSort => "Clear Sort",
+            Self::ValidationDialog => "Data Validation...",
+            Self::ExcludeFromValidation => "Exclude from Validation",
+            Self::ClearValidationExclusions => "Clear Validation Exclusions",
+            Self::CircleInvalidData => "Circle Invalid Data",
+            Self::ClearInvalidCircles => "Clear Invalid Circles",
             Self::HubCheckStatus => "VisiHub: Check Status",
             Self::HubPull => "VisiHub: Update from Remote",
             Self::HubPublish => "VisiHub: Publish",
@@ -334,6 +346,11 @@ impl CommandId {
             Self::SortDescending => "sort order descending desc z-a largest highest",
             Self::ToggleAutoFilter => "filter dropdown autofilter data",
             Self::ClearSort => "unsort restore original order",
+            Self::ValidationDialog => "validate data rules constraints list dropdown",
+            Self::ExcludeFromValidation => "validate exclude skip ignore",
+            Self::ClearValidationExclusions => "validate exclusions clear remove",
+            Self::CircleInvalidData => "validate invalid circle mark highlight",
+            Self::ClearInvalidCircles => "validate invalid circle clear remove",
             Self::HubCheckStatus => "visihub cloud sync status check refresh",
             Self::HubPull => "visihub cloud sync update pull",
             Self::HubPublish => "visihub cloud sync publish upload push commit",
@@ -414,6 +431,11 @@ impl CommandId {
             Self::SortDescending,
             Self::ToggleAutoFilter,
             Self::ClearSort,
+            Self::ValidationDialog,
+            Self::ExcludeFromValidation,
+            Self::ClearValidationExclusions,
+            Self::CircleInvalidData,
+            Self::ClearInvalidCircles,
             Self::HubCheckStatus,
             Self::HubPull,
             Self::HubPublish,
@@ -505,7 +527,12 @@ impl CommandId {
             | Self::SortAscending
             | Self::SortDescending
             | Self::ToggleAutoFilter
-            | Self::ClearSort => Some(MenuCategory::Data),
+            | Self::ClearSort
+            | Self::ValidationDialog
+            | Self::ExcludeFromValidation
+            | Self::ClearValidationExclusions
+            | Self::CircleInvalidData
+            | Self::ClearInvalidCircles => Some(MenuCategory::Data),
 
             // Help menu
             Self::ShowShortcuts

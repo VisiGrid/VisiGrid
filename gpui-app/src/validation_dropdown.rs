@@ -382,18 +382,14 @@ mod tests {
         if let ValidationDropdownState::Open(mut open) = state {
             assert_eq!(open.filtered_count(), 5);
 
+            // "an" only matches "Banana" (case-insensitive substring)
+            // - "apple" - no 'an'
+            // - "banana" - yes (bANana)
+            // - "cherry" - no
+            // - "date" - no
+            // - "elderberry" - no
             open.set_filter("an");
-            assert_eq!(open.filtered_count(), 2); // Banana, Elderberry (wait, no - "an" matches "Banana")
-            // Actually: "an" matches "Banana" (bANana)
-            // Let me check: "Apple" - no, "Banana" - yes (bANana), "Cherry" - no, "Date" - no, "Elderberry" - no
-            // So only 1 match
-
-            // Wait, case-insensitive: "banana".contains("an") = true
-            // Let me trace through:
-            // - "apple".to_lowercase() = "apple", contains "an"? No
-            // - "banana".to_lowercase() = "banana", contains "an"? Yes
-            // - "cherry", "date", "elderberry" - no "an"
-            // So filtered_count should be 1
+            assert_eq!(open.filtered_count(), 1);
         }
     }
 
@@ -403,10 +399,14 @@ mod tests {
         let mut state = ValidationDropdownState::open((0, 0), list);
 
         if let Some(open) = state.as_open_mut() {
+            // "A" matches items containing 'a' (case-insensitive):
+            // - "Apple" - yes
+            // - "Banana" - yes
+            // - "Cherry" - no 'a'
+            // - "Date" - yes
+            // - "Elderberry" - no 'a'
             open.set_filter("A");
-            // "apple", "banana", "date", "elderberry" all contain 'a'
-            // "cherry" does not contain 'a'
-            assert_eq!(open.filtered_count(), 4);
+            assert_eq!(open.filtered_count(), 3);
 
             open.set_filter("APPLE");
             assert_eq!(open.filtered_count(), 1);

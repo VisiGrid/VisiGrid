@@ -22,5 +22,5 @@ pub use document::*;
 pub use persistence::*;
 pub use store::*;
 
-// Note: user and resolved modules are only used internally within settings
-// Their types are accessed via the store interface (user_settings, etc.)
+// Re-export UserSettings for internal tests
+pub(crate) use user::UserSettings;

@@ -140,6 +140,38 @@ pub enum UndoAction {
         /// New sort state (column and direction) for redo
         new_sort_state: (usize, bool), // (column, is_ascending)
     },
+    /// Validation rule set (for undo: restore previous rules)
+    ValidationSet {
+        sheet_index: usize,
+        /// Target range where validation was applied
+        range: visigrid_engine::validation::CellRange,
+        /// Rules that were removed (for undo)
+        previous_rules: Vec<(visigrid_engine::validation::CellRange, visigrid_engine::validation::ValidationRule)>,
+        /// The new rule that was set (for redo)
+        new_rule: visigrid_engine::validation::ValidationRule,
+    },
+    /// Validation rules cleared (for undo: restore the cleared rules)
+    ValidationCleared {
+        sheet_index: usize,
+        /// Target range where validation was cleared
+        range: visigrid_engine::validation::CellRange,
+        /// Rules that were cleared (for undo: restore these)
+        cleared_rules: Vec<(visigrid_engine::validation::CellRange, visigrid_engine::validation::ValidationRule)>,
+    },
+    /// Validation exclusion added (for undo: remove the exclusion)
+    ValidationExcluded {
+        sheet_index: usize,
+        /// Range that was excluded from validation
+        range: visigrid_engine::validation::CellRange,
+    },
+    /// Validation exclusion cleared (for undo: restore the exclusions)
+    ValidationExclusionCleared {
+        sheet_index: usize,
+        /// Target range where exclusions were cleared
+        range: visigrid_engine::validation::CellRange,
+        /// Exclusions that were cleared (for undo: restore these)
+        cleared_exclusions: Vec<visigrid_engine::validation::CellRange>,
+    },
 }
 
 impl UndoAction {
@@ -205,6 +237,38 @@ impl UndoAction {
             }
             UndoAction::SortApplied { .. } => {
                 "Sort".to_string()
+            }
+            UndoAction::ValidationSet { range, .. } => {
+                let count = range.cell_count();
+                if count == 1 {
+                    "Set validation".to_string()
+                } else {
+                    format!("Set validation ({} cells)", count)
+                }
+            }
+            UndoAction::ValidationCleared { range, .. } => {
+                let count = range.cell_count();
+                if count == 1 {
+                    "Clear validation".to_string()
+                } else {
+                    format!("Clear validation ({} cells)", count)
+                }
+            }
+            UndoAction::ValidationExcluded { range, .. } => {
+                let count = range.cell_count();
+                if count == 1 {
+                    "Exclude from validation".to_string()
+                } else {
+                    format!("Exclude from validation ({} cells)", count)
+                }
+            }
+            UndoAction::ValidationExclusionCleared { range, .. } => {
+                let count = range.cell_count();
+                if count == 1 {
+                    "Clear exclusion".to_string()
+                } else {
+                    format!("Clear exclusions ({} cells)", count)
+                }
             }
         }
     }
