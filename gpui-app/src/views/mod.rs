@@ -26,6 +26,7 @@ mod menu_bar;
 mod status_bar;
 mod theme_picker;
 mod tour;
+mod validation_dialog;
 mod validation_dropdown_view;
 
 use std::time::Duration;
@@ -63,6 +64,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_hub_paste_token = app.mode == Mode::HubPasteToken;
     let show_hub_link = app.mode == Mode::HubLink;
     let show_hub_publish_confirm = app.mode == Mode::HubPublishConfirm;
+    let show_validation_dialog = app.mode == Mode::ValidationDialog;
     let show_import_overlay = app.import_overlay_visible;
     let show_name_tooltip = app.should_show_name_tooltip(cx) && app.mode == Mode::Navigation;
     let show_f2_tip = app.should_show_f2_tip(cx);  // Show immediately on trigger, not gated on mode
@@ -2143,6 +2145,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_license, |div| {
             div.child(license_dialog::render_license_dialog(app, cx))
+        })
+        .when(show_validation_dialog, |div| {
+            div.child(validation_dialog::render_validation_dialog(app, cx))
         })
         .when(show_hub_paste_token, |div| {
             div.child(hub_dialogs::render_paste_token_dialog(app, cx))

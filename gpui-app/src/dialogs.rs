@@ -339,4 +339,290 @@ impl Spreadsheet {
             cx.notify();
         }
     }
+
+    // =========================================================================
+    // Data Validation dialog (Phase 4)
+    // =========================================================================
+
+    pub fn show_validation_dialog(&mut self, cx: &mut Context<Self>) {
+        use visigrid_engine::validation::CellRange;
+
+        // Close validation dropdown when opening modal
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::ModalOpened,
+            cx,
+        );
+        self.lua_console.visible = false;
+
+        // Reset dialog state
+        self.validation_dialog.reset();
+
+        // Capture the target range (current selection)
+        let (row, col) = self.view_state.selected;
+        let range = if let Some((end_row, end_col)) = self.view_state.selection_end {
+            let (min_row, max_row) = if row <= end_row { (row, end_row) } else { (end_row, row) };
+            let (min_col, max_col) = if col <= end_col { (col, end_col) } else { (end_col, col) };
+            CellRange::new(min_row, min_col, max_row, max_col)
+        } else {
+            CellRange::single(row, col)
+        };
+        self.validation_dialog.target_range = Some(range.clone());
+
+        // Load existing validation if present (check first cell of selection)
+        // Clone the rule to release the borrow before modifying validation_dialog
+        let existing_rule = self.sheet().validations.get(row, col).cloned();
+        if let Some(rule) = existing_rule {
+            self.validation_dialog.load_from_rule(&rule);
+        }
+
+        self.mode = Mode::ValidationDialog;
+        cx.notify();
+    }
+
+    pub fn hide_validation_dialog(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        self.validation_dialog.reset();
+        cx.notify();
+    }
+
+    pub fn apply_validation_dialog(&mut self, cx: &mut Context<Self>) {
+        use crate::app::{ValidationTypeOption, NumericOperatorOption};
+        use visigrid_engine::validation::{ValidationRule, ValidationType, ListSource, NumericConstraint, ComparisonOperator};
+
+        // Copy all needed values upfront to avoid borrow issues
+        let validation_type = self.validation_dialog.validation_type;
+        let list_source_str = self.validation_dialog.list_source.clone();
+        let show_dropdown = self.validation_dialog.show_dropdown;
+        let numeric_operator = self.validation_dialog.numeric_operator;
+        let value1_str = self.validation_dialog.value1.clone();
+        let value2_str = self.validation_dialog.value2.clone();
+        let ignore_blank = self.validation_dialog.ignore_blank;
+        let target_range = self.validation_dialog.target_range.clone();
+
+        // Build the validation rule based on current state
+        let rule = match validation_type {
+            ValidationTypeOption::AnyValue => {
+                ValidationRule::new(ValidationType::AnyValue)
+            }
+            ValidationTypeOption::List => {
+                // Parse list source
+                let source = list_source_str.trim();
+                if source.is_empty() {
+                    self.validation_dialog.error = Some("List source is required".to_string());
+                    cx.notify();
+                    return;
+                }
+
+                // Determine source type: range ref, named range, or inline list
+                let list_source = if source.contains('!') || source.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) && source.contains(':') {
+                    // Looks like a range reference (e.g., "A1:A10" or "Sheet1!A1:A10")
+                    ListSource::Range(source.to_string())
+                } else if source.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) && !source.contains(',') {
+                    // Looks like a named range (starts with letter/underscore, no commas)
+                    ListSource::NamedRange(source.to_string())
+                } else {
+                    // Inline comma-separated list
+                    let items: Vec<String> = source.split(',').map(|s| s.trim().to_string()).collect();
+                    if items.is_empty() || items.iter().all(|s| s.is_empty()) {
+                        self.validation_dialog.error = Some("At least one list item is required".to_string());
+                        cx.notify();
+                        return;
+                    }
+                    ListSource::Inline(items)
+                };
+
+                ValidationRule::new(ValidationType::List(list_source))
+                    .with_show_dropdown(show_dropdown)
+            }
+            ValidationTypeOption::WholeNumber | ValidationTypeOption::Decimal => {
+                // Parse numeric constraint
+                let operator = match numeric_operator {
+                    NumericOperatorOption::Between => ComparisonOperator::Between,
+                    NumericOperatorOption::NotBetween => ComparisonOperator::NotBetween,
+                    NumericOperatorOption::EqualTo => ComparisonOperator::EqualTo,
+                    NumericOperatorOption::NotEqualTo => ComparisonOperator::NotEqualTo,
+                    NumericOperatorOption::GreaterThan => ComparisonOperator::GreaterThan,
+                    NumericOperatorOption::LessThan => ComparisonOperator::LessThan,
+                    NumericOperatorOption::GreaterThanOrEqual => ComparisonOperator::GreaterThanOrEqual,
+                    NumericOperatorOption::LessThanOrEqual => ComparisonOperator::LessThanOrEqual,
+                };
+
+                // Parse value1
+                let v1_str = value1_str.trim();
+                if v1_str.is_empty() {
+                    self.validation_dialog.error = Some("Value is required".to_string());
+                    cx.notify();
+                    return;
+                }
+                let value1 = Self::parse_constraint_value(v1_str);
+
+                // Parse value2 for between operators
+                let value2 = if numeric_operator.needs_two_values() {
+                    let v2_str = value2_str.trim();
+                    if v2_str.is_empty() {
+                        self.validation_dialog.error = Some("Maximum value is required".to_string());
+                        cx.notify();
+                        return;
+                    }
+                    Some(Self::parse_constraint_value(v2_str))
+                } else {
+                    None
+                };
+
+                let constraint = NumericConstraint { operator, value1, value2 };
+
+                if validation_type == ValidationTypeOption::WholeNumber {
+                    ValidationRule::new(ValidationType::WholeNumber(constraint))
+                } else {
+                    ValidationRule::new(ValidationType::Decimal(constraint))
+                }
+            }
+        };
+
+        // Apply common options
+        let rule = rule.with_ignore_blank(ignore_blank);
+
+        // Apply to target range
+        if let Some(range) = target_range {
+            self.sheet_mut().validations.set(range.clone(), rule);
+            self.bump_cells_rev();
+
+            let cell_count = range.cell_count();
+            self.status_message = Some(format!(
+                "Applied {} validation to {} cell{}",
+                validation_type.label(),
+                cell_count,
+                if cell_count == 1 { "" } else { "s" }
+            ));
+        }
+
+        self.hide_validation_dialog(cx);
+    }
+
+    pub fn clear_validation_dialog(&mut self, cx: &mut Context<Self>) {
+        // Clone target range to avoid borrow issues
+        let target_range = self.validation_dialog.target_range.clone();
+
+        // Clear validation from target range
+        if let Some(range) = target_range {
+            self.sheet_mut().validations.clear_range(&range);
+            self.bump_cells_rev();
+
+            let cell_count = range.cell_count();
+            self.status_message = Some(format!(
+                "Cleared validation from {} cell{}",
+                cell_count,
+                if cell_count == 1 { "" } else { "s" }
+            ));
+        }
+
+        self.hide_validation_dialog(cx);
+    }
+
+    /// Parse a constraint value string (number, cell ref, or formula)
+    fn parse_constraint_value(s: &str) -> visigrid_engine::validation::ConstraintValue {
+        use visigrid_engine::validation::ConstraintValue;
+
+        // Try parsing as number first
+        if let Ok(n) = s.parse::<f64>() {
+            return ConstraintValue::Number(n);
+        }
+
+        // Check if it's a cell reference (starts with letter, contains only alphanumeric)
+        if s.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '$' || c == '!' || c == ':')
+        {
+            return ConstraintValue::CellRef(s.to_string());
+        }
+
+        // Treat as formula
+        ConstraintValue::Formula(s.to_string())
+    }
+
+    // Validation dialog input handling
+    pub fn validation_dialog_type_char(&mut self, c: char, cx: &mut Context<Self>) {
+        use crate::app::ValidationDialogFocus;
+
+        match self.validation_dialog.focus {
+            ValidationDialogFocus::Source => {
+                self.validation_dialog.list_source.push(c);
+                self.validation_dialog.error = None;
+            }
+            ValidationDialogFocus::Value1 => {
+                self.validation_dialog.value1.push(c);
+                self.validation_dialog.error = None;
+            }
+            ValidationDialogFocus::Value2 => {
+                self.validation_dialog.value2.push(c);
+                self.validation_dialog.error = None;
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    pub fn validation_dialog_backspace(&mut self, cx: &mut Context<Self>) {
+        use crate::app::ValidationDialogFocus;
+
+        match self.validation_dialog.focus {
+            ValidationDialogFocus::Source => {
+                self.validation_dialog.list_source.pop();
+                self.validation_dialog.error = None;
+            }
+            ValidationDialogFocus::Value1 => {
+                self.validation_dialog.value1.pop();
+                self.validation_dialog.error = None;
+            }
+            ValidationDialogFocus::Value2 => {
+                self.validation_dialog.value2.pop();
+                self.validation_dialog.error = None;
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    pub fn validation_dialog_tab(&mut self, shift: bool, cx: &mut Context<Self>) {
+        use crate::app::{ValidationDialogFocus, ValidationTypeOption};
+
+        // Close any open dropdowns
+        self.validation_dialog.type_dropdown_open = false;
+        self.validation_dialog.operator_dropdown_open = false;
+
+        // Cycle through focusable fields based on validation type
+        let fields: Vec<ValidationDialogFocus> = match self.validation_dialog.validation_type {
+            ValidationTypeOption::AnyValue => {
+                vec![ValidationDialogFocus::TypeDropdown]
+            }
+            ValidationTypeOption::List => {
+                vec![ValidationDialogFocus::TypeDropdown, ValidationDialogFocus::Source]
+            }
+            ValidationTypeOption::WholeNumber | ValidationTypeOption::Decimal => {
+                if self.validation_dialog.numeric_operator.needs_two_values() {
+                    vec![
+                        ValidationDialogFocus::TypeDropdown,
+                        ValidationDialogFocus::OperatorDropdown,
+                        ValidationDialogFocus::Value1,
+                        ValidationDialogFocus::Value2,
+                    ]
+                } else {
+                    vec![
+                        ValidationDialogFocus::TypeDropdown,
+                        ValidationDialogFocus::OperatorDropdown,
+                        ValidationDialogFocus::Value1,
+                    ]
+                }
+            }
+        };
+
+        let current_idx = fields.iter().position(|f| *f == self.validation_dialog.focus).unwrap_or(0);
+        let next_idx = if shift {
+            if current_idx == 0 { fields.len() - 1 } else { current_idx - 1 }
+        } else {
+            (current_idx + 1) % fields.len()
+        };
+
+        self.validation_dialog.focus = fields[next_idx];
+        cx.notify();
+    }
 }

@@ -374,6 +374,217 @@ impl Default for SelectionFormatState {
     }
 }
 
+// ============================================================================
+// Validation Dialog State (Phase 4)
+// ============================================================================
+
+/// Validation type options for the dialog dropdown
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ValidationTypeOption {
+    #[default]
+    AnyValue,
+    List,
+    WholeNumber,
+    Decimal,
+}
+
+impl ValidationTypeOption {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::AnyValue => "Any value",
+            Self::List => "List",
+            Self::WholeNumber => "Whole number",
+            Self::Decimal => "Decimal",
+        }
+    }
+
+    pub const ALL: &'static [ValidationTypeOption] = &[
+        Self::AnyValue,
+        Self::List,
+        Self::WholeNumber,
+        Self::Decimal,
+    ];
+}
+
+/// Numeric comparison operator options
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NumericOperatorOption {
+    #[default]
+    Between,
+    NotBetween,
+    EqualTo,
+    NotEqualTo,
+    GreaterThan,
+    LessThan,
+    GreaterThanOrEqual,
+    LessThanOrEqual,
+}
+
+impl NumericOperatorOption {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Between => "between",
+            Self::NotBetween => "not between",
+            Self::EqualTo => "equal to",
+            Self::NotEqualTo => "not equal to",
+            Self::GreaterThan => "greater than",
+            Self::LessThan => "less than",
+            Self::GreaterThanOrEqual => "greater than or equal to",
+            Self::LessThanOrEqual => "less than or equal to",
+        }
+    }
+
+    pub const ALL: &'static [NumericOperatorOption] = &[
+        Self::Between,
+        Self::NotBetween,
+        Self::EqualTo,
+        Self::NotEqualTo,
+        Self::GreaterThan,
+        Self::LessThan,
+        Self::GreaterThanOrEqual,
+        Self::LessThanOrEqual,
+    ];
+
+    /// Whether this operator requires two values (min/max)
+    pub fn needs_two_values(&self) -> bool {
+        matches!(self, Self::Between | Self::NotBetween)
+    }
+}
+
+/// Which field in the validation dialog has focus
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ValidationDialogFocus {
+    #[default]
+    None,
+    TypeDropdown,
+    OperatorDropdown,
+    Source,      // List source field
+    Value1,      // First value (or Minimum for Between)
+    Value2,      // Second value (Maximum for Between)
+}
+
+/// State for the data validation dialog (Phase 4)
+#[derive(Debug, Clone, Default)]
+pub struct ValidationDialogState {
+    /// Currently selected validation type
+    pub validation_type: ValidationTypeOption,
+    /// Whether the type dropdown is expanded
+    pub type_dropdown_open: bool,
+    /// Whether the operator dropdown is expanded
+    pub operator_dropdown_open: bool,
+
+    // List validation fields
+    /// Source for list validation (e.g., "A1:A10" or "Yes,No,Maybe")
+    pub list_source: String,
+    /// Show dropdown arrow in cell
+    pub show_dropdown: bool,
+
+    // Numeric validation fields
+    /// Comparison operator
+    pub numeric_operator: NumericOperatorOption,
+    /// First value (or minimum for between)
+    pub value1: String,
+    /// Second value (maximum for between)
+    pub value2: String,
+
+    // Common fields
+    /// Allow blank cells
+    pub ignore_blank: bool,
+
+    /// Which field currently has focus
+    pub focus: ValidationDialogFocus,
+
+    /// Error message to display (validation errors)
+    pub error: Option<String>,
+
+    /// The range we're applying validation to (captured when dialog opens)
+    pub target_range: Option<visigrid_engine::validation::CellRange>,
+
+    /// Whether we loaded existing validation (for Clear button visibility)
+    pub has_existing_validation: bool,
+}
+
+impl ValidationDialogState {
+    /// Reset to defaults for a new dialog session
+    pub fn reset(&mut self) {
+        *self = Self::default();
+        self.show_dropdown = true;  // Default to showing dropdown for list
+        self.ignore_blank = true;   // Default to allowing blank
+    }
+
+    /// Load state from an existing validation rule
+    pub fn load_from_rule(&mut self, rule: &visigrid_engine::validation::ValidationRule) {
+        use visigrid_engine::validation::{ValidationType, ListSource};
+
+        self.reset();
+        self.has_existing_validation = true;
+        self.ignore_blank = rule.ignore_blank;
+        self.show_dropdown = rule.show_dropdown;
+
+        match &rule.rule_type {
+            ValidationType::AnyValue => {
+                self.validation_type = ValidationTypeOption::AnyValue;
+            }
+            ValidationType::List(source) => {
+                self.validation_type = ValidationTypeOption::List;
+                match source {
+                    ListSource::Inline(items) => {
+                        self.list_source = items.join(",");
+                    }
+                    ListSource::Range(r) => {
+                        self.list_source = r.clone();
+                    }
+                    ListSource::NamedRange(n) => {
+                        self.list_source = n.clone();
+                    }
+                }
+            }
+            ValidationType::WholeNumber(constraint) => {
+                self.validation_type = ValidationTypeOption::WholeNumber;
+                self.load_numeric_constraint(constraint);
+            }
+            ValidationType::Decimal(constraint) => {
+                self.validation_type = ValidationTypeOption::Decimal;
+                self.load_numeric_constraint(constraint);
+            }
+            _ => {
+                // Date, Time, TextLength, Custom - not yet supported in dialog
+                // Show as AnyValue (read-only)
+                self.validation_type = ValidationTypeOption::AnyValue;
+            }
+        }
+    }
+
+    fn load_numeric_constraint(&mut self, constraint: &visigrid_engine::validation::NumericConstraint) {
+        use visigrid_engine::validation::{ComparisonOperator, ConstraintValue};
+
+        self.numeric_operator = match constraint.operator {
+            ComparisonOperator::Between => NumericOperatorOption::Between,
+            ComparisonOperator::NotBetween => NumericOperatorOption::NotBetween,
+            ComparisonOperator::EqualTo => NumericOperatorOption::EqualTo,
+            ComparisonOperator::NotEqualTo => NumericOperatorOption::NotEqualTo,
+            ComparisonOperator::GreaterThan => NumericOperatorOption::GreaterThan,
+            ComparisonOperator::LessThan => NumericOperatorOption::LessThan,
+            ComparisonOperator::GreaterThanOrEqual => NumericOperatorOption::GreaterThanOrEqual,
+            ComparisonOperator::LessThanOrEqual => NumericOperatorOption::LessThanOrEqual,
+        };
+
+        // Helper to convert constraint value to string
+        let value_to_string = |v: &ConstraintValue| -> String {
+            match v {
+                ConstraintValue::Number(n) => n.to_string(),
+                ConstraintValue::CellRef(r) => r.clone(),
+                ConstraintValue::Formula(f) => f.clone(),
+            }
+        };
+
+        self.value1 = value_to_string(&constraint.value1);
+        if let Some(ref v2) = constraint.value2 {
+            self.value2 = value_to_string(v2);
+        }
+    }
+}
+
 // Grid configuration
 pub const NUM_ROWS: usize = 65536;
 pub const NUM_COLS: usize = 256;
@@ -767,6 +978,9 @@ pub struct Spreadsheet {
     // Validation dropdown state (data validation list picker)
     pub validation_dropdown: crate::validation_dropdown::ValidationDropdownState,
 
+    // Validation dialog state (Phase 4: Data > Validation menu)
+    pub validation_dialog: ValidationDialogState,
+
     // Validation failure navigation (Phase 6B: F8/Shift+F8 to cycle through invalid cells)
     pub validation_failures: Vec<(usize, usize)>,  // (row, col) of failed cells
     pub validation_failure_index: usize,           // Current index for cycling
@@ -1020,6 +1234,8 @@ impl Spreadsheet {
             hub_link_loading: false,
 
             validation_dropdown: crate::validation_dropdown::ValidationDropdownState::default(),
+
+            validation_dialog: ValidationDialogState::default(),
 
             validation_failures: Vec::new(),
             validation_failure_index: 0,
