@@ -27,6 +27,7 @@ mod status_bar;
 mod theme_picker;
 mod tour;
 
+use std::time::Duration;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, CELL_HEIGHT, CreateNameFocus};
@@ -359,6 +360,17 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
                 return;
             }
+            // Special handling for CreateNamedRange mode - paste into focused field
+            if this.mode == Mode::CreateNamedRange {
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        for c in text.chars().filter(|c| !c.is_control()) {
+                            this.create_name_insert_char(c, cx);
+                        }
+                    }
+                }
+                return;
+            }
             this.paste(cx);
             this.update_edit_scroll(window);
             this.update_title_if_needed(window);
@@ -421,6 +433,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 Mode::FontPicker => this.font_picker_execute(cx),
                 Mode::Command => this.palette_execute(cx),
                 Mode::GoTo => this.confirm_goto(cx),
+                Mode::CreateNamedRange => this.confirm_create_named_range(cx),
                 _ => {
                     this.confirm_edit(cx);
                     this.update_title_if_needed(window);
@@ -504,6 +517,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &TabNext, window, cx| {
+            // Dialog modes handle Tab themselves
+            if this.mode == Mode::CreateNamedRange {
+                this.create_name_tab(cx);
+                return;
+            }
             // If autocomplete is visible, Tab accepts the suggestion
             if this.autocomplete_visible {
                 this.autocomplete_accept(cx);
@@ -526,6 +544,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &BackspaceChar, window, cx| {
+            // Dialog modes handle backspace themselves
+            if this.mode == Mode::CreateNamedRange {
+                this.create_name_backspace(cx);
+                return;
+            }
             // Lua console handles its own backspace
             if this.lua_console.visible {
                 this.lua_console.backspace();
@@ -1280,6 +1303,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                         return;
                     }
                 }
+                return; // Consume all keystrokes in create named range mode
             }
 
             // Handle Edit Description mode
@@ -2043,7 +2067,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             div.child(render_rename_symbol_dialog(app))
         })
         .when(show_create_named_range, |div| {
-            div.child(render_create_named_range_dialog(app))
+            div.child(render_create_named_range_dialog(app, cx))
         })
         .when(show_edit_description, |div| {
             div.child(render_edit_description_dialog(app))
@@ -2969,7 +2993,7 @@ fn col_to_letter(col: usize) -> String {
 }
 
 /// Render the create named range dialog (Ctrl+Shift+N)
-fn render_create_named_range_dialog(app: &Spreadsheet) -> impl IntoElement {
+fn render_create_named_range_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let panel_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
@@ -2981,14 +3005,18 @@ fn render_create_named_range_dialog(app: &Spreadsheet) -> impl IntoElement {
     let name_focused = app.create_name_focus == CreateNameFocus::Name;
     let desc_focused = app.create_name_focus == CreateNameFocus::Description;
 
-    // Centered dialog overlay
+    // Centered dialog overlay - blocks clicks from reaching grid below
     div()
+        .id("create-named-range-overlay")
         .absolute()
         .inset_0()
         .flex()
         .items_center()
         .justify_center()
         .bg(hsla(0.0, 0.0, 0.0, 0.5))
+        .on_mouse_down(MouseButton::Left, cx.listener(|_this, _event, _window, _cx| {
+            // Consume click to prevent it reaching grid below
+        }))
         .child(
             div()
                 .w(px(400.0))
@@ -3043,6 +3071,7 @@ fn render_create_named_range_dialog(app: &Spreadsheet) -> impl IntoElement {
                         )
                         .child(
                             div()
+                                .id("create-name-input")
                                 .flex_1()
                                 .px_2()
                                 .py_1()
@@ -3056,11 +3085,36 @@ fn render_create_named_range_dialog(app: &Spreadsheet) -> impl IntoElement {
                                 } else {
                                     panel_border
                                 })
-                                .text_color(text_primary)
+                                .text_color(if app.create_name_name.is_empty() && !name_focused { text_muted } else { text_primary })
+                                .cursor_text()
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.create_name_focus = CreateNameFocus::Name;
+                                    cx.notify();
+                                }))
+                                .flex()
+                                .items_center()
                                 .child(if app.create_name_name.is_empty() && !name_focused {
                                     "(required)".to_string()
                                 } else {
                                     app.create_name_name.clone()
+                                })
+                                .when(name_focused, |d| {
+                                    d.child(
+                                        div()
+                                            .w(px(1.0))
+                                            .h(px(14.0))
+                                            .bg(text_primary)
+                                            .with_animation(
+                                                "name-cursor-blink",
+                                                Animation::new(Duration::from_millis(530))
+                                                    .repeat()
+                                                    .with_easing(pulsating_between(0.0, 1.0)),
+                                                |this, delta| {
+                                                    let opacity = if delta > 0.5 { 0.0 } else { 1.0 };
+                                                    this.opacity(opacity)
+                                                },
+                                            )
+                                    )
                                 })
                         )
                 )
@@ -3079,6 +3133,7 @@ fn render_create_named_range_dialog(app: &Spreadsheet) -> impl IntoElement {
                         )
                         .child(
                             div()
+                                .id("create-desc-input")
                                 .flex_1()
                                 .px_2()
                                 .py_1()
@@ -3086,11 +3141,36 @@ fn render_create_named_range_dialog(app: &Spreadsheet) -> impl IntoElement {
                                 .rounded_sm()
                                 .border_1()
                                 .border_color(if desc_focused { accent } else { panel_border })
-                                .text_color(if app.create_name_description.is_empty() { text_muted } else { text_primary })
-                                .child(if app.create_name_description.is_empty() {
+                                .text_color(if app.create_name_description.is_empty() && !desc_focused { text_muted } else { text_primary })
+                                .cursor_text()
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.create_name_focus = CreateNameFocus::Description;
+                                    cx.notify();
+                                }))
+                                .flex()
+                                .items_center()
+                                .child(if app.create_name_description.is_empty() && !desc_focused {
                                     "(optional)".to_string()
                                 } else {
                                     app.create_name_description.clone()
+                                })
+                                .when(desc_focused, |d| {
+                                    d.child(
+                                        div()
+                                            .w(px(1.0))
+                                            .h(px(14.0))
+                                            .bg(text_primary)
+                                            .with_animation(
+                                                "desc-cursor-blink",
+                                                Animation::new(Duration::from_millis(530))
+                                                    .repeat()
+                                                    .with_easing(pulsating_between(0.0, 1.0)),
+                                                |this, delta| {
+                                                    let opacity = if delta > 0.5 { 0.0 } else { 1.0 };
+                                                    this.opacity(opacity)
+                                                },
+                                            )
+                                    )
                                 })
                         )
                 )

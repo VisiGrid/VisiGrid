@@ -1366,8 +1366,9 @@ fn render_names_tab(
                         .border_1()
                         .border_color(accent.opacity(0.5))
                         .hover(|s| s.bg(accent.opacity(0.1)))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
                             this.show_create_named_range(cx);
+                            window.focus(&this.focus_handle, cx);
                         }))
                         .child("+ Create")
                 )
@@ -1438,6 +1439,7 @@ fn render_names_tab(
 
 /// Detail info for a named range (Phase 5)
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct NamedRangeDetail {
     name: String,
     reference: String,
@@ -1446,8 +1448,10 @@ struct NamedRangeDetail {
     value_preview: String,
     /// Number of cells in the range
     cell_count: usize,
-    /// Usage count (formulas referencing this name)
+    /// Usage count (formulas referencing this name by name)
     usage_count: usize,
+    /// Dependents count (cells that depend on cells in this range, from dependency graph)
+    dependents_count: usize,
     /// Dependency depth (max depth of cells in range)
     depth: Option<usize>,
     /// Whether verified mode is on and this range is verified
@@ -1462,16 +1466,16 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRang
     use visigrid_engine::cell_id::CellId;
 
     // Extract all data from named range first (immutable borrow)
-    let (reference, description, cells, cell_count) = {
+    let (reference, description, cells, cell_count, sheet_index) = {
         let nr = app.workbook.get_named_range(name)?;
         let reference = nr.reference_string();
         let description = nr.description.clone();
 
-        let (cells, cell_count): (Vec<(usize, usize)>, usize) = match &nr.target {
-            NamedRangeTarget::Cell { row, col, .. } => {
-                (vec![(*row, *col)], 1)
+        let (cells, cell_count, sheet_index): (Vec<(usize, usize)>, usize, usize) = match &nr.target {
+            NamedRangeTarget::Cell { sheet, row, col } => {
+                (vec![(*row, *col)], 1, *sheet)
             }
-            NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => {
+            NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
                 let mut cells = Vec::new();
                 for r in *start_row..=*end_row {
                     for c in *start_col..=*end_col {
@@ -1479,15 +1483,43 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRang
                     }
                 }
                 let count = cells.len();
-                (cells, count)
+                (cells, count, *sheet)
             }
         };
 
-        (reference, description, cells, cell_count)
+        (reference, description, cells, cell_count, sheet_index)
     };
 
     // Now we can call mutable methods
     let usage_count = app.get_named_range_usage_count(name);
+
+    // Count dependents from the dependency graph (cells that depend on cells in this range)
+    let dependents_count = {
+        use std::collections::HashSet;
+        // Get the SheetId from the sheet index
+        let sheet_id = app.workbook.sheets()
+            .get(sheet_index)
+            .map(|s| s.id)
+            .unwrap_or_else(|| app.sheet().id);
+        let mut all_dependents: HashSet<CellId> = HashSet::new();
+
+        // Convert cells in range to CellIds for exclusion
+        let range_cells: HashSet<CellId> = cells.iter()
+            .map(|(r, c)| CellId::new(sheet_id, *r, *c))
+            .collect();
+
+        // Collect unique dependents from all cells in the range
+        for (row, col) in &cells {
+            let deps = app.workbook.get_dependents(sheet_id, *row, *col);
+            for dep in deps {
+                // Don't count cells within the range itself as dependents
+                if !range_cells.contains(&dep) {
+                    all_dependents.insert(dep);
+                }
+            }
+        }
+        all_dependents.len()
+    };
 
     // Value preview: first cell value (or summary for multi-cell ranges)
     let value_preview = if cell_count == 1 {
@@ -1502,32 +1534,39 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRang
         }
     };
 
-    // Get depth and verification from recalc report (if available)
-    let (depth, is_verified, has_dynamic_refs) = if app.verified_mode {
-        if let Some(report) = &app.last_recalc_report {
-            let sheet_id = app.sheet().id;
-            let mut max_depth = 0usize;
-            let mut all_verified = true;
-            let mut any_dynamic = false;
+    // Compute depth from dependency graph (works without Verified Mode)
+    // Depth = max depth of precedent chain (0 for raw values, 1+ for formulas)
+    let (depth, is_verified, has_dynamic_refs) = {
+        // Get the SheetId from the sheet index
+        let sheet_id = app.workbook.sheets()
+            .get(sheet_index)
+            .map(|s| s.id)
+            .unwrap_or_else(|| app.sheet().id);
 
-            for (row, col) in &cells {
-                let cell_id = CellId::new(sheet_id, *row, *col);
-                if let Some(info) = report.get_cell_info(&cell_id) {
-                    max_depth = max_depth.max(info.depth);
-                    if info.has_unknown_deps {
+        let mut max_depth = 0usize;
+        let mut any_dynamic = false;
+
+        for (row, col) in &cells {
+            let cell_id = CellId::new(sheet_id, *row, *col);
+            // Compute depth by traversing precedents
+            let cell_depth = compute_cell_depth(&app.workbook, cell_id, &mut std::collections::HashSet::new());
+            max_depth = max_depth.max(cell_depth);
+
+            // Check for dynamic refs in the formula
+            let raw = app.sheet().get_raw(*row, *col);
+            if raw.starts_with('=') {
+                if let Ok(expr) = visigrid_engine::formula::parser::parse(&raw[1..]) {
+                    if visigrid_engine::formula::analyze::has_dynamic_deps(&expr) {
                         any_dynamic = true;
                     }
-                } else {
-                    // Cell not in report means it wasn't recomputed (constant)
                 }
             }
-
-            (Some(max_depth), all_verified && !any_dynamic, any_dynamic)
-        } else {
-            (None, false, false)
         }
-    } else {
-        (None, false, false)
+
+        // is_verified only true if Verified Mode is on and we have a valid report
+        let is_verified = app.verified_mode && app.last_recalc_report.is_some() && !any_dynamic;
+
+        (Some(max_depth), is_verified, any_dynamic)
     };
 
     Some(NamedRangeDetail {
@@ -1537,6 +1576,7 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRang
         value_preview,
         cell_count,
         usage_count,
+        dependents_count,
         depth,
         is_verified: app.verified_mode && is_verified,
         has_dynamic_refs,
@@ -1655,13 +1695,13 @@ fn render_named_range_detail(
                             div()
                                 .text_size(px(9.0))
                                 .text_color(text_muted)
-                                .child("Used by")
+                                .child("Feeds")
                         )
                         .child(
                             div()
                                 .text_size(px(11.0))
                                 .text_color(text_primary)
-                                .child(SharedString::from(format!("{} formulas", detail.usage_count)))
+                                .child(SharedString::from(format!("{} cells", detail.dependents_count)))
                         )
                 )
         )
@@ -2702,6 +2742,47 @@ pub fn get_precedents(formula: &str) -> Vec<(usize, usize)> {
     } else {
         Vec::new()
     }
+}
+
+/// Compute the depth of a cell by traversing its precedents.
+/// Depth 0 = raw value (no formula), Depth 1+ = formula depth.
+/// Uses memoization via visited set to avoid recomputation and cycles.
+fn compute_cell_depth(
+    workbook: &visigrid_engine::workbook::Workbook,
+    cell_id: visigrid_engine::cell_id::CellId,
+    visited: &mut std::collections::HashSet<visigrid_engine::cell_id::CellId>,
+) -> usize {
+    // Cycle detection
+    if visited.contains(&cell_id) {
+        return 0;
+    }
+    visited.insert(cell_id);
+
+    // Get the cell's formula
+    let raw = workbook.sheets()
+        .iter()
+        .find(|s| s.id == cell_id.sheet)
+        .map(|s| s.get_raw(cell_id.row, cell_id.col))
+        .unwrap_or_default();
+
+    // Raw values have depth 0
+    if !raw.starts_with('=') {
+        return 0;
+    }
+
+    // Get precedents and find max depth
+    let precedents = workbook.get_precedents(cell_id.sheet, cell_id.row, cell_id.col);
+    if precedents.is_empty() {
+        return 1; // Formula with no cell refs (e.g., =1+2)
+    }
+
+    let max_prec_depth = precedents
+        .into_iter()
+        .map(|prec| compute_cell_depth(workbook, prec, visited))
+        .max()
+        .unwrap_or(0);
+
+    max_prec_depth + 1
 }
 
 // Get dependents (cells that reference the given cell)
