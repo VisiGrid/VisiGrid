@@ -59,6 +59,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("f12", GoToPrecedents, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "r"), RenameSymbol, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "n"), CreateNamedRange, Some("Spreadsheet")),
+        // Validation failure navigation
+        KeyBinding::new("f8", NextInvalidCell, Some("Spreadsheet")),
+        KeyBinding::new("shift-f8", PrevInvalidCell, Some("Spreadsheet")),
 
         // Editing
         KeyBinding::new("f2", StartEdit, Some("Spreadsheet")),
@@ -88,6 +91,8 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("f4", CycleReference, Some("Spreadsheet")),
         // Alt+= AutoSum (Excel behavior)
         KeyBinding::new("alt-=", AutoSum, Some("Spreadsheet")),
+        // Alt+Down - open validation dropdown (Excel behavior)
+        KeyBinding::new("alt-down", OpenValidationDropdown, Some("Spreadsheet")),
 
         // Selection
         KeyBinding::new(&kb(m, "a"), SelectAll, Some("Spreadsheet")),

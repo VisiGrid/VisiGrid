@@ -91,6 +91,8 @@ pub fn set_app_menus(cx: &mut App) {
             items: vec![
                 MenuItem::action("Fill Down", FillDown),
                 MenuItem::action("Fill Right", FillRight),
+                MenuItem::separator(),
+                MenuItem::action("Validation...", ShowDataValidation),
             ],
         },
         // Help menu

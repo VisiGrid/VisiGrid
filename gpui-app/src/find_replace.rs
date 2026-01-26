@@ -53,6 +53,12 @@ impl Spreadsheet {
             return;
         }
 
+        // Close validation dropdown when opening modal
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::ModalOpened,
+            cx,
+        );
+
         // Fresh open: clear state
         self.lua_console.visible = false;
         self.mode = Mode::Find;

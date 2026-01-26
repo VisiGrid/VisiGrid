@@ -282,6 +282,12 @@ impl Spreadsheet {
 
     /// Switch to a specific sheet by index
     pub fn goto_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
+        // Close validation dropdown when switching sheets
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::SheetSwitch,
+            cx,
+        );
+
         // Commit any pending edit before switching sheets
         self.commit_pending_edit();
         if self.workbook.set_active_sheet(index) {

@@ -26,6 +26,11 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn show_goto(&mut self, cx: &mut Context<Self>) {
+        // Close validation dropdown when opening modal
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::ModalOpened,
+            cx,
+        );
         self.lua_console.visible = false;
         self.mode = Mode::GoTo;
         self.goto_input.clear();
@@ -39,6 +44,12 @@ impl Spreadsheet {
     }
 
     pub fn confirm_goto(&mut self, cx: &mut Context<Self>) {
+        // Close validation dropdown when jumping to a cell
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::SelectionChanged,
+            cx,
+        );
+
         if let Some((row, col)) = Self::parse_cell_ref(&self.goto_input) {
             if row < NUM_ROWS && col < NUM_COLS {
                 self.view_state.selected = (row, col);
@@ -163,6 +174,11 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn show_about(&mut self, cx: &mut Context<Self>) {
+        // Close validation dropdown when opening modal
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::ModalOpened,
+            cx,
+        );
         // Close console if open (About dialog needs focus)
         self.lua_console.visible = false;
         self.mode = Mode::About;

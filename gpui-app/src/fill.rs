@@ -86,7 +86,20 @@ impl Spreadsheet {
             self.maybe_smoke_recalc();
         }
 
-        self.status_message = Some("Filled down".into());
+        // Validate filled range and report failures
+        let failures = self.workbook.validate_range(
+            self.sheet_index(), min_row + 1, min_col, max_row, max_col
+        );
+        let total_cells = (max_row - min_row) * (max_col - min_col + 1);
+        if failures.count > 0 {
+            self.store_validation_failures(&failures);
+            self.status_message = Some(format!(
+                "Filled down (Validation: {} of {} cells failed) — Press F8 to jump",
+                failures.count, total_cells
+            ));
+        } else {
+            self.status_message = Some("Filled down".into());
+        }
         cx.notify();
     }
 
@@ -153,7 +166,20 @@ impl Spreadsheet {
             self.maybe_smoke_recalc();
         }
 
-        self.status_message = Some("Filled right".into());
+        // Validate filled range and report failures
+        let failures = self.workbook.validate_range(
+            self.sheet_index(), min_row, min_col + 1, max_row, max_col
+        );
+        let total_cells = (max_row - min_row + 1) * (max_col - min_col);
+        if failures.count > 0 {
+            self.store_validation_failures(&failures);
+            self.status_message = Some(format!(
+                "Filled right (Validation: {} of {} cells failed) — Press F8 to jump",
+                failures.count, total_cells
+            ));
+        } else {
+            self.status_message = Some("Filled right".into());
+        }
         cx.notify();
     }
 

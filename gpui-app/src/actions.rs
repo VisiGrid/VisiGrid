@@ -24,6 +24,9 @@ actions!(navigation, [
     // IDE-style navigation (Shift+F12 / F12)
     FindReferences,    // Shift+F12: Find cells that reference current cell
     GoToPrecedents,    // F12: Go to cells that current cell references
+    // Validation failure navigation (F8 / Shift+F8)
+    NextInvalidCell,   // F8: Jump to next invalid cell
+    PrevInvalidCell,   // Shift+F8: Jump to previous invalid cell
 ]);
 
 // Editing actions
@@ -184,12 +187,14 @@ actions!(sheets, [
     AddSheet,
 ]);
 
-// Data actions (sort/filter)
+// Data actions (sort/filter/validation)
 actions!(data, [
     SortAscending,   // Sort current column ascending
     SortDescending,  // Sort current column descending
     ToggleAutoFilter, // Ctrl+Shift+F - enable/disable AutoFilter
     ClearSort,       // Remove current sort (restore original order)
+    ShowDataValidation,  // Data → Validation... dialog
+    OpenValidationDropdown,  // Alt+Down - open validation dropdown for current cell
 ]);
 
 // Command palette actions

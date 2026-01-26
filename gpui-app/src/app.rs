@@ -763,6 +763,16 @@ pub struct Spreadsheet {
     pub hub_selected_dataset: Option<usize>,
     pub hub_new_dataset_name: String,
     pub hub_link_loading: bool,
+
+    // Validation dropdown state (data validation list picker)
+    pub validation_dropdown: crate::validation_dropdown::ValidationDropdownState,
+
+    // Validation failure navigation (Phase 6B: F8/Shift+F8 to cycle through invalid cells)
+    pub validation_failures: Vec<(usize, usize)>,  // (row, col) of failed cells
+    pub validation_failure_index: usize,           // Current index for cycling
+
+    // Invalid cell markers (Phase 6C: visible red corner marks)
+    pub invalid_cells: std::collections::HashMap<(usize, usize), visigrid_engine::validation::ValidationFailureReason>,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -1008,6 +1018,13 @@ impl Spreadsheet {
             hub_selected_dataset: None,
             hub_new_dataset_name: String::new(),
             hub_link_loading: false,
+
+            validation_dropdown: crate::validation_dropdown::ValidationDropdownState::default(),
+
+            validation_failures: Vec::new(),
+            validation_failure_index: 0,
+
+            invalid_cells: std::collections::HashMap::new(),
         }
     }
 
@@ -1019,6 +1036,344 @@ impl Spreadsheet {
     /// Get a theme token color
     pub fn token(&self, key: TokenKey) -> Hsla {
         self.active_theme().get(key)
+    }
+
+    // ========================================================================
+    // Validation Dropdown
+    // ========================================================================
+
+    /// Close the validation dropdown if open.
+    ///
+    /// Call this from all invalidation points:
+    /// - Selection change
+    /// - Sheet switch
+    /// - Scroll/zoom
+    /// - Modal open
+    /// - Click outside
+    pub fn close_validation_dropdown(
+        &mut self,
+        reason: crate::validation_dropdown::DropdownCloseReason,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::validation_dropdown::DropdownCloseReason;
+
+        if self.validation_dropdown.is_open() {
+            self.validation_dropdown.close();
+
+            // Show status message for specific close reasons
+            if reason == DropdownCloseReason::SourceChanged {
+                self.status_message = Some("List updated".to_string());
+            }
+
+            cx.notify();
+        }
+    }
+
+    /// Check if validation dropdown is open
+    pub fn is_validation_dropdown_open(&self) -> bool {
+        self.validation_dropdown.is_open()
+    }
+
+    /// Open the validation dropdown for the current cell (if it has list validation)
+    pub fn open_validation_dropdown(&mut self, cx: &mut Context<Self>) {
+        use crate::validation_dropdown::ValidationDropdownState;
+
+        let (row, col) = self.view_state.selected;
+        let sheet_index = self.workbook.active_sheet_index();
+
+        // Get list items for this cell (if it has list validation)
+        let resolved = match self.workbook.get_list_items(sheet_index, row, col) {
+            Some(list) if !list.items.is_empty() => list,
+            Some(_) => {
+                // Has list validation but list is empty
+                self.status_message = Some("Validation list is empty".to_string());
+                cx.notify();
+                return;
+            }
+            None => {
+                // No list validation on this cell
+                self.status_message = Some("No dropdown for this cell".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        // Open the dropdown
+        self.validation_dropdown = ValidationDropdownState::open(
+            (row, col),
+            std::sync::Arc::new(resolved),
+        );
+
+        cx.notify();
+    }
+
+    /// Check if the validation dropdown source has changed (fingerprint mismatch).
+    /// Call this during render or update cycle to detect stale data.
+    pub fn check_dropdown_staleness(&mut self, cx: &mut Context<Self>) {
+        use crate::validation_dropdown::DropdownCloseReason;
+
+        let open_state = match self.validation_dropdown.as_open() {
+            Some(state) => state,
+            None => return,
+        };
+
+        let (row, col) = open_state.cell;
+        let stored_fingerprint = open_state.source_fingerprint;
+        let sheet_index = self.workbook.active_sheet_index();
+
+        // Get current fingerprint from source
+        if let Some(current_list) = self.workbook.get_list_items(sheet_index, row, col) {
+            if current_list.source_fingerprint != stored_fingerprint {
+                self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx);
+            }
+        } else {
+            // Source no longer exists - close dropdown
+            self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx);
+        }
+    }
+
+    /// Route a key event through the dropdown first.
+    ///
+    /// Returns true if the event was consumed (dropdown handled it).
+    /// Call this BEFORE any other key handling.
+    pub fn route_dropdown_key_event(
+        &mut self,
+        key: &str,
+        modifiers: crate::validation_dropdown::KeyModifiers,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::validation_dropdown::DropdownOutcome;
+
+        let open_state = match self.validation_dropdown.as_open_mut() {
+            Some(state) => state,
+            None => return false, // Dropdown not open
+        };
+
+        let outcome = open_state.handle_key(key, modifiers);
+
+        match outcome {
+            DropdownOutcome::Consumed => {
+                cx.notify();
+                true
+            }
+            DropdownOutcome::CloseNoCommit => {
+                self.validation_dropdown.close();
+                cx.notify();
+                // For Tab, return false so grid can handle navigation
+                key == "tab"
+            }
+            DropdownOutcome::CommitValue(value) => {
+                // Use the same commit path as click-to-select (undo, dep graph)
+                self.commit_validation_value(&value, cx);
+                true
+            }
+            DropdownOutcome::NotConsumed => false,
+        }
+    }
+
+    /// Route a character input through the dropdown first.
+    ///
+    /// Returns true if the event was consumed.
+    pub fn route_dropdown_char_event(
+        &mut self,
+        ch: char,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::validation_dropdown::DropdownOutcome;
+
+        let open_state = match self.validation_dropdown.as_open_mut() {
+            Some(state) => state,
+            None => return false,
+        };
+
+        let outcome = open_state.handle_char(ch);
+
+        match outcome {
+            DropdownOutcome::Consumed => {
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Commit a value from the validation dropdown (called when user clicks an item).
+    ///
+    /// Uses the same undo/recalc pipeline as normal cell editing to ensure:
+    /// - Undo/redo works correctly
+    /// - Dependency graph is updated
+    /// - Dirty state is tracked via history
+    pub fn commit_validation_value(&mut self, value: &str, cx: &mut Context<Self>) {
+        use crate::validation_dropdown::DropdownCloseReason;
+
+        // Close dropdown first
+        self.close_validation_dropdown(DropdownCloseReason::Committed, cx);
+
+        // Commit value using the same path as normal cell editing
+        let (row, col) = self.view_state.selected;
+        let old_value = self.sheet().get_raw(row, col);
+
+        // Record for undo (same as confirm_edit)
+        self.history.record_change(self.sheet_index(), row, col, old_value, value.to_string());
+
+        // Set value and update dependency graph (same as confirm_edit)
+        self.set_cell_value(row, col, value);
+
+        // Bump revision for render cache invalidation
+        self.cells_rev = self.cells_rev.wrapping_add(1);
+        cx.notify();
+    }
+
+    // ========================================================================
+    // Validation Failure Navigation (Phase 6B: F8/Shift+F8)
+    // ========================================================================
+
+    /// Store validation failures for navigation and display.
+    /// Called after paste/fill operations that may cause validation failures.
+    /// Populates both the navigation list (F8) and the invalid_cells map (red markers).
+    pub fn store_validation_failures(&mut self, failures: &visigrid_engine::workbook::ValidationFailures) {
+        // Store for F8 navigation
+        self.validation_failures = failures.failures.iter()
+            .map(|f| (f.row, f.col))
+            .collect();
+        self.validation_failure_index = 0;
+
+        // Store for red corner markers (adds to existing, doesn't clear)
+        for f in &failures.failures {
+            self.invalid_cells.insert((f.row, f.col), f.reason);
+        }
+    }
+
+    /// Clear all invalid cell markers.
+    pub fn clear_invalid_circles(&mut self, cx: &mut Context<Self>) {
+        let count = self.invalid_cells.len();
+        self.invalid_cells.clear();
+        self.validation_failures.clear();
+        self.validation_failure_index = 0;
+        self.status_message = Some(format!("Cleared {} invalid cell markers", count));
+        cx.notify();
+    }
+
+    /// Circle Invalid Data: validate all cells with validation rules and mark invalid ones.
+    pub fn circle_invalid_data(&mut self, cx: &mut Context<Self>) {
+        use visigrid_engine::validation::ValidationResult;
+        use visigrid_engine::workbook::Workbook;
+
+        // Clear existing markers
+        self.invalid_cells.clear();
+        self.validation_failures.clear();
+        self.validation_failure_index = 0;
+
+        // Collect validation ranges first (to avoid borrow conflict)
+        let ranges: Vec<_> = self.sheet().validations.iter()
+            .map(|(range, _)| range.clone())
+            .collect();
+
+        // Validate each cell with a rule
+        for target in ranges {
+            for row in target.start_row..=target.end_row {
+                for col in target.start_col..=target.end_col {
+                    let display_value = self.sheet().get_display(row, col);
+                    // Skip empty cells
+                    if display_value.is_empty() {
+                        continue;
+                    }
+                    let result = self.workbook.validate_cell_input(self.sheet_index(), row, col, &display_value);
+                    if let ValidationResult::Invalid { reason, .. } = result {
+                        // Classify the failure reason
+                        let failure_reason = Workbook::classify_failure_reason(&reason);
+                        self.invalid_cells.insert((row, col), failure_reason);
+                        self.validation_failures.push((row, col));
+                    }
+                }
+            }
+        }
+
+        // Sort failures in row-major order for predictable navigation
+        self.validation_failures.sort_by_key(|&(r, c)| (r, c));
+
+        let count = self.invalid_cells.len();
+        if count == 0 {
+            self.status_message = Some("All cells are valid".to_string());
+        } else {
+            self.status_message = Some(format!("Found {} invalid cells. Press F8 to navigate.", count));
+        }
+        cx.notify();
+    }
+
+    /// Check if a cell is marked as invalid (for rendering).
+    pub fn is_cell_invalid(&self, row: usize, col: usize) -> bool {
+        self.invalid_cells.contains_key(&(row, col))
+    }
+
+    /// Get the invalid reason for a cell (for inspector).
+    pub fn get_invalid_reason(&self, row: usize, col: usize) -> Option<visigrid_engine::validation::ValidationFailureReason> {
+        self.invalid_cells.get(&(row, col)).copied()
+    }
+
+    /// Clear invalid marker for a specific cell (called when cell is edited to valid value).
+    pub fn clear_cell_invalid(&mut self, row: usize, col: usize) {
+        self.invalid_cells.remove(&(row, col));
+        // Also remove from navigation list
+        self.validation_failures.retain(|&(r, c)| r != row || c != col);
+        // Adjust index if needed
+        if !self.validation_failures.is_empty() && self.validation_failure_index >= self.validation_failures.len() {
+            self.validation_failure_index = 0;
+        }
+    }
+
+    /// Jump to the next invalid cell (F8).
+    pub fn next_invalid_cell(&mut self, cx: &mut Context<Self>) {
+        if self.validation_failures.is_empty() {
+            self.status_message = Some("No validation failures to navigate".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Move to next failure (with wrap-around)
+        self.validation_failure_index = (self.validation_failure_index + 1) % self.validation_failures.len();
+        let (row, col) = self.validation_failures[self.validation_failure_index];
+
+        // Select the cell and scroll into view
+        self.view_state.selected = (row, col);
+        self.view_state.selection_end = None;
+        self.ensure_visible(cx);
+
+        self.status_message = Some(format!(
+            "Invalid cell {} of {} — F8 next, Shift+F8 prev",
+            self.validation_failure_index + 1,
+            self.validation_failures.len()
+        ));
+        cx.notify();
+    }
+
+    /// Jump to the previous invalid cell (Shift+F8).
+    pub fn prev_invalid_cell(&mut self, cx: &mut Context<Self>) {
+        if self.validation_failures.is_empty() {
+            self.status_message = Some("No validation failures to navigate".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Move to previous failure (with wrap-around)
+        if self.validation_failure_index == 0 {
+            self.validation_failure_index = self.validation_failures.len() - 1;
+        } else {
+            self.validation_failure_index -= 1;
+        }
+        let (row, col) = self.validation_failures[self.validation_failure_index];
+
+        // Select the cell and scroll into view
+        self.view_state.selected = (row, col);
+        self.view_state.selection_end = None;
+        self.ensure_visible(cx);
+
+        self.status_message = Some(format!(
+            "Invalid cell {} of {} — F8 next, Shift+F8 prev",
+            self.validation_failure_index + 1,
+            self.validation_failures.len()
+        ));
+        cx.notify();
     }
 
     // ========================================================================
@@ -1067,6 +1422,12 @@ impl Spreadsheet {
 
     /// Set zoom level (all zoom changes go through this)
     pub fn set_zoom(&mut self, new_zoom: f32, cx: &mut Context<Self>) {
+        // Close validation dropdown on zoom
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::Zoom,
+            cx,
+        );
+
         // Clamp to valid range
         let clamped = new_zoom.max(ZOOM_STEPS[0]).min(ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
         if (clamped - self.view_state.zoom_level).abs() < 0.001 {

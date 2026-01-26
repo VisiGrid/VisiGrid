@@ -26,6 +26,7 @@ mod menu_bar;
 mod status_bar;
 mod theme_picker;
 mod tour;
+mod validation_dropdown_view;
 
 use std::time::Duration;
 use gpui::*;
@@ -38,6 +39,9 @@ use crate::mode::{Mode, InspectorTab};
 use crate::theme::TokenKey;
 
 pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    // Check if validation dropdown source has changed (fingerprint mismatch)
+    app.check_dropdown_staleness(cx);
+
     let editing = app.mode.is_editing();
     let show_goto = app.mode == Mode::GoTo;
     let show_find = app.mode == Mode::Find;
@@ -71,6 +75,14 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .track_focus(&app.focus_handle)
         // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
+            // Validation dropdown navigation takes priority
+            if this.is_validation_dropdown_open() {
+                if let Some(state) = this.validation_dropdown.as_open_mut() {
+                    state.move_up();
+                    cx.notify();
+                }
+                return;
+            }
             // Lua console: history prev
             if this.lua_console.visible {
                 this.lua_console.history_prev();
@@ -91,6 +103,14 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
+            // Validation dropdown navigation takes priority
+            if this.is_validation_dropdown_open() {
+                if let Some(state) = this.validation_dropdown.as_open_mut() {
+                    state.move_down();
+                    cx.notify();
+                }
+                return;
+            }
             // Lua console: history next
             if this.lua_console.visible {
                 this.lua_console.history_next();
@@ -189,9 +209,25 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &PageUp, _, cx| {
+            // Validation dropdown takes priority
+            if this.is_validation_dropdown_open() {
+                if let Some(state) = this.validation_dropdown.as_open_mut() {
+                    state.page_up(10);
+                    cx.notify();
+                }
+                return;
+            }
             this.page_up(cx);
         }))
         .on_action(cx.listener(|this, _: &PageDown, _, cx| {
+            // Validation dropdown takes priority
+            if this.is_validation_dropdown_open() {
+                if let Some(state) = this.validation_dropdown.as_open_mut() {
+                    state.page_down(10);
+                    cx.notify();
+                }
+                return;
+            }
             this.page_down(cx);
         }))
         // Selection extension (formula mode: extend range reference)
@@ -416,6 +452,22 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.maybe_show_f2_tip(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
+            // Validation dropdown: Enter commits selected item
+            if this.is_validation_dropdown_open() {
+                if let Some(state) = this.validation_dropdown.as_open() {
+                    if let Some(value) = state.selected_item() {
+                        let value = value.to_string();
+                        this.commit_validation_value(&value, cx);
+                    } else {
+                        // No items visible - just close
+                        this.close_validation_dropdown(
+                            crate::validation_dropdown::DropdownCloseReason::Escape,
+                            cx,
+                        );
+                    }
+                }
+                return;
+            }
             // Lua console handles its own Enter
             if this.lua_console.visible {
                 crate::views::lua_console::execute_console(this, cx);
@@ -459,6 +511,14 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &CancelEdit, window, cx| {
+            // Validation dropdown: Escape closes without committing
+            if this.is_validation_dropdown_open() {
+                this.close_validation_dropdown(
+                    crate::validation_dropdown::DropdownCloseReason::Escape,
+                    cx,
+                );
+                return;
+            }
             // Lua console handles its own Escape
             if this.lua_console.visible {
                 this.lua_console.hide();
@@ -603,6 +663,15 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &ClearSort, window, cx| {
             this.clear_sort(cx);
             this.update_title_if_needed(window);
+        }))
+        // Data validation
+        .on_action(cx.listener(|this, _: &ShowDataValidation, _, cx| {
+            // TODO: Show data validation dialog
+            this.status_message = Some("Data validation dialog not yet implemented".to_string());
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &OpenValidationDropdown, _, cx| {
+            this.open_validation_dropdown(cx);
         }))
         .on_action(cx.listener(|this, _: &AutoSum, _, cx| {
             this.autosum(cx);
@@ -884,6 +953,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &CreateNamedRange, _, cx| {
             this.show_create_named_range(cx);
         }))
+        // Validation failure navigation (F8 / Shift+F8)
+        .on_action(cx.listener(|this, _: &NextInvalidCell, _, cx| {
+            this.next_invalid_cell(cx);
+        }))
+        .on_action(cx.listener(|this, _: &PrevInvalidCell, _, cx| {
+            this.prev_invalid_cell(cx);
+        }))
         // Command palette
         .on_action(cx.listener(|this, _: &ToggleCommandPalette, _, cx| {
             this.toggle_palette(cx);
@@ -1019,6 +1095,30 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                                 cx.notify();
                                 return;
                             }
+                        }
+                    }
+                }
+            }
+
+            // Handle validation dropdown keys (MUST come before edit-mode triggers)
+            if this.is_validation_dropdown_open() {
+                let modifiers = crate::validation_dropdown::KeyModifiers {
+                    control: event.keystroke.modifiers.control,
+                    alt: event.keystroke.modifiers.alt,
+                    shift: event.keystroke.modifiers.shift,
+                    platform: event.keystroke.modifiers.platform,
+                };
+
+                // Route key through dropdown first
+                if this.route_dropdown_key_event(&event.keystroke.key, modifiers, cx) {
+                    return;
+                }
+
+                // Handle character input for filtering
+                if let Some(key_char) = &event.keystroke.key_char {
+                    for ch in key_char.chars() {
+                        if this.route_dropdown_char_event(ch, cx) {
+                            return;
                         }
                     }
                 }
@@ -2098,6 +2198,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         // Filter dropdown popup
         .when_some(filter_dropdown::render_filter_dropdown(app, cx), |div, dropdown| {
+            div.child(dropdown)
+        })
+        // Validation dropdown popup (list validation)
+        .when_some(validation_dropdown_view::render_validation_dropdown(app, cx), |div, dropdown| {
             div.child(dropdown)
         })
         // Inspector panel (right-side drawer)

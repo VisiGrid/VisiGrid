@@ -168,6 +168,8 @@ impl Spreadsheet {
 
             // Parse tab-separated values and build values grid for provenance
             let mut values_grid: Vec<Vec<String>> = Vec::new();
+            let mut end_row = start_row;
+            let mut end_col = start_col;
             for (row_offset, line) in text.lines().enumerate() {
                 let mut row_values: Vec<String> = Vec::new();
                 for (col_offset, value) in line.split('\t').enumerate() {
@@ -191,6 +193,10 @@ impl Spreadsheet {
                             });
                         }
                         self.sheet_mut().set_value(row, col, &new_value);
+
+                        // Track paste bounds
+                        end_row = end_row.max(row);
+                        end_col = end_col.max(col);
                     }
                 }
                 if !row_values.is_empty() {
@@ -212,7 +218,21 @@ impl Spreadsheet {
                 self.bump_cells_rev();  // Invalidate cell search cache
                 self.is_modified = true;
             }
-            self.status_message = Some("Pasted from clipboard".to_string());
+
+            // Validate pasted range and report failures
+            let failures = self.workbook.validate_range(
+                self.sheet_index(), start_row, start_col, end_row, end_col
+            );
+            let total_cells = (end_row - start_row + 1) * (end_col - start_col + 1);
+            if failures.count > 0 {
+                self.store_validation_failures(&failures);
+                self.status_message = Some(format!(
+                    "Pasted from clipboard (Validation: {} of {} cells failed) — Press F8 to jump",
+                    failures.count, total_cells
+                ));
+            } else {
+                self.status_message = Some("Pasted from clipboard".to_string());
+            }
 
             // Smoke mode: trigger full ordered recompute for dogfooding
             self.maybe_smoke_recalc();
@@ -281,6 +301,8 @@ impl Spreadsheet {
         let (start_row, start_col) = self.view_state.selected;
         let mut changes = Vec::new();
         let mut values_grid: Vec<Vec<String>> = Vec::new();
+        let mut end_row = start_row;
+        let mut end_col = start_col;
 
         if use_internal_values {
             // Use typed values from internal clipboard (clone to avoid borrow issues)
@@ -303,6 +325,9 @@ impl Spreadsheet {
                                 });
                             }
                             self.sheet_mut().set_value(row, col, &new_value);
+
+                            end_row = end_row.max(row);
+                            end_col = end_col.max(col);
                         }
                     }
                     if !grid_row.is_empty() {
@@ -330,6 +355,9 @@ impl Spreadsheet {
                             });
                         }
                         self.sheet_mut().set_value(row, col, &new_value);
+
+                        end_row = end_row.max(row);
+                        end_col = end_col.max(col);
                     }
                 }
                 if !grid_row.is_empty() {
@@ -354,7 +382,21 @@ impl Spreadsheet {
             // Smoke mode: trigger full ordered recompute for dogfooding
             self.maybe_smoke_recalc();
         }
-        self.status_message = Some("Pasted values".to_string());
+
+        // Validate pasted range and report failures
+        let failures = self.workbook.validate_range(
+            self.sheet_index(), start_row, start_col, end_row, end_col
+        );
+        let total_cells = (end_row - start_row + 1) * (end_col - start_col + 1);
+        if failures.count > 0 {
+            self.store_validation_failures(&failures);
+            self.status_message = Some(format!(
+                "Pasted values (Validation: {} of {} cells failed) — Press F8 to jump",
+                failures.count, total_cells
+            ));
+        } else {
+            self.status_message = Some("Pasted values".to_string());
+        }
         cx.notify();
     }
 

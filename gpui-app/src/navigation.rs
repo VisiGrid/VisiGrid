@@ -20,6 +20,12 @@ impl Spreadsheet {
     pub fn move_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
+        // Close validation dropdown when selection changes
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::SelectionChanged,
+            cx,
+        );
+
         let (row, col) = self.view_state.selected;
         let new_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
         let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
@@ -252,6 +258,12 @@ impl Spreadsheet {
     }
 
     pub fn scroll(&mut self, delta_rows: i32, delta_cols: i32, cx: &mut Context<Self>) {
+        // Close validation dropdown on scroll
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::Scroll,
+            cx,
+        );
+
         let visible_rows = self.visible_rows();
         let visible_cols = self.visible_cols();
 

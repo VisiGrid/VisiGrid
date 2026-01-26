@@ -792,6 +792,22 @@ fn render_cell(
         cell = cell.bg(fill_preview_bg).border_1().border_color(fill_preview_border);
     }
 
+    // Phase 6C: Invalid cell corner triangle (data validation)
+    // Small red corner mark in top-right indicates validation failure
+    if app.is_cell_invalid(data_row, col) {
+        let invalid_color = rgb(0xE53935);  // Material Red 600
+        let mark_size = 6.0 * app.metrics.zoom;
+        cell = cell.child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .w(px(mark_size))
+                .h(px(mark_size))
+                .bg(invalid_color)
+        );
+    }
+
     // Determine if we should show the fill handle on this cell
     // Excel-style: show fill handle at bottom-right corner of selection
     // - For single cell: show on active cell

@@ -2,9 +2,22 @@
 //!
 //! Constrains what users can enter into cells: dropdown lists, number ranges,
 //! date limits, and custom formula rules.
+//!
+//! ## Case Sensitivity
+//!
+//! - **List validation matching**: Case-sensitive. "Yes" != "yes".
+//! - **Dropdown filter search**: Case-insensitive (UI layer handles this).
+//!
+//! This is explicit and consistent. Users who want case-insensitive matching
+//! should normalize their list items.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+/// Maximum number of items in a resolved list. Prevents UI freeze on huge ranges.
+pub const MAX_LIST_ITEMS: usize = 10_000;
 
 // ============================================================================
 // Core Types
@@ -17,6 +30,8 @@ pub struct ValidationRule {
     pub rule_type: ValidationType,
     /// If true, empty/blank values are always valid.
     pub ignore_blank: bool,
+    /// For List type: show dropdown arrow in cell. Ignored for other types.
+    pub show_dropdown: bool,
     /// Optional message shown when cell is selected.
     pub input_message: Option<InputMessage>,
     /// Optional error alert shown when validation fails.
@@ -26,9 +41,12 @@ pub struct ValidationRule {
 impl ValidationRule {
     /// Create a new validation rule with the given type.
     pub fn new(rule_type: ValidationType) -> Self {
+        // Default show_dropdown to true for List types
+        let show_dropdown = matches!(rule_type, ValidationType::List(_));
         Self {
             rule_type,
             ignore_blank: true,
+            show_dropdown,
             input_message: None,
             error_alert: None,
         }
@@ -37,6 +55,12 @@ impl ValidationRule {
     /// Set ignore_blank option.
     pub fn with_ignore_blank(mut self, ignore: bool) -> Self {
         self.ignore_blank = ignore;
+        self
+    }
+
+    /// Set show_dropdown option (for List validation).
+    pub fn with_show_dropdown(mut self, show: bool) -> Self {
+        self.show_dropdown = show;
         self
     }
 
@@ -238,6 +262,163 @@ pub enum ListSource {
 }
 
 // ============================================================================
+// Numeric Validation Helpers
+// ============================================================================
+
+/// Error when parsing numeric input for validation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NumericParseError {
+    /// Input is empty (after trimming whitespace).
+    Empty,
+    /// Input contains invalid characters or format.
+    InvalidFormat,
+    /// Input has a fractional part but WholeNumber validation requires integer.
+    FractionalNotAllowed,
+}
+
+impl std::fmt::Display for NumericParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NumericParseError::Empty => write!(f, "Value is empty"),
+            NumericParseError::InvalidFormat => write!(f, "Value is not a valid number"),
+            NumericParseError::FractionalNotAllowed => write!(f, "Whole number required (no decimals)"),
+        }
+    }
+}
+
+/// Error when resolving a constraint value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstraintResolveError {
+    /// Referenced cell is blank.
+    BlankConstraint,
+    /// Referenced cell or formula result is not numeric.
+    NotNumeric,
+    /// Cell reference could not be resolved.
+    InvalidReference(String),
+    /// Formula evaluation failed.
+    FormulaError(String),
+}
+
+impl std::fmt::Display for ConstraintResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConstraintResolveError::BlankConstraint => write!(f, "Constraint is blank"),
+            ConstraintResolveError::NotNumeric => write!(f, "Constraint is not numeric"),
+            ConstraintResolveError::InvalidReference(r) => write!(f, "Invalid reference: {}", r),
+            ConstraintResolveError::FormulaError(e) => write!(f, "Formula error: {}", e),
+        }
+    }
+}
+
+/// Reason why a cell failed validation.
+///
+/// Used for reporting after paste/fill operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationFailureReason {
+    /// Input value doesn't match the allowed type/range.
+    InvalidValue,
+    /// Constraint references a blank cell.
+    ConstraintBlank,
+    /// Constraint reference is not numeric.
+    ConstraintNotNumeric,
+    /// Constraint reference could not be resolved.
+    InvalidReference,
+    /// Formula constraint not supported.
+    FormulaNotSupported,
+    /// List is empty (no valid options).
+    ListEmpty,
+    /// Value not in list.
+    NotInList,
+}
+
+/// Parse user input as a number for validation.
+///
+/// # Rules
+/// - Whitespace is trimmed
+/// - Leading `+` is allowed
+/// - Decimal point allowed only if `allow_decimal` is true
+/// - For WholeNumber: rejects any fractional input (including `3.0`, `3.`)
+///
+/// # Examples
+/// ```
+/// use visigrid_engine::validation::parse_numeric_input;
+///
+/// // Decimal allows fractional
+/// assert!(parse_numeric_input("3.14", true).is_ok());
+/// assert!(parse_numeric_input(".5", true).is_ok());
+///
+/// // WholeNumber rejects fractional
+/// assert!(parse_numeric_input("3.14", false).is_err());
+/// assert!(parse_numeric_input("3.0", false).is_err());
+/// assert!(parse_numeric_input("3", false).is_ok());
+/// ```
+pub fn parse_numeric_input(value: &str, allow_decimal: bool) -> Result<f64, NumericParseError> {
+    let trimmed = value.trim();
+
+    if trimmed.is_empty() {
+        return Err(NumericParseError::Empty);
+    }
+
+    // Strip leading + (allowed for positive numbers)
+    let normalized = if trimmed.starts_with('+') {
+        &trimmed[1..]
+    } else {
+        trimmed
+    };
+
+    if normalized.is_empty() {
+        return Err(NumericParseError::InvalidFormat);
+    }
+
+    // Check for decimal point
+    let has_decimal = normalized.contains('.');
+
+    if !allow_decimal && has_decimal {
+        // WholeNumber validation: reject any input with decimal point
+        // This includes "3.0" and "3." - strict integer requirement
+        return Err(NumericParseError::FractionalNotAllowed);
+    }
+
+    // Parse the number
+    normalized.parse::<f64>().map_err(|_| NumericParseError::InvalidFormat)
+}
+
+/// Evaluate a numeric constraint.
+///
+/// # Arguments
+/// - `x`: The value being validated
+/// - `operator`: The comparison operator
+/// - `a`: First constraint value (min for Between, the value for single-value operators)
+/// - `b`: Second constraint value (max for Between/NotBetween, None for others)
+///
+/// # Between Inclusivity
+/// - `Between(a, b)`: returns true if `a <= x <= b` (inclusive)
+/// - `NotBetween(a, b)`: returns true if `x < a || x > b`
+pub fn eval_numeric_constraint(
+    x: f64,
+    operator: ComparisonOperator,
+    a: f64,
+    b: Option<f64>,
+) -> bool {
+    match operator {
+        ComparisonOperator::Between => {
+            let max = b.unwrap_or(a);
+            x >= a && x <= max
+        }
+        ComparisonOperator::NotBetween => {
+            let max = b.unwrap_or(a);
+            x < a || x > max
+        }
+        ComparisonOperator::EqualTo => (x - a).abs() < f64::EPSILON,
+        ComparisonOperator::NotEqualTo => (x - a).abs() >= f64::EPSILON,
+        ComparisonOperator::GreaterThan => x > a,
+        ComparisonOperator::LessThan => x < a,
+        ComparisonOperator::GreaterThanOrEqual => x >= a,
+        ComparisonOperator::LessThanOrEqual => x <= a,
+    }
+}
+
+// ============================================================================
 // Messages
 // ============================================================================
 
@@ -358,6 +539,89 @@ impl ValidationResult {
     /// Returns true if the result is invalid.
     pub fn is_invalid(&self) -> bool {
         matches!(self, ValidationResult::Invalid { .. })
+    }
+}
+
+// ============================================================================
+// Resolved List (for dropdown UI)
+// ============================================================================
+
+/// A resolved list of dropdown items ready for UI display.
+///
+/// Returned by `Sheet::get_list_items()` for cells with list validation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedList {
+    /// The list items (trimmed, possibly truncated).
+    pub items: Vec<String>,
+    /// True if the list was truncated due to exceeding MAX_LIST_ITEMS.
+    pub is_truncated: bool,
+    /// Fingerprint of the source data. Changes when source cells change.
+    /// Used to detect stale dropdowns.
+    pub source_fingerprint: u64,
+}
+
+impl ResolvedList {
+    /// Create a new resolved list from items.
+    ///
+    /// Normalizes items (trim whitespace) and truncates if needed.
+    pub fn from_items(raw_items: Vec<String>) -> Self {
+        let mut items: Vec<String> = raw_items
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .collect();
+
+        let is_truncated = items.len() > MAX_LIST_ITEMS;
+        if is_truncated {
+            items.truncate(MAX_LIST_ITEMS);
+        }
+
+        let source_fingerprint = Self::compute_fingerprint(&items);
+
+        Self {
+            items,
+            is_truncated,
+            source_fingerprint,
+        }
+    }
+
+    /// Create an empty resolved list.
+    pub fn empty() -> Self {
+        Self {
+            items: Vec::new(),
+            is_truncated: false,
+            source_fingerprint: 0,
+        }
+    }
+
+    /// Compute a fingerprint for the list items.
+    fn compute_fingerprint(items: &[String]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        items.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Check if a value matches any item in the list (case-sensitive).
+    pub fn contains(&self, value: &str) -> bool {
+        let trimmed = value.trim();
+        self.items.iter().any(|item| item == trimmed)
+    }
+
+    /// Check if a value matches any item in the list (case-insensitive).
+    /// Used for dropdown filter searching.
+    pub fn contains_case_insensitive(&self, value: &str) -> bool {
+        let trimmed = value.trim();
+        self.items.iter().any(|item| item.eq_ignore_ascii_case(trimmed))
+    }
+
+    /// Filter items by a search string (case-insensitive).
+    /// Returns items that contain the search string as a substring.
+    pub fn filter(&self, search: &str) -> Vec<&str> {
+        let search_lower = search.to_lowercase();
+        self.items
+            .iter()
+            .filter(|item| item.to_lowercase().contains(&search_lower))
+            .map(|s| s.as_str())
+            .collect()
     }
 }
 
@@ -637,5 +901,219 @@ mod tests {
         let parsed: ValidationRule = serde_json::from_str(&json).unwrap();
 
         assert_eq!(rule, parsed);
+    }
+
+    // ========================================================================
+    // ResolvedList tests
+    // ========================================================================
+
+    #[test]
+    fn test_resolved_list_from_items() {
+        let items = vec![
+            "  Yes  ".to_string(),
+            "No".to_string(),
+            "  Maybe ".to_string(),
+        ];
+        let resolved = ResolvedList::from_items(items);
+
+        assert_eq!(resolved.items, vec!["Yes", "No", "Maybe"]);
+        assert!(!resolved.is_truncated);
+        assert!(resolved.source_fingerprint != 0);
+    }
+
+    #[test]
+    fn test_resolved_list_contains_case_sensitive() {
+        let resolved = ResolvedList::from_items(vec![
+            "Yes".to_string(),
+            "No".to_string(),
+        ]);
+
+        // Case-sensitive matching
+        assert!(resolved.contains("Yes"));
+        assert!(resolved.contains("No"));
+        assert!(!resolved.contains("yes")); // Different case = no match
+        assert!(!resolved.contains("YES"));
+        assert!(!resolved.contains("Maybe"));
+
+        // Whitespace is trimmed
+        assert!(resolved.contains("  Yes  "));
+    }
+
+    #[test]
+    fn test_resolved_list_contains_case_insensitive() {
+        let resolved = ResolvedList::from_items(vec![
+            "Yes".to_string(),
+            "No".to_string(),
+        ]);
+
+        // Case-insensitive matching
+        assert!(resolved.contains_case_insensitive("Yes"));
+        assert!(resolved.contains_case_insensitive("yes"));
+        assert!(resolved.contains_case_insensitive("YES"));
+        assert!(resolved.contains_case_insensitive("No"));
+        assert!(!resolved.contains_case_insensitive("Maybe"));
+    }
+
+    #[test]
+    fn test_resolved_list_filter() {
+        let resolved = ResolvedList::from_items(vec![
+            "Open".to_string(),
+            "In Progress".to_string(),
+            "Closed".to_string(),
+            "On Hold".to_string(),
+        ]);
+
+        // Case-insensitive substring filtering
+        let filtered = resolved.filter("o");
+        assert_eq!(filtered, vec!["Open", "In Progress", "Closed", "On Hold"]);
+
+        let filtered = resolved.filter("pro");
+        assert_eq!(filtered, vec!["In Progress"]);
+
+        let filtered = resolved.filter("CL");
+        assert_eq!(filtered, vec!["Closed"]);
+
+        let filtered = resolved.filter("xyz");
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_resolved_list_truncation() {
+        // Create a list larger than MAX_LIST_ITEMS
+        let large_items: Vec<String> = (0..MAX_LIST_ITEMS + 100)
+            .map(|i| format!("Item{}", i))
+            .collect();
+
+        let resolved = ResolvedList::from_items(large_items);
+
+        assert_eq!(resolved.items.len(), MAX_LIST_ITEMS);
+        assert!(resolved.is_truncated);
+    }
+
+    #[test]
+    fn test_resolved_list_fingerprint_changes() {
+        let list1 = ResolvedList::from_items(vec!["A".to_string(), "B".to_string()]);
+        let list2 = ResolvedList::from_items(vec!["A".to_string(), "C".to_string()]);
+        let list3 = ResolvedList::from_items(vec!["A".to_string(), "B".to_string()]);
+
+        // Different content = different fingerprint
+        assert_ne!(list1.source_fingerprint, list2.source_fingerprint);
+
+        // Same content = same fingerprint
+        assert_eq!(list1.source_fingerprint, list3.source_fingerprint);
+    }
+
+    #[test]
+    fn test_resolved_list_empty() {
+        let resolved = ResolvedList::empty();
+
+        assert!(resolved.items.is_empty());
+        assert!(!resolved.is_truncated);
+        assert_eq!(resolved.source_fingerprint, 0);
+    }
+
+    // ========================================================================
+    // Numeric Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_numeric_input_basic() {
+        // Basic parsing
+        assert_eq!(parse_numeric_input("5", true).unwrap(), 5.0);
+        assert_eq!(parse_numeric_input("  5  ", true).unwrap(), 5.0);
+        assert_eq!(parse_numeric_input("+5", true).unwrap(), 5.0);
+        assert_eq!(parse_numeric_input("-5", true).unwrap(), -5.0);
+
+        // Decimal input
+        assert_eq!(parse_numeric_input("3.14", true).unwrap(), 3.14);
+        assert_eq!(parse_numeric_input(".5", true).unwrap(), 0.5);
+        assert_eq!(parse_numeric_input("-.5", true).unwrap(), -0.5);
+
+        // Empty/invalid
+        assert!(parse_numeric_input("", true).is_err());
+        assert!(parse_numeric_input("  ", true).is_err());
+        assert!(parse_numeric_input("abc", true).is_err());
+        assert!(parse_numeric_input("+", true).is_err());
+    }
+
+    #[test]
+    fn test_parse_numeric_input_whole_number_strictness() {
+        // WholeNumber allows integers
+        assert_eq!(parse_numeric_input("3", false).unwrap(), 3.0);
+        assert_eq!(parse_numeric_input("-10", false).unwrap(), -10.0);
+        assert_eq!(parse_numeric_input("+7", false).unwrap(), 7.0);
+
+        // WholeNumber rejects ANY decimal point (strict)
+        assert_eq!(
+            parse_numeric_input("3.5", false),
+            Err(NumericParseError::FractionalNotAllowed)
+        );
+        assert_eq!(
+            parse_numeric_input("3.0", false),
+            Err(NumericParseError::FractionalNotAllowed)
+        );
+        assert_eq!(
+            parse_numeric_input("3.", false),
+            Err(NumericParseError::FractionalNotAllowed)
+        );
+        assert_eq!(
+            parse_numeric_input(".0", false),
+            Err(NumericParseError::FractionalNotAllowed)
+        );
+    }
+
+    #[test]
+    fn test_eval_numeric_constraint_between_inclusive() {
+        // Between is inclusive on both ends: a <= x <= b
+        assert!(eval_numeric_constraint(1.0, ComparisonOperator::Between, 1.0, Some(100.0)));
+        assert!(eval_numeric_constraint(50.0, ComparisonOperator::Between, 1.0, Some(100.0)));
+        assert!(eval_numeric_constraint(100.0, ComparisonOperator::Between, 1.0, Some(100.0)));
+
+        // Outside bounds
+        assert!(!eval_numeric_constraint(0.0, ComparisonOperator::Between, 1.0, Some(100.0)));
+        assert!(!eval_numeric_constraint(101.0, ComparisonOperator::Between, 1.0, Some(100.0)));
+    }
+
+    #[test]
+    fn test_eval_numeric_constraint_not_between() {
+        // NotBetween: x < a || x > b
+        assert!(eval_numeric_constraint(0.0, ComparisonOperator::NotBetween, 1.0, Some(100.0)));
+        assert!(eval_numeric_constraint(101.0, ComparisonOperator::NotBetween, 1.0, Some(100.0)));
+
+        // Inside bounds = fail
+        assert!(!eval_numeric_constraint(1.0, ComparisonOperator::NotBetween, 1.0, Some(100.0)));
+        assert!(!eval_numeric_constraint(50.0, ComparisonOperator::NotBetween, 1.0, Some(100.0)));
+        assert!(!eval_numeric_constraint(100.0, ComparisonOperator::NotBetween, 1.0, Some(100.0)));
+    }
+
+    #[test]
+    fn test_eval_numeric_constraint_greater_than() {
+        assert!(eval_numeric_constraint(1.0, ComparisonOperator::GreaterThan, 0.0, None));
+        assert!(!eval_numeric_constraint(0.0, ComparisonOperator::GreaterThan, 0.0, None));
+        assert!(!eval_numeric_constraint(-1.0, ComparisonOperator::GreaterThan, 0.0, None));
+    }
+
+    #[test]
+    fn test_eval_numeric_constraint_less_than_or_equal() {
+        assert!(eval_numeric_constraint(0.5, ComparisonOperator::LessThanOrEqual, 1.0, None));
+        assert!(eval_numeric_constraint(1.0, ComparisonOperator::LessThanOrEqual, 1.0, None)); // boundary
+        assert!(!eval_numeric_constraint(1.1, ComparisonOperator::LessThanOrEqual, 1.0, None));
+    }
+
+    #[test]
+    fn test_eval_numeric_constraint_decimal_boundary() {
+        // Decimal validation: >=0
+        assert!(eval_numeric_constraint(0.0, ComparisonOperator::GreaterThanOrEqual, 0.0, None));
+        assert!(eval_numeric_constraint(0.5, ComparisonOperator::GreaterThanOrEqual, 0.0, None));
+        assert!(!eval_numeric_constraint(-0.1, ComparisonOperator::GreaterThanOrEqual, 0.0, None));
+    }
+
+    #[test]
+    fn test_eval_numeric_constraint_equal() {
+        assert!(eval_numeric_constraint(42.0, ComparisonOperator::EqualTo, 42.0, None));
+        assert!(!eval_numeric_constraint(42.1, ComparisonOperator::EqualTo, 42.0, None));
+
+        assert!(eval_numeric_constraint(42.0, ComparisonOperator::NotEqualTo, 0.0, None));
+        assert!(!eval_numeric_constraint(0.0, ComparisonOperator::NotEqualTo, 0.0, None));
     }
 }

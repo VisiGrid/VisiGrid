@@ -680,6 +680,145 @@ fn render_inspector_tab(
             ))
     );
 
+    // ========== VALIDATION SECTION (Free) ==========
+    // Show validation info if this cell has data validation
+    if let Some(rule) = app.sheet().validations.get(row, col) {
+        use visigrid_engine::validation::{ValidationType, ListSource};
+
+        let validation_type = match &rule.rule_type {
+            ValidationType::AnyValue => "Any value".to_string(),
+            ValidationType::List(source) => {
+                let source_desc = match source {
+                    ListSource::Inline(items) => format!("{} items", items.len()),
+                    ListSource::Range(r) => r.clone(),
+                    ListSource::NamedRange(n) => n.clone(),
+                };
+                format!("List ({})", source_desc)
+            }
+            ValidationType::WholeNumber(_) => "Whole number".to_string(),
+            ValidationType::Decimal(_) => "Decimal".to_string(),
+            ValidationType::Date(_) => "Date".to_string(),
+            ValidationType::Time(_) => "Time".to_string(),
+            ValidationType::TextLength(_) => "Text length".to_string(),
+            ValidationType::Custom(f) => format!("Custom: {}", f),
+        };
+
+        let mut validation_section = section("Validation", panel_border, text_primary)
+            .child(info_row("Type", &validation_type, text_muted, text_primary));
+
+        // Show dropdown hint for list validation
+        if rule.show_dropdown && matches!(rule.rule_type, ValidationType::List(_)) {
+            validation_section = validation_section.child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .py_1()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(text_muted)
+                            .child("Open dropdown")
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .bg(accent.opacity(0.1))
+                            .border_1()
+                            .border_color(accent.opacity(0.3))
+                            .text_size(px(10.0))
+                            .text_color(accent)
+                            .child(if cfg!(target_os = "macos") { "Option+Down" } else { "Alt+Down" })
+                    )
+            );
+        }
+
+        // Phase 6C: Show validation status (Valid/Invalid with reason)
+        if let Some(reason) = app.get_invalid_reason(row, col) {
+            use visigrid_engine::validation::ValidationFailureReason;
+            let error_color: Hsla = rgb(0xE53935).into();
+            let reason_text = match reason {
+                ValidationFailureReason::InvalidValue => "Value does not meet criteria",
+                ValidationFailureReason::ConstraintBlank => "Constraint cell is empty",
+                ValidationFailureReason::ConstraintNotNumeric => "Constraint cell is not numeric",
+                ValidationFailureReason::InvalidReference => "Invalid reference",
+                ValidationFailureReason::FormulaNotSupported => "Formula constraints not supported",
+                ValidationFailureReason::ListEmpty => "List is empty",
+                ValidationFailureReason::NotInList => "Value not in allowed list",
+            };
+            validation_section = validation_section.child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .py_1()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(text_muted)
+                            .child("Status")
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(6.0))
+                                    .h(px(6.0))
+                                    .rounded(px(3.0))
+                                    .bg(error_color)
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(error_color)
+                                    .child(SharedString::from(reason_text))
+                            )
+                    )
+            );
+        } else if !display_value.is_empty() {
+            // Show "Valid" status for non-empty cells with validation
+            let valid_color: Hsla = rgb(0x43A047).into();  // Material Green 600
+            validation_section = validation_section.child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .py_1()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(text_muted)
+                            .child("Status")
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(6.0))
+                                    .h(px(6.0))
+                                    .rounded(px(3.0))
+                                    .bg(valid_color)
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(valid_color)
+                                    .child("Valid")
+                            )
+                    )
+            );
+        }
+
+        content = content.child(validation_section);
+    }
+
     // Spill info (if applicable)
     if has_spill_info {
         let mut spill_section = section("Array Spill", panel_border, text_primary);

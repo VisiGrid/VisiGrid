@@ -31,6 +31,11 @@ impl Spreadsheet {
     }
 
     pub fn show_palette(&mut self, cx: &mut Context<Self>) {
+        // Close validation dropdown when opening modal
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::ModalOpened,
+            cx,
+        );
         self.lua_console.visible = false;
         // Save pre-palette state for restore on Esc
         self.palette_pre_selection = self.view_state.selected;

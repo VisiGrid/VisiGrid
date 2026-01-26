@@ -266,6 +266,9 @@ fn render_data_menu(text_primary: Hsla, text_muted: Hsla, text_disabled: Hsla, s
         .child(menu_item("Fill Down", Some("Ctrl+D"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.fill_down(cx); }))
         .child(menu_item("Fill Right", Some("Ctrl+R"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.fill_right(cx); }))
         .child(menu_separator(border))
+        .child(menu_item("Circle Invalid Data", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.circle_invalid_data(cx); }))
+        .child(menu_item("Clear Invalid Circles", None, text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.clear_invalid_circles(cx); }))
+        .child(menu_separator(border))
         .child(menu_item_disabled("Sort...", text_disabled))
         .child(menu_item_disabled("Filter", text_disabled))
 }

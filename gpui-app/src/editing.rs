@@ -142,6 +142,16 @@ impl Spreadsheet {
 
         // Smoke mode: trigger full ordered recompute for dogfooding
         self.maybe_smoke_recalc();
+
+        // Auto-clear invalid marker if cell is now valid (Phase 6C)
+        if self.invalid_cells.contains_key(&(row, col)) {
+            use visigrid_engine::validation::ValidationResult;
+            let display_value = self.sheet().get_display(row, col);
+            let result = self.workbook.validate_cell_input(self.sheet_index(), row, col, &display_value);
+            if matches!(result, ValidationResult::Valid) {
+                self.clear_cell_invalid(row, col);
+            }
+        }
     }
 
     /// Run full ordered recompute if enabled (smoke mode or verified mode).

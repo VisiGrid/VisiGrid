@@ -46,6 +46,7 @@ mod sheet_ops;
 mod sort_filter;
 mod theme;
 mod undo_redo;
+mod validation_dropdown;
 mod views;
 pub mod workbook_view;
 

@@ -36,6 +36,23 @@ pub struct PathTraceResult {
     pub truncated: bool,
 }
 
+/// Result of validating a range of cells (e.g., after paste/fill).
+#[derive(Debug, Clone, Default)]
+pub struct ValidationFailures {
+    /// Number of cells that failed validation.
+    pub count: usize,
+    /// Positions and reasons of failed cells (up to 100, for navigation).
+    pub failures: Vec<ValidationFailure>,
+}
+
+/// A single validation failure with position and reason.
+#[derive(Debug, Clone)]
+pub struct ValidationFailure {
+    pub row: usize,
+    pub col: usize,
+    pub reason: crate::validation::ValidationFailureReason,
+}
+
 /// A workbook containing multiple sheets
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workbook {
@@ -384,6 +401,406 @@ impl Workbook {
     /// List all named ranges
     pub fn list_named_ranges(&self) -> Vec<&NamedRange> {
         self.named_ranges.list()
+    }
+
+    // =========================================================================
+    // List Validation Resolution
+    // =========================================================================
+
+    /// Get list items for a cell with list validation.
+    ///
+    /// This is the workbook-level API that can resolve named ranges.
+    /// Returns None if the cell has no validation or non-list validation.
+    pub fn get_list_items(&self, sheet_index: usize, row: usize, col: usize) -> Option<crate::validation::ResolvedList> {
+        use crate::validation::{ValidationType, ListSource, ResolvedList};
+
+        let sheet = self.sheets.get(sheet_index)?;
+        let rule = sheet.validations.get(row, col)?;
+
+        match &rule.rule_type {
+            ValidationType::List(source) => {
+                match source {
+                    ListSource::Inline(values) => {
+                        Some(ResolvedList::from_items(values.clone()))
+                    }
+                    ListSource::Range(range_str) => {
+                        // Parse range string, may include sheet reference
+                        let range_str = range_str.trim_start_matches('=').trim();
+                        Some(self.resolve_range_to_list(sheet_index, range_str))
+                    }
+                    ListSource::NamedRange(name) => {
+                        // Strip leading = if present (UI accepts both forms)
+                        let name = name.trim_start_matches('=');
+                        Some(self.resolve_named_range_to_list(name))
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a range string (possibly with sheet reference) to list items.
+    fn resolve_range_to_list(&self, current_sheet: usize, range_str: &str) -> crate::validation::ResolvedList {
+        use crate::validation::ResolvedList;
+
+        // Check for sheet reference: "Sheet1!A1:A10"
+        let (sheet_idx, cell_range) = if let Some(bang_pos) = range_str.find('!') {
+            let sheet_name = &range_str[..bang_pos].trim_matches('\'');
+            let cell_range = &range_str[bang_pos + 1..];
+
+            // Find sheet by name
+            match self.sheets.iter().position(|s| s.name == *sheet_name) {
+                Some(idx) => (idx, cell_range),
+                None => return ResolvedList::empty(), // Sheet not found
+            }
+        } else {
+            (current_sheet, range_str)
+        };
+
+        // Use the sheet's resolve method
+        if let Some(sheet) = self.sheets.get(sheet_idx) {
+            sheet.resolve_range_to_list(cell_range)
+        } else {
+            ResolvedList::empty()
+        }
+    }
+
+    /// Resolve a named range to list items.
+    fn resolve_named_range_to_list(&self, name: &str) -> crate::validation::ResolvedList {
+        use crate::validation::ResolvedList;
+        use crate::named_range::NamedRangeTarget;
+
+        let named_range = match self.named_ranges.get(name) {
+            Some(nr) => nr,
+            None => return ResolvedList::empty(),
+        };
+
+        match &named_range.target {
+            NamedRangeTarget::Cell { sheet, row, col } => {
+                if let Some(s) = self.sheets.get(*sheet) {
+                    let display = s.get_display(*row, *col);
+                    if display.is_empty() {
+                        return ResolvedList::empty();
+                    }
+                    return ResolvedList::from_items(vec![display]);
+                }
+                ResolvedList::empty()
+            }
+            NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
+                if let Some(s) = self.sheets.get(*sheet) {
+                    // Collect values from range
+                    let mut items = Vec::new();
+                    for row in *start_row..=*end_row {
+                        for col in *start_col..=*end_col {
+                            let display = s.get_display(row, col);
+                            if !display.is_empty() {
+                                items.push(display);
+                            }
+                        }
+                    }
+                    return ResolvedList::from_items(items);
+                }
+                ResolvedList::empty()
+            }
+        }
+    }
+
+    /// Check if a cell has list validation with dropdown enabled.
+    pub fn has_list_dropdown(&self, sheet_index: usize, row: usize, col: usize) -> bool {
+        if let Some(sheet) = self.sheets.get(sheet_index) {
+            sheet.has_list_dropdown(row, col)
+        } else {
+            false
+        }
+    }
+
+    // =========================================================================
+    // Numeric Constraint Resolution (workbook-level)
+    // =========================================================================
+
+    /// Resolve a constraint value to a number.
+    ///
+    /// This is the workbook-level resolver that can handle cross-sheet CellRefs.
+    /// - Literal numbers: return directly
+    /// - CellRef: parse "A1" or "Sheet2!A1", get computed value, parse as number
+    /// - Formula: not yet implemented (returns FormulaError)
+    pub fn resolve_constraint_value(
+        &self,
+        current_sheet: usize,
+        value: &crate::validation::ConstraintValue,
+    ) -> Result<f64, crate::validation::ConstraintResolveError> {
+        use crate::validation::{ConstraintValue, ConstraintResolveError};
+
+        match value {
+            ConstraintValue::Number(n) => Ok(*n),
+            ConstraintValue::CellRef(ref_str) => {
+                self.resolve_cell_ref_to_number(current_sheet, ref_str)
+            }
+            ConstraintValue::Formula(_formula) => {
+                // Formula constraint evaluation not yet implemented
+                // Return deterministic error so behavior is predictable
+                Err(ConstraintResolveError::FormulaError(
+                    "Formula constraints not yet implemented".to_string()
+                ))
+            }
+        }
+    }
+
+    /// Resolve a cell reference string to a numeric value.
+    ///
+    /// Handles both same-sheet ("A1") and cross-sheet ("Sheet2!A1") references.
+    fn resolve_cell_ref_to_number(
+        &self,
+        current_sheet: usize,
+        ref_str: &str,
+    ) -> Result<f64, crate::validation::ConstraintResolveError> {
+        use crate::validation::ConstraintResolveError;
+
+        // Parse reference: check for sheet prefix
+        let (sheet_idx, cell_ref) = if let Some(bang_pos) = ref_str.find('!') {
+            let sheet_name = ref_str[..bang_pos].trim_matches('\'');
+            let cell_ref = &ref_str[bang_pos + 1..];
+
+            // Find sheet by name
+            let idx = self.sheets.iter()
+                .position(|s| s.name == sheet_name)
+                .ok_or_else(|| ConstraintResolveError::InvalidReference(
+                    format!("Sheet '{}' not found", sheet_name)
+                ))?;
+            (idx, cell_ref)
+        } else {
+            (current_sheet, ref_str)
+        };
+
+        // Get sheet
+        let sheet = self.sheets.get(sheet_idx)
+            .ok_or_else(|| ConstraintResolveError::InvalidReference(
+                format!("Sheet index {} out of range", sheet_idx)
+            ))?;
+
+        // Parse cell reference
+        let (row, col) = sheet.parse_cell_ref(cell_ref)
+            .ok_or_else(|| ConstraintResolveError::InvalidReference(
+                format!("Invalid cell reference: {}", cell_ref)
+            ))?;
+
+        // Get computed value (display value, not raw formula)
+        let display = sheet.get_display(row, col);
+
+        if display.is_empty() {
+            return Err(ConstraintResolveError::BlankConstraint);
+        }
+
+        // Parse as number
+        display.parse::<f64>()
+            .map_err(|_| ConstraintResolveError::NotNumeric)
+    }
+
+    /// Validate a cell input at the workbook level.
+    ///
+    /// This handles cross-sheet CellRef constraints that require workbook context.
+    /// For List validation and other types, delegates to the sheet.
+    pub fn validate_cell_input(
+        &self,
+        sheet_index: usize,
+        row: usize,
+        col: usize,
+        value: &str,
+    ) -> crate::validation::ValidationResult {
+        use crate::validation::{ValidationResult, ValidationType, NumericParseError};
+
+        let sheet = match self.sheets.get(sheet_index) {
+            Some(s) => s,
+            None => return ValidationResult::Valid,
+        };
+
+        let rule = match sheet.validations.get(row, col) {
+            Some(r) => r,
+            None => return ValidationResult::Valid,
+        };
+
+        // Check ignore_blank
+        if rule.ignore_blank && value.trim().is_empty() {
+            return ValidationResult::Valid;
+        }
+
+        // Handle numeric types with workbook-level constraint resolution
+        match &rule.rule_type {
+            ValidationType::WholeNumber(constraint) => {
+                use crate::validation::parse_numeric_input;
+
+                let num = match parse_numeric_input(value, false) {
+                    Ok(n) => n,
+                    Err(NumericParseError::FractionalNotAllowed) => {
+                        return ValidationResult::Invalid {
+                            rule: rule.clone(),
+                            reason: "Value must be a whole number (no decimals)".to_string(),
+                        };
+                    }
+                    Err(_) => {
+                        return ValidationResult::Invalid {
+                            rule: rule.clone(),
+                            reason: "Value must be a whole number".to_string(),
+                        };
+                    }
+                };
+
+                self.validate_numeric_constraint(sheet_index, num, constraint, rule, "whole number")
+            }
+
+            ValidationType::Decimal(constraint) => {
+                use crate::validation::parse_numeric_input;
+
+                let num = match parse_numeric_input(value, true) {
+                    Ok(n) => n,
+                    Err(_) => {
+                        return ValidationResult::Invalid {
+                            rule: rule.clone(),
+                            reason: "Value must be a number".to_string(),
+                        };
+                    }
+                };
+
+                self.validate_numeric_constraint(sheet_index, num, constraint, rule, "number")
+            }
+
+            // For other types, delegate to sheet (they don't need cross-sheet resolution)
+            _ => sheet.validate_cell_input(row, col, value),
+        }
+    }
+
+    /// Helper to validate a numeric value against a constraint using workbook resolver.
+    fn validate_numeric_constraint(
+        &self,
+        sheet_index: usize,
+        value: f64,
+        constraint: &crate::validation::NumericConstraint,
+        rule: &crate::validation::ValidationRule,
+        type_name: &str,
+    ) -> crate::validation::ValidationResult {
+        use crate::validation::{ValidationResult, eval_numeric_constraint, ComparisonOperator};
+
+        // Resolve constraint values using workbook-level resolver
+        let v1 = match self.resolve_constraint_value(sheet_index, &constraint.value1) {
+            Ok(n) => n,
+            Err(e) => {
+                return ValidationResult::Invalid {
+                    rule: rule.clone(),
+                    reason: format!("Validation constraint error: {}", e),
+                };
+            }
+        };
+
+        let v2 = match &constraint.value2 {
+            Some(cv) => match self.resolve_constraint_value(sheet_index, cv) {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    return ValidationResult::Invalid {
+                        rule: rule.clone(),
+                        reason: format!("Validation constraint error: {}", e),
+                    };
+                }
+            },
+            None => None,
+        };
+
+        // Use the shared evaluation helper
+        let valid = eval_numeric_constraint(value, constraint.operator, v1, v2);
+
+        if valid {
+            ValidationResult::Valid
+        } else {
+            let reason = match constraint.operator {
+                ComparisonOperator::Between => {
+                    format!("{} must be between {} and {}", type_name, v1, v2.unwrap_or(0.0))
+                }
+                ComparisonOperator::NotBetween => {
+                    format!("{} must not be between {} and {}", type_name, v1, v2.unwrap_or(0.0))
+                }
+                ComparisonOperator::EqualTo => format!("{} must equal {}", type_name, v1),
+                ComparisonOperator::NotEqualTo => format!("{} must not equal {}", type_name, v1),
+                ComparisonOperator::GreaterThan => format!("{} must be greater than {}", type_name, v1),
+                ComparisonOperator::LessThan => format!("{} must be less than {}", type_name, v1),
+                ComparisonOperator::GreaterThanOrEqual => format!("{} must be at least {}", type_name, v1),
+                ComparisonOperator::LessThanOrEqual => format!("{} must be at most {}", type_name, v1),
+            };
+
+            ValidationResult::Invalid {
+                rule: rule.clone(),
+                reason,
+            }
+        }
+    }
+
+    /// Validate a range of cells and return failure information.
+    ///
+    /// Used after paste/fill operations to count validation failures.
+    /// Returns the count of invalid cells, their positions, and failure reasons.
+    pub fn validate_range(
+        &self,
+        sheet_index: usize,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    ) -> ValidationFailures {
+        use crate::validation::ValidationResult;
+
+        let sheet = match self.sheets.get(sheet_index) {
+            Some(s) => s,
+            None => return ValidationFailures::default(),
+        };
+
+        let mut failures = ValidationFailures::default();
+
+        for row in start_row..=end_row {
+            for col in start_col..=end_col {
+                // Get the current display value of the cell
+                let value = sheet.get_display(row, col);
+
+                // Validate using workbook-level validation
+                let result = self.validate_cell_input(sheet_index, row, col, &value);
+
+                if let ValidationResult::Invalid { reason, .. } = result {
+                    failures.count += 1;
+                    // Store first 100 failures for navigation
+                    if failures.failures.len() < 100 {
+                        // Classify reason from the error message
+                        let failure_reason = Self::classify_failure_reason(&reason);
+                        failures.failures.push(ValidationFailure {
+                            row,
+                            col,
+                            reason: failure_reason,
+                        });
+                    }
+                }
+            }
+        }
+
+        failures
+    }
+
+    /// Classify a validation failure reason from the error message.
+    pub fn classify_failure_reason(reason: &str) -> crate::validation::ValidationFailureReason {
+        use crate::validation::ValidationFailureReason;
+
+        let lower = reason.to_lowercase();
+        if lower.contains("blank") {
+            ValidationFailureReason::ConstraintBlank
+        } else if lower.contains("not numeric") || lower.contains("constraint is not") {
+            ValidationFailureReason::ConstraintNotNumeric
+        } else if lower.contains("formula") {
+            ValidationFailureReason::FormulaNotSupported
+        } else if lower.contains("reference") || lower.contains("not found") {
+            ValidationFailureReason::InvalidReference
+        } else if lower.contains("not in list") || lower.contains("not allowed") {
+            ValidationFailureReason::NotInList
+        } else if lower.contains("list is empty") || lower.contains("no items") {
+            ValidationFailureReason::ListEmpty
+        } else {
+            // Default: the value itself is invalid (doesn't meet constraint)
+            ValidationFailureReason::InvalidValue
+        }
     }
 
     // =========================================================================
@@ -1722,5 +2139,335 @@ mod tests {
         // B1 = A1 should be valid
         let result = wb.check_formula_cycle(sheet_id, 0, 1, "=A1");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_list_items_named_range() {
+        use crate::validation::ValidationRule;
+
+        let mut wb = Workbook::new();
+
+        // Set source values in A1:A3
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "High");
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "Medium");
+        wb.sheet_mut(0).unwrap().set_value(2, 0, "Low");
+
+        // Create named range
+        wb.define_name_for_range("Priority", 0, 0, 0, 2, 0).unwrap();
+
+        // Set list validation using named range
+        let rule = ValidationRule::new(crate::validation::ValidationType::List(
+            crate::validation::ListSource::NamedRange("Priority".to_string())
+        ));
+        wb.sheet_mut(0).unwrap().set_cell_validation(0, 1, rule);
+
+        // Get list items via workbook API
+        let list = wb.get_list_items(0, 0, 1).expect("Should resolve named range");
+        assert_eq!(list.items, vec!["High", "Medium", "Low"]);
+        assert!(!list.is_truncated);
+    }
+
+    #[test]
+    fn test_get_list_items_cross_sheet_range() {
+        use crate::validation::ValidationRule;
+
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2
+
+        // Set source values on Sheet2!A1:A3
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "Alpha");
+        wb.sheet_mut(1).unwrap().set_value(1, 0, "Beta");
+        wb.sheet_mut(1).unwrap().set_value(2, 0, "Gamma");
+
+        // Set list validation on Sheet1 referencing Sheet2
+        let rule = ValidationRule::list_range("Sheet2!A1:A3");
+        wb.sheet_mut(0).unwrap().set_cell_validation(0, 0, rule);
+
+        // Get list items - should resolve cross-sheet
+        let list = wb.get_list_items(0, 0, 0).expect("Should resolve cross-sheet");
+        assert_eq!(list.items, vec!["Alpha", "Beta", "Gamma"]);
+    }
+
+    #[test]
+    fn test_has_list_dropdown_workbook() {
+        use crate::validation::{ValidationRule, NumericConstraint};
+
+        let mut wb = Workbook::new();
+
+        // List validation with dropdown
+        let list_rule = ValidationRule::list_inline(vec!["A".into()]);
+        wb.sheet_mut(0).unwrap().set_cell_validation(0, 0, list_rule);
+        assert!(wb.has_list_dropdown(0, 0, 0));
+
+        // Non-list validation
+        let num_rule = ValidationRule::whole_number(NumericConstraint::between(1, 10));
+        wb.sheet_mut(0).unwrap().set_cell_validation(0, 1, num_rule);
+        assert!(!wb.has_list_dropdown(0, 0, 1));
+
+        // Invalid sheet index
+        assert!(!wb.has_list_dropdown(99, 0, 0));
+    }
+
+    // =========================================================================
+    // Numeric Validation Cross-Sheet Tests (Phase 3)
+    // =========================================================================
+
+    #[test]
+    fn test_validation_cell_ref_constraint_cross_sheet() {
+        // Sheet1 B2 has Decimal <= Sheet2!A1, validation should work across sheets
+        use crate::validation::{ValidationRule, ValidationResult, NumericConstraint, ConstraintValue};
+
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2
+
+        // Set constraint value on Sheet2!A1
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "50");
+
+        // Set validation on Sheet1!B2: Decimal <= Sheet2!A1
+        let constraint = NumericConstraint {
+            operator: crate::validation::ComparisonOperator::LessThanOrEqual,
+            value1: ConstraintValue::CellRef("Sheet2!A1".to_string()),
+            value2: None,
+        };
+        let rule = ValidationRule::decimal(constraint);
+        wb.sheet_mut(0).unwrap().set_cell_validation(1, 1, rule);
+
+        // Value 30 should be valid (30 <= 50)
+        let result = wb.validate_cell_input(0, 1, 1, "30");
+        assert!(matches!(result, ValidationResult::Valid), "30 <= 50 should be valid");
+
+        // Value 50 should be valid (50 <= 50)
+        let result = wb.validate_cell_input(0, 1, 1, "50");
+        assert!(matches!(result, ValidationResult::Valid), "50 <= 50 should be valid");
+
+        // Value 60 should be invalid (60 > 50)
+        let result = wb.validate_cell_input(0, 1, 1, "60");
+        assert!(matches!(result, ValidationResult::Invalid { .. }), "60 > 50 should be invalid");
+    }
+
+    #[test]
+    fn test_validation_cell_ref_constraint_cross_sheet_updates() {
+        // Change Sheet2 A1, validation result should change
+        use crate::validation::{ValidationRule, ValidationResult, NumericConstraint, ConstraintValue};
+
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2
+
+        // Set initial constraint value on Sheet2!A1
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "50");
+
+        // Set validation on Sheet1!A1: Decimal <= Sheet2!A1
+        let constraint = NumericConstraint {
+            operator: crate::validation::ComparisonOperator::LessThanOrEqual,
+            value1: ConstraintValue::CellRef("Sheet2!A1".to_string()),
+            value2: None,
+        };
+        let rule = ValidationRule::decimal(constraint);
+        wb.sheet_mut(0).unwrap().set_cell_validation(0, 0, rule);
+
+        // Value 60 should be invalid initially (60 > 50)
+        let result = wb.validate_cell_input(0, 0, 0, "60");
+        assert!(matches!(result, ValidationResult::Invalid { .. }), "60 > 50 should be invalid");
+
+        // Update Sheet2!A1 to 100
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "100");
+
+        // Now 60 should be valid (60 <= 100)
+        let result = wb.validate_cell_input(0, 0, 0, "60");
+        assert!(matches!(result, ValidationResult::Valid), "60 <= 100 should be valid after update");
+    }
+
+    #[test]
+    fn test_validation_formula_constraint_error() {
+        // Formula constraint should return deterministic FormulaError
+        use crate::validation::{ValidationRule, ValidationResult, NumericConstraint, ConstraintValue};
+
+        let mut wb = Workbook::new();
+
+        // Set validation with formula constraint (not yet implemented)
+        let constraint = NumericConstraint {
+            operator: crate::validation::ComparisonOperator::LessThan,
+            value1: ConstraintValue::Formula("=A1+10".to_string()),
+            value2: None,
+        };
+        let rule = ValidationRule::decimal(constraint);
+        wb.sheet_mut(0).unwrap().set_cell_validation(0, 0, rule);
+
+        // Validation should fail with formula error
+        let result = wb.validate_cell_input(0, 0, 0, "5");
+        match result {
+            ValidationResult::Invalid { reason, .. } => {
+                assert!(reason.contains("Formula") || reason.contains("formula"),
+                    "Error should mention formula: {}", reason);
+            }
+            ValidationResult::Valid => {
+                panic!("Formula constraint should fail deterministically, not pass");
+            }
+        }
+    }
+
+    // =========================================================================
+    // Range Validation Tests (Phase 6A: Paste/Fill)
+    // =========================================================================
+
+    #[test]
+    fn test_validate_range_paste_numeric() {
+        // Simulate paste into validated numeric range: some valid, some invalid
+        use crate::validation::{ValidationRule, NumericConstraint};
+
+        let mut wb = Workbook::new();
+
+        // Set validation on A1:A5: Whole number between 1 and 10
+        let rule = ValidationRule::whole_number(NumericConstraint::between(1, 10));
+        for row in 0..5 {
+            wb.sheet_mut(0).unwrap().set_cell_validation(row, 0, rule.clone());
+        }
+
+        // Simulate pasting values: 5, 15, 3, -1, 8
+        // Valid: 5, 3, 8 (3 cells)
+        // Invalid: 15, -1 (2 cells)
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "5");   // valid
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "15");  // invalid (> 10)
+        wb.sheet_mut(0).unwrap().set_value(2, 0, "3");   // valid
+        wb.sheet_mut(0).unwrap().set_value(3, 0, "-1");  // invalid (< 1)
+        wb.sheet_mut(0).unwrap().set_value(4, 0, "8");   // valid
+
+        let failures = wb.validate_range(0, 0, 0, 4, 0);
+
+        assert_eq!(failures.count, 2, "Expected 2 validation failures");
+        assert_eq!(failures.failures.len(), 2, "Expected 2 failure entries");
+        let positions: Vec<_> = failures.failures.iter().map(|f| (f.row, f.col)).collect();
+        assert!(positions.contains(&(1, 0)), "Row 1 should be invalid");
+        assert!(positions.contains(&(3, 0)), "Row 3 should be invalid");
+    }
+
+    #[test]
+    fn test_validate_range_fill_numeric() {
+        // Simulate fill down into validated range
+        use crate::validation::{ValidationRule, NumericConstraint};
+
+        let mut wb = Workbook::new();
+
+        // Set validation on B1:B3: Decimal less than 100
+        let rule = ValidationRule::decimal(NumericConstraint::less_than(100.0));
+        for row in 0..3 {
+            wb.sheet_mut(0).unwrap().set_cell_validation(row, 1, rule.clone());
+        }
+
+        // Simulate fill with value 50 (all valid)
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "50");
+        wb.sheet_mut(0).unwrap().set_value(1, 1, "50");
+        wb.sheet_mut(0).unwrap().set_value(2, 1, "50");
+
+        let failures = wb.validate_range(0, 0, 1, 2, 1);
+        assert_eq!(failures.count, 0, "All values should be valid");
+
+        // Now fill with value 150 (all invalid)
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "150");
+        wb.sheet_mut(0).unwrap().set_value(1, 1, "150");
+        wb.sheet_mut(0).unwrap().set_value(2, 1, "150");
+
+        let failures = wb.validate_range(0, 0, 1, 2, 1);
+        assert_eq!(failures.count, 3, "All values should be invalid");
+    }
+
+    #[test]
+    fn test_validation_failures_with_reasons() {
+        // Verify that failures include reason codes
+        use crate::validation::{ValidationRule, NumericConstraint, ValidationFailureReason};
+
+        let mut wb = Workbook::new();
+
+        // Set validation: Whole number between 1 and 10
+        let rule = ValidationRule::whole_number(NumericConstraint::between(1, 10));
+        for row in 0..3 {
+            wb.sheet_mut(0).unwrap().set_cell_validation(row, 0, rule.clone());
+        }
+
+        // Set values: valid, invalid (out of range), invalid (out of range)
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "5");   // valid
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "15");  // invalid
+        wb.sheet_mut(0).unwrap().set_value(2, 0, "-1");  // invalid
+
+        let failures = wb.validate_range(0, 0, 0, 2, 0);
+
+        assert_eq!(failures.count, 2);
+        assert_eq!(failures.failures.len(), 2);
+
+        // Both failures should be InvalidValue (value doesn't meet constraint)
+        for failure in &failures.failures {
+            assert_eq!(failure.reason, ValidationFailureReason::InvalidValue);
+        }
+    }
+
+    #[test]
+    fn test_validation_failures_navigation_semantics() {
+        // Test that failures are in row-major order (for predictable F8 cycling)
+        use crate::validation::{ValidationRule, NumericConstraint};
+
+        let mut wb = Workbook::new();
+
+        // Set validation on a 3x3 range
+        let rule = ValidationRule::whole_number(NumericConstraint::between(1, 10));
+        for row in 0..3 {
+            for col in 0..3 {
+                wb.sheet_mut(0).unwrap().set_cell_validation(row, col, rule.clone());
+            }
+        }
+
+        // Set some invalid values in non-sequential positions
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "5");   // valid
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "20");  // invalid (0,1)
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "5");   // valid
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "30");  // invalid (1,0)
+        wb.sheet_mut(0).unwrap().set_value(1, 1, "5");   // valid
+        wb.sheet_mut(0).unwrap().set_value(1, 2, "5");   // valid
+        wb.sheet_mut(0).unwrap().set_value(2, 0, "5");   // valid
+        wb.sheet_mut(0).unwrap().set_value(2, 1, "5");   // valid
+        wb.sheet_mut(0).unwrap().set_value(2, 2, "40");  // invalid (2,2)
+
+        let failures = wb.validate_range(0, 0, 0, 2, 2);
+
+        assert_eq!(failures.count, 3);
+        assert_eq!(failures.failures.len(), 3);
+
+        // Check order is row-major: (0,1), (1,0), (2,2)
+        assert_eq!((failures.failures[0].row, failures.failures[0].col), (0, 1));
+        assert_eq!((failures.failures[1].row, failures.failures[1].col), (1, 0));
+        assert_eq!((failures.failures[2].row, failures.failures[2].col), (2, 2));
+    }
+
+    #[test]
+    fn test_validation_failures_overwrite() {
+        // Test that new validation overwrites previous failures
+        use crate::validation::{ValidationRule, NumericConstraint};
+
+        let mut wb = Workbook::new();
+
+        // First validation: 2 failures in A1:A3
+        let rule = ValidationRule::whole_number(NumericConstraint::between(1, 10));
+        for row in 0..3 {
+            wb.sheet_mut(0).unwrap().set_cell_validation(row, 0, rule.clone());
+        }
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "20");
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "5");
+        wb.sheet_mut(0).unwrap().set_value(2, 0, "30");
+
+        let failures1 = wb.validate_range(0, 0, 0, 2, 0);
+        assert_eq!(failures1.count, 2);
+
+        // Second validation: different range B1:B2, 1 failure
+        for row in 0..2 {
+            wb.sheet_mut(0).unwrap().set_cell_validation(row, 1, rule.clone());
+        }
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "5");
+        wb.sheet_mut(0).unwrap().set_value(1, 1, "50");
+
+        let failures2 = wb.validate_range(0, 0, 1, 1, 1);
+        assert_eq!(failures2.count, 1);
+
+        // The two ValidationFailures are independent - simulates UI overwrite
+        // (This test just verifies the engine returns independent results)
+        assert_ne!(failures1.count, failures2.count);
     }
 }
