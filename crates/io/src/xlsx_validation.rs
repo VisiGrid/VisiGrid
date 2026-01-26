@@ -270,6 +270,509 @@ fn constraint_value_to_formula(value: &ConstraintValue) -> Formula {
 }
 
 // ============================================================================
+// Import: Excel -> VisiGrid
+// ============================================================================
+
+use quick_xml::events::Event;
+use quick_xml::Reader;
+use std::collections::HashMap;
+use std::io::{Read, Seek};
+use std::path::Path;
+use visigrid_engine::validation::{CellRange, ErrorAlert, InputMessage};
+use zip::ZipArchive;
+
+/// A validation rule parsed from XLSX, ready to be added to a sheet
+#[derive(Debug, Clone)]
+pub struct ImportedValidation {
+    pub range: CellRange,
+    pub rule: ValidationRule,
+}
+
+/// Parse all validation rules from an XLSX file for a specific sheet.
+///
+/// Returns a list of (range, rule) pairs that can be added to the sheet's ValidationStore.
+pub fn parse_sheet_validations(
+    xlsx_path: &Path,
+    sheet_name: &str,
+) -> Result<Vec<ImportedValidation>, String> {
+    let file = std::fs::File::open(xlsx_path)
+        .map_err(|e| format!("Failed to open XLSX file: {}", e))?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|e| format!("Failed to read XLSX as ZIP: {}", e))?;
+
+    // Step 1: Find the worksheet XML path for this sheet name
+    let xml_path = find_worksheet_xml_path(&mut archive, sheet_name)?;
+
+    // Step 2: Read and parse the worksheet XML
+    let xml_content = read_zip_file(&mut archive, &xml_path)?;
+
+    // Step 3: Parse <dataValidation> elements
+    parse_validations_from_xml(&xml_content)
+}
+
+/// Find the worksheet XML path for a given sheet name.
+///
+/// This requires parsing:
+/// 1. xl/workbook.xml to find the sheet's rId
+/// 2. xl/_rels/workbook.xml.rels to map rId to the actual XML path
+fn find_worksheet_xml_path<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    sheet_name: &str,
+) -> Result<String, String> {
+    // Parse workbook.xml to find sheet rId
+    let workbook_xml = read_zip_file(archive, "xl/workbook.xml")?;
+    let rid = find_sheet_rid(&workbook_xml, sheet_name)?;
+
+    // Parse workbook.xml.rels to find the target path
+    let rels_xml = read_zip_file(archive, "xl/_rels/workbook.xml.rels")?;
+    let target = find_relationship_target(&rels_xml, &rid)?;
+
+    // Target is relative to xl/, so prepend it
+    Ok(format!("xl/{}", target))
+}
+
+/// Find the rId for a sheet name in workbook.xml
+fn find_sheet_rid(workbook_xml: &str, sheet_name: &str) -> Result<String, String> {
+    let mut reader = Reader::from_str(workbook_xml);
+    reader.config_mut().trim_text(true);
+
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) if e.name().as_ref() == b"sheet" => {
+                let mut name = None;
+                let mut rid = None;
+
+                for attr in e.attributes().flatten() {
+                    match attr.key.as_ref() {
+                        b"name" => {
+                            name = Some(
+                                String::from_utf8_lossy(&attr.value).to_string()
+                            );
+                        }
+                        b"r:id" => {
+                            rid = Some(
+                                String::from_utf8_lossy(&attr.value).to_string()
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+
+                if name.as_deref() == Some(sheet_name) {
+                    if let Some(r) = rid {
+                        return Ok(r);
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("XML parse error: {}", e)),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Err(format!("Sheet '{}' not found in workbook.xml", sheet_name))
+}
+
+/// Find the target path for a relationship ID in workbook.xml.rels
+fn find_relationship_target(rels_xml: &str, rid: &str) -> Result<String, String> {
+    let mut reader = Reader::from_str(rels_xml);
+    reader.config_mut().trim_text(true);
+
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e))
+                if e.name().as_ref() == b"Relationship" =>
+            {
+                let mut id = None;
+                let mut target = None;
+
+                for attr in e.attributes().flatten() {
+                    match attr.key.as_ref() {
+                        b"Id" => {
+                            id = Some(String::from_utf8_lossy(&attr.value).to_string());
+                        }
+                        b"Target" => {
+                            target = Some(String::from_utf8_lossy(&attr.value).to_string());
+                        }
+                        _ => {}
+                    }
+                }
+
+                if id.as_deref() == Some(rid) {
+                    if let Some(t) = target {
+                        return Ok(t);
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("XML parse error: {}", e)),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Err(format!("Relationship '{}' not found", rid))
+}
+
+/// Read a file from the ZIP archive
+fn read_zip_file<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    path: &str,
+) -> Result<String, String> {
+    let mut file = archive
+        .by_name(path)
+        .map_err(|e| format!("File '{}' not found in XLSX: {}", path, e))?;
+
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|e| format!("Failed to read '{}': {}", path, e))?;
+
+    Ok(content)
+}
+
+/// Parse <dataValidation> elements from worksheet XML
+fn parse_validations_from_xml(xml: &str) -> Result<Vec<ImportedValidation>, String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+
+    let mut validations = Vec::new();
+    let mut buf = Vec::new();
+    let mut in_data_validation = false;
+    let mut current_attrs: HashMap<String, String> = HashMap::new();
+    let mut formula1: Option<String> = None;
+    let mut formula2: Option<String> = None;
+    let mut in_formula1 = false;
+    let mut in_formula2 = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"dataValidation" => {
+                in_data_validation = true;
+                current_attrs.clear();
+                formula1 = None;
+                formula2 = None;
+
+                // Collect attributes
+                for attr in e.attributes().flatten() {
+                    let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                    let value = String::from_utf8_lossy(&attr.value).to_string();
+                    current_attrs.insert(key, value);
+                }
+            }
+            Ok(Event::Empty(ref e)) if e.name().as_ref() == b"dataValidation" => {
+                // Self-closing <dataValidation /> - collect attrs and process
+                current_attrs.clear();
+                for attr in e.attributes().flatten() {
+                    let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                    let value = String::from_utf8_lossy(&attr.value).to_string();
+                    current_attrs.insert(key, value);
+                }
+
+                // Process this validation (no formulas since self-closing)
+                if let Some(sqref) = current_attrs.get("sqref") {
+                    if let Some(imported) = parse_single_validation(&current_attrs, None, None) {
+                        for range in parse_sqref(sqref) {
+                            validations.push(ImportedValidation {
+                                range,
+                                rule: imported.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            Ok(Event::Start(ref e)) if in_data_validation && e.name().as_ref() == b"formula1" => {
+                in_formula1 = true;
+            }
+            Ok(Event::Start(ref e)) if in_data_validation && e.name().as_ref() == b"formula2" => {
+                in_formula2 = true;
+            }
+            Ok(Event::Text(ref e)) if in_formula1 => {
+                formula1 = Some(e.unescape().unwrap_or_default().to_string());
+            }
+            Ok(Event::Text(ref e)) if in_formula2 => {
+                formula2 = Some(e.unescape().unwrap_or_default().to_string());
+            }
+            Ok(Event::End(ref e)) if e.name().as_ref() == b"formula1" => {
+                in_formula1 = false;
+            }
+            Ok(Event::End(ref e)) if e.name().as_ref() == b"formula2" => {
+                in_formula2 = false;
+            }
+            Ok(Event::End(ref e)) if e.name().as_ref() == b"dataValidation" => {
+                in_data_validation = false;
+
+                // Process the collected validation
+                if let Some(sqref) = current_attrs.get("sqref") {
+                    if let Some(imported) =
+                        parse_single_validation(&current_attrs, formula1.as_deref(), formula2.as_deref())
+                    {
+                        for range in parse_sqref(sqref) {
+                            validations.push(ImportedValidation {
+                                range,
+                                rule: imported.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("XML parse error: {}", e)),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(validations)
+}
+
+/// Parse a single <dataValidation> element into a ValidationRule
+fn parse_single_validation(
+    attrs: &HashMap<String, String>,
+    formula1: Option<&str>,
+    formula2: Option<&str>,
+) -> Option<ValidationRule> {
+    let validation_type = attrs.get("type").map(|s| s.as_str()).unwrap_or("none");
+
+    let rule_type = match validation_type {
+        "list" => {
+            let source = parse_list_source(formula1?)?;
+            ValidationType::List(source)
+        }
+        "whole" => {
+            let constraint = parse_numeric_constraint(attrs, formula1, formula2)?;
+            ValidationType::WholeNumber(constraint)
+        }
+        "decimal" => {
+            let constraint = parse_numeric_constraint(attrs, formula1, formula2)?;
+            ValidationType::Decimal(constraint)
+        }
+        // Phase 5B types - skip for now
+        "date" | "time" | "textLength" | "custom" => return None,
+        // "none" or unknown - skip
+        _ => return None,
+    };
+
+    let mut rule = ValidationRule::new(rule_type);
+
+    // allowBlank: "1" = true, "0" or absent = false
+    rule.ignore_blank = attrs.get("allowBlank").map(|v| v == "1").unwrap_or(false);
+
+    // showDropDown: INVERTED! "1" = hide dropdown, "0" or absent = show
+    // VisiGrid: show_dropdown=true means show
+    rule.show_dropdown = attrs.get("showDropDown").map(|v| v != "1").unwrap_or(true);
+
+    // Input message
+    let show_input = attrs.get("showInputMessage").map(|v| v == "1").unwrap_or(false);
+    if show_input {
+        let title = attrs.get("promptTitle").cloned().unwrap_or_default();
+        let message = attrs.get("prompt").cloned().unwrap_or_default();
+        if !title.is_empty() || !message.is_empty() {
+            rule.input_message = Some(InputMessage {
+                show: true,
+                title,
+                message,
+            });
+        }
+    }
+
+    // Error alert
+    let show_error = attrs.get("showErrorMessage").map(|v| v == "1").unwrap_or(false);
+    if show_error {
+        let title = attrs.get("errorTitle").cloned().unwrap_or_default();
+        let message = attrs.get("error").cloned().unwrap_or_default();
+        let style = match attrs.get("errorStyle").map(|s| s.as_str()) {
+            Some("warning") => ErrorStyle::Warning,
+            Some("information") => ErrorStyle::Information,
+            _ => ErrorStyle::Stop, // Default
+        };
+        if !title.is_empty() || !message.is_empty() {
+            rule.error_alert = Some(ErrorAlert {
+                show: true,
+                style,
+                title,
+                message,
+            });
+        }
+    }
+
+    Some(rule)
+}
+
+/// Parse list source from formula1
+fn parse_list_source(formula1: &str) -> Option<ListSource> {
+    let formula1 = formula1.trim();
+
+    if formula1.is_empty() {
+        return None;
+    }
+
+    // Inline list: starts and ends with quotes, comma-separated
+    // e.g., "Yes,No,Maybe" or "\"Yes\",\"No\""
+    if formula1.starts_with('"') && formula1.ends_with('"') {
+        let inner = &formula1[1..formula1.len() - 1];
+        let items: Vec<String> = inner.split(',').map(|s| s.trim().to_string()).collect();
+        return Some(ListSource::Inline(items));
+    }
+
+    // Range reference: contains $ or : or !
+    // e.g., $A$1:$A$10, Sheet2!$B$1:$B$20
+    if formula1.contains('$') || formula1.contains(':') || formula1.contains('!') {
+        // Prepend = for VisiGrid's Range format
+        return Some(ListSource::Range(format!("={}", formula1)));
+    }
+
+    // Named range: simple identifier
+    // e.g., StatusOptions
+    Some(ListSource::NamedRange(formula1.to_string()))
+}
+
+/// Parse numeric constraint from attributes and formulas
+fn parse_numeric_constraint(
+    attrs: &HashMap<String, String>,
+    formula1: Option<&str>,
+    formula2: Option<&str>,
+) -> Option<NumericConstraint> {
+    let operator = parse_operator(attrs.get("operator").map(|s| s.as_str()))?;
+    let value1 = parse_constraint_value(formula1?)?;
+    let value2 = if matches!(operator, ComparisonOperator::Between | ComparisonOperator::NotBetween) {
+        Some(parse_constraint_value(formula2?)?)
+    } else {
+        None
+    };
+
+    Some(NumericConstraint {
+        operator,
+        value1,
+        value2,
+    })
+}
+
+/// Parse comparison operator from Excel attribute
+fn parse_operator(op: Option<&str>) -> Option<ComparisonOperator> {
+    Some(match op.unwrap_or("between") {
+        "between" => ComparisonOperator::Between,
+        "notBetween" => ComparisonOperator::NotBetween,
+        "equal" => ComparisonOperator::EqualTo,
+        "notEqual" => ComparisonOperator::NotEqualTo,
+        "greaterThan" => ComparisonOperator::GreaterThan,
+        "lessThan" => ComparisonOperator::LessThan,
+        "greaterThanOrEqual" => ComparisonOperator::GreaterThanOrEqual,
+        "lessThanOrEqual" => ComparisonOperator::LessThanOrEqual,
+        _ => return None,
+    })
+}
+
+/// Parse a constraint value (number, cell reference, or formula)
+fn parse_constraint_value(value: &str) -> Option<ConstraintValue> {
+    let value = value.trim();
+
+    if value.is_empty() {
+        return None;
+    }
+
+    // Try to parse as number first
+    if let Ok(n) = value.parse::<f64>() {
+        return Some(ConstraintValue::Number(n));
+    }
+
+    // Cell reference: starts with letter or $, contains no functions
+    // e.g., A1, $A$1, Sheet2!B5
+    if is_cell_reference(value) {
+        return Some(ConstraintValue::CellRef(format!("={}", value)));
+    }
+
+    // Otherwise treat as formula
+    Some(ConstraintValue::Formula(format!("={}", value)))
+}
+
+/// Check if a string looks like a cell reference (not a formula)
+fn is_cell_reference(s: &str) -> bool {
+    // Cell refs: A1, $A$1, Sheet1!A1, 'Sheet Name'!$A$1
+    // NOT formulas: TODAY(), MAX(A1:A10), A1+B1
+
+    // If it contains parentheses or operators, it's likely a formula
+    if s.contains('(') || s.contains('+') || s.contains('-') || s.contains('*') || s.contains('/') {
+        return false;
+    }
+
+    // Simple heuristic: cell refs match [Sheet!][$]Col[$]Row pattern
+    // This is a simplified check - just verify it's not obviously a formula
+    true
+}
+
+/// Parse Excel sqref into CellRange(s)
+///
+/// sqref can be:
+/// - Single cell: "A1" -> CellRange(0,0,0,0)
+/// - Single range: "A1:B10" -> CellRange(0,0,9,1)
+/// - Multiple: "A1:A10 C1:C10" -> two ranges
+fn parse_sqref(sqref: &str) -> Vec<CellRange> {
+    sqref
+        .split_whitespace()
+        .filter_map(|part| parse_single_range(part))
+        .collect()
+}
+
+/// Parse a single range reference like "A1" or "A1:B10"
+fn parse_single_range(range_str: &str) -> Option<CellRange> {
+    let range_str = range_str.trim();
+
+    if let Some((start, end)) = range_str.split_once(':') {
+        // Range: A1:B10
+        let (start_row, start_col) = parse_cell_ref(start)?;
+        let (end_row, end_col) = parse_cell_ref(end)?;
+        Some(CellRange::new(start_row, start_col, end_row, end_col))
+    } else {
+        // Single cell: A1 -> A1:A1
+        let (row, col) = parse_cell_ref(range_str)?;
+        Some(CellRange::new(row, col, row, col))
+    }
+}
+
+/// Parse a cell reference like "A1" or "$A$1" into (row, col)
+fn parse_cell_ref(cell_ref: &str) -> Option<(usize, usize)> {
+    let cell_ref = cell_ref.replace('$', ""); // Strip $ signs
+    let cell_ref = cell_ref.trim();
+
+    // Find where letters end and numbers begin
+    let mut col_end = 0;
+    for (i, c) in cell_ref.chars().enumerate() {
+        if c.is_ascii_digit() {
+            col_end = i;
+            break;
+        }
+    }
+
+    if col_end == 0 {
+        return None;
+    }
+
+    let col_str = &cell_ref[..col_end];
+    let row_str = &cell_ref[col_end..];
+
+    let col = col_from_letters(col_str)?;
+    let row: usize = row_str.parse().ok()?;
+
+    // Excel rows are 1-indexed, VisiGrid is 0-indexed
+    Some((row.saturating_sub(1), col))
+}
+
+/// Convert column letters to 0-based index (A=0, B=1, ..., Z=25, AA=26, ...)
+fn col_from_letters(letters: &str) -> Option<usize> {
+    let mut col = 0usize;
+    for c in letters.chars() {
+        if !c.is_ascii_alphabetic() {
+            return None;
+        }
+        col = col * 26 + (c.to_ascii_uppercase() as usize - 'A' as usize + 1);
+    }
+    Some(col.saturating_sub(1))
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -379,5 +882,237 @@ mod tests {
 
         let rule = ValidationRule::custom("=A1>0");
         assert!(rule_to_xlsx(&rule).is_none(), "Custom should not export yet");
+    }
+
+    // ========================================================================
+    // Import Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_cell_ref() {
+        assert_eq!(parse_cell_ref("A1"), Some((0, 0)));
+        assert_eq!(parse_cell_ref("B2"), Some((1, 1)));
+        assert_eq!(parse_cell_ref("$A$1"), Some((0, 0)));
+        assert_eq!(parse_cell_ref("Z1"), Some((0, 25)));
+        assert_eq!(parse_cell_ref("AA1"), Some((0, 26)));
+        assert_eq!(parse_cell_ref("AB10"), Some((9, 27)));
+    }
+
+    #[test]
+    fn test_col_from_letters() {
+        assert_eq!(col_from_letters("A"), Some(0));
+        assert_eq!(col_from_letters("B"), Some(1));
+        assert_eq!(col_from_letters("Z"), Some(25));
+        assert_eq!(col_from_letters("AA"), Some(26));
+        assert_eq!(col_from_letters("AB"), Some(27));
+        assert_eq!(col_from_letters("AZ"), Some(51));
+        assert_eq!(col_from_letters("BA"), Some(52));
+    }
+
+    #[test]
+    fn test_parse_sqref_single_cell() {
+        let ranges = parse_sqref("A1");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], CellRange::new(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn test_parse_sqref_range() {
+        let ranges = parse_sqref("A1:B10");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], CellRange::new(0, 0, 9, 1));
+    }
+
+    #[test]
+    fn test_parse_sqref_multiple() {
+        let ranges = parse_sqref("A1:A10 C1:C10");
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0], CellRange::new(0, 0, 9, 0));
+        assert_eq!(ranges[1], CellRange::new(0, 2, 9, 2));
+    }
+
+    #[test]
+    fn test_parse_list_source_inline() {
+        let source = parse_list_source("\"Yes,No,Maybe\"");
+        assert!(matches!(source, Some(ListSource::Inline(items)) if items == vec!["Yes", "No", "Maybe"]));
+    }
+
+    #[test]
+    fn test_parse_list_source_range() {
+        let source = parse_list_source("$A$1:$A$10");
+        assert!(matches!(source, Some(ListSource::Range(r)) if r == "=$A$1:$A$10"));
+
+        let source = parse_list_source("Sheet2!$B$1:$B$20");
+        assert!(matches!(source, Some(ListSource::Range(r)) if r == "=Sheet2!$B$1:$B$20"));
+    }
+
+    #[test]
+    fn test_parse_list_source_named_range() {
+        let source = parse_list_source("StatusOptions");
+        assert!(matches!(source, Some(ListSource::NamedRange(n)) if n == "StatusOptions"));
+    }
+
+    #[test]
+    fn test_parse_operator() {
+        assert_eq!(parse_operator(Some("between")), Some(ComparisonOperator::Between));
+        assert_eq!(parse_operator(Some("notBetween")), Some(ComparisonOperator::NotBetween));
+        assert_eq!(parse_operator(Some("equal")), Some(ComparisonOperator::EqualTo));
+        assert_eq!(parse_operator(Some("notEqual")), Some(ComparisonOperator::NotEqualTo));
+        assert_eq!(parse_operator(Some("greaterThan")), Some(ComparisonOperator::GreaterThan));
+        assert_eq!(parse_operator(Some("lessThan")), Some(ComparisonOperator::LessThan));
+        assert_eq!(parse_operator(Some("greaterThanOrEqual")), Some(ComparisonOperator::GreaterThanOrEqual));
+        assert_eq!(parse_operator(Some("lessThanOrEqual")), Some(ComparisonOperator::LessThanOrEqual));
+    }
+
+    #[test]
+    fn test_parse_constraint_value_number() {
+        let val = parse_constraint_value("42");
+        assert!(matches!(val, Some(ConstraintValue::Number(n)) if (n - 42.0).abs() < 0.001));
+
+        let val = parse_constraint_value("3.14");
+        assert!(matches!(val, Some(ConstraintValue::Number(n)) if (n - 3.14).abs() < 0.001));
+    }
+
+    #[test]
+    fn test_parse_constraint_value_cell_ref() {
+        let val = parse_constraint_value("$A$1");
+        assert!(matches!(val, Some(ConstraintValue::CellRef(r)) if r == "=$A$1"));
+    }
+
+    #[test]
+    fn test_parse_validations_from_xml_list() {
+        let xml = r#"<?xml version="1.0"?>
+            <worksheet>
+                <dataValidations count="1">
+                    <dataValidation type="list" allowBlank="1" showDropDown="0" sqref="B2:B100">
+                        <formula1>"Open,In Progress,Closed"</formula1>
+                    </dataValidation>
+                </dataValidations>
+            </worksheet>"#;
+
+        let validations = parse_validations_from_xml(xml).unwrap();
+        assert_eq!(validations.len(), 1);
+
+        let v = &validations[0];
+        assert_eq!(v.range, CellRange::new(1, 1, 99, 1));
+        assert!(v.rule.ignore_blank);
+        assert!(v.rule.show_dropdown); // showDropDown="0" in Excel means show
+
+        match &v.rule.rule_type {
+            ValidationType::List(ListSource::Inline(items)) => {
+                assert_eq!(items, &vec!["Open", "In Progress", "Closed"]);
+            }
+            _ => panic!("Expected inline list"),
+        }
+    }
+
+    #[test]
+    fn test_parse_validations_from_xml_whole_number() {
+        let xml = r#"<?xml version="1.0"?>
+            <worksheet>
+                <dataValidations count="1">
+                    <dataValidation type="whole" operator="between" allowBlank="0" sqref="C2:C50">
+                        <formula1>1</formula1>
+                        <formula2>100</formula2>
+                    </dataValidation>
+                </dataValidations>
+            </worksheet>"#;
+
+        let validations = parse_validations_from_xml(xml).unwrap();
+        assert_eq!(validations.len(), 1);
+
+        let v = &validations[0];
+        assert_eq!(v.range, CellRange::new(1, 2, 49, 2));
+        assert!(!v.rule.ignore_blank);
+
+        match &v.rule.rule_type {
+            ValidationType::WholeNumber(c) => {
+                assert!(matches!(c.operator, ComparisonOperator::Between));
+                assert!(matches!(c.value1, ConstraintValue::Number(n) if (n - 1.0).abs() < 0.001));
+                assert!(matches!(c.value2, Some(ConstraintValue::Number(n)) if (n - 100.0).abs() < 0.001));
+            }
+            _ => panic!("Expected whole number"),
+        }
+    }
+
+    #[test]
+    fn test_parse_validations_from_xml_with_messages() {
+        let xml = r#"<?xml version="1.0"?>
+            <worksheet>
+                <dataValidations count="1">
+                    <dataValidation type="decimal" operator="greaterThan"
+                        allowBlank="1"
+                        showInputMessage="1" promptTitle="Enter Value" prompt="Must be positive"
+                        showErrorMessage="1" errorStyle="warning" errorTitle="Warning" error="Value should be positive"
+                        sqref="D2:D10">
+                        <formula1>0</formula1>
+                    </dataValidation>
+                </dataValidations>
+            </worksheet>"#;
+
+        let validations = parse_validations_from_xml(xml).unwrap();
+        assert_eq!(validations.len(), 1);
+
+        let v = &validations[0];
+        assert!(v.rule.ignore_blank);
+
+        // Check input message
+        let msg = v.rule.input_message.as_ref().unwrap();
+        assert!(msg.show);
+        assert_eq!(msg.title, "Enter Value");
+        assert_eq!(msg.message, "Must be positive");
+
+        // Check error alert
+        let alert = v.rule.error_alert.as_ref().unwrap();
+        assert!(alert.show);
+        assert!(matches!(alert.style, ErrorStyle::Warning));
+        assert_eq!(alert.title, "Warning");
+        assert_eq!(alert.message, "Value should be positive");
+    }
+
+    #[test]
+    fn test_parse_validations_multiple_ranges() {
+        let xml = r#"<?xml version="1.0"?>
+            <worksheet>
+                <dataValidations count="1">
+                    <dataValidation type="list" sqref="A1:A10 C1:C10">
+                        <formula1>"Yes,No"</formula1>
+                    </dataValidation>
+                </dataValidations>
+            </worksheet>"#;
+
+        let validations = parse_validations_from_xml(xml).unwrap();
+        assert_eq!(validations.len(), 2);
+        assert_eq!(validations[0].range, CellRange::new(0, 0, 9, 0));
+        assert_eq!(validations[1].range, CellRange::new(0, 2, 9, 2));
+    }
+
+    #[test]
+    fn test_show_dropdown_inversion() {
+        // Excel showDropDown="1" means HIDE dropdown
+        // VisiGrid show_dropdown=true means SHOW dropdown
+        let xml_hide = r#"<?xml version="1.0"?>
+            <worksheet>
+                <dataValidations>
+                    <dataValidation type="list" showDropDown="1" sqref="A1">
+                        <formula1>"Yes,No"</formula1>
+                    </dataValidation>
+                </dataValidations>
+            </worksheet>"#;
+
+        let validations = parse_validations_from_xml(xml_hide).unwrap();
+        assert!(!validations[0].rule.show_dropdown, "showDropDown='1' should map to show_dropdown=false");
+
+        let xml_show = r#"<?xml version="1.0"?>
+            <worksheet>
+                <dataValidations>
+                    <dataValidation type="list" showDropDown="0" sqref="A1">
+                        <formula1>"Yes,No"</formula1>
+                    </dataValidation>
+                </dataValidations>
+            </worksheet>"#;
+
+        let validations = parse_validations_from_xml(xml_show).unwrap();
+        assert!(validations[0].rule.show_dropdown, "showDropDown='0' should map to show_dropdown=true");
     }
 }

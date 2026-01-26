@@ -57,6 +57,10 @@ pub struct ImportResult {
     pub warnings: Vec<String>,
     /// Total import duration in milliseconds
     pub import_duration_ms: u128,
+    /// Total validations imported
+    pub validations_imported: usize,
+    /// Total validations skipped (unsupported types)
+    pub validations_skipped: usize,
 }
 
 impl ImportResult {
@@ -149,8 +153,14 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
 
         // Skip empty sheets but still create them
         if height == 0 || width == 0 {
-            let sheet = Sheet::new_with_name(SheetId(next_sheet_id), MAX_ROWS, MAX_COLS, sheet_name);
+            let mut sheet = Sheet::new_with_name(SheetId(next_sheet_id), MAX_ROWS, MAX_COLS, sheet_name);
             next_sheet_id += 1;
+
+            // Import validations even for empty sheets
+            let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet);
+            result.validations_imported += imported;
+            result.validations_skipped += skipped;
+
             sheets.push(sheet);
             result.sheets_imported += 1;
             result.sheet_stats.push(stats);
@@ -381,6 +391,11 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
         result.formulas_failed += stats.formulas_with_errors;
         result.formulas_with_unknowns += stats.formulas_with_unknowns;
         result.dates_imported += stats.dates_imported + stats.times_imported;
+
+        // Import validation rules from worksheet XML
+        let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet);
+        result.validations_imported += imported;
+        result.validations_skipped += skipped;
 
         sheets.push(sheet);
         result.sheets_imported += 1;
@@ -861,6 +876,34 @@ fn export_validation_rules(
     }
 
     Ok((exported, skipped))
+}
+
+/// Import validation rules for a sheet from XLSX
+///
+/// Returns (imported_count, skipped_count).
+/// Skipped rules are those with unsupported types (Date, Time, TextLength, Custom).
+fn import_validation_rules(
+    xlsx_path: &Path,
+    sheet_name: &str,
+    sheet: &mut Sheet,
+) -> (usize, usize) {
+    use crate::xlsx_validation::parse_sheet_validations;
+
+    match parse_sheet_validations(xlsx_path, sheet_name) {
+        Ok(validations) => {
+            let mut imported = 0;
+            for v in validations {
+                sheet.validations.set(v.range, v.rule);
+                imported += 1;
+            }
+            (imported, 0) // Skipping is handled in parse_sheet_validations
+        }
+        Err(_) => {
+            // Validation parsing failed - not fatal, just skip
+            // This can happen if the sheet has no validations or XML structure differs
+            (0, 0)
+        }
+    }
 }
 
 /// Build an Excel Format from VisiGrid CellFormat
@@ -1370,6 +1413,175 @@ mod tests {
         // 3 supported (List, WholeNumber, Decimal), 2 skipped (Date, Custom)
         assert_eq!(result.validations_exported, 3);
         assert_eq!(result.validations_skipped, 2);
+    }
+
+    // ========================================================================
+    // Validation round-trip tests
+    // ========================================================================
+
+    #[test]
+    fn test_validation_roundtrip_list() {
+        use visigrid_engine::validation::{CellRange, ListSource, ValidationRule, ValidationType};
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+
+        // Create list validation
+        let mut rule = ValidationRule::list_inline(vec!["Open".into(), "In Progress".into(), "Closed".into()]);
+        rule.ignore_blank = true;
+        rule.show_dropdown = true;
+        sheet.validations.set(CellRange::new(1, 1, 99, 1), rule);
+
+        // Export
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("roundtrip_list.xlsx");
+        let export_result = export(&workbook, &export_path, None).unwrap();
+        assert_eq!(export_result.validations_exported, 1);
+
+        // Import
+        let (imported_workbook, import_result) = import(&export_path).unwrap();
+        assert_eq!(import_result.validations_imported, 1);
+
+        // Verify the rule was preserved
+        let imported_sheet = imported_workbook.active_sheet();
+        let imported_rule = imported_sheet.validations.get(50, 1);
+        assert!(imported_rule.is_some(), "Validation rule should exist");
+
+        let imported_rule = imported_rule.unwrap();
+        assert!(imported_rule.ignore_blank);
+        assert!(imported_rule.show_dropdown);
+
+        match &imported_rule.rule_type {
+            ValidationType::List(ListSource::Inline(items)) => {
+                assert_eq!(items, &vec!["Open", "In Progress", "Closed"]);
+            }
+            _ => panic!("Expected inline list validation"),
+        }
+    }
+
+    #[test]
+    fn test_validation_roundtrip_whole_number() {
+        use visigrid_engine::validation::{CellRange, ComparisonOperator, ConstraintValue, NumericConstraint, ValidationRule, ValidationType};
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+
+        // Create whole number validation (between 1 and 100)
+        let mut rule = ValidationRule::whole_number(NumericConstraint::between(1, 100));
+        rule.ignore_blank = false;
+        sheet.validations.set(CellRange::new(0, 2, 49, 2), rule);
+
+        // Export
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("roundtrip_whole.xlsx");
+        let export_result = export(&workbook, &export_path, None).unwrap();
+        assert_eq!(export_result.validations_exported, 1);
+
+        // Import
+        let (imported_workbook, import_result) = import(&export_path).unwrap();
+        assert_eq!(import_result.validations_imported, 1);
+
+        // Verify the rule was preserved
+        let imported_sheet = imported_workbook.active_sheet();
+        let imported_rule = imported_sheet.validations.get(25, 2);
+        assert!(imported_rule.is_some(), "Validation rule should exist");
+
+        let imported_rule = imported_rule.unwrap();
+        assert!(!imported_rule.ignore_blank);
+
+        match &imported_rule.rule_type {
+            ValidationType::WholeNumber(constraint) => {
+                assert!(matches!(constraint.operator, ComparisonOperator::Between));
+                assert!(matches!(constraint.value1, ConstraintValue::Number(n) if (n - 1.0).abs() < 0.001));
+                assert!(matches!(constraint.value2, Some(ConstraintValue::Number(n)) if (n - 100.0).abs() < 0.001));
+            }
+            _ => panic!("Expected whole number validation"),
+        }
+    }
+
+    #[test]
+    fn test_validation_roundtrip_decimal() {
+        use visigrid_engine::validation::{CellRange, ComparisonOperator, ConstraintValue, NumericConstraint, ValidationRule, ValidationType};
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+
+        // Create decimal validation (greater than 0)
+        let rule = ValidationRule::decimal(NumericConstraint::greater_than(0.0));
+        sheet.validations.set(CellRange::new(0, 3, 19, 3), rule);
+
+        // Export
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("roundtrip_decimal.xlsx");
+        let export_result = export(&workbook, &export_path, None).unwrap();
+        assert_eq!(export_result.validations_exported, 1);
+
+        // Import
+        let (imported_workbook, import_result) = import(&export_path).unwrap();
+        assert_eq!(import_result.validations_imported, 1);
+
+        // Verify the rule was preserved
+        let imported_sheet = imported_workbook.active_sheet();
+        let imported_rule = imported_sheet.validations.get(10, 3);
+        assert!(imported_rule.is_some(), "Validation rule should exist");
+
+        let imported_rule = imported_rule.unwrap();
+
+        match &imported_rule.rule_type {
+            ValidationType::Decimal(constraint) => {
+                assert!(matches!(constraint.operator, ComparisonOperator::GreaterThan));
+                assert!(matches!(constraint.value1, ConstraintValue::Number(n) if n.abs() < 0.001));
+            }
+            _ => panic!("Expected decimal validation"),
+        }
+    }
+
+    #[test]
+    fn test_validation_roundtrip_multiple() {
+        use visigrid_engine::validation::{CellRange, NumericConstraint, ValidationRule, ValidationType};
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+
+        // Create multiple validations
+        let list_rule = ValidationRule::list_inline(vec!["A".into(), "B".into(), "C".into()]);
+        sheet.validations.set(CellRange::new(0, 0, 9, 0), list_rule);
+
+        let whole_rule = ValidationRule::whole_number(NumericConstraint::between(0, 50));
+        sheet.validations.set(CellRange::new(0, 1, 9, 1), whole_rule);
+
+        let decimal_rule = ValidationRule::decimal(NumericConstraint::less_than(100.0));
+        sheet.validations.set(CellRange::new(0, 2, 9, 2), decimal_rule);
+
+        // Export
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("roundtrip_multiple.xlsx");
+        let export_result = export(&workbook, &export_path, None).unwrap();
+        assert_eq!(export_result.validations_exported, 3);
+
+        // Import
+        let (imported_workbook, import_result) = import(&export_path).unwrap();
+        assert_eq!(import_result.validations_imported, 3);
+
+        // Verify all rules exist
+        let imported_sheet = imported_workbook.active_sheet();
+        assert!(imported_sheet.validations.get(5, 0).is_some(), "List validation should exist");
+        assert!(imported_sheet.validations.get(5, 1).is_some(), "Whole number validation should exist");
+        assert!(imported_sheet.validations.get(5, 2).is_some(), "Decimal validation should exist");
+
+        // Verify types
+        assert!(matches!(
+            imported_sheet.validations.get(5, 0).unwrap().rule_type,
+            ValidationType::List(_)
+        ));
+        assert!(matches!(
+            imported_sheet.validations.get(5, 1).unwrap().rule_type,
+            ValidationType::WholeNumber(_)
+        ));
+        assert!(matches!(
+            imported_sheet.validations.get(5, 2).unwrap().rule_type,
+            ValidationType::Decimal(_)
+        ));
     }
 
     // ========================================================================
