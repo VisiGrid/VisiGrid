@@ -7,4 +7,5 @@ pub mod named_range;
 pub mod provenance;
 pub mod recalc;
 pub mod sheet;
+pub mod validation;
 pub mod workbook;
