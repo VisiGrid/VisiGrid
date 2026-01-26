@@ -4,6 +4,7 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
+use crate::ui::modal_backdrop;
 
 /// The type of impact action being previewed
 #[derive(Clone, Debug, PartialEq)]
@@ -71,26 +72,19 @@ pub fn render_impact_preview(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
     let has_usages = !usages.is_empty();
     let subtitle_color = if is_delete && has_usages { error } else { text_muted };
 
-    // Centered dialog overlay
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0.0, 0.0, 0.0, 0.5))
-        .child(
-            div()
-                .w(px(480.0))
-                .max_h(px(400.0))
-                .bg(panel_bg)
-                .border_1()
-                .border_color(panel_border)
-                .rounded_lg()
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                // Header
+    modal_backdrop(
+        "impact-preview-dialog",
+        div()
+            .w(px(480.0))
+            .max_h(px(400.0))
+            .bg(panel_bg)
+            .border_1()
+            .border_color(panel_border)
+            .rounded_lg()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            // Header
                 .child(
                     div()
                         .px_5()
@@ -215,5 +209,5 @@ pub fn render_impact_preview(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                                 )
                         )
                 )
-        )
+    )
 }

@@ -4,6 +4,7 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
+use crate::ui::{modal_overlay, Button};
 
 /// Render the paste token dialog (fallback auth flow)
 pub fn render_paste_token_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -18,35 +19,23 @@ pub fn render_paste_token_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet
     let token_value = app.hub_token_input.clone();
     let has_token = !token_value.is_empty();
 
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0.0, 0.0, 0.0, 0.5))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-            this.hub_cancel_sign_in(cx);
-        }))
-        .child(
-            div()
-                .id("paste-token-dialog")
-                .w(px(420.0))
-                .bg(panel_bg)
-                .border_1()
-                .border_color(panel_border)
-                .rounded_lg()
-                .shadow_xl()
-                .overflow_hidden()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .child(
-                    div()
-                        .p_6()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
+    modal_overlay(
+        "paste-token-dialog",
+        |this, cx| this.hub_cancel_sign_in(cx),
+        div()
+            .w(px(420.0))
+            .bg(panel_bg)
+            .border_1()
+            .border_color(panel_border)
+            .rounded_lg()
+            .shadow_xl()
+            .overflow_hidden()
+            .child(
+                div()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
                         // Title
                         .child(
                             div()
@@ -120,38 +109,21 @@ pub fn render_paste_token_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet
                                 .gap_2()
                                 .justify_end()
                                 .child(
-                                    div()
-                                        .id("cancel-sign-in")
-                                        .px_4()
-                                        .py_2()
-                                        .border_1()
-                                        .border_color(panel_border)
-                                        .rounded_md()
-                                        .text_color(text_muted)
-                                        .text_size(px(13.0))
-                                        .cursor_pointer()
-                                        .hover(move |s| s.bg(panel_border))
+                                    Button::new("cancel-sign-in", "Cancel")
+                                        .secondary(panel_border, text_muted)
                                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                                             this.hub_cancel_sign_in(cx);
                                         }))
-                                        .child("Cancel")
                                 )
                                 .child(
-                                    div()
-                                        .id("confirm-sign-in")
-                                        .px_4()
-                                        .py_2()
-                                        .bg(if has_token { accent } else { hsla(0.0, 0.0, 0.3, 1.0) })
-                                        .rounded_md()
-                                        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-                                        .text_size(px(13.0))
-                                        .cursor(if has_token { CursorStyle::PointingHand } else { CursorStyle::Arrow })
+                                    Button::new("confirm-sign-in", "Sign In")
+                                        .disabled(!has_token)
+                                        .primary(accent, hsla(0.0, 0.0, 1.0, 1.0))
                                         .when(has_token, |d| {
                                             d.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                                                 this.hub_complete_sign_in(cx);
                                             }))
                                         })
-                                        .child("Sign In")
                                 )
                         )
                         // Help text
@@ -164,8 +136,9 @@ pub fn render_paste_token_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet
                                 .text_color(text_muted)
                                 .child("If the browser didn't open, visit visihub.app/desktop/authorize")
                         )
-                )
-        )
+                ),
+        cx,
+    )
 }
 
 /// Render the link to dataset dialog
@@ -188,91 +161,80 @@ pub fn render_link_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     let can_link = selected_repo.is_some() && selected_dataset.is_some();
     let can_create = selected_repo.is_some() && !new_dataset_name.trim().is_empty();
 
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0.0, 0.0, 0.0, 0.5))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-            this.hub_cancel_link(cx);
-        }))
-        .child(
-            div()
-                .id("link-dialog")
-                .w(px(480.0))
-                .max_h(px(500.0))
-                .bg(panel_bg)
-                .border_1()
-                .border_color(panel_border)
-                .rounded_lg()
-                .shadow_xl()
-                .overflow_hidden()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .child(
-                    div()
-                        .p_6()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        // Title
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(18.0))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(text_primary)
-                                        .child("Link to VisiHub")
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .text_color(text_muted)
-                                        .child("Select a repository and dataset to link this workbook.")
-                                )
-                        )
-                        // Loading indicator
-                        .when(loading, |el| {
-                            el.child(
+    modal_overlay(
+        "link-dialog",
+        |this, cx| this.hub_cancel_link(cx),
+        div()
+            .w(px(480.0))
+            .max_h(px(500.0))
+            .bg(panel_bg)
+            .border_1()
+            .border_color(panel_border)
+            .rounded_lg()
+            .shadow_xl()
+            .overflow_hidden()
+            .child(
+                div()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    // Title
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(18.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(text_primary)
+                                    .child("Link to VisiHub")
+                            )
+                            .child(
                                 div()
                                     .text_size(px(13.0))
                                     .text_color(text_muted)
-                                    .child("Loading...")
+                                    .child("Select a repository and dataset to link this workbook.")
                             )
-                        })
-                        // Repository list
-                        .when(!loading && !repos.is_empty(), |el| {
-                            el.child(render_repo_list(&repos, selected_repo, panel_bg, panel_border, text_primary, text_muted, selection_bg, cx))
-                        })
-                        // Dataset list (when repo selected)
-                        .when(selected_repo.is_some() && !loading, |el| {
-                            el.child(render_dataset_list(&datasets, selected_dataset, panel_bg, panel_border, text_primary, text_muted, selection_bg, cx))
-                        })
-                        // Create new dataset
-                        .when(selected_repo.is_some() && !loading, |el| {
-                            el.child(render_create_dataset(&new_dataset_name, can_create, panel_border, text_muted, text_primary, app_bg, accent, cx))
-                        })
-                        // Mode info
-                        .child(
+                    )
+                    // Loading indicator
+                    .when(loading, |el| {
+                        el.child(
                             div()
-                                .pt_2()
-                                .border_t_1()
-                                .border_color(panel_border)
-                                .text_size(px(11.0))
+                                .text_size(px(13.0))
                                 .text_color(text_muted)
-                                .child("Mode: Pull only (receive updates)")
+                                .child("Loading...")
                         )
-                        // Buttons
-                        .child(render_link_buttons(can_link, panel_border, text_muted, accent, cx))
-                )
-        )
+                    })
+                    // Repository list
+                    .when(!loading && !repos.is_empty(), |el| {
+                        el.child(render_repo_list(&repos, selected_repo, panel_bg, panel_border, text_primary, text_muted, selection_bg, cx))
+                    })
+                    // Dataset list (when repo selected)
+                    .when(selected_repo.is_some() && !loading, |el| {
+                        el.child(render_dataset_list(&datasets, selected_dataset, panel_bg, panel_border, text_primary, text_muted, selection_bg, cx))
+                    })
+                    // Create new dataset
+                    .when(selected_repo.is_some() && !loading, |el| {
+                        el.child(render_create_dataset(&new_dataset_name, can_create, panel_border, text_muted, text_primary, app_bg, accent, cx))
+                    })
+                    // Mode info
+                    .child(
+                        div()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(panel_border)
+                            .text_size(px(11.0))
+                            .text_color(text_muted)
+                            .child("Mode: Pull only (receive updates)")
+                    )
+                    // Buttons
+                    .child(render_link_buttons(can_link, panel_border, text_muted, accent, cx))
+            ),
+        cx,
+    )
 }
 
 fn render_repo_list(
@@ -467,38 +429,21 @@ fn render_link_buttons(
         .gap_2()
         .justify_end()
         .child(
-            div()
-                .id("cancel-link")
-                .px_4()
-                .py_2()
-                .border_1()
-                .border_color(panel_border)
-                .rounded_md()
-                .text_color(text_muted)
-                .text_size(px(13.0))
-                .cursor_pointer()
-                .hover(move |s| s.bg(panel_border))
+            Button::new("cancel-link", "Cancel")
+                .secondary(panel_border, text_muted)
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     this.hub_cancel_link(cx);
                 }))
-                .child("Cancel")
         )
         .child(
-            div()
-                .id("confirm-link")
-                .px_4()
-                .py_2()
-                .bg(if can_link { accent } else { hsla(0.0, 0.0, 0.3, 1.0) })
-                .rounded_md()
-                .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-                .text_size(px(13.0))
-                .cursor(if can_link { CursorStyle::PointingHand } else { CursorStyle::Arrow })
+            Button::new("confirm-link", "Link")
+                .disabled(!can_link)
+                .primary(accent, hsla(0.0, 0.0, 1.0, 1.0))
                 .when(can_link, |d| {
                     d.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                         this.hub_confirm_link(cx);
                     }))
                 })
-                .child("Link")
         )
 }
 
@@ -526,119 +471,89 @@ pub fn render_publish_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreads
     let warning_color = hsla(0.08, 0.9, 0.55, 1.0); // Orange
     let danger_color = hsla(0.0, 0.7, 0.5, 1.0); // Red-ish
 
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0.0, 0.0, 0.0, 0.5))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-            this.hub_cancel_publish_confirm(cx);
-        }))
-        .child(
-            div()
-                .id("publish-confirm-dialog")
-                .w(px(400.0))
-                .bg(panel_bg)
-                .border_1()
-                .border_color(warning_color)
-                .rounded_lg()
-                .shadow_xl()
-                .overflow_hidden()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .child(
-                    div()
-                        .p_6()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        // Warning icon and title
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .text_size(px(24.0))
-                                        .text_color(warning_color)
-                                        .child("⚠")
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(18.0))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(text_primary)
-                                        .child("Remote has changed")
-                                )
-                        )
-                        // Body text
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(text_muted)
-                                .child("VisiHub has a newer version of this workbook. Publishing now will replace the remote version.")
-                        )
-                        // Buttons
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .justify_end()
-                                .child(
-                                    div()
-                                        .id("cancel-publish")
-                                        .px_4()
-                                        .py_2()
-                                        .border_1()
-                                        .border_color(panel_border)
-                                        .rounded_md()
-                                        .text_color(text_muted)
-                                        .text_size(px(13.0))
-                                        .cursor_pointer()
-                                        .hover(move |s| s.bg(panel_border))
-                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                            this.hub_cancel_publish_confirm(cx);
-                                        }))
-                                        .child("Cancel")
-                                )
-                                .child(
-                                    div()
-                                        .id("open-remote-copy")
-                                        .px_4()
-                                        .py_2()
-                                        .bg(panel_border)
-                                        .rounded_md()
-                                        .text_color(text_primary)
-                                        .text_size(px(13.0))
-                                        .cursor_pointer()
-                                        .hover(move |s| s.bg(hsla(0.0, 0.0, 0.4, 1.0)))
-                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                            this.hub_cancel_publish_confirm(cx);
-                                            this.hub_open_remote_as_copy(cx);
-                                        }))
-                                        .child("Open Remote as Copy")
-                                )
-                                .child(
-                                    div()
-                                        .id("publish-anyway")
-                                        .px_4()
-                                        .py_2()
-                                        .bg(danger_color)
-                                        .rounded_md()
-                                        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-                                        .text_size(px(13.0))
-                                        .cursor_pointer()
-                                        .hover(move |s| s.bg(hsla(0.0, 0.8, 0.4, 1.0)))
-                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                            this.hub_confirm_publish_anyway(cx);
-                                        }))
-                                        .child("Publish Anyway")
-                                )
-                        )
-                )
-        )
+    modal_overlay(
+        "publish-confirm-dialog",
+        |this, cx| this.hub_cancel_publish_confirm(cx),
+        div()
+            .w(px(400.0))
+            .bg(panel_bg)
+            .border_1()
+            .border_color(warning_color)
+            .rounded_lg()
+            .shadow_xl()
+            .overflow_hidden()
+            .child(
+                div()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    // Warning icon and title
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_size(px(24.0))
+                                    .text_color(warning_color)
+                                    .child("⚠")
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(18.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(text_primary)
+                                    .child("Remote has changed")
+                            )
+                    )
+                    // Body text
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(text_muted)
+                            .child("VisiHub has a newer version of this workbook. Publishing now will replace the remote version.")
+                    )
+                    // Buttons
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .justify_end()
+                            .child(
+                                Button::new("cancel-publish", "Cancel")
+                                    .secondary(panel_border, text_muted)
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                        this.hub_cancel_publish_confirm(cx);
+                                    }))
+                            )
+                            .child(
+                                div()
+                                    .id("open-remote-copy")
+                                    .px_4()
+                                    .py_2()
+                                    .bg(panel_border)
+                                    .rounded_md()
+                                    .text_color(text_primary)
+                                    .text_size(px(13.0))
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(hsla(0.0, 0.0, 0.4, 1.0)))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                        this.hub_cancel_publish_confirm(cx);
+                                        this.hub_open_remote_as_copy(cx);
+                                    }))
+                                    .child("Open Remote as Copy")
+                            )
+                            .child(
+                                Button::new("publish-anyway", "Publish Anyway")
+                                    .primary(danger_color, hsla(0.0, 0.0, 1.0, 1.0))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                        this.hub_confirm_publish_anyway(cx);
+                                    }))
+                            )
+                    )
+            ),
+        cx,
+    )
 }

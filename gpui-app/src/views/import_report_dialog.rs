@@ -7,9 +7,14 @@ use visigrid_io::xlsx::ImportResult;
 
 use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
+use crate::ui::{modal_overlay, Button};
 
 /// Render the Import Report dialog overlay
 pub fn render_import_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let Some(import_result) = &app.import_result else {
+        return div().into_any_element();
+    };
+
     let panel_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
@@ -19,41 +24,24 @@ pub fn render_import_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
     let warning_color = app.token(TokenKey::Warn);
     let error_color = app.token(TokenKey::Error);
 
-    let import_result = match &app.import_result {
-        Some(ir) => ir,
-        None => return div().into_any_element(),
-    };
-
     let filename = app.import_filename.as_deref().unwrap_or("unknown file");
 
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0.0, 0.0, 0.0, 0.5))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-            this.hide_import_report(cx);
-            cx.stop_propagation();
-        }))
-        .child(
-            div()
-                .w(px(500.0))
-                .max_h(px(600.0))
-                .bg(panel_bg)
-                .border_1()
-                .border_color(panel_border)
-                .rounded_lg()
-                .shadow_xl()
-                .overflow_hidden()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .flex()
-                .flex_col()
-                // Header
-                .child(
+    modal_overlay(
+        "import-report-dialog",
+        |this, cx| this.hide_import_report(cx),
+        div()
+            .w(px(500.0))
+            .max_h(px(600.0))
+            .bg(panel_bg)
+            .border_1()
+            .border_color(panel_border)
+            .rounded_lg()
+            .shadow_xl()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            // Header
+            .child(
                     div()
                         .px_4()
                         .py_3()
@@ -105,25 +93,15 @@ pub fn render_import_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
                         .flex()
                         .justify_end()
                         .child(
-                            div()
-                                .id("import-report-close-btn")
-                                .px_4()
-                                .py(px(6.0))
-                                .bg(accent)
-                                .rounded_md()
-                                .cursor_pointer()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(app.token(TokenKey::TextInverse))
-                                .hover(|s| s.opacity(0.9))
+                            Button::new("import-report-close-btn", "Close")
+                                .primary(accent, app.token(TokenKey::TextInverse))
                                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                                     this.hide_import_report(cx);
                                 }))
-                                .child("Close")
                         )
-                )
-        )
-        .into_any_element()
+                ),
+        cx,
+    ).into_any_element()
 }
 
 fn render_summary_section(ir: &ImportResult, text_primary: Hsla, text_muted: Hsla) -> impl IntoElement {

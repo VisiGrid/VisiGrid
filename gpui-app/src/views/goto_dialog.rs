@@ -1,6 +1,7 @@
 use gpui::*;
 use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
+use crate::ui::modal_backdrop;
 
 /// Render the Go To cell dialog overlay
 pub fn render_goto_dialog(app: &Spreadsheet) -> impl IntoElement {
@@ -13,26 +14,20 @@ pub fn render_goto_dialog(app: &Spreadsheet) -> impl IntoElement {
     let text_disabled = app.token(TokenKey::TextDisabled);
     let accent = app.token(TokenKey::Accent);
 
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0.0, 0.0, 0.0, 0.5))  // Semi-transparent backdrop
-        .child(
-            div()
-                .w(px(300.0))
-                .bg(panel_bg)
-                .border_1()
-                .border_color(accent)
-                .rounded_md()
-                .p_4()
-                .flex()
-                .flex_col()
-                .gap_2()
-                // Title
-                .child(
+    modal_backdrop(
+        "goto-dialog",
+        div()
+            .w(px(300.0))
+            .bg(panel_bg)
+            .border_1()
+            .border_color(accent)
+            .rounded_md()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_2()
+            // Title
+            .child(
                     div()
                         .text_color(text_primary)
                         .font_weight(FontWeight::MEDIUM)
@@ -66,6 +61,6 @@ pub fn render_goto_dialog(app: &Spreadsheet) -> impl IntoElement {
                         .text_color(text_disabled)
                         .text_xs()
                         .child("Enter to confirm, Escape to cancel")
-                )
-        )
+            )
+    )
 }

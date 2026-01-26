@@ -155,9 +155,10 @@ impl Spreadsheet {
     // Sheet access convenience methods
     // =========================================================================
 
-    /// Get a reference to the active sheet
+    /// Get a reference to the active sheet (preview-aware)
+    /// Returns the snapshot's sheet during preview, live sheet otherwise
     pub fn sheet(&self) -> &Sheet {
-        self.workbook.active_sheet()
+        self.display_workbook().active_sheet()
     }
 
     /// Get a mutable reference to the active sheet
@@ -292,6 +293,12 @@ impl Spreadsheet {
         self.commit_pending_edit();
         if self.workbook.set_active_sheet(index) {
             self.clear_selection_state();
+            // Clear history highlight unless it's for the new sheet
+            if let Some((sheet_idx, _, _, _, _)) = self.history_highlight_range {
+                if sheet_idx != index {
+                    self.history_highlight_range = None;
+                }
+            }
             cx.notify();
         }
     }

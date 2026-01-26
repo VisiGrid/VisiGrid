@@ -17,38 +17,122 @@ impl Spreadsheet {
     // UI uses VIEW space (what user sees after sort/filter)
     // Storage uses DATA space (canonical row numbers)
     // Convert at boundaries only
+    //
+    // PREVIEW MODE: When previewing, we use the preview session's row_order
+    // instead of the live row_view. This allows showing sorted state from history.
+
+    /// Get the preview row order for the active sheet, if in preview mode
+    /// Returns None if not previewing or no sort order recorded
+    #[inline]
+    pub fn preview_row_order(&self) -> Option<&[usize]> {
+        self.preview_session().and_then(|session| {
+            let sheet_idx = self.workbook.active_sheet_index();
+            session.view_state.per_sheet.get(sheet_idx)
+                .and_then(|sv| sv.row_order.as_deref())
+        })
+    }
+
+    /// Get the preview sort state for the active sheet
+    /// Returns (column, is_ascending) if sort is active in preview
+    #[inline]
+    pub fn preview_sort_state(&self) -> Option<(usize, bool)> {
+        self.preview_session().and_then(|session| {
+            let sheet_idx = self.workbook.active_sheet_index();
+            session.view_state.per_sheet.get(sheet_idx)
+                .and_then(|sv| sv.sort)
+        })
+    }
+
+    /// Get the sort state to display (preview-aware)
+    /// Returns (column, is_ascending) if the current view is sorted
+    /// Uses preview sort state when previewing, live filter_state.sort otherwise
+    #[inline]
+    pub fn display_sort_state(&self) -> Option<(usize, bool)> {
+        if self.is_previewing() {
+            self.preview_sort_state()
+        } else {
+            self.filter_state.sort.as_ref().map(|s| {
+                (s.column, s.direction == visigrid_engine::filter::SortDirection::Ascending)
+            })
+        }
+    }
 
     /// Convert view row to data row
+    /// In preview mode, uses preview row order if available
     #[inline]
     pub fn view_to_data(&self, view_row: usize) -> usize {
-        self.row_view.view_to_data(view_row)
+        if let Some(row_order) = self.preview_row_order() {
+            // Preview mode with sorted state
+            row_order.get(view_row).copied().unwrap_or(view_row)
+        } else if self.is_previewing() {
+            // Preview mode but sort invalidated - identity
+            view_row
+        } else {
+            // Live mode
+            self.row_view.view_to_data(view_row)
+        }
     }
 
     /// Convert data row to view row (None if hidden by filter)
+    /// In preview mode, filtering is not active (all rows visible)
     #[inline]
     pub fn data_to_view(&self, data_row: usize) -> Option<usize> {
-        self.row_view.data_to_view(data_row)
+        if let Some(row_order) = self.preview_row_order() {
+            // Preview mode with sorted state - find position
+            row_order.iter().position(|&r| r == data_row)
+        } else if self.is_previewing() {
+            // Preview mode but sort invalidated - identity, always visible
+            Some(data_row)
+        } else {
+            // Live mode
+            self.row_view.data_to_view(data_row)
+        }
     }
 
     /// Get visible row count
+    /// In preview mode, all rows are considered visible (no filter state)
     #[inline]
     pub fn visible_row_count(&self) -> usize {
-        self.row_view.visible_count()
+        if self.is_previewing() {
+            // Preview doesn't track filters, use sheet's row count
+            // (Heuristic: use same count as live row_view for consistency)
+            self.row_view.row_count()
+        } else {
+            self.row_view.visible_count()
+        }
     }
 
     /// Get the nth visible row (view_row, data_row) for rendering
     /// Returns None if index is out of bounds
+    /// In preview mode, uses preview row order if available
     #[inline]
     pub fn nth_visible_row(&self, visible_index: usize) -> Option<(usize, usize)> {
-        let view_row = self.row_view.nth_visible(visible_index)?;
-        let data_row = self.row_view.view_to_data(view_row);
-        Some((view_row, data_row))
+        if let Some(row_order) = self.preview_row_order() {
+            // Preview mode with sorted state
+            let data_row = row_order.get(visible_index).copied()?;
+            // view_row == visible_index in sorted preview (no filter)
+            Some((visible_index, data_row))
+        } else if self.is_previewing() {
+            // Preview mode but sort invalidated - identity mapping
+            if visible_index < self.row_view.row_count() {
+                Some((visible_index, visible_index))
+            } else {
+                None
+            }
+        } else {
+            // Live mode
+            let view_row = self.row_view.nth_visible(visible_index)?;
+            let data_row = self.row_view.view_to_data(view_row);
+            Some((view_row, data_row))
+        }
     }
 
     /// View row indices that are visible after filtering
     /// (Not to be confused with visible_rows() which returns screen row count)
     #[inline]
     pub fn filtered_row_indices(&self) -> &[usize] {
+        // Note: This method is used for live filtering state only
+        // Preview mode doesn't use this - it uses preview_row_order() directly
         self.row_view.visible_rows()
     }
 
@@ -74,6 +158,9 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         use visigrid_engine::filter::{sort_by_column, SortState};
+
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
 
         // Ensure filter range is set (use current selection if not)
         if self.filter_state.filter_range.is_none() {
@@ -128,6 +215,7 @@ impl Spreadsheet {
         };
 
         self.history.record_action_with_provenance(crate::history::UndoAction::SortApplied {
+            sheet_index: self.workbook.active_sheet_index(),
             previous_row_order: undo_item.previous_row_order,
             previous_sort_state,
             new_row_order: new_order.clone(),

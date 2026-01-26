@@ -5,6 +5,7 @@ use gpui::prelude::FluentBuilder;
 use std::time::SystemTime;
 use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
+use crate::ui::modal_backdrop;
 
 /// A single refactor log entry
 #[derive(Clone, Debug)]
@@ -55,26 +56,19 @@ pub fn render_refactor_log(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> 
     let entries = app.refactor_log.clone();
     let is_empty = entries.is_empty();
 
-    // Centered dialog overlay
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0.0, 0.0, 0.0, 0.5))
-        .child(
-            div()
-                .w(px(520.0))
-                .max_h(px(450.0))
-                .bg(panel_bg)
-                .border_1()
-                .border_color(panel_border)
-                .rounded_lg()
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                // Header
+    modal_backdrop(
+        "refactor-log-dialog",
+        div()
+            .w(px(520.0))
+            .max_h(px(450.0))
+            .bg(panel_bg)
+            .border_1()
+            .border_color(panel_border)
+            .rounded_lg()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            // Header
                 .child(
                     div()
                         .px_5()
@@ -218,5 +212,5 @@ pub fn render_refactor_log(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> 
                                 .child("Close")
                         )
                 )
-        )
+    )
 }

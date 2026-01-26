@@ -111,6 +111,26 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         )
 }
 
+/// Render sort indicator for a column if it's the sorted column
+/// Returns None if not sorted, Some(element) with ▲ or ▼ if sorted
+fn render_sort_indicator(app: &Spreadsheet, col: usize) -> Option<impl IntoElement> {
+    let sort_state = app.display_sort_state()?;
+    if sort_state.0 != col {
+        return None;
+    }
+
+    let arrow = if sort_state.1 { "▲" } else { "▼" };
+    let accent = app.token(TokenKey::Accent);
+
+    Some(
+        div()
+            .text_size(px(8.0))
+            .text_color(accent)
+            .ml(px(2.0))
+            .child(arrow)
+    )
+}
+
 /// Render a single column header with resize handle and selection support
 fn render_column_header(
     app: &Spreadsheet,
@@ -142,7 +162,14 @@ fn render_column_header(
         .text_sm()
         .cursor_pointer()
         .hover(|s| s.bg(selection_bg.opacity(0.3)))
-        .child(Spreadsheet::col_letter(col))
+        // Column letter with optional sort indicator
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .child(Spreadsheet::col_letter(col))
+                .when_some(render_sort_indicator(app, col), |d, indicator| d.child(indicator))
+        )
         // Filter dropdown button (when AutoFilter is enabled)
         .when_some(render_filter_button(app, col, cx), |d, btn| d.child(btn))
         // Click handler for column selection

@@ -1,6 +1,8 @@
 // VisiGrid CLI - headless spreadsheet operations
 // See docs/cli-v1.md for specification
 
+mod replay;
+
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -8,12 +10,12 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 
 // Exit codes per spec
-const EXIT_SUCCESS: u8 = 0;
-const EXIT_EVAL_ERROR: u8 = 1;
-const EXIT_ARGS_ERROR: u8 = 2;
-const EXIT_IO_ERROR: u8 = 3;
-const EXIT_PARSE_ERROR: u8 = 4;
-const EXIT_FORMAT_ERROR: u8 = 5;
+pub const EXIT_SUCCESS: u8 = 0;
+pub const EXIT_EVAL_ERROR: u8 = 1;
+pub const EXIT_ARGS_ERROR: u8 = 2;
+pub const EXIT_IO_ERROR: u8 = 3;
+pub const EXIT_PARSE_ERROR: u8 = 4;
+pub const EXIT_FORMAT_ERROR: u8 = 5;
 
 #[derive(Parser)]
 #[command(name = "visigrid-cli")]
@@ -91,6 +93,32 @@ enum Commands {
         /// File to open
         file: Option<PathBuf>,
     },
+
+    /// Replay a provenance script (Phase 9B)
+    Replay {
+        /// Path to the Lua provenance script
+        script: PathBuf,
+
+        /// Verify fingerprint against script header (fail if mismatch)
+        #[arg(long)]
+        verify: bool,
+
+        /// Output file for resulting spreadsheet (csv, tsv, or json)
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+
+        /// Output format (inferred from extension if not specified)
+        #[arg(long, short = 'f')]
+        format: Option<String>,
+
+        /// Print fingerprint and exit
+        #[arg(long)]
+        fingerprint: bool,
+
+        /// Quiet mode - only print errors
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -138,6 +166,14 @@ fn main() -> ExitCode {
             spill,
         }) => cmd_calc(formula, from, into, delimiter, headers, spill),
         Some(Commands::Open { file }) => cmd_open(file),
+        Some(Commands::Replay {
+            script,
+            verify,
+            output,
+            format,
+            fingerprint,
+            quiet,
+        }) => cmd_replay(script, verify, output, format, fingerprint, quiet),
     };
 
     match result {
@@ -149,29 +185,29 @@ fn main() -> ExitCode {
     }
 }
 
-struct CliError {
-    code: u8,
-    message: String,
+pub struct CliError {
+    pub code: u8,
+    pub message: String,
 }
 
 impl CliError {
-    fn args(msg: impl Into<String>) -> Self {
+    pub fn args(msg: impl Into<String>) -> Self {
         Self { code: EXIT_ARGS_ERROR, message: msg.into() }
     }
 
-    fn io(msg: impl Into<String>) -> Self {
+    pub fn io(msg: impl Into<String>) -> Self {
         Self { code: EXIT_IO_ERROR, message: msg.into() }
     }
 
-    fn parse(msg: impl Into<String>) -> Self {
+    pub fn parse(msg: impl Into<String>) -> Self {
         Self { code: EXIT_PARSE_ERROR, message: msg.into() }
     }
 
-    fn format(msg: impl Into<String>) -> Self {
+    pub fn format(msg: impl Into<String>) -> Self {
         Self { code: EXIT_FORMAT_ERROR, message: msg.into() }
     }
 
-    fn eval(msg: impl Into<String>) -> Self {
+    pub fn eval(msg: impl Into<String>) -> Self {
         Self { code: EXIT_EVAL_ERROR, message: msg.into() }
     }
 }
@@ -928,4 +964,91 @@ fn cmd_open(file: Option<PathBuf>) -> Result<(), CliError> {
             Err(CliError::io("GUI binary not found. Install VisiGrid GUI or add visigrid-gui to PATH."))
         }
     }
+}
+
+// ============================================================================
+// replay (Phase 9B)
+// ============================================================================
+
+fn cmd_replay(
+    script: PathBuf,
+    verify: bool,
+    output: Option<PathBuf>,
+    format: Option<String>,
+    fingerprint_only: bool,
+    quiet: bool,
+) -> Result<(), CliError> {
+    // Execute the script
+    let result = replay::execute_script(&script)?;
+
+    // Handle --fingerprint flag
+    if fingerprint_only {
+        if result.has_nondeterministic {
+            // Warn about nondeterministic functions but still print fingerprint
+            eprintln!("warning: script contains nondeterministic functions: {}",
+                result.nondeterministic_found.join(", "));
+            eprintln!("warning: fingerprint will vary between runs");
+        }
+        println!("{}", result.fingerprint.to_string());
+        return Ok(());
+    }
+
+    // Fail early if --verify is used with nondeterministic functions
+    if verify && result.has_nondeterministic {
+        return Err(CliError::eval(format!(
+            "Cannot verify: script contains nondeterministic functions ({}). \
+             These produce different results on each run.",
+            result.nondeterministic_found.join(", ")
+        )));
+    }
+
+    // Print result summary (unless quiet)
+    if !quiet {
+        eprintln!("Replayed {} operations", result.operations);
+        eprintln!("Fingerprint: {}", result.fingerprint.to_string());
+
+        if result.has_nondeterministic {
+            eprintln!("Warning: nondeterministic functions used: {}",
+                result.nondeterministic_found.join(", "));
+        }
+
+        if let Some(ref expected) = result.expected_fingerprint {
+            if result.has_nondeterministic {
+                eprintln!("Verification: SKIP (nondeterministic functions present)");
+            } else if result.verified {
+                eprintln!("Verification: PASS (matches expected)");
+            } else {
+                eprintln!("Verification: FAIL");
+                eprintln!("  Expected: {}", expected.to_string());
+                eprintln!("  Got:      {}", result.fingerprint.to_string());
+            }
+        } else {
+            eprintln!("Verification: SKIP (no expected fingerprint in script)");
+        }
+    }
+
+    // Check verification failure
+    if verify && !result.verified {
+        return Err(CliError::eval("Fingerprint verification failed"));
+    }
+
+    // Export output if requested
+    if let Some(output_path) = output {
+        // Infer format from extension if not specified
+        let fmt = format.unwrap_or_else(|| {
+            output_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_lowercase())
+                .unwrap_or_else(|| "csv".to_string())
+        });
+
+        replay::export_workbook(&result.workbook, &output_path, &fmt)?;
+
+        if !quiet {
+            eprintln!("Wrote output to: {}", output_path.display());
+        }
+    }
+
+    Ok(())
 }

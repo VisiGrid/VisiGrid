@@ -25,6 +25,9 @@ impl Spreadsheet {
 
     /// Fill down: copy the first row's values/formulas to remaining rows in selection
     pub fn fill_down(&mut self, cx: &mut Context<Self>) {
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
+
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
         // Need at least 2 rows selected
@@ -105,6 +108,9 @@ impl Spreadsheet {
 
     /// Fill right: copy the first column's values/formulas to remaining columns in selection
     pub fn fill_right(&mut self, cx: &mut Context<Self>) {
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
+
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
         // Need at least 2 columns selected

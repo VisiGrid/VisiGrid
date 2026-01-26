@@ -38,6 +38,7 @@ mod scripting_stub;
 #[cfg(not(feature = "pro"))]
 use scripting_stub as scripting;
 mod named_ranges;
+mod provenance;
 mod ref_target;
 mod search;
 mod session;
@@ -45,6 +46,7 @@ mod settings;
 mod sheet_ops;
 mod sort_filter;
 mod theme;
+mod ui;
 mod undo_redo;
 mod validation_dropdown;
 mod views;

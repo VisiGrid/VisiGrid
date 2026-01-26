@@ -128,6 +128,10 @@ fn render_header(
                         .text_color(text_muted)
                         .hover(|s| s.bg(panel_border))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            // Exit preview when closing inspector
+                            if this.is_previewing() {
+                                this.exit_preview(cx);
+                            }
                             this.inspector_visible = false;
                             cx.notify();
                         }))
@@ -2964,6 +2968,9 @@ fn format_relative_time(time: std::time::SystemTime) -> String {
 // History Tab
 // ============================================================================
 
+/// Number of history entries visible in virtual scroll window
+const HISTORY_VIEW_LEN: usize = 30;
+
 fn render_history_tab(
     app: &mut Spreadsheet,
     text_primary: Hsla,
@@ -2972,19 +2979,45 @@ fn render_history_tab(
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
+    use crate::app::HistoryFilterMode;
     use crate::history::HistoryDisplayEntry;
 
     let all_entries = app.history.display_entries();
+    let total_count = all_entries.len();
     let filter_query = app.history_filter_query.clone();
+    let filter_mode = app.history_filter_mode;
+    let active_sheet_idx = app.workbook.active_sheet_index();
     let selected_id = app.selected_history_id;
+    let view_start = app.history_view_start;
     let is_pro = visigrid_license::is_feature_enabled("inspector");
 
-    // Filter entries by label/scope (case-insensitive substring)
+    // Filter entries by mode first
+    let mode_filtered: Vec<HistoryDisplayEntry> = all_entries
+        .into_iter()
+        .filter(|e| match filter_mode {
+            HistoryFilterMode::All => true,
+            HistoryFilterMode::CurrentSheet => {
+                e.sheet_index.map_or(true, |si| si == active_sheet_idx)
+            }
+            HistoryFilterMode::ValidationOnly => {
+                e.label.to_lowercase().contains("validation") || e.label.to_lowercase().contains("exclusion")
+            }
+            HistoryFilterMode::DataEditsOnly => {
+                e.label.starts_with("Edit")
+                    || e.label.starts_with("Paste")
+                    || e.label.starts_with("Fill")
+                    || e.label.starts_with("Clear")
+                    || e.label.starts_with("Sort")
+            }
+        })
+        .collect();
+
+    // Then filter by text query (case-insensitive substring)
     let entries: Vec<HistoryDisplayEntry> = if filter_query.is_empty() {
-        all_entries
+        mode_filtered
     } else {
         let q = filter_query.to_lowercase();
-        all_entries
+        mode_filtered
             .into_iter()
             .filter(|e| {
                 e.label.to_lowercase().contains(&q) || e.scope.to_lowercase().contains(&q)
@@ -2992,14 +3025,98 @@ fn render_history_tab(
             .collect()
     };
 
+    let filtered_count = entries.len();
+    let is_filtered = filter_mode != HistoryFilterMode::All || !filter_query.is_empty();
+
+    // Virtual scroll: only render visible entries
+    let view_start_clamped = view_start.min(entries.len().saturating_sub(1));
+    let view_end = (view_start_clamped + HISTORY_VIEW_LEN).min(entries.len());
+    let visible_entries: Vec<HistoryDisplayEntry> = entries[view_start_clamped..view_end].to_vec();
+    let can_scroll_up = view_start_clamped > 0;
+    let can_scroll_down = view_end < entries.len();
+
     // Find selected entry for detail view
     let selected_entry: Option<HistoryDisplayEntry> = selected_id
         .and_then(|id| entries.iter().find(|e| e.id == id).cloned());
 
+    // Collect entry IDs for keyboard navigation (full list, not just visible)
+    let entry_ids: Vec<u64> = entries.iter().map(|e| e.id).collect();
+    let entry_ids_for_scroll = entry_ids.clone();
+    // Collect highlight ranges keyed by entry ID for Enter-to-jump
+    let entry_highlights: std::collections::HashMap<u64, Option<(usize, usize, usize, usize, usize)>> = entries.iter()
+        .map(|e| (e.id, e.sheet_index.and_then(|si| e.affected_range.map(|(sr, sc, er, ec)| (si, sr, sc, er, ec)))))
+        .collect();
+
+    // Filter mode label for banner
+    let filter_label = match filter_mode {
+        HistoryFilterMode::All => None,
+        HistoryFilterMode::CurrentSheet => Some("This Sheet"),
+        HistoryFilterMode::ValidationOnly => Some("Validation"),
+        HistoryFilterMode::DataEditsOnly => Some("Data Edits"),
+    };
+
     div()
+        .id("history-tab")
         .size_full()
         .flex()
         .flex_col()
+        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+            let key = event.keystroke.key.as_str();
+            match key {
+                "up" | "down" => {
+                    // Navigate selection up/down
+                    if entry_ids.is_empty() {
+                        return;
+                    }
+                    let current_idx = this.selected_history_id
+                        .and_then(|id| entry_ids.iter().position(|&eid| eid == id));
+
+                    let new_idx = match (key, current_idx) {
+                        ("up", Some(idx)) if idx > 0 => Some(idx - 1),
+                        ("up", Some(_)) => Some(0), // Already at top
+                        ("up", None) => Some(0), // Select first
+                        ("down", Some(idx)) if idx < entry_ids.len() - 1 => Some(idx + 1),
+                        ("down", Some(idx)) => Some(idx), // Already at bottom
+                        ("down", None) => Some(0), // Select first
+                        _ => None,
+                    };
+
+                    if let Some(idx) = new_idx {
+                        let new_id = entry_ids[idx];
+                        this.selected_history_id = Some(new_id);
+                        this.history_highlight_range = entry_highlights.get(&new_id).copied().flatten();
+                        // Auto-scroll to keep selection visible
+                        if idx < this.history_view_start {
+                            this.history_view_start = idx;
+                        } else if idx >= this.history_view_start + HISTORY_VIEW_LEN {
+                            this.history_view_start = idx.saturating_sub(HISTORY_VIEW_LEN - 1);
+                        }
+                        cx.notify();
+                    }
+                }
+                "enter" => {
+                    // Jump to affected range and select it
+                    if let Some(range) = this.history_highlight_range {
+                        let (sheet_idx, start_row, start_col, end_row, end_col) = range;
+                        // Switch to sheet if needed
+                        if sheet_idx != this.workbook.active_sheet_index() {
+                            this.workbook.set_active_sheet(sheet_idx);
+                        }
+                        // Select the full affected range
+                        this.view_state.selected = (start_row, start_col);
+                        if start_row != end_row || start_col != end_col {
+                            this.view_state.selection_end = Some((end_row, end_col));
+                        } else {
+                            this.view_state.selection_end = None;
+                        }
+                        // Scroll to make selection visible
+                        this.ensure_cell_visible(start_row, start_col);
+                        cx.notify();
+                    }
+                }
+                _ => {}
+            }
+        }))
         // Filter input
         .child(
             div()
@@ -3040,26 +3157,129 @@ fn render_history_tab(
                             }
                         }))
                 )
+                // Filter mode chips
+                .child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .children([
+                            (HistoryFilterMode::All, "All"),
+                            (HistoryFilterMode::CurrentSheet, "This Sheet"),
+                            (HistoryFilterMode::ValidationOnly, "Validation"),
+                            (HistoryFilterMode::DataEditsOnly, "Data"),
+                        ].into_iter().map(|(mode, label)| {
+                            let is_active = filter_mode == mode;
+                            div()
+                                .id(SharedString::from(format!("history-filter-{:?}", mode)))
+                                .px_2()
+                                .py(px(2.0))
+                                .rounded_sm()
+                                .text_size(px(10.0))
+                                .cursor_pointer()
+                                .when(is_active, |el| {
+                                    el.bg(accent.opacity(0.3))
+                                        .text_color(accent)
+                                        .border_1()
+                                        .border_color(accent.opacity(0.5))
+                                })
+                                .when(!is_active, |el| {
+                                    el.bg(panel_border.opacity(0.2))
+                                        .text_color(text_muted)
+                                        .hover(|s| s.bg(panel_border.opacity(0.4)))
+                                })
+                                .child(label)
+                                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                                    this.history_filter_mode = mode;
+                                    cx.notify();
+                                }))
+                        }))
+                )
         )
+        // Filter banner (when filtered)
+        .when(is_filtered, |el| {
+            el.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .bg(accent.opacity(0.1))
+                    .border_b_1()
+                    .border_color(panel_border)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(10.0))
+                            .text_color(text_muted)
+                            .child(SharedString::from(format!("Showing {} of {}", filtered_count, total_count)))
+                            .when(filter_label.is_some(), |el| {
+                                el.child(
+                                    div()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .bg(accent.opacity(0.2))
+                                        .text_color(accent)
+                                        .child(filter_label.unwrap_or(""))
+                                )
+                            })
+                    )
+                    .child(
+                        div()
+                            .id("clear-history-filter")
+                            .text_size(px(10.0))
+                            .text_color(text_muted)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(text_primary))
+                            .child("Clear")
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.history_filter_mode = crate::app::HistoryFilterMode::All;
+                                this.history_filter_query.clear();
+                                this.history_view_start = 0;
+                                cx.notify();
+                            }))
+                    )
+            )
+        })
         .child(
-            // Entry list
+            // Entry list with virtual scroll
             div()
+                .id("history-entry-list")
                 .flex_1()
                 .overflow_hidden()
+                .on_scroll_wheel(cx.listener(move |this, event: &gpui::ScrollWheelEvent, _, cx| {
+                    let delta = event.delta.pixel_delta(px(24.0));
+                    let dy: f32 = delta.y.into();
+                    let scroll_lines = (-dy / 24.0).round() as i32;
+
+                    if scroll_lines > 0 {
+                        // Scroll down
+                        let max_start = entry_ids_for_scroll.len().saturating_sub(HISTORY_VIEW_LEN);
+                        this.history_view_start = (this.history_view_start + scroll_lines as usize).min(max_start);
+                    } else if scroll_lines < 0 {
+                        // Scroll up
+                        this.history_view_start = this.history_view_start.saturating_sub((-scroll_lines) as usize);
+                    }
+                    cx.notify();
+                }))
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .children(entries.iter().map(|entry| {
+                        .children(visible_entries.iter().map(|entry| {
                             render_history_entry(entry, selected_id, text_primary, text_muted, panel_border, cx)
                         }))
-                        .when(entries.is_empty(), |el| {
+                        .when(filtered_count == 0, |el| {
                             el.child(
                                 div()
                                     .p_4()
                                     .text_size(px(12.0))
                                     .text_color(text_muted)
-                                    .child(if filter_query.is_empty() {
+                                    .child(if total_count == 0 {
                                         "No history yet"
                                     } else {
                                         "No matches"
@@ -3068,6 +3288,65 @@ fn render_history_tab(
                         })
                 )
         )
+        // Scroll indicator (when list is scrollable)
+        .when(filtered_count > HISTORY_VIEW_LEN, |el| {
+            el.child(
+                div()
+                    .h(px(20.0))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_t_1()
+                    .border_color(panel_border)
+                    .bg(panel_border.opacity(0.1))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(text_muted)
+                            .child(SharedString::from(format!(
+                                "{}-{} of {}",
+                                view_start_clamped + 1,
+                                view_end,
+                                filtered_count
+                            )))
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("history-scroll-up")
+                                    .text_size(px(10.0))
+                                    .cursor_pointer()
+                                    .text_color(if can_scroll_up { text_primary } else { text_muted.opacity(0.3) })
+                                    .child("▲")
+                                    .when(can_scroll_up, |el| {
+                                        el.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                            this.history_view_start = this.history_view_start.saturating_sub(HISTORY_VIEW_LEN);
+                                            cx.notify();
+                                        }))
+                                    })
+                            )
+                            .child(
+                                div()
+                                    .id("history-scroll-down")
+                                    .text_size(px(10.0))
+                                    .cursor_pointer()
+                                    .text_color(if can_scroll_down { text_primary } else { text_muted.opacity(0.3) })
+                                    .child("▼")
+                                    .when(can_scroll_down, |el| {
+                                        el.on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                                            let max_start = filtered_count.saturating_sub(HISTORY_VIEW_LEN);
+                                            this.history_view_start = (this.history_view_start + HISTORY_VIEW_LEN).min(max_start);
+                                            cx.notify();
+                                        }))
+                                    })
+                            )
+                    )
+            )
+        })
         // Detail panel for selected entry
         .when(selected_entry.is_some(), |el| {
             let entry = selected_entry.unwrap();
@@ -3086,6 +3365,13 @@ fn render_history_entry(
     let is_selected = selected_id == Some(entry.id);
     let entry_id = entry.id;
     let is_undoable = entry.is_undoable;
+    let location = entry.location.clone();
+    let sheet_idx = entry.sheet_index;
+
+    // Capture highlight info for click handler
+    let highlight_range = entry.sheet_index.and_then(|si| {
+        entry.affected_range.map(|(sr, sc, er, ec)| (si, sr, sc, er, ec))
+    });
 
     // Format relative time
     let time_str = format_instant_relative(entry.timestamp);
@@ -3103,11 +3389,13 @@ fn render_history_entry(
         .border_color(panel_border.opacity(0.3))
         .hover(|s| s.bg(panel_border.opacity(0.3)))
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            // Toggle selection
+            // Toggle selection and highlight
             if this.selected_history_id == Some(entry_id) {
                 this.selected_history_id = None;
+                this.history_highlight_range = None;
             } else {
                 this.selected_history_id = Some(entry_id);
+                this.history_highlight_range = highlight_range;
             }
             cx.notify();
         }))
@@ -3145,13 +3433,59 @@ fn render_history_entry(
                         .child(SharedString::from(time_str))
                 )
         )
-        // Bottom row: scope (if present)
-        .when(!entry.scope.is_empty(), |el| {
+        // Bottom row: scope or location
+        .when(!entry.scope.is_empty() || location.is_some(), |el| {
             el.child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(text_muted)
-                    .child(SharedString::from(entry.scope.clone()))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        // Scope (from provenance) or empty
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(text_muted)
+                            .when(!entry.scope.is_empty(), |el| {
+                                el.child(SharedString::from(entry.scope.clone()))
+                            })
+                    )
+                    // Location chip (clickable to jump without selecting)
+                    .when(location.is_some(), |el| {
+                        let loc = location.clone().unwrap();
+                        let jump_range = highlight_range;
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("history-loc-{}", entry_id)))
+                                .px_1()
+                                .rounded_sm()
+                                .bg(panel_border.opacity(0.3))
+                                .text_size(px(9.0))
+                                .text_color(text_muted)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(panel_border.opacity(0.5)).text_color(text_primary))
+                                .child(SharedString::from(format!(
+                                    "{}{}",
+                                    if sheet_idx.is_some() { format!("S{}!", sheet_idx.unwrap() + 1) } else { String::new() },
+                                    loc
+                                )))
+                                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    // Jump to location (entry selection happens via parent handler)
+                                    if let Some((si, sr, sc, er, ec)) = jump_range {
+                                        if si != this.workbook.active_sheet_index() {
+                                            this.workbook.set_active_sheet(si);
+                                        }
+                                        this.view_state.selected = (sr, sc);
+                                        if sr != er || sc != ec {
+                                            this.view_state.selection_end = Some((er, ec));
+                                        } else {
+                                            this.view_state.selection_end = None;
+                                        }
+                                        this.ensure_cell_visible(sr, sc);
+                                        cx.notify();
+                                    }
+                                }))
+                        )
+                    })
             )
         })
 }
@@ -3166,108 +3500,246 @@ fn render_history_detail(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let lua_code = entry.lua.clone();
-    let has_lua = lua_code.is_some();
+    let generated_lua = entry.generated_lua.clone();
+    let summary = entry.summary.clone();
+    let has_changes = !entry.affected_cells.is_empty();
+    let entry_is_undoable = entry.is_undoable;
+
+    // Determine which Lua to use (explicit provenance takes priority)
+    let copyable_lua = lua_code.clone().or_else(|| generated_lua.clone());
+    let has_lua = copyable_lua.is_some();
+
+    // Format cell address from row/col (e.g., "A1", "B2")
+    fn cell_addr(row: usize, col: usize) -> String {
+        let col_letter = if col < 26 {
+            ((b'A' + col as u8) as char).to_string()
+        } else {
+            let first = (b'A' + (col / 26 - 1) as u8) as char;
+            let second = (b'A' + (col % 26) as u8) as char;
+            format!("{}{}", first, second)
+        };
+        format!("{}{}", col_letter, row + 1)
+    }
+
+    // Show up to 5 changes - clone data to own it
+    let changes_to_show: Vec<(usize, usize, String, String)> = entry
+        .affected_cells
+        .iter()
+        .take(5)
+        .map(|(r, c, o, n)| (*r, *c, o.clone(), n.clone()))
+        .collect();
+    let more_count = entry.affected_cells.len().saturating_sub(5);
 
     div()
         .border_t_1()
         .border_color(panel_border)
         .flex()
         .flex_col()
-        .max_h(px(200.0))
+        .max_h(px(250.0))
         .overflow_hidden()
-        // Header
-        .child(
-            div()
-                .px_3()
-                .py_2()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(text_muted)
-                        .child("Provenance")
-                )
-                .when(has_lua && is_pro, |el| {
-                    let lua_for_copy = lua_code.clone().unwrap();
-                    el.child(
-                        div()
-                            .id("copy-lua-button")
-                            .px_2()
-                            .py_1()
-                            .text_size(px(10.0))
-                            .text_color(accent)
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(accent.opacity(0.1)))
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(lua_for_copy.clone()));
-                                this.status_message = Some("Copied Lua to clipboard".to_string());
-                                cx.notify();
-                            }))
-                            .child("Copy")
-                    )
-                })
-        )
-        // Content
-        .child(
-            div()
-                .flex_1()
-                .overflow_hidden()
-                .px_3()
-                .pb_2()
-                .child(
-                    if !entry.is_provenanced {
-                        // No provenance fallback
+        // Action summary (when available)
+        .when(summary.is_some(), |el: Div| {
+            let summary_text = summary.clone().unwrap();
+            el.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(panel_border)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
                         div()
                             .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(text_muted)
-                            .child("No provenance for this action")
-                            .into_any_element()
-                    } else if !is_pro {
-                        // Pro upsell
+                            .child("Details")
+                    )
+                    .child(
                         div()
-                            .p_2()
-                            .rounded_md()
-                            .bg(panel_border.opacity(0.3))
+                            .text_size(px(11.0))
+                            .text_color(text_primary)
+                            .child(SharedString::from(summary_text))
+                    )
+            )
+        })
+        // Changes section (when there are affected cells)
+        .when(has_changes, |el: Div| {
+            el.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(text_muted)
+                            .child("Changes")
+                    )
+                    .children(changes_to_show.into_iter().map(|(row, col, old, new)| {
+                        let addr = cell_addr(row, col);
+                        div()
                             .flex()
-                            .flex_col()
-                            .gap_1()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(11.0))
                             .child(
                                 div()
-                                    .text_size(px(11.0))
-                                    .text_color(text_primary)
-                                    .child("View Lua provenance with Pro")
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
                                     .text_color(text_muted)
-                                    .child("See the exact operation as executable Lua code")
+                                    .min_w(px(40.0))
+                                    .child(SharedString::from(addr))
                             )
-                            .into_any_element()
-                    } else {
-                        // Lua code block
-                        div()
-                            .p_2()
-                            .rounded_md()
-                            .bg(rgb(0x1a1a1a))
-                            .border_1()
-                            .border_color(panel_border)
-                            .overflow_hidden()
                             .child(
                                 div()
-                                    .text_size(px(11.0))
-                                    .font_family("monospace")
-                                    .text_color(text_primary)
-                                    .child(SharedString::from(lua_code.unwrap_or_default()))
+                                    .text_color(text_muted)
+                                    .max_w(px(80.0))
+                                    .overflow_hidden()
+                                    .child(SharedString::from(if old.is_empty() { "(empty)".to_string() } else { old }))
                             )
-                            .into_any_element()
-                    }
-                )
-        )
+                            .child(
+                                div()
+                                    .text_color(text_muted)
+                                    .child("→")
+                            )
+                            .child(
+                                div()
+                                    .text_color(text_primary)
+                                    .max_w(px(80.0))
+                                    .overflow_hidden()
+                                    .child(SharedString::from(if new.is_empty() { "(empty)".to_string() } else { new }))
+                            )
+                    }))
+                    .when(more_count > 0, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(text_muted)
+                                .child(SharedString::from(format!("...and {} more", more_count)))
+                        )
+                    })
+            )
+        })
+        // Provenance section (when there's Lua code)
+        .when(lua_code.is_some(), |el: Div| {
+            let code = lua_code.clone().unwrap();
+            el.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(text_muted)
+                            .child("Provenance")
+                    )
+                    .child(
+                        if is_pro {
+                            div()
+                                .p_2()
+                                .rounded_md()
+                                .bg(rgb(0x1a1a1a))
+                                .border_1()
+                                .border_color(panel_border)
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_family("monospace")
+                                        .text_color(text_primary)
+                                        .child(SharedString::from(code))
+                                )
+                                .into_any_element()
+                        } else {
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(accent)
+                                .child("View Lua with Pro")
+                                .into_any_element()
+                        }
+                    )
+            )
+        })
+        // Empty state
+        .when(!has_changes && lua_code.is_none(), |el: Div| {
+            el.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(11.0))
+                    .text_color(text_muted)
+                    .child("No details available")
+            )
+        })
+        // Action buttons (Copy Lua + Rewind to here)
+        .when(entry_is_undoable || has_lua, |el: Div| {
+            el.child({
+                let lua_for_copy = copyable_lua.clone();
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(panel_border)
+                    .flex()
+                    .gap_2()
+                    // Copy Lua button (when Lua is available)
+                    .when(has_lua, |el: Div| {
+                        el.child(
+                            div()
+                                .id("copy-lua-btn")
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(accent.opacity(0.15))
+                                .border_1()
+                                .border_color(accent.opacity(0.3))
+                                .text_size(px(11.0))
+                                .text_color(accent)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(accent.opacity(0.25)))
+                                .child("Copy Lua")
+                                .on_mouse_down(MouseButton::Left, {
+                                    let lua = lua_for_copy.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        if let Some(ref code) = lua {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
+                                            this.status_message = Some("Lua copied to clipboard".to_string());
+                                            cx.notify();
+                                        }
+                                    })
+                                })
+                        )
+                    })
+                    // Rewind to here button (when entry is undoable)
+                    .when(entry_is_undoable, |el: Div| {
+                        el.child(
+                            div()
+                                .id("rewind-to-here-btn")
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(hsla(0.0, 0.8, 0.3, 0.2))
+                                .border_1()
+                                .border_color(hsla(0.0, 0.8, 0.4, 0.5))
+                                .text_size(px(11.0))
+                                .text_color(hsla(0.0, 0.8, 0.7, 1.0))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(hsla(0.0, 0.8, 0.3, 0.4)))
+                                .child("Rewind to here...")
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.show_rewind_confirm(cx);
+                                }))
+                        )
+                    })
+            })
+        })
 }
 
 /// Format an Instant as relative time (e.g., "12s ago", "5m ago")

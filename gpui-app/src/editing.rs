@@ -19,6 +19,9 @@ impl Spreadsheet {
     pub fn start_edit(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
+        // Block editing during preview mode
+        if self.block_if_previewing(cx) { return; }
+
         let (row, col) = self.view_state.selected;
 
         // Block editing spill receivers - show message and redirect to parent
@@ -60,6 +63,9 @@ impl Spreadsheet {
 
     pub fn start_edit_clear(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
+
+        // Block editing during preview mode
+        if self.block_if_previewing(cx) { return; }
 
         let (row, col) = self.view_state.selected;
 

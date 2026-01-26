@@ -342,6 +342,31 @@ fn render_status_message(
 ) -> impl IntoElement {
     let has_import_result = app.import_result.is_some();
     let accent = app.token(TokenKey::Accent);
+    let warning = app.token(TokenKey::Warn);
+
+    // Highest priority: preview mode banner
+    if let Some(session) = app.preview_session() {
+        return div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .px_2()
+                    .py_px()
+                    .bg(warning.opacity(0.2))
+                    .rounded_sm()
+                    .text_color(warning)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("PREVIEW")
+            )
+            .child(
+                div()
+                    .text_color(text_muted)
+                    .child(format!("Before \"{}\" — Release Space to return", session.action_summary))
+            )
+            .into_any_element();
+    }
 
     // Priority: hint buffer > status message > mode text
     let message = if let Some(hint) = hint_buffer {

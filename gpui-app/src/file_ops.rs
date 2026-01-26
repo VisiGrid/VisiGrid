@@ -13,6 +13,8 @@ const OVERLAY_DELAY_MS: u64 = 150;
 impl Spreadsheet {
     pub fn new_file(&mut self, cx: &mut Context<Self>) {
         self.workbook = Workbook::new();
+        self.base_workbook = self.workbook.clone(); // Capture base state for replay
+        self.rewind_preview = crate::app::RewindPreviewState::Off; // Reset preview state
         self.current_file = None;
         self.is_modified = false;
         self.doc_settings = DocumentSettings::default();  // Reset doc settings
@@ -83,6 +85,8 @@ impl Spreadsheet {
         match result {
             Ok(workbook) => {
                 self.workbook = workbook;
+                self.base_workbook = self.workbook.clone(); // Capture base state for replay
+                self.rewind_preview = crate::app::RewindPreviewState::Off;
                 self.import_result = None;
                 self.import_filename = None;
                 self.import_source_dir = None;
@@ -196,6 +200,8 @@ impl Spreadsheet {
                     Ok((workbook, mut result)) => {
                         // Atomic swap: replace entire workbook
                         this.workbook = workbook;
+                        this.base_workbook = this.workbook.clone(); // Capture base state for replay
+                        this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
                         this.doc_settings = DocumentSettings::default();
@@ -258,6 +264,8 @@ impl Spreadsheet {
                 let duration_ms = start_time.elapsed().as_millis();
 
                 self.workbook = workbook;
+                self.base_workbook = self.workbook.clone(); // Capture base state for replay
+                self.rewind_preview = crate::app::RewindPreviewState::Off;
                 self.import_filename = Some(filename.clone());
                 self.import_source_dir = source_dir;
                 self.doc_settings = DocumentSettings::default();
@@ -460,6 +468,67 @@ impl Spreadsheet {
                             this.status_message = Some(format!("Export failed: {}", e));
                             this.export_result = None;
                             this.export_filename = None;
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Export history as a deterministic Lua provenance script.
+    /// Phase 9A: allows history to be replayed, audited, or shared.
+    pub fn export_provenance(&mut self, cx: &mut Context<Self>) {
+        use crate::provenance::{export_script, ExportOptions};
+
+        let directory = self.current_file.as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        let base_name = self.current_file.as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|n| n.to_str())
+            .unwrap_or("history");
+        let suggested_name = format!("{}_provenance.lua", base_name);
+
+        // Capture data needed for export
+        let entries: Vec<_> = self.history.canonical_entries().to_vec();
+        let fingerprint = self.history.fingerprint();
+        let workbook_name = self.current_file.as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+
+        let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = future.await {
+                let _ = this.update(cx, |this, cx| {
+                    let options = ExportOptions {
+                        include_header: true,
+                        include_fingerprint: true,
+                        sheet_filter: None, // Export all sheets
+                    };
+
+                    let script = export_script(
+                        &entries,
+                        fingerprint,
+                        workbook_name.as_deref(),
+                        &options,
+                    );
+
+                    match std::fs::write(&path, &script) {
+                        Ok(()) => {
+                            let action_count = entries.len();
+                            this.status_message = Some(format!(
+                                "Exported {} actions to {}",
+                                action_count,
+                                path.display()
+                            ));
+                        }
+                        Err(e) => {
+                            this.status_message = Some(format!("Export failed: {}", e));
                         }
                     }
                     cx.notify();

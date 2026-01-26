@@ -267,6 +267,13 @@ fn render_cell(
         })
     });
 
+    // Check if cell is in history highlight range (Phase 7A)
+    let is_history_highlight = app.history_highlight_range.map_or(false, |(sheet_idx, sr, sc, er, ec)| {
+        sheet_idx == app.workbook.active_sheet_index()
+            && view_row >= sr && view_row <= er
+            && col >= sc && col <= ec
+    });
+
     // Check for hint mode and get hint label for this cell
     let hint_label = if app.mode == Mode::Hint {
         app.hint_state.labels.iter()
@@ -382,6 +389,20 @@ fn render_cell(
                     .border_color(accent.opacity(0.6))
             );
         }
+    }
+
+    // History highlight (Phase 7A - when a history entry is selected)
+    if is_history_highlight && !is_selected && !is_active {
+        // Use orange/amber to distinguish from selection (blue) and formula refs (varied)
+        let history_color: Hsla = rgb(0xf59e0b).into(); // Amber-500
+        cell = cell.child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(history_color.opacity(0.25))
+                .border_1()
+                .border_color(history_color.opacity(0.7))
+        );
     }
 
     // Apply horizontal alignment

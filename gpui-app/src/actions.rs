@@ -106,6 +106,7 @@ actions!(file, [
     ExportTsv,
     ExportJson,
     ExportXlsx,
+    ExportProvenance,  // Phase 9A: Export history as Lua script
     CloseWindow,
     Quit,
 ]);
@@ -128,6 +129,7 @@ actions!(view, [
     ZoomOut,
     ZoomReset,
     ShowAbout,
+    ShowLicense,
     ShowFontPicker,
     // Freeze panes
     FreezeTopRow,      // Freeze first row only

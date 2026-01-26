@@ -12,9 +12,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.8"
+version = "0.3.0"
 edition = "2021"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 # Shared dependencies

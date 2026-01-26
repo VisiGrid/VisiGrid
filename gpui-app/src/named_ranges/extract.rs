@@ -433,8 +433,12 @@ impl Spreadsheet {
         }
 
         // 3. Record undo action (group)
+        // Get the full named range we just created for the undo action
+        let created_range = self.workbook.get_named_range(&name)
+            .cloned()
+            .expect("Named range was just created");
         let mut actions = vec![
-            UndoAction::NamedRangeCreated { name: name.clone() },
+            UndoAction::NamedRangeCreated { named_range: created_range },
         ];
         if !cell_changes.is_empty() {
             actions.push(UndoAction::Values {

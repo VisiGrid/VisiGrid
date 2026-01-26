@@ -4,6 +4,7 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
+use crate::ui::{modal_overlay, DialogFrame, DialogSize};
 
 /// User-friendly license summary for UI display
 /// Decoupled from raw license payload to avoid leaking internals
@@ -181,312 +182,274 @@ pub fn render_license_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         LicenseStatus::Free => text_muted,
     };
 
-    // Backdrop
-    div()
-        .id("license-backdrop")
-        .absolute()
-        .inset_0()
-        .bg(rgba(0x00000080))
+    // Header with close button
+    let header = div()
         .flex()
         .items_center()
-        .justify_center()
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-            this.hide_license(cx);
-        }))
+        .justify_between()
         .child(
-            // Dialog
             div()
-                .id("license-dialog")
-                .w(px(500.0))
-                .bg(panel_bg)
-                .border_1()
-                .border_color(panel_border)
-                .rounded_lg()
-                .shadow_lg()
-                .overflow_hidden()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                    let key = &event.keystroke.key;
-                    match key.as_str() {
-                        "escape" => this.hide_license(cx),
-                        "enter" => {
-                            if !this.license_input.is_empty() {
-                                this.apply_license(cx);
-                            }
-                        }
-                        "backspace" => this.license_backspace(cx),
-                        _ => {
-                            if let Some(c) = event.keystroke.key_char.as_ref().and_then(|s| s.chars().next()) {
-                                if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt {
-                                    this.license_insert_char(c, cx);
-                                }
-                            }
-                        }
-                    }
-                    cx.stop_propagation();
+                .text_size(px(14.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(text_primary)
+                .child("License")
+        )
+        .child(
+            div()
+                .id("license-close")
+                .px_2()
+                .cursor_pointer()
+                .text_color(text_muted)
+                .hover(|s| s.text_color(text_primary))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.hide_license(cx);
                 }))
+                .child("×")
+        );
+
+    // Body content
+    let body = div()
+        // Status badge at top
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
                 .child(
-                    // Header
                     div()
-                        .h(px(48.0))
-                        .px_4()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .border_b_1()
-                        .border_color(panel_border)
-                        .child(
-                            div()
-                                .text_base()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(text_primary)
-                                .child("License")
-                        )
-                        .child(
-                            div()
-                                .id("license-close")
-                                .px_2()
-                                .cursor_pointer()
-                                .text_color(text_muted)
-                                .hover(|s| s.text_color(text_primary))
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.hide_license(cx);
-                                }))
-                                .child("×")
-                        )
+                        .w(px(10.0))
+                        .h(px(10.0))
+                        .rounded_full()
+                        .bg(status_color)
                 )
                 .child(
-                    // Content
                     div()
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        // Status badge at top
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .w(px(10.0))
-                                        .h(px(10.0))
-                                        .rounded_full()
-                                        .bg(status_color)
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(text_primary)
-                                        .child(format!("VisiGrid {}", info.edition))
-                                )
-                                .child(
-                                    div()
-                                        .px_2()
-                                        .py_px()
-                                        .rounded_sm()
-                                        .bg(status_color.opacity(0.15))
-                                        .text_xs()
-                                        .text_color(status_color)
-                                        .child(info.status.label())
-                                )
-                        )
-                        // Info table
-                        .child(
-                            div()
-                                .p_3()
-                                .bg(editor_bg)
-                                .rounded_md()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                // Edition row
-                                .child(render_info_row("Edition", &info.edition, text_muted, text_primary))
-                                // Status row
-                                .child(render_info_row("Status", info.status.label(), text_muted, status_color))
-                                // Plan row (only if licensed)
-                                .when(has_license, |d| {
-                                    d.child(render_info_row("Plan", &info.plan, text_muted, text_primary))
-                                })
-                                // Expires row
-                                .child(render_info_row(
-                                    "Expires",
-                                    &info.expires,
-                                    text_muted,
-                                    if info.status == LicenseStatus::GracePeriod { warning_color } else { text_primary }
-                                ))
-                                // Copy diagnostics button
-                                .child(
-                                    div()
-                                        .mt_2()
-                                        .pt_2()
-                                        .border_t_1()
-                                        .border_color(panel_border)
-                                        .child(
-                                            div()
-                                                .id("copy-diagnostics")
-                                                .text_xs()
-                                                .text_color(text_muted)
-                                                .cursor_pointer()
-                                                .hover(|s| s.text_color(accent))
-                                                .on_mouse_down(MouseButton::Left, {
-                                                    let diagnostics = info.diagnostics();
-                                                    cx.listener(move |this, _, _window, cx| {
-                                                        cx.write_to_clipboard(ClipboardItem::new_string(diagnostics.clone()));
-                                                        this.status_message = Some("Diagnostics copied to clipboard".to_string());
-                                                        cx.notify();
-                                                    })
-                                                })
-                                                .child("Copy Diagnostics")
-                                        )
-                                )
-                        )
-                        // Upgrade prompt (only if Free)
-                        .when(info.status == LicenseStatus::Free, |d| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(text_muted)
-                                    .child("Upgrade to Pro for Lua scripting, large files, and more.")
-                            )
-                        })
-                        // Input section
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(text_muted)
-                                        .child(if has_license { "Enter new license" } else { "Enter license key" })
-                                )
-                                .child(
-                                    // Text input area
-                                    div()
-                                        .id("license-input")
-                                        .h(px(80.0))
-                                        .w_full()
-                                        .p_2()
-                                        .bg(editor_bg)
-                                        .border_1()
-                                        .border_color(if app.license_error.is_some() { error_color } else { panel_border })
-                                        .rounded_md()
-                                        .text_xs()
-                                        .font_family("monospace")
-                                        .text_color(text_primary)
-                                        .overflow_hidden()
-                                        .child(
-                                            if app.license_input.is_empty() {
-                                                div()
-                                                    .text_color(text_muted.opacity(0.5))
-                                                    .child("Paste license JSON here...")
-                                            } else {
-                                                div()
-                                                    .child(truncate_license(&app.license_input, 400))
-                                            }
-                                        )
-                                )
-                                // Error message with action hint
-                                .when(app.license_error.is_some(), |d| {
-                                    d.child(
-                                        div()
-                                            .p_2()
-                                            .bg(error_color.opacity(0.1))
-                                            .rounded_md()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(error_color)
-                                                    .child(app.license_error.clone().unwrap_or_default())
-                                            )
-                                    )
-                                })
-                        )
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(text_primary)
+                        .child(format!("VisiGrid {}", info.edition))
                 )
                 .child(
-                    // Footer
                     div()
-                        .h(px(56.0))
-                        .px_4()
-                        .flex()
-                        .items_center()
-                        .justify_between()
+                        .px_2()
+                        .py_px()
+                        .rounded_sm()
+                        .bg(status_color.opacity(0.15))
+                        .text_xs()
+                        .text_color(status_color)
+                        .child(info.status.label())
+                )
+        )
+        // Info table
+        .child(
+            div()
+                .p_3()
+                .bg(editor_bg)
+                .rounded_md()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(render_info_row("Edition", &info.edition, text_muted, text_primary))
+                .child(render_info_row("Status", info.status.label(), text_muted, status_color))
+                .when(has_license, |d| {
+                    d.child(render_info_row("Plan", &info.plan, text_muted, text_primary))
+                })
+                .child(render_info_row(
+                    "Expires",
+                    &info.expires,
+                    text_muted,
+                    if info.status == LicenseStatus::GracePeriod { warning_color } else { text_primary }
+                ))
+                .child(
+                    div()
+                        .mt_2()
+                        .pt_2()
                         .border_t_1()
                         .border_color(panel_border)
                         .child(
-                            // Left side - remove license if present
                             div()
-                                .when(has_license, |d| {
-                                    d.child(
-                                        div()
-                                            .id("remove-license")
-                                            .px_3()
-                                            .py_1()
-                                            .rounded_md()
-                                            .text_xs()
-                                            .text_color(error_color)
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(error_color.opacity(0.1)))
-                                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                                this.clear_license(cx);
-                                            }))
-                                            .child("Remove License")
-                                    )
+                                .id("copy-diagnostics")
+                                .text_xs()
+                                .text_color(text_muted)
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(accent))
+                                .on_mouse_down(MouseButton::Left, {
+                                    let diagnostics = info.diagnostics();
+                                    cx.listener(move |this, _, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(diagnostics.clone()));
+                                        this.status_message = Some("Diagnostics copied to clipboard".to_string());
+                                        cx.notify();
+                                    })
                                 })
-                        )
-                        .child(
-                            // Right side - buttons
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id("license-cancel")
-                                        .px_4()
-                                        .py_2()
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(panel_border)
-                                        .text_xs()
-                                        .text_color(text_muted)
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(panel_border.opacity(0.3)))
-                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                            this.hide_license(cx);
-                                        }))
-                                        .child("Cancel")
-                                )
-                                .child(
-                                    div()
-                                        .id("license-apply")
-                                        .px_4()
-                                        .py_2()
-                                        .rounded_md()
-                                        .bg(if app.license_input.is_empty() { accent.opacity(0.5) } else { accent })
-                                        .text_xs()
-                                        .text_color(rgb(0xffffff))
-                                        .when(!app.license_input.is_empty(), |d| {
-                                            d.cursor_pointer()
-                                                .hover(|s| s.opacity(0.9))
-                                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                                    this.apply_license(cx);
-                                                }))
-                                        })
-                                        .child("Activate")
-                                )
+                                .child("Copy Diagnostics")
                         )
                 )
         )
+        // Upgrade prompt (only if Free)
+        .when(info.status == LicenseStatus::Free, |d| {
+            d.child(
+                div()
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child("Upgrade to Pro for Lua scripting, large files, and more.")
+            )
+        })
+        // Input section
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(text_muted)
+                        .child(if has_license { "Enter new license" } else { "Enter license key" })
+                )
+                .child(
+                    div()
+                        .id("license-input")
+                        .h(px(80.0))
+                        .w_full()
+                        .p_2()
+                        .bg(editor_bg)
+                        .border_1()
+                        .border_color(if app.license_error.is_some() { error_color } else { panel_border })
+                        .rounded_md()
+                        .text_xs()
+                        .font_family("monospace")
+                        .text_color(text_primary)
+                        .overflow_hidden()
+                        .child(
+                            if app.license_input.is_empty() {
+                                div()
+                                    .text_color(text_muted.opacity(0.5))
+                                    .child("Paste license JSON here...")
+                            } else {
+                                div()
+                                    .child(truncate_license(&app.license_input, 400))
+                            }
+                        )
+                )
+                .when(app.license_error.is_some(), |d| {
+                    d.child(
+                        div()
+                            .p_2()
+                            .bg(error_color.opacity(0.1))
+                            .rounded_md()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(error_color)
+                                    .child(app.license_error.clone().unwrap_or_default())
+                            )
+                    )
+                })
+        );
+
+    // Footer with buttons
+    let footer = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .when(has_license, |d| {
+                    d.child(
+                        div()
+                            .id("remove-license")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(error_color)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(error_color.opacity(0.1)))
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.clear_license(cx);
+                            }))
+                            .child("Remove License")
+                    )
+                })
+        )
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .id("license-cancel")
+                        .px_4()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(panel_border)
+                        .text_xs()
+                        .text_color(text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(panel_border.opacity(0.3)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.hide_license(cx);
+                        }))
+                        .child("Cancel")
+                )
+                .child(
+                    div()
+                        .id("license-apply")
+                        .px_4()
+                        .py_2()
+                        .rounded_md()
+                        .bg(if app.license_input.is_empty() { accent.opacity(0.5) } else { accent })
+                        .text_xs()
+                        .text_color(rgb(0xffffff))
+                        .when(!app.license_input.is_empty(), |d| {
+                            d.cursor_pointer()
+                                .hover(|s| s.opacity(0.9))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.apply_license(cx);
+                                }))
+                        })
+                        .child("Activate")
+                )
+        );
+
+    modal_overlay(
+        "license-dialog",
+        |this, cx| this.hide_license(cx),
+        // Wrap DialogFrame in div for keyboard handling
+        div()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                let key = &event.keystroke.key;
+                match key.as_str() {
+                    "escape" => this.hide_license(cx),
+                    "enter" => {
+                        if !this.license_input.is_empty() {
+                            this.apply_license(cx);
+                        }
+                    }
+                    "backspace" => this.license_backspace(cx),
+                    _ => {
+                        if let Some(c) = event.keystroke.key_char.as_ref().and_then(|s| s.chars().next()) {
+                            if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt {
+                                this.license_insert_char(c, cx);
+                            }
+                        }
+                    }
+                }
+                cx.stop_propagation();
+            }))
+            .child(
+                DialogFrame::new(body, panel_bg, panel_border)
+                    .size(DialogSize::Lg)
+                    .header(header)
+                    .footer(footer)
+            ),
+        cx,
+    )
 }
 
 /// Truncate license text for display

@@ -15,6 +15,9 @@ impl Spreadsheet {
 
     /// Insert rows or columns based on current selection (Ctrl+=)
     pub fn insert_rows_or_cols(&mut self, cx: &mut Context<Self>) {
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
+
         // v1: Only operate on primary selection, ignore additional selections
         if !self.view_state.additional_selections.is_empty() {
             self.status_message = Some("Insert not supported with multiple selections".to_string());
@@ -41,6 +44,9 @@ impl Spreadsheet {
 
     /// Delete rows or columns based on current selection (Ctrl+-)
     pub fn delete_rows_or_cols(&mut self, cx: &mut Context<Self>) {
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
+
         // v1: Only operate on primary selection, ignore additional selections
         if !self.view_state.additional_selections.is_empty() {
             self.status_message = Some("Delete not supported with multiple selections".to_string());

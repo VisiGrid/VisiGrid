@@ -38,6 +38,8 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Export as JSON...", ExportJson),
                 MenuItem::action("Export to Excel (.xlsx)...", ExportXlsx),
                 MenuItem::separator(),
+                MenuItem::action("Export Provenance Script (.lua)...", ExportProvenance),
+                MenuItem::separator(),
                 MenuItem::action("Close", CloseWindow),
                 MenuItem::action("Quit", Quit),
             ],
@@ -100,6 +102,7 @@ pub fn set_app_menus(cx: &mut App) {
             name: "Help".into(),
             items: vec![
                 MenuItem::action("About VisiGrid", ShowAbout),
+                MenuItem::action("License...", ShowLicense),
             ],
         },
     ]);

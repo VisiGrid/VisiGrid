@@ -6429,10 +6429,12 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visigrid-cli"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
+ "blake3",
  "clap",
  "csv",
+ "mlua",
  "serde_json",
  "shellexpand",
  "visigrid-engine",
@@ -6442,7 +6444,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-config"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "dirs 5.0.1",
  "serde",
@@ -6452,14 +6454,14 @@ dependencies = [
 
 [[package]]
 name = "visigrid-core"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "visigrid-engine"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "ordered-float",
  "rustc-hash 2.1.1",
@@ -6469,7 +6471,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-gpui"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "core-text",
@@ -6494,7 +6496,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-io"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "calamine",
  "csv",
@@ -6511,7 +6513,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-license"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "base64",
  "chrono",

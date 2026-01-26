@@ -9,144 +9,66 @@ use visigrid_io::xlsx::ExportResult;
 
 use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
+use crate::ui::{modal_overlay, Button, DialogFrame, DialogSize, dialog_header_with_subtitle};
 
 /// Render the Export Report dialog overlay
 pub fn render_export_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let Some(export_result) = &app.export_result else {
+        return div().into_any_element();
+    };
+
     let panel_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
     let text_muted = app.token(TokenKey::TextMuted);
     let accent = app.token(TokenKey::Accent);
     let warning_color = app.token(TokenKey::Warn);
+    let text_inverse = app.token(TokenKey::TextInverse);
 
-    let export_result = match &app.export_result {
-        Some(er) => er,
-        None => return div().into_any_element(),
+    let filename = app.export_filename.as_deref().unwrap_or("unknown file").to_string();
+
+    // Body content
+    let body = div()
+        .child(render_summary_section(export_result, text_primary, text_muted))
+        .child(render_formula_conversions(export_result, text_primary, text_muted, warning_color))
+        .child(render_precision_warnings(export_result, text_primary, text_muted, warning_color));
+
+    // Footer with buttons
+    let copy_button = if export_result.has_warnings() {
+        let report = export_result.full_report_with_context(&filename);
+        Button::new("export-report-copy-btn", "Copy Details")
+            .secondary(panel_border, text_muted)
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(report.clone()));
+                cx.stop_propagation();
+            })
+            .into_any_element()
+    } else {
+        div().into_any_element()
     };
 
-    let filename = app.export_filename.as_deref().unwrap_or("unknown file");
-
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0.0, 0.0, 0.0, 0.5))
+    let close_button = Button::new("export-report-close-btn", "Close")
+        .primary(accent, text_inverse)
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
             this.hide_export_report(cx);
-            cx.stop_propagation();
-        }))
-        .child(
-            div()
-                .w(px(500.0))
-                .max_h(px(500.0))
-                .bg(panel_bg)
-                .border_1()
-                .border_color(panel_border)
-                .rounded_lg()
-                .shadow_xl()
-                .overflow_hidden()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .flex()
-                .flex_col()
-                // Header
-                .child(
-                    div()
-                        .px_4()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(panel_border)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_size(px(14.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(text_primary)
-                                .child("Export Report")
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(text_muted)
-                                .child(filename.to_string())
-                        )
-                )
-                // Content (scrollable)
-                .child(
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        // Summary section
-                        .child(render_summary_section(export_result, text_primary, text_muted))
-                        // Formula conversions section
-                        .child(render_formula_conversions(export_result, text_primary, text_muted, warning_color))
-                        // Precision warnings section
-                        .child(render_precision_warnings(export_result, text_primary, text_muted, warning_color))
-                )
-                // Footer with close button
-                .child(
-                    div()
-                        .w_full()
-                        .px_4()
-                        .py_3()
-                        .border_t_1()
-                        .border_color(panel_border)
-                        .flex()
-                        .justify_between()
-                        .child(
-                            // Copy report button (if there are warnings)
-                            if export_result.has_warnings() {
-                                let report = export_result.full_report_with_context(filename);
-                                div()
-                                    .id("export-report-copy-btn")
-                                    .px_3()
-                                    .py(px(6.0))
-                                    .border_1()
-                                    .border_color(panel_border)
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_size(px(12.0))
-                                    .text_color(text_muted)
-                                    .hover(|s| s.bg(panel_border.opacity(0.3)))
-                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(report.clone()));
-                                        cx.stop_propagation();
-                                    })
-                                    .child("Copy Details")
-                                    .into_any_element()
-                            } else {
-                                div().into_any_element()
-                            }
-                        )
-                        .child(
-                            div()
-                                .id("export-report-close-btn")
-                                .px_4()
-                                .py(px(6.0))
-                                .bg(accent)
-                                .rounded_md()
-                                .cursor_pointer()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(app.token(TokenKey::TextInverse))
-                                .hover(|s| s.opacity(0.9))
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.hide_export_report(cx);
-                                }))
-                                .child("Close")
-                        )
-                )
-        )
-        .into_any_element()
+        }));
+
+    let footer = div()
+        .flex()
+        .justify_between()
+        .child(copy_button)
+        .child(close_button);
+
+    modal_overlay(
+        "export-report-dialog",
+        |this, cx| this.hide_export_report(cx),
+        DialogFrame::new(body, panel_bg, panel_border)
+            .size(DialogSize::Lg)
+            .max_height(px(500.0))
+            .header(dialog_header_with_subtitle("Export Report", filename, text_primary, text_muted))
+            .footer(footer),
+        cx,
+    ).into_any_element()
 }
 
 fn render_summary_section(er: &ExportResult, text_primary: Hsla, text_muted: Hsla) -> impl IntoElement {

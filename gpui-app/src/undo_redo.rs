@@ -44,9 +44,10 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: restored '{}'", name));
                 }
-                UndoAction::NamedRangeCreated { name } => {
+                UndoAction::NamedRangeCreated { named_range } => {
                     // Delete the created named range
-                    self.workbook.delete_named_range(&name);
+                    let name = &named_range.name;
+                    self.workbook.delete_named_range(name);
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: removed '{}'", name));
                 }
@@ -238,6 +239,12 @@ impl Spreadsheet {
                     self.revalidate_range(&range);
                     self.status_message = Some(format!("Undo: clear exclusions ({} cells)", range.cell_count()));
                 }
+                UndoAction::Rewind { .. } => {
+                    // Rewind is audit-only - cannot be undone
+                    // (It's the last action after truncation, so this shouldn't be reached)
+                    self.status_message = Some("Cannot undo rewind".to_string());
+                    return;  // Don't modify state
+                }
             }
             self.is_modified = true;
             self.request_title_refresh(cx);
@@ -268,8 +275,8 @@ impl Spreadsheet {
                 let _ = self.workbook.named_ranges_mut().set(named_range);
                 self.bump_cells_rev();
             }
-            UndoAction::NamedRangeCreated { name } => {
-                self.workbook.delete_named_range(&name);
+            UndoAction::NamedRangeCreated { named_range } => {
+                self.workbook.delete_named_range(&named_range.name);
                 self.bump_cells_rev();
             }
             UndoAction::NamedRangeRenamed { old_name, new_name } => {
@@ -428,6 +435,10 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
                 self.revalidate_range(&range);
+            }
+            UndoAction::Rewind { .. } => {
+                // Rewind is audit-only - cannot be undone
+                // This should never be reached (Rewind is always last in stack)
             }
         }
     }
@@ -594,6 +605,10 @@ impl Spreadsheet {
                 self.bump_cells_rev();
                 self.revalidate_range(&range);
             }
+            UndoAction::Rewind { .. } => {
+                // Rewind is audit-only - cannot be redone
+                // This should never be reached
+            }
         }
     }
 
@@ -624,10 +639,12 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Redo: deleted '{}'", name));
                 }
-                UndoAction::NamedRangeCreated { ref name } => {
-                    // Re-create is not possible without the original data
-                    // This shouldn't happen in practice (create followed by undo-redo)
-                    self.status_message = Some(format!("Redo: recreate '{}' not supported", name));
+                UndoAction::NamedRangeCreated { ref named_range } => {
+                    // Re-create the named range (now possible with full payload)
+                    let name = named_range.name.clone();
+                    let _ = self.workbook.named_ranges_mut().set(named_range.clone());
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Redo: recreated '{}'", name));
                 }
                 UndoAction::NamedRangeRenamed { old_name, new_name } => {
                     // Rename again to new name
@@ -788,6 +805,11 @@ impl Spreadsheet {
                     // Recompute invalid markers (cells may now be validated)
                     self.revalidate_range(&range);
                     self.status_message = Some(format!("Redo: clear exclusions ({} cells)", range.cell_count()));
+                }
+                UndoAction::Rewind { .. } => {
+                    // Rewind is audit-only - cannot be redone
+                    self.status_message = Some("Cannot redo rewind".to_string());
+                    return;  // Don't modify state
                 }
             }
             self.is_modified = true;

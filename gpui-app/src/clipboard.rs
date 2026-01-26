@@ -98,6 +98,9 @@ impl Spreadsheet {
     }
 
     pub fn cut(&mut self, cx: &mut Context<Self>) {
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
+
         self.copy(cx);
 
         // Clear the selected cells and record history
@@ -122,6 +125,9 @@ impl Spreadsheet {
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
+
         // If editing, paste into the edit buffer instead
         if self.mode.is_editing() {
             self.paste_into_edit(cx);
@@ -276,6 +282,9 @@ impl Spreadsheet {
     /// Paste Values: paste computed values only (no formulas).
     /// Uses typed values from internal clipboard, or parses external clipboard with leading-zero guard.
     pub fn paste_values(&mut self, cx: &mut Context<Self>) {
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
+
         // If editing, paste canonical text into edit buffer (top-left cell only)
         if self.mode.is_editing() {
             self.paste_values_into_edit(cx);
@@ -518,6 +527,9 @@ impl Spreadsheet {
     }
 
     pub fn delete_selection(&mut self, cx: &mut Context<Self>) {
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
+
         let mut changes = Vec::new();
         let mut skipped_spill_receivers = false;
 
