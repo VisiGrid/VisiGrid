@@ -4,6 +4,7 @@ pub mod csv;
 pub mod json;
 pub mod native;
 pub mod xlsx;
+pub mod xlsx_validation;
 
 /// Native .sheet format version
 /// Increment when schema changes in a way that old versions can't read

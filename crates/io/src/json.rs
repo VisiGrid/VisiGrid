@@ -46,6 +46,7 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+    use visigrid_engine::sheet::SheetId;
 
     #[test]
     fn test_json_export() {

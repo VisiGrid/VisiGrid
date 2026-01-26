@@ -463,6 +463,10 @@ pub struct ExportResult {
     pub converted_formulas: Vec<ConvertedFormula>,
     /// Numbers exported as text due to precision limits (>15 digits)
     pub precision_warnings: Vec<PrecisionWarning>,
+    /// Validation rules exported
+    pub validations_exported: usize,
+    /// Validation rules skipped (unsupported types)
+    pub validations_skipped: usize,
     /// Export duration in milliseconds
     pub export_duration_ms: u128,
     /// Warnings generated during export
@@ -673,6 +677,11 @@ pub fn export(
             apply_layout(worksheet, layout)?;
         }
 
+        // Export validation rules
+        let (exported, skipped) = export_validation_rules(worksheet, sheet)?;
+        result.validations_exported += exported;
+        result.validations_skipped += skipped;
+
         result.sheets_exported += 1;
     }
 
@@ -816,6 +825,44 @@ fn export_sheet_cells(
     Ok((cells_exported, formulas_exported, formulas_as_values, converted_formulas, precision_warnings))
 }
 
+/// Export validation rules for a sheet
+///
+/// Returns (exported_count, skipped_count).
+/// Skipped rules are those with unsupported types (Date, Time, TextLength, Custom).
+fn export_validation_rules(
+    worksheet: &mut Worksheet,
+    sheet: &Sheet,
+) -> Result<(usize, usize), String> {
+    use crate::xlsx_validation::rule_to_xlsx;
+
+    let mut exported = 0;
+    let mut skipped = 0;
+
+    for (range, rule) in sheet.validations.iter() {
+        match rule_to_xlsx(rule) {
+            Some(dv) => {
+                // rust_xlsxwriter uses 0-based row/col as u32/u16
+                worksheet
+                    .add_data_validation(
+                        range.start_row as u32,
+                        range.start_col as u16,
+                        range.end_row as u32,
+                        range.end_col as u16,
+                        &dv,
+                    )
+                    .map_err(|e| format!("Failed to add validation: {}", e))?;
+                exported += 1;
+            }
+            None => {
+                // Unsupported validation type (Date, Time, TextLength, Custom)
+                skipped += 1;
+            }
+        }
+    }
+
+    Ok((exported, skipped))
+}
+
 /// Build an Excel Format from VisiGrid CellFormat
 fn build_excel_format(cell_format: &CellFormat) -> Format {
     let mut format = Format::new();
@@ -937,7 +984,7 @@ fn has_formatting(format: &CellFormat) -> bool {
         || format.italic
         || format.underline
         || format.strikethrough
-        || format.alignment != Alignment::Left
+        || format.alignment != Alignment::General
         || format.vertical_alignment != VerticalAlignment::Middle
         || format.number_format != NumberFormat::General
         || format.font_family.is_some()
@@ -1206,6 +1253,123 @@ mod tests {
         let mut border_format = CellFormat::default();
         border_format.border_top = CellBorder::thin();
         assert!(has_formatting(&border_format));
+    }
+
+    // ========================================================================
+    // Validation export
+    // ========================================================================
+
+    #[test]
+    fn test_export_with_validation_list() {
+        use visigrid_engine::validation::{CellRange, ValidationRule};
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+
+        // Set up some data
+        sheet.set_value(0, 0, "Status");
+        sheet.set_value(1, 0, "Active");
+
+        // Add list validation to A2:A10
+        let rule = ValidationRule::list_inline(vec![
+            "Active".into(),
+            "Inactive".into(),
+            "Pending".into(),
+        ]);
+        let range = CellRange::new(1, 0, 9, 0);
+        sheet.validations.set(range, rule);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("test_validation.xlsx");
+
+        let result = export(&workbook, &export_path, None).unwrap();
+
+        assert_eq!(result.validations_exported, 1);
+        assert_eq!(result.validations_skipped, 0);
+        assert!(export_path.exists());
+    }
+
+    #[test]
+    fn test_export_with_validation_numeric() {
+        use visigrid_engine::validation::{CellRange, NumericConstraint, ValidationRule};
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+
+        sheet.set_value(0, 0, "Value");
+        sheet.set_value(1, 0, "50");
+
+        // Add whole number validation (1-100)
+        let rule = ValidationRule::whole_number(NumericConstraint::between(1, 100));
+        let range = CellRange::new(1, 0, 9, 0);
+        sheet.validations.set(range, rule);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("test_numeric_validation.xlsx");
+
+        let result = export(&workbook, &export_path, None).unwrap();
+
+        assert_eq!(result.validations_exported, 1);
+        assert_eq!(result.validations_skipped, 0);
+    }
+
+    #[test]
+    fn test_export_with_unsupported_validation() {
+        use visigrid_engine::validation::{CellRange, NumericConstraint, ValidationRule, ValidationType};
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+
+        sheet.set_value(0, 0, "Text");
+        sheet.set_value(1, 0, "Hello");
+
+        // Add text length validation (not yet supported)
+        let rule = ValidationRule::new(ValidationType::TextLength(NumericConstraint::between(1, 50)));
+        let range = CellRange::new(1, 0, 9, 0);
+        sheet.validations.set(range, rule);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("test_unsupported.xlsx");
+
+        let result = export(&workbook, &export_path, None).unwrap();
+
+        // TextLength is skipped in Phase 5A
+        assert_eq!(result.validations_exported, 0);
+        assert_eq!(result.validations_skipped, 1);
+    }
+
+    #[test]
+    fn test_export_validation_count_summary() {
+        use visigrid_engine::validation::{CellRange, NumericConstraint, ValidationRule, ValidationType};
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+
+        // Add multiple validations: some supported, some not
+        let list_rule = ValidationRule::list_inline(vec!["A".into(), "B".into()]);
+        sheet.validations.set(CellRange::new(0, 0, 4, 0), list_rule);
+
+        let whole_rule = ValidationRule::whole_number(NumericConstraint::between(0, 100));
+        sheet.validations.set(CellRange::new(0, 1, 4, 1), whole_rule);
+
+        let decimal_rule = ValidationRule::decimal(NumericConstraint::greater_than(0.0));
+        sheet.validations.set(CellRange::new(0, 2, 4, 2), decimal_rule);
+
+        // Unsupported: Date, Time, TextLength, Custom
+        let date_rule = ValidationRule::new(ValidationType::Date(NumericConstraint::between(0, 100)));
+        sheet.validations.set(CellRange::new(0, 3, 4, 3), date_rule);
+
+        let custom_rule = ValidationRule::custom("=A1>0");
+        sheet.validations.set(CellRange::new(0, 4, 4, 4), custom_rule);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("test_mixed_validation.xlsx");
+
+        let result = export(&workbook, &export_path, None).unwrap();
+
+        // 3 supported (List, WholeNumber, Decimal), 2 skipped (Date, Custom)
+        assert_eq!(result.validations_exported, 3);
+        assert_eq!(result.validations_skipped, 2);
     }
 
     // ========================================================================
