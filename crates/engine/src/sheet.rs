@@ -1001,9 +1001,8 @@ impl Sheet {
         }
 
         // Validate based on type
+        // NOTE: No AnyValue case - rule absence handles "any value" semantics
         match &rule.rule_type {
-            ValidationType::AnyValue => ValidationResult::Valid,
-
             ValidationType::List(source) => {
                 let resolved = self.resolve_list_source(source);
                 let trimmed_value = value.trim();

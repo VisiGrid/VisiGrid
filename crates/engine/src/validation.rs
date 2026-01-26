@@ -103,10 +103,12 @@ impl ValidationRule {
 }
 
 /// The type of validation to apply.
+///
+/// NOTE: There is no `AnyValue` variant. "Any value" is a UI concept that maps
+/// to clearing the validation rule (rule absence). This keeps the invariant:
+/// `get(row, col) == None` means no validation applies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValidationType {
-    /// No validation (accept any value).
-    AnyValue,
     /// Restrict to integers within bounds.
     WholeNumber(NumericConstraint),
     /// Restrict to decimals within bounds.
@@ -907,8 +909,10 @@ mod tests {
     #[test]
     fn test_validation_store_clear_range() {
         let mut store = ValidationStore::new();
-        store.set(CellRange::new(0, 0, 5, 5), ValidationRule::new(ValidationType::AnyValue));
-        store.set(CellRange::new(10, 10, 15, 15), ValidationRule::new(ValidationType::AnyValue));
+        // Use a real validation type (WholeNumber) instead of AnyValue
+        let rule = ValidationRule::whole_number(NumericConstraint::between(1, 100));
+        store.set(CellRange::new(0, 0, 5, 5), rule.clone());
+        store.set(CellRange::new(10, 10, 15, 15), rule);
 
         assert_eq!(store.len(), 2);
 
@@ -953,7 +957,7 @@ mod tests {
         assert!(!valid.is_invalid());
 
         let invalid = ValidationResult::Invalid {
-            rule: ValidationRule::new(ValidationType::AnyValue),
+            rule: ValidationRule::whole_number(NumericConstraint::between(1, 100)),
             reason: "test".into(),
         };
         assert!(!invalid.is_valid());
@@ -1207,7 +1211,8 @@ mod tests {
 
         // Set up: A1:A100 has a validation rule
         let rule_range = CellRange::new(0, 0, 99, 0);
-        store.set(rule_range, ValidationRule::new(ValidationType::AnyValue));
+        let rule = ValidationRule::whole_number(NumericConstraint::between(1, 100));
+        store.set(rule_range, rule);
 
         // A50 should have validation
         assert!(store.get(49, 0).is_some(), "A50 should have validation");
@@ -1234,7 +1239,8 @@ mod tests {
 
         // Set up: A1:A100 has a validation rule
         let rule_range = CellRange::new(0, 0, 99, 0);
-        store.set(rule_range, ValidationRule::new(ValidationType::AnyValue));
+        let rule = ValidationRule::whole_number(NumericConstraint::between(1, 100));
+        store.set(rule_range, rule);
 
         // Exclude A10:A20
         let exclusion_range = CellRange::new(9, 0, 19, 0);
@@ -1273,17 +1279,39 @@ mod tests {
 
     #[test]
     fn test_exclusion_serialization() {
+        // Test that individual components serialize correctly
+        // Note: ValidationStore uses BTreeMap<CellRange, ValidationRule> which can't
+        // serialize directly to JSON (non-string keys). Native format uses SQLite.
+
+        let rule = ValidationRule::whole_number(NumericConstraint::between(1, 100));
+        let range = CellRange::new(0, 0, 9, 0);
+        let exclusion = CellRange::new(3, 0, 5, 0);
+
+        // Test rule serialization
+        let rule_json = serde_json::to_string(&rule).unwrap();
+        let parsed_rule: ValidationRule = serde_json::from_str(&rule_json).unwrap();
+        assert_eq!(parsed_rule, rule);
+
+        // Test range serialization
+        let range_json = serde_json::to_string(&range).unwrap();
+        let parsed_range: CellRange = serde_json::from_str(&range_json).unwrap();
+        assert_eq!(parsed_range, range);
+
+        // Test exclusion set serialization (BTreeSet<CellRange>)
+        let exclusions: std::collections::BTreeSet<CellRange> = [exclusion].into_iter().collect();
+        let exclusions_json = serde_json::to_string(&exclusions).unwrap();
+        let parsed_exclusions: std::collections::BTreeSet<CellRange> = serde_json::from_str(&exclusions_json).unwrap();
+        assert_eq!(parsed_exclusions, exclusions);
+
+        // Test store behavior (functional, not serialization)
         let mut store = ValidationStore::new();
-        store.set(CellRange::new(0, 0, 9, 0), ValidationRule::new(ValidationType::AnyValue));
-        store.exclude(CellRange::new(3, 0, 5, 0));
+        store.set(range, rule);
+        store.exclude(exclusion);
 
-        let json = serde_json::to_string(&store).unwrap();
-        let parsed: ValidationStore = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed.exclusions_len(), 1);
-        assert!(parsed.is_excluded(4, 0));
-        assert!(parsed.get(4, 0).is_none());
-        assert!(parsed.get(0, 0).is_some());
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.exclusions_len(), 1);
+        assert!(store.is_excluded(4, 0));
+        assert!(store.get(4, 0).is_none());
+        assert!(store.get(0, 0).is_some());
     }
 }

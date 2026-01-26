@@ -686,7 +686,7 @@ fn render_inspector_tab(
         use visigrid_engine::validation::{ValidationType, ListSource};
 
         let validation_type = match &rule.rule_type {
-            ValidationType::AnyValue => "Any value".to_string(),
+            // NOTE: No AnyValue case - that variant no longer exists
             ValidationType::List(source) => {
                 let source_desc = match source {
                     ListSource::Inline(items) => format!("{} items", items.len()),

@@ -1437,14 +1437,14 @@ fn test_fill_handle_undo_single_entry() {
 /// Test partial overlap: existing large rule, apply smaller rule, undo restores original exactly.
 #[test]
 fn test_validation_undo_partial_overlap_restore() {
-    use visigrid_engine::validation::{CellRange, ValidationRule, ValidationType, ValidationStore};
+    use visigrid_engine::validation::{CellRange, ValidationRule, ValidationStore, NumericConstraint};
     use crate::history::{History, UndoAction};
 
     let mut validations = ValidationStore::new();
 
     // Set up: A1:A100 (rows 0-99, col 0) has a "Whole Number" rule
     let original_range = CellRange::new(0, 0, 99, 0);
-    let original_rule = ValidationRule::new(ValidationType::AnyValue);
+    let original_rule = ValidationRule::whole_number(NumericConstraint::between(1, 100));
     validations.set(original_range, original_rule.clone());
 
     assert!(validations.get(0, 0).is_some(), "A1 should have validation");
@@ -1453,7 +1453,7 @@ fn test_validation_undo_partial_overlap_restore() {
 
     // Apply new rule to A10:A20 (rows 9-19)
     let new_range = CellRange::new(9, 0, 19, 0);
-    let new_rule = ValidationRule::new(ValidationType::AnyValue);
+    let new_rule = ValidationRule::whole_number(NumericConstraint::between(1, 50));
 
     // Capture overlapping rules before clear (mimics dialog behavior)
     let previous_rules: Vec<(CellRange, ValidationRule)> = validations
@@ -1487,17 +1487,18 @@ fn test_validation_undo_partial_overlap_restore() {
 /// Test redo runs full replace pipeline (clear overlaps + set).
 #[test]
 fn test_validation_redo_runs_replace_pipeline() {
-    use visigrid_engine::validation::{CellRange, ValidationRule, ValidationType, ValidationStore};
+    use visigrid_engine::validation::{CellRange, ValidationRule, ValidationStore, NumericConstraint};
 
     let mut validations = ValidationStore::new();
 
     // Set up: A1:A100 rule
     let original_range = CellRange::new(0, 0, 99, 0);
-    validations.set(original_range, ValidationRule::new(ValidationType::AnyValue));
+    let original_rule = ValidationRule::whole_number(NumericConstraint::between(1, 100));
+    validations.set(original_range, original_rule);
 
     // Apply new rule to A10:A20
     let new_range = CellRange::new(9, 0, 19, 0);
-    let new_rule = ValidationRule::new(ValidationType::AnyValue);
+    let new_rule = ValidationRule::whole_number(NumericConstraint::between(1, 50));
 
     // Capture for undo
     let previous_rules: Vec<(CellRange, ValidationRule)> = validations
@@ -1518,7 +1519,8 @@ fn test_validation_redo_runs_replace_pipeline() {
 
     // Now someone adds another rule at A50:A60 (external mutation)
     let external_range = CellRange::new(49, 0, 59, 0);
-    validations.set(external_range, ValidationRule::new(ValidationType::AnyValue));
+    let external_rule = ValidationRule::whole_number(NumericConstraint::between(1, 200));
+    validations.set(external_range, external_rule);
 
     // Redo: must run full replace pipeline, not just set
     // This clears overlaps in new_range (which now includes the original restored rule)
@@ -1536,13 +1538,13 @@ fn test_validation_redo_runs_replace_pipeline() {
 /// Test clear validation undo restores the cleared rules.
 #[test]
 fn test_validation_clear_undo_restores() {
-    use visigrid_engine::validation::{CellRange, ValidationRule, ValidationType, ValidationStore};
+    use visigrid_engine::validation::{CellRange, ValidationRule, ValidationStore, NumericConstraint};
 
     let mut validations = ValidationStore::new();
 
     // Set up: A1:A10 has a rule
     let range = CellRange::new(0, 0, 9, 0);
-    let rule = ValidationRule::new(ValidationType::AnyValue);
+    let rule = ValidationRule::whole_number(NumericConstraint::between(1, 100));
     validations.set(range, rule.clone());
 
     assert!(validations.get(0, 0).is_some(), "A1 should have validation before clear");
@@ -1652,13 +1654,13 @@ fn test_validation_any_value_restores_broader_rule_precedence() {
 /// Test applying same rule twice is idempotent (no history spam).
 #[test]
 fn test_validation_same_rule_twice_idempotent() {
-    use visigrid_engine::validation::{CellRange, ValidationRule, ValidationType, ValidationStore};
+    use visigrid_engine::validation::{CellRange, ValidationRule, ValidationStore, NumericConstraint};
 
     let mut validations = ValidationStore::new();
 
     // Apply rule to A1:A10
     let range = CellRange::new(0, 0, 9, 0);
-    let rule = ValidationRule::new(ValidationType::AnyValue);
+    let rule = ValidationRule::whole_number(NumericConstraint::between(1, 100));
 
     // First apply
     let previous_rules_1: Vec<(CellRange, ValidationRule)> = validations
@@ -1724,7 +1726,7 @@ fn test_validation_undo_multiple_overlaps() {
 
     // Apply new rule that overlaps both: A40:A60 (rows 39-59)
     let new_range = CellRange::new(39, 0, 59, 0);
-    let new_rule = ValidationRule::new(ValidationType::AnyValue);
+    let new_rule = ValidationRule::whole_number(NumericConstraint::between(10, 90));
 
     // Capture overlapping rules
     let previous_rules: Vec<(CellRange, ValidationRule)> = validations

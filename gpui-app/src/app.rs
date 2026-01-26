@@ -522,9 +522,7 @@ impl ValidationDialogState {
         self.show_dropdown = rule.show_dropdown;
 
         match &rule.rule_type {
-            ValidationType::AnyValue => {
-                self.validation_type = ValidationTypeOption::AnyValue;
-            }
+            // NOTE: No AnyValue case - that variant no longer exists in engine
             ValidationType::List(source) => {
                 self.validation_type = ValidationTypeOption::List;
                 match source {
