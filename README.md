@@ -4,9 +4,9 @@
 
 VisiGrid is a native desktop spreadsheet designed for correctness under change.
 
-It makes causality explicit: you can see where numbers come from, why they changed, and whether values are fully up to date. Structural edits are traceable, recomputation is deterministic, and circular dependencies are caught at edit-time.
+It makes causality explicit: where values come from, why they changed, and whether the workbook is fully up to date. Structural edits are traceable, recomputation is deterministic, and circular dependencies are caught at edit-time.
 
-Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)).
+Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)). Designed as a deterministic computation engine with a GPU-accelerated UI, not a scriptable notebook or macro layer.
 
 ## Why VisiGrid
 
@@ -29,7 +29,7 @@ VisiGrid is built to make these failures visible before they matter.
 - **Provenance History** — structural edits emit replayable Lua.
 - **Cycle Detection** — circular dependencies caught at edit-time.
 
-## Everyday Work, Without Friction
+## Editing and Navigation
 
 - Command palette for every action
 - Keyboard-first navigation and editing
