@@ -1027,15 +1027,38 @@ fn cmd_ai_doctor(json: bool, test: bool) -> Result<(), CliError> {
     };
 
     let enabled = ai_settings.provider.is_enabled();
-    let model = ai_settings.effective_model();
+    let model_configured = !ai_settings.model.is_empty();
+    let model_effective = if enabled {
+        ai_settings.effective_model().to_string()
+    } else {
+        "(none)".to_string()
+    };
     let keychain_available = ai::keychain_available();
+
+    // Determine status and blocking reason
+    let (status, blocking_reason) = if !enabled {
+        (AIDoctorStatus::Disabled, Some("provider=none".to_string()))
+    } else if !matches!(ai_settings.provider, AIProvider::Local) && !key_lookup.key.is_some() {
+        (AIDoctorStatus::Misconfigured, Some("missing_api_key".to_string()))
+    } else {
+        (AIDoctorStatus::Ready, None)
+    };
+
+    // Context policy based on privacy mode
+    let context_policy = if ai_settings.privacy_mode {
+        "minimal_values_only"
+    } else {
+        "values_and_formulas"
+    };
 
     // Build diagnostics
     let diag = AIDoctorReport {
         enabled,
         provider: provider_str.to_string(),
-        model: model.to_string(),
+        model_configured,
+        model_effective,
         privacy_mode: ai_settings.privacy_mode,
+        context_policy: context_policy.to_string(),
         allow_proposals: ai_settings.allow_proposals,
         key_present: key_lookup.key.is_some(),
         key_source: key_lookup.source,
@@ -1045,13 +1068,21 @@ fn cmd_ai_doctor(json: bool, test: bool) -> Result<(), CliError> {
         } else {
             None
         },
+        status,
+        blocking_reason,
         test_skipped: !test,
         test_result: None,
     };
 
-    // Run connectivity test if requested
+    // Run connectivity test if requested (skip if disabled)
     let diag = if test && enabled {
         run_ai_test(diag, ai_settings)
+    } else if test && !enabled {
+        // --test with provider=none just skips, not fails
+        let mut d = diag;
+        d.test_skipped = false;
+        d.test_result = Some("skipped (AI disabled)".to_string());
+        d
     } else {
         diag
     };
@@ -1059,10 +1090,15 @@ fn cmd_ai_doctor(json: bool, test: bool) -> Result<(), CliError> {
     // Output
     if json {
         let json_output = serde_json::json!({
+            "schema_version": 1,
+            "status": diag.status.as_str(),
+            "blocking_reason": diag.blocking_reason,
             "enabled": diag.enabled,
             "provider": diag.provider,
-            "model": diag.model,
+            "model_configured": diag.model_configured,
+            "model_effective": diag.model_effective,
             "privacy_mode": diag.privacy_mode,
+            "context_policy": diag.context_policy,
             "allow_proposals": diag.allow_proposals,
             "key": if diag.key_present { "present" } else { "missing" },
             "key_source": diag.key_source.as_str(),
@@ -1076,10 +1112,15 @@ fn cmd_ai_doctor(json: bool, test: bool) -> Result<(), CliError> {
     } else {
         println!("AI Doctor");
         println!("---------");
-        println!("enabled:         {}", if diag.enabled { "true" } else { "false" });
+        println!("status:          {}", diag.status.as_str());
+        if let Some(reason) = &diag.blocking_reason {
+            println!("blocking_reason: {}", reason);
+        }
         println!("provider:        {}", diag.provider);
-        println!("model:           {}", if diag.model.is_empty() { "(default)" } else { &diag.model });
+        println!("model_configured:{}", diag.model_configured);
+        println!("model_effective: {}", diag.model_effective);
         println!("privacy_mode:    {}", diag.privacy_mode);
+        println!("context_policy:  {}", diag.context_policy);
         println!("allow_proposals: {}", diag.allow_proposals);
         println!("key:             {}", if diag.key_present { "present" } else { "missing" });
         println!("key_source:      {}", diag.key_source.as_str());
@@ -1094,42 +1135,68 @@ fn cmd_ai_doctor(json: bool, test: bool) -> Result<(), CliError> {
         }
 
         // Actionable fix suggestions
-        if !diag.enabled {
+        if let Some(reason) = &diag.blocking_reason {
             println!();
-            println!("AI is disabled. To enable:");
-            println!("  Set ai.provider in ~/.config/visigrid/settings.json");
-        } else if !diag.key_present && !matches!(ai_settings.provider, AIProvider::Local) {
-            println!();
-            println!("Fix: set {} or store key in keychain", format!("VISIGRID_{}_KEY", provider_str.to_uppercase()));
+            match reason.as_str() {
+                "provider=none" => {
+                    println!("AI is disabled. To enable:");
+                    println!("  Set ai.provider in ~/.config/visigrid/settings.json");
+                }
+                "missing_api_key" => {
+                    println!("Fix: set {} or store key in keychain",
+                        format!("VISIGRID_{}_KEY", provider_str.to_uppercase()));
+                }
+                _ => {}
+            }
         }
     }
 
-    // Determine exit code
-    if !enabled {
-        // AI disabled is not an error, but distinct for scripts
-        return Err(CliError { code: EXIT_AI_DISABLED, message: "AI is disabled".to_string() });
+    // Determine exit code based on status
+    match diag.status {
+        AIDoctorStatus::Disabled => {
+            Err(CliError { code: EXIT_AI_DISABLED, message: "AI is disabled".to_string() })
+        }
+        AIDoctorStatus::Misconfigured => {
+            let reason = diag.blocking_reason.unwrap_or_else(|| "unknown".to_string());
+            Err(CliError { code: EXIT_AI_MISSING_KEY, message: format!("AI misconfigured: {}", reason) })
+        }
+        AIDoctorStatus::Ready => Ok(()),
     }
-
-    // For cloud providers, check key
-    if !matches!(ai_settings.provider, AIProvider::Local) && !diag.key_present {
-        return Err(CliError { code: EXIT_AI_MISSING_KEY, message: "API key missing".to_string() });
-    }
-
-    Ok(())
 }
 
 struct AIDoctorReport {
     enabled: bool,
     provider: String,
-    model: String,
+    model_configured: bool,
+    model_effective: String,
     privacy_mode: bool,
+    context_policy: String,
     allow_proposals: bool,
     key_present: bool,
     key_source: visigrid_config::ai::KeySource,
     keychain_available: bool,
     endpoint: Option<String>,
+    status: AIDoctorStatus,
+    blocking_reason: Option<String>,
     test_skipped: bool,
     test_result: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum AIDoctorStatus {
+    Disabled,
+    Misconfigured,
+    Ready,
+}
+
+impl AIDoctorStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            AIDoctorStatus::Disabled => "disabled",
+            AIDoctorStatus::Misconfigured => "misconfigured",
+            AIDoctorStatus::Ready => "ready",
+        }
+    }
 }
 
 fn run_ai_test(mut diag: AIDoctorReport, ai_settings: &visigrid_config::settings::AISettings) -> AIDoctorReport {
