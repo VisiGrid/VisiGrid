@@ -12,16 +12,17 @@ use crate::app::{Spreadsheet, PaletteScope};
 use crate::search::{SearchItem, MenuCategory};
 use crate::theme::TokenKey;
 
-/// Get display name for a palette scope
+/// Get display name for a palette scope (uppercase for breadcrumb)
 fn scope_name(scope: &PaletteScope) -> &'static str {
     match scope {
         PaletteScope::Menu(cat) => match cat {
-            MenuCategory::File => "File",
-            MenuCategory::Edit => "Edit",
-            MenuCategory::View => "View",
-            MenuCategory::Format => "Format",
-            MenuCategory::Data => "Data",
-            MenuCategory::Help => "Help",
+            MenuCategory::File => "FILE",
+            MenuCategory::Edit => "EDIT",
+            MenuCategory::View => "VIEW",
+            MenuCategory::Format => "FORMAT",
+            MenuCategory::Data => "DATA",
+            MenuCategory::Tools => "TOOLS",
+            MenuCategory::Help => "HELP",
         }
     }
 }
@@ -107,7 +108,6 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                 .flex_1()
                                 .flex()
                                 .items_center()
-                                .gap_2()
                                 // Scope badge (when scoped via Alt accelerator)
                                 .when(has_scope, |d| {
                                     let scope_text = scope.map(scope_name).unwrap_or("");
@@ -115,12 +115,13 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                         div()
                                             .px_2()
                                             .py(px(2.0))
+                                            .mr_2()  // margin-right to separate from query text
                                             .bg(selection_bg)
                                             .rounded_sm()
                                             .text_size(px(11.0))
                                             .text_color(text_primary)
                                             .font_weight(FontWeight::MEDIUM)
-                                            .child(format!("{} \u{25B8}", scope_text))  // "File ▸"
+                                            .child(format!("{} \u{25B8}", scope_text))  // "FILE ▸"
                                     )
                                 })
                                 // Query text or placeholder
@@ -174,6 +175,42 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                 .flex()
                                 .flex_col()
                                 .gap_1()
+                                // Alt scope hints (Excel-style command access)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .pb_2()
+                                        .mb_1()
+                                        .border_b_1()
+                                        .border_color(panel_border)
+                                        .text_size(px(10.0))
+                                        .children(
+                                            MenuCategory::all_for_hints().iter().map(|cat| {
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .px(px(4.0))
+                                                            .py(px(1.0))
+                                                            .bg(toolbar_hover)
+                                                            .rounded_sm()
+                                                            .text_color(text_muted)
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .child(format!("Alt+{}", cat.key_hint()))
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_color(text_disabled)
+                                                            .child(cat.name())
+                                                    )
+                                            })
+                                        )
+                                )
+                                // Search prefix hints
                                 .child(
                                     div().flex().gap_4()
                                         .child(div().child(">  commands"))

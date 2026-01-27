@@ -400,6 +400,8 @@ impl Spreadsheet {
         // Commit any pending edit before switching sheets
         self.commit_pending_edit(cx);
         if self.wb_mut(cx, |wb| wb.set_active_sheet(index)) {
+            self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+            self.debug_assert_sheet_cache_sync(cx);  // Catch desync immediately at switch point
             self.clear_selection_state();
             // Clear history highlight unless it's for the new sheet
             if let Some((sheet_idx, _, _, _, _)) = self.history_highlight_range {
@@ -415,6 +417,8 @@ impl Spreadsheet {
     pub fn add_sheet(&mut self, cx: &mut Context<Self>) {
         let new_index = self.wb_mut(cx, |wb| wb.add_sheet());
         self.wb_mut(cx, |wb| wb.set_active_sheet(new_index));
+        self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+        self.debug_assert_sheet_cache_sync(cx);  // Catch desync immediately
         self.clear_selection_state();
         self.is_modified = true;
         cx.notify();

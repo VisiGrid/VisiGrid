@@ -2196,6 +2196,255 @@ mod tests {
         }
     }
 
+    // ========================================================================
+    // Per-sheet layout export tests
+    //
+    // NOTE: These are export-only tests. Calamine (our import library) doesn't
+    // support reading column widths or row heights - it's focused on cell data.
+    // We verify export correctness by parsing the XLSX XML directly.
+    //
+    // TODO: Implement layout import by parsing XLSX XML ourselves (like we do
+    // in these tests), then add full round-trip tests. This would allow:
+    // - Preserving user's column widths when re-importing an exported file
+    // - Importing Excel files with custom layouts
+    // ========================================================================
+
+    #[test]
+    fn test_xlsx_export_writes_per_sheet_column_widths() {
+        // This test verifies that column widths are correctly written per-sheet
+        // when exporting to XLSX. It's a critical regression test for the
+        // per-sheet sizing feature.
+        //
+        // We parse the XLSX ZIP directly to verify the column widths in each
+        // sheet's XML, since calamine doesn't support reading layout data.
+
+        use std::io::Read as IoRead;
+
+        let mut workbook = Workbook::new();
+
+        // Sheet 1: set data and prepare custom widths
+        workbook.active_sheet_mut().set_value(0, 0, "Sheet1 Data");
+        workbook.active_sheet_mut().set_value(0, 1, "Col B");
+        workbook.active_sheet_mut().set_value(0, 2, "Col C");
+
+        // Sheet 2: add and set data
+        workbook.add_sheet();
+        workbook.sheet_mut(1).unwrap().set_value(0, 0, "Sheet2 Data");
+        workbook.sheet_mut(1).unwrap().set_value(0, 1, "Different Layout");
+
+        // Sheet 3: add and set data
+        workbook.add_sheet();
+        workbook.sheet_mut(2).unwrap().set_value(0, 0, "Sheet3 Data");
+
+        // Create per-sheet layouts with DIFFERENT column widths
+        // Sheet 1: wide column A (200px), normal B, narrow C
+        let mut layout1 = ExportLayout::default();
+        layout1.col_widths.insert(0, 200.0);  // Wide
+        layout1.col_widths.insert(1, 100.0);  // Normal
+        layout1.col_widths.insert(2, 50.0);   // Narrow
+
+        // Sheet 2: narrow column A, wide B
+        let mut layout2 = ExportLayout::default();
+        layout2.col_widths.insert(0, 70.0);   // Narrow
+        layout2.col_widths.insert(1, 250.0);  // Very wide
+
+        // Sheet 3: only default widths (no customization)
+        let layout3 = ExportLayout::default();
+
+        let layouts = vec![layout1, layout2, layout3];
+
+        // Export
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("per_sheet_widths.xlsx");
+
+        let result = export(&workbook, &export_path, Some(&layouts)).unwrap();
+        assert_eq!(result.sheets_exported, 3);
+
+        // Parse the XLSX to verify per-sheet column widths
+        let file = std::fs::File::open(&export_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+
+        // Helper to extract col widths from worksheet XML
+        // XLSX XML is typically minified (no newlines), so we parse it character by character
+        fn extract_col_widths(xml: &str) -> Vec<(usize, f64)> {
+            let mut widths = Vec::new();
+            let mut search_start = 0;
+
+            // Find all <col ... /> or <col ...></col> elements
+            while let Some(col_start) = xml[search_start..].find("<col ") {
+                let abs_start = search_start + col_start;
+                // Find the end of this tag (either /> or >)
+                let tag_end = xml[abs_start..].find("/>")
+                    .or_else(|| xml[abs_start..].find('>'))
+                    .map(|e| abs_start + e)
+                    .unwrap_or(xml.len());
+
+                let col_tag = &xml[abs_start..tag_end];
+
+                // Helper to extract attribute value
+                fn get_attr(tag: &str, attr: &str) -> Option<String> {
+                    let search = format!("{}=\"", attr);
+                    if let Some(pos) = tag.find(&search) {
+                        let start = pos + search.len();
+                        if let Some(end) = tag[start..].find('"') {
+                            return Some(tag[start..start + end].to_string());
+                        }
+                    }
+                    None
+                }
+
+                // Extract min, max, and width attributes
+                if let (Some(min_str), Some(width_str)) = (get_attr(col_tag, "min"), get_attr(col_tag, "width")) {
+                    if let (Ok(min), Ok(width)) = (min_str.parse::<usize>(), width_str.parse::<f64>()) {
+                        // max defaults to min if not specified
+                        let max = get_attr(col_tag, "max")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(min);
+
+                        // Add each column in the range (convert to 0-based)
+                        for col in min..=max {
+                            widths.push((col - 1, width));
+                        }
+                    }
+                }
+
+                search_start = tag_end;
+            }
+            widths
+        }
+
+        // Read sheet1.xml
+        let mut sheet1_xml = String::new();
+        archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut sheet1_xml).unwrap();
+        let sheet1_widths = extract_col_widths(&sheet1_xml);
+
+        // Read sheet2.xml
+        let mut sheet2_xml = String::new();
+        archive.by_name("xl/worksheets/sheet2.xml").unwrap().read_to_string(&mut sheet2_xml).unwrap();
+        let sheet2_widths = extract_col_widths(&sheet2_xml);
+
+        // Read sheet3.xml
+        let mut sheet3_xml = String::new();
+        archive.by_name("xl/worksheets/sheet3.xml").unwrap().read_to_string(&mut sheet3_xml).unwrap();
+        let sheet3_widths = extract_col_widths(&sheet3_xml);
+
+        // Verify Sheet 1 has 3 custom column widths
+        assert_eq!(sheet1_widths.len(), 3, "Sheet1 should have 3 custom column widths");
+
+        // Verify Sheet 2 has 2 custom column widths
+        assert_eq!(sheet2_widths.len(), 2, "Sheet2 should have 2 custom column widths");
+
+        // Verify Sheet 3 has no custom column widths (uses defaults)
+        assert_eq!(sheet3_widths.len(), 0, "Sheet3 should have no custom column widths");
+
+        // Verify the actual widths are different between sheets
+        // Sheet 1 col A should be wider than Sheet 2 col A (200px vs 70px)
+        let sheet1_col_a_width = sheet1_widths.iter().find(|(col, _)| *col == 0).map(|(_, w)| *w).unwrap_or(0.0);
+        let sheet2_col_a_width = sheet2_widths.iter().find(|(col, _)| *col == 0).map(|(_, w)| *w).unwrap_or(0.0);
+
+        // 200px / 7 ≈ 28.6 Excel units, 70px / 7 = 10 Excel units
+        assert!(sheet1_col_a_width > sheet2_col_a_width,
+            "Sheet1 col A ({:.1}) should be wider than Sheet2 col A ({:.1})",
+            sheet1_col_a_width, sheet2_col_a_width);
+
+        // Sheet 2 col B should be very wide (250px → ~35.7 Excel units)
+        let sheet2_col_b_width = sheet2_widths.iter().find(|(col, _)| *col == 1).map(|(_, w)| *w).unwrap_or(0.0);
+        assert!(sheet2_col_b_width > 30.0,
+            "Sheet2 col B ({:.1}) should be very wide (>30 Excel units)",
+            sheet2_col_b_width);
+
+        // Re-import and verify data integrity (widths not preserved in import,
+        // but data should be intact)
+        let (reimported, _) = import(&export_path).unwrap();
+        assert_eq!(reimported.sheet_count(), 3);
+        assert_eq!(reimported.sheet(0).unwrap().get_display(0, 0), "Sheet1 Data");
+        assert_eq!(reimported.sheet(1).unwrap().get_display(0, 0), "Sheet2 Data");
+        assert_eq!(reimported.sheet(2).unwrap().get_display(0, 0), "Sheet3 Data");
+    }
+
+    #[test]
+    fn test_xlsx_export_writes_per_sheet_row_heights() {
+        // Verify row heights are written per-sheet correctly to XLSX.
+        // We parse the XML directly since calamine doesn't read layout data.
+
+        use std::io::Read as IoRead;
+
+        let mut workbook = Workbook::new();
+        workbook.active_sheet_mut().set_value(0, 0, "Sheet1 Row 0");
+        workbook.add_sheet();
+        workbook.sheet_mut(1).unwrap().set_value(0, 0, "Sheet2 Row 0");
+        workbook.sheet_mut(1).unwrap().set_value(1, 0, "Sheet2 Row 1");
+
+        // Sheet 1: very tall row 0 (100px → ~75 points)
+        let mut layout1 = ExportLayout::default();
+        layout1.row_heights.insert(0, 100.0);
+
+        // Sheet 2: medium tall row 0 (40px → ~30 points) - distinct from default (~15pt)
+        let mut layout2 = ExportLayout::default();
+        layout2.row_heights.insert(0, 40.0);
+
+        let layouts = vec![layout1, layout2];
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("per_sheet_row_heights.xlsx");
+
+        let result = export(&workbook, &export_path, Some(&layouts)).unwrap();
+        assert_eq!(result.sheets_exported, 2);
+
+        // Parse the XLSX to verify per-sheet row heights differ
+        let file = std::fs::File::open(&export_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+
+        // Helper to extract row 1's height from worksheet XML
+        fn extract_row_height(xml: &str, row_num: usize) -> Option<f64> {
+            // Look for <row r="N" ... ht="H" ...>
+            let row_search = format!("r=\"{}\"", row_num);
+            let mut search_start = 0;
+
+            while let Some(row_start) = xml[search_start..].find("<row ") {
+                let abs_start = search_start + row_start;
+                let tag_end = xml[abs_start..].find('>').map(|e| abs_start + e).unwrap_or(xml.len());
+                let row_tag = &xml[abs_start..tag_end];
+
+                if row_tag.contains(&row_search) {
+                    // Extract ht attribute
+                    if let Some(ht_pos) = row_tag.find("ht=\"") {
+                        let ht_start = ht_pos + 4;
+                        if let Some(ht_end) = row_tag[ht_start..].find('"') {
+                            if let Ok(height) = row_tag[ht_start..ht_start + ht_end].parse::<f64>() {
+                                return Some(height);
+                            }
+                        }
+                    }
+                }
+                search_start = tag_end;
+            }
+            None
+        }
+
+        let mut sheet1_xml = String::new();
+        archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut sheet1_xml).unwrap();
+
+        let mut sheet2_xml = String::new();
+        archive.by_name("xl/worksheets/sheet2.xml").unwrap().read_to_string(&mut sheet2_xml).unwrap();
+
+        // Get row 1 heights from each sheet (1-based in XML, so row index 0 = r="1")
+        let sheet1_row0_height = extract_row_height(&sheet1_xml, 1);
+        let sheet2_row0_height = extract_row_height(&sheet2_xml, 1);
+
+        // Both sheets should have row 0 (r="1") height defined
+        assert!(sheet1_row0_height.is_some(), "Sheet1 row 0 should have custom height");
+        assert!(sheet2_row0_height.is_some(), "Sheet2 row 0 should have custom height");
+
+        // Sheet 1's row 0 should be much taller than Sheet 2's row 0
+        // (100px / 1.33 ≈ 75pt vs 20px / 1.33 ≈ 15pt)
+        let h1 = sheet1_row0_height.unwrap();
+        let h2 = sheet2_row0_height.unwrap();
+        assert!(h1 > h2 * 2.0,
+            "Sheet1 row 0 height ({:.1}) should be much taller than Sheet2 row 0 ({:.1})",
+            h1, h2);
+    }
+
     #[test]
     #[ignore]  // Run explicitly with --ignored flag
     fn import_benchmark_small() {

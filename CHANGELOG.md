@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.3.4
+
+Excel-accurate behavior. Keyboard-first navigation. Layout is now auditable.
+
+### Command Palette: Alt Scoping
+
+Excel-style Alt scoping for the Command Palette:
+- `Alt+A` → Data, `Alt+E` → Edit, `Alt+F` → File, `Alt+V` → View, `Alt+T` → Tools
+- Scope hint bar appears on open, making Alt workflows discoverable
+- Uppercase scope breadcrumb (`DATA ›`, `TOOLS ›`) for clear command context
+
+Windows Excel users can bring their Alt muscle memory to macOS and Linux.
+
+### Deterministic Recalculation (F9)
+
+- `F9` now always recalculates (Excel-accurate)
+- Verified Mode is no longer overloaded onto F9
+- Status bar shows: `Recalculated · 1,284 cells · 12 ms · Verified`
+
+### Navigation Ergonomics
+
+- `Ctrl+Backspace` jumps viewport to active cell
+- Arrow keys, Backspace, and typing correctly scoped inside modals
+- Grid navigation fully blocked while dialogs are open
+
+### Modal & Inspector Fixes
+
+Inspector (`Ctrl+1`) now:
+- Closes when clicking outside
+- Fully captures clicks inside (no grid click-through)
+- Disables grid interaction while open
+
+Keyboard handling consistent across theme picker, font picker, named range editors, license dialogs, Find/GoTo/Rename flows.
+
+### Excel-Accurate Text Overflow
+
+Text spillover now matches Excel exactly:
+- Only left-aligned (or General text) spills; center/right clips
+- Two-pass rendering (background → overlay), deduplicated across freeze panes
+- Visual ellipsis (`…`) when clipped
+- Respects adjacent cell occupancy, alignment, and grid bounds
+
+### Per-Sheet Column & Row Sizing
+
+Column widths and row heights stored per sheet (Excel-correct):
+- New sheets start with default sizing (no inheritance from active sheet)
+- Duplicate Sheet = identical layout
+- Correct behavior across sheet switching, named range jumps, trace navigation, session restore, async Excel import
+- XLSX export writes correct per-sheet layout XML
+
+### Layout Provenance
+
+Layout changes are now first-class, undoable actions with full provenance:
+- **Set column width** / **Set row height** actions in History
+- Clear summaries: `Col A: default → 200`, `Row 5: 50 → default`
+- Full undo/redo, Space-bar preview, rewind support
+- Stable `SheetId` addressing (survives sheet delete/reorder)
+- Provenance export as Lua:
+  ```lua
+  grid.set_col_width{ sheet_id=3, col="A", width=200 }
+  grid.clear_row_height{ sheet_id=3, row=5 }
+  ```
+
+Layout is now part of the audit trail, not hidden UI state.
+
+---
+
 ## 0.3.3
 
 Explainable Spreadsheets: Trace formulas, validate inputs, navigate everything from the keyboard.

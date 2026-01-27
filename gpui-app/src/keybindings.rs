@@ -50,6 +50,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("pageup", PageUp, Some("Spreadsheet")),
         KeyBinding::new("pagedown", PageDown, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "g"), GoToCell, Some("Spreadsheet")),
+        KeyBinding::new(&kb(m, "backspace"), JumpToActiveCell, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "f"), FindInCells, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "h"), FindReplace, Some("Spreadsheet")),
         KeyBinding::new("f3", FindNext, Some("Spreadsheet")),
@@ -129,7 +130,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "1"), ShowFormatPanel, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "m"), ToggleProblems, Some("Spreadsheet")),
         KeyBinding::new("f11", ToggleZenMode, Some("Spreadsheet")),
-        KeyBinding::new("f9", ToggleVerifiedMode, Some("Spreadsheet")),  // Toggle verified mode
+        KeyBinding::new("f9", Recalculate, Some("Spreadsheet")),  // Excel: force recalculate
         KeyBinding::new(&kb_shift(m, "l"), ToggleLuaConsole, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "`"), ToggleFormulaView, Some("Spreadsheet")),
 
@@ -265,21 +266,24 @@ pub fn register_menu_accelerators(cx: &mut App) {
 /// never Alt keydown/keyup. This prevents ghost states and ensures
 /// Option key works normally for character composition when disabled.
 ///
-/// These keybindings open the Command Palette scoped to a menu category:
-/// - Alt+F -> File commands
-/// - Alt+E -> Edit commands
-/// - Alt+V -> View commands
-/// - Alt+O -> Format commands (O like Excel)
-/// - Alt+D -> Data commands
-/// - Alt+H -> Home/Format commands (modern Excel 2010+)
+/// These keybindings open the Command Palette scoped to a menu category.
+/// Key mappings match Excel ribbon tabs for muscle memory:
+/// - Alt+A -> Data (Excel ribbon: Alt+A)
+/// - Alt+E -> Edit
+/// - Alt+F -> File
+/// - Alt+V -> View
+/// - Alt+T -> Tools (trace, explain, audit)
+/// - Alt+O -> Format (legacy Excel 2003)
+/// - Alt+H -> Help
 #[cfg(target_os = "macos")]
 pub fn register_alt_accelerators(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("alt-f", AltFile, Some("Spreadsheet")),
+        KeyBinding::new("alt-a", AltData, Some("Spreadsheet")),    // Excel ribbon: A=Data
         KeyBinding::new("alt-e", AltEdit, Some("Spreadsheet")),
+        KeyBinding::new("alt-f", AltFile, Some("Spreadsheet")),
         KeyBinding::new("alt-v", AltView, Some("Spreadsheet")),
+        KeyBinding::new("alt-t", AltTools, Some("Spreadsheet")),   // Tools: trace, explain
         KeyBinding::new("alt-o", AltFormat, Some("Spreadsheet")),
-        KeyBinding::new("alt-d", AltData, Some("Spreadsheet")),
         KeyBinding::new("alt-h", AltHelp, Some("Spreadsheet")),
     ]);
 }

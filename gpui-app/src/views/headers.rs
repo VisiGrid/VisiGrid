@@ -231,6 +231,12 @@ fn render_column_header(
                         let x: f32 = event.position.x.into();
                         this.resize_start_pos = x;
                         this.resize_start_size = this.col_width(col);
+                        // Capture original map value for history (None = was default)
+                        let sheet_id = this.cached_sheet_id();
+                        this.resize_start_original = this.col_widths
+                            .get(&sheet_id)
+                            .and_then(|m| m.get(&col))
+                            .copied();
                         cx.notify();
                     }
                 }))
@@ -313,6 +319,12 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
                         let y: f32 = event.position.y.into();
                         this.resize_start_pos = y;
                         this.resize_start_size = this.row_height(row);
+                        // Capture original map value for history (None = was default)
+                        let sheet_id = this.cached_sheet_id();
+                        this.resize_start_original = this.row_heights
+                            .get(&sheet_id)
+                            .and_then(|m| m.get(&row))
+                            .copied();
                         cx.notify();
                     }
                 }))

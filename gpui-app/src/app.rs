@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::formula::eval::CellLookup;
 use visigrid_engine::filter::{RowView, FilterState};
+use visigrid_engine::sheet::SheetId;
 
 use crate::clipboard::InternalClipboard;
 use crate::find_replace::MatchHit;
@@ -1074,15 +1075,21 @@ pub struct Spreadsheet {
     pub window_size: Size<Pixels>,
     pub cached_window_bounds: Option<WindowBounds>,  // Cached for session snapshot
 
-    // Column/row sizing
-    pub col_widths: HashMap<usize, f32>,   // Custom column widths (default: CELL_WIDTH)
-    pub row_heights: HashMap<usize, f32>,  // Custom row heights (default: CELL_HEIGHT)
+    // Column/row sizing (per-sheet)
+    // Each sheet has independent column widths and row heights.
+    // New sheets start with defaults (Excel behavior), not inherited from current sheet.
+    pub col_widths: HashMap<SheetId, HashMap<usize, f32>>,   // SheetId -> col -> width
+    pub row_heights: HashMap<SheetId, HashMap<usize, f32>>,  // SheetId -> row -> height
+    /// Cached active sheet ID for fast lookups without context.
+    /// Updated whenever the active sheet changes.
+    cached_sheet_id: SheetId,
 
     // Resize drag state
     pub resizing_col: Option<usize>,       // Column being resized (by right edge)
     pub resizing_row: Option<usize>,       // Row being resized (by bottom edge)
     pub resize_start_pos: f32,             // Mouse position at drag start
     pub resize_start_size: f32,            // Original size at drag start
+    pub resize_start_original: Option<f32>, // Original map value (None = was default)
 
     // Menu bar state (Excel 2003 style dropdown menus)
     pub open_menu: Option<crate::mode::Menu>,
@@ -1356,6 +1363,7 @@ impl Default for NamedRangeUsageCache {
 impl Spreadsheet {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workbook_data = Workbook::new();
+        let initial_sheet_id = workbook_data.active_sheet().id;
         let base_workbook = workbook_data.clone(); // Capture initial state for replay
         let workbook = cx.new(|_| workbook_data);
 
@@ -1436,10 +1444,12 @@ impl Spreadsheet {
             cached_window_bounds: Some(window.window_bounds()),
             col_widths: HashMap::new(),
             row_heights: HashMap::new(),
+            cached_sheet_id: initial_sheet_id,
             resizing_col: None,
             resizing_row: None,
             resize_start_pos: 0.0,
             resize_start_size: 0.0,
+            resize_start_original: None,
             open_menu: None,
             renaming_sheet: None,
             sheet_rename_input: String::new(),
@@ -1646,16 +1656,30 @@ impl Spreadsheet {
         self.validation_dropdown.is_open()
     }
 
-    /// Open the validation dropdown for the current cell (if it has list validation)
+    /// Open dropdown for the current cell (Alt+Down - Excel muscle memory)
+    ///
+    /// Priority:
+    /// 1. If cell has list validation → open validation dropdown
+    /// 2. If column has AutoFilter active → open filter dropdown
+    /// 3. Else → show "No dropdown" message
     pub fn open_validation_dropdown(&mut self, cx: &mut Context<Self>) {
         use crate::validation_dropdown::ValidationDropdownState;
 
         let (row, col) = self.view_state.selected;
         let sheet_index = self.sheet_index(cx);
 
-        // Get list items for this cell (if it has list validation)
-        let resolved = match self.wb(cx).get_list_items(sheet_index, row, col) {
-            Some(list) if !list.items.is_empty() => list,
+        // Priority 1: Check for list validation
+        let resolved = self.wb(cx).get_list_items(sheet_index, row, col);
+        match resolved {
+            Some(list) if !list.items.is_empty() => {
+                // Open validation dropdown
+                self.validation_dropdown = ValidationDropdownState::open(
+                    (row, col),
+                    std::sync::Arc::new(list),
+                );
+                cx.notify();
+                return;
+            }
             Some(_) => {
                 // Has list validation but list is empty
                 self.status_message = Some("Validation list is empty".to_string());
@@ -1663,19 +1687,23 @@ impl Spreadsheet {
                 return;
             }
             None => {
-                // No list validation on this cell
-                self.status_message = Some("No dropdown for this cell".to_string());
-                cx.notify();
-                return;
+                // No list validation - fall through to check filter
             }
         };
 
-        // Open the dropdown
-        self.validation_dropdown = ValidationDropdownState::open(
-            (row, col),
-            std::sync::Arc::new(resolved),
-        );
+        // Priority 2: Check for AutoFilter on this column
+        if self.filter_state.is_enabled() {
+            if let Some((_, col_start, _, col_end)) = self.filter_state.data_range() {
+                if col >= col_start && col <= col_end {
+                    // Column is in filter range - open filter dropdown
+                    self.open_filter_dropdown(col, cx);
+                    return;
+                }
+            }
+        }
 
+        // No dropdown available
+        self.status_message = Some("No dropdown available".to_string());
         cx.notify();
     }
 
@@ -2325,6 +2353,8 @@ impl Spreadsheet {
             CommandId::CycleTracePrecedent => self.cycle_trace_precedent(false, cx),
             CommandId::CycleTraceDependent => self.cycle_trace_dependent(false, cx),
             CommandId::ReturnToTraceSource => self.return_to_trace_source(cx),
+            CommandId::ToggleVerifiedMode => self.toggle_verified_mode(cx),
+            CommandId::Recalculate => self.recalculate(cx),
 
             // Window - dispatch to App-level handler
             CommandId::SwitchWindow => cx.dispatch_action(&crate::actions::SwitchWindow),
@@ -2414,34 +2444,161 @@ impl Spreadsheet {
         }
     }
 
-    /// Get width for a column (custom or default)
+    /// Get width for a column (custom or default) for the current sheet
     pub fn col_width(&self, col: usize) -> f32 {
-        *self.col_widths.get(&col).unwrap_or(&CELL_WIDTH)
+        self.col_widths
+            .get(&self.cached_sheet_id)
+            .and_then(|sheet_widths| sheet_widths.get(&col))
+            .copied()
+            .unwrap_or(CELL_WIDTH)
     }
 
-    /// Get height for a row (custom or default)
+    /// Get height for a row (custom or default) for the current sheet
     pub fn row_height(&self, row: usize) -> f32 {
-        *self.row_heights.get(&row).unwrap_or(&CELL_HEIGHT)
+        self.row_heights
+            .get(&self.cached_sheet_id)
+            .and_then(|sheet_heights| sheet_heights.get(&row))
+            .copied()
+            .unwrap_or(CELL_HEIGHT)
     }
 
-    /// Set column width
+    /// Set column width for the current sheet
     pub fn set_col_width(&mut self, col: usize, width: f32) {
         let width = width.max(20.0).min(500.0); // Clamp between 20-500px
+        let sheet_widths = self.col_widths.entry(self.cached_sheet_id).or_insert_with(HashMap::new);
         if (width - CELL_WIDTH).abs() < 1.0 {
-            self.col_widths.remove(&col); // Remove if close to default
+            sheet_widths.remove(&col); // Remove if close to default
         } else {
-            self.col_widths.insert(col, width);
+            sheet_widths.insert(col, width);
         }
     }
 
-    /// Set row height
+    /// Set row height for the current sheet
     pub fn set_row_height(&mut self, row: usize, height: f32) {
         let height = height.max(12.0).min(200.0); // Clamp between 12-200px
+        let sheet_heights = self.row_heights.entry(self.cached_sheet_id).or_insert_with(HashMap::new);
         if (height - CELL_HEIGHT).abs() < 1.0 {
-            self.row_heights.remove(&row); // Remove if close to default
+            sheet_heights.remove(&row); // Remove if close to default
         } else {
-            self.row_heights.insert(row, height);
+            sheet_heights.insert(row, height);
         }
+    }
+
+    /// Record a column width change to history (for undo/redo support).
+    /// Called on mouse up after a resize drag to coalesce all drag events into one history entry.
+    pub fn record_col_width_change(&mut self, col: usize, old: Option<f32>, cx: &mut Context<Self>) {
+        // Get the current value from the map
+        let new = self.col_widths
+            .get(&self.cached_sheet_id)
+            .and_then(|m| m.get(&col))
+            .copied();
+
+        // Only record if something actually changed
+        if old != new {
+            // Use SheetId (stable across sheet reorder/delete) instead of index
+            let sheet_id = self.cached_sheet_id;
+            self.history.record_action_with_provenance(
+                crate::history::UndoAction::ColumnWidthSet {
+                    sheet_id,
+                    col,
+                    old,
+                    new,
+                },
+                None,
+            );
+            self.is_modified = true;
+        }
+    }
+
+    /// Record a row height change to history (for undo/redo support).
+    /// Called on mouse up after a resize drag to coalesce all drag events into one history entry.
+    pub fn record_row_height_change(&mut self, row: usize, old: Option<f32>, cx: &mut Context<Self>) {
+        // Get the current value from the map
+        let new = self.row_heights
+            .get(&self.cached_sheet_id)
+            .and_then(|m| m.get(&row))
+            .copied();
+
+        // Only record if something actually changed
+        if old != new {
+            // Use SheetId (stable across sheet reorder/delete) instead of index
+            let sheet_id = self.cached_sheet_id;
+            self.history.record_action_with_provenance(
+                crate::history::UndoAction::RowHeightSet {
+                    sheet_id,
+                    row,
+                    old,
+                    new,
+                },
+                None,
+            );
+            self.is_modified = true;
+        }
+    }
+
+    /// Get mutable reference to column widths map for the current sheet
+    /// Creates the map if it doesn't exist
+    pub fn sheet_col_widths_mut(&mut self) -> &mut HashMap<usize, f32> {
+        self.col_widths.entry(self.cached_sheet_id).or_insert_with(HashMap::new)
+    }
+
+    /// Get mutable reference to row heights map for the current sheet
+    /// Creates the map if it doesn't exist
+    pub fn sheet_row_heights_mut(&mut self) -> &mut HashMap<usize, f32> {
+        self.row_heights.entry(self.cached_sheet_id).or_insert_with(HashMap::new)
+    }
+
+    /// Check if current sheet has any custom row heights
+    pub fn has_custom_row_heights(&self) -> bool {
+        self.row_heights.get(&self.cached_sheet_id).map_or(false, |h| !h.is_empty())
+    }
+
+    /// Update cached sheet ID from the workbook.
+    /// Call this after switching sheets.
+    pub fn update_cached_sheet_id(&mut self, cx: &mut Context<Self>) {
+        self.cached_sheet_id = self.workbook.read(cx).active_sheet().id;
+    }
+
+    /// Get the cached sheet ID (for use in views without context access)
+    pub fn cached_sheet_id(&self) -> SheetId {
+        self.cached_sheet_id
+    }
+
+    /// Debug assertion: verify cached_sheet_id matches the workbook's active sheet.
+    /// Call this in hot paths (render, selection change) to catch desync bugs early.
+    /// Only runs in debug builds.
+    #[inline]
+    pub fn debug_assert_sheet_cache_sync(&self, cx: &Context<Self>) {
+        #[cfg(debug_assertions)]
+        {
+            let actual_id = self.workbook.read(cx).active_sheet().id;
+            debug_assert_eq!(
+                self.cached_sheet_id, actual_id,
+                "cached_sheet_id desync! cached={:?}, actual={:?}. \
+                 A code path changed the active sheet without calling update_cached_sheet_id().",
+                self.cached_sheet_id, actual_id
+            );
+        }
+    }
+
+    /// Get mutable reference to column widths map for a specific sheet by index
+    /// Used by undo/redo operations that need to access a specific sheet's sizing.
+    /// Creates the map if it doesn't exist.
+    pub fn sheet_col_widths_for_index_mut(&mut self, sheet_index: usize, cx: &mut Context<Self>) -> &mut HashMap<usize, f32> {
+        let sheet_id = self.workbook.read(cx).sheets().get(sheet_index)
+            .map(|s| s.id)
+            .unwrap_or(self.cached_sheet_id);
+        self.col_widths.entry(sheet_id).or_insert_with(HashMap::new)
+    }
+
+    /// Get mutable reference to row heights map for a specific sheet by index
+    /// Used by undo/redo operations that need to access a specific sheet's sizing.
+    /// Creates the map if it doesn't exist.
+    pub fn sheet_row_heights_for_index_mut(&mut self, sheet_index: usize, cx: &mut Context<Self>) -> &mut HashMap<usize, f32> {
+        let sheet_id = self.workbook.read(cx).sheets().get(sheet_index)
+            .map(|s| s.id)
+            .unwrap_or(self.cached_sheet_id);
+        self.row_heights.entry(sheet_id).or_insert_with(HashMap::new)
     }
 
     /// Get the X position of a column's left edge (relative to start of grid, after row header)
@@ -2517,7 +2674,7 @@ impl Spreadsheet {
         if y < 0.0 { return None; }
 
         // O(1) fast path: uniform row heights (use scaled cell height)
-        if self.row_heights.is_empty() {
+        if !self.has_custom_row_heights() {
             let row = self.view_state.scroll_row + (y / self.metrics.cell_h).floor() as usize;
             return Some(row.min(NUM_ROWS - 1));
         }
@@ -2560,7 +2717,7 @@ impl Spreadsheet {
     /// Auto-fit row height to content (for multi-line text in future)
     pub fn auto_fit_row_height(&mut self, row: usize, cx: &mut Context<Self>) {
         // For now, just reset to default since we don't support multi-line
-        self.row_heights.remove(&row);
+        self.sheet_row_heights_mut().remove(&row);
         cx.notify();
     }
 
@@ -2630,12 +2787,24 @@ impl Spreadsheet {
     /// Auto-fit row height without notifying (for batch operations)
     fn auto_fit_row_height_no_notify(&mut self, row: usize) {
         // For now, just reset to default since we don't support multi-line
-        self.row_heights.remove(&row);
+        self.sheet_row_heights_mut().remove(&row);
     }
 
     /// Check if edit_value starts with = or + (formula indicator)
     pub fn is_formula_content(&self) -> bool {
         self.edit_value.starts_with('=') || self.edit_value.starts_with('+')
+    }
+
+    /// Check if grid navigation should be blocked (modal is open).
+    /// Use this in action handlers to prevent keyboard leaks to the grid.
+    ///
+    /// IMPORTANT: When adding a new modal mode:
+    /// 1. Add it to Mode::is_overlay() in mode.rs
+    /// 2. This method will then correctly block grid navigation
+    /// 3. For text-input modals, also add cursor handling in MoveLeft/MoveRight handlers
+    #[inline]
+    pub fn should_block_grid_navigation(&self) -> bool {
+        self.mode.is_overlay() || self.lua_console.visible
     }
 
     /// Calculate which borders to draw for a selected cell.
@@ -3042,6 +3211,8 @@ impl Spreadsheet {
         if let RewindPreviewState::On(session) = std::mem::take(&mut self.rewind_preview) {
             // Restore live focus (Option A: peek behavior)
             self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(session.live_focus.sheet_index); });
+            self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+            self.debug_assert_sheet_cache_sync(cx);  // Catch desync at preview exit
             self.view_state.selected = session.live_focus.selected;
             self.view_state.selection_end = session.live_focus.selection_end;
             self.view_state.scroll_row = session.live_focus.scroll_row;
@@ -3242,6 +3413,8 @@ impl Spreadsheet {
         self.workbook.update(cx, |wb, _| {
             *wb = plan.new_workbook;
         });
+        self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+        self.debug_assert_sheet_cache_sync(cx);  // Catch desync at rewind
         // Update base_workbook to match (this is now the canonical state)
         self.base_workbook = self.wb(cx).clone();
 
@@ -3478,6 +3651,16 @@ impl Render for Spreadsheet {
 
         // Cache window bounds for session snapshot (updated each render)
         self.cached_window_bounds = Some(window.window_bounds());
+
+        // Modal focus guard: when an overlay modal is open, grid navigation should be blocked.
+        // This assertion catches bugs where a modal is showing but mode isn't set correctly.
+        // If this fires, either lua_console.visible is true without matching mode, or
+        // you added a new modal that needs to be included in should_block_grid_navigation().
+        debug_assert!(
+            !self.lua_console.visible || self.should_block_grid_navigation(),
+            "Lua console visible but grid navigation not blocked - mode is {:?}",
+            self.mode
+        );
 
         // Update grid layout cache for hit-testing
         let menu_height = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };

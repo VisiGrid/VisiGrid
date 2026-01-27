@@ -22,6 +22,8 @@ impl Spreadsheet {
     /// - "New in This Window" menu item (if exposed)
     pub fn new_in_place(&mut self, cx: &mut Context<Self>) {
         self.wb_mut(cx, |wb| *wb = Workbook::new());
+        self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+        self.debug_assert_sheet_cache_sync(cx);
         self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
         self.rewind_preview = crate::app::RewindPreviewState::Off; // Reset preview state
         self.current_file = None;
@@ -94,6 +96,8 @@ impl Spreadsheet {
         match result {
             Ok(workbook) => {
                 self.wb_mut(cx, |wb| *wb = workbook);
+                self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+                self.debug_assert_sheet_cache_sync(cx);
                 self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
                 self.rewind_preview = crate::app::RewindPreviewState::Off;
                 self.import_result = None;
@@ -209,6 +213,8 @@ impl Spreadsheet {
                     Ok((workbook, mut result)) => {
                         // Atomic swap: replace entire workbook (wrap in Entity)
                         this.workbook = cx.new(|_| workbook);
+                        this.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+                        this.debug_assert_sheet_cache_sync(cx);
                         this.base_workbook = this.wb(cx).clone(); // Capture base state for replay
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
@@ -273,6 +279,8 @@ impl Spreadsheet {
                 let duration_ms = start_time.elapsed().as_millis();
 
                 self.wb_mut(cx, |wb| *wb = workbook);
+                self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+                self.debug_assert_sheet_cache_sync(cx);
                 self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
                 self.rewind_preview = crate::app::RewindPreviewState::Off;
                 self.import_filename = Some(filename.clone());
@@ -593,19 +601,28 @@ impl Spreadsheet {
     /// Note: Frozen panes will be added when that feature is implemented (see roadmap)
     fn build_export_layouts(&self, cx: &App) -> Vec<xlsx::ExportLayout> {
         let mut layouts = Vec::new();
+        let wb = self.wb(cx);
 
-        for _ in 0..self.wb(cx).sheet_count() {
+        for sheet_idx in 0..wb.sheet_count() {
             let mut layout = xlsx::ExportLayout::default();
 
-            // Copy column widths from the app state
-            // Note: We store these per-sheet in the future, but for now use current sheet's widths
-            for (col, width) in &self.col_widths {
-                layout.col_widths.insert(*col, *width);
-            }
+            // Get the sheet's ID for per-sheet storage lookup
+            if let Some(sheet) = wb.sheets().get(sheet_idx) {
+                let sheet_id = sheet.id;
 
-            // Row heights (if we track them)
-            for (row, height) in &self.row_heights {
-                layout.row_heights.insert(*row, *height);
+                // Copy column widths for this specific sheet
+                if let Some(sheet_widths) = self.col_widths.get(&sheet_id) {
+                    for (col, width) in sheet_widths {
+                        layout.col_widths.insert(*col, *width);
+                    }
+                }
+
+                // Copy row heights for this specific sheet
+                if let Some(sheet_heights) = self.row_heights.get(&sheet_id) {
+                    for (row, height) in sheet_heights {
+                        layout.row_heights.insert(*row, *height);
+                    }
+                }
             }
 
             // Frozen panes: Not yet implemented in VisiGrid (see roadmap)

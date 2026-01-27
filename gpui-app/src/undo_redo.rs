@@ -5,6 +5,8 @@
 //! - apply_undo_action() and apply_redo_action() helper methods
 //! - Handles all UndoAction variants: Values, Format, NamedRange*, Group, Rows*, Cols*, Sort
 
+use std::collections::HashMap;
+
 use gpui::*;
 
 use crate::app::Spreadsheet;
@@ -12,6 +14,17 @@ use crate::history::UndoAction;
 
 /// Maximum rows in the spreadsheet
 const NUM_ROWS: usize = 1_000_000;
+
+/// Convert column index to letter (0 = A, 25 = Z, 26 = AA)
+fn col_to_letter(col: usize) -> String {
+    if col < 26 {
+        ((b'A' + col as u8) as char).to_string()
+    } else {
+        let first = (b'A' + (col / 26 - 1) as u8) as char;
+        let second = (b'A' + (col % 26) as u8) as char;
+        format!("{}{}", first, second)
+    }
+}
 /// Maximum columns in the spreadsheet
 const NUM_COLS: usize = 16_384;
 
@@ -80,17 +93,18 @@ impl Spreadsheet {
                             sheet.delete_rows(at_row, count);
                         }
                     });
-                    // Shift row heights back up
-                    let heights_to_shift: Vec<_> = self.row_heights
+                    // Shift row heights back up (per-sheet)
+                    let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
+                    let heights_to_shift: Vec<_> = sheet_heights
                         .iter()
                         .filter(|(r, _)| **r >= at_row + count)
                         .map(|(r, h)| (*r, *h))
                         .collect();
                     for r in at_row..NUM_ROWS {
-                        self.row_heights.remove(&r);
+                        sheet_heights.remove(&r);
                     }
                     for (r, h) in heights_to_shift {
-                        self.row_heights.insert(r - count, h);
+                        sheet_heights.insert(r - count, h);
                     }
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} row(s)", count));
@@ -107,23 +121,24 @@ impl Spreadsheet {
                             }
                         }
                     });
-                    // Shift row heights down and restore deleted heights
-                    let heights_to_shift: Vec<_> = self.row_heights
+                    // Shift row heights down and restore deleted heights (per-sheet)
+                    let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
+                    let heights_to_shift: Vec<_> = sheet_heights
                         .iter()
                         .filter(|(r, _)| **r >= at_row)
                         .map(|(r, h)| (*r, *h))
                         .collect();
                     for (r, _) in &heights_to_shift {
-                        self.row_heights.remove(r);
+                        sheet_heights.remove(r);
                     }
                     for (r, h) in heights_to_shift {
                         if r + count < NUM_ROWS {
-                            self.row_heights.insert(r + count, h);
+                            sheet_heights.insert(r + count, h);
                         }
                     }
                     // Restore deleted row heights
                     for (r, h) in deleted_row_heights {
-                        self.row_heights.insert(r, h);
+                        sheet_heights.insert(r, h);
                     }
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: deleted {} row(s)", count));
@@ -135,17 +150,18 @@ impl Spreadsheet {
                             sheet.delete_cols(at_col, count);
                         }
                     });
-                    // Shift column widths back left
-                    let widths_to_shift: Vec<_> = self.col_widths
+                    // Shift column widths back left (per-sheet)
+                    let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
+                    let widths_to_shift: Vec<_> = sheet_widths
                         .iter()
                         .filter(|(c, _)| **c >= at_col + count)
                         .map(|(c, w)| (*c, *w))
                         .collect();
                     for c in at_col..NUM_COLS {
-                        self.col_widths.remove(&c);
+                        sheet_widths.remove(&c);
                     }
                     for (c, w) in widths_to_shift {
-                        self.col_widths.insert(c - count, w);
+                        sheet_widths.insert(c - count, w);
                     }
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} column(s)", count));
@@ -162,26 +178,50 @@ impl Spreadsheet {
                             }
                         }
                     });
-                    // Shift column widths right and restore deleted widths
-                    let widths_to_shift: Vec<_> = self.col_widths
+                    // Shift column widths right and restore deleted widths (per-sheet)
+                    let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
+                    let widths_to_shift: Vec<_> = sheet_widths
                         .iter()
                         .filter(|(c, _)| **c >= at_col)
                         .map(|(c, w)| (*c, *w))
                         .collect();
                     for (c, _) in &widths_to_shift {
-                        self.col_widths.remove(c);
+                        sheet_widths.remove(c);
                     }
                     for (c, w) in widths_to_shift {
                         if c + count < NUM_COLS {
-                            self.col_widths.insert(c + count, w);
+                            sheet_widths.insert(c + count, w);
                         }
                     }
                     // Restore deleted column widths
                     for (c, w) in deleted_col_widths {
-                        self.col_widths.insert(c, w);
+                        sheet_widths.insert(c, w);
                     }
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: deleted {} column(s)", count));
+                }
+                UndoAction::ColumnWidthSet { sheet_id, col, old, .. } => {
+                    // Undo: restore old width (or remove if was default)
+                    // Use SheetId directly (stable across sheet reorder/delete)
+                    let sheet_widths = self.col_widths.entry(sheet_id).or_insert_with(HashMap::new);
+                    if let Some(old_width) = old {
+                        sheet_widths.insert(col, old_width);
+                    } else {
+                        sheet_widths.remove(&col);
+                    }
+                    let col_letter = col_to_letter(col);
+                    self.status_message = Some(format!("Undo: column {} width", col_letter));
+                }
+                UndoAction::RowHeightSet { sheet_id, row, old, .. } => {
+                    // Undo: restore old height (or remove if was default)
+                    // Use SheetId directly (stable across sheet reorder/delete)
+                    let sheet_heights = self.row_heights.entry(sheet_id).or_insert_with(HashMap::new);
+                    if let Some(old_height) = old {
+                        sheet_heights.insert(row, old_height);
+                    } else {
+                        sheet_heights.remove(&row);
+                    }
+                    self.status_message = Some(format!("Undo: row {} height", row + 1));
                 }
                 UndoAction::SortApplied { previous_row_order, previous_sort_state, .. } => {
                     // Restore previous row order
@@ -338,17 +378,18 @@ impl Spreadsheet {
                         sheet.delete_rows(at_row, count);
                     }
                 });
-                // Shift row heights back up
-                let heights_to_shift: Vec<_> = self.row_heights
+                // Shift row heights back up (per-sheet)
+                let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
+                let heights_to_shift: Vec<_> = sheet_heights
                     .iter()
                     .filter(|(r, _)| **r >= at_row + count)
                     .map(|(r, h)| (*r, *h))
                     .collect();
                 for r in at_row..NUM_ROWS {
-                    self.row_heights.remove(&r);
+                    sheet_heights.remove(&r);
                 }
                 for (r, h) in heights_to_shift {
-                    self.row_heights.insert(r - count, h);
+                    sheet_heights.insert(r - count, h);
                 }
                 self.bump_cells_rev();
             }
@@ -362,22 +403,23 @@ impl Spreadsheet {
                         }
                     }
                 });
-                // Shift row heights down and restore deleted heights
-                let heights_to_shift: Vec<_> = self.row_heights
+                // Shift row heights down and restore deleted heights (per-sheet)
+                let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
+                let heights_to_shift: Vec<_> = sheet_heights
                     .iter()
                     .filter(|(r, _)| **r >= at_row)
                     .map(|(r, h)| (*r, *h))
                     .collect();
                 for (r, _) in &heights_to_shift {
-                    self.row_heights.remove(r);
+                    sheet_heights.remove(r);
                 }
                 for (r, h) in heights_to_shift {
                     if r + count < NUM_ROWS {
-                        self.row_heights.insert(r + count, h);
+                        sheet_heights.insert(r + count, h);
                     }
                 }
                 for (r, h) in deleted_row_heights {
-                    self.row_heights.insert(r, h);
+                    sheet_heights.insert(r, h);
                 }
                 self.bump_cells_rev();
             }
@@ -387,17 +429,18 @@ impl Spreadsheet {
                         sheet.delete_cols(at_col, count);
                     }
                 });
-                // Shift column widths back left
-                let widths_to_shift: Vec<_> = self.col_widths
+                // Shift column widths back left (per-sheet)
+                let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
+                let widths_to_shift: Vec<_> = sheet_widths
                     .iter()
                     .filter(|(c, _)| **c >= at_col + count)
                     .map(|(c, w)| (*c, *w))
                     .collect();
                 for c in at_col..NUM_COLS {
-                    self.col_widths.remove(&c);
+                    sheet_widths.remove(&c);
                 }
                 for (c, w) in widths_to_shift {
-                    self.col_widths.insert(c - count, w);
+                    sheet_widths.insert(c - count, w);
                 }
                 self.bump_cells_rev();
             }
@@ -411,24 +454,43 @@ impl Spreadsheet {
                         }
                     }
                 });
-                // Shift column widths right and restore deleted widths
-                let widths_to_shift: Vec<_> = self.col_widths
+                // Shift column widths right and restore deleted widths (per-sheet)
+                let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
+                let widths_to_shift: Vec<_> = sheet_widths
                     .iter()
                     .filter(|(c, _)| **c >= at_col)
                     .map(|(c, w)| (*c, *w))
                     .collect();
                 for (c, _) in &widths_to_shift {
-                    self.col_widths.remove(c);
+                    sheet_widths.remove(c);
                 }
                 for (c, w) in widths_to_shift {
                     if c + count < NUM_COLS {
-                        self.col_widths.insert(c + count, w);
+                        sheet_widths.insert(c + count, w);
                     }
                 }
                 for (c, w) in deleted_col_widths {
-                    self.col_widths.insert(c, w);
+                    sheet_widths.insert(c, w);
                 }
                 self.bump_cells_rev();
+            }
+            UndoAction::ColumnWidthSet { sheet_id, col, old, .. } => {
+                // Undo: restore old width (or remove if was default)
+                let sheet_widths = self.col_widths.entry(sheet_id).or_insert_with(HashMap::new);
+                if let Some(old_width) = old {
+                    sheet_widths.insert(col, old_width);
+                } else {
+                    sheet_widths.remove(&col);
+                }
+            }
+            UndoAction::RowHeightSet { sheet_id, row, old, .. } => {
+                // Undo: restore old height (or remove if was default)
+                let sheet_heights = self.row_heights.entry(sheet_id).or_insert_with(HashMap::new);
+                if let Some(old_height) = old {
+                    sheet_heights.insert(row, old_height);
+                } else {
+                    sheet_heights.remove(&row);
+                }
             }
             UndoAction::SortApplied { previous_row_order, previous_sort_state, .. } => {
                 self.row_view.apply_sort(previous_row_order);
@@ -557,18 +619,19 @@ impl Spreadsheet {
                 self.sheet_mut(sheet_index, cx, |sheet| {
                     sheet.insert_rows(at_row, count);
                 });
-                // Shift row heights down (same as insert_rows in main code)
-                let heights_to_shift: Vec<_> = self.row_heights
+                // Shift row heights down (per-sheet)
+                let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
+                let heights_to_shift: Vec<_> = sheet_heights
                     .iter()
                     .filter(|(r, _)| **r >= at_row)
                     .map(|(r, h)| (*r, *h))
                     .collect();
                 for (r, _) in &heights_to_shift {
-                    self.row_heights.remove(r);
+                    sheet_heights.remove(r);
                 }
                 for (r, h) in heights_to_shift {
                     if r + count < NUM_ROWS {
-                        self.row_heights.insert(r + count, h);
+                        sheet_heights.insert(r + count, h);
                     }
                 }
                 self.bump_cells_rev();
@@ -577,17 +640,18 @@ impl Spreadsheet {
                 self.sheet_mut(sheet_index, cx, |sheet| {
                     sheet.delete_rows(at_row, count);
                 });
-                // Shift row heights up (same as delete_rows in main code)
-                let heights_to_shift: Vec<_> = self.row_heights
+                // Shift row heights up (per-sheet)
+                let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
+                let heights_to_shift: Vec<_> = sheet_heights
                     .iter()
                     .filter(|(r, _)| **r >= at_row + count)
                     .map(|(r, h)| (*r, *h))
                     .collect();
                 for r in at_row..NUM_ROWS {
-                    self.row_heights.remove(&r);
+                    sheet_heights.remove(&r);
                 }
                 for (r, h) in heights_to_shift {
-                    self.row_heights.insert(r - count, h);
+                    sheet_heights.insert(r - count, h);
                 }
                 self.bump_cells_rev();
             }
@@ -595,18 +659,19 @@ impl Spreadsheet {
                 self.sheet_mut(sheet_index, cx, |sheet| {
                     sheet.insert_cols(at_col, count);
                 });
-                // Shift column widths right (same as insert_cols in main code)
-                let widths_to_shift: Vec<_> = self.col_widths
+                // Shift column widths right (per-sheet)
+                let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
+                let widths_to_shift: Vec<_> = sheet_widths
                     .iter()
                     .filter(|(c, _)| **c >= at_col)
                     .map(|(c, w)| (*c, *w))
                     .collect();
                 for (c, _) in &widths_to_shift {
-                    self.col_widths.remove(c);
+                    sheet_widths.remove(c);
                 }
                 for (c, w) in widths_to_shift {
                     if c + count < NUM_COLS {
-                        self.col_widths.insert(c + count, w);
+                        sheet_widths.insert(c + count, w);
                     }
                 }
                 self.bump_cells_rev();
@@ -615,19 +680,38 @@ impl Spreadsheet {
                 self.sheet_mut(sheet_index, cx, |sheet| {
                     sheet.delete_cols(at_col, count);
                 });
-                // Shift column widths left (same as delete_cols in main code)
-                let widths_to_shift: Vec<_> = self.col_widths
+                // Shift column widths left (per-sheet)
+                let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
+                let widths_to_shift: Vec<_> = sheet_widths
                     .iter()
                     .filter(|(c, _)| **c >= at_col + count)
                     .map(|(c, w)| (*c, *w))
                     .collect();
                 for c in at_col..NUM_COLS {
-                    self.col_widths.remove(&c);
+                    sheet_widths.remove(&c);
                 }
                 for (c, w) in widths_to_shift {
-                    self.col_widths.insert(c - count, w);
+                    sheet_widths.insert(c - count, w);
                 }
                 self.bump_cells_rev();
+            }
+            UndoAction::ColumnWidthSet { sheet_id, col, new, .. } => {
+                // Redo: apply new width (or remove if resetting to default)
+                let sheet_widths = self.col_widths.entry(sheet_id).or_insert_with(HashMap::new);
+                if let Some(new_width) = new {
+                    sheet_widths.insert(col, new_width);
+                } else {
+                    sheet_widths.remove(&col);
+                }
+            }
+            UndoAction::RowHeightSet { sheet_id, row, new, .. } => {
+                // Redo: apply new height (or remove if resetting to default)
+                let sheet_heights = self.row_heights.entry(sheet_id).or_insert_with(HashMap::new);
+                if let Some(new_height) = new {
+                    sheet_heights.insert(row, new_height);
+                } else {
+                    sheet_heights.remove(&row);
+                }
             }
             UndoAction::SortApplied { new_row_order, new_sort_state, .. } => {
                 self.row_view.apply_sort(new_row_order);
@@ -761,18 +845,19 @@ impl Spreadsheet {
                             sheet.insert_rows(at_row, count);
                         }
                     });
-                    // Shift row heights down
-                    let heights_to_shift: Vec<_> = self.row_heights
+                    // Shift row heights down (per-sheet)
+                    let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
+                    let heights_to_shift: Vec<_> = sheet_heights
                         .iter()
                         .filter(|(r, _)| **r >= at_row)
                         .map(|(r, h)| (*r, *h))
                         .collect();
                     for (r, _) in &heights_to_shift {
-                        self.row_heights.remove(r);
+                        sheet_heights.remove(r);
                     }
                     for (r, h) in heights_to_shift {
                         if r + count < NUM_ROWS {
-                            self.row_heights.insert(r + count, h);
+                            sheet_heights.insert(r + count, h);
                         }
                     }
                     self.bump_cells_rev();
@@ -785,17 +870,18 @@ impl Spreadsheet {
                             sheet.delete_rows(at_row, count);
                         }
                     });
-                    // Shift row heights up
-                    let heights_to_shift: Vec<_> = self.row_heights
+                    // Shift row heights up (per-sheet)
+                    let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
+                    let heights_to_shift: Vec<_> = sheet_heights
                         .iter()
                         .filter(|(r, _)| **r >= at_row + count)
                         .map(|(r, h)| (*r, *h))
                         .collect();
                     for r in at_row..NUM_ROWS {
-                        self.row_heights.remove(&r);
+                        sheet_heights.remove(&r);
                     }
                     for (r, h) in heights_to_shift {
-                        self.row_heights.insert(r - count, h);
+                        sheet_heights.insert(r - count, h);
                     }
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Redo: delete {} row(s)", count));
@@ -807,18 +893,19 @@ impl Spreadsheet {
                             sheet.insert_cols(at_col, count);
                         }
                     });
-                    // Shift column widths right
-                    let widths_to_shift: Vec<_> = self.col_widths
+                    // Shift column widths right (per-sheet)
+                    let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
+                    let widths_to_shift: Vec<_> = sheet_widths
                         .iter()
                         .filter(|(c, _)| **c >= at_col)
                         .map(|(c, w)| (*c, *w))
                         .collect();
                     for (c, _) in &widths_to_shift {
-                        self.col_widths.remove(c);
+                        sheet_widths.remove(c);
                     }
                     for (c, w) in widths_to_shift {
                         if c + count < NUM_COLS {
-                            self.col_widths.insert(c + count, w);
+                            sheet_widths.insert(c + count, w);
                         }
                     }
                     self.bump_cells_rev();
@@ -831,20 +918,42 @@ impl Spreadsheet {
                             sheet.delete_cols(at_col, count);
                         }
                     });
-                    // Shift column widths left
-                    let widths_to_shift: Vec<_> = self.col_widths
+                    // Shift column widths left (per-sheet)
+                    let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
+                    let widths_to_shift: Vec<_> = sheet_widths
                         .iter()
                         .filter(|(c, _)| **c >= at_col + count)
                         .map(|(c, w)| (*c, *w))
                         .collect();
                     for c in at_col..NUM_COLS {
-                        self.col_widths.remove(&c);
+                        sheet_widths.remove(&c);
                     }
                     for (c, w) in widths_to_shift {
-                        self.col_widths.insert(c - count, w);
+                        sheet_widths.insert(c - count, w);
                     }
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Redo: delete {} column(s)", count));
+                }
+                UndoAction::ColumnWidthSet { sheet_id, col, new, .. } => {
+                    // Redo: apply new width (or remove if resetting to default)
+                    let sheet_widths = self.col_widths.entry(sheet_id).or_insert_with(HashMap::new);
+                    if let Some(new_width) = new {
+                        sheet_widths.insert(col, new_width);
+                    } else {
+                        sheet_widths.remove(&col);
+                    }
+                    let col_letter = col_to_letter(col);
+                    self.status_message = Some(format!("Redo: column {} width", col_letter));
+                }
+                UndoAction::RowHeightSet { sheet_id, row, new, .. } => {
+                    // Redo: apply new height (or remove if resetting to default)
+                    let sheet_heights = self.row_heights.entry(sheet_id).or_insert_with(HashMap::new);
+                    if let Some(new_height) = new {
+                        sheet_heights.insert(row, new_height);
+                    } else {
+                        sheet_heights.remove(&row);
+                    }
+                    self.status_message = Some(format!("Redo: row {} height", row + 1));
                 }
                 UndoAction::SortApplied { new_row_order, new_sort_state, .. } => {
                     // Re-apply the sort

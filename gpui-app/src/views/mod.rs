@@ -166,6 +166,19 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 cx.notify();
                 return;
             }
+            // Modal modes: capture arrow keys, don't leak to grid
+            // List-only modals (no text input): arrows are no-op for left/right
+            if matches!(this.mode, Mode::ThemePicker | Mode::FontPicker) {
+                return;  // No horizontal navigation in vertical lists
+            }
+            // Text input modals: move cursor left in the input field
+            if matches!(this.mode, Mode::Command | Mode::GoTo | Mode::Find |
+                Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription |
+                Mode::ExtractNamedRange | Mode::License) {
+                // These modes handle cursor movement in their on_key_down handlers
+                // Just block the event from reaching the grid
+                return;
+            }
             if this.mode.is_formula() {
                 if this.formula_is_caret_mode() {
                     // Caret mode: move cursor in formula text
@@ -187,6 +200,19 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             if this.lua_console.visible {
                 this.lua_console.cursor_right();
                 cx.notify();
+                return;
+            }
+            // Modal modes: capture arrow keys, don't leak to grid
+            // List-only modals (no text input): arrows are no-op for left/right
+            if matches!(this.mode, Mode::ThemePicker | Mode::FontPicker) {
+                return;  // No horizontal navigation in vertical lists
+            }
+            // Text input modals: move cursor right in the input field
+            if matches!(this.mode, Mode::Command | Mode::GoTo | Mode::Find |
+                Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription |
+                Mode::ExtractNamedRange | Mode::License) {
+                // These modes handle cursor movement in their on_key_down handlers
+                // Just block the event from reaching the grid
                 return;
             }
             if this.mode.is_formula() {
@@ -711,6 +737,21 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.goto_backspace(cx);
             } else if this.mode == Mode::Find {
                 this.find_backspace(cx);
+            } else if this.mode == Mode::ThemePicker {
+                this.theme_picker_backspace(cx);
+            } else if this.mode == Mode::FontPicker {
+                this.font_picker_backspace(cx);
+            } else if this.mode == Mode::RenameSymbol {
+                this.rename_symbol_backspace(cx);
+            } else if this.mode == Mode::EditDescription {
+                this.edit_description_backspace(cx);
+            } else if this.mode == Mode::ExtractNamedRange {
+                match this.extract_focus {
+                    CreateNameFocus::Name => this.extract_name_backspace(cx),
+                    CreateNameFocus::Description => this.extract_description_backspace(cx),
+                }
+            } else if this.mode == Mode::License {
+                this.license_backspace(cx);
             } else if this.mode.is_editing() {
                 this.backspace(cx);
                 this.update_edit_scroll(window);
@@ -790,6 +831,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &ToggleVerifiedMode, _, cx| {
             this.toggle_verified_mode(cx);
+        }))
+        .on_action(cx.listener(|this, _: &Recalculate, _, cx| {
+            this.recalculate(cx);
         }))
         // Zoom
         .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
@@ -1034,6 +1078,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &GoToCell, _, cx| {
             this.show_goto(cx);
         }))
+        // Jump to active cell (Ctrl+Backspace)
+        .on_action(cx.listener(|this, _: &JumpToActiveCell, _, cx| {
+            this.ensure_visible(cx);
+            cx.notify();
+        }))
         // Find dialog
         .on_action(cx.listener(|this, _: &FindInCells, _, cx| {
             this.show_find(cx);
@@ -1242,11 +1291,14 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.apply_menu_scope(MenuCategory::Data, cx);
             }
         }))
-        .on_action(cx.listener(|this, _: &AltHelp, _, cx| {
-            // Alt+H = Home (formatting) in modern Excel, not Help
-            // Help is accessible via F1 or Command Palette
+        .on_action(cx.listener(|this, _: &AltTools, _, cx| {
             if this.mode == Mode::Navigation || this.mode == Mode::Command {
-                this.apply_menu_scope(MenuCategory::Format, cx);
+                this.apply_menu_scope(MenuCategory::Tools, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &AltHelp, _, cx| {
+            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+                this.apply_menu_scope(MenuCategory::Help, cx);
             }
         }))
         // Sheet navigation
@@ -2113,9 +2165,17 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.lua_console.resizing = false;
                 cx.notify();
             }
-            if this.resizing_col.is_some() || this.resizing_row.is_some() {
-                this.resizing_col = None;
-                this.resizing_row = None;
+            // End column/row resize and record to history (coalescing)
+            if let Some(col) = this.resizing_col.take() {
+                // Record the sizing change to history (coalesces all drag events into one entry)
+                let old = this.resize_start_original.take();
+                this.record_col_width_change(col, old, cx);
+                cx.notify();
+            }
+            if let Some(row) = this.resizing_row.take() {
+                // Record the sizing change to history (coalesces all drag events into one entry)
+                let old = this.resize_start_original.take();
+                this.record_row_height_change(row, old, cx);
                 cx.notify();
             }
             // End header selection drag
@@ -2472,9 +2532,31 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when_some(validation_dropdown_view::render_validation_dropdown(app, cx), |div, dropdown| {
             div.child(dropdown)
         })
-        // Inspector panel (right-side drawer)
-        .when(show_inspector, |div| {
-            div.child(inspector_panel::render_inspector_panel(app, cx))
+        // Inspector panel (right-side drawer) with click-outside-to-close backdrop
+        // The backdrop captures all mouse events to prevent grid interaction
+        .when(show_inspector, |d| {
+            d.child(
+                gpui::div()
+                    .id("inspector-backdrop")
+                    .absolute()
+                    .inset_0()
+                    // Transparent background makes the element "hit testable" - without this,
+                    // GPUI may pass events through to elements behind it
+                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
+                    // Click backdrop to close inspector (outside the panel)
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        // Stop propagation first to prevent grid from receiving this event
+                        cx.stop_propagation();
+                        this.inspector_visible = false;
+                        cx.notify();
+                    }))
+                    // Also stop mouse up to prevent any grid selection from completing
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    // The panel itself stops propagation so clicks on it don't close
+                    .child(inspector_panel::render_inspector_panel(app, cx))
+            )
         })
         // NOTE: Autocomplete, signature help, and error banner popups are now rendered
         // in the grid overlay layer (grid.rs::render_popup_overlay) where they can be

@@ -37,9 +37,9 @@ pub fn render_inspector_panel(app: &mut Spreadsheet, cx: &mut Context<Spreadshee
         .flex()
         .flex_col()
         .overflow_hidden()
-        // Capture mouse events to prevent click-through to grid
-        .on_mouse_down(MouseButton::Left, |_, _, _| {
-            // Absorb click - don't propagate to grid
+        // Capture mouse events to prevent click-through to grid and backdrop
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
         })
         // Clear hover highlight when mouse leaves inspector panel
         .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
@@ -3098,6 +3098,7 @@ fn render_history_tab(
                         // Switch to sheet if needed
                         if sheet_idx != this.sheet_index(cx) {
                             this.wb_mut(cx, |wb| wb.set_active_sheet(sheet_idx));
+                            this.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                         }
                         // Select the full affected range
                         this.view_state.selected = (start_row, start_col);
@@ -3470,6 +3471,7 @@ fn render_history_entry(
                                     if let Some((si, sr, sc, er, ec)) = jump_range {
                                         if si != this.sheet_index(cx) {
                                             this.wb_mut(cx, |wb| wb.set_active_sheet(si));
+                                            this.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                                         }
                                         this.view_state.selected = (sr, sc);
                                         if sr != er || sc != ec {

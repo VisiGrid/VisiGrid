@@ -81,18 +81,19 @@ impl Spreadsheet {
         });
 
         // Shift row heights down (from bottom to avoid overwriting)
-        let heights_to_shift: Vec<_> = self.row_heights
+        let sheet_heights = self.sheet_row_heights_mut();
+        let heights_to_shift: Vec<_> = sheet_heights
             .iter()
             .filter(|(r, _)| **r >= at_row)
             .map(|(r, h)| (*r, *h))
             .collect();
         for (r, _) in &heights_to_shift {
-            self.row_heights.remove(r);
+            sheet_heights.remove(r);
         }
         for (r, h) in heights_to_shift {
             let new_row = r + count;
             if new_row < NUM_ROWS {
-                self.row_heights.insert(new_row, h);
+                sheet_heights.insert(new_row, h);
             }
         }
 
@@ -127,26 +128,27 @@ impl Spreadsheet {
             }
         }
 
-        // Capture row heights for deleted rows
-        let deleted_row_heights: Vec<_> = self.row_heights
+        // Capture row heights for deleted rows (per-sheet)
+        let sheet_heights = self.sheet_row_heights_mut();
+        let deleted_row_heights: Vec<_> = sheet_heights
             .iter()
             .filter(|(r, _)| **r >= at_row && **r < at_row + count)
             .map(|(r, h)| (*r, *h))
             .collect();
 
         // Remove heights for deleted rows and shift remaining up
-        let heights_to_shift: Vec<_> = self.row_heights
+        let heights_to_shift: Vec<_> = sheet_heights
             .iter()
             .filter(|(r, _)| **r >= at_row + count)
             .map(|(r, h)| (*r, *h))
             .collect();
         // Remove all affected heights
         for r in at_row..NUM_ROWS {
-            self.row_heights.remove(&r);
+            sheet_heights.remove(&r);
         }
         // Re-insert shifted heights
         for (r, h) in heights_to_shift {
-            self.row_heights.insert(r - count, h);
+            sheet_heights.insert(r - count, h);
         }
 
         // Perform the delete
@@ -186,19 +188,20 @@ impl Spreadsheet {
             sheet.insert_cols(at_col, count);
         });
 
-        // Shift column widths right (from right to avoid overwriting)
-        let widths_to_shift: Vec<_> = self.col_widths
+        // Shift column widths right (from right to avoid overwriting) - per-sheet
+        let sheet_widths = self.sheet_col_widths_mut();
+        let widths_to_shift: Vec<_> = sheet_widths
             .iter()
             .filter(|(c, _)| **c >= at_col)
             .map(|(c, w)| (*c, *w))
             .collect();
         for (c, _) in &widths_to_shift {
-            self.col_widths.remove(c);
+            sheet_widths.remove(c);
         }
         for (c, w) in widths_to_shift {
             let new_col = c + count;
             if new_col < NUM_COLS {
-                self.col_widths.insert(new_col, w);
+                sheet_widths.insert(new_col, w);
             }
         }
 
@@ -233,26 +236,27 @@ impl Spreadsheet {
             }
         }
 
-        // Capture column widths for deleted columns
-        let deleted_col_widths: Vec<_> = self.col_widths
+        // Capture column widths for deleted columns (per-sheet)
+        let sheet_widths = self.sheet_col_widths_mut();
+        let deleted_col_widths: Vec<_> = sheet_widths
             .iter()
             .filter(|(c, _)| **c >= at_col && **c < at_col + count)
             .map(|(c, w)| (*c, *w))
             .collect();
 
         // Remove widths for deleted columns and shift remaining left
-        let widths_to_shift: Vec<_> = self.col_widths
+        let widths_to_shift: Vec<_> = sheet_widths
             .iter()
             .filter(|(c, _)| **c >= at_col + count)
             .map(|(c, w)| (*c, *w))
             .collect();
         // Remove all affected widths
         for c in at_col..NUM_COLS {
-            self.col_widths.remove(&c);
+            sheet_widths.remove(&c);
         }
         // Re-insert shifted widths
         for (c, w) in widths_to_shift {
-            self.col_widths.insert(c - count, w);
+            sheet_widths.insert(c - count, w);
         }
 
         // Perform the delete

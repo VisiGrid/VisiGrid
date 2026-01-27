@@ -15,6 +15,7 @@ actions!(navigation, [
     PageUp,
     PageDown,
     GoToCell,
+    JumpToActiveCell,  // Ctrl+Backspace: Scroll view to show active cell
     FindInCells,
     FindNext,
     FindPrev,
@@ -126,6 +127,7 @@ actions!(view, [
     ToggleFormulaView,
     ToggleShowZeros,
     ToggleVerifiedMode, // Toggle verified/deterministic recalc mode
+    Recalculate,        // F9: Force full recalculation (Excel muscle memory)
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -230,13 +232,15 @@ actions!(palette, [
 
 // Alt accelerator actions (open Command Palette scoped to menu)
 // These are opt-in on macOS via settings. On Windows/Linux, native Alt menus exist.
+// Key mappings match Excel ribbon tabs: A=Data, E=Edit, F=File, V=View, T=Tools
 actions!(accelerators, [
     AltFile,    // Alt+F - opens palette scoped to File commands
     AltEdit,    // Alt+E - opens palette scoped to Edit commands
     AltView,    // Alt+V - opens palette scoped to View commands
     AltFormat,  // Alt+O - opens palette scoped to Format commands (legacy Excel)
-    AltData,    // Alt+D - opens palette scoped to Data commands
-    AltHelp,    // Alt+H - opens palette scoped to Home/Format (modern Excel 2010+)
+    AltData,    // Alt+A - opens palette scoped to Data commands (Excel ribbon: Alt+A)
+    AltTools,   // Alt+T - opens palette scoped to Tools (trace, explain, audit)
+    AltHelp,    // Alt+H - opens palette scoped to Help
 ]);
 
 // Default app prompt actions (macOS title bar chip)

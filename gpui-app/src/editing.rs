@@ -277,6 +277,37 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Force full recalculation of all formulas (F9 - Excel muscle memory).
+    ///
+    /// In Excel, F9 recalculates all formulas in all open workbooks.
+    /// VisiGrid uses automatic recalc, so this is primarily useful for:
+    /// - Refreshing volatile functions (NOW, TODAY, RAND, etc.)
+    /// - Forcing recalc after external data changes
+    /// - Verifying formula results match expectations
+    pub fn recalculate(&mut self, cx: &mut Context<Self>) {
+        self.in_smoke_recalc = true;
+        let report = self.wb_mut(cx, |wb| wb.recompute_full_ordered());
+        self.in_smoke_recalc = false;
+
+        // Build informative status message
+        let cells = report.cells_recomputed;
+        let ms = report.duration_ms;
+        let verified_suffix = if self.verified_mode { " · Verified" } else { "" };
+        let msg = if cells == 0 {
+            format!("Recalculated · no formulas{}", verified_suffix)
+        } else if ms == 0 {
+            format!("Recalculated · {} cells · <1 ms{}", cells, verified_suffix)
+        } else {
+            format!("Recalculated · {} cells · {} ms{}", cells, ms, verified_suffix)
+        };
+        self.status_message = Some(msg);
+
+        if self.verified_mode {
+            self.last_recalc_report = Some(report);
+        }
+        cx.notify();
+    }
+
     /// Commit edit and move right (Tab, or Right arrow in Edit mode)
     ///
     /// # Commit-on-Arrow Policy (Excel-like fast data entry)

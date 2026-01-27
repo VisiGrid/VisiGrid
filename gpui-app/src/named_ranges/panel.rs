@@ -151,16 +151,24 @@ impl Spreadsheet {
 
         let target_info = self.wb(cx).get_named_range(name).map(|nr| {
             match &nr.target {
-                NamedRangeTarget::Cell { row, col, .. } => {
-                    (*row, *col, *row, *col, nr.reference_string())
+                NamedRangeTarget::Cell { sheet, row, col } => {
+                    (*sheet, *row, *col, *row, *col, nr.reference_string())
                 }
-                NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => {
-                    (*start_row, *start_col, *end_row, *end_col, nr.reference_string())
+                NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
+                    (*sheet, *start_row, *start_col, *end_row, *end_col, nr.reference_string())
                 }
             }
         });
 
-        if let Some((start_row, start_col, end_row, end_col, ref_str)) = target_info {
+        if let Some((sheet_idx, start_row, start_col, end_row, end_col, ref_str)) = target_info {
+            // Switch to target sheet if different
+            let current_sheet = self.sheet_index(cx);
+            if sheet_idx != current_sheet {
+                self.wb_mut(cx, |wb| wb.set_active_sheet(sheet_idx));
+                self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+                self.debug_assert_sheet_cache_sync(cx);
+            }
+
             // Select the whole range
             self.view_state.selected = (start_row, start_col);
             if start_row == end_row && start_col == end_col {

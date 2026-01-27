@@ -91,6 +91,11 @@ pub fn render_grid(
     cx: &mut Context<Spreadsheet>,
     pane_side: Option<SplitSide>,
 ) -> impl IntoElement {
+    // Verify cached_sheet_id is in sync (debug builds only)
+    // This catches desync bugs early - if this fires, a code path changed
+    // the active sheet without calling update_cached_sheet_id().
+    app.debug_assert_sheet_cache_sync(cx);
+
     // Get view state based on which pane we're rendering
     let view_state = get_pane_view_state(app, pane_side);
     let scroll_row = view_state.scroll_row;
@@ -149,6 +154,8 @@ pub fn render_grid(
                         })
                     )
             )
+            // Text spill overlay - draws overflowing text above cell backgrounds
+            .child(render_text_spill_overlay(app, window, cx, pane_side))
             // Dashed borders overlay for formula references (above cells, below popups)
             .child(render_formula_ref_borders(app, pane_side))
             // Popup overlay layer - positioned relative to grid, not window chrome
@@ -273,6 +280,8 @@ pub fn render_grid(
                         )
                 )
         )
+        // Text spill overlay - draws overflowing text above cell backgrounds
+        .child(render_text_spill_overlay(app, window, cx, pane_side))
         // Dashed borders overlay for formula references (above cells, below popups)
         .child(render_formula_ref_borders(app, pane_side))
         // Popup overlay layer - positioned relative to grid, not window chrome
@@ -404,6 +413,10 @@ fn render_cell(
     let cell_row = view_row;  // For UI interactions (click, selection)
     let cell_col = col;
 
+    // NOTE: Text spillover is rendered in a separate overlay pass (render_text_spill_overlay)
+    // to avoid z-order issues where adjacent cells' backgrounds cover the spilled text.
+    // Cells always clip their own content; spill is drawn on top of all cell backgrounds.
+
     // Determine border color based on cell state
     // Precedence: selection > ref_target > spill states > formula refs > gridlines
     let border_color = if has_spill_error {
@@ -425,7 +438,7 @@ fn render_cell(
         .size_full()
         .flex()
         .px_1()
-        .overflow_hidden()
+        .overflow_hidden()  // Always clip; spill is rendered in overlay layer
         .bg(cell_base_background(app, is_editing, format.background_color))
         .border_color(border_color);
 
@@ -860,37 +873,89 @@ fn render_cell(
         }
     } else {
         // Not editing - show value with formatting using StyledText
-        let text_content: SharedString = value.into();
+        // Text spillover is handled by render_text_spill_overlay() in a separate pass.
+        // If this cell will be rendered by the spill overlay, skip text here to avoid double-draw.
+        let use_spill_overlay = should_use_spill_overlay(
+            data_row,
+            col,
+            &value,
+            col_width,
+            format.alignment,
+            is_selected,
+            is_active,
+            is_editing,
+            app,
+            window,
+            cx,
+        );
 
-        // Check if any formatting is applied
-        let has_formatting = format.bold || format.italic || format.underline;
+        if !use_spill_overlay {
+            let text_content: SharedString = value.clone().into();
 
-        if has_formatting {
-            // Get base text style from window and apply cell formatting
-            let mut text_style = window.text_style();
-            text_style.color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
+            // Check if any formatting is applied
+            let has_formatting = format.bold || format.italic || format.underline;
 
-            // Note: Bold/italic font variants may not render on Linux due to gpui limitations
-            // with cosmic-text font selection. Underline works because it's drawn separately.
-            // See: https://github.com/zed-industries/zed - Linux text system TODOs
-            if format.bold {
-                text_style.font_weight = FontWeight::BOLD;
+            if has_formatting {
+                // Get base text style from window and apply cell formatting
+                let mut text_style = window.text_style();
+                text_style.color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
+
+                // Note: Bold/italic font variants may not render on Linux due to gpui limitations
+                // with cosmic-text font selection. Underline works because it's drawn separately.
+                // See: https://github.com/zed-industries/zed - Linux text system TODOs
+                if format.bold {
+                    text_style.font_weight = FontWeight::BOLD;
+                }
+                if format.italic {
+                    text_style.font_style = FontStyle::Italic;
+                }
+                if format.underline {
+                    text_style.underline = Some(UnderlineStyle {
+                        thickness: px(1.),
+                        ..Default::default()
+                    });
+                }
+
+                cell = cell.child(StyledText::new(text_content).with_default_highlights(&text_style, []));
+            } else {
+                // No formatting - just add text directly
+                cell = cell.child(text_content);
             }
-            if format.italic {
-                text_style.font_style = FontStyle::Italic;
-            }
-            if format.underline {
-                text_style.underline = Some(UnderlineStyle {
-                    thickness: px(1.),
-                    ..Default::default()
-                });
-            }
 
-            cell = cell.child(StyledText::new(text_content).with_default_highlights(&text_style, []));
-        } else {
-            // No formatting - just add text directly
-            cell = cell.child(text_content);
+            // Show ellipsis indicator when text is clipped (overflows but doesn't spill).
+            // This makes it clear the text is truncated, not missing.
+            // Excel-accurate: only left-aligned text spills, center/right is clipped.
+            //
+            // Conditions for ellipsis:
+            // - Text overflows cell width (is_text_overflow)
+            // - Cell is NOT in edit mode (already true - we're in the else branch)
+            // - Spill is NOT active (already true - we're in !use_spill_overlay block)
+            let is_clipped = is_text_overflow(&value, col_width, app, window);
+            if is_clipped {
+                // Ellipsis with cell background for fade effect, text at 70% opacity for visibility
+                let bg = cell_base_background(app, is_editing, format.background_color);
+                let text_color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
+                let ellipsis_color = text_color.opacity(0.7); // Visible but subtle
+
+                cell = cell.child(
+                    div()
+                        .absolute()
+                        .right(px(1.0))  // Inside border
+                        .top(px(1.0))
+                        .bottom(px(1.0))
+                        .w(px(14.0))
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .pr(px(2.0))
+                        .bg(bg)  // Fade effect using cell background
+                        .text_color(ellipsis_color)
+                        .text_size(px(10.0))
+                        .child("…")
+                );
+            }
         }
+        // If use_spill_overlay is true, text is rendered by render_text_spill_overlay() instead
     }
 
     // Add hint badge overlay when in hint mode
@@ -1032,6 +1097,191 @@ fn render_cell(
     }
 
     wrapper
+}
+
+/// Resolve alignment for rendering, applying Excel-style General rules.
+/// This MUST be used by both normal cell rendering and spill overlay to ensure consistency.
+///
+/// Excel rules:
+/// - Explicit Left/Center/Right: use as-is
+/// - General: text → Left, numbers/dates → Right
+#[inline]
+fn resolved_alignment(alignment: Alignment, is_number: bool) -> Alignment {
+    match alignment {
+        Alignment::General => {
+            if is_number {
+                Alignment::Right
+            } else {
+                Alignment::Left
+            }
+        }
+        explicit => explicit,
+    }
+}
+
+/// Check if a cell's alignment allows text spillover.
+/// Only left-aligned text spills rightward. Center and right-aligned text does not spill.
+/// General alignment spills only for non-numeric values (text left-aligns, numbers right-align).
+#[inline]
+fn should_alignment_spill(alignment: Alignment, is_number: bool) -> bool {
+    match resolved_alignment(alignment, is_number) {
+        Alignment::Left => true,
+        Alignment::Center | Alignment::Right | Alignment::General => false,
+    }
+}
+
+/// Calculate how much a cell's text should spill into adjacent cells (Excel-style overflow).
+/// Returns Some(extra_pixels) if text should spill, None otherwise.
+/// Only left-aligned text (or General alignment for text values) spills rightward.
+///
+/// # Spill Behavior (Excel-compatible)
+/// - Text spills rightward into adjacent empty cells only
+/// - Spill stops at the first non-empty cell
+/// - Selected/active cells don't spill (handled by caller)
+/// - Editing cells don't spill (handled by caller)
+/// - Numbers never spill (they show #### if too wide, but we don't implement that yet)
+fn calculate_text_spill(
+    row: usize,
+    col: usize,
+    text: &str,
+    cell_width: f32,
+    alignment: Alignment,
+    app: &Spreadsheet,
+    window: &Window,
+    cx: &App,
+) -> Option<f32> {
+    // Check if alignment allows spilling
+    let is_number = matches!(app.sheet(cx).get_computed_value(row, col), Value::Number(_));
+    if !should_alignment_spill(alignment, is_number) {
+        return None;
+    }
+
+    // Shape text to get its pixel width
+    let text_owned = text.to_string();
+    let text_shared: SharedString = text_owned.into();
+    let text_len = text_shared.len();
+    if text_len == 0 {
+        return None;
+    }
+
+    let shaped = window.text_system().shape_line(
+        text_shared,
+        px(app.metrics.font_size),
+        &[TextRun {
+            len: text_len,
+            font: Font::default(),
+            color: Hsla::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+
+    let text_width: f32 = shaped.width.into();
+    let padding = 8.0; // px_1 = 4px each side
+    let available_width = cell_width - padding;
+
+    if text_width <= available_width {
+        return None; // Text fits, no spill needed
+    }
+
+    // Calculate how many columns we can spill into
+    let overflow_needed = text_width - available_width;
+    let mut spill_width: f32 = 0.0;
+    let mut check_col = col + 1;
+    let max_col = col + 10; // Limit spillover to prevent runaway
+
+    while spill_width < overflow_needed && check_col < max_col {
+        // Check if adjacent cell is empty
+        let adjacent_display = app.sheet(cx).get_formatted_display(row, check_col);
+        if !adjacent_display.is_empty() {
+            break; // Adjacent cell has content, stop spilling
+        }
+
+        // Add this column's width to spill area
+        let adj_col_width = app.metrics.col_width(app.col_width(check_col));
+        spill_width += adj_col_width;
+        check_col += 1;
+    }
+
+    if spill_width > 0.0 {
+        Some(spill_width)
+    } else {
+        None
+    }
+}
+
+/// Check if text overflows the cell width (used for ellipsis indicator).
+/// Returns true if text is wider than available cell width.
+#[inline]
+fn is_text_overflow(
+    text: &str,
+    cell_width: f32,
+    app: &Spreadsheet,
+    window: &Window,
+) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+
+    let text_shared: SharedString = text.to_string().into();
+    let text_len = text_shared.len();
+    if text_len == 0 {
+        return false;
+    }
+
+    let shaped = window.text_system().shape_line(
+        text_shared,
+        px(app.metrics.font_size),
+        &[TextRun {
+            len: text_len,
+            font: Font::default(),
+            color: Hsla::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+
+    let text_width: f32 = shaped.width.into();
+    let padding = 8.0; // px_1 = 4px each side
+    let available_width = cell_width - padding;
+
+    text_width > available_width
+}
+
+/// Check if a cell's text should be rendered by the spill overlay instead of the normal cell.
+/// Use this in render_cell to avoid double-drawing text.
+///
+/// Returns true if:
+/// - Text overflows the cell width
+/// - Alignment allows spilling (left-aligned or General for text)
+/// - There's at least one adjacent empty cell to spill into
+///
+/// When this returns true, render_cell should NOT draw the text - the spill overlay will handle it.
+#[inline]
+fn should_use_spill_overlay(
+    data_row: usize,
+    col: usize,
+    text: &str,
+    cell_width: f32,
+    alignment: Alignment,
+    is_selected: bool,
+    is_active: bool,
+    is_editing: bool,
+    app: &Spreadsheet,
+    window: &Window,
+    cx: &App,
+) -> bool {
+    // Selected, active, or editing cells don't use spill overlay (z-order complexity)
+    if is_selected || is_active || is_editing {
+        return false;
+    }
+
+    // Check if this cell would spill (text overflows AND can spill into adjacent cells)
+    calculate_text_spill(data_row, col, text, cell_width, alignment, app, window, cx).is_some()
 }
 
 /// Returns the base background color for a cell (ignoring selection state).
@@ -1237,6 +1487,267 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
     .into_any_element()
 }
 
+/// Render text that spills into adjacent empty cells (Excel-style overflow).
+/// This is a separate overlay pass that draws AFTER all cell backgrounds,
+/// ensuring spilled text isn't covered by neighboring cells.
+///
+/// Key invariants:
+/// - Only left-aligned text (or General for text values) spills rightward
+/// - Spill stops at first non-empty adjacent cell
+/// - Selected/active/editing cells don't spill (simplifies z-order)
+/// - This is paint-only: no hit testing (clicks go to underlying cells)
+///
+/// IMPORTANT: Spill text is rendered in a second pass as a paint-only overlay.
+/// - Never attach IDs or handlers (hit testing must remain cell-based)
+/// - Must render after cell backgrounds and before borders/selections
+/// - Only for display mode (never during edit)
+/// Breaking this will cause z-order, clipping, or selection bugs.
+fn render_text_spill_overlay(
+    app: &Spreadsheet,
+    window: &Window,
+    cx: &App,
+    pane_side: Option<SplitSide>,
+) -> impl IntoElement {
+    // Get view state for this pane
+    let view_state = get_pane_view_state(app, pane_side);
+    let scroll_row = view_state.scroll_row;
+    let scroll_col = view_state.scroll_col;
+    let (selected_row, selected_col) = view_state.selected;
+
+    let visible_rows = app.visible_rows();
+    let visible_cols = app.visible_cols();
+    let metrics = &app.metrics;
+
+    // Collect spill runs: cells whose text overflows into adjacent empty cells
+    // Use HashMap to dedupe by (data_row, col) - prevents double-draw with freeze panes
+    struct SpillRun {
+        x: f32,           // Screen X position (relative to grid)
+        y: f32,           // Screen Y position
+        base_width: f32,  // Original cell width (for alignment calculation)
+        total_width: f32, // Cell width + spill width (paint region)
+        height: f32,      // Cell height
+        text: String,
+        text_width: f32,  // Shaped text width for alignment
+        text_color: Hsla,
+        font_size: f32,
+        alignment: Alignment, // For text positioning within base_width
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    }
+
+    let mut spill_runs: std::collections::HashMap<(usize, usize), SpillRun> = std::collections::HashMap::new();
+
+    // Text color for non-selected cells
+    let cell_text = app.token(TokenKey::CellText);
+
+    // Scan visible cells for spill candidates
+    for screen_row in 0..visible_rows {
+        let visible_index = scroll_row + screen_row;
+
+        // Get view_row and data_row for this screen position
+        let Some((view_row, data_row)) = app.nth_visible_row(visible_index, cx) else {
+            continue;
+        };
+
+        // Calculate Y position for this row
+        let mut y: f32 = 0.0;
+        for r in 0..screen_row {
+            let idx = scroll_row + r;
+            if let Some((vr, _)) = app.nth_visible_row(idx, cx) {
+                y += metrics.row_height(app.row_height(vr));
+            }
+        }
+        let row_height = metrics.row_height(app.row_height(view_row));
+
+        for screen_col in 0..visible_cols {
+            let col = scroll_col + screen_col;
+
+            // Skip selected/active cells (they don't spill to avoid z-order complexity)
+            if view_row == selected_row && col == selected_col {
+                continue;
+            }
+
+            // Get cell display value
+            let display = app.sheet(cx).get_formatted_display(data_row, col);
+            if display.is_empty() {
+                continue;
+            }
+
+            // Get format and check if alignment allows spilling
+            let format = app.sheet(cx).get_format(data_row, col);
+            let is_number = matches!(
+                app.sheet(cx).get_computed_value(data_row, col),
+                Value::Number(_)
+            );
+
+            if !should_alignment_spill(format.alignment, is_number) {
+                continue;
+            }
+
+            // Calculate cell width
+            let col_width = metrics.col_width(app.col_width(col));
+
+            // Shape text to get its pixel width
+            let text_owned = display.clone();
+            let text_shared: SharedString = text_owned.clone().into();
+            let text_len = text_shared.len();
+            if text_len == 0 {
+                continue;
+            }
+
+            let shaped = window.text_system().shape_line(
+                text_shared,
+                px(metrics.font_size),
+                &[TextRun {
+                    len: text_len,
+                    font: Font::default(),
+                    color: Hsla::default(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            );
+
+            let text_width: f32 = shaped.width.into();
+            let padding = 8.0; // px_1 = 4px each side
+            let available_width = col_width - padding;
+
+            if text_width <= available_width {
+                continue; // Text fits, no spill needed
+            }
+
+            // Calculate how many columns we can spill into
+            let overflow_needed = text_width - available_width;
+            let mut spill_width: f32 = 0.0;
+            let mut check_col = col + 1;
+            let max_col = col + 10; // Limit spillover
+
+            while spill_width < overflow_needed && check_col < max_col {
+                // Check if adjacent cell is empty
+                let adjacent_display = app.sheet(cx).get_formatted_display(data_row, check_col);
+                if !adjacent_display.is_empty() {
+                    break; // Adjacent cell has content, stop spilling
+                }
+
+                // Add this column's width to spill area
+                let adj_col_width = metrics.col_width(app.col_width(check_col));
+                spill_width += adj_col_width;
+                check_col += 1;
+            }
+
+            if spill_width <= 0.0 {
+                continue; // Can't spill anywhere
+            }
+
+            // Calculate X position for this cell
+            let mut x: f32 = 0.0;
+            for c in scroll_col..col {
+                x += metrics.col_width(app.col_width(c));
+            }
+
+            // Use entry to dedupe - keep first entry for each (data_row, col)
+            // This prevents double-draw when freeze panes render same cell in multiple quadrants
+            // IMPORTANT: Use resolved_alignment to get the effective alignment (General → Left for text)
+            let effective_alignment = resolved_alignment(format.alignment, is_number);
+            spill_runs.entry((data_row, col)).or_insert(SpillRun {
+                x,
+                y,
+                base_width: col_width,           // Original cell width for alignment
+                total_width: col_width + spill_width,  // Extended paint region
+                height: row_height,
+                text: text_owned,
+                text_width,                      // For alignment calculation
+                text_color: cell_text,
+                font_size: metrics.font_size,
+                alignment: effective_alignment,  // Resolved alignment for text positioning
+                bold: format.bold,
+                italic: format.italic,
+                underline: format.underline,
+            });
+        }
+    }
+
+    if spill_runs.is_empty() {
+        return div().into_any_element();
+    }
+
+    // Render spill runs as absolutely positioned divs
+    // These sit above cell backgrounds but have no hit testing (paint-only)
+    //
+    // IMPORTANT: Text is anchored to the ORIGINAL cell (base_width), not the spill area.
+    // Spill only extends the paint region, not the alignment reference.
+    // - Left-aligned: text starts at left edge of original cell
+    // - Center-aligned: text centered within original cell (may extend right)
+    // - Right-aligned: text right-aligned within original cell (shouldn't spill, but handle gracefully)
+    let padding = 4.0; // Same as px_1() = 4px each side
+
+    // The overlay must be clipped to the grid content area (excluding row headers).
+    // Row headers are HEADER_WIDTH (50px) wide, rendered inside each row.
+    // Position overlay at left=HEADER_WIDTH to align with cell content area.
+    let header_width = crate::app::HEADER_WIDTH * app.metrics.zoom;
+
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(header_width))  // Offset past row headers
+        .right_0()
+        .overflow_hidden()       // Clip spills at grid boundary
+        .children(
+            spill_runs.into_values().map(|run| {
+                // Compute text x-offset based on alignment within BASE cell (not spill area)
+                // This is the key: text position is calculated as if confined to original cell,
+                // but we paint into the extended region.
+                // Note: alignment is pre-resolved (General → Left for text), so we only see explicit values.
+                let text_x_offset = match run.alignment {
+                    Alignment::Left | Alignment::General => {
+                        // Left-aligned: start at left edge + padding
+                        padding
+                    }
+                    Alignment::Center => {
+                        // Center within base cell (not spill area) - rare for spillable text
+                        let available = run.base_width - (padding * 2.0);
+                        padding + ((available - run.text_width) / 2.0).max(0.0)
+                    }
+                    Alignment::Right => {
+                        // Right-aligned within base cell - shouldn't spill, but handle gracefully
+                        (run.base_width - padding - run.text_width).max(padding)
+                    }
+                };
+
+                let mut text_div = div()
+                    .absolute()
+                    .left(px(run.x))
+                    .top(px(run.y))
+                    .w(px(run.total_width))
+                    .h(px(run.height))
+                    .flex()
+                    .items_center()
+                    .overflow_hidden() // Clip to spill area
+                    .text_color(run.text_color)
+                    .text_size(px(run.font_size));
+
+                // Apply formatting
+                if run.bold {
+                    text_div = text_div.font_weight(FontWeight::BOLD);
+                }
+                if run.italic {
+                    text_div = text_div.italic();
+                }
+
+                // Position text with calculated offset (anchored to base cell)
+                text_div.child(
+                    div()
+                        .pl(px(text_x_offset))
+                        .child(run.text)
+                )
+            })
+        )
+        .into_any_element()
+}
+
 /// Render the popup overlay layer for autocomplete, signature help, and error banners.
 /// Popups are positioned relative to the active cell rect in grid coordinates (post-scroll).
 /// When editing in formula bar, popup anchors to top of grid (just below formula bar).
@@ -1347,3 +1858,20 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
             ))
         })
 }
+
+// Tests for spill logic are in visigrid-engine/src/sheet.rs (test_text_spill_*)
+// because the binary crate doesn't support unit tests well.
+//
+// ELLIPSIS SEMANTICS (locked):
+// Ellipsis ("…") shows when ALL of these are true:
+// 1. text_width > cell_width - padding (text overflows)
+// 2. Cell is NOT in edit mode
+// 3. Spill overlay is NOT active for this cell
+//
+// Ellipsis does NOT show when:
+// - Text fits in cell (no overflow)
+// - Cell is being edited (edit mode shows full text)
+// - Spill overlay is active (text is visible via spillover)
+//
+// This matches Excel behavior: only left-aligned text spills,
+// center/right aligned text is clipped with ellipsis indicator.

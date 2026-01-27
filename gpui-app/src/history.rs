@@ -3,6 +3,7 @@
 use visigrid_engine::cell::CellFormat;
 use visigrid_engine::named_range::NamedRange;
 use visigrid_engine::provenance::Provenance;
+use visigrid_engine::sheet::SheetId;
 use visigrid_engine::workbook::Workbook;
 use std::time::Instant;
 
@@ -165,6 +166,26 @@ pub enum UndoAction {
         /// Deleted column widths: (col, width)
         deleted_col_widths: Vec<(usize, f32)>,
     },
+    /// Column width changed (for undo: restore old width)
+    ColumnWidthSet {
+        /// Sheet ID (stable across reorder/delete, unlike index)
+        sheet_id: SheetId,
+        col: usize,
+        /// Old width (None = was using default)
+        old: Option<f32>,
+        /// New width (None = reset to default)
+        new: Option<f32>,
+    },
+    /// Row height changed (for undo: restore old height)
+    RowHeightSet {
+        /// Sheet ID (stable across reorder/delete, unlike index)
+        sheet_id: SheetId,
+        row: usize,
+        /// Old height (None = was using default)
+        old: Option<f32>,
+        /// New height (None = reset to default)
+        new: Option<f32>,
+    },
     /// Sort applied (for undo: restore previous row order)
     SortApplied {
         /// Sheet where sort was applied (required for replay)
@@ -307,6 +328,12 @@ impl UndoAction {
                     format!("Delete {} columns", count)
                 }
             }
+            UndoAction::ColumnWidthSet { .. } => {
+                "Set column width".to_string()
+            }
+            UndoAction::RowHeightSet { .. } => {
+                "Set row height".to_string()
+            }
             UndoAction::SortApplied { .. } => {
                 "Sort".to_string()
             }
@@ -398,6 +425,19 @@ impl UndoAction {
             UndoAction::ColsDeleted { at_col, count, .. } => {
                 let col_letter = col_to_letter(*at_col);
                 Some(format!("{} column(s) at {}", count, col_letter))
+            }
+            UndoAction::ColumnWidthSet { col, old, new, .. } => {
+                let col_letter = col_to_letter(*col);
+                // Use unit-free numbers (internal units, not guaranteed to match Excel)
+                let old_str = old.map(|w| format!("{:.0}", w)).unwrap_or_else(|| "default".to_string());
+                let new_str = new.map(|w| format!("{:.0}", w)).unwrap_or_else(|| "default".to_string());
+                Some(format!("Col {}: {} → {}", col_letter, old_str, new_str))
+            }
+            UndoAction::RowHeightSet { row, old, new, .. } => {
+                // Use unit-free numbers (internal units, not guaranteed to match Excel)
+                let old_str = old.map(|h| format!("{:.0}", h)).unwrap_or_else(|| "default".to_string());
+                let new_str = new.map(|h| format!("{:.0}", h)).unwrap_or_else(|| "default".to_string());
+                Some(format!("Row {}: {} → {}", row + 1, old_str, new_str))
             }
             // Simple actions - label is sufficient
             _ => None,
@@ -878,6 +918,18 @@ impl History {
                     (Some(*sheet_index), cells, range)
                 }
             }
+            UndoAction::ColumnWidthSet { col, .. } => {
+                // Highlight the affected column (first 100 rows)
+                // Note: sheet_id not resolved to index here; caller must handle
+                let bbox = (0, *col, 99, *col);
+                (None, vec![], Some(bbox))
+            }
+            UndoAction::RowHeightSet { row, .. } => {
+                // Highlight the affected row (first 26 columns)
+                // Note: sheet_id not resolved to index here; caller must handle
+                let bbox = (*row, 0, *row, 25);
+                (None, vec![], Some(bbox))
+            }
             UndoAction::Group { actions, .. } => {
                 // For groups, combine all sub-action details
                 let mut all_cells = Vec::new();
@@ -1226,6 +1278,12 @@ impl History {
                     sheet_view.sort = None;
                 }
             }
+            UndoAction::ColumnWidthSet { .. } | UndoAction::RowHeightSet { .. } => {
+                // Column/row sizing is stored at the app level (Spreadsheet), not in Workbook.
+                // For preview purposes, we skip these - the preview shows correct data values
+                // even if column widths differ from the historical state.
+                // This is acceptable because sizing is visual-only, not computational.
+            }
             UndoAction::SortApplied { sheet_index, new_row_order, new_sort_state, .. } => {
                 // Validate sheet exists
                 if *sheet_index >= view_state.per_sheet.len() {
@@ -1307,6 +1365,8 @@ pub enum UndoActionKind {
     RowsDeleted,
     ColsInserted,
     ColsDeleted,
+    ColumnWidthSet,
+    RowHeightSet,
     SortApplied,
     SortCleared,
     ValidationSet,
@@ -1334,6 +1394,8 @@ impl UndoActionKind {
             UndoActionKind::RowsDeleted => true,
             UndoActionKind::ColsInserted => true,
             UndoActionKind::ColsDeleted => true,
+            UndoActionKind::ColumnWidthSet => true,
+            UndoActionKind::RowHeightSet => true,
             UndoActionKind::ValidationSet => true,
             UndoActionKind::ValidationCleared => true,
             UndoActionKind::ValidationExcluded => true,
@@ -1363,6 +1425,8 @@ impl UndoActionKind {
             UndoActionKind::RowsDeleted => "Delete rows",
             UndoActionKind::ColsInserted => "Insert columns",
             UndoActionKind::ColsDeleted => "Delete columns",
+            UndoActionKind::ColumnWidthSet => "Set column width",
+            UndoActionKind::RowHeightSet => "Set row height",
             UndoActionKind::SortApplied => "Sort",
             UndoActionKind::SortCleared => "Clear sort",
             UndoActionKind::ValidationSet => "Set validation",
@@ -1389,6 +1453,8 @@ impl UndoActionKind {
             UndoActionKind::RowsDeleted => 0x09,
             UndoActionKind::ColsInserted => 0x0A,
             UndoActionKind::ColsDeleted => 0x0B,
+            UndoActionKind::ColumnWidthSet => 0x12,
+            UndoActionKind::RowHeightSet => 0x13,
             UndoActionKind::SortApplied => 0x0C,
             UndoActionKind::SortCleared => 0x11,
             UndoActionKind::ValidationSet => 0x0D,
@@ -1415,6 +1481,8 @@ impl UndoAction {
             UndoAction::RowsDeleted { .. } => UndoActionKind::RowsDeleted,
             UndoAction::ColsInserted { .. } => UndoActionKind::ColsInserted,
             UndoAction::ColsDeleted { .. } => UndoActionKind::ColsDeleted,
+            UndoAction::ColumnWidthSet { .. } => UndoActionKind::ColumnWidthSet,
+            UndoAction::RowHeightSet { .. } => UndoActionKind::RowHeightSet,
             UndoAction::SortApplied { .. } => UndoActionKind::SortApplied,
             UndoAction::SortCleared { .. } => UndoActionKind::SortCleared,
             UndoAction::ValidationSet { .. } => UndoActionKind::ValidationSet,

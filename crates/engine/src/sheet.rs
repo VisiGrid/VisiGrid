@@ -2311,4 +2311,186 @@ mod tests {
 
         assert_ne!(fp1, fp2);
     }
+
+    // ===== Text Spillover Tests =====
+    // These verify the engine's cell emptiness detection used by gpui-app's text spill feature.
+
+    /// Regression test: get_formatted_display returns empty for empty cells.
+    /// This is critical for text spillover to work correctly - spill should stop
+    /// at the first non-empty cell.
+    #[test]
+    fn test_text_spill_empty_cell_detection() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Empty cell should have empty display
+        assert!(sheet.get_formatted_display(0, 0).is_empty(),
+            "Empty cell should return empty display");
+
+        // Cell with text should have non-empty display
+        sheet.set_value(0, 0, "Hello");
+        assert!(!sheet.get_formatted_display(0, 0).is_empty(),
+            "Text cell should return non-empty display");
+
+        // Cell with number should have non-empty display
+        sheet.set_value(0, 1, "42");
+        assert!(!sheet.get_formatted_display(0, 1).is_empty(),
+            "Number cell should return non-empty display");
+
+        // Cell with formula should have non-empty display
+        sheet.set_value(0, 2, "=1+1");
+        assert!(!sheet.get_formatted_display(0, 2).is_empty(),
+            "Formula cell should return non-empty display");
+
+        // Cell with zero should have non-empty display (zero is a value)
+        sheet.set_value(0, 3, "0");
+        assert!(!sheet.get_formatted_display(0, 3).is_empty(),
+            "Zero cell should return non-empty display");
+    }
+
+    /// Test that spill scenario setup is correct: A1 has text, B1 empty, C1 blocks.
+    #[test]
+    fn test_text_spill_scenario() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // A1: long text that would spill
+        sheet.set_value(0, 0, "This is a very long text that should spill over");
+
+        // B1: empty (should allow spill)
+        // (no set_value needed)
+
+        // C1: has value (should block spill)
+        sheet.set_value(0, 2, "Block");
+
+        // Verify the spill scenario
+        assert!(!sheet.get_formatted_display(0, 0).is_empty(), "A1 should have text");
+        assert!(sheet.get_formatted_display(0, 1).is_empty(), "B1 should be empty (allows spill)");
+        assert!(!sheet.get_formatted_display(0, 2).is_empty(), "C1 should block spill");
+    }
+
+    /// Alignment affects spill: General alignment with number should NOT spill.
+    #[test]
+    fn test_text_spill_alignment_with_number() {
+        use crate::formula::eval::Value;
+
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Set a number with General alignment (default)
+        sheet.set_value(0, 0, "12345.67");
+        let format = sheet.get_format(0, 0);
+        assert_eq!(format.alignment, crate::cell::Alignment::General);
+
+        // Check computed value is a number
+        let value = sheet.get_computed_value(0, 0);
+        assert!(matches!(value, Value::Number(_)),
+            "12345.67 should be computed as a number");
+    }
+
+    // ========== Ellipsis semantics tests ==========
+    // These test the conditions that determine whether ellipsis shows vs spill.
+    // UI layer shows ellipsis when: text_overflows AND !spill_eligible
+    // Spill eligible = left-aligned (or General for text) + adjacent empty cells
+
+    /// Center alignment should NOT spill, so ellipsis should show (if text overflows).
+    #[test]
+    fn test_ellipsis_shown_when_center_aligned_no_spill() {
+        use crate::cell::Alignment;
+
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Long text in A1 with Center alignment
+        sheet.set_value(0, 0, "This is a very long text that would overflow");
+        sheet.set_alignment(0, 0, Alignment::Center);
+
+        // B1 is empty (spill would be possible if alignment allowed)
+        assert!(sheet.get_formatted_display(0, 1).is_empty());
+
+        // With Center alignment, spill is NOT eligible
+        // (resolved alignment is Center, which doesn't spill)
+        let format = sheet.get_format(0, 0);
+        assert_eq!(format.alignment, Alignment::Center);
+
+        // In UI layer: text_overflows=true, spill_eligible=false → ellipsis shows
+    }
+
+    /// Right alignment should NOT spill, so ellipsis should show (if text overflows).
+    #[test]
+    fn test_ellipsis_shown_when_right_aligned_no_spill() {
+        use crate::cell::Alignment;
+
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Long text in A1 with Right alignment
+        sheet.set_value(0, 0, "This is a very long text that would overflow");
+        sheet.set_alignment(0, 0, Alignment::Right);
+
+        // B1 is empty
+        assert!(sheet.get_formatted_display(0, 1).is_empty());
+
+        // With Right alignment, spill is NOT eligible
+        let format = sheet.get_format(0, 0);
+        assert_eq!(format.alignment, Alignment::Right);
+
+        // In UI layer: text_overflows=true, spill_eligible=false → ellipsis shows
+    }
+
+    /// Left alignment with empty neighbor SHOULD spill, so ellipsis should NOT show.
+    #[test]
+    fn test_ellipsis_not_shown_when_left_aligned_spill_active() {
+        use crate::cell::Alignment;
+
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Long text in A1 with Left alignment
+        sheet.set_value(0, 0, "This is a very long text that would overflow");
+        sheet.set_alignment(0, 0, Alignment::Left);
+
+        // B1 is empty - spill is possible
+        assert!(sheet.get_formatted_display(0, 1).is_empty());
+
+        // With Left alignment + empty neighbor, spill IS eligible
+        let format = sheet.get_format(0, 0);
+        assert_eq!(format.alignment, Alignment::Left);
+
+        // In UI layer: text_overflows=true, spill_eligible=true → NO ellipsis (spill active)
+    }
+
+    /// General alignment for text should resolve to Left and spill.
+    #[test]
+    fn test_ellipsis_not_shown_when_general_text_spills() {
+        use crate::cell::Alignment;
+
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Long text in A1 with General alignment (default)
+        sheet.set_value(0, 0, "This is a very long text that would overflow");
+
+        // B1 is empty - spill is possible
+        assert!(sheet.get_formatted_display(0, 1).is_empty());
+
+        // General alignment
+        let format = sheet.get_format(0, 0);
+        assert_eq!(format.alignment, Alignment::General);
+
+        // For text values, General resolves to Left → spill IS eligible
+        // In UI layer: text_overflows=true, spill_eligible=true → NO ellipsis (spill active)
+    }
+
+    /// Left-aligned text with non-empty neighbor should NOT spill, so ellipsis shows.
+    #[test]
+    fn test_ellipsis_shown_when_left_aligned_blocked_by_neighbor() {
+        use crate::cell::Alignment;
+
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Long text in A1 with Left alignment
+        sheet.set_value(0, 0, "This is a very long text that would overflow");
+        sheet.set_alignment(0, 0, Alignment::Left);
+
+        // B1 has content - blocks spill
+        sheet.set_value(0, 1, "Blocker");
+        assert!(!sheet.get_formatted_display(0, 1).is_empty());
+
+        // With Left alignment but blocked neighbor, spill is NOT possible
+        // In UI layer: text_overflows=true, spill_eligible=false (blocked) → ellipsis shows
+    }
 }

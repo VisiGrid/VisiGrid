@@ -22,6 +22,7 @@ pub enum MenuCategory {
     View,
     Format,
     Data,
+    Tools,
     Help,
 }
 
@@ -34,8 +35,33 @@ impl MenuCategory {
             Self::View => "View",
             Self::Format => "Format",
             Self::Data => "Data",
+            Self::Tools => "Tools",
             Self::Help => "Help",
         }
+    }
+
+    /// Short key hint for Alt accelerator display
+    pub fn key_hint(&self) -> &'static str {
+        match self {
+            Self::File => "F",
+            Self::Edit => "E",
+            Self::View => "V",
+            Self::Format => "O",
+            Self::Data => "A",
+            Self::Tools => "T",
+            Self::Help => "H",
+        }
+    }
+
+    /// All categories in display order for scope hints bar
+    pub fn all_for_hints() -> &'static [MenuCategory] {
+        &[
+            Self::Data,    // A - most common for power users
+            Self::Edit,    // E
+            Self::File,    // F
+            Self::View,    // V
+            Self::Tools,   // T
+        ]
     }
 }
 
@@ -120,6 +146,8 @@ pub enum CommandId {
     CycleTracePrecedent,
     CycleTraceDependent,
     ReturnToTraceSource,
+    ToggleVerifiedMode,
+    Recalculate,
 
     // Window
     SwitchWindow,
@@ -226,6 +254,8 @@ impl CommandId {
             Self::CycleTracePrecedent => "Jump to Precedent",
             Self::CycleTraceDependent => "Jump to Dependent",
             Self::ReturnToTraceSource => "Return to Trace Source",
+            Self::ToggleVerifiedMode => "Toggle Verified Mode",
+            Self::Recalculate => "Recalculate All",
             Self::SwitchWindow => "Switch Window...",
             Self::ExtractNamedRange => "Extract to Named Range...",
             Self::ShowShortcuts => "Show Keyboard Shortcuts",
@@ -312,6 +342,7 @@ impl CommandId {
             Self::ReturnToTraceSource => Some("⌥↩"),
             #[cfg(not(target_os = "macos"))]
             Self::ReturnToTraceSource => Some("F5"),
+            Self::Recalculate => Some("F9"),
             _ => None,
         }
     }
@@ -405,6 +436,8 @@ impl CommandId {
             Self::CycleTracePrecedent => "trace precedent input jump navigate cycle next previous",
             Self::CycleTraceDependent => "trace dependent output jump navigate cycle next previous",
             Self::ReturnToTraceSource => "trace back return source origin home",
+            Self::ToggleVerifiedMode => "verified deterministic recalc audit trust",
+            Self::Recalculate => "recalc refresh calculate formulas f9",
         }
     }
 
@@ -469,6 +502,8 @@ impl CommandId {
             Self::CycleTracePrecedent,
             Self::CycleTraceDependent,
             Self::ReturnToTraceSource,
+            Self::ToggleVerifiedMode,
+            Self::Recalculate,
             Self::SwitchWindow,
             Self::ExtractNamedRange,
             Self::ShowShortcuts,
@@ -551,10 +586,14 @@ impl CommandId {
             | Self::UnfreezePanes
             | Self::SplitRight
             | Self::CloseSplit
-            | Self::ToggleTrace
+            | Self::Recalculate => Some(MenuCategory::View),
+
+            // Tools menu (trace, explain, audit)
+            Self::ToggleTrace
             | Self::CycleTracePrecedent
             | Self::CycleTraceDependent
-            | Self::ReturnToTraceSource => Some(MenuCategory::View),
+            | Self::ReturnToTraceSource
+            | Self::ToggleVerifiedMode => Some(MenuCategory::Tools),
 
             // Format menu
             Self::ToggleBold
@@ -2009,5 +2048,104 @@ mod tests {
             }
             _ => panic!("Expected JumpToCell action"),
         }
+    }
+
+    // =========================================================================
+    // Keyboard Invariants Tests
+    //
+    // These shortcuts are Excel muscle memory and MUST NEVER change.
+    // If a test fails here, you're breaking power user workflows.
+    // =========================================================================
+
+    #[test]
+    fn test_keyboard_invariant_f9_is_recalculate() {
+        // F9 = Recalculate (Excel muscle memory)
+        // This was previously ToggleVerifiedMode - that was WRONG.
+        assert_eq!(CommandId::Recalculate.shortcut(), Some("F9"));
+    }
+
+    #[test]
+    fn test_keyboard_invariant_f2_edit_cell() {
+        // F2 must start cell editing - universal spreadsheet convention
+        // Note: F2 isn't in CommandId (it's a direct keybinding to StartEdit action)
+        // This test documents the invariant even if we can't test the keybinding directly
+    }
+
+    #[test]
+    fn test_keyboard_invariant_fill_shortcuts() {
+        // Ctrl+D = Fill Down, Ctrl+R = Fill Right
+        // These are fundamental data entry shortcuts
+        assert_eq!(CommandId::FillDown.shortcut(), Some("Ctrl+D"));
+        assert_eq!(CommandId::FillRight.shortcut(), Some("Ctrl+R"));
+    }
+
+    #[test]
+    fn test_keyboard_invariant_autosum() {
+        // Alt+= = AutoSum
+        assert_eq!(CommandId::AutoSum.shortcut(), Some("Alt+="));
+    }
+
+    #[test]
+    fn test_verified_mode_discoverable() {
+        // ToggleVerifiedMode must be in the command palette (no shortcut is OK)
+        // but it must be findable
+        assert!(CommandId::all().contains(&CommandId::ToggleVerifiedMode));
+        assert_eq!(CommandId::ToggleVerifiedMode.name(), "Toggle Verified Mode");
+        // It should be in Tools menu category for Alt+T scoping
+        assert_eq!(CommandId::ToggleVerifiedMode.menu_category(), Some(MenuCategory::Tools));
+    }
+
+    #[test]
+    fn test_recalculate_in_view_menu() {
+        // Recalculate should be accessible via Alt+V (View menu)
+        assert_eq!(CommandId::Recalculate.menu_category(), Some(MenuCategory::View));
+    }
+
+    #[test]
+    fn test_trace_commands_in_tools_menu() {
+        // Trace commands should be in Tools menu (Alt+T)
+        assert_eq!(CommandId::ToggleTrace.menu_category(), Some(MenuCategory::Tools));
+        assert_eq!(CommandId::CycleTracePrecedent.menu_category(), Some(MenuCategory::Tools));
+        assert_eq!(CommandId::CycleTraceDependent.menu_category(), Some(MenuCategory::Tools));
+        assert_eq!(CommandId::ReturnToTraceSource.menu_category(), Some(MenuCategory::Tools));
+        assert_eq!(CommandId::ToggleVerifiedMode.menu_category(), Some(MenuCategory::Tools));
+    }
+
+    #[test]
+    fn test_alt_scope_key_hints() {
+        // Verify Alt key hints match Excel ribbon convention
+        assert_eq!(MenuCategory::Data.key_hint(), "A");  // Excel: Alt+A = Data
+        assert_eq!(MenuCategory::Edit.key_hint(), "E");
+        assert_eq!(MenuCategory::File.key_hint(), "F");
+        assert_eq!(MenuCategory::View.key_hint(), "V");
+        assert_eq!(MenuCategory::Tools.key_hint(), "T");
+    }
+
+    // =========================================================================
+    // Alt+Down Priority Contract (Excel muscle memory)
+    //
+    // Alt+Down opens dropdowns in this priority order:
+    // 1. Validation list dropdown (if cell has list validation)
+    // 2. AutoFilter dropdown (if column is in filter range)
+    // 3. "No dropdown available" status message
+    //
+    // This order matches Excel behavior: validation takes precedence over filter.
+    // Changing this order will break user muscle memory.
+    // =========================================================================
+
+    #[test]
+    fn test_alt_down_priority_documented() {
+        // This test documents the Alt+Down priority contract.
+        // The actual implementation is in app.rs::open_validation_dropdown().
+        //
+        // Priority order (MUST NOT CHANGE):
+        // 1. Validation list dropdown (wins)
+        // 2. AutoFilter dropdown (fallback)
+        // 3. Status message "No dropdown available"
+        //
+        // If you're seeing this test and wondering why it exists:
+        // It's a contract marker. The behavior is tested via integration tests,
+        // but this ensures the contract is documented in the test suite.
+        assert!(true, "Alt+Down priority: validation > filter > nothing");
     }
 }

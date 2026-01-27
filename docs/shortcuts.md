@@ -16,6 +16,7 @@ Complete reference for keyboard shortcuts.
 | Ctrl+Home | Go to A1 |
 | Ctrl+End | Go to last cell |
 | Ctrl+Arrow | Jump to edge of data |
+| Ctrl+Backspace | Jump to active cell (scroll view) |
 | Page Up/Down | Page scroll |
 | Ctrl+G | Go To dialog |
 | Ctrl+F | Find |
@@ -149,17 +150,28 @@ Complete reference for keyboard shortcuts.
 
 ---
 
-## Menu Accelerators (Excel 2003 Style)
+## Alt Key (Excel-style Command Access)
 
-| Shortcut | Action |
-|----------|--------|
-| Alt+F | File menu |
-| Alt+E | Edit menu |
-| Alt+V | View menu |
-| Alt+I | Insert menu |
-| Alt+O | Format menu |
-| Alt+D | Data menu |
-| Alt+H | Help menu |
+VisiGrid supports Excel-style Alt navigation using a scoped command palette.
+
+- Alt enters command mode
+- First key selects a scope
+- Commands are searched and executed via the palette
+
+This preserves Excel muscle memory while keeping commands discoverable and explainable.
+
+| Shortcut | Scope | What's in it |
+|----------|-------|--------------|
+| Alt+A | Data | Filter, Sort, Validation |
+| Alt+E | Edit | Fill, Clear, Undo/Redo |
+| Alt+F | File | Open, Save, Export |
+| Alt+V | View | Inspector, Zoom, Freeze |
+| Alt+T | Tools | Trace, Verified Mode, Explain |
+| Alt+O | Format | Bold, Italic, Colors |
+| Alt+H | Help | About, Shortcuts |
+| Alt+Down | — | Open validation/filter dropdown |
+
+**Example flow:** Alt+A → type "sort" → Enter
 
 ---
 
@@ -212,6 +224,25 @@ Remap any shortcut via JSON config.
 ```
 
 User keybindings override defaults.
+
+---
+
+## Keyboard Invariants
+
+These shortcuts **never change** — they're Excel muscle memory that VisiGrid respects unconditionally. When using macOS with Ctrl preference, these remain Ctrl-based (not Cmd).
+
+| Shortcut | Action | Rationale |
+|----------|--------|-----------|
+| F2 | Edit cell | Universal spreadsheet convention |
+| F4 | Cycle reference (in formula) | $A$1 → A$1 → $A1 → A1 |
+| F9 | Recalculate all | Excel's "refresh" key |
+| Ctrl+D | Fill Down | Fundamental data entry |
+| Ctrl+R | Fill Right | Fundamental data entry |
+| Ctrl+Arrow | Jump to data edge | Power navigation |
+| Ctrl+Shift+Arrow | Extend to data edge | Power selection |
+| Ctrl+Backspace | Jump to active cell | View navigation |
+| Alt+= | AutoSum | Quick sum formula |
+| Alt+Down | Open dropdown | Validation list → Filter menu → nothing |
 
 ---
 

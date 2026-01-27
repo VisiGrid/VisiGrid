@@ -134,6 +134,41 @@ impl UndoAction {
                     count
                 ))
             }
+            UndoAction::ColumnWidthSet { sheet_id, col, new, .. } => {
+                // Use sheet_id (stable) instead of sheet_index (fragile)
+                let col_letter = col_to_letter(*col);
+                if let Some(width) = new {
+                    Some(format!(
+                        "grid.set_col_width{{ sheet_id={}, col=\"{}\", width={:.0} }}",
+                        sheet_id.0,
+                        col_letter,
+                        width
+                    ))
+                } else {
+                    Some(format!(
+                        "grid.clear_col_width{{ sheet_id={}, col=\"{}\" }}",
+                        sheet_id.0,
+                        col_letter
+                    ))
+                }
+            }
+            UndoAction::RowHeightSet { sheet_id, row, new, .. } => {
+                // Use sheet_id (stable) instead of sheet_index (fragile)
+                if let Some(height) = new {
+                    Some(format!(
+                        "grid.set_row_height{{ sheet_id={}, row={}, height={:.0} }}",
+                        sheet_id.0,
+                        row + 1,
+                        height
+                    ))
+                } else {
+                    Some(format!(
+                        "grid.clear_row_height{{ sheet_id={}, row={} }}",
+                        sheet_id.0,
+                        row + 1
+                    ))
+                }
+            }
             UndoAction::SortApplied { sheet_index, new_sort_state, .. } => {
                 let (col, ascending) = new_sort_state;
                 Some(format!(
@@ -568,6 +603,10 @@ fn action_affects_sheet(action: &UndoAction, sheet_index: usize) -> bool {
         UndoAction::RowsDeleted { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::ColsInserted { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::ColsDeleted { sheet_index: s, .. } => *s == sheet_index,
+        // Layout actions use SheetId, not sheet_index - need to resolve at call site
+        // For now, always include layout actions (they're rare in per-sheet exports)
+        UndoAction::ColumnWidthSet { .. } => true,
+        UndoAction::RowHeightSet { .. } => true,
         UndoAction::SortApplied { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::SortCleared { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::ValidationSet { sheet_index: s, .. } => *s == sheet_index,
