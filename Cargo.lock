@@ -3093,6 +3093,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyring"
+version = "3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
+dependencies = [
+ "log",
+ "zeroize",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6429,7 +6439,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visigrid-cli"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "blake3",
  "clap",
@@ -6444,9 +6454,10 @@ dependencies = [
 
 [[package]]
 name = "visigrid-config"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "dirs 5.0.1",
+ "keyring",
  "serde",
  "serde_json",
  "toml 0.8.23",
@@ -6454,14 +6465,14 @@ dependencies = [
 
 [[package]]
 name = "visigrid-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "visigrid-engine"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "ordered-float",
  "rustc-hash 2.1.1",
@@ -6471,7 +6482,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-gpui"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "blake3",
  "core-text",
@@ -6496,7 +6507,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-io"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "calamine",
  "csv",
@@ -6513,7 +6524,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-license"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "base64",
  "chrono",

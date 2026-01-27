@@ -6,6 +6,97 @@ use std::fs;
 use std::path::PathBuf;
 use crate::theme::ThemeSource;
 
+/// AI provider selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AIProvider {
+    /// AI features disabled (default)
+    #[default]
+    None,
+    /// Local model via Ollama
+    Local,
+    /// OpenAI API
+    #[serde(rename = "openai")]
+    OpenAI,
+    /// Anthropic API
+    Anthropic,
+}
+
+impl AIProvider {
+    /// Returns true if AI features are enabled
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, AIProvider::None)
+    }
+
+    /// Returns the default model for this provider
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            AIProvider::None => "",
+            AIProvider::Local => "llama3:8b",
+            AIProvider::OpenAI => "gpt-4o",
+            AIProvider::Anthropic => "claude-sonnet-4-20250514",
+        }
+    }
+}
+
+/// AI-specific settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AISettings {
+    /// Selected AI provider
+    pub provider: AIProvider,
+
+    /// Model identifier (provider-specific)
+    pub model: String,
+
+    /// Privacy mode: minimize data sent to AI
+    pub privacy_mode: bool,
+
+    /// Custom endpoint for Local provider (Ollama URL)
+    pub endpoint: Option<String>,
+
+    /// Allow AI to propose cell changes (gated feature)
+    pub allow_proposals: bool,
+
+    /// Last time the API key was tested (ISO 8601)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_key_test: Option<String>,
+
+    /// Result of last key test
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_key_test_result: Option<String>,
+}
+
+impl Default for AISettings {
+    fn default() -> Self {
+        Self {
+            provider: AIProvider::None,
+            model: String::new(), // Empty = use provider default
+            privacy_mode: true,   // Privacy first
+            endpoint: None,
+            allow_proposals: false, // Sidecar stance: no edits by default
+            last_key_test: None,
+            last_key_test_result: None,
+        }
+    }
+}
+
+impl AISettings {
+    /// Get the effective model (user-specified or provider default)
+    pub fn effective_model(&self) -> &str {
+        if self.model.is_empty() {
+            self.provider.default_model()
+        } else {
+            &self.model
+        }
+    }
+
+    /// Get the effective endpoint for Local provider
+    pub fn effective_endpoint(&self) -> &str {
+        self.endpoint.as_deref().unwrap_or("http://localhost:11434")
+    }
+}
+
 /// Keyboard modifier style preference (primarily for macOS users)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -72,6 +163,10 @@ pub struct Settings {
     // Keyboard
     #[serde(rename = "keyboard.modifierStyle")]
     pub modifier_style: ModifierStyle,
+
+    // AI
+    #[serde(rename = "ai", default)]
+    pub ai: AISettings,
 }
 
 impl Default for Settings {
@@ -100,6 +195,8 @@ impl Default for Settings {
             theme_source: ThemeSource::Auto,
             // Keyboard
             modifier_style: ModifierStyle::default(),
+            // AI
+            ai: AISettings::default(),
         }
     }
 }
@@ -199,7 +296,17 @@ impl Settings {
     "ui.showSheetTabs": true,
 
     // Keyboard (macOS only: "platform" = Cmd, "ctrl" = Ctrl)
-    "keyboard.modifierStyle": "platform"
+    "keyboard.modifierStyle": "platform",
+
+    // AI (disabled by default)
+    // Provider options: "none", "local", "openai", "anthropic"
+    // API keys are stored in system keychain, not in this file
+    "ai": {
+        "provider": "none",
+        "model": "",
+        "privacy_mode": true,
+        "allow_proposals": false
+    }
 }
 "#;
 
