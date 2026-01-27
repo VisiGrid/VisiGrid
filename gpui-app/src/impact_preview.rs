@@ -6,7 +6,7 @@
 //! - Applying previewed actions
 //! - Refactor log display
 
-use gpui::*;
+use gpui::{*};
 use crate::app::Spreadsheet;
 use crate::mode::Mode;
 use crate::settings::{user_settings, update_user_settings, TipId};
@@ -17,14 +17,14 @@ impl Spreadsheet {
     // =========================================================================
 
     /// Find all cells that reference a named range
-    fn find_named_range_usages(&self, name: &str) -> Vec<crate::views::impact_preview::ImpactedFormula> {
+    fn find_named_range_usages(&self, name: &str, cx: &App) -> Vec<crate::views::impact_preview::ImpactedFormula> {
         use crate::views::impact_preview::ImpactedFormula;
 
         let name_upper = name.to_uppercase();
         let mut usages = Vec::new();
 
         // Scan all cells for formulas containing the name
-        for ((row, col), cell) in self.sheet().cells_iter() {
+        for ((row, col), cell) in self.sheet(cx).cells_iter() {
             let raw = cell.value.raw_display();
             if !raw.starts_with('=') {
                 continue;
@@ -66,7 +66,7 @@ impl Spreadsheet {
     pub fn show_impact_preview_for_rename(&mut self, old_name: &str, new_name: &str, cx: &mut Context<Self>) {
         use crate::views::impact_preview::ImpactAction;
 
-        let usages = self.find_named_range_usages(old_name);
+        let usages = self.find_named_range_usages(old_name, cx);
         self.impact_preview_action = Some(ImpactAction::Rename {
             old_name: old_name.to_string(),
             new_name: new_name.to_string(),
@@ -80,7 +80,7 @@ impl Spreadsheet {
     pub fn show_impact_preview_for_delete(&mut self, name: &str, cx: &mut Context<Self>) {
         use crate::views::impact_preview::ImpactAction;
 
-        let usages = self.find_named_range_usages(name);
+        let usages = self.find_named_range_usages(name, cx);
         self.impact_preview_action = Some(ImpactAction::Delete {
             name: name.to_string(),
         });

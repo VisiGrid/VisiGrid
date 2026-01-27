@@ -20,7 +20,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
     let raw_value = if editing {
         app.edit_value.clone()
     } else {
-        app.sheet().get_raw(app.view_state.selected.0, app.view_state.selected.1)
+        app.sheet(cx).get_raw(app.view_state.selected.0, app.view_state.selected.1)
     };
 
     // Theme colors

@@ -45,11 +45,15 @@ mod session;
 mod settings;
 mod sheet_ops;
 mod sort_filter;
+mod split_view;
 mod theme;
+mod trace;
 mod ui;
 mod undo_redo;
 mod validation_dropdown;
 mod views;
+mod window_registry;
+mod window_switcher;
 pub mod workbook_view;
 
 #[cfg(test)]
@@ -328,6 +332,9 @@ fn main() {
         // Initialize session manager
         cx.set_global(SessionManager::new());
 
+        // Initialize window registry for multi-window management
+        cx.set_global(window_registry::WindowRegistry::new());
+
         // Get modifier style preference for keybindings
         let modifier_style = settings::user_settings(cx)
             .navigation
@@ -338,6 +345,7 @@ fn main() {
 
         keybindings::register(cx, modifier_style);
         user_keybindings::register_user_keybindings(cx);
+        window_switcher::register_keybindings(cx);
 
         // Register Alt+letter accelerators based on setting
         // - Enabled (macOS only): Alt opens scoped Command Palette
@@ -370,6 +378,58 @@ fn main() {
                 mgr.save_now();
             });
             cx.quit();
+        });
+
+        // Set up NewWindow handler (Ctrl+N opens a new window, not replace in-place)
+        // This must be at App level because we need cx.open_window()
+        cx.on_action(move |_: &actions::NewWindow, cx| {
+            // Check if this will be the second window (for tip)
+            let is_second_window = cx
+                .try_global::<window_registry::WindowRegistry>()
+                .map(|r| r.count() == 1)
+                .unwrap_or(false);
+
+            let work_area = get_work_area(cx);
+            let bounds = compute_window_bounds(None, work_area);
+
+            cx.open_window(
+                build_window_options(WindowBounds::Windowed(bounds)),
+                |window, cx| {
+                    let entity = cx.new(|cx| Spreadsheet::new(window, cx));
+                    entity.update(cx, |spreadsheet, cx| {
+                        spreadsheet.register_with_window_registry(cx);
+
+                        // Show tip for window switcher when 2nd window opens
+                        if is_second_window {
+                            use crate::settings::{user_settings, TipId};
+                            if !user_settings(cx).is_tip_dismissed(TipId::WindowSwitcher) {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    spreadsheet.status_message = Some("Tip: Press Cmd+` to switch between windows".into());
+                                }
+                                #[cfg(not(target_os = "macos"))]
+                                {
+                                    spreadsheet.status_message = Some("Tip: Press Ctrl+` to switch between windows".into());
+                                }
+                                // Dismiss tip after showing once
+                                settings::update_user_settings(cx, |settings| {
+                                    settings.dismiss_tip(TipId::WindowSwitcher);
+                                });
+                            }
+                        }
+                    });
+                    entity
+                },
+            )
+            .ok(); // Ignore error if window creation fails
+        });
+
+        // Set up SwitchWindow handler (Cmd+` / Ctrl+` opens window switcher)
+        cx.on_action(|_: &actions::SwitchWindow, cx| {
+            // Get the currently focused window to pass to the switcher
+            if let Some(window) = cx.active_window() {
+                window_switcher::open_switcher(cx, window);
+            }
         });
 
         // Set up native macOS menu bar
@@ -407,7 +467,7 @@ fn main() {
                 let _ = cx.open_window(
                     build_window_options(window_bounds),
                     move |window, cx| {
-                        cx.new(|cx| {
+                        let entity = cx.new(|cx| {
                             let mut app = Spreadsheet::new(window, cx);
 
                             // Load file if present and exists
@@ -425,10 +485,15 @@ fn main() {
 
                             // Apply session state (scroll, selection, panels)
                             // This is safe even if file didn't load - clamping handles it
-                            app.apply(&window_session);
+                            app.apply(&window_session, cx);
 
                             app
-                        })
+                        });
+                        // Register with window registry for window switcher
+                        entity.update(cx, |spreadsheet, cx| {
+                            spreadsheet.register_with_window_registry(cx);
+                        });
+                        entity
                     },
                 );
             }
@@ -440,7 +505,7 @@ fn main() {
             cx.open_window(
                 build_window_options(WindowBounds::Windowed(bounds)),
                 move |window, cx| {
-                    cx.new(|cx| {
+                    let entity = cx.new(|cx| {
                         let mut app = Spreadsheet::new(window, cx);
                         if path.exists() {
                             app.load_file(&path, cx);
@@ -451,7 +516,12 @@ fn main() {
                             ));
                         }
                         app
-                    })
+                    });
+                    // Register with window registry for window switcher
+                    entity.update(cx, |spreadsheet, cx| {
+                        spreadsheet.register_with_window_registry(cx);
+                    });
+                    entity
                 },
             )
             .unwrap();
@@ -461,7 +531,14 @@ fn main() {
 
             cx.open_window(
                 build_window_options(WindowBounds::Windowed(bounds)),
-                |window, cx| cx.new(|cx| Spreadsheet::new(window, cx)),
+                |window, cx| {
+                    let entity = cx.new(|cx| Spreadsheet::new(window, cx));
+                    // Register with window registry for window switcher
+                    entity.update(cx, |spreadsheet, cx| {
+                        spreadsheet.register_with_window_registry(cx);
+                    });
+                    entity
+                },
             )
             .unwrap();
         }

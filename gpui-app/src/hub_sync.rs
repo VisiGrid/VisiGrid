@@ -357,7 +357,7 @@ impl Spreadsheet {
             let _ = this.update(cx, |this, cx| {
                 match visigrid_io::native::load_workbook(&copy_path) {
                     Ok(workbook) => {
-                        this.workbook = workbook;
+                        this.workbook = cx.new(|_| workbook);
                         this.current_file = Some(copy_path.clone());
                         this.hub_link = Some(updated_link);
                         this.hub_status = HubStatus::Idle;
@@ -570,7 +570,7 @@ impl Spreadsheet {
             let _ = this.update(cx, |this, cx| {
                 match visigrid_io::native::load_workbook(&path) {
                     Ok(workbook) => {
-                        this.workbook = workbook;
+                        this.workbook = cx.new(|_| workbook);
                         this.hub_link = Some(updated_link);
                         this.hub_status = HubStatus::Idle;
                         this.hub_activity = None;

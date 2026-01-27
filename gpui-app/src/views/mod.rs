@@ -368,9 +368,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         // File actions
-        .on_action(cx.listener(|this, _: &NewFile, window, cx| {
-            this.new_file(cx);
-            this.update_title_if_needed(window);
+        // Note: NewWindow (Ctrl+N) is handled at App level in main.rs
+        // NewInPlace replaces current workbook (dangerous, not bound by default)
+        .on_action(cx.listener(|this, _: &NewInPlace, window, cx| {
+            this.new_in_place(cx);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &OpenFile, _, cx| {
             this.open_file(cx);
@@ -430,7 +432,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &Cut, window, cx| {
             this.cut(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &Paste, window, cx| {
             // Sheet rename: paste text
@@ -467,40 +469,40 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
             this.paste(cx);
             this.update_edit_scroll(window);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &PasteValues, window, cx| {
             this.paste_values(cx);
             this.update_edit_scroll(window);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &DeleteCell, window, cx| {
             if !this.mode.is_editing() {
                 this.delete_selection(cx);
-                this.update_title_if_needed(window);
+                this.update_title_if_needed(window, cx);
             }
         }))
         // Insert/Delete rows/columns (Ctrl+= / Ctrl+-)
         .on_action(cx.listener(|this, _: &InsertRowsOrCols, window, cx| {
             if !this.mode.is_editing() {
                 this.insert_rows_or_cols(cx);
-                this.update_title_if_needed(window);
+                this.update_title_if_needed(window, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &DeleteRowsOrCols, window, cx| {
             if !this.mode.is_editing() {
                 this.delete_rows_or_cols(cx);
-                this.update_title_if_needed(window);
+                this.update_title_if_needed(window, cx);
             }
         }))
         // Undo/Redo
         .on_action(cx.listener(|this, _: &Undo, window, cx| {
             this.undo(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &Redo, window, cx| {
             this.redo(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         // Editing actions
         // F2: Start edit (Navigation) or toggle Caret/Point mode (Formula)
@@ -545,7 +547,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             // If autocomplete is visible, Enter accepts the suggestion
             if this.autocomplete_visible {
                 this.autocomplete_accept(cx);
-                this.update_title_if_needed(window);
+                this.update_title_if_needed(window, cx);
                 return;
             }
             // Handle Enter key based on current mode
@@ -557,7 +559,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 Mode::CreateNamedRange => this.confirm_create_named_range(cx),
                 _ => {
                     this.confirm_edit(cx);
-                    this.update_title_if_needed(window);
+                    this.update_title_if_needed(window, cx);
                 }
             }
         }))
@@ -575,7 +577,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
                 _ => {
                     this.confirm_edit_up(cx);
-                    this.update_title_if_needed(window);
+                    this.update_title_if_needed(window, cx);
                 }
             }
         }))
@@ -668,12 +670,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             // If autocomplete is visible, Tab accepts the suggestion
             if this.autocomplete_visible {
                 this.autocomplete_accept(cx);
-                this.update_title_if_needed(window);
+                this.update_title_if_needed(window, cx);
                 return;
             }
             if this.mode.is_editing() {
                 this.confirm_edit_and_move_right(cx);
-                this.update_title_if_needed(window);
+                this.update_title_if_needed(window, cx);
             } else {
                 this.move_selection(0, 1, cx);
             }
@@ -681,7 +683,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &TabPrev, window, cx| {
             if this.mode.is_editing() {
                 this.confirm_edit_and_move_left(cx);
-                this.update_title_if_needed(window);
+                this.update_title_if_needed(window, cx);
             } else {
                 this.move_selection(0, -1, cx);
             }
@@ -715,7 +717,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 // Navigation mode: backspace clears selected cells (like Delete key)
                 this.delete_selection(cx);
-                this.update_title_if_needed(window);
+                this.update_title_if_needed(window, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &DeleteChar, window, cx| {
@@ -735,27 +737,27 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &FillDown, window, cx| {
             this.fill_down(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &FillRight, window, cx| {
             this.fill_right(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         // Data operations (sort/filter)
         .on_action(cx.listener(|this, _: &SortAscending, window, cx| {
             this.sort_by_current_column(visigrid_engine::filter::SortDirection::Ascending, cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &SortDescending, window, cx| {
             this.sort_by_current_column(visigrid_engine::filter::SortDirection::Descending, cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleAutoFilter, _, cx| {
             this.toggle_auto_filter(cx);
         }))
         .on_action(cx.listener(|this, _: &ClearSort, window, cx| {
             this.clear_sort(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         // Data validation
         .on_action(cx.listener(|this, _: &ShowDataValidation, _, cx| {
@@ -811,6 +813,42 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &UnfreezePanes, _, cx| {
             this.unfreeze_panes(cx);
+        }))
+        // Split view
+        .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
+            this.split_right(cx);
+        }))
+        .on_action(cx.listener(|this, _: &CloseSplit, _, cx| {
+            this.close_split(cx);
+        }))
+        .on_action(cx.listener(|this, _: &FocusOtherPane, _, cx| {
+            this.focus_other_pane(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ToggleTrace, _, cx| {
+            this.toggle_trace(cx);
+        }))
+        .on_action(cx.listener(|this, _: &CycleTracePrecedent, window, cx| {
+            // Block while validation dropdown or any modal is open
+            if this.is_validation_dropdown_open() || this.mode.is_overlay() {
+                return;
+            }
+            let reverse = window.modifiers().shift;
+            this.cycle_trace_precedent(reverse, cx);
+        }))
+        .on_action(cx.listener(|this, _: &CycleTraceDependent, window, cx| {
+            // Block while validation dropdown or any modal is open
+            if this.is_validation_dropdown_open() || this.mode.is_overlay() {
+                return;
+            }
+            let reverse = window.modifiers().shift;
+            this.cycle_trace_dependent(reverse, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ReturnToTraceSource, _, cx| {
+            // Block while validation dropdown or any modal is open
+            if this.is_validation_dropdown_open() || this.mode.is_overlay() {
+                return;
+            }
+            this.return_to_trace_source(cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleLuaConsole, window, cx| {
             // Pro feature gate
@@ -924,73 +962,73 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         // Formatting
         .on_action(cx.listener(|this, _: &ToggleBold, window, cx| {
             this.toggle_bold(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleItalic, window, cx| {
             this.toggle_italic(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleUnderline, window, cx| {
             this.toggle_underline(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &FormatCurrency, window, cx| {
             this.format_currency(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &FormatPercent, window, cx| {
             this.format_percent(cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         // Background colors
         .on_action(cx.listener(|this, _: &ClearBackground, window, cx| {
             this.set_background_color(None, cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &BackgroundYellow, window, cx| {
             this.set_background_color(Some([255, 255, 0, 255]), cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &BackgroundGreen, window, cx| {
             this.set_background_color(Some([198, 239, 206, 255]), cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &BackgroundBlue, window, cx| {
             this.set_background_color(Some([189, 215, 238, 255]), cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &BackgroundRed, window, cx| {
             this.set_background_color(Some([255, 199, 206, 255]), cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &BackgroundOrange, window, cx| {
             this.set_background_color(Some([255, 235, 156, 255]), cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &BackgroundPurple, window, cx| {
             this.set_background_color(Some([204, 192, 218, 255]), cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &BackgroundGray, window, cx| {
             this.set_background_color(Some([217, 217, 217, 255]), cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &BackgroundCyan, window, cx| {
             this.set_background_color(Some([183, 222, 232, 255]), cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         // Borders
         .on_action(cx.listener(|this, _: &BordersAll, window, cx| {
             this.apply_borders(BorderApplyMode::All, cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &BordersOutline, window, cx| {
             this.apply_borders(BorderApplyMode::Outline, cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &BordersClear, window, cx| {
             this.apply_borders(BorderApplyMode::Clear, cx);
-            this.update_title_if_needed(window);
+            this.update_title_if_needed(window, cx);
         }))
         // Go To dialog
         .on_action(cx.listener(|this, _: &GoToCell, _, cx| {
@@ -1019,7 +1057,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &FindReferences, _, cx| {
             // In edit mode, check if cursor is on a named range
             if this.mode.is_editing() {
-                if let Some(name) = this.named_range_at_cursor() {
+                if let Some(name) = this.named_range_at_cursor(cx) {
                     this.show_named_range_references(&name, cx);
                     return;
                 }
@@ -1031,7 +1069,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &GoToPrecedents, _, cx| {
             // In edit mode, check if cursor is on a named range
             if this.mode.is_editing() {
-                if let Some(name) = this.named_range_at_cursor() {
+                if let Some(name) = this.named_range_at_cursor(cx) {
                     this.go_to_named_range_definition(&name, cx);
                     return;
                 }
@@ -1073,15 +1111,85 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &OpenKeybindings, _, cx| {
             this.open_keybindings(cx);
         }))
-        .on_action(cx.listener(|this, _: &CloseWindow, window, _cx| {
+        // Window menu actions
+        .on_action(cx.listener(|_this, _: &Minimize, window, _cx| {
+            window.minimize_window();
+        }))
+        .on_action(cx.listener(|_this, _: &Zoom, window, _cx| {
+            window.zoom_window();
+        }))
+        .on_action(cx.listener(|_this, _: &BringAllToFront, _window, cx| {
+            // Activate the app to bring all windows to front
+            cx.activate(true);
+        }))
+        .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
             // Commit any pending edit before closing
-            this.commit_pending_edit();
-            // Close the current window (not quit the app)
-            window.remove_window();
+            this.commit_pending_edit(cx);
+
+            // If workbook is clean, just close
+            if !this.is_modified {
+                // Unregister from window registry before closing
+                this.unregister_from_window_registry(cx);
+                window.remove_window();
+                return;
+            }
+
+            // Workbook is dirty - prompt user to save
+            let filename = this.current_file.as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("Untitled");
+
+            let receiver = window.prompt(
+                gpui::PromptLevel::Warning,
+                &format!("Do you want to save changes to \"{}\"?", filename),
+                Some("Your changes will be lost if you don't save them."),
+                &["Save", "Don't Save", "Cancel"],
+                cx,
+            );
+
+            // Capture window handle for closing from async context
+            let window_handle = window.window_handle();
+
+            cx.spawn(async move |this, cx| {
+                if let Ok(response) = receiver.await {
+                    match response {
+                        0 => {
+                            // Save, then close
+                            let save_succeeded = this.update(cx, |this, cx| {
+                                this.save_and_close(cx)
+                            }).unwrap_or(false);
+
+                            if save_succeeded {
+                                // Unregister from window registry before closing
+                                let _ = this.update(cx, |this, cx| {
+                                    this.unregister_from_window_registry(cx);
+                                });
+                                let _ = window_handle.update(cx, |_, window, _| {
+                                    window.remove_window();
+                                });
+                            }
+                        }
+                        1 => {
+                            // Don't Save - close without saving
+                            // Unregister from window registry before closing
+                            let _ = this.update(cx, |this, cx| {
+                                this.unregister_from_window_registry(cx);
+                            });
+                            let _ = window_handle.update(cx, |_, window, _| {
+                                window.remove_window();
+                            });
+                        }
+                        _ => {
+                            // Cancel - do nothing
+                        }
+                    }
+                }
+            }).detach();
         }))
         .on_action(cx.listener(|this, _: &Quit, _, cx| {
             // Commit any pending edit before quitting
-            this.commit_pending_edit();
+            this.commit_pending_edit(cx);
             // Propagate to global quit handler (saves session and quits)
             cx.propagate();
         }))
@@ -2260,7 +2368,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             div.child(formula_bar::render_formula_bar(app, window, cx))
         })
         .child(headers::render_column_headers(app, cx))
-        .child(grid::render_grid(app, window, cx))
+        // Split view: render two grids side-by-side, or single grid
+        .child(if app.is_split() {
+            render_split_grids(app, window, cx).into_any_element()
+        } else {
+            grid::render_grid(app, window, cx, None).into_any_element()
+        })
         // Lua console panel (above status bar)
         .child(lua_console::render_lua_console(app, cx))
         .when(!zen_mode, |div| {
@@ -2376,13 +2489,60 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             div.child(formula_bar::render_hover_docs(func, panel_bg, panel_border, text_primary, text_muted, accent))
         })
         // F1 hold-to-peek context help overlay
-        .when(app.f1_help_visible, |div| {
-            div.child(render_f1_help_overlay(app))
-        })
+        .when_some(
+            app.f1_help_visible.then(|| render_f1_help_overlay(app, cx)),
+            |div, overlay| div.child(overlay)
+        )
+}
+
+/// Render split view with two grids side-by-side (50/50)
+fn render_split_grids(
+    app: &mut Spreadsheet,
+    window: &Window,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    use crate::split_view::SplitSide;
+
+    let accent = app.token(TokenKey::Accent);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let active_side = app.split_active_side;
+
+    // Border width for active pane indicator
+    let active_border_width = px(2.0);
+
+    div()
+        .flex()
+        .flex_row()
+        .size_full()
+        // Left pane (uses main view_state)
+        .child(
+            div()
+                .flex_1()
+                .h_full()
+                .overflow_hidden()
+                .border_r_1()
+                .border_color(panel_border)
+                .when(active_side == SplitSide::Left, |d| {
+                    d.border_2().border_color(accent)
+                })
+                .child(grid::render_grid(app, window, cx, Some(SplitSide::Left)))
+        )
+        // Vertical divider (implicit via border)
+        // Right pane (uses split_pane.view_state for independent scroll/selection)
+        .child(
+            div()
+                .flex_1()
+                .h_full()
+                .overflow_hidden()
+                .when(active_side == SplitSide::Right, |d| {
+                    d.border_2().border_color(accent)
+                })
+                .child(grid::render_grid(app, window, cx, Some(SplitSide::Right)))
+        )
 }
 
 /// Render the F1 hold-to-peek context help overlay
-fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
+fn render_f1_help_overlay(app: &Spreadsheet, cx: &App) -> impl IntoElement {
     let panel_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
@@ -2484,7 +2644,7 @@ fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
 
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                let display = app.sheet().get_display(row, col);
+                let display = app.sheet(cx).get_display(row, col);
                 if !display.is_empty() {
                     count += 1;
                     // Try to parse as number (handles both values and formula results)
@@ -2690,13 +2850,13 @@ fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
         // Single cell inspector
         let (row, col) = app.view_state.selected;
         let cell_ref = app.cell_ref_at(row, col);
-        let raw_value = app.sheet().get_raw(row, col);
-        let display_value = app.sheet().get_display(row, col);
+        let raw_value = app.sheet(cx).get_raw(row, col);
+        let display_value = app.sheet(cx).get_display(row, col);
         let is_formula = raw_value.starts_with('=');
-        let format = app.sheet().get_format(row, col);
+        let format = app.sheet(cx).get_format(row, col);
 
         // Get dependents (always useful)
-        let dependents = inspector_panel::get_dependents(app, row, col);
+        let dependents = inspector_panel::get_dependents(app, row, col, cx);
 
         // Build format badges
         let mut format_badges: Vec<&str> = Vec::new();
@@ -2728,7 +2888,7 @@ fn render_f1_help_overlay(app: &Spreadsheet) -> impl IntoElement {
             let depth = if app.verified_mode {
                 if let Some(report) = &app.last_recalc_report {
                     use visigrid_engine::cell_id::CellId;
-                    let sheet_id = app.sheet().id;
+                    let sheet_id = app.sheet(cx).id;
                     let cell_id = CellId::new(sheet_id, row, col);
                     report.get_cell_info(&cell_id).map(|info| info.depth)
                 } else {

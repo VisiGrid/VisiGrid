@@ -531,30 +531,30 @@ impl Global for SessionManager {}
 // ============================================================================
 
 use crate::app::Spreadsheet;
-use gpui::{Window, WindowBounds};
+use gpui::{Window, WindowBounds, App, Context};
 
 impl Spreadsheet {
     /// Capture current state as a WindowSession snapshot
-    pub fn snapshot(&self, window: &Window) -> WindowSession {
-        self.snapshot_with_bounds(Some(window.window_bounds()))
+    pub fn snapshot(&self, window: &Window, cx: &App) -> WindowSession {
+        self.snapshot_with_bounds(Some(window.window_bounds()), cx)
     }
 
     /// Capture current state using cached window bounds (for use without Window access)
-    pub fn snapshot_cached(&self) -> WindowSession {
-        self.snapshot_with_bounds(self.cached_window_bounds)
+    pub fn snapshot_cached(&self, cx: &App) -> WindowSession {
+        self.snapshot_with_bounds(self.cached_window_bounds, cx)
     }
 
     /// Internal: create snapshot with given window bounds
-    fn snapshot_with_bounds(&self, window_bounds: Option<WindowBounds>) -> WindowSession {
+    fn snapshot_with_bounds(&self, window_bounds: Option<WindowBounds>, cx: &App) -> WindowSession {
         // Capture sheet states
-        let sheets: Vec<SheetSession> = self.workbook.sheets()
+        let sheets: Vec<SheetSession> = self.wb(cx).sheets()
             .iter()
             .enumerate()
             .map(|(idx, sheet)| {
                 // For the active sheet, use current viewport state
                 // For other sheets, we'd need per-sheet scroll/selection tracking
                 // (not implemented yet - for now, only active sheet has accurate state)
-                if idx == self.workbook.active_sheet_index() {
+                if idx == self.wb(cx).active_sheet_index() {
                     SheetSession {
                         name: sheet.name.clone(),
                         scroll: ScrollPosition {
@@ -588,7 +588,7 @@ impl Spreadsheet {
         WindowSession {
             file: self.current_file.clone(),
             sheets,
-            active_sheet: self.workbook.active_sheet_index(),
+            active_sheet: self.wb(cx).active_sheet_index(),
             bounds,
             maximized,
             fullscreen,
@@ -604,7 +604,7 @@ impl Spreadsheet {
     ///
     /// Call this after loading the file but before first render.
     /// Does NOT load the file - caller must do that first.
-    pub fn apply(&mut self, session: &WindowSession) {
+    pub fn apply(&mut self, session: &WindowSession, cx: &mut Context<Self>) {
         // Find matching sheet by name (handles sheet reordering)
         let active_sheet_name = session.sheets
             .get(session.active_sheet)
@@ -612,19 +612,19 @@ impl Spreadsheet {
 
         // Switch to active sheet if found
         if let Some(name) = active_sheet_name {
-            if let Some(idx) = self.workbook.sheets()
+            if let Some(idx) = self.wb(cx).sheets()
                 .iter()
                 .position(|s| s.name == name)
             {
-                self.workbook.set_active_sheet(idx);
+                self.wb_mut(cx, |wb| wb.set_active_sheet(idx));
             }
         }
 
         // Apply scroll and selection for active sheet
-        let active_idx = self.workbook.active_sheet_index();
+        let active_idx = self.wb(cx).active_sheet_index();
         if let Some(sheet_session) = session.sheets.get(active_idx) {
             // Clamp to valid range (sheet may have shrunk)
-            let sheet = self.workbook.active_sheet();
+            let sheet = self.sheet(cx);
             let max_row = sheet.rows;
             let max_col = sheet.cols;
 
@@ -636,14 +636,14 @@ impl Spreadsheet {
                 sheet_session.selection.anchor.1.min(max_col.saturating_sub(1)),
             );
 
-            self.view_state.selection_end = sheet_session.selection.end.map(|(r, c)| {
+            self.view_state.selection_end = sheet_session.selection.end.map(|(r, c): (usize, usize)| {
                 (r.min(max_row.saturating_sub(1)), c.min(max_col.saturating_sub(1)))
             });
 
             // Restore additional selections (clamped)
             self.view_state.additional_selections = sheet_session.selection.additional
                 .iter()
-                .map(|(anchor, end)| {
+                .map(|(anchor, end): &((usize, usize), Option<(usize, usize)>)| {
                     let clamped_anchor = (
                         anchor.0.min(max_row.saturating_sub(1)),
                         anchor.1.min(max_col.saturating_sub(1)),

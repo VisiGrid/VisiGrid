@@ -113,8 +113,8 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
 
 /// Render sort indicator for a column if it's the sorted column
 /// Returns None if not sorted, Some(element) with ▲ or ▼ if sorted
-fn render_sort_indicator(app: &Spreadsheet, col: usize) -> Option<impl IntoElement> {
-    let sort_state = app.display_sort_state()?;
+fn render_sort_indicator(app: &Spreadsheet, col: usize, cx: &App) -> Option<impl IntoElement> {
+    let sort_state = app.display_sort_state(cx)?;
     if sort_state.0 != col {
         return None;
     }
@@ -178,7 +178,7 @@ fn render_column_header(
                 .overflow_hidden()
                 .when(has_filter_button, |d| d.pr(px(HEADER_CHROME_WIDTH)))
                 .child(Spreadsheet::col_letter(col))
-                .when_some(render_sort_indicator(app, col), |d, indicator| d.child(indicator))
+                .when_some(render_sort_indicator(app, col, cx), |d, indicator| d.child(indicator))
         )
         // Filter dropdown button (when AutoFilter is enabled)
         .when_some(render_filter_button(app, col, cx), |d, btn| d.child(btn))

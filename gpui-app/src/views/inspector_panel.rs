@@ -284,8 +284,8 @@ fn render_inspector_tab(
     // Pro: Verification Certificate, Impact Summary, Mini DAG, Trust Metrics
     let is_pro = visigrid_license::is_feature_enabled("inspector");
 
-    let raw_value = app.sheet().get_raw(row, col);
-    let display_value = app.sheet().get_display(row, col);
+    let raw_value = app.sheet(cx).get_raw(row, col);
+    let display_value = app.sheet(cx).get_display(row, col);
     let is_formula = raw_value.starts_with('=');
 
     // Determine cell type
@@ -313,12 +313,12 @@ fn render_inspector_tab(
     };
 
     // Get dependents (cells that depend on this cell)
-    let dependents = get_dependents(app, row, col);
+    let dependents = get_dependents(app, row, col, cx);
 
     // Check spill info
-    let is_spill_parent = app.sheet().is_spill_parent(row, col);
-    let is_spill_receiver = app.sheet().is_spill_receiver(row, col);
-    let spill_parent = app.sheet().get_spill_parent(row, col);
+    let is_spill_parent = app.sheet(cx).is_spill_parent(row, col);
+    let is_spill_receiver = app.sheet(cx).is_spill_receiver(row, col);
+    let spill_parent = app.sheet(cx).get_spill_parent(row, col);
 
     let cell_address = app.cell_ref_at(row, col);
     let has_spill_info = is_spill_parent || is_spill_receiver;
@@ -327,7 +327,7 @@ fn render_inspector_tab(
     // Get verification data for Pro features
     let recalc_info = if is_pro && app.verified_mode {
         if let Some(report) = &app.last_recalc_report {
-            let sheet_id = app.sheet().id;
+            let sheet_id = app.sheet(cx).id;
             let cell_id = CellId::new(sheet_id, row, col);
             report.get_cell_info(&cell_id).cloned()
         } else {
@@ -456,15 +456,15 @@ fn render_inspector_tab(
     // ========== PRO: TRUST HEADER (Phase 3.5 — Impact + Risk Semantics) ==========
     // This is the "certificate" feel — shows impact and any trust issues
     if is_pro {
-        let sheet_id = app.sheet().id;
-        let impact = app.workbook.compute_impact(sheet_id, row, col);
+        let sheet_id = app.sheet(cx).id;
+        let impact = app.wb(cx).compute_impact(sheet_id, row, col);
 
         // Cycle detection: use recalc report as source of truth when available
         // 1. Check if this cell itself is #CYCLE!
         // 2. Check if any upstream cell has #CYCLE! (via graph traversal)
         // 3. If verified mode, check recalc report's had_cycles flag
         let cell_is_cycle = display_value == "#CYCLE!";
-        let upstream_has_cycle = app.workbook.has_cycle_in_upstream(sheet_id, row, col);
+        let upstream_has_cycle = app.wb(cx).has_cycle_in_upstream(sheet_id, row, col);
         let report_had_cycles = app.verified_mode
             && app.last_recalc_report.as_ref().map(|r| r.had_cycles).unwrap_or(false);
 
@@ -582,7 +582,7 @@ fn render_inspector_tab(
     if is_pro {
         if let Some(ref trace_path) = app.inspector_trace_path {
             if !trace_path.is_empty() {
-                let sheet_id = app.sheet().id;
+                let sheet_id = app.sheet(cx).id;
                 let warning_color: Hsla = rgb(0xFFA500).into();
 
                 // Build path string: A1 → B1 → C1 → ...
@@ -686,7 +686,7 @@ fn render_inspector_tab(
 
     // ========== VALIDATION SECTION (Free) ==========
     // Show validation info if this cell has data validation
-    if let Some(rule) = app.sheet().validations.get(row, col) {
+    if let Some(rule) = app.sheet(cx).validations.get(row, col) {
         use visigrid_engine::validation::{ValidationType, ListSource};
 
         let validation_type = match &rule.rule_type {
@@ -932,7 +932,7 @@ fn render_inspector_tab(
     // Proof section (Pro feature, only when verified mode is enabled)
     if is_pro && app.verified_mode {
         if let Some(report) = &app.last_recalc_report {
-            let sheet_id = app.sheet().id;
+            let sheet_id = app.sheet(cx).id;
             let cell_id = CellId::new(sheet_id, row, col);
 
             if let Some(info) = report.get_cell_info(&cell_id) {
@@ -1229,7 +1229,7 @@ fn render_format_tab(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     // Get format state for entire selection (tri-state resolution)
-    let state = app.selection_format_state();
+    let state = app.selection_format_state(cx);
 
     div()
         .p_3()
@@ -1261,21 +1261,18 @@ fn render_names_tab(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     // First collect the named ranges (immutable borrow)
-    let ranges: Vec<_> = app.filtered_named_ranges()
-        .into_iter()
-        .cloned()
-        .collect();
+    let ranges: Vec<_> = app.filtered_named_ranges(cx);
 
     // Then get usage counts (mutable borrow for cache)
     let named_ranges: Vec<_> = ranges.into_iter()
         .map(|nr| {
-            let usage_count = app.get_named_range_usage_count(&nr.name);
+            let usage_count = app.get_named_range_usage_count(&nr.name, cx);
             (nr, usage_count)
         })
         .collect();
 
     let filter_query = app.names_filter_query.clone();
-    let all_names = app.workbook.list_named_ranges();
+    let all_names = app.wb(cx).list_named_ranges();
     let has_names = !all_names.is_empty();
     let has_filtered_results = !named_ranges.is_empty();
     let name_count = all_names.len();
@@ -1285,7 +1282,7 @@ fn render_names_tab(
     // Get detail info for selected named range (Pro feature)
     let selected_detail = if is_pro {
         selected_name.as_ref().and_then(|name| {
-            get_named_range_detail(app, name)
+            get_named_range_detail(app, name, cx)
         })
     } else {
         None
@@ -1604,13 +1601,13 @@ struct NamedRangeDetail {
 }
 
 /// Get detail info for a named range
-fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRangeDetail> {
+fn get_named_range_detail(app: &mut Spreadsheet, name: &str, cx: &App) -> Option<NamedRangeDetail> {
     use visigrid_engine::named_range::NamedRangeTarget;
     use visigrid_engine::cell_id::CellId;
 
     // Extract all data from named range first (immutable borrow)
     let (reference, description, cells, cell_count, sheet_index) = {
-        let nr = app.workbook.get_named_range(name)?;
+        let nr = app.wb(cx).get_named_range(name)?;
         let reference = nr.reference_string();
         let description = nr.description.clone();
 
@@ -1634,16 +1631,16 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRang
     };
 
     // Now we can call mutable methods
-    let usage_count = app.get_named_range_usage_count(name);
+    let usage_count = app.get_named_range_usage_count(name, cx);
 
     // Count dependents from the dependency graph (cells that depend on cells in this range)
     let dependents_count = {
         use std::collections::HashSet;
         // Get the SheetId from the sheet index
-        let sheet_id = app.workbook.sheets()
+        let sheet_id = app.wb(cx).sheets()
             .get(sheet_index)
             .map(|s| s.id)
-            .unwrap_or_else(|| app.sheet().id);
+            .unwrap_or_else(|| app.sheet(cx).id);
         let mut all_dependents: HashSet<CellId> = HashSet::new();
 
         // Convert cells in range to CellIds for exclusion
@@ -1653,7 +1650,7 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRang
 
         // Collect unique dependents from all cells in the range
         for (row, col) in &cells {
-            let deps = app.workbook.get_dependents(sheet_id, *row, *col);
+            let deps = app.wb(cx).get_dependents(sheet_id, *row, *col);
             for dep in deps {
                 // Don't count cells within the range itself as dependents
                 if !range_cells.contains(&dep) {
@@ -1667,9 +1664,9 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRang
     // Value preview: first cell value (or summary for multi-cell ranges)
     let value_preview = if cell_count == 1 {
         let (row, col) = cells[0];
-        app.sheet().get_display(row, col)
+        app.sheet(cx).get_display(row, col)
     } else {
-        let first_val = app.sheet().get_display(cells[0].0, cells[0].1);
+        let first_val = app.sheet(cx).get_display(cells[0].0, cells[0].1);
         if first_val.is_empty() {
             format!("{} cells", cell_count)
         } else {
@@ -1681,10 +1678,10 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRang
     // Depth = max depth of precedent chain (0 for raw values, 1+ for formulas)
     let (depth, is_verified, has_dynamic_refs) = {
         // Get the SheetId from the sheet index
-        let sheet_id = app.workbook.sheets()
+        let sheet_id = app.wb(cx).sheets()
             .get(sheet_index)
             .map(|s| s.id)
-            .unwrap_or_else(|| app.sheet().id);
+            .unwrap_or_else(|| app.sheet(cx).id);
 
         let mut max_depth = 0usize;
         let mut any_dynamic = false;
@@ -1692,11 +1689,11 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str) -> Option<NamedRang
         for (row, col) in &cells {
             let cell_id = CellId::new(sheet_id, *row, *col);
             // Compute depth by traversing precedents
-            let cell_depth = compute_cell_depth(&app.workbook, cell_id, &mut std::collections::HashSet::new());
+            let cell_depth = compute_cell_depth(app.wb(cx), cell_id, &mut std::collections::HashSet::new());
             max_depth = max_depth.max(cell_depth);
 
             // Check for dynamic refs in the formula
-            let raw = app.sheet().get_raw(*row, *col);
+            let raw = app.sheet(cx).get_raw(*row, *col);
             if raw.starts_with('=') {
                 if let Ok(expr) = visigrid_engine::formula::parser::parse(&raw[1..]) {
                     if visigrid_engine::formula::analyze::has_dynamic_deps(&expr) {
@@ -2034,7 +2031,7 @@ fn render_text_style_section(
                 .child(
                     format_toggle_btn("B", bold_active, bold_mixed, true, text_primary, text_muted, accent, panel_border)
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            let state = this.selection_format_state();
+                            let state = this.selection_format_state(cx);
                             let new_value = !matches!(state.bold, TriState::Uniform(true));
                             this.set_bold(new_value, cx);
                         }))
@@ -2043,7 +2040,7 @@ fn render_text_style_section(
                 .child(
                     format_toggle_btn("I", italic_active, italic_mixed, false, text_primary, text_muted, accent, panel_border)
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            let state = this.selection_format_state();
+                            let state = this.selection_format_state(cx);
                             let new_value = !matches!(state.italic, TriState::Uniform(true));
                             this.set_italic(new_value, cx);
                         }))
@@ -2052,7 +2049,7 @@ fn render_text_style_section(
                 .child(
                     format_toggle_btn("U", underline_active, underline_mixed, false, text_primary, text_muted, accent, panel_border)
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            let state = this.selection_format_state();
+                            let state = this.selection_format_state(cx);
                             let new_value = !matches!(state.underline, TriState::Uniform(true));
                             this.set_underline(new_value, cx);
                         }))
@@ -2609,7 +2606,7 @@ fn render_alignment_section(
                 .child(
                     wrap_toggle_btn(wrap_active, wrap_mixed, text_primary, text_muted, accent, panel_border)
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                            let state = this.selection_format_state();
+                            let state = this.selection_format_state(cx);
                             let new_overflow = if matches!(state.text_overflow, TriState::Uniform(TextOverflow::Wrap)) {
                                 TextOverflow::Clip
                             } else {
@@ -2930,9 +2927,9 @@ fn compute_cell_depth(
 
 // Get dependents (cells that reference the given cell)
 // Uses the workbook's dependency graph for O(1) lookup instead of O(n) scan.
-pub fn get_dependents(app: &Spreadsheet, row: usize, col: usize) -> Vec<(usize, usize)> {
-    let sheet_id = app.sheet().id;
-    let deps = app.workbook.get_dependents(sheet_id, row, col);
+pub fn get_dependents(app: &Spreadsheet, row: usize, col: usize, cx: &App) -> Vec<(usize, usize)> {
+    let sheet_id = app.sheet(cx).id;
+    let deps = app.wb(cx).get_dependents(sheet_id, row, col);
 
     // Filter to same-sheet cells and convert to (row, col)
     let mut dependents: Vec<(usize, usize)> = deps
@@ -2986,7 +2983,7 @@ fn render_history_tab(
     let total_count = all_entries.len();
     let filter_query = app.history_filter_query.clone();
     let filter_mode = app.history_filter_mode;
-    let active_sheet_idx = app.workbook.active_sheet_index();
+    let active_sheet_idx = app.sheet_index(cx);
     let selected_id = app.selected_history_id;
     let view_start = app.history_view_start;
     let is_pro = visigrid_license::is_feature_enabled("inspector");
@@ -3099,8 +3096,8 @@ fn render_history_tab(
                     if let Some(range) = this.history_highlight_range {
                         let (sheet_idx, start_row, start_col, end_row, end_col) = range;
                         // Switch to sheet if needed
-                        if sheet_idx != this.workbook.active_sheet_index() {
-                            this.workbook.set_active_sheet(sheet_idx);
+                        if sheet_idx != this.sheet_index(cx) {
+                            this.wb_mut(cx, |wb| wb.set_active_sheet(sheet_idx));
                         }
                         // Select the full affected range
                         this.view_state.selected = (start_row, start_col);
@@ -3471,8 +3468,8 @@ fn render_history_entry(
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                                     // Jump to location (entry selection happens via parent handler)
                                     if let Some((si, sr, sc, er, ec)) = jump_range {
-                                        if si != this.workbook.active_sheet_index() {
-                                            this.workbook.set_active_sheet(si);
+                                        if si != this.sheet_index(cx) {
+                                            this.wb_mut(cx, |wb| wb.set_active_sheet(si));
                                         }
                                         this.view_state.selected = (sr, sc);
                                         if sr != er || sc != ec {

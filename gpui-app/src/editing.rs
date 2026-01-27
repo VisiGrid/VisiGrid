@@ -57,14 +57,14 @@ impl Spreadsheet {
         let (row, col) = self.view_state.selected;
 
         // Block editing spill receivers - show message and redirect to parent
-        if let Some((parent_row, parent_col)) = self.sheet().get_spill_parent(row, col) {
+        if let Some((parent_row, parent_col)) = self.sheet(cx).get_spill_parent(row, col) {
             let parent_ref = self.cell_ref_at(parent_row, parent_col);
             self.status_message = Some(format!("Cannot edit spill range. Edit {} instead.", parent_ref));
             cx.notify();
             return;
         }
 
-        self.edit_original = self.sheet().get_raw(row, col);
+        self.edit_original = self.sheet(cx).get_raw(row, col);
         self.edit_value = self.edit_original.clone();
         self.edit_cursor = self.edit_value.len();  // Cursor at end (byte offset)
         self.edit_scroll_x = 0.0;
@@ -109,14 +109,14 @@ impl Spreadsheet {
         let (row, col) = self.view_state.selected;
 
         // Block editing spill receivers - show message and redirect to parent
-        if let Some((parent_row, parent_col)) = self.sheet().get_spill_parent(row, col) {
+        if let Some((parent_row, parent_col)) = self.sheet(cx).get_spill_parent(row, col) {
             let parent_ref = self.cell_ref_at(parent_row, parent_col);
             self.status_message = Some(format!("Cannot edit spill range. Edit {} instead.", parent_ref));
             cx.notify();
             return;
         }
 
-        self.edit_original = self.sheet().get_raw(row, col);
+        self.edit_original = self.sheet(cx).get_raw(row, col);
         self.edit_value = String::new();
         self.edit_cursor = 0;
         self.edit_scroll_x = 0.0;
@@ -162,7 +162,7 @@ impl Spreadsheet {
 
     /// Commit any pending edit without moving the cursor.
     /// Call this before file operations (Save, Export) to ensure unsaved edits are captured.
-    pub fn commit_pending_edit(&mut self) {
+    pub fn commit_pending_edit(&mut self, cx: &mut Context<Self>) {
         if !self.mode.is_editing() {
             return;
         }
@@ -188,8 +188,8 @@ impl Spreadsheet {
             }
         }
 
-        self.history.record_change(self.sheet_index(), row, col, old_value, new_value.clone());
-        self.set_cell_value(row, col, &new_value);  // Use helper that updates dep graph
+        self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
+        self.set_cell_value(row, col, &new_value, cx);  // Use helper that updates dep graph
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
@@ -202,13 +202,13 @@ impl Spreadsheet {
         self.formula_highlighted_refs.clear();
 
         // Smoke mode: trigger full ordered recompute for dogfooding
-        self.maybe_smoke_recalc();
+        self.maybe_smoke_recalc(cx);
 
         // Auto-clear invalid marker if cell is now valid (Phase 6C)
         if self.invalid_cells.contains_key(&(row, col)) {
             use visigrid_engine::validation::ValidationResult;
-            let display_value = self.sheet().get_display(row, col);
-            let result = self.workbook.validate_cell_input(self.sheet_index(), row, col, &display_value);
+            let display_value = self.sheet(cx).get_display(row, col);
+            let result = self.wb(cx).validate_cell_input(self.sheet_index(cx), row, col, &display_value);
             if matches!(result, ValidationResult::Valid) {
                 self.clear_cell_invalid(row, col);
             }
@@ -219,7 +219,7 @@ impl Spreadsheet {
     ///
     /// - Smoke mode (VISIGRID_RECALC=full): Logs to file for dogfooding
     /// - Verified mode: Updates last_recalc_report for status bar display
-    pub(crate) fn maybe_smoke_recalc(&mut self) {
+    pub(crate) fn maybe_smoke_recalc(&mut self, cx: &mut Context<Self>) {
         let smoke_enabled = is_smoke_recalc_enabled();
 
         // Skip if neither mode is active or we're already in a recalc
@@ -228,7 +228,7 @@ impl Spreadsheet {
         }
 
         self.in_smoke_recalc = true;
-        let report = self.workbook.recompute_full_ordered();
+        let report = self.wb_mut(cx, |wb| wb.recompute_full_ordered());
 
         // Store report for verified mode status bar
         if self.verified_mode {
@@ -266,7 +266,7 @@ impl Spreadsheet {
         if self.verified_mode {
             // Run initial recalc when enabling
             self.in_smoke_recalc = true;
-            let report = self.workbook.recompute_full_ordered();
+            let report = self.wb_mut(cx, |wb| wb.recompute_full_ordered());
             self.last_recalc_report = Some(report);
             self.in_smoke_recalc = false;
             self.status_message = Some("Verified mode enabled".to_string());
@@ -381,11 +381,11 @@ impl Spreadsheet {
         // Apply to all target cells
         for (row, col) in &target_cells {
             // Skip spill receivers
-            if self.sheet().get_spill_parent(*row, *col).is_some() {
+            if self.sheet(cx).get_spill_parent(*row, *col).is_some() {
                 continue;
             }
 
-            let old_value = self.sheet().get_raw(*row, *col);
+            let old_value = self.sheet(cx).get_raw(*row, *col);
 
             // For formulas, shift relative references based on delta from primary cell
             let new_value = if is_formula {
@@ -407,13 +407,14 @@ impl Spreadsheet {
         }
 
         // Apply all changes
-        let sheet_index = self.workbook.active_sheet_index();
+        let sheet_index = self.sheet_index(cx);
         for change in &changes {
-            self.set_cell_value(change.row, change.col, &change.new_value);
+            self.set_cell_value(change.row, change.col, &change.new_value, cx);
         }
 
         // Record batch for undo
-        if !changes.is_empty() {
+        let had_changes = !changes.is_empty();
+        if had_changes {
             self.history.record_batch(sheet_index, changes);
         }
 
@@ -428,7 +429,13 @@ impl Spreadsheet {
         self.autocomplete_visible = false;
         self.bump_cells_rev();
         self.is_modified = true;
-        self.maybe_smoke_recalc();
+        self.maybe_smoke_recalc(cx);
+
+        // Invalidate trace cache (dependencies may have changed)
+        if had_changes {
+            self.invalidate_trace_if_needed(cx);
+        }
+
         cx.notify();
     }
 
@@ -690,14 +697,14 @@ impl Spreadsheet {
             let (row, col) = self.view_state.selected;
 
             // Block editing spill receivers
-            if let Some((parent_row, parent_col)) = self.sheet().get_spill_parent(row, col) {
+            if let Some((parent_row, parent_col)) = self.sheet(cx).get_spill_parent(row, col) {
                 let parent_ref = self.cell_ref_at(parent_row, parent_col);
                 self.status_message = Some(format!("Cannot edit spill range. Edit {} instead.", parent_ref));
                 cx.notify();
                 return;
             }
 
-            self.edit_original = self.sheet().get_raw(row, col);
+            self.edit_original = self.sheet(cx).get_raw(row, col);
             self.edit_value = c.to_string();
             self.edit_cursor = c.len_utf8();  // Byte offset after first char
 
@@ -768,8 +775,8 @@ impl Spreadsheet {
             }
         }
 
-        self.history.record_change(self.sheet_index(), row, col, old_value, new_value.clone());
-        self.set_cell_value(row, col, &new_value);  // Use helper that updates dep graph
+        self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
+        self.set_cell_value(row, col, &new_value, cx);  // Use helper that updates dep graph
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
@@ -790,7 +797,7 @@ impl Spreadsheet {
         self.stop_caret_blink();
 
         // Smoke mode: trigger full ordered recompute for dogfooding
-        self.maybe_smoke_recalc();
+        self.maybe_smoke_recalc(cx);
 
         // Move after confirming
         self.move_selection(dr, dc, cx);
@@ -805,7 +812,7 @@ impl Spreadsheet {
         use visigrid_engine::provenance::MutationOp;
 
         let primary_cell = self.view_state.selected;
-        let base_value = self.sheet().get_raw(primary_cell.0, primary_cell.1);
+        let base_value = self.sheet(cx).get_raw(primary_cell.0, primary_cell.1);
 
         let is_formula = base_value.starts_with('=');
 
@@ -848,12 +855,12 @@ impl Spreadsheet {
 
         for (row, col) in &target_cells {
             // Skip spill receivers
-            if self.sheet().get_spill_parent(*row, *col).is_some() {
+            if self.sheet(cx).get_spill_parent(*row, *col).is_some() {
                 skipped_spill += 1;
                 continue;
             }
 
-            let old_value = self.sheet().get_raw(*row, *col);
+            let old_value = self.sheet(cx).get_raw(*row, *col);
 
             // For formulas, shift relative references based on delta from primary cell
             let new_value = if is_formula {
@@ -872,22 +879,24 @@ impl Spreadsheet {
                     new_value: new_value.clone(),
                 });
             }
-            self.sheet_mut().set_value(*row, *col, &new_value);
+            self.active_sheet_mut(cx, |s| s.set_value(*row, *col, &new_value));
             filled_count += 1;
         }
 
+        let sheet_id = self.sheet(cx).id;
+        let sheet_name = self.sheet(cx).name.clone();
         if !changes.is_empty() {
             let provenance = MutationOp::MultiEdit {
-                sheet: self.sheet().id,
+                sheet: sheet_id,
                 cells: target_cells.clone(),
                 value: base_value.clone(),
-            }.to_provenance(&self.sheet().name);
-            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+            }.to_provenance(&sheet_name);
+            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 
             // Smoke mode: trigger full ordered recompute for dogfooding
-            self.maybe_smoke_recalc();
+            self.maybe_smoke_recalc(cx);
         }
 
         self.view_state.additional_selections.clear();
@@ -918,7 +927,7 @@ impl Spreadsheet {
         }
 
         let (row, col) = self.view_state.selected;
-        let cell_value = self.sheet().get_display(row, col);
+        let cell_value = self.sheet(cx).get_display(row, col);
 
         if let Some(target) = links::detect_link(&cell_value) {
             let open_string = target.open_string();
@@ -954,9 +963,9 @@ impl Spreadsheet {
     }
 
     /// Detect link in current cell (for status bar hint)
-    pub fn detected_link(&self) -> Option<crate::links::LinkTarget> {
+    pub fn detected_link(&self, cx: &App) -> Option<crate::links::LinkTarget> {
         let (row, col) = self.view_state.selected;
-        let cell_value = self.sheet().get_display(row, col);
+        let cell_value = self.sheet(cx).get_display(row, col);
         crate::links::detect_link(&cell_value)
     }
 }

@@ -1,4 +1,4 @@
-use gpui::*;
+use gpui::{*};
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
 use crate::links::LinkTarget;
@@ -8,12 +8,12 @@ use crate::theme::TokenKey;
 /// Render the bottom status bar (Zed-inspired minimal design)
 pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     // Calculate selection stats if multiple cells selected
-    let selection_stats = calculate_selection_stats(app);
+    let selection_stats = calculate_selection_stats(app, cx);
 
     // Detect link in current cell (only in navigation mode with single cell selected)
     // Don't show hint if multi-selection is active (Ctrl+Enter won't work anyway)
     let detected_link = if !editing && app.mode == Mode::Navigation && !app.is_multi_selection() {
-        app.detected_link()
+        app.detected_link(cx)
     } else {
         None
     };
@@ -44,9 +44,9 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
         None
     };
 
-    // Get sheet information
-    let sheet_names = app.workbook.sheet_names();
-    let active_index = app.workbook.active_sheet_index();
+    // Get sheet information (convert to owned Strings to break borrow on cx for closure usage)
+    let sheet_names: Vec<String> = app.wb(cx).sheet_names().iter().map(|s| s.to_string()).collect();
+    let active_index = app.wb(cx).active_sheet_index();
     let renaming_sheet = app.renaming_sheet;
     let context_menu_sheet = app.sheet_context_menu;
 
@@ -150,6 +150,19 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                     )
                 })
                 .children(selection_stats)
+                // Trace mode indicator (Alt+T)
+                .when(app.trace_enabled, |d| {
+                    let trace_summary = app.trace_summary().unwrap_or_else(|| "Trace: (range selected)".to_string());
+                    let trace_color = app.token(TokenKey::Ok); // Green semantic color
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_color(trace_color)
+                            .child(trace_summary)
+                    )
+                })
                 // Hub sync status indicator (always shown)
                 .child(render_hub_indicator(app, cx))
                 // Verified mode indicator
@@ -453,7 +466,7 @@ fn render_status_message(
 const MAX_STATS_CELLS: usize = 10_000;
 
 /// Calculate statistics for the current selection
-fn calculate_selection_stats(app: &Spreadsheet) -> Vec<Div> {
+fn calculate_selection_stats(app: &Spreadsheet, cx: &App) -> Vec<Div> {
     let ((min_row, min_col), (max_row, max_col)) = app.selection_range();
     let text_muted = app.token(TokenKey::TextMuted);
     let text_primary = app.token(TokenKey::TextPrimary);
@@ -485,7 +498,7 @@ fn calculate_selection_stats(app: &Spreadsheet) -> Vec<Div> {
     for row in min_row..=max_row {
         for col in min_col..=max_col {
             count += 1;
-            let display = app.sheet().get_display(row, col);
+            let display = app.sheet(cx).get_display(row, col);
             if let Ok(num) = display.parse::<f64>() {
                 values.push(num);
             }

@@ -11,9 +11,11 @@
 
 use gpui::*;
 use visigrid_engine::sheet::Sheet;
+use visigrid_engine::workbook::Workbook;
 use crate::app::{Spreadsheet, display_filename, ext_lower, is_native_ext, DocumentMeta, DocumentSource};
 use crate::mode::Mode;
 use crate::session::SessionManager;
+use crate::window_registry::{WindowInfo, WindowRegistry};
 
 impl Spreadsheet {
     // =========================================================================
@@ -105,14 +107,14 @@ impl Spreadsheet {
     /// Update the global session with this window's current state.
     /// Called on significant state changes (file open/save, panel toggles).
     pub fn update_session(&self, window: &Window, cx: &mut Context<Self>) {
-        let snapshot = self.snapshot(window);
+        let snapshot = self.snapshot(window, cx);
         self.update_session_with_snapshot(snapshot, cx);
     }
 
     /// Update session using cached window bounds (for use without Window access).
     /// Useful from file_ops or other places where Window isn't available.
     pub fn update_session_cached(&self, cx: &mut Context<Self>) {
-        let snapshot = self.snapshot_cached();
+        let snapshot = self.snapshot_cached(cx);
         self.update_session_with_snapshot(snapshot, cx);
     }
 
@@ -155,28 +157,95 @@ impl Spreadsheet {
     // Sheet access convenience methods
     // =========================================================================
 
-    /// Get a reference to the active sheet (preview-aware)
-    /// Returns the snapshot's sheet during preview, live sheet otherwise
-    pub fn sheet(&self) -> &Sheet {
-        self.display_workbook().active_sheet()
-    }
-
-    /// Get a mutable reference to the active sheet
-    pub fn sheet_mut(&mut self) -> &mut Sheet {
-        self.workbook.active_sheet_mut()
+    /// Get a reference to the active sheet (preview-aware).
+    /// Returns the snapshot's sheet during preview, live sheet otherwise.
+    /// Pass &**cx from Context, or &app directly.
+    pub fn sheet<'a>(&'a self, cx: &'a App) -> &'a Sheet {
+        self.display_workbook(cx).active_sheet()
     }
 
     /// Get the active sheet index (for undo history)
-    pub fn sheet_index(&self) -> usize {
-        self.workbook.active_sheet_index()
+    /// Pass &**cx from Context, or &app directly.
+    pub fn sheet_index(&self, cx: &App) -> usize {
+        self.wb(cx).active_sheet_index()
     }
 
     /// Set a cell value and update the dependency graph.
     /// This is the preferred way to set cell values - it ensures the dep graph stays in sync.
-    pub fn set_cell_value(&mut self, row: usize, col: usize, value: &str) {
-        let sheet_id = self.workbook.active_sheet_id();
-        self.workbook.active_sheet_mut().set_value(row, col, value);
-        self.workbook.update_cell_deps(sheet_id, row, col);
+    pub fn set_cell_value(&mut self, row: usize, col: usize, value: &str, cx: &mut Context<Self>) {
+        self.workbook.update(cx, |wb, _| {
+            let sheet_id = wb.active_sheet_id();
+            wb.active_sheet_mut().set_value(row, col, value);
+            wb.update_cell_deps(sheet_id, row, col);
+        });
+    }
+
+    /// Execute a mutation on the workbook's active sheet.
+    /// Use this instead of sheet_mut() for proper Entity semantics.
+    pub fn with_active_sheet_mut<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Sheet) -> R,
+    ) -> R {
+        self.workbook.update(cx, |wb, _| {
+            f(wb.active_sheet_mut())
+        })
+    }
+
+    /// Execute a mutation on a specific sheet by index.
+    pub fn with_sheet_mut<R>(
+        &mut self,
+        sheet_idx: usize,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Sheet) -> R,
+    ) -> Option<R> {
+        self.workbook.update(cx, |wb, _| {
+            wb.sheet_mut(sheet_idx).map(f)
+        })
+    }
+
+    /// Read from the workbook (returns reference valid during borrow).
+    /// For more complex reads, use self.wb(cx) directly.
+    pub fn with_workbook<R>(&self, cx: &App, f: impl FnOnce(&Workbook) -> R) -> R {
+        f(self.wb(cx))
+    }
+
+    /// Update the workbook (for mutations that need full workbook access).
+    pub fn update_workbook<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Workbook, &mut Context<Workbook>) -> R,
+    ) -> R {
+        self.workbook.update(cx, f)
+    }
+
+    // =========================================================================
+    // Shorthand Workbook Accessors (minimize boilerplate)
+    // =========================================================================
+
+    /// Shorthand for read-only workbook access: `self.wb(cx).method()`
+    /// Pass &*cx from Context, or &app directly. Context auto-derefs to App.
+    #[inline]
+    pub fn wb<'a>(&'a self, cx: &'a App) -> &'a Workbook {
+        self.workbook.read(cx)
+    }
+
+    /// Shorthand for workbook mutation: `self.wb_mut(cx, |wb| wb.method())`
+    #[inline]
+    pub fn wb_mut<R>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Workbook) -> R) -> R {
+        self.workbook.update(cx, |wb, _| f(wb))
+    }
+
+    /// Shorthand for sheet mutation by index: `self.sheet_mut(idx, cx, |s| s.method())`
+    #[inline]
+    pub fn sheet_mut<R>(&mut self, sheet_idx: usize, cx: &mut Context<Self>, f: impl FnOnce(&mut Sheet) -> R) -> Option<R> {
+        self.workbook.update(cx, |wb, _| wb.sheet_mut(sheet_idx).map(f))
+    }
+
+    /// Shorthand for active sheet mutation: `self.active_sheet_mut(cx, |s| s.method())`
+    #[inline]
+    pub fn active_sheet_mut<R>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Sheet) -> R) -> R {
+        self.workbook.update(cx, |wb, _| f(wb.active_sheet_mut()))
     }
 
     // =========================================================================
@@ -191,12 +260,51 @@ impl Spreadsheet {
 
     /// Update window title if it changed (debounced).
     /// This is the ONLY way titles should update.
-    pub fn update_title_if_needed(&mut self, window: &mut Window) {
+    /// Also updates the global window registry for the window switcher.
+    pub fn update_title_if_needed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let title = self.document_meta.title_string(self.is_dirty());
         if self.cached_title.as_deref() != Some(&title) {
             window.set_window_title(&title);
-            self.cached_title = Some(title);
+            self.cached_title = Some(title.clone());
+
+            // Update the window registry for the window switcher
+            self.sync_window_registry(cx);
         }
+    }
+
+    /// Sync this window's info to the global registry
+    pub fn sync_window_registry(&self, cx: &mut Context<Self>) {
+        let display_title = self.document_meta.display_name.clone();
+
+        cx.update_global::<WindowRegistry, _>(|registry, _| {
+            registry.update(
+                self.window_handle,
+                display_title,
+                self.is_dirty(),
+                self.current_file.clone(),
+            );
+        });
+    }
+
+    /// Register this window with the global registry (call once on creation)
+    pub fn register_with_window_registry(&self, cx: &mut Context<Self>) {
+        let display_title = self.document_meta.display_name.clone();
+
+        cx.update_global::<WindowRegistry, _>(|registry, _| {
+            registry.register(WindowInfo::new(
+                self.window_handle,
+                display_title,
+                self.is_dirty(),
+                self.current_file.clone(),
+            ));
+        });
+    }
+
+    /// Unregister this window from the global registry (call on close)
+    pub fn unregister_from_window_registry(&self, cx: &mut Context<Self>) {
+        cx.update_global::<WindowRegistry, _>(|registry, _| {
+            registry.unregister(self.window_handle);
+        });
     }
 
     /// Invalidate the title cache (forces update on next update_title_if_needed call).
@@ -267,7 +375,7 @@ impl Spreadsheet {
 
     /// Move to the next sheet
     pub fn next_sheet(&mut self, cx: &mut Context<Self>) {
-        if self.workbook.next_sheet() {
+        if self.wb_mut(cx, |wb| wb.next_sheet()) {
             self.clear_selection_state();
             cx.notify();
         }
@@ -275,7 +383,7 @@ impl Spreadsheet {
 
     /// Move to the previous sheet
     pub fn prev_sheet(&mut self, cx: &mut Context<Self>) {
-        if self.workbook.prev_sheet() {
+        if self.wb_mut(cx, |wb| wb.prev_sheet()) {
             self.clear_selection_state();
             cx.notify();
         }
@@ -290,8 +398,8 @@ impl Spreadsheet {
         );
 
         // Commit any pending edit before switching sheets
-        self.commit_pending_edit();
-        if self.workbook.set_active_sheet(index) {
+        self.commit_pending_edit(cx);
+        if self.wb_mut(cx, |wb| wb.set_active_sheet(index)) {
             self.clear_selection_state();
             // Clear history highlight unless it's for the new sheet
             if let Some((sheet_idx, _, _, _, _)) = self.history_highlight_range {
@@ -305,8 +413,8 @@ impl Spreadsheet {
 
     /// Add a new sheet and switch to it
     pub fn add_sheet(&mut self, cx: &mut Context<Self>) {
-        let new_index = self.workbook.add_sheet();
-        self.workbook.set_active_sheet(new_index);
+        let new_index = self.wb_mut(cx, |wb| wb.add_sheet());
+        self.wb_mut(cx, |wb| wb.set_active_sheet(new_index));
         self.clear_selection_state();
         self.is_modified = true;
         cx.notify();
@@ -329,9 +437,9 @@ impl Spreadsheet {
 
     /// Start renaming a sheet (double-click on tab or context menu)
     pub fn start_sheet_rename(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(name) = self.workbook.sheet_names().get(index) {
+        if let Some(name) = self.wb(cx).sheet_names().get(index).map(|s| s.to_string()) {
             self.renaming_sheet = Some(index);
-            self.sheet_rename_input = name.to_string();
+            self.sheet_rename_input = name;
             self.sheet_rename_cursor = self.sheet_rename_input.len();
             self.sheet_rename_select_all = true;  // Select all on start
             self.sheet_context_menu = None;
@@ -372,7 +480,7 @@ impl Spreadsheet {
             }
 
             // Validation: reject duplicates (case-insensitive)
-            let is_duplicate = self.workbook.sheet_names()
+            let is_duplicate = self.wb(cx).sheet_names()
                 .iter()
                 .enumerate()
                 .any(|(i, name)| i != index && name.eq_ignore_ascii_case(new_name));
@@ -385,7 +493,8 @@ impl Spreadsheet {
             }
 
             // Apply the rename
-            self.workbook.rename_sheet(index, new_name);
+            let new_name_owned = new_name.to_string();
+            self.wb_mut(cx, |wb| wb.rename_sheet(index, &new_name_owned));
             self.is_modified = true;
 
             reset_state(self);
@@ -540,7 +649,7 @@ impl Spreadsheet {
 
     /// Delete a sheet
     pub fn delete_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.workbook.delete_sheet(index) {
+        if self.wb_mut(cx, |wb| wb.delete_sheet(index)) {
             self.is_modified = true;
             self.sheet_context_menu = None;
             self.request_title_refresh(cx);

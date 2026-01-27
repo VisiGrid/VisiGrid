@@ -92,7 +92,7 @@ pub enum CommandId {
     BordersClear,
 
     // File
-    NewFile,
+    NewWindow,
     OpenFile,
     Save,
     SaveAs,
@@ -114,6 +114,15 @@ pub enum CommandId {
     FreezeFirstColumn,
     FreezePanes,
     UnfreezePanes,
+    SplitRight,
+    CloseSplit,
+    ToggleTrace,
+    CycleTracePrecedent,
+    CycleTraceDependent,
+    ReturnToTraceSource,
+
+    // Window
+    SwitchWindow,
 
     // Refactoring
     ExtractNamedRange,
@@ -193,7 +202,7 @@ impl CommandId {
             Self::BordersAll => "Borders: All",
             Self::BordersOutline => "Borders: Outline",
             Self::BordersClear => "Borders: Clear",
-            Self::NewFile => "New File",
+            Self::NewWindow => "New Workbook",
             Self::OpenFile => "Open File",
             Self::Save => "Save",
             Self::SaveAs => "Save As",
@@ -211,6 +220,13 @@ impl CommandId {
             Self::FreezeFirstColumn => "Freeze First Column",
             Self::FreezePanes => "Freeze Panes",
             Self::UnfreezePanes => "Unfreeze Panes",
+            Self::SplitRight => "Split View",
+            Self::CloseSplit => "Close Split View",
+            Self::ToggleTrace => "Toggle Trace Mode",
+            Self::CycleTracePrecedent => "Jump to Precedent",
+            Self::CycleTraceDependent => "Jump to Dependent",
+            Self::ReturnToTraceSource => "Return to Trace Source",
+            Self::SwitchWindow => "Switch Window...",
             Self::ExtractNamedRange => "Extract to Named Range...",
             Self::ShowShortcuts => "Show Keyboard Shortcuts",
             Self::OpenKeybindings => "Open Keybindings (JSON)",
@@ -264,7 +280,7 @@ impl CommandId {
             Self::FormatCurrency => Some("Ctrl+Shift+$"),
             Self::FormatPercent => Some("Ctrl+Shift+%"),
             Self::FormatCells => Some("Ctrl+1"),
-            Self::NewFile => Some("Ctrl+N"),
+            Self::NewWindow => Some("Ctrl+N"),
             Self::OpenFile => Some("Ctrl+O"),
             Self::Save => Some("Ctrl+S"),
             Self::SaveAs => Some("Ctrl+Shift+S"),
@@ -274,6 +290,28 @@ impl CommandId {
             Self::ZoomOut => Some("Ctrl+Shift+-"),
             Self::ZoomReset => Some("Ctrl+0"),
             Self::ToggleAutoFilter => Some("Ctrl+Shift+F"),
+            #[cfg(target_os = "macos")]
+            Self::SwitchWindow => Some("Cmd+`"),
+            #[cfg(not(target_os = "macos"))]
+            Self::SwitchWindow => Some("Ctrl+`"),
+            Self::SplitRight => Some("Ctrl+\\"),
+            Self::CloseSplit => Some("Ctrl+Shift+\\"),
+            #[cfg(target_os = "macos")]
+            Self::ToggleTrace => Some("⌥T"),
+            #[cfg(not(target_os = "macos"))]
+            Self::ToggleTrace => Some("Alt+T"),
+            #[cfg(target_os = "macos")]
+            Self::CycleTracePrecedent => Some("⌥["),
+            #[cfg(not(target_os = "macos"))]
+            Self::CycleTracePrecedent => Some("Ctrl+["),
+            #[cfg(target_os = "macos")]
+            Self::CycleTraceDependent => Some("⌥]"),
+            #[cfg(not(target_os = "macos"))]
+            Self::CycleTraceDependent => Some("Ctrl+]"),
+            #[cfg(target_os = "macos")]
+            Self::ReturnToTraceSource => Some("⌥↩"),
+            #[cfg(not(target_os = "macos"))]
+            Self::ReturnToTraceSource => Some("F5"),
             _ => None,
         }
     }
@@ -315,7 +353,7 @@ impl CommandId {
             Self::BordersAll => "format border grid lines box",
             Self::BordersOutline => "format border box outline perimeter frame",
             Self::BordersClear => "format border clear remove none",
-            Self::NewFile => "create workbook",
+            Self::NewWindow => "create workbook file window blank",
             Self::OpenFile => "load",
             Self::Save => "write",
             Self::SaveAs => "write export",
@@ -333,6 +371,7 @@ impl CommandId {
             Self::FreezeFirstColumn => "lock pin column",
             Self::FreezePanes => "lock pin split scroll",
             Self::UnfreezePanes => "unlock unpin clear",
+            Self::SwitchWindow => "window workbook navigate focus",
             Self::ExtractNamedRange => "extract refactor variable name range",
             Self::ShowShortcuts => "help keys bindings hotkeys",
             Self::OpenKeybindings => "shortcuts remap customize config json",
@@ -360,6 +399,12 @@ impl CommandId {
             Self::HubSignIn => "visihub cloud sync sign in login authenticate token",
             Self::HubSignOut => "visihub cloud sync sign out logout disconnect",
             Self::HubLinkDialog => "visihub cloud sync link connect dataset repository",
+            Self::SplitRight => "split view pane side by side divide window",
+            Self::CloseSplit => "split close merge unsplit single pane",
+            Self::ToggleTrace => "trace precedents dependents dependency audit formula inputs outputs",
+            Self::CycleTracePrecedent => "trace precedent input jump navigate cycle next previous",
+            Self::CycleTraceDependent => "trace dependent output jump navigate cycle next previous",
+            Self::ReturnToTraceSource => "trace back return source origin home",
         }
     }
 
@@ -400,7 +445,7 @@ impl CommandId {
             Self::BordersAll,
             Self::BordersOutline,
             Self::BordersClear,
-            Self::NewFile,
+            Self::NewWindow,
             Self::OpenFile,
             Self::Save,
             Self::SaveAs,
@@ -418,6 +463,13 @@ impl CommandId {
             Self::FreezeFirstColumn,
             Self::FreezePanes,
             Self::UnfreezePanes,
+            Self::SplitRight,
+            Self::CloseSplit,
+            Self::ToggleTrace,
+            Self::CycleTracePrecedent,
+            Self::CycleTraceDependent,
+            Self::ReturnToTraceSource,
+            Self::SwitchWindow,
             Self::ExtractNamedRange,
             Self::ShowShortcuts,
             Self::OpenKeybindings,
@@ -458,7 +510,7 @@ impl CommandId {
     pub fn menu_category(&self) -> Option<MenuCategory> {
         match self {
             // File menu
-            Self::NewFile
+            Self::NewWindow
             | Self::OpenFile
             | Self::Save
             | Self::SaveAs
@@ -496,7 +548,13 @@ impl CommandId {
             | Self::FreezeTopRow
             | Self::FreezeFirstColumn
             | Self::FreezePanes
-            | Self::UnfreezePanes => Some(MenuCategory::View),
+            | Self::UnfreezePanes
+            | Self::SplitRight
+            | Self::CloseSplit
+            | Self::ToggleTrace
+            | Self::CycleTracePrecedent
+            | Self::CycleTraceDependent
+            | Self::ReturnToTraceSource => Some(MenuCategory::View),
 
             // Format menu
             Self::ToggleBold
@@ -547,6 +605,7 @@ impl CommandId {
             | Self::SelectBlanks
             | Self::ExtractNamedRange
             | Self::SelectTheme
+            | Self::SwitchWindow
             | Self::NextSheet
             | Self::PrevSheet
             | Self::AddSheet => None,

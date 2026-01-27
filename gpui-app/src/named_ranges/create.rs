@@ -1,6 +1,6 @@
 //! Create Named Range (Ctrl+Shift+N) - create named ranges from selection
 
-use gpui::*;
+use gpui::{*};
 use visigrid_engine::named_range::is_valid_name;
 use crate::app::{Spreadsheet, CreateNameFocus};
 use crate::mode::Mode;
@@ -41,7 +41,7 @@ impl Spreadsheet {
             CreateNameFocus::Name => self.create_name_name.push(c),
             CreateNameFocus::Description => self.create_name_description.push(c),
         }
-        self.validate_create_name();
+        self.validate_create_name(cx);
         cx.notify();
     }
 
@@ -51,7 +51,7 @@ impl Spreadsheet {
             CreateNameFocus::Name => { self.create_name_name.pop(); }
             CreateNameFocus::Description => { self.create_name_description.pop(); }
         }
-        self.validate_create_name();
+        self.validate_create_name(cx);
         cx.notify();
     }
 
@@ -65,7 +65,7 @@ impl Spreadsheet {
     }
 
     /// Validate the name field
-    fn validate_create_name(&mut self) {
+    fn validate_create_name(&mut self, cx: &App) {
         if self.create_name_name.is_empty() {
             self.create_name_validation_error = Some("Name is required".into());
             return;
@@ -77,7 +77,7 @@ impl Spreadsheet {
         }
 
         // Check if name already exists
-        if self.workbook.get_named_range(&self.create_name_name).is_some() {
+        if self.wb(cx).get_named_range(&self.create_name_name).is_some() {
             self.create_name_validation_error = Some(format!(
                 "'{}' already exists",
                 self.create_name_name
@@ -91,7 +91,7 @@ impl Spreadsheet {
     /// Confirm creation of the named range
     pub fn confirm_create_named_range(&mut self, cx: &mut Context<Self>) {
         // Validate first
-        self.validate_create_name();
+        self.validate_create_name(cx);
         if self.create_name_validation_error.is_some() {
             return;
         }
@@ -112,27 +112,29 @@ impl Spreadsheet {
             anchor_row.max(end_row),
             anchor_col.max(end_col),
         );
-        let sheet = self.workbook.active_sheet_index();
+        let sheet = self.wb(cx).active_sheet_index();
 
         let result = if start_row == end_row && start_col == end_col {
             // Single cell
-            self.workbook.define_name_for_cell(&name, sheet, start_row, start_col)
+            self.wb_mut(cx, |wb| wb.define_name_for_cell(&name, sheet, start_row, start_col))
         } else {
             // Range
-            self.workbook.define_name_for_range(
+            self.wb_mut(cx, |wb| wb.define_name_for_range(
                 &name, sheet, start_row, start_col, end_row, end_col
-            )
+            ))
         };
 
         match result {
             Ok(()) => {
                 // Add description if provided
                 if let Some(desc) = description {
-                    if let Some(nr) = self.workbook.named_ranges_mut().get(&name).cloned() {
-                        let mut updated = nr;
-                        updated.description = Some(desc);
-                        let _ = self.workbook.named_ranges_mut().set(updated);
-                    }
+                    self.workbook.update(cx, |wb, _| {
+                        if let Some(nr) = wb.named_ranges_mut().get(&name).cloned() {
+                            let mut updated = nr;
+                            updated.description = Some(desc);
+                            let _ = wb.named_ranges_mut().set(updated);
+                        }
+                    });
                 }
 
                 self.is_modified = true;

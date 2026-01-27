@@ -168,7 +168,7 @@ fn render_file_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, bo
     div()
         .flex()
         .flex_col()
-        .child(menu_item("New", Some("Ctrl+N"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.new_file(cx); }))
+        .child(menu_item("New Workbook", Some("Ctrl+N"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); cx.dispatch_action(&crate::actions::NewWindow); }))
         .child(menu_item("Open...", Some("Ctrl+O"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.open_file(cx); }))
         .child(menu_item("Save", Some("Ctrl+S"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.save(cx); }))
         .child(menu_item("Save As...", Some("Ctrl+Shift+S"), text_primary, text_muted, selection_bg, cx, |this, cx| { this.close_menu(cx); this.save_as(cx); }))

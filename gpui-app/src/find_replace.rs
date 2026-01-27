@@ -218,10 +218,10 @@ impl Spreadsheet {
         }
 
         let query = self.find_input.to_lowercase();
-        let sheet_idx = self.workbook.active_sheet_index();
+        let sheet_idx = self.wb(cx).active_sheet_index();
 
         // Collect cell data to search
-        let cells_to_search: Vec<_> = self.sheet().cells_iter()
+        let cells_to_search: Vec<_> = self.sheet(cx).cells_iter()
             .filter_map(|(&(row, col), cell)| {
                 match &cell.value {
                     CellValue::Text(text) => Some((row, col, MatchKind::Text, text.clone())),
@@ -348,7 +348,7 @@ impl Spreadsheet {
         };
 
         // Get the raw value
-        let raw_value = self.sheet().get_raw(hit.row, hit.col);
+        let raw_value = self.sheet(cx).get_raw(hit.row, hit.col);
 
         // Perform the replacement
         let new_value = if hit.kind == MatchKind::Formula && Self::is_ref_like(&self.find_input) {
@@ -360,9 +360,9 @@ impl Spreadsheet {
         };
 
         // Record undo and apply
-        let sheet_index = self.sheet_index();
+        let sheet_index = self.sheet_index(cx);
         self.history.record_change(sheet_index, hit.row, hit.col, raw_value, new_value.clone());
-        self.sheet_mut().set_value(hit.row, hit.col, &new_value);
+        self.active_sheet_mut(cx, |s| s.set_value(hit.row, hit.col, &new_value));
         cx.notify();
 
         // Recompute find results (offsets have changed)
@@ -407,7 +407,7 @@ impl Spreadsheet {
             // Sort hits by start position descending (replace from end to preserve offsets)
             cell_hits.sort_by(|a, b| b.start.cmp(&a.start));
 
-            let raw_value = self.sheet().get_raw(row, col);
+            let raw_value = self.sheet(cx).get_raw(row, col);
             let mut new_value = raw_value.clone();
 
             // Apply replacements in reverse order
@@ -442,11 +442,11 @@ impl Spreadsheet {
                 new_value: new_value.clone(),
             });
 
-            self.sheet_mut().set_value(row, col, &new_value);
+            self.active_sheet_mut(cx, |s| s.set_value(row, col, &new_value));
         }
 
         // Record all changes as single batch undo
-        let sheet_index = self.sheet_index();
+        let sheet_index = self.sheet_index(cx);
         self.history.record_batch(sheet_index, changes);
 
         // Clear results and show status

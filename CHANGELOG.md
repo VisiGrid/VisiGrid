@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.3
+
+Explainable Spreadsheets: Trace formulas, validate inputs, navigate everything from the keyboard.
+
+### Split View
+
+- **Side-by-side comparison** (`Ctrl+\`) — view two regions of the same workbook simultaneously
+- **Independent scroll and selection** per pane — each pane maintains its own view state
+- **Shared data** — edits in one pane are immediately visible in the other
+- **Close split** (`Ctrl+Shift+\`) — return to single pane, preserving active pane's state
+- **Focus other pane** (`Cmd+]` on macOS, `Ctrl+`` on Windows/Linux)
+
+### Trace Mode
+
+- **Toggle trace** (`Alt+T` / `⌥T`) — highlight formula dependencies for the selected cell
+- **Precedents** (inputs) shown in green tint, **dependents** (outputs) in purple
+- **Jump to precedent** (`Ctrl+[` on Windows/Linux, `⌥[` on macOS) — cycle through inputs
+- **Jump to dependent** (`Ctrl+]` on Windows/Linux, `⌥]` on macOS) — cycle through outputs
+- **Return to source** (`F5` on Windows/Linux, `⌥↩` on macOS) — snap back to original cell
+- **Invalid input warning** — status bar shows `⚠ N marked invalid (F8)` when precedents have validation failures
+- **Theme-aware colors** — trace highlights respect your theme (Ledger Dark, Slate, Light, VisiCalc, Catppuccin)
+- **Performance safe** — capped at 10,000 traced cells
+
+### Trace + Validation Integration
+
+- **Honest composition** — trace shows causality, validation shows integrity, no graph pollution
+- **Actionable badge** — `F8` jumps to invalid inputs directly from trace mode
+- **"Marked invalid"** wording — system is explicit about what it knows (no implied omniscience)
+- **Modal-safe** — trace shortcuts blocked during validation dropdown or dialog
+
+### Status Bar
+
+Live affordance surface that teaches shortcuts:
+```
+Trace: A1 | 3 prec | 2 dep | Ctrl+[ ] | Back: F5 | ⚠ 2 marked invalid (F8)
+```
+
+---
+
 ## 0.3.1
 
 Editing & Keyboard Polish

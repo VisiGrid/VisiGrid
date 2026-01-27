@@ -984,7 +984,9 @@ impl CellRect {
 
 pub struct Spreadsheet {
     // Core data
-    pub workbook: Workbook,
+    /// The shared workbook entity. All mutations must go through update(cx, ...).
+    /// This enables future multi-view support where multiple views share the same workbook.
+    pub workbook: Entity<Workbook>,
     pub history: History,
     /// Base workbook state for replay (captured on load/new, never mutated)
     pub base_workbook: Workbook,
@@ -1005,6 +1007,14 @@ pub struct Spreadsheet {
     // View state (selection, scroll, zoom, freeze panes)
     // This will become Entity<WorkbookView> in future phases for multi-tab support
     pub view_state: WorkbookViewState,
+
+    // Split view state (Ctrl+\ to split right)
+    pub split_pane: Option<crate::split_view::SplitPane>,
+    pub split_active_side: crate::split_view::SplitSide,
+
+    // Dependency tracing (Alt+T to toggle)
+    pub trace_enabled: bool,
+    pub trace_cache: Option<crate::trace::TraceCache>,
 
     // Mode & editing
     pub mode: Mode,
@@ -1047,6 +1057,8 @@ pub struct Spreadsheet {
     // File state
     pub current_file: Option<PathBuf>,
     pub is_modified: bool,  // Legacy - use is_dirty() for title bar
+    pub close_after_save: bool,  // Set by save_and_close() to close window after Save As completes
+    pub window_handle: gpui::AnyWindowHandle,  // Handle for closing window from async contexts
     pub recent_files: Vec<PathBuf>,  // Recently opened files (most recent first)
     pub recent_commands: Vec<CommandId>,  // Recently executed commands (most recent first)
 
@@ -1343,13 +1355,15 @@ impl Default for NamedRangeUsageCache {
 
 impl Spreadsheet {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let workbook = Workbook::new();
-        let base_workbook = workbook.clone(); // Capture initial state for replay
+        let workbook_data = Workbook::new();
+        let base_workbook = workbook_data.clone(); // Capture initial state for replay
+        let workbook = cx.new(|_| workbook_data);
 
         let focus_handle = cx.focus_handle();
         let console_focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         let window_size = window.viewport_size();
+        let window_handle = window.window_handle();
 
         // Get theme from global settings store
         let theme = user_settings(cx).appearance.theme_id
@@ -1374,6 +1388,10 @@ impl Spreadsheet {
             filter_search_text: String::new(),
             filter_checked_items: std::collections::HashSet::new(),
             view_state: WorkbookViewState::default(),
+            split_pane: None,
+            split_active_side: crate::split_view::SplitSide::Left,
+            trace_enabled: false,
+            trace_cache: None,
             mode: Mode::Navigation,
             edit_value: String::new(),
             edit_cursor: 0,
@@ -1404,6 +1422,8 @@ impl Spreadsheet {
             internal_clipboard: None,
             current_file: None,
             is_modified: false,
+            close_after_save: false,
+            window_handle: window_handle.into(),
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             document_meta: DocumentMeta::default(),
@@ -1631,10 +1651,10 @@ impl Spreadsheet {
         use crate::validation_dropdown::ValidationDropdownState;
 
         let (row, col) = self.view_state.selected;
-        let sheet_index = self.workbook.active_sheet_index();
+        let sheet_index = self.sheet_index(cx);
 
         // Get list items for this cell (if it has list validation)
-        let resolved = match self.workbook.get_list_items(sheet_index, row, col) {
+        let resolved = match self.wb(cx).get_list_items(sheet_index, row, col) {
             Some(list) if !list.items.is_empty() => list,
             Some(_) => {
                 // Has list validation but list is empty
@@ -1671,10 +1691,10 @@ impl Spreadsheet {
 
         let (row, col) = open_state.cell;
         let stored_fingerprint = open_state.source_fingerprint;
-        let sheet_index = self.workbook.active_sheet_index();
+        let sheet_index = self.sheet_index(cx);
 
         // Get current fingerprint from source
-        if let Some(current_list) = self.workbook.get_list_items(sheet_index, row, col) {
+        if let Some(current_list) = self.wb(cx).get_list_items(sheet_index, row, col) {
             if current_list.source_fingerprint != stored_fingerprint {
                 self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx);
             }
@@ -1763,13 +1783,13 @@ impl Spreadsheet {
 
         // Commit value using the same path as normal cell editing
         let (row, col) = self.view_state.selected;
-        let old_value = self.sheet().get_raw(row, col);
+        let old_value = self.sheet(cx).get_raw(row, col);
 
         // Record for undo (same as confirm_edit)
-        self.history.record_change(self.sheet_index(), row, col, old_value, value.to_string());
+        self.history.record_change(self.sheet_index(cx), row, col, old_value, value.to_string());
 
         // Set value and update dependency graph (same as confirm_edit)
-        self.set_cell_value(row, col, value);
+        self.set_cell_value(row, col, value, cx);
 
         // Bump revision for render cache invalidation
         self.cells_rev = self.cells_rev.wrapping_add(1);
@@ -1817,20 +1837,21 @@ impl Spreadsheet {
         self.validation_failure_index = 0;
 
         // Collect validation ranges first (to avoid borrow conflict)
-        let ranges: Vec<_> = self.sheet().validations.iter()
+        let ranges: Vec<_> = self.sheet(cx).validations.iter()
             .map(|(range, _)| range.clone())
             .collect();
 
         // Validate each cell with a rule
+        let sheet_idx = self.sheet_index(cx);
         for target in ranges {
             for row in target.start_row..=target.end_row {
                 for col in target.start_col..=target.end_col {
-                    let display_value = self.sheet().get_display(row, col);
+                    let display_value = self.sheet(cx).get_display(row, col);
                     // Skip empty cells
                     if display_value.is_empty() {
                         continue;
                     }
-                    let result = self.workbook.validate_cell_input(self.sheet_index(), row, col, &display_value);
+                    let result = self.wb(cx).validate_cell_input(sheet_idx, row, col, &display_value);
                     if let ValidationResult::Invalid { reason, .. } = result {
                         // Classify the failure reason
                         let failure_reason = Workbook::classify_failure_reason(&reason);
@@ -2100,13 +2121,13 @@ impl Spreadsheet {
 
     /// Ensure cell search cache is fresh (rebuilds if cells_rev changed)
     /// Returns a reference to the cached entries.
-    pub(crate) fn ensure_cell_search_cache_fresh(&mut self) -> &[crate::search::CellEntry] {
+    pub(crate) fn ensure_cell_search_cache_fresh(&mut self, cx: &App) -> &[crate::search::CellEntry] {
         use crate::search::CellEntry;
         use visigrid_engine::cell::CellValue;
 
         if self.cell_search_cache.cached_rev != self.cells_rev {
             // Cache is stale, rebuild from sparse storage
-            let sheet = self.sheet();
+            let sheet = self.sheet(cx);
             let entries: Vec<CellEntry> = sheet.cells_iter()
                 .filter(|(_, cell)| !matches!(cell.value, CellValue::Empty))
                 .take(1000)  // Cap cells scanned for performance
@@ -2149,7 +2170,7 @@ impl Spreadsheet {
                     self.edit_cursor += func_text.len();  // Byte length
                 } else {
                     // Grid navigation: start formula edit with =FUNC(
-                    self.edit_original = self.sheet().get_raw(self.view_state.selected.0, self.view_state.selected.1);
+                    self.edit_original = self.sheet(cx).get_raw(self.view_state.selected.0, self.view_state.selected.1);
                     self.edit_value = format!("={}(", name);
                     self.edit_cursor = self.edit_value.len();  // Byte offset at end
                     self.mode = Mode::Formula;
@@ -2269,7 +2290,8 @@ impl Spreadsheet {
             CommandId::BordersClear => self.apply_borders(BorderApplyMode::Clear, cx),
 
             // File
-            CommandId::NewFile => self.new_file(cx),
+            // NewWindow dispatches the action which propagates to App-level handler
+            CommandId::NewWindow => cx.dispatch_action(&crate::actions::NewWindow),
             CommandId::OpenFile => self.open_file(cx),
             CommandId::Save => self.save(cx),
             CommandId::SaveAs => self.save_as(cx),
@@ -2297,10 +2319,26 @@ impl Spreadsheet {
             CommandId::FreezeFirstColumn => self.freeze_first_column(cx),
             CommandId::FreezePanes => self.freeze_panes(cx),
             CommandId::UnfreezePanes => self.unfreeze_panes(cx),
+            CommandId::SplitRight => self.split_right(cx),
+            CommandId::CloseSplit => self.close_split(cx),
+            CommandId::ToggleTrace => self.toggle_trace(cx),
+            CommandId::CycleTracePrecedent => self.cycle_trace_precedent(false, cx),
+            CommandId::CycleTraceDependent => self.cycle_trace_dependent(false, cx),
+            CommandId::ReturnToTraceSource => self.return_to_trace_source(cx),
+
+            // Window - dispatch to App-level handler
+            CommandId::SwitchWindow => cx.dispatch_action(&crate::actions::SwitchWindow),
 
             // Help
             CommandId::ShowShortcuts => {
-                self.status_message = Some("Shortcuts: Ctrl+D Fill Down, Ctrl+R Fill Right, Ctrl+Enter Multi-edit".into());
+                #[cfg(target_os = "macos")]
+                {
+                    self.status_message = Some("Shortcuts: Cmd+D Fill Down, Cmd+R Fill Right, Cmd+Enter Multi-edit, Cmd+` Switch Window".into());
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    self.status_message = Some("Shortcuts: Ctrl+D Fill Down, Ctrl+R Fill Right, Ctrl+Enter Multi-edit, Ctrl+` Switch Window".into());
+                }
                 cx.notify();
             }
             CommandId::OpenKeybindings => {
@@ -2507,7 +2545,7 @@ impl Spreadsheet {
 
         // Check all rows for content in this column
         for row in 0..NUM_ROWS {
-            let text = self.sheet().get_text(row, col);
+            let text = self.sheet(cx).get_text(row, col);
             if !text.is_empty() {
                 // Estimate width: ~7px per character + padding
                 let estimated_width = text.len() as f32 * 7.5 + 16.0;
@@ -2542,7 +2580,7 @@ impl Spreadsheet {
             }
             // Auto-fit each selected column
             for col in cols_to_fit {
-                self.auto_fit_col_width_no_notify(col);
+                self.auto_fit_col_width_no_notify(col, cx);
             }
             cx.notify();
         } else {
@@ -2552,10 +2590,10 @@ impl Spreadsheet {
     }
 
     /// Auto-fit column width without notifying (for batch operations)
-    fn auto_fit_col_width_no_notify(&mut self, col: usize) {
+    fn auto_fit_col_width_no_notify(&mut self, col: usize, cx: &App) {
         let mut max_width: f32 = 40.0; // Minimum width
         for row in 0..NUM_ROWS {
-            let text = self.sheet().get_text(row, col);
+            let text = self.sheet(cx).get_text(row, col);
             if !text.is_empty() {
                 let estimated_width = text.len() as f32 * 7.5 + 16.0;
                 max_width = max_width.max(estimated_width);
@@ -2632,8 +2670,8 @@ impl Spreadsheet {
     /// - Own right and bottom: always draw if set
     /// - Own top: only draw if cell above has no bottom border
     /// - Own left: only draw if cell to left has no right border
-    pub fn cell_user_borders(&self, row: usize, col: usize) -> (bool, bool, bool, bool) {
-        let format = self.sheet().get_format(row, col);
+    pub fn cell_user_borders(&self, row: usize, col: usize, cx: &App) -> (bool, bool, bool, bool) {
+        let format = self.sheet(cx).get_format(row, col);
 
         // Right and bottom: always draw if set
         let right = format.border_right.is_set();
@@ -2642,7 +2680,7 @@ impl Spreadsheet {
         // Top: only draw if cell above has no bottom border
         let top = if format.border_top.is_set() {
             if row > 0 {
-                let above_format = self.sheet().get_format(row - 1, col);
+                let above_format = self.sheet(cx).get_format(row - 1, col);
                 !above_format.border_bottom.is_set()
             } else {
                 true // No cell above, draw top border
@@ -2654,7 +2692,7 @@ impl Spreadsheet {
         // Left: only draw if cell to left has no right border
         let left = if format.border_left.is_set() {
             if col > 0 {
-                let left_format = self.sheet().get_format(row, col - 1);
+                let left_format = self.sheet(cx).get_format(row, col - 1);
                 !left_format.border_right.is_set()
             } else {
                 true // No cell to left, draw left border
@@ -2667,8 +2705,8 @@ impl Spreadsheet {
     }
 
     /// Check if any user-defined border is set for this cell
-    pub fn has_user_borders(&self, row: usize, col: usize) -> bool {
-        let format = self.sheet().get_format(row, col);
+    pub fn has_user_borders(&self, row: usize, col: usize, cx: &App) -> bool {
+        let format = self.sheet(cx).get_format(row, col);
         format.border_top.is_set() ||
         format.border_right.is_set() ||
         format.border_bottom.is_set() ||
@@ -2754,7 +2792,7 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    self.sheet_mut().toggle_bold(row, col);
+                    self.active_sheet_mut(cx, |s| s.toggle_bold(row, col));
                 }
             }
         }
@@ -2766,7 +2804,7 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    self.sheet_mut().toggle_italic(row, col);
+                    self.active_sheet_mut(cx, |s| s.toggle_italic(row, col));
                 }
             }
         }
@@ -2778,7 +2816,7 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    self.sheet_mut().toggle_underline(row, col);
+                    self.active_sheet_mut(cx, |s| s.toggle_underline(row, col));
                 }
             }
         }
@@ -2790,7 +2828,7 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    self.sheet_mut().set_number_format(row, col, NumberFormat::Currency { decimals: 2 });
+                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, NumberFormat::Currency { decimals: 2 }));
                 }
             }
         }
@@ -2802,7 +2840,7 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    self.sheet_mut().set_number_format(row, col, NumberFormat::Percent { decimals: 2 });
+                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, NumberFormat::Percent { decimals: 2 }));
                 }
             }
         }
@@ -2880,11 +2918,12 @@ impl Spreadsheet {
         }
     }
 
-    /// Get the workbook to display - preview snapshot if previewing, else live workbook
-    pub fn display_workbook(&self) -> &Workbook {
+    /// Get the workbook to display - preview snapshot if previewing, else live workbook.
+    /// Requires context to access the Entity<Workbook> - pass &**cx from Context.
+    pub fn display_workbook<'a>(&'a self, cx: &'a App) -> &'a Workbook {
         match &self.rewind_preview {
             RewindPreviewState::On(session) => &session.snapshot,
-            RewindPreviewState::Off => &self.workbook,
+            RewindPreviewState::Off => self.wb(cx),
         }
     }
 
@@ -2957,7 +2996,7 @@ impl Spreadsheet {
 
         // Capture current focus for restoration
         let live_focus = PreviewFocus {
-            sheet_index: self.workbook.active_sheet_index(),
+            sheet_index: self.sheet_index(cx),
             selected: self.view_state.selected,
             selection_end: self.view_state.selection_end,
             scroll_row: self.view_state.scroll_row,
@@ -2982,7 +3021,7 @@ impl Spreadsheet {
 
         // Navigate to the affected area in preview
         // Switch to the sheet where the action occurred
-        let _ = self.workbook.set_active_sheet(sheet_idx);
+        self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(sheet_idx); });
         self.view_state.selected = (start_row, start_col);
         self.view_state.selection_end = if start_row != end_row || start_col != end_col {
             Some((end_row, end_col))
@@ -3002,7 +3041,7 @@ impl Spreadsheet {
     pub fn exit_preview(&mut self, cx: &mut Context<Self>) {
         if let RewindPreviewState::On(session) = std::mem::take(&mut self.rewind_preview) {
             // Restore live focus (Option A: peek behavior)
-            let _ = self.workbook.set_active_sheet(session.live_focus.sheet_index);
+            self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(session.live_focus.sheet_index); });
             self.view_state.selected = session.live_focus.selected;
             self.view_state.selection_end = session.live_focus.selection_end;
             self.view_state.scroll_row = session.live_focus.scroll_row;
@@ -3096,7 +3135,7 @@ impl Spreadsheet {
 
                 // Navigate to the affected area
                 if let Some((sheet_idx, start_row, start_col, end_row, end_col)) = new_highlight {
-                    let _ = self.workbook.set_active_sheet(sheet_idx);
+                    self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(sheet_idx); });
                     self.view_state.selected = (start_row, start_col);
                     self.view_state.selection_end = if start_row != end_row || start_col != end_col {
                         Some((end_row, end_col))
@@ -3113,7 +3152,7 @@ impl Spreadsheet {
             }
             Err(e) => {
                 // Preview build failed - show error and restore live focus
-                let _ = self.workbook.set_active_sheet(live_focus.sheet_index);
+                self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(live_focus.sheet_index); });
                 self.view_state.selected = live_focus.selected;
                 self.view_state.selection_end = live_focus.selection_end;
                 self.view_state.scroll_row = live_focus.scroll_row;
@@ -3199,17 +3238,19 @@ impl Spreadsheet {
 
         // === ATOMIC COMMIT: Do not fail after this point ===
 
-        // 1. Replace the workbook
-        self.workbook = plan.new_workbook;
+        // 1. Replace the workbook content
+        self.workbook.update(cx, |wb, _| {
+            *wb = plan.new_workbook;
+        });
         // Update base_workbook to match (this is now the canonical state)
-        self.base_workbook = self.workbook.clone();
+        self.base_workbook = self.wb(cx).clone();
 
         // 2. Apply view state from the plan (row ordering per sheet)
         // Reset row_view to identity for the current sheet
         self.row_view = visigrid_engine::filter::RowView::new(NUM_ROWS);
 
         // If the preview view state has sort info for current sheet, re-apply it
-        let active_idx = self.workbook.active_sheet_index();
+        let active_idx = self.sheet_index(cx);
         if let Some(sheet_view) = plan.new_view_state.per_sheet.get(active_idx) {
             if let Some(ref row_order) = sheet_view.row_order {
                 // Apply the stored row order
@@ -3318,15 +3359,15 @@ impl Spreadsheet {
             if let RewindPreviewState::On(ref session) = self.rewind_preview {
                 // Get sheet name and location from the history entry
                 let entry = self.history.entry_at(session.target_global_index);
-                let (sheet_name, location) = entry
-                    .map(|e| {
-                        let display = crate::history::History::to_display_entry(e, true);
-                        let sheet = display.sheet_index.and_then(|i| {
-                            self.workbook.sheet(i).map(|s| s.name.clone())
-                        });
-                        (sheet, display.location)
-                    })
-                    .unwrap_or((None, None));
+                let (sheet_name, location) = if let Some(e) = entry {
+                    let display = crate::history::History::to_display_entry(e, true);
+                    let sheet = display.sheet_index.and_then(|i| {
+                        self.wb(cx).sheet(i).map(|s| s.name.clone())
+                    });
+                    (sheet, display.location)
+                } else {
+                    (None, None)
+                };
 
                 (
                     session.entry_id,
@@ -3421,7 +3462,7 @@ impl Render for Spreadsheet {
         // One-shot title refresh (triggered by async operations without window access)
         if self.pending_title_refresh {
             self.pending_title_refresh = false;
-            self.update_title_if_needed(window);
+            self.update_title_if_needed(window, cx);
         }
 
         // Update window size if changed (handles resize)
@@ -3478,7 +3519,7 @@ impl Render for Spreadsheet {
         // This avoids re-parsing on every render
         if !self.mode.is_editing() {
             let cell = self.view_state.selected;
-            let formula = self.sheet().get_raw(cell.0, cell.1);
+            let formula = self.sheet(cx).get_raw(cell.0, cell.1);
 
             // Only update cache if cell or formula changed
             let cache_valid = self.formula_bar_cache_cell == Some(cell)

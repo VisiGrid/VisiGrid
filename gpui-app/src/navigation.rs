@@ -19,7 +19,7 @@
 //! The `visible_rows` cache in RowView provides O(1) access to the next/previous
 //! visible row via binary search.
 
-use gpui::*;
+use gpui::{*};
 use crate::app::{Spreadsheet, NUM_ROWS, NUM_COLS};
 
 impl Spreadsheet {
@@ -84,7 +84,7 @@ impl Spreadsheet {
             cx,
         );
 
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.active_view_state().selected;
 
         // For vertical movement, use filter-aware navigation
         let new_row = if dr != 0 {
@@ -96,9 +96,10 @@ impl Spreadsheet {
         // For horizontal movement, simple arithmetic (columns aren't filtered)
         let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
 
-        self.view_state.selected = (new_row, new_col);
-        self.view_state.selection_end = None;  // Clear range selection
-        self.view_state.additional_selections.clear();  // Clear discontiguous selections
+        let view_state = self.active_view_state_mut();
+        view_state.selected = (new_row, new_col);
+        view_state.selection_end = None;  // Clear range selection
+        view_state.additional_selections.clear();  // Clear discontiguous selections
 
         self.ensure_visible(cx);
     }
@@ -106,7 +107,8 @@ impl Spreadsheet {
     pub fn extend_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
-        let (row, col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
+        let view_state = self.active_view_state();
+        let (row, col) = view_state.selection_end.unwrap_or(view_state.selected);
 
         // For vertical movement, use filter-aware navigation
         let new_row = if dr != 0 {
@@ -118,7 +120,7 @@ impl Spreadsheet {
         // For horizontal movement, simple arithmetic
         let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
 
-        self.view_state.selection_end = Some((new_row, new_col));
+        self.active_view_state_mut().selection_end = Some((new_row, new_col));
 
         self.ensure_visible(cx);
     }
@@ -143,14 +145,14 @@ impl Spreadsheet {
 
     /// Find the data boundary in a direction (used by Ctrl+Arrow and Ctrl+Shift+Arrow)
     /// When filtering is active, only considers visible rows.
-    pub(crate) fn find_data_boundary(&self, start_row: usize, start_col: usize, dr: i32, dc: i32) -> (usize, usize) {
+    pub(crate) fn find_data_boundary(&self, start_row: usize, start_col: usize, dr: i32, dc: i32, cx: &App) -> (usize, usize) {
         let mut row = start_row;
         let mut col = start_col;
 
         // Get cell value, converting view row to data row
         let get_cell_value = |view_row: usize, c: usize| -> bool {
             let data_row = self.row_view.view_to_data(view_row);
-            self.sheet().get_cell(data_row, c).value.raw_display().is_empty()
+            self.sheet(cx).get_cell(data_row, c).value.raw_display().is_empty()
         };
 
         let current_empty = get_cell_value(row, col);
@@ -270,7 +272,7 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
 
         let (row, col) = self.view_state.selected;
-        let (new_row, new_col) = self.find_data_boundary(row, col, dr, dc);
+        let (new_row, new_col) = self.find_data_boundary(row, col, dr, dc, cx);
 
         self.view_state.selected = (new_row, new_col);
         self.view_state.selection_end = None;
@@ -284,7 +286,7 @@ impl Spreadsheet {
 
         // Start from current selection end (or selected if no selection)
         let (row, col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
-        let (new_row, new_col) = self.find_data_boundary(row, col, dr, dc);
+        let (new_row, new_col) = self.find_data_boundary(row, col, dr, dc, cx);
 
         // Extend selection to this point (don't move selected, just selection_end)
         self.view_state.selection_end = Some((new_row, new_col));
@@ -296,37 +298,39 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn ensure_visible(&mut self, cx: &mut Context<Self>) {
-        let (row, col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
         let visible_rows = self.visible_rows();
         let visible_cols = self.visible_cols();
 
+        let view_state = self.active_view_state_mut();
+        let (row, col) = view_state.selection_end.unwrap_or(view_state.selected);
+
         // When freeze panes are active, calculate scrollable region
-        let scrollable_visible_rows = visible_rows.saturating_sub(self.view_state.frozen_rows);
-        let scrollable_visible_cols = visible_cols.saturating_sub(self.view_state.frozen_cols);
+        let scrollable_visible_rows = visible_rows.saturating_sub(view_state.frozen_rows);
+        let scrollable_visible_cols = visible_cols.saturating_sub(view_state.frozen_cols);
 
         // Vertical scroll - frozen rows are always visible, only scroll for rows in scrollable region
-        if row < self.view_state.frozen_rows {
+        if row < view_state.frozen_rows {
             // Row is in frozen region - always visible, but ensure scroll_row is valid
-            self.view_state.scroll_row = self.view_state.scroll_row.max(self.view_state.frozen_rows);
-        } else if row < self.view_state.scroll_row {
-            self.view_state.scroll_row = row;
-        } else if scrollable_visible_rows > 0 && row >= self.view_state.scroll_row + scrollable_visible_rows {
-            self.view_state.scroll_row = row - scrollable_visible_rows + 1;
+            view_state.scroll_row = view_state.scroll_row.max(view_state.frozen_rows);
+        } else if row < view_state.scroll_row {
+            view_state.scroll_row = row;
+        } else if scrollable_visible_rows > 0 && row >= view_state.scroll_row + scrollable_visible_rows {
+            view_state.scroll_row = row - scrollable_visible_rows + 1;
         }
 
         // Horizontal scroll - frozen cols are always visible, only scroll for cols in scrollable region
-        if col < self.view_state.frozen_cols {
+        if col < view_state.frozen_cols {
             // Col is in frozen region - always visible, but ensure scroll_col is valid
-            self.view_state.scroll_col = self.view_state.scroll_col.max(self.view_state.frozen_cols);
-        } else if col < self.view_state.scroll_col {
-            self.view_state.scroll_col = col;
-        } else if scrollable_visible_cols > 0 && col >= self.view_state.scroll_col + scrollable_visible_cols {
-            self.view_state.scroll_col = col - scrollable_visible_cols + 1;
+            view_state.scroll_col = view_state.scroll_col.max(view_state.frozen_cols);
+        } else if col < view_state.scroll_col {
+            view_state.scroll_col = col;
+        } else if scrollable_visible_cols > 0 && col >= view_state.scroll_col + scrollable_visible_cols {
+            view_state.scroll_col = col - scrollable_visible_cols + 1;
         }
 
         // Ensure scroll positions don't go below freeze bounds
-        self.view_state.scroll_row = self.view_state.scroll_row.max(self.view_state.frozen_rows);
-        self.view_state.scroll_col = self.view_state.scroll_col.max(self.view_state.frozen_cols);
+        view_state.scroll_row = view_state.scroll_row.max(view_state.frozen_rows);
+        view_state.scroll_col = view_state.scroll_col.max(view_state.frozen_cols);
 
         cx.notify();
     }
@@ -341,20 +345,21 @@ impl Spreadsheet {
         let visible_rows = self.visible_rows();
         let visible_cols = self.visible_cols();
 
+        let view_state = self.active_view_state_mut();
         // When freeze panes are active, scrollable region starts after frozen rows/cols
-        let min_scroll_row = self.view_state.frozen_rows;
-        let min_scroll_col = self.view_state.frozen_cols;
+        let min_scroll_row = view_state.frozen_rows;
+        let min_scroll_col = view_state.frozen_cols;
 
-        let new_row = (self.view_state.scroll_row as i32 + delta_rows)
+        let new_row = (view_state.scroll_row as i32 + delta_rows)
             .max(min_scroll_row as i32)
             .min((NUM_ROWS.saturating_sub(visible_rows)) as i32) as usize;
-        let new_col = (self.view_state.scroll_col as i32 + delta_cols)
+        let new_col = (view_state.scroll_col as i32 + delta_cols)
             .max(min_scroll_col as i32)
             .min((NUM_COLS.saturating_sub(visible_cols)) as i32) as usize;
 
-        if new_row != self.view_state.scroll_row || new_col != self.view_state.scroll_col {
-            self.view_state.scroll_row = new_row;
-            self.view_state.scroll_col = new_col;
+        if new_row != view_state.scroll_row || new_col != view_state.scroll_col {
+            view_state.scroll_row = new_row;
+            view_state.scroll_col = new_col;
             cx.notify();
         }
     }
@@ -365,34 +370,41 @@ impl Spreadsheet {
 
     pub fn select_cell(&mut self, row: usize, col: usize, extend: bool, cx: &mut Context<Self>) {
         if extend {
-            self.view_state.selection_end = Some((row, col));
+            self.active_view_state_mut().selection_end = Some((row, col));
         } else {
-            self.view_state.selected = (row, col);
-            self.view_state.selection_end = None;
-            self.view_state.additional_selections.clear();  // Clear Ctrl+Click selections
+            {
+                let view_state = self.active_view_state_mut();
+                view_state.selected = (row, col);
+                view_state.selection_end = None;
+                view_state.additional_selections.clear();  // Clear Ctrl+Click selections
+            }
             // Clear trace path when selection changes (unless inspector is pinned)
             if self.inspector_pinned.is_none() && self.inspector_trace_path.is_some() {
                 self.inspector_trace_path = None;
                 self.inspector_trace_incomplete = false;
             }
         }
+        // Update dependency trace if enabled
+        self.recompute_trace_if_needed(cx);
         cx.notify();
     }
 
     /// Ctrl+Click to add/toggle cell in selection (discontiguous selection)
     pub fn ctrl_click_cell(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        let view_state = self.active_view_state_mut();
         // Save current selection to additional_selections
-        self.view_state.additional_selections.push((self.view_state.selected, self.view_state.selection_end));
+        view_state.additional_selections.push((view_state.selected, view_state.selection_end));
         // Start new selection at clicked cell
-        self.view_state.selected = (row, col);
-        self.view_state.selection_end = None;
+        view_state.selected = (row, col);
+        view_state.selection_end = None;
         cx.notify();
     }
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.view_state.selected = (0, 0);
-        self.view_state.selection_end = Some((NUM_ROWS - 1, NUM_COLS - 1));
-        self.view_state.additional_selections.clear();  // Clear discontiguous selections
+        let view_state = self.active_view_state_mut();
+        view_state.selected = (0, 0);
+        view_state.selection_end = Some((NUM_ROWS - 1, NUM_COLS - 1));
+        view_state.additional_selections.clear();  // Clear discontiguous selections
         cx.notify();
     }
 
@@ -403,20 +415,22 @@ impl Spreadsheet {
     /// Start drag selection - called on mouse_down
     pub fn start_drag_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         self.dragging_selection = true;
-        self.view_state.selected = (row, col);
-        self.view_state.selection_end = None;
-        self.view_state.additional_selections.clear();  // Clear Ctrl+Click selections on new drag
+        let view_state = self.active_view_state_mut();
+        view_state.selected = (row, col);
+        view_state.selection_end = None;
+        view_state.additional_selections.clear();  // Clear Ctrl+Click selections on new drag
         cx.notify();
     }
 
     /// Start drag selection with Ctrl held (add to existing selections)
     pub fn start_ctrl_drag_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         self.dragging_selection = true;
+        let view_state = self.active_view_state_mut();
         // Save current selection to additional_selections
-        self.view_state.additional_selections.push((self.view_state.selected, self.view_state.selection_end));
+        view_state.additional_selections.push((view_state.selected, view_state.selection_end));
         // Start new selection at clicked cell
-        self.view_state.selected = (row, col);
-        self.view_state.selection_end = None;
+        view_state.selected = (row, col);
+        view_state.selection_end = None;
         cx.notify();
     }
 
@@ -426,8 +440,9 @@ impl Spreadsheet {
             return;
         }
         // Only update if the cell changed to avoid unnecessary redraws
-        if self.view_state.selection_end != Some((row, col)) {
-            self.view_state.selection_end = Some((row, col));
+        let view_state = self.active_view_state_mut();
+        if view_state.selection_end != Some((row, col)) {
+            view_state.selection_end = Some((row, col));
             cx.notify();
         }
     }
@@ -445,8 +460,9 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn selection_range(&self) -> ((usize, usize), (usize, usize)) {
-        let start = self.view_state.selected;
-        let end = self.view_state.selection_end.unwrap_or(start);
+        let view_state = self.active_view_state();
+        let start = view_state.selected;
+        let end = view_state.selection_end.unwrap_or(start);
         let min_row = start.0.min(end.0);
         let max_row = start.0.max(end.0);
         let min_col = start.1.min(end.1);
@@ -457,18 +473,19 @@ impl Spreadsheet {
     /// Clamp selection to valid bounds after operations that might invalidate it.
     /// Preserves column where possible (user mental model), clamps row to valid range.
     pub fn clamp_selection(&mut self) {
+        let view_state = self.active_view_state_mut();
         // Clamp selected cell
-        self.view_state.selected.0 = self.view_state.selected.0.min(NUM_ROWS - 1);
-        self.view_state.selected.1 = self.view_state.selected.1.min(NUM_COLS - 1);
+        view_state.selected.0 = view_state.selected.0.min(NUM_ROWS - 1);
+        view_state.selected.1 = view_state.selected.1.min(NUM_COLS - 1);
 
         // Clamp selection_end if present
-        if let Some(ref mut end) = self.view_state.selection_end {
+        if let Some(ref mut end) = view_state.selection_end {
             end.0 = end.0.min(NUM_ROWS - 1);
             end.1 = end.1.min(NUM_COLS - 1);
         }
 
         // Clamp additional selections
-        for (start, end) in &mut self.view_state.additional_selections {
+        for (start, end) in &mut view_state.additional_selections {
             start.0 = start.0.min(NUM_ROWS - 1);
             start.1 = start.1.min(NUM_COLS - 1);
             if let Some(ref mut e) = end {
@@ -481,27 +498,29 @@ impl Spreadsheet {
     /// Returns true if more than one cell is selected.
     /// This includes range selections and Ctrl+Click additional selections.
     pub fn is_multi_selection(&self) -> bool {
+        let view_state = self.active_view_state();
         // Check if primary selection is a range (more than one cell)
-        if let Some(end) = self.view_state.selection_end {
-            if end != self.view_state.selected {
+        if let Some(end) = view_state.selection_end {
+            if end != view_state.selected {
                 return true;
             }
         }
         // Check if there are additional Ctrl+Click selections
-        if !self.view_state.additional_selections.is_empty() {
+        if !view_state.additional_selections.is_empty() {
             return true;
         }
         false
     }
 
     pub fn is_selected(&self, row: usize, col: usize) -> bool {
+        let view_state = self.active_view_state();
         // Check active selection
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
         if row >= min_row && row <= max_row && col >= min_col && col <= max_col {
             return true;
         }
         // Check additional selections (Ctrl+Click ranges)
-        for (start, end) in &self.view_state.additional_selections {
+        for (start, end) in &view_state.additional_selections {
             let end = end.unwrap_or(*start);
             let min_row = start.0.min(end.0);
             let max_row = start.0.max(end.0);

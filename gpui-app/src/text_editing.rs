@@ -241,7 +241,7 @@ impl Spreadsheet {
         let (end_row, end_col) = self.formula_ref_end.unwrap_or((anchor_row, anchor_col));
 
         // Jump to data boundary from end position
-        let (new_row, new_col) = self.find_data_boundary(end_row, end_col, dr, dc);
+        let (new_row, new_col) = self.find_data_boundary(end_row, end_col, dr, dc, cx);
 
         self.formula_ref_end = Some((new_row, new_col));
         self.update_formula_reference(false);
@@ -265,7 +265,7 @@ impl Spreadsheet {
             self.view_state.selected
         };
 
-        let (new_row, new_col) = self.find_data_boundary(start_row, start_col, dr, dc);
+        let (new_row, new_col) = self.find_data_boundary(start_row, start_col, dr, dc, cx);
 
         let is_new = self.formula_ref_cell.is_none();
         self.formula_ref_cell = Some((new_row, new_col));

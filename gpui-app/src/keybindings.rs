@@ -114,7 +114,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb_shift(m, "v"), PasteValues, Some("Spreadsheet")),
 
         // File
-        KeyBinding::new(&kb(m, "n"), NewFile, Some("Spreadsheet")),
+        // Note: NewWindow is handled at App level (main.rs) to open a new window
+        // We still bind it here so the keybinding shows in help, but the action
+        // propagates up to the App-level handler
+        KeyBinding::new(&kb(m, "n"), NewWindow, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "o"), OpenFile, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "s"), Save, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "s"), SaveAs, Some("Spreadsheet")),
@@ -133,6 +136,33 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Borders (Excel: Ctrl+Shift+& = outline, Ctrl+Shift+_ = clear)
         KeyBinding::new(&kb_shift(m, "7"), BordersOutline, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "-"), BordersClear, Some("Spreadsheet")),
+
+        // Split view
+        KeyBinding::new(&kb(m, "\\"), SplitRight, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "\\"), CloseSplit, Some("Spreadsheet")),
+        // Split pane focus: Cmd+] on macOS, Ctrl+\ on Windows/Linux (to avoid Ctrl+] Excel conflict)
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-]", FocusOtherPane, Some("Spreadsheet")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-`", FocusOtherPane, Some("Spreadsheet")),
+
+        // Dependency tracing
+        // Toggle: Alt+T (Option+T on macOS) - universal
+        KeyBinding::new("alt-t", ToggleTrace, Some("Spreadsheet")),
+        // Jump to precedent/dependent: Ctrl+[/] on Windows/Linux (Excel), Alt+[/] on macOS
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("alt-[", CycleTracePrecedent, Some("Spreadsheet")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("alt-]", CycleTraceDependent, Some("Spreadsheet")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-[", CycleTracePrecedent, Some("Spreadsheet")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-]", CycleTraceDependent, Some("Spreadsheet")),
+        // Return to trace source: F5 on Windows/Linux (Excel), Alt+Enter on macOS
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("alt-enter", ReturnToTraceSource, Some("Spreadsheet")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("f5", ReturnToTraceSource, Some("Spreadsheet")),
 
         // Format
         KeyBinding::new(&kb(m, "b"), ToggleBold, Some("Spreadsheet")),
@@ -182,7 +212,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // macOS always uses Cmd for these system shortcuts regardless of preference
         bindings.push(KeyBinding::new("cmd-,", ShowPreferences, Some("Spreadsheet")));
         bindings.push(KeyBinding::new("cmd-w", CloseWindow, Some("Spreadsheet")));
+        bindings.push(KeyBinding::new("cmd-m", Minimize, Some("Spreadsheet")));
         bindings.push(KeyBinding::new("cmd-q", Quit, Some("Spreadsheet")));
+        // Window switcher: Cmd+` (backtick)
+        bindings.push(KeyBinding::new("cmd-`", SwitchWindow, Some("Spreadsheet")));
 
         // Ctrl+U starts edit on Mac (F2 is often brightness)
         bindings.push(KeyBinding::new("ctrl-u", StartEdit, Some("Spreadsheet")));
@@ -199,6 +232,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
 
         // Quit shortcut (Ctrl+Q on Windows/Linux)
         bindings.push(KeyBinding::new("ctrl-q", Quit, Some("Spreadsheet")));
+
+        // Window switcher: Ctrl+` (backtick)
+        bindings.push(KeyBinding::new("ctrl-`", SwitchWindow, Some("Spreadsheet")));
 
         // Ctrl+U for underline on non-Mac
         bindings.push(KeyBinding::new(&kb(m, "u"), ToggleUnderline, Some("Spreadsheet")));

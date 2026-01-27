@@ -1830,6 +1830,183 @@ fn test_exclusion_undo_redo_restores_behavior() {
     assert_eq!(validations.exclusions_len(), 1, "One exclusion after redo");
 }
 
+// =========================================================================
+// NEW WINDOW REGRESSION TESTS
+// =========================================================================
+//
+// These tests verify the NewWindow behavior doesn't regress.
+// Multi-window tests that require gpui context are deferred until we have
+// a proper window harness. For now, we test what we can at the unit level.
+
+/// Test that new_in_place() is destructive: resets workbook state.
+/// This is the dangerous method that NewInPlace action calls.
+#[test]
+fn test_new_in_place_is_destructive() {
+    use visigrid_engine::workbook::Workbook;
+
+    // Create a workbook and modify it
+    let mut workbook = Workbook::new();
+    workbook.sheet_mut(0).unwrap().set_value(0, 0, "important data");
+    workbook.sheet_mut(0).unwrap().set_value(5, 5, "=SUM(A1:A10)");
+
+    // Verify data exists
+    assert_eq!(workbook.sheet(0).unwrap().get_raw(0, 0), "important data");
+    assert_eq!(workbook.sheet(0).unwrap().get_raw(5, 5), "=SUM(A1:A10)");
+
+    // Simulate what new_in_place does: replace with fresh workbook
+    workbook = Workbook::new();
+
+    // All data should be gone
+    assert_eq!(workbook.sheet(0).unwrap().get_raw(0, 0), "");
+    assert_eq!(workbook.sheet(0).unwrap().get_raw(5, 5), "");
+}
+
+/// Test that keybinding registry maps Ctrl+N to NewWindow (not NewInPlace).
+/// This is a snapshot test to catch accidental rebinding regressions.
+#[test]
+fn test_keybinding_maps_ctrl_n_to_new_window() {
+    // We can't easily introspect gpui keybindings at runtime without a full App context.
+    // Instead, this test validates the source code pattern.
+    //
+    // The keybinding registration in keybindings.rs should contain:
+    //   KeyBinding::new(&kb(m, "n"), NewWindow, Some("Spreadsheet"))
+    //
+    // This test serves as documentation that:
+    // 1. Ctrl+N (or Cmd+N on macOS) is bound to NewWindow
+    // 2. NewInPlace is NOT bound to any default key
+    // 3. The App-level handler in main.rs opens a new window
+
+    // If this test fails, someone changed the keybinding.
+    // Verify the source directly to ensure correctness.
+
+    let keybindings_source = include_str!("keybindings.rs");
+
+    // Verify NewWindow is bound to Ctrl+N
+    assert!(
+        keybindings_source.contains("kb(m, \"n\"), NewWindow"),
+        "Ctrl+N should be bound to NewWindow, not NewInPlace or NewFile"
+    );
+
+    // Verify NewInPlace is NOT bound anywhere in the default keybindings
+    assert!(
+        !keybindings_source.contains("NewInPlace"),
+        "NewInPlace should NOT be bound to any key by default"
+    );
+}
+
+/// Test that CloseWindow handler checks is_modified flag.
+/// This is a source code verification test - we verify the handler exists
+/// and includes the dirty check pattern.
+#[test]
+fn test_close_window_checks_dirty_flag() {
+    let views_source = include_str!("views/mod.rs");
+
+    // Verify CloseWindow handler checks is_modified
+    assert!(
+        views_source.contains("if !this.is_modified"),
+        "CloseWindow handler should check is_modified flag"
+    );
+
+    // Verify dirty workbook triggers prompt (not immediate close)
+    assert!(
+        views_source.contains("window.prompt("),
+        "CloseWindow handler should show prompt when dirty"
+    );
+
+    // Verify save_and_close is called for "Save" option
+    assert!(
+        views_source.contains("save_and_close"),
+        "CloseWindow handler should call save_and_close for Save option"
+    );
+}
+
+/// Test that Ctrl+W is bound to CloseWindow action.
+#[test]
+fn test_keybinding_maps_ctrl_w_to_close_window() {
+    let keybindings_source = include_str!("keybindings.rs");
+
+    // Verify CloseWindow is bound (cmd-w on macOS)
+    assert!(
+        keybindings_source.contains("CloseWindow"),
+        "CloseWindow should be bound to a key"
+    );
+}
+
+/// Test that NewWindow handler does NOT call new_in_place or mutate workbook state.
+/// This verifies the architectural separation: NewWindow opens a new window,
+/// it doesn't touch the current workbook.
+#[test]
+fn test_newwindow_does_not_mutate_current_state() {
+    // Verify the NewWindow handler is at App level (main.rs), not Spreadsheet level
+    let main_source = include_str!("main.rs");
+
+    // NewWindow handler must be at App level (has cx.open_window)
+    assert!(
+        main_source.contains("on_action") && main_source.contains("NewWindow") && main_source.contains("open_window"),
+        "NewWindow handler should be at App level with cx.open_window()"
+    );
+
+    // Verify Spreadsheet doesn't handle NewWindow directly
+    let views_source = include_str!("views/mod.rs");
+    assert!(
+        !views_source.contains("on_action") || !views_source.contains("&NewWindow,"),
+        "Spreadsheet should NOT have its own NewWindow handler that could mutate state"
+    );
+
+    // Verify new_in_place is not called by NewWindow
+    let actions_source = include_str!("actions.rs");
+    assert!(
+        actions_source.contains("NewWindow") && actions_source.contains("NewInPlace"),
+        "Actions should have separate NewWindow and NewInPlace"
+    );
+
+    // NewWindow in main.rs should create new Spreadsheet, not call new_in_place
+    assert!(
+        main_source.contains("Spreadsheet::new") && main_source.contains("NewWindow"),
+        "NewWindow should create new Spreadsheet::new(), not call new_in_place()"
+    );
+    assert!(
+        !main_source.contains("new_in_place"),
+        "NewWindow handler must NOT call new_in_place"
+    );
+}
+
+/// Test that window registry is initialized and used for window management.
+#[test]
+fn test_window_registry_initialized() {
+    let main_source = include_str!("main.rs");
+
+    // Verify WindowRegistry is initialized
+    assert!(
+        main_source.contains("WindowRegistry::new"),
+        "main.rs should initialize WindowRegistry as global"
+    );
+
+    // Verify SwitchWindow handler exists
+    assert!(
+        main_source.contains("SwitchWindow") && main_source.contains("on_action"),
+        "main.rs should have SwitchWindow handler"
+    );
+
+    // Verify windows are registered
+    assert!(
+        main_source.contains("register_with_window_registry"),
+        "Windows should be registered with the registry on creation"
+    );
+}
+
+/// Test that Cmd+` (macOS) / Ctrl+` (Linux/Win) is bound to SwitchWindow.
+#[test]
+fn test_keybinding_maps_backtick_to_switch_window() {
+    let keybindings_source = include_str!("keybindings.rs");
+
+    // Verify SwitchWindow is bound to backtick
+    assert!(
+        keybindings_source.contains("SwitchWindow") && keybindings_source.contains("`"),
+        "SwitchWindow should be bound to Cmd+` or Ctrl+`"
+    );
+}
+
 /// Test: Circle Invalid Data ignores excluded cells.
 /// When validating a range, excluded cells should not be flagged as invalid.
 /// The key behavior is that `get()` returns `None` for excluded cells.

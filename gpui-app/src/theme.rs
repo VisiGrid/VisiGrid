@@ -107,6 +107,11 @@ pub enum TokenKey {
     HintBadgeMatchText,    // Text for matching hints
     HintBadgeUniqueBg,     // Background for unique match (highlight)
     HintBadgeUniqueText,   // Text for unique match
+
+    // Dependency tracing (Alt+T)
+    TracePrecedentBg,      // Background tint for precedent cells (inputs)
+    TraceDependentBg,      // Background tint for dependent cells (outputs)
+    TraceSourceBorder,     // Border for the source cell being traced
 }
 
 impl TokenKey {
@@ -192,6 +197,10 @@ impl TokenKey {
         TokenKey::HintBadgeMatchText,
         TokenKey::HintBadgeUniqueBg,
         TokenKey::HintBadgeUniqueText,
+        // Dependency tracing
+        TokenKey::TracePrecedentBg,
+        TokenKey::TraceDependentBg,
+        TokenKey::TraceSourceBorder,
     ];
 }
 
@@ -392,6 +401,11 @@ pub fn ledger_dark_theme() -> Theme {
     tokens.insert(TokenKey::HintBadgeUniqueBg, ok);
     tokens.insert(TokenKey::HintBadgeUniqueText, bg_dark);
 
+    // Dependency tracing - subtle, doesn't destroy readability
+    tokens.insert(TokenKey::TracePrecedentBg, rgba(0x3ccb7f18));  // Green-500 at ~9% - inputs
+    tokens.insert(TokenKey::TraceDependentBg, rgba(0xb48efc18));  // Violet at ~9% - outputs
+    tokens.insert(TokenKey::TraceSourceBorder, accent);           // Blue accent for source
+
     Theme {
         meta: ThemeMeta {
             id: "ledger-dark",
@@ -510,6 +524,11 @@ pub fn slate_dark_theme() -> Theme {
     tokens.insert(TokenKey::HintBadgeMatchText, rgb(0x18181b));
     tokens.insert(TokenKey::HintBadgeUniqueBg, rgb(0x22c55e));
     tokens.insert(TokenKey::HintBadgeUniqueText, rgb(0x18181b));
+
+    // Dependency tracing
+    tokens.insert(TokenKey::TracePrecedentBg, rgba(0x22c55e18));  // Green at ~9%
+    tokens.insert(TokenKey::TraceDependentBg, rgba(0xa855f718));  // Purple at ~9%
+    tokens.insert(TokenKey::TraceSourceBorder, accent);
 
     Theme {
         meta: ThemeMeta {
@@ -643,6 +662,11 @@ pub fn ledger_light_theme() -> Theme {
     tokens.insert(TokenKey::HintBadgeUniqueBg, ok);
     tokens.insert(TokenKey::HintBadgeUniqueText, white);
 
+    // Dependency tracing - light mode needs slightly more saturation
+    tokens.insert(TokenKey::TracePrecedentBg, rgba(0x05966920));  // Emerald-600 at ~12%
+    tokens.insert(TokenKey::TraceDependentBg, rgba(0x7c3aed20));  // Violet-600 at ~12%
+    tokens.insert(TokenKey::TraceSourceBorder, accent);
+
     Theme {
         meta: ThemeMeta {
             id: "ledger-light",
@@ -754,6 +778,11 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::HintBadgeMatchText, rgb(0x000000));    // Black text on green
     tokens.insert(TokenKey::HintBadgeUniqueBg, rgb(0xffff00));     // Yellow for unique match
     tokens.insert(TokenKey::HintBadgeUniqueText, rgb(0x000000));   // Black text on yellow
+
+    // Dependency tracing (retro green/yellow)
+    tokens.insert(TokenKey::TracePrecedentBg, rgba(0x00ff0020));   // Bright green at ~12%
+    tokens.insert(TokenKey::TraceDependentBg, rgba(0xffff0020));   // Yellow at ~12%
+    tokens.insert(TokenKey::TraceSourceBorder, green);
 
     Theme {
         meta: ThemeMeta {
@@ -887,6 +916,11 @@ pub fn catppuccin_theme() -> Theme {
     tokens.insert(TokenKey::HintBadgeMatchText, base);          // Dark text on yellow
     tokens.insert(TokenKey::HintBadgeUniqueBg, green);          // Green for unique match
     tokens.insert(TokenKey::HintBadgeUniqueText, base);         // Dark text on green
+
+    // Dependency tracing (Catppuccin pastels)
+    tokens.insert(TokenKey::TracePrecedentBg, rgba(0x40a02b20));  // Green at ~12%
+    tokens.insert(TokenKey::TraceDependentBg, rgba(0x8839ef20));  // Mauve at ~12%
+    tokens.insert(TokenKey::TraceSourceBorder, lavender);
 
     Theme {
         meta: ThemeMeta {

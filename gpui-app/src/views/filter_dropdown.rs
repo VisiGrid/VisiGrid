@@ -29,7 +29,7 @@ pub fn render_filter_dropdown(
 
     // Get header text for the column
     let header_text = if let Some(header_row) = app.filter_state.header_row() {
-        app.sheet().get_display(header_row, col)
+        app.sheet(cx).get_display(header_row, col)
     } else {
         Spreadsheet::col_letter(col)
     };

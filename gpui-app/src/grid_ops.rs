@@ -73,12 +73,12 @@ impl Spreadsheet {
 
     /// Insert rows at position with undo support
     fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
-        let sheet_index = self.workbook.active_sheet_index();
+        let sheet_index = self.sheet_index(cx);
 
         // Perform the insert
-        if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+        self.sheet_mut(sheet_index, cx, |sheet| {
             sheet.insert_rows(at_row, count);
-        }
+        });
 
         // Shift row heights down (from bottom to avoid overwriting)
         let heights_to_shift: Vec<_> = self.row_heights
@@ -111,19 +111,18 @@ impl Spreadsheet {
 
     /// Delete rows at position with undo support
     fn delete_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
-        let sheet_index = self.workbook.active_sheet_index();
+        let sheet_index = self.sheet_index(cx);
 
         // Capture cells to be deleted for undo
         let mut deleted_cells = Vec::new();
-        if let Some(sheet) = self.workbook.sheet(sheet_index) {
-            for row in at_row..at_row + count {
-                for col in 0..NUM_COLS {
-                    let raw = sheet.get_raw(row, col);
-                    let format = sheet.get_format(row, col);
-                    // Only store non-empty cells
-                    if !raw.is_empty() || format != Default::default() {
-                        deleted_cells.push((row, col, raw, format));
-                    }
+        let sheet = self.sheet(cx);
+        for row in at_row..at_row + count {
+            for col in 0..NUM_COLS {
+                let raw = sheet.get_raw(row, col);
+                let format = sheet.get_format(row, col);
+                // Only store non-empty cells
+                if !raw.is_empty() || format != Default::default() {
+                    deleted_cells.push((row, col, raw, format));
                 }
             }
         }
@@ -151,9 +150,9 @@ impl Spreadsheet {
         }
 
         // Perform the delete
-        if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+        self.sheet_mut(sheet_index, cx, |sheet| {
             sheet.delete_rows(at_row, count);
-        }
+        });
 
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::RowsDeleted {
@@ -180,12 +179,12 @@ impl Spreadsheet {
 
     /// Insert columns at position with undo support
     fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
-        let sheet_index = self.workbook.active_sheet_index();
+        let sheet_index = self.sheet_index(cx);
 
         // Perform the insert
-        if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+        self.sheet_mut(sheet_index, cx, |sheet| {
             sheet.insert_cols(at_col, count);
-        }
+        });
 
         // Shift column widths right (from right to avoid overwriting)
         let widths_to_shift: Vec<_> = self.col_widths
@@ -218,19 +217,18 @@ impl Spreadsheet {
 
     /// Delete columns at position with undo support
     fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
-        let sheet_index = self.workbook.active_sheet_index();
+        let sheet_index = self.sheet_index(cx);
 
         // Capture cells to be deleted for undo
         let mut deleted_cells = Vec::new();
-        if let Some(sheet) = self.workbook.sheet(sheet_index) {
-            for col in at_col..at_col + count {
-                for row in 0..NUM_ROWS {
-                    let raw = sheet.get_raw(row, col);
-                    let format = sheet.get_format(row, col);
-                    // Only store non-empty cells
-                    if !raw.is_empty() || format != Default::default() {
-                        deleted_cells.push((row, col, raw, format));
-                    }
+        let sheet = self.sheet(cx);
+        for col in at_col..at_col + count {
+            for row in 0..NUM_ROWS {
+                let raw = sheet.get_raw(row, col);
+                let format = sheet.get_format(row, col);
+                // Only store non-empty cells
+                if !raw.is_empty() || format != Default::default() {
+                    deleted_cells.push((row, col, raw, format));
                 }
             }
         }
@@ -258,9 +256,9 @@ impl Spreadsheet {
         }
 
         // Perform the delete
-        if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
+        self.sheet_mut(sheet_index, cx, |sheet| {
             sheet.delete_cols(at_col, count);
-        }
+        });
 
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::ColsDeleted {

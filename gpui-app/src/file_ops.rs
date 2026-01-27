@@ -11,9 +11,18 @@ use crate::settings::{load_doc_settings, save_doc_settings, DocumentSettings};
 const OVERLAY_DELAY_MS: u64 = 150;
 
 impl Spreadsheet {
-    pub fn new_file(&mut self, cx: &mut Context<Self>) {
-        self.workbook = Workbook::new();
-        self.base_workbook = self.workbook.clone(); // Capture base state for replay
+    /// Replace the current workbook in-place with a blank workbook.
+    ///
+    /// WARNING: This is destructive - it discards all unsaved changes without
+    /// confirmation. Use `NewWindow` action (Ctrl+N) instead for safe behavior
+    /// that opens a new window.
+    ///
+    /// This method exists for:
+    /// - Internal use (e.g., after explicit user confirmation)
+    /// - "New in This Window" menu item (if exposed)
+    pub fn new_in_place(&mut self, cx: &mut Context<Self>) {
+        self.wb_mut(cx, |wb| *wb = Workbook::new());
+        self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
         self.rewind_preview = crate::app::RewindPreviewState::Off; // Reset preview state
         self.current_file = None;
         self.is_modified = false;
@@ -84,8 +93,8 @@ impl Spreadsheet {
 
         match result {
             Ok(workbook) => {
-                self.workbook = workbook;
-                self.base_workbook = self.workbook.clone(); // Capture base state for replay
+                self.wb_mut(cx, |wb| *wb = workbook);
+                self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
                 self.rewind_preview = crate::app::RewindPreviewState::Off;
                 self.import_result = None;
                 self.import_filename = None;
@@ -128,7 +137,7 @@ impl Spreadsheet {
                 // Update session with new file path
                 self.update_session_cached(cx);
 
-                let named_count = self.workbook.list_named_ranges().len();
+                let named_count = self.wb(cx).list_named_ranges().len();
 
                 let status = if named_count > 0 {
                     format!("Opened: {} ({} named ranges)", path.display(), named_count)
@@ -198,9 +207,9 @@ impl Spreadsheet {
 
                 match import_result {
                     Ok((workbook, mut result)) => {
-                        // Atomic swap: replace entire workbook
-                        this.workbook = workbook;
-                        this.base_workbook = this.workbook.clone(); // Capture base state for replay
+                        // Atomic swap: replace entire workbook (wrap in Entity)
+                        this.workbook = cx.new(|_| workbook);
+                        this.base_workbook = this.wb(cx).clone(); // Capture base state for replay
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
@@ -263,8 +272,8 @@ impl Spreadsheet {
             Ok((workbook, mut result)) => {
                 let duration_ms = start_time.elapsed().as_millis();
 
-                self.workbook = workbook;
-                self.base_workbook = self.workbook.clone(); // Capture base state for replay
+                self.wb_mut(cx, |wb| *wb = workbook);
+                self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
                 self.rewind_preview = crate::app::RewindPreviewState::Off;
                 self.import_filename = Some(filename.clone());
                 self.import_source_dir = source_dir;
@@ -309,7 +318,7 @@ impl Spreadsheet {
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
         // Commit any pending edit so it's included in the save
-        self.commit_pending_edit();
+        self.commit_pending_edit(cx);
 
         if let Some(path) = &self.current_file.clone() {
             self.save_to_path(path, cx);
@@ -318,9 +327,31 @@ impl Spreadsheet {
         }
     }
 
+    /// Save the workbook and return whether the save can proceed synchronously.
+    /// Returns true if file was saved (has existing path), false if Save As dialog is needed.
+    /// Used by close-with-save flow to know if window can be closed immediately.
+    pub fn save_and_close(&mut self, cx: &mut Context<Self>) -> bool {
+        // Commit any pending edit so it's included in the save
+        self.commit_pending_edit(cx);
+
+        if let Some(path) = &self.current_file.clone() {
+            // File has a path - save synchronously
+            self.save_to_path(path, cx);
+            // Check if save succeeded by looking at is_modified flag
+            // (save_to_path sets is_modified = false on success via finalize_save)
+            !self.is_modified
+        } else {
+            // File is untitled - need Save As dialog
+            // Set flag so window closes after save completes
+            self.close_after_save = true;
+            self.save_as(cx);
+            false // Can't close immediately, async save in progress
+        }
+    }
+
     pub fn save_as(&mut self, cx: &mut Context<Self>) {
         // Commit any pending edit so it's included in the save
-        self.commit_pending_edit();
+        self.commit_pending_edit(cx);
 
         // For directory: prefer current file location, then import source, then current dir
         let directory = self.current_file.as_ref()
@@ -349,8 +380,28 @@ impl Spreadsheet {
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
-                let _ = this.update(cx, |this, cx| {
+                let close_result = this.update(cx, |this, cx| {
                     this.save_to_path(&path, cx);
+                    // Check if we should close after save (from save_and_close flow)
+                    let should_close = this.close_after_save && !this.is_modified;
+                    this.close_after_save = false;  // Reset flag
+                    if should_close {
+                        Some(this.window_handle)
+                    } else {
+                        None
+                    }
+                }).ok().flatten();
+
+                // Close window if save_and_close was in progress
+                if let Some(window_handle) = close_result {
+                    let _ = window_handle.update(cx, |_, window, _| {
+                        window.remove_window();
+                    });
+                }
+            } else {
+                // User cancelled Save As - reset close_after_save flag
+                let _ = this.update(cx, |this, _cx| {
+                    this.close_after_save = false;
                 });
             }
         })
@@ -363,8 +414,8 @@ impl Spreadsheet {
         // For .sheet files, use workbook-level save to preserve named ranges
         // For CSV, use sheet-level export (named ranges not supported in CSV)
         let result = match extension.to_lowercase().as_str() {
-            "csv" => csv::export(self.sheet(), path),
-            _ => native::save_workbook(&self.workbook, path),  // Default to .sheet format
+            "csv" => csv::export(self.sheet(cx), path),
+            _ => native::save_workbook(self.wb(cx), path),  // Default to .sheet format
         };
 
         match result {
@@ -380,7 +431,7 @@ impl Spreadsheet {
                 // Update session with new file path
                 self.update_session_cached(cx);
 
-                let named_count = self.workbook.list_named_ranges().len();
+                let named_count = self.wb(cx).list_named_ranges().len();
                 let status = if named_count > 0 {
                     format!("Saved: {} ({} named ranges)", path.display(), named_count)
                 } else {
@@ -411,7 +462,7 @@ impl Spreadsheet {
     /// This is a presentation snapshot - not a round-trip format.
     pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
         // Commit any pending edit so it's included in the export
-        self.commit_pending_edit();
+        self.commit_pending_edit(cx);
 
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
@@ -431,16 +482,16 @@ impl Spreadsheet {
         let suggested_name = format!("{}.xlsx", base_name);
 
         // Build layout information for each sheet
-        let _layouts = self.build_export_layouts();
+        let _layouts = self.build_export_layouts(cx);
 
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
                 let _ = this.update(cx, |this, cx| {
                     // Rebuild layouts in case data changed
-                    let layouts = this.build_export_layouts();
+                    let layouts = this.build_export_layouts(cx);
 
-                    match xlsx::export(&this.workbook, &path, Some(&layouts)) {
+                    match xlsx::export(this.wb(cx), &path, Some(&layouts)) {
                         Ok(result) => {
                             let filename = path.file_name()
                                 .and_then(|n| n.to_str())
@@ -540,10 +591,10 @@ impl Spreadsheet {
 
     /// Build ExportLayout for each sheet (column widths, row heights)
     /// Note: Frozen panes will be added when that feature is implemented (see roadmap)
-    fn build_export_layouts(&self) -> Vec<xlsx::ExportLayout> {
+    fn build_export_layouts(&self, cx: &App) -> Vec<xlsx::ExportLayout> {
         let mut layouts = Vec::new();
 
-        for _ in 0..self.workbook.sheet_count() {
+        for _ in 0..self.wb(cx).sheet_count() {
             let mut layout = xlsx::ExportLayout::default();
 
             // Copy column widths from the app state
@@ -572,7 +623,7 @@ impl Spreadsheet {
         F: Fn(&visigrid_engine::sheet::Sheet, &std::path::Path) -> Result<(), String> + Send + 'static,
     {
         // Commit any pending edit so it's included in the export
-        self.commit_pending_edit();
+        self.commit_pending_edit(cx);
 
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
@@ -589,7 +640,7 @@ impl Spreadsheet {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
                 let _ = this.update(cx, |this, cx| {
-                    match export_fn(this.sheet(), &path) {
+                    match export_fn(this.sheet(cx), &path) {
                         Ok(()) => {
                             this.status_message = Some(format!("Exported: {}", path.display()));
                         }

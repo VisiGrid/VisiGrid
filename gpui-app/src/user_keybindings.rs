@@ -275,7 +275,7 @@ fn create_binding(key: &str, action: &str) -> Option<KeyBinding> {
         "clipboard.pastevalues" | "edit.pastevalues" => Some(KeyBinding::new(key, PasteValues, context)),
 
         // File
-        "file.new" => Some(KeyBinding::new(key, NewFile, context)),
+        "file.new" => Some(KeyBinding::new(key, NewWindow, context)),
         "file.open" => Some(KeyBinding::new(key, OpenFile, context)),
         "file.save" => Some(KeyBinding::new(key, Save, context)),
         "file.saveas" => Some(KeyBinding::new(key, SaveAs, context)),

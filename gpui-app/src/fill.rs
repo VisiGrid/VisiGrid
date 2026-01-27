@@ -2,7 +2,7 @@
 //!
 //! This module contains Fill Down, Fill Right, AutoSum, Fill Handle, and transform operations.
 
-use gpui::*;
+use gpui::{*};
 use regex::Regex;
 
 use crate::app::{Spreadsheet, FillDrag, FillAxis};
@@ -42,11 +42,11 @@ impl Spreadsheet {
         // For each column in selection
         for col in min_col..=max_col {
             // Get the source value/formula from the first row
-            let source = self.sheet().get_raw(min_row, col);
+            let source = self.sheet(cx).get_raw(min_row, col);
 
             // Fill down to all other rows
             for row in (min_row + 1)..=max_row {
-                let old_value = self.sheet().get_raw(row, col);
+                let old_value = self.sheet(cx).get_raw(row, col);
                 let new_value = if source.starts_with('=') {
                     // Adjust relative references for formulas
                     self.adjust_formula_refs(&source, row as i32 - min_row as i32, 0)
@@ -62,13 +62,13 @@ impl Spreadsheet {
                         new_value: new_value.clone(),
                     });
                 }
-                self.set_cell_value(row, col, &new_value);
+                self.set_cell_value(row, col, &new_value, cx);
             }
         }
 
         if !changes.is_empty() {
             let provenance = MutationOp::Fill {
-                sheet: self.sheet().id,
+                sheet: self.sheet(cx).id,
                 src_start_row: min_row,
                 src_start_col: min_col,
                 src_end_row: min_row,
@@ -79,19 +79,19 @@ impl Spreadsheet {
                 dst_end_col: max_col,
                 direction: FillDirection::Down,
                 mode: FillMode::Both,
-            }.to_provenance(&self.sheet().name);
+            }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
 
             // Smoke mode: trigger full ordered recompute for dogfooding
-            self.maybe_smoke_recalc();
+            self.maybe_smoke_recalc(cx);
         }
 
         // Validate filled range and report failures
-        let failures = self.workbook.validate_range(
-            self.sheet_index(), min_row + 1, min_col, max_row, max_col
+        let failures = self.wb(cx).validate_range(
+            self.sheet_index(cx), min_row + 1, min_col, max_row, max_col
         );
         let total_cells = (max_row - min_row) * (max_col - min_col + 1);
         if failures.count > 0 {
@@ -125,11 +125,11 @@ impl Spreadsheet {
         // For each row in selection
         for row in min_row..=max_row {
             // Get the source value/formula from the first column
-            let source = self.sheet().get_raw(row, min_col);
+            let source = self.sheet(cx).get_raw(row, min_col);
 
             // Fill right to all other columns
             for col in (min_col + 1)..=max_col {
-                let old_value = self.sheet().get_raw(row, col);
+                let old_value = self.sheet(cx).get_raw(row, col);
                 let new_value = if source.starts_with('=') {
                     // Adjust relative references for formulas
                     self.adjust_formula_refs(&source, 0, col as i32 - min_col as i32)
@@ -145,13 +145,13 @@ impl Spreadsheet {
                         new_value: new_value.clone(),
                     });
                 }
-                self.set_cell_value(row, col, &new_value);
+                self.set_cell_value(row, col, &new_value, cx);
             }
         }
 
         if !changes.is_empty() {
             let provenance = MutationOp::Fill {
-                sheet: self.sheet().id,
+                sheet: self.sheet(cx).id,
                 src_start_row: min_row,
                 src_start_col: min_col,
                 src_end_row: max_row,
@@ -162,19 +162,19 @@ impl Spreadsheet {
                 dst_end_col: max_col,
                 direction: FillDirection::Right,
                 mode: FillMode::Both,
-            }.to_provenance(&self.sheet().name);
+            }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
 
             // Smoke mode: trigger full ordered recompute for dogfooding
-            self.maybe_smoke_recalc();
+            self.maybe_smoke_recalc(cx);
         }
 
         // Validate filled range and report failures
-        let failures = self.workbook.validate_range(
-            self.sheet_index(), min_row, min_col + 1, max_row, max_col
+        let failures = self.wb(cx).validate_range(
+            self.sheet_index(cx), min_row, min_col + 1, max_row, max_col
         );
         let total_cells = (max_row - min_row + 1) * (max_col - min_col);
         if failures.count > 0 {
@@ -200,10 +200,10 @@ impl Spreadsheet {
         let (row, col) = self.view_state.selected;
 
         // Find contiguous numeric cells above
-        let above_range = self.find_numeric_range_above(row, col);
+        let above_range = self.find_numeric_range_above(row, col, cx);
 
         // Find contiguous numeric cells to the left
-        let left_range = self.find_numeric_range_left(row, col);
+        let left_range = self.find_numeric_range_left(row, col, cx);
 
         // Choose the longer range, preferring above if equal
         // Also track the detected range for highlighting
@@ -267,7 +267,7 @@ impl Spreadsheet {
         }
 
         // Enter edit mode with the formula
-        self.edit_original = self.sheet().get_raw(row, col);
+        self.edit_original = self.sheet(cx).get_raw(row, col);
         self.edit_value = formula;
         self.edit_cursor = self.edit_value.chars().count(); // Cursor at end
         self.mode = Mode::Formula;
@@ -277,7 +277,7 @@ impl Spreadsheet {
 
     /// Find contiguous numeric cells above the given cell
     /// Returns (start_row, end_row) if found, None otherwise
-    fn find_numeric_range_above(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+    fn find_numeric_range_above(&self, row: usize, col: usize, cx: &App) -> Option<(usize, usize)> {
         if row == 0 {
             return None;
         }
@@ -286,12 +286,12 @@ impl Spreadsheet {
         let mut start_row = end_row;
 
         // Check if the cell above is numeric
-        if !self.is_cell_numeric(end_row, col) {
+        if !self.is_cell_numeric(end_row, col, cx) {
             return None;
         }
 
         // Walk upward finding contiguous numeric cells
-        while start_row > 0 && self.is_cell_numeric(start_row - 1, col) {
+        while start_row > 0 && self.is_cell_numeric(start_row - 1, col, cx) {
             start_row -= 1;
         }
 
@@ -306,7 +306,7 @@ impl Spreadsheet {
 
     /// Find contiguous numeric cells to the left of the given cell
     /// Returns (start_col, end_col) if found, None otherwise
-    fn find_numeric_range_left(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+    fn find_numeric_range_left(&self, row: usize, col: usize, cx: &App) -> Option<(usize, usize)> {
         if col == 0 {
             return None;
         }
@@ -315,12 +315,12 @@ impl Spreadsheet {
         let mut start_col = end_col;
 
         // Check if the cell to the left is numeric
-        if !self.is_cell_numeric(row, end_col) {
+        if !self.is_cell_numeric(row, end_col, cx) {
             return None;
         }
 
         // Walk leftward finding contiguous numeric cells
-        while start_col > 0 && self.is_cell_numeric(row, start_col - 1) {
+        while start_col > 0 && self.is_cell_numeric(row, start_col - 1, cx) {
             start_col -= 1;
         }
 
@@ -334,15 +334,15 @@ impl Spreadsheet {
     }
 
     /// Check if a cell contains a numeric value (not empty, not text, not error)
-    fn is_cell_numeric(&self, row: usize, col: usize) -> bool {
-        let raw = self.sheet().get_raw(row, col);
+    fn is_cell_numeric(&self, row: usize, col: usize, cx: &App) -> bool {
+        let raw = self.sheet(cx).get_raw(row, col);
         if raw.is_empty() {
             return false;
         }
 
         // If it's a formula, check the result
         if raw.starts_with('=') {
-            let display = self.sheet().get_display(row, col);
+            let display = self.sheet(cx).get_display(row, col);
             // Check if display is a number
             display.parse::<f64>().is_ok()
         } else {
@@ -409,7 +409,7 @@ impl Spreadsheet {
 
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                let old_value = self.sheet().get_raw(row, col);
+                let old_value = self.sheet(cx).get_raw(row, col);
 
                 // Skip empty cells and formulas
                 if old_value.is_empty() || old_value.starts_with('=') {
@@ -425,14 +425,14 @@ impl Spreadsheet {
                         old_value,
                         new_value: new_value.clone(),
                     });
-                    self.set_cell_value(row, col, &new_value);
+                    self.set_cell_value(row, col, &new_value, cx);
                     trimmed_count += 1;
                 }
             }
         }
 
         if !changes.is_empty() {
-            self.history.record_batch(self.sheet_index(), changes);
+            self.history.record_batch(self.sheet_index(cx), changes);
             self.bump_cells_rev();
             self.is_modified = true;
         }
@@ -459,7 +459,7 @@ impl Spreadsheet {
 
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                let value = self.sheet().get_raw(row, col);
+                let value = self.sheet(cx).get_raw(row, col);
                 if value.is_empty() {
                     blank_cells.push((row, col));
                 }
@@ -616,7 +616,7 @@ impl Spreadsheet {
             return;
         }
 
-        let source = self.sheet().get_raw(anchor_row, col);
+        let source = self.sheet(cx).get_raw(anchor_row, col);
         let mut changes = Vec::new();
 
         // Determine fill direction and range (excluding anchor)
@@ -630,7 +630,7 @@ impl Spreadsheet {
 
         for row in &fill_range {
             let delta_row = *row as i32 - anchor_row as i32;
-            let old_value = self.sheet().get_raw(*row, col);
+            let old_value = self.sheet(cx).get_raw(*row, col);
             let new_value = if source.starts_with('=') {
                 self.adjust_formula_refs(&source, delta_row, 0)
             } else {
@@ -645,7 +645,7 @@ impl Spreadsheet {
                     new_value: new_value.clone(),
                 });
             }
-            self.set_cell_value(*row, col, &new_value);
+            self.set_cell_value(*row, col, &new_value, cx);
         }
 
         let count = fill_range.len();
@@ -658,7 +658,7 @@ impl Spreadsheet {
             };
 
             let provenance = MutationOp::Fill {
-                sheet: self.sheet().id,
+                sheet: self.sheet(cx).id,
                 src_start_row: anchor_row,
                 src_start_col: col,
                 src_end_row: anchor_row,
@@ -669,14 +669,14 @@ impl Spreadsheet {
                 dst_end_col: col,
                 direction,
                 mode: FillMode::Both,
-            }.to_provenance(&self.sheet().name);
+            }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 
             // Smoke mode: trigger full ordered recompute for dogfooding
-            self.maybe_smoke_recalc();
+            self.maybe_smoke_recalc(cx);
         }
 
         // Update selection to include filled range
@@ -700,7 +700,7 @@ impl Spreadsheet {
             return;
         }
 
-        let source = self.sheet().get_raw(row, anchor_col);
+        let source = self.sheet(cx).get_raw(row, anchor_col);
         let mut changes = Vec::new();
 
         // Determine fill direction and range (excluding anchor)
@@ -714,7 +714,7 @@ impl Spreadsheet {
 
         for col in &fill_range {
             let delta_col = *col as i32 - anchor_col as i32;
-            let old_value = self.sheet().get_raw(row, *col);
+            let old_value = self.sheet(cx).get_raw(row, *col);
             let new_value = if source.starts_with('=') {
                 self.adjust_formula_refs(&source, 0, delta_col)
             } else {
@@ -729,7 +729,7 @@ impl Spreadsheet {
                     new_value: new_value.clone(),
                 });
             }
-            self.set_cell_value(row, *col, &new_value);
+            self.set_cell_value(row, *col, &new_value, cx);
         }
 
         let count = fill_range.len();
@@ -742,7 +742,7 @@ impl Spreadsheet {
             };
 
             let provenance = MutationOp::Fill {
-                sheet: self.sheet().id,
+                sheet: self.sheet(cx).id,
                 src_start_row: row,
                 src_start_col: anchor_col,
                 src_end_row: row,
@@ -753,14 +753,14 @@ impl Spreadsheet {
                 dst_end_col: dst_end,
                 direction,
                 mode: FillMode::Both,
-            }.to_provenance(&self.sheet().name);
+            }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 
             // Smoke mode: trigger full ordered recompute for dogfooding
-            self.maybe_smoke_recalc();
+            self.maybe_smoke_recalc(cx);
         }
 
         // Update selection to include filled range

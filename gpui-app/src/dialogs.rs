@@ -9,7 +9,7 @@
 //! - Import/Export report dialogs
 //! - Inspector panel
 
-use gpui::*;
+use gpui::{*};
 use crate::app::Spreadsheet;
 use crate::mode::Mode;
 use crate::settings::{update_user_settings, Setting};
@@ -311,11 +311,11 @@ impl Spreadsheet {
     pub fn set_trace_path(&mut self, from_row: usize, from_col: usize, to_row: usize, to_col: usize, forward: bool, cx: &mut Context<Self>) {
         use visigrid_engine::cell_id::CellId;
 
-        let sheet_id = self.sheet().id;
+        let sheet_id = self.sheet(cx).id;
         let from = CellId::new(sheet_id, from_row, from_col);
         let to = CellId::new(sheet_id, to_row, to_col);
 
-        let result = self.workbook.find_path(from, to, forward);
+        let result = self.wb(cx).find_path(from, to, forward);
 
         if result.path.is_empty() {
             // No path found - clear any existing trace
@@ -370,7 +370,7 @@ impl Spreadsheet {
 
         // Load existing validation if present (check first cell of selection)
         // Clone the rule to release the borrow before modifying validation_dialog
-        let existing_rule = self.sheet().validations.get(row, col).cloned();
+        let existing_rule = self.sheet(cx).validations.get(row, col).cloned();
         if let Some(rule) = existing_rule {
             self.validation_dialog.load_from_rule(&rule);
         }
@@ -404,10 +404,10 @@ impl Spreadsheet {
         // This matches Excel semantics: "Any value" means "no validation"
         if validation_type == ValidationTypeOption::AnyValue {
             if let Some(range) = target_range {
-                let sheet_index = self.sheet_index();
+                let sheet_index = self.sheet_index(cx);
 
                 // Capture rules to be cleared for undo
-                let cleared_rules: Vec<(CellRange, ValidationRule)> = self.sheet()
+                let cleared_rules: Vec<(CellRange, ValidationRule)> = self.sheet(cx)
                     .validations
                     .iter()
                     .filter(|(r, _)| r.overlaps(&range))
@@ -415,7 +415,7 @@ impl Spreadsheet {
                     .collect();
 
                 // Clear the rules
-                self.sheet_mut().validations.clear_range(&range);
+                self.active_sheet_mut(cx, |s| s.validations.clear_range(&range));
                 self.bump_cells_rev();
 
                 // Clear invalid markers in the range
@@ -535,10 +535,10 @@ impl Spreadsheet {
 
         // Apply to target range
         if let Some(range) = target_range {
-            let sheet_index = self.sheet_index();
+            let sheet_index = self.sheet_index(cx);
 
             // Replace-in-range semantics: capture overlapping rules before clearing
-            let previous_rules: Vec<(CellRange, ValidationRule)> = self.sheet()
+            let previous_rules: Vec<(CellRange, ValidationRule)> = self.sheet(cx)
                 .validations
                 .iter()
                 .filter(|(r, _)| r.overlaps(&range))
@@ -546,8 +546,8 @@ impl Spreadsheet {
                 .collect();
 
             // Clear overlapping rules, then set new rule
-            self.sheet_mut().validations.clear_range(&range);
-            self.sheet_mut().validations.set(range.clone(), rule.clone());
+            self.active_sheet_mut(cx, |s| s.validations.clear_range(&range));
+            self.active_sheet_mut(cx, |s| s.validations.set(range.clone(), rule.clone()));
             self.bump_cells_rev();
 
             // Record history for undo
@@ -562,7 +562,7 @@ impl Spreadsheet {
             );
 
             // Validate cells in range and mark invalid ones
-            let invalid_count = self.validate_and_mark_range(&range);
+            let invalid_count = self.validate_and_mark_range(&range, cx);
 
             // Build compact rule summary for status
             let rule_summary = Self::compact_rule_summary(
@@ -644,23 +644,23 @@ impl Spreadsheet {
 
     /// Validate cells in a range and mark invalid ones with circles.
     /// Returns the count of invalid cells.
-    fn validate_and_mark_range(&mut self, range: &visigrid_engine::validation::CellRange) -> usize {
+    fn validate_and_mark_range(&mut self, range: &visigrid_engine::validation::CellRange, cx: &App) -> usize {
         use visigrid_engine::validation::ValidationResult;
         use visigrid_engine::workbook::Workbook;
 
         let mut invalid_count = 0;
-        let sheet_index = self.sheet_index();
+        let sheet_index = self.sheet_index(cx);
 
         for row in range.start_row..=range.end_row {
             for col in range.start_col..=range.end_col {
-                let display_value = self.sheet().get_display(row, col);
+                let display_value = self.sheet(cx).get_display(row, col);
                 // Skip empty cells if ignore_blank is true (handled by validation)
                 if display_value.is_empty() {
                     // Clear any existing invalid marker
                     self.invalid_cells.remove(&(row, col));
                     continue;
                 }
-                let result = self.workbook.validate_cell_input(sheet_index, row, col, &display_value);
+                let result = self.wb(cx).validate_cell_input(sheet_index, row, col, &display_value);
                 match result {
                     ValidationResult::Invalid { reason, .. } => {
                         let failure_reason = Workbook::classify_failure_reason(&reason);
@@ -695,10 +695,10 @@ impl Spreadsheet {
 
         // Clear validation from target range
         if let Some(range) = target_range {
-            let sheet_index = self.sheet_index();
+            let sheet_index = self.sheet_index(cx);
 
             // Capture rules to be cleared for undo
-            let cleared_rules: Vec<(CellRange, visigrid_engine::validation::ValidationRule)> = self.sheet()
+            let cleared_rules: Vec<(CellRange, visigrid_engine::validation::ValidationRule)> = self.sheet(cx)
                 .validations
                 .iter()
                 .filter(|(r, _)| r.overlaps(&range))
@@ -706,7 +706,7 @@ impl Spreadsheet {
                 .collect();
 
             // Clear the rules
-            self.sheet_mut().validations.clear_range(&range);
+            self.active_sheet_mut(cx, |s| s.validations.clear_range(&range));
             self.bump_cells_rev();
 
             // Clear invalid markers in the range
@@ -762,10 +762,10 @@ impl Spreadsheet {
             col.max(end_col),
         );
 
-        let sheet_index = self.sheet_index();
+        let sheet_index = self.sheet_index(cx);
 
         // Add the exclusion
-        self.sheet_mut().validations.exclude(range);
+        self.active_sheet_mut(cx, |s| s.validations.exclude(range));
         self.bump_cells_rev();
 
         // Clear invalid markers in the excluded range
@@ -811,10 +811,10 @@ impl Spreadsheet {
             col.max(end_col),
         );
 
-        let sheet_index = self.sheet_index();
+        let sheet_index = self.sheet_index(cx);
 
         // Capture exclusions that will be cleared (for undo)
-        let cleared_exclusions: Vec<CellRange> = self.sheet()
+        let cleared_exclusions: Vec<CellRange> = self.sheet(cx)
             .validations
             .exclusions_in_range(&range);
 
@@ -825,11 +825,11 @@ impl Spreadsheet {
         }
 
         // Clear the exclusions
-        self.sheet_mut().validations.clear_exclusions_in_range(&range);
+        self.active_sheet_mut(cx, |s| s.validations.clear_exclusions_in_range(&range));
         self.bump_cells_rev();
 
         // Revalidate the range (cells may now be validated again)
-        let invalid_count = self.validate_and_mark_range(&range);
+        let invalid_count = self.validate_and_mark_range(&range, cx);
 
         // Record history for undo
         self.history.record_action_with_provenance(

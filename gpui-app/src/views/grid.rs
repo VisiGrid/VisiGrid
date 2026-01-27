@@ -6,11 +6,72 @@ use crate::fill::{FILL_HANDLE_BORDER, FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_S
 use crate::formula_refs::RefKey;
 use crate::mode::Mode;
 use crate::settings::{user_settings, Setting};
+use crate::split_view::SplitSide;
 use crate::theme::TokenKey;
+use crate::trace::TraceRole;
+use crate::workbook_view::WorkbookViewState;
 use super::headers::render_row_header;
 use super::formula_bar;
 use visigrid_engine::cell::{Alignment, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
+
+/// Get the view state for a specific pane.
+/// - `None` or `Some(SplitSide::Left)` → main view_state
+/// - `Some(SplitSide::Right)` → split_pane.view_state (falls back to main if no split)
+fn get_pane_view_state(app: &Spreadsheet, pane_side: Option<SplitSide>) -> &WorkbookViewState {
+    match pane_side {
+        None | Some(SplitSide::Left) => &app.view_state,
+        Some(SplitSide::Right) => app.split_pane.as_ref()
+            .map(|p| &p.view_state)
+            .unwrap_or(&app.view_state),
+    }
+}
+
+/// Check if a cell is selected based on the pane's view state.
+fn is_selected_in_pane(
+    view_state: &WorkbookViewState,
+    row: usize,
+    col: usize,
+) -> bool {
+    view_state.is_selected(row, col)
+}
+
+/// Get selection borders for a cell based on pane view state.
+/// Returns (top, right, bottom, left) indicating which edges need borders.
+fn selection_borders_for_pane(
+    view_state: &WorkbookViewState,
+    row: usize,
+    col: usize,
+) -> (bool, bool, bool, bool) {
+    // Check if this cell is selected
+    if !view_state.is_selected(row, col) {
+        return (false, false, false, false);
+    }
+
+    // Only draw borders on selection edges (not interior cell boundaries)
+    let above_selected = row > 0 && view_state.is_selected(row - 1, col);
+    let below_selected = view_state.is_selected(row + 1, col);
+    let left_selected = col > 0 && view_state.is_selected(row, col - 1);
+    let right_selected = view_state.is_selected(row, col + 1);
+
+    (
+        !above_selected, // top: draw if cell above is NOT selected
+        !right_selected, // right: draw if cell to right is NOT selected
+        !below_selected, // bottom: draw if cell below is NOT selected
+        !left_selected,  // left: draw if cell to left is NOT selected
+    )
+}
+
+/// Get selection range from view state
+fn selection_range_for_pane(view_state: &WorkbookViewState) -> ((usize, usize), (usize, usize)) {
+    let (r1, c1) = view_state.selected;
+    let (r2, c2) = view_state.selection_end.unwrap_or(view_state.selected);
+    let min_row = r1.min(r2);
+    let max_row = r1.max(r2);
+    let min_col = c1.min(c2);
+    let max_col = c1.max(c2);
+    ((min_row, min_col), (max_row, max_col))
+}
 
 /// Render the main cell grid with freeze pane support
 ///
@@ -19,16 +80,28 @@ use visigrid_engine::formula::eval::Value;
 /// 2. Frozen rows (top, scrolls horizontally only)
 /// 3. Frozen cols (left, scrolls vertically only)
 /// 4. Main grid (scrolls both directions)
-pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    let scroll_row = app.view_state.scroll_row;
-    let scroll_col = app.view_state.scroll_col;
-    let selected = app.view_state.selected;
+///
+/// The `pane_side` parameter specifies which split pane is being rendered:
+/// - `None` = no split view, use main view_state
+/// - `Some(SplitSide::Left)` = left pane, use main view_state
+/// - `Some(SplitSide::Right)` = right pane, use split_pane.view_state
+pub fn render_grid(
+    app: &mut Spreadsheet,
+    window: &Window,
+    cx: &mut Context<Spreadsheet>,
+    pane_side: Option<SplitSide>,
+) -> impl IntoElement {
+    // Get view state based on which pane we're rendering
+    let view_state = get_pane_view_state(app, pane_side);
+    let scroll_row = view_state.scroll_row;
+    let scroll_col = view_state.scroll_col;
+    let frozen_rows = view_state.frozen_rows;
+    let frozen_cols = view_state.frozen_cols;
+
     let editing = app.mode.is_editing();
     let edit_value = app.edit_value.clone();
     let total_visible_rows = app.visible_rows();
     let total_visible_cols = app.visible_cols();
-    let frozen_rows = app.view_state.frozen_rows;
-    let frozen_cols = app.view_state.frozen_cols;
 
     // Read show_gridlines from global settings
     let show_gridlines = match &user_settings(cx).appearance.show_gridlines {
@@ -58,13 +131,14 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                             // Get the view_row and data_row for this screen position
                             // This respects both sort order AND filter visibility
                             let visible_index = scroll_row + screen_row;
-                            let (view_row, data_row) = app.nth_visible_row(visible_index)?;
+                            let (view_row, data_row) = app.nth_visible_row(visible_index, cx)?;
                             Some(render_row(
                                 view_row,
                                 data_row,
                                 scroll_col,
                                 total_visible_cols,
-                                selected,
+                                view_state,
+                                pane_side,
                                 editing,
                                 &edit_value,
                                 show_gridlines,
@@ -76,7 +150,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                     )
             )
             // Dashed borders overlay for formula references (above cells, below popups)
-            .child(render_formula_ref_borders(app))
+            .child(render_formula_ref_borders(app, pane_side))
             // Popup overlay layer - positioned relative to grid, not window chrome
             .child(render_popup_overlay(app, cx))
             .into_any_element();
@@ -101,7 +175,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                     .children(
                         (0..frozen_rows).map(|view_row| {
                             // Frozen rows: view_row == data_row (headers don't sort)
-                            let data_row = app.view_to_data(view_row);
+                            let data_row = app.view_to_data(view_row, cx);
                             // Use scaled row height for rendering
                             let row_height = metrics.row_height(app.row_height(view_row));
                             div()
@@ -115,7 +189,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                                     d.children(
                                         (0..frozen_cols).map(|col| {
                                             let col_width = metrics.col_width(app.col_width(col));
-                                            render_cell(view_row, data_row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                            render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, app, window, cx)
                                         })
                                     )
                                 })
@@ -133,7 +207,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                                     (0..scrollable_visible_cols).map(|visible_col| {
                                         let col = scroll_col + visible_col;
                                         let col_width = metrics.col_width(app.col_width(col));
-                                        render_cell(view_row, data_row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                        render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, app, window, cx)
                                     })
                                 )
                         })
@@ -161,7 +235,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                                 // Get the view_row and data_row for this screen position
                                 // Account for frozen rows + scroll position in visible index
                                 let visible_index = frozen_rows + scroll_row + screen_row;
-                                let (view_row, data_row) = app.nth_visible_row(visible_index)?;
+                                let (view_row, data_row) = app.nth_visible_row(visible_index, cx)?;
                                 let row_height = metrics.row_height(app.row_height(view_row));
                                 Some(div()
                                     .flex()
@@ -174,7 +248,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                                         d.children(
                                             (0..frozen_cols).map(|col| {
                                                 let col_width = metrics.col_width(app.col_width(col));
-                                                render_cell(view_row, data_row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                                render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, app, window, cx)
                                             })
                                         )
                                     })
@@ -192,7 +266,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                                         (0..scrollable_visible_cols).map(|visible_col| {
                                             let col = scroll_col + visible_col;
                                             let col_width = metrics.col_width(app.col_width(col));
-                                            render_cell(view_row, data_row, col, col_width, row_height, selected, editing, &edit_value, show_gridlines, app, window, cx)
+                                            render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, app, window, cx)
                                         })
                                     ))
                             })
@@ -200,7 +274,7 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                 )
         )
         // Dashed borders overlay for formula references (above cells, below popups)
-        .child(render_formula_ref_borders(app))
+        .child(render_formula_ref_borders(app, pane_side))
         // Popup overlay layer - positioned relative to grid, not window chrome
         .child(render_popup_overlay(app, cx))
         .into_any_element()
@@ -211,7 +285,8 @@ fn render_row(
     data_row: usize,
     scroll_col: usize,
     visible_cols: usize,
-    selected: (usize, usize),
+    view_state: &WorkbookViewState,
+    pane_side: Option<SplitSide>,
     editing: bool,
     edit_value: &str,
     show_gridlines: bool,
@@ -232,7 +307,7 @@ fn render_row(
                 let col = scroll_col + visible_col;
                 let col_width = app.metrics.col_width(app.col_width(col));
                 // view_row for selection/display, data_row for cell data access
-                render_cell(view_row, data_row, col, col_width, row_height, selected, editing, edit_value, show_gridlines, app, window, cx)
+                render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, edit_value, show_gridlines, app, window, cx)
             })
         )
 }
@@ -243,7 +318,8 @@ fn render_cell(
     col: usize,
     col_width: f32,
     _row_height: f32,
-    selected: (usize, usize),
+    view_state: &WorkbookViewState,
+    pane_side: Option<SplitSide>,
     editing: bool,
     edit_value: &str,
     show_gridlines: bool,
@@ -252,8 +328,9 @@ fn render_cell(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     // Selection uses view_row (what user sees/clicks)
-    let is_selected = app.is_selected(view_row, col);
-    let is_active = selected == (view_row, col);
+    // Use pane-specific view state for selection checks
+    let is_selected = is_selected_in_pane(view_state, view_row, col);
+    let is_active = view_state.selected == (view_row, col);
     let is_editing = editing && is_active;
     let is_formula_ref = app.is_formula_ref(view_row, col);
     let formula_ref_color = app.formula_ref_color(view_row, col);  // Color index for multi-color refs
@@ -261,7 +338,7 @@ fn render_cell(
     let is_inspector_hover = app.inspector_hover_cell == Some((view_row, col));  // Hover highlight from inspector
 
     // Check if cell is in trace path (Phase 3.5b)
-    let sheet_id = app.sheet().id;
+    let sheet_id = app.sheet(cx).id;
     let trace_position = app.inspector_trace_path.as_ref().and_then(|path| {
         path.iter().position(|cell| {
             cell.sheet == sheet_id && cell.row == view_row && cell.col == col
@@ -272,9 +349,12 @@ fn render_cell(
         })
     });
 
+    // Dependency trace highlighting (Alt+T)
+    let trace_role = app.trace_role(sheet_id, view_row, col);
+
     // Check if cell is in history highlight range (Phase 7A)
     let is_history_highlight = app.history_highlight_range.map_or(false, |(sheet_idx, sr, sc, er, ec)| {
-        sheet_idx == app.workbook.active_sheet_index()
+        sheet_idx == app.sheet_index(cx)
             && view_row >= sr && view_row <= er
             && col >= sc && col <= ec
     });
@@ -294,9 +374,9 @@ fn render_cell(
     };
 
     // Spill state detection - uses data_row (storage)
-    let is_spill_parent = app.sheet().is_spill_parent(data_row, col);
-    let is_spill_receiver = app.sheet().is_spill_receiver(data_row, col);
-    let has_spill_error = app.sheet().has_spill_error(data_row, col);
+    let is_spill_parent = app.sheet(cx).is_spill_parent(data_row, col);
+    let is_spill_receiver = app.sheet(cx).is_spill_receiver(data_row, col);
+    let has_spill_error = app.sheet(cx).has_spill_error(data_row, col);
 
     // Check for multi-edit preview (shows what each selected cell will receive)
     let multi_edit_preview = app.multi_edit_preview(view_row, col);
@@ -309,9 +389,9 @@ fn render_cell(
         // Show the preview value for cells in multi-selection during editing
         preview
     } else if app.show_formulas() {
-        app.sheet().get_raw(data_row, col)
+        app.sheet(cx).get_raw(data_row, col)
     } else {
-        let display = app.sheet().get_formatted_display(data_row, col);
+        let display = app.sheet(cx).get_formatted_display(data_row, col);
         // Hide zero values if show_zeros is false
         if !app.show_zeros() && display == "0" {
             String::new()
@@ -320,7 +400,7 @@ fn render_cell(
         }
     };
 
-    let format = app.sheet().get_format(data_row, col);
+    let format = app.sheet(cx).get_format(data_row, col);
     let cell_row = view_row;  // For UI interactions (click, selection)
     let cell_col = col;
 
@@ -410,6 +490,49 @@ fn render_cell(
         );
     }
 
+    // Dependency trace highlight (Alt+T - shows precedents and dependents)
+    // Only show for non-selected, non-active cells to avoid visual clutter
+    if !is_selected && !is_active {
+        match trace_role {
+            TraceRole::Source => {
+                // Source cell: strong accent border (selection handles the fill)
+                let source_border = app.token(TokenKey::TraceSourceBorder);
+                cell = cell.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border_2()
+                        .border_color(source_border)
+                );
+            }
+            TraceRole::Precedent => {
+                // Precedent (input): themed tint
+                let precedent_bg = app.token(TokenKey::TracePrecedentBg);
+                cell = cell.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(precedent_bg)
+                        .border_1()
+                        .border_color(precedent_bg.opacity(0.6))
+                );
+            }
+            TraceRole::Dependent => {
+                // Dependent (output): themed tint
+                let dependent_bg = app.token(TokenKey::TraceDependentBg);
+                cell = cell.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(dependent_bg)
+                        .border_1()
+                        .border_color(dependent_bg.opacity(0.6))
+                );
+            }
+            TraceRole::None => {}
+        }
+    }
+
     // Apply horizontal alignment
     // When editing, always left-align so caret positioning works correctly
     // General alignment: numbers right-align, text/empty left-aligns (Excel behavior)
@@ -419,7 +542,7 @@ fn render_cell(
     } else {
         match format.alignment {
             Alignment::General => {
-                let computed = app.sheet().get_computed_value(data_row, col);
+                let computed = app.sheet(cx).get_computed_value(data_row, col);
                 match computed {
                     Value::Number(_) => cell.justify_end(),
                     _ => cell.justify_start(),
@@ -452,7 +575,8 @@ fn render_cell(
         cell.border_1()
     } else if is_selected {
         // Selected cells: only draw outer edges to avoid double borders
-        let (top, right, bottom, left) = app.selection_borders(view_row, col);
+        // Use pane-specific view state for selection border calculation
+        let (top, right, bottom, left) = selection_borders_for_pane(view_state, view_row, col);
         let mut c = cell;
         if top { c = c.border_t_1(); }
         if right { c = c.border_r_1(); }
@@ -479,7 +603,7 @@ fn render_cell(
         // Formula ref borders are drawn as dashed overlays (render_formula_ref_borders)
         // so formula ref cells fall through here for normal gridline/user border handling
         // Check for user-defined borders first (stored per data cell)
-        let (user_top, user_right, user_bottom, user_left) = app.cell_user_borders(data_row, col);
+        let (user_top, user_right, user_bottom, user_left) = app.cell_user_borders(data_row, col, cx);
         let has_user_border = user_top || user_right || user_bottom || user_left;
 
         if has_user_border {
@@ -494,8 +618,9 @@ fn render_cell(
         } else if show_gridlines {
             // Normal gridlines (only when enabled in settings)
             // Don't draw gridlines toward selected cells (selection borders handle those edges)
-            let cell_right_selected = app.is_selected(view_row, col + 1);
-            let cell_below_selected = app.is_selected(view_row + 1, col);
+            // Use pane-specific view state for selection checks
+            let cell_right_selected = is_selected_in_pane(view_state, view_row, col + 1);
+            let cell_below_selected = is_selected_in_pane(view_state, view_row + 1, col);
             let mut c = cell;
             if !cell_right_selected { c = c.border_r_1(); }
             if !cell_below_selected { c = c.border_b_1(); }
@@ -527,8 +652,11 @@ fn render_cell(
                 return;
             }
 
+            // Activate this pane if we're in split view
+            this.activate_pane(pane_side, cx);
+
             // If clicking a spill receiver, redirect to the spill parent
-            let (target_row, target_col) = if let Some((parent_row, parent_col)) = this.sheet().get_spill_parent(cell_row, cell_col) {
+            let (target_row, target_col) = if let Some((parent_row, parent_col)) = this.sheet(cx).get_spill_parent(cell_row, cell_col) {
                 (parent_row, parent_col)
             } else {
                 (cell_row, cell_col)
@@ -837,9 +965,10 @@ fn render_cell(
     // - For range selection: show on cell at (max_row, max_col)
     // - No additional selections (Ctrl+Click multi-select)
     // - Not editing, not in hint mode, not already fill dragging
-    let is_fill_handle_cell = if app.view_state.selection_end.is_some() {
+    // Use pane-specific view state for selection info
+    let is_fill_handle_cell = if view_state.selection_end.is_some() {
         // Range selection: fill handle goes on bottom-right corner
-        let ((_min_row, _min_col), (max_row, max_col)) = app.selection_range();
+        let ((_min_row, _min_col), (max_row, max_col)) = selection_range_for_pane(view_state);
         view_row == max_row && col == max_col
     } else {
         // Single cell: fill handle goes on active cell
@@ -848,7 +977,7 @@ fn render_cell(
     let show_fill_handle = is_fill_handle_cell
         && !is_editing
         && app.mode != Mode::Hint
-        && app.view_state.additional_selections.is_empty()
+        && view_state.additional_selections.is_empty()
         && !app.is_fill_dragging();
 
     // Wrap in relative container for absolute positioning (hint badges, fill handle)
@@ -985,9 +1114,19 @@ fn cell_text_color(app: &Spreadsheet, is_editing: bool, is_selected: bool, is_mu
 /// Render dashed borders around formula reference ranges.
 /// Uses canvas to draw dashed rectangles around each unique referenced range.
 /// Only renders when in formula edit mode with at least one reference.
-fn render_formula_ref_borders(app: &Spreadsheet) -> impl IntoElement {
+/// Only shows in the active pane (where editing is happening).
+fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -> impl IntoElement {
     // Only render in formula edit mode
     if !app.mode.is_formula() && !(app.mode.is_editing() && app.is_formula_content()) {
+        return div().into_any_element();
+    }
+
+    // Only show formula ref borders in the active pane
+    let is_active_pane = match pane_side {
+        None => true, // No split, always show
+        Some(side) => side == app.split_active_side,
+    };
+    if !is_active_pane {
         return div().into_any_element();
     }
 
@@ -1007,9 +1146,10 @@ fn render_formula_ref_borders(app: &Spreadsheet) -> impl IntoElement {
         }
     }
 
-    // Compute bounds for each range
-    let scroll_row = app.view_state.scroll_row;
-    let scroll_col = app.view_state.scroll_col;
+    // Compute bounds for each range using the pane's view state
+    let view_state = get_pane_view_state(app, pane_side);
+    let scroll_row = view_state.scroll_row;
+    let scroll_col = view_state.scroll_col;
 
     let range_bounds: Vec<(Bounds<Pixels>, Hsla)> = ranges
         .iter()

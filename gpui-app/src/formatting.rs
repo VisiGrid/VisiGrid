@@ -21,7 +21,7 @@ pub enum BorderApplyMode {
 
 impl Spreadsheet {
     /// Compute format state for the current selection (tri-state resolution)
-    pub fn selection_format_state(&self) -> SelectionFormatState {
+    pub fn selection_format_state(&self, cx: &App) -> SelectionFormatState {
         let mut state = SelectionFormatState::default();
         let mut first = true;
         let mut last_display: Option<String> = None;
@@ -30,9 +30,9 @@ impl Spreadsheet {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     state.cell_count += 1;
-                    let raw = self.sheet().get_raw(row, col);
-                    let display = self.sheet().get_display(row, col);
-                    let format = self.sheet().get_format(row, col);
+                    let raw = self.sheet(cx).get_raw(row, col);
+                    let display = self.sheet(cx).get_display(row, col);
+                    let format = self.sheet(cx).get_format(row, col);
 
                     if first {
                         state.raw_value = TriState::Uniform(raw.clone());
@@ -76,9 +76,9 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    let before = self.sheet().get_format(row, col);
-                    self.sheet_mut().set_bold(row, col, value);
-                    let after = self.sheet().get_format(row, col);
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_bold(row, col, value));
+                    let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });
                     }
@@ -88,7 +88,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Bold {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Bold, desc.clone());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Bold, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -101,9 +101,9 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    let before = self.sheet().get_format(row, col);
-                    self.sheet_mut().set_italic(row, col, value);
-                    let after = self.sheet().get_format(row, col);
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_italic(row, col, value));
+                    let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });
                     }
@@ -113,7 +113,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Italic {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Italic, desc.clone());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Italic, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -126,9 +126,9 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    let before = self.sheet().get_format(row, col);
-                    self.sheet_mut().set_underline(row, col, value);
-                    let after = self.sheet().get_format(row, col);
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_underline(row, col, value));
+                    let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });
                     }
@@ -138,7 +138,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Underline {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Underline, desc.clone());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Underline, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -151,9 +151,9 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    let before = self.sheet().get_format(row, col);
-                    self.sheet_mut().set_font_family(row, col, font.clone());
-                    let after = self.sheet().get_format(row, col);
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_font_family(row, col, font.clone()));
+                    let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });
                     }
@@ -164,7 +164,7 @@ impl Spreadsheet {
         if count > 0 {
             let font_name = font.as_deref().unwrap_or("default");
             let desc = format!("Font '{}'", font_name);
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Font, desc.clone());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Font, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -177,9 +177,9 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    let before = self.sheet().get_format(row, col);
-                    self.sheet_mut().set_alignment(row, col, alignment);
-                    let after = self.sheet().get_format(row, col);
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_alignment(row, col, alignment));
+                    let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });
                     }
@@ -195,7 +195,7 @@ impl Spreadsheet {
                 Alignment::Right => "Right",
             };
             let desc = format!("Align {}", align_name);
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Alignment, desc.clone());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Alignment, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -208,9 +208,9 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    let before = self.sheet().get_format(row, col);
-                    self.sheet_mut().set_vertical_alignment(row, col, valign);
-                    let after = self.sheet().get_format(row, col);
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_vertical_alignment(row, col, valign));
+                    let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });
                     }
@@ -225,7 +225,7 @@ impl Spreadsheet {
                 VerticalAlignment::Bottom => "Bottom",
             };
             let desc = format!("V-Align {}", valign_name);
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::VerticalAlignment, desc.clone());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::VerticalAlignment, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -238,9 +238,9 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    let before = self.sheet().get_format(row, col);
-                    self.sheet_mut().set_text_overflow(row, col, overflow);
-                    let after = self.sheet().get_format(row, col);
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_text_overflow(row, col, overflow));
+                    let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });
                     }
@@ -255,7 +255,7 @@ impl Spreadsheet {
                 TextOverflow::Overflow => "Overflow",
             };
             let desc = overflow_name.to_string();
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::TextOverflow, desc.clone());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::TextOverflow, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -268,9 +268,9 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    let before = self.sheet().get_format(row, col);
-                    self.sheet_mut().set_number_format(row, col, format);
-                    let after = self.sheet().get_format(row, col);
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, format));
+                    let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });
                     }
@@ -289,7 +289,7 @@ impl Spreadsheet {
                 NumberFormat::DateTime => "DateTime",
             };
             let desc = format!("{} format", format_name);
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::NumberFormat, desc.clone());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::NumberFormat, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -302,7 +302,7 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    let before = self.sheet().get_format(row, col);
+                    let before = self.sheet(cx).get_format(row, col);
                     let new_format = match before.number_format {
                         NumberFormat::Number { decimals } => {
                             let new_dec = (decimals as i8 + delta).clamp(0, 10) as u8;
@@ -319,8 +319,8 @@ impl Spreadsheet {
                         _ => None,
                     };
                     if let Some(fmt) = new_format {
-                        self.sheet_mut().set_number_format(row, col, fmt);
-                        let after = self.sheet().get_format(row, col);
+                        self.active_sheet_mut(cx, |s| s.set_number_format(row, col, fmt));
+                        let after = self.sheet(cx).get_format(row, col);
                         if before != after {
                             patches.push(CellFormatPatch { row, col, before, after });
                         }
@@ -331,7 +331,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Decimal {}", if delta > 0 { "+" } else { "-" });
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::DecimalPlaces, desc.clone());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::DecimalPlaces, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -344,9 +344,9 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    let before = self.sheet().get_format(row, col);
-                    self.sheet_mut().set_background_color(row, col, color);
-                    let after = self.sheet().get_format(row, col);
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_background_color(row, col, color));
+                    let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });
                     }
@@ -356,7 +356,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = if color.is_some() { "Background color" } else { "Clear background" };
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::BackgroundColor, desc.to_string());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::BackgroundColor, desc.to_string());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -379,9 +379,9 @@ impl Spreadsheet {
                     // Set all 4 edges on each cell to Thin
                     for row in min_row..=max_row {
                         for col in min_col..=max_col {
-                            let before = self.sheet().get_format(row, col);
-                            self.sheet_mut().set_borders(row, col, thin, thin, thin, thin);
-                            let after = self.sheet().get_format(row, col);
+                            let before = self.sheet(cx).get_format(row, col);
+                            self.active_sheet_mut(cx, |s| s.set_borders(row, col, thin, thin, thin, thin));
+                            let after = self.sheet(cx).get_format(row, col);
                             if before != after {
                                 patches.push(CellFormatPatch { row, col, before, after });
                             }
@@ -393,32 +393,32 @@ impl Spreadsheet {
                     // Set only perimeter edges, leave interior unchanged
                     for row in min_row..=max_row {
                         for col in min_col..=max_col {
-                            let before = self.sheet().get_format(row, col);
+                            let before = self.sheet(cx).get_format(row, col);
                             let mut changed = false;
 
                             // Top edge: only if on top row of selection
                             if row == min_row {
-                                self.sheet_mut().set_border_top(row, col, thin);
+                                self.active_sheet_mut(cx, |s| s.set_border_top(row, col, thin));
                                 changed = true;
                             }
                             // Bottom edge: only if on bottom row of selection
                             if row == max_row {
-                                self.sheet_mut().set_border_bottom(row, col, thin);
+                                self.active_sheet_mut(cx, |s| s.set_border_bottom(row, col, thin));
                                 changed = true;
                             }
                             // Left edge: only if on left column of selection
                             if col == min_col {
-                                self.sheet_mut().set_border_left(row, col, thin);
+                                self.active_sheet_mut(cx, |s| s.set_border_left(row, col, thin));
                                 changed = true;
                             }
                             // Right edge: only if on right column of selection
                             if col == max_col {
-                                self.sheet_mut().set_border_right(row, col, thin);
+                                self.active_sheet_mut(cx, |s| s.set_border_right(row, col, thin));
                                 changed = true;
                             }
 
                             if changed {
-                                let after = self.sheet().get_format(row, col);
+                                let after = self.sheet(cx).get_format(row, col);
                                 if before != after {
                                     patches.push(CellFormatPatch { row, col, before, after });
                                 }
@@ -430,9 +430,9 @@ impl Spreadsheet {
                     // Clear all 4 edges on each cell
                     for row in min_row..=max_row {
                         for col in min_col..=max_col {
-                            let before = self.sheet().get_format(row, col);
-                            self.sheet_mut().set_borders(row, col, none, none, none, none);
-                            let after = self.sheet().get_format(row, col);
+                            let before = self.sheet(cx).get_format(row, col);
+                            self.active_sheet_mut(cx, |s| s.set_borders(row, col, none, none, none, none));
+                            let after = self.sheet(cx).get_format(row, col);
                             if before != after {
                                 patches.push(CellFormatPatch { row, col, before, after });
                             }
@@ -444,21 +444,21 @@ impl Spreadsheet {
                     if min_row > 0 {
                         for col in min_col..=max_col {
                             let adj_row = min_row - 1;
-                            let before = self.sheet().get_format(adj_row, col);
-                            self.sheet_mut().set_border_bottom(adj_row, col, none);
-                            let after = self.sheet().get_format(adj_row, col);
+                            let before = self.sheet(cx).get_format(adj_row, col);
+                            self.active_sheet_mut(cx, |s| s.set_border_bottom(adj_row, col, none));
+                            let after = self.sheet(cx).get_format(adj_row, col);
                             if before != after {
                                 patches.push(CellFormatPatch { row: adj_row, col, before, after });
                             }
                         }
                     }
                     // Clear bottom edge of cells below the selection
-                    if max_row + 1 < self.sheet().rows {
+                    if max_row + 1 < self.sheet(cx).rows {
                         for col in min_col..=max_col {
                             let adj_row = max_row + 1;
-                            let before = self.sheet().get_format(adj_row, col);
-                            self.sheet_mut().set_border_top(adj_row, col, none);
-                            let after = self.sheet().get_format(adj_row, col);
+                            let before = self.sheet(cx).get_format(adj_row, col);
+                            self.active_sheet_mut(cx, |s| s.set_border_top(adj_row, col, none));
+                            let after = self.sheet(cx).get_format(adj_row, col);
                             if before != after {
                                 patches.push(CellFormatPatch { row: adj_row, col, before, after });
                             }
@@ -468,21 +468,21 @@ impl Spreadsheet {
                     if min_col > 0 {
                         for row in min_row..=max_row {
                             let adj_col = min_col - 1;
-                            let before = self.sheet().get_format(row, adj_col);
-                            self.sheet_mut().set_border_right(row, adj_col, none);
-                            let after = self.sheet().get_format(row, adj_col);
+                            let before = self.sheet(cx).get_format(row, adj_col);
+                            self.active_sheet_mut(cx, |s| s.set_border_right(row, adj_col, none));
+                            let after = self.sheet(cx).get_format(row, adj_col);
                             if before != after {
                                 patches.push(CellFormatPatch { row, col: adj_col, before, after });
                             }
                         }
                     }
                     // Clear left edge of cells to the right of the selection
-                    if max_col + 1 < self.sheet().cols {
+                    if max_col + 1 < self.sheet(cx).cols {
                         for row in min_row..=max_row {
                             let adj_col = max_col + 1;
-                            let before = self.sheet().get_format(row, adj_col);
-                            self.sheet_mut().set_border_left(row, adj_col, none);
-                            let after = self.sheet().get_format(row, adj_col);
+                            let before = self.sheet(cx).get_format(row, adj_col);
+                            self.active_sheet_mut(cx, |s| s.set_border_left(row, adj_col, none));
+                            let after = self.sheet(cx).get_format(row, adj_col);
                             if before != after {
                                 patches.push(CellFormatPatch { row, col: adj_col, before, after });
                             }
@@ -499,7 +499,7 @@ impl Spreadsheet {
                 BorderApplyMode::Outline => "Outline",
                 BorderApplyMode::Clear => "Clear borders",
             };
-            self.history.record_format(self.sheet_index(), patches, FormatActionKind::Border, desc.to_string());
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Border, desc.to_string());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }

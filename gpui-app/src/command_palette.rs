@@ -8,7 +8,7 @@
 //! - Font picker
 //! - Theme picker
 
-use gpui::*;
+use gpui::{*};
 
 use crate::app::{Spreadsheet, PaletteScope};
 use crate::mode::Mode;
@@ -47,7 +47,7 @@ impl Spreadsheet {
         self.palette_query.clear();
         self.palette_selected = 0;
         self.palette_scope = None;  // Clear scope for normal palette
-        self.update_palette_results();
+        self.update_palette_results(cx);
         cx.notify();
     }
 
@@ -69,7 +69,7 @@ impl Spreadsheet {
         self.palette_query.clear();
         self.palette_selected = 0;
         self.palette_scope = Some(PaletteScope::Menu(category));
-        self.update_palette_results();
+        self.update_palette_results(cx);
         cx.notify();
     }
 
@@ -78,7 +78,7 @@ impl Spreadsheet {
     pub fn clear_palette_scope(&mut self, cx: &mut Context<Self>) -> bool {
         if self.palette_scope.is_some() {
             self.palette_scope = None;
-            self.update_palette_results();
+            self.update_palette_results(cx);
             cx.notify();
             true
         } else {
@@ -97,7 +97,7 @@ impl Spreadsheet {
 
         // Find all cells that reference this cell (dependents)
         let mut references = Vec::new();
-        for (&(cell_row, cell_col), cell) in self.sheet().cells_iter() {
+        for (&(cell_row, cell_col), cell) in self.sheet(cx).cells_iter() {
             if let CellValue::Formula { source, .. } = &cell.value {
                 if let Ok(expr) = parse(source) {
                     let refs = extract_cell_refs(&expr);
@@ -152,7 +152,7 @@ impl Spreadsheet {
         let source_cell_ref = self.cell_ref_at(row, col);
 
         // Get formula from cell
-        let raw = self.sheet().get_raw(row, col);
+        let raw = self.sheet(cx).get_raw(row, col);
         if !raw.starts_with('=') {
             self.status_message = Some(format!("{} is not a formula", source_cell_ref));
             cx.notify();
@@ -178,7 +178,7 @@ impl Spreadsheet {
         // Build precedent entries
         let mut precedents: Vec<PrecedentEntry> = refs.iter().map(|(r, c)| {
             let cell_ref = self.cell_ref_at(*r, *c);
-            let display = self.sheet().get_display(*r, *c);
+            let display = self.sheet(cx).get_display(*r, *c);
             PrecedentEntry::new(*r, *c, cell_ref, display)
         }).collect();
 
@@ -206,7 +206,7 @@ impl Spreadsheet {
     }
 
     /// Get named range at cursor (if in a formula referencing one)
-    pub fn named_range_at_cursor(&self) -> Option<String> {
+    pub fn named_range_at_cursor(&self, cx: &App) -> Option<String> {
         // Only works in formula mode with edit_value containing a formula
         if !self.mode.is_formula() && !self.mode.is_editing() {
             return None;
@@ -236,7 +236,7 @@ impl Spreadsheet {
         let word = &text[start..end];
 
         // Check if this word is a named range
-        if self.workbook.get_named_range(word).is_some() {
+        if self.wb(cx).get_named_range(word).is_some() {
             Some(word.to_string())
         } else {
             None
@@ -248,7 +248,7 @@ impl Spreadsheet {
         use visigrid_engine::named_range::NamedRangeTarget;
 
         // Extract data from named range before mutable borrows
-        let target_info = self.workbook.get_named_range(name).map(|nr| {
+        let target_info = self.wb(cx).get_named_range(name).map(|nr| {
             let (row, col) = match &nr.target {
                 NamedRangeTarget::Cell { row, col, .. } => (*row, *col),
                 NamedRangeTarget::Range { start_row, start_col, .. } => (*start_row, *start_col),
@@ -280,7 +280,7 @@ impl Spreadsheet {
 
         // Find all cells that use this named range
         let mut references = Vec::new();
-        for (&(cell_row, cell_col), cell) in self.sheet().cells_iter() {
+        for (&(cell_row, cell_col), cell) in self.sheet(cx).cells_iter() {
             if let CellValue::Formula { source, .. } = &cell.value {
                 // Check if formula references this named range (word-boundary aware)
                 if self.formula_references_name(source, &name_upper) {
@@ -364,7 +364,7 @@ impl Spreadsheet {
     }
 
     /// Update palette results based on current query and scope
-    pub(crate) fn update_palette_results(&mut self) {
+    pub(crate) fn update_palette_results(&mut self, cx: &App) {
         // Clone query string first to avoid borrow conflicts with cache refresh
         let query_str = self.palette_query.clone();
         let query = SearchQuery::parse(&query_str);
@@ -383,7 +383,7 @@ impl Spreadsheet {
 
         // Add named ranges when no prefix (Quick Open behavior) or with $ prefix
         if query.prefix.is_none() || query.prefix == Some('$') {
-            let entries: Vec<NamedRangeEntry> = self.workbook.list_named_ranges()
+            let entries: Vec<NamedRangeEntry> = self.wb(cx).list_named_ranges()
                 .into_iter()
                 .map(|nr| {
                     let (row, col) = match &nr.target {
@@ -412,7 +412,7 @@ impl Spreadsheet {
         // Add cell search with @ prefix (uses generation-based cache for freshness)
         if query.prefix == Some('@') {
             // Ensure cache is fresh (rebuilds only if cells_rev changed)
-            self.ensure_cell_search_cache_fresh();
+            self.ensure_cell_search_cache_fresh(cx);
 
             // Search over cached entries
             let provider = CellSearchProvider::new(self.cell_search_cache.entries.clone());
@@ -506,7 +506,7 @@ impl Spreadsheet {
     pub fn palette_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
         self.palette_query.push(c);
         self.palette_selected = 0;  // Reset selection on filter change
-        self.update_palette_results();
+        self.update_palette_results(cx);
         cx.notify();
     }
 
@@ -529,13 +529,13 @@ impl Spreadsheet {
             }
             self.palette_query.pop();
             self.palette_selected = 0;  // Reset selection on filter change
-            self.update_palette_results();
+            self.update_palette_results(cx);
             cx.notify();
         } else if self.palette_scope.is_some() {
             // Query empty but scoped - clear scope, return to full palette
             self.palette_scope = None;
             self.palette_selected = 0;
-            self.update_palette_results();
+            self.update_palette_results(cx);
             cx.notify();
         }
         // Query empty and no scope - do nothing (Esc closes palette)
@@ -653,11 +653,13 @@ impl Spreadsheet {
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
         let font = if font_name.is_empty() { None } else { Some(font_name.to_string()) };
 
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                self.sheet_mut().set_font_family(row, col, font.clone());
+        self.active_sheet_mut(cx, |sheet| {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    sheet.set_font_family(row, col, font.clone());
+                }
             }
-        }
+        });
 
         self.is_modified = true;
         let cell_count = (max_row - min_row + 1) * (max_col - min_col + 1);
@@ -669,11 +671,13 @@ impl Spreadsheet {
     pub fn clear_font_from_selection(&mut self, cx: &mut Context<Self>) {
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                self.sheet_mut().set_font_family(row, col, None);
+        self.active_sheet_mut(cx, |sheet| {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    sheet.set_font_family(row, col, None);
+                }
             }
-        }
+        });
 
         self.is_modified = true;
         self.status_message = Some("Cleared font from selection".to_string());

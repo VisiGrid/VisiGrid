@@ -182,6 +182,8 @@ pub enum TipId {
     RenameF12,
     /// "Set as default app" prompt in title bar
     DefaultAppPrompt,
+    /// Window switcher shortcut tip (shown when 2nd window opens)
+    WindowSwitcher,
 }
 
 /// Collection of dismissed tips

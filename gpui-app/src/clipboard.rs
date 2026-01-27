@@ -86,8 +86,8 @@ impl Spreadsheet {
                 if col > min_col {
                     raw_tsv.push('\t');
                 }
-                raw_tsv.push_str(&self.sheet().get_raw(data_row, col));
-                row_values.push(self.sheet().get_computed_value(data_row, col));
+                raw_tsv.push_str(&self.sheet(cx).get_raw(data_row, col));
+                row_values.push(self.sheet(cx).get_computed_value(data_row, col));
             }
             values.push(row_values);
         }
@@ -134,17 +134,17 @@ impl Spreadsheet {
             let data_row = self.row_view.view_to_data(view_row);
 
             for col in min_col..=max_col {
-                let old_value = self.sheet().get_raw(data_row, col);
+                let old_value = self.sheet(cx).get_raw(data_row, col);
                 if !old_value.is_empty() {
                     changes.push(CellChange {
                         row: data_row, col, old_value, new_value: String::new(),
                     });
                 }
-                self.sheet_mut().set_value(data_row, col, "");
+                self.active_sheet_mut(cx, |s| s.set_value(data_row, col, ""));
             }
         }
 
-        self.history.record_batch(self.sheet_index(), changes);
+        self.history.record_batch(self.sheet_index(cx), changes);
         self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
 
@@ -242,7 +242,7 @@ impl Spreadsheet {
                 let mut values_grid: Vec<Vec<String>> = Vec::new();
 
                 for (data_row, col) in &target_cells {
-                    let old_value = self.sheet().get_raw(*data_row, *col);
+                    let old_value = self.sheet(cx).get_raw(*data_row, *col);
 
                     // For formulas, shift relative references based on delta from primary cell (data coords)
                     let new_value = if is_formula && is_internal {
@@ -258,7 +258,7 @@ impl Spreadsheet {
                             row: *data_row, col: *col, old_value, new_value: new_value.clone(),
                         });
                     }
-                    self.sheet_mut().set_value(*data_row, *col, &new_value);
+                    self.active_sheet_mut(cx, |s| s.set_value(*data_row, *col, &new_value));
                 }
 
                 // Build values grid for provenance
@@ -270,20 +270,20 @@ impl Spreadsheet {
                 if !changes.is_empty() {
                     let data_start_row = self.row_view.view_to_data(start_row);
                     let provenance = MutationOp::Paste {
-                        sheet: self.sheet().id,
+                        sheet: self.sheet(cx).id,
                         dst_row: data_start_row,
                         dst_col: start_col,
                         values: values_grid,
                         mode: PasteMode::Both,
-                    }.to_provenance(&self.sheet().name);
+                    }.to_provenance(&self.sheet(cx).name);
 
-                    self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+                    self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
                     self.bump_cells_rev();
                     self.is_modified = true;
                 }
 
                 self.status_message = Some(format!("Pasted to {} cells", target_cells.len()));
-                self.maybe_smoke_recalc();
+                self.maybe_smoke_recalc(cx);
                 cx.notify();
                 return;
             }
@@ -346,7 +346,7 @@ impl Spreadsheet {
                 for (col_offset, value) in line.split('\t').enumerate() {
                     let col = start_col + col_offset;
                     if target_data_row < NUM_ROWS && col < NUM_COLS {
-                        let old_value = self.sheet().get_raw(target_data_row, col);
+                        let old_value = self.sheet(cx).get_raw(target_data_row, col);
 
                         // Adjust formula references based on data row delta
                         let formula_delta_row = target_data_row as i32 - data_start_row as i32;
@@ -363,7 +363,7 @@ impl Spreadsheet {
                                 row: target_data_row, col, old_value, new_value: new_value.clone(),
                             });
                         }
-                        self.sheet_mut().set_value(target_data_row, col, &new_value);
+                        self.active_sheet_mut(cx, |s| s.set_value(target_data_row, col, &new_value));
 
                         // Track paste bounds (in data coordinates)
                         end_data_row = end_data_row.max(target_data_row);
@@ -378,21 +378,21 @@ impl Spreadsheet {
             // Record with provenance (only if changes were made)
             if !changes.is_empty() {
                 let provenance = MutationOp::Paste {
-                    sheet: self.sheet().id,
+                    sheet: self.sheet(cx).id,
                     dst_row: data_start_row,
                     dst_col: start_col,
                     values: values_grid,
                     mode: PasteMode::Both,  // Regular paste includes formulas
-                }.to_provenance(&self.sheet().name);
+                }.to_provenance(&self.sheet(cx).name);
 
-                self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+                self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
                 self.bump_cells_rev();  // Invalidate cell search cache
                 self.is_modified = true;
             }
 
             // Validate pasted range and report failures (using data coordinates)
-            let failures = self.workbook.validate_range(
-                self.sheet_index(), data_start_row, start_col, end_data_row, end_col
+            let failures = self.wb(cx).validate_range(
+                self.sheet_index(cx), data_start_row, start_col, end_data_row, end_col
             );
             let total_cells = (end_data_row - data_start_row + 1) * (end_col - start_col + 1);
             if failures.count > 0 {
@@ -406,7 +406,7 @@ impl Spreadsheet {
             }
 
             // Smoke mode: trigger full ordered recompute for dogfooding
-            self.maybe_smoke_recalc();
+            self.maybe_smoke_recalc(cx);
 
             cx.notify();
         }
@@ -528,7 +528,7 @@ impl Spreadsheet {
                     for (col_offset, value) in row_values.iter().enumerate() {
                         let col = start_col + col_offset;
                         if target_data_row < NUM_ROWS && col < NUM_COLS {
-                            let old_value = self.sheet().get_raw(target_data_row, col);
+                            let old_value = self.sheet(cx).get_raw(target_data_row, col);
                             let new_value = Self::value_to_canonical_string(value);
 
                             grid_row.push(new_value.clone());
@@ -538,7 +538,7 @@ impl Spreadsheet {
                                     row: target_data_row, col, old_value, new_value: new_value.clone(),
                                 });
                             }
-                            self.sheet_mut().set_value(target_data_row, col, &new_value);
+                            self.active_sheet_mut(cx, |s| s.set_value(target_data_row, col, &new_value));
 
                             end_data_row = end_data_row.max(target_data_row);
                             end_col = end_col.max(col);
@@ -562,7 +562,7 @@ impl Spreadsheet {
                 for (col_offset, cell_text) in line.split('\t').enumerate() {
                     let col = start_col + col_offset;
                     if target_data_row < NUM_ROWS && col < NUM_COLS {
-                        let old_value = self.sheet().get_raw(target_data_row, col);
+                        let old_value = self.sheet(cx).get_raw(target_data_row, col);
                         let parsed_value = Self::parse_external_value(cell_text);
                         let new_value = Self::value_to_canonical_string(&parsed_value);
 
@@ -573,7 +573,7 @@ impl Spreadsheet {
                                 row: target_data_row, col, old_value, new_value: new_value.clone(),
                             });
                         }
-                        self.sheet_mut().set_value(target_data_row, col, &new_value);
+                        self.active_sheet_mut(cx, |s| s.set_value(target_data_row, col, &new_value));
 
                         end_data_row = end_data_row.max(target_data_row);
                         end_col = end_col.max(col);
@@ -587,24 +587,24 @@ impl Spreadsheet {
 
         if !changes.is_empty() {
             let provenance = MutationOp::Paste {
-                sheet: self.sheet().id,
+                sheet: self.sheet(cx).id,
                 dst_row: data_start_row,
                 dst_col: start_col,
                 values: values_grid,
                 mode: PasteMode::Values,
-            }.to_provenance(&self.sheet().name);
+            }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 
             // Smoke mode: trigger full ordered recompute for dogfooding
-            self.maybe_smoke_recalc();
+            self.maybe_smoke_recalc(cx);
         }
 
         // Validate pasted range and report failures (using data coordinates)
-        let failures = self.workbook.validate_range(
-            self.sheet_index(), data_start_row, start_col, end_data_row, end_col
+        let failures = self.wb(cx).validate_range(
+            self.sheet_index(cx), data_start_row, start_col, end_data_row, end_col
         );
         let total_cells = (end_data_row - data_start_row + 1) * (end_col - start_col + 1);
         if failures.count > 0 {
@@ -758,18 +758,18 @@ impl Spreadsheet {
 
                 for col in min_col..=max_col {
                     // Skip spill receivers - only the parent formula can be deleted
-                    if self.sheet().is_spill_receiver(data_row, col) {
+                    if self.sheet(cx).is_spill_receiver(data_row, col) {
                         skipped_spill_receivers = true;
                         continue;
                     }
 
-                    let old_value = self.sheet().get_raw(data_row, col);
+                    let old_value = self.sheet(cx).get_raw(data_row, col);
                     if !old_value.is_empty() {
                         changes.push(CellChange {
                             row: data_row, col, old_value, new_value: String::new(),
                         });
                     }
-                    self.sheet_mut().clear_cell(data_row, col);
+                    self.active_sheet_mut(cx, |s| s.clear_cell(data_row, col));
                 }
             }
         }
@@ -783,17 +783,17 @@ impl Spreadsheet {
                 let data_min_row = self.row_view.view_to_data(min_row);
                 let data_max_row = self.row_view.view_to_data(max_row);
                 Some(MutationOp::Clear {
-                    sheet: self.sheet().id,
+                    sheet: self.sheet(cx).id,
                     start_row: data_min_row,
                     start_col: min_col,
                     end_row: data_max_row,
                     end_col: max_col,
                     mode: ClearMode::All,
-                }.to_provenance(&self.sheet().name))
+                }.to_provenance(&self.sheet(cx).name))
             } else {
                 None  // Discontiguous selection - no provenance
             };
-            self.history.record_batch_with_provenance(self.sheet_index(), changes, provenance);
+            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, provenance);
             self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
         }

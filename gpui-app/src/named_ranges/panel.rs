@@ -1,6 +1,6 @@
 //! Named Ranges Panel Actions - delete, jump, filter, and usage tracking
 
-use gpui::*;
+use gpui::{*};
 use crate::app::Spreadsheet;
 use crate::history::UndoAction;
 
@@ -12,7 +12,7 @@ impl Spreadsheet {
     /// Delete a named range by name (shows impact preview first)
     pub fn delete_named_range(&mut self, name: &str, cx: &mut Context<Self>) {
         // Check if named range exists
-        if self.workbook.get_named_range(name).is_none() {
+        if self.wb(cx).get_named_range(name).is_none() {
             self.status_message = Some(format!("Named range '{}' not found", name));
             cx.notify();
             return;
@@ -25,7 +25,7 @@ impl Spreadsheet {
     /// Internal method to delete a named range (called from impact preview)
     pub(crate) fn delete_named_range_internal(&mut self, name: &str, usage_count: usize, cx: &mut Context<Self>) {
         // Get the named range first (need to clone for undo)
-        let named_range = self.workbook.get_named_range(name).cloned();
+        let named_range = self.wb(cx).get_named_range(name).cloned();
 
         if let Some(nr) = named_range {
             // Record undo action BEFORE deleting
@@ -34,7 +34,7 @@ impl Spreadsheet {
             });
 
             // Now delete
-            self.workbook.delete_named_range(name);
+            self.wb_mut(cx, |wb| wb.delete_named_range(name));
             self.is_modified = true;
             self.bump_cells_rev();
 
@@ -55,11 +55,11 @@ impl Spreadsheet {
     }
 
     /// Count how many formula cells reference a named range
-    fn count_named_range_references(&self, name: &str) -> usize {
+    fn count_named_range_references(&self, name: &str, cx: &App) -> usize {
         let name_upper = name.to_uppercase();
         let mut count = 0;
 
-        for ((_, _), cell) in self.sheet().cells_iter() {
+        for ((_, _), cell) in self.sheet(cx).cells_iter() {
             let raw = cell.value.raw_display();
             if raw.starts_with('=') {
                 // Simple check: does the formula contain this name as a word?
@@ -80,10 +80,10 @@ impl Spreadsheet {
     }
 
     /// Get usage count for a named range (with caching)
-    pub fn get_named_range_usage_count(&mut self, name: &str) -> usize {
+    pub fn get_named_range_usage_count(&mut self, name: &str, cx: &App) -> usize {
         // Check if cache is stale
         if self.named_range_usage_cache.cached_rev != self.cells_rev {
-            self.rebuild_named_range_usage_cache();
+            self.rebuild_named_range_usage_cache(cx);
         }
 
         // Return cached count (or 0 if not found)
@@ -94,11 +94,11 @@ impl Spreadsheet {
     }
 
     /// Rebuild the usage count cache for all named ranges
-    fn rebuild_named_range_usage_cache(&mut self) {
+    fn rebuild_named_range_usage_cache(&mut self, cx: &App) {
         self.named_range_usage_cache.counts.clear();
 
         // Get all named range names (lowercase for lookup)
-        let names: Vec<String> = self.workbook.list_named_ranges()
+        let names: Vec<String> = self.wb(cx).list_named_ranges()
             .iter()
             .map(|nr| nr.name.to_lowercase())
             .collect();
@@ -114,7 +114,7 @@ impl Spreadsheet {
         }
 
         // Collect all formulas first (to avoid borrow issues)
-        let formulas: Vec<String> = self.sheet().cells_iter()
+        let formulas: Vec<String> = self.sheet(cx).cells_iter()
             .filter_map(|((_, _), cell)| {
                 let raw = cell.value.raw_display();
                 if raw.starts_with('=') {
@@ -149,7 +149,7 @@ impl Spreadsheet {
     pub fn jump_to_named_range(&mut self, name: &str, cx: &mut Context<Self>) {
         use visigrid_engine::named_range::NamedRangeTarget;
 
-        let target_info = self.workbook.get_named_range(name).map(|nr| {
+        let target_info = self.wb(cx).get_named_range(name).map(|nr| {
             match &nr.target {
                 NamedRangeTarget::Cell { row, col, .. } => {
                     (*row, *col, *row, *col, nr.reference_string())
@@ -187,9 +187,9 @@ impl Spreadsheet {
     }
 
     /// Get filtered named ranges for the Names panel
-    pub fn filtered_named_ranges(&self) -> Vec<&visigrid_engine::named_range::NamedRange> {
+    pub fn filtered_named_ranges(&self, cx: &App) -> Vec<visigrid_engine::named_range::NamedRange> {
         let query = self.names_filter_query.to_lowercase();
-        let mut ranges: Vec<_> = self.workbook.list_named_ranges()
+        let mut ranges: Vec<_> = self.wb(cx).list_named_ranges()
             .into_iter()
             .filter(|nr| {
                 if query.is_empty() {
@@ -201,6 +201,7 @@ impl Spreadsheet {
                         .map(|d| d.to_lowercase().contains(&query))
                         .unwrap_or(false)
             })
+            .cloned()
             .collect();
 
         // Sort alphabetically by name
@@ -213,7 +214,7 @@ impl Spreadsheet {
         use visigrid_engine::named_range::NamedRangeTarget;
         use visigrid_engine::cell_id::CellId;
 
-        let range_info = self.workbook.get_named_range(name).map(|nr| {
+        let range_info = self.wb(cx).get_named_range(name).map(|nr| {
             let sheet_index = match &nr.target {
                 NamedRangeTarget::Cell { sheet, .. } => *sheet,
                 NamedRangeTarget::Range { sheet, .. } => *sheet,
@@ -235,9 +236,9 @@ impl Spreadsheet {
 
         if let Some((sheet_index, cells)) = range_info {
             // Get the sheet ID for CellId construction
-            let sheet_id = self.workbook.sheets().get(sheet_index)
+            let sheet_id = self.wb(cx).sheets().get(sheet_index)
                 .map(|s| s.id)
-                .unwrap_or_else(|| self.sheet().id);
+                .unwrap_or_else(|| self.sheet(cx).id);
 
             // Build trace path: cells in the range + their precedents
             let mut trace_cells: Vec<CellId> = cells.iter()
@@ -253,10 +254,10 @@ impl Spreadsheet {
                     break;
                 }
 
-                let raw = self.sheet().get_raw(*row, *col);
+                let raw = self.sheet(cx).get_raw(*row, *col);
                 if raw.starts_with('=') {
                     // Get precedents from dependency graph
-                    let precedents = self.workbook.get_precedents(sheet_id, *row, *col);
+                    let precedents = self.wb(cx).get_precedents(sheet_id, *row, *col);
                     for prec in precedents {
                         if !trace_cells.contains(&prec) {
                             trace_cells.push(prec);

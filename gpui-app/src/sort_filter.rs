@@ -24,9 +24,9 @@ impl Spreadsheet {
     /// Get the preview row order for the active sheet, if in preview mode
     /// Returns None if not previewing or no sort order recorded
     #[inline]
-    pub fn preview_row_order(&self) -> Option<&[usize]> {
+    pub fn preview_row_order(&self, cx: &App) -> Option<&[usize]> {
         self.preview_session().and_then(|session| {
-            let sheet_idx = self.workbook.active_sheet_index();
+            let sheet_idx = self.sheet_index(cx);
             session.view_state.per_sheet.get(sheet_idx)
                 .and_then(|sv| sv.row_order.as_deref())
         })
@@ -35,9 +35,9 @@ impl Spreadsheet {
     /// Get the preview sort state for the active sheet
     /// Returns (column, is_ascending) if sort is active in preview
     #[inline]
-    pub fn preview_sort_state(&self) -> Option<(usize, bool)> {
+    pub fn preview_sort_state(&self, cx: &App) -> Option<(usize, bool)> {
         self.preview_session().and_then(|session| {
-            let sheet_idx = self.workbook.active_sheet_index();
+            let sheet_idx = self.sheet_index(cx);
             session.view_state.per_sheet.get(sheet_idx)
                 .and_then(|sv| sv.sort)
         })
@@ -47,9 +47,9 @@ impl Spreadsheet {
     /// Returns (column, is_ascending) if the current view is sorted
     /// Uses preview sort state when previewing, live filter_state.sort otherwise
     #[inline]
-    pub fn display_sort_state(&self) -> Option<(usize, bool)> {
+    pub fn display_sort_state(&self, cx: &App) -> Option<(usize, bool)> {
         if self.is_previewing() {
-            self.preview_sort_state()
+            self.preview_sort_state(cx)
         } else {
             self.filter_state.sort.as_ref().map(|s| {
                 (s.column, s.direction == visigrid_engine::filter::SortDirection::Ascending)
@@ -60,8 +60,8 @@ impl Spreadsheet {
     /// Convert view row to data row
     /// In preview mode, uses preview row order if available
     #[inline]
-    pub fn view_to_data(&self, view_row: usize) -> usize {
-        if let Some(row_order) = self.preview_row_order() {
+    pub fn view_to_data(&self, view_row: usize, cx: &App) -> usize {
+        if let Some(row_order) = self.preview_row_order(cx) {
             // Preview mode with sorted state
             row_order.get(view_row).copied().unwrap_or(view_row)
         } else if self.is_previewing() {
@@ -76,8 +76,8 @@ impl Spreadsheet {
     /// Convert data row to view row (None if hidden by filter)
     /// In preview mode, filtering is not active (all rows visible)
     #[inline]
-    pub fn data_to_view(&self, data_row: usize) -> Option<usize> {
-        if let Some(row_order) = self.preview_row_order() {
+    pub fn data_to_view(&self, data_row: usize, cx: &App) -> Option<usize> {
+        if let Some(row_order) = self.preview_row_order(cx) {
             // Preview mode with sorted state - find position
             row_order.iter().position(|&r| r == data_row)
         } else if self.is_previewing() {
@@ -106,8 +106,8 @@ impl Spreadsheet {
     /// Returns None if index is out of bounds
     /// In preview mode, uses preview row order if available
     #[inline]
-    pub fn nth_visible_row(&self, visible_index: usize) -> Option<(usize, usize)> {
-        if let Some(row_order) = self.preview_row_order() {
+    pub fn nth_visible_row(&self, visible_index: usize, cx: &App) -> Option<(usize, usize)> {
+        if let Some(row_order) = self.preview_row_order(cx) {
             // Preview mode with sorted state
             let data_row = row_order.get(visible_index).copied()?;
             // view_row == visible_index in sorted preview (no filter)
@@ -166,7 +166,7 @@ impl Spreadsheet {
         if self.filter_state.filter_range.is_none() {
             // Auto-detect range: from row 0 to last non-empty row in current column
             let col = self.view_state.selected.1;
-            let max_row = self.find_last_data_row(col);
+            let max_row = self.find_last_data_row(col, cx);
             if max_row == 0 {
                 self.status_message = Some("No data to sort".to_string());
                 cx.notify();
@@ -179,7 +179,7 @@ impl Spreadsheet {
         let col = self.view_state.selected.1;
 
         // Create value_at closure (captures sheet for computed values)
-        let sheet = self.sheet();
+        let sheet = self.sheet(cx);
         let value_at = |data_row: usize, c: usize| -> visigrid_engine::formula::eval::Value {
             sheet.get_computed_value(data_row, c)
         };
@@ -202,20 +202,20 @@ impl Spreadsheet {
         // Build provenance
         let provenance = if let Some((start_row, start_col, end_row, end_col)) = self.filter_state.filter_range {
             Some(MutationOp::Sort {
-                sheet: self.sheet().id,
+                sheet: self.sheet(cx).id,
                 range_start_row: start_row,
                 range_start_col: start_col,
                 range_end_row: end_row,
                 range_end_col: end_col,
                 keys: vec![SortKey { col, ascending: is_ascending }],
                 has_header: false,  // TODO: detect header row
-            }.to_provenance(&self.sheet().name))
+            }.to_provenance(&self.sheet(cx).name))
         } else {
             None
         };
 
         self.history.record_action_with_provenance(crate::history::UndoAction::SortApplied {
-            sheet_index: self.workbook.active_sheet_index(),
+            sheet_index: self.sheet_index(cx),
             previous_row_order: undo_item.previous_row_order,
             previous_sort_state,
             new_row_order: new_order.clone(),
@@ -241,8 +241,8 @@ impl Spreadsheet {
     }
 
     /// Find the last non-empty row in a column (for auto-detecting sort range)
-    fn find_last_data_row(&self, col: usize) -> usize {
-        let sheet = self.sheet();
+    fn find_last_data_row(&self, col: usize, cx: &App) -> usize {
+        let sheet = self.sheet(cx);
         let mut last_row = 0;
         // Scan up to a reasonable limit (or could use sheet's actual data extent)
         for row in 0..10000 {
@@ -265,8 +265,8 @@ impl Spreadsheet {
         } else {
             // Enable: set filter range based on selection or data region
             let (row, col) = self.view_state.selected;
-            let max_row = self.find_last_data_row(col);
-            let max_col = self.find_last_data_col(row);
+            let max_row = self.find_last_data_row(col, cx);
+            let max_col = self.find_last_data_col(row, cx);
 
             if max_row == 0 && max_col == 0 {
                 self.status_message = Some("No data for AutoFilter".to_string());
@@ -293,7 +293,7 @@ impl Spreadsheet {
 
         // Collect values for the column first (to avoid borrow conflicts)
         let values: Vec<(usize, visigrid_engine::formula::eval::Value)> = if let Some((data_start, _, data_end, _)) = self.filter_state.data_range() {
-            let sheet = self.sheet();
+            let sheet = self.sheet(cx);
             (data_start..=data_end)
                 .map(|data_row| (data_row, sheet.get_computed_value(data_row, col)))
                 .collect()
@@ -397,7 +397,7 @@ impl Spreadsheet {
         }
 
         // Apply filters to row_view
-        self.apply_all_filters();
+        self.apply_all_filters(cx);
 
         self.filter_dropdown_col = None;
         self.filter_search_text.clear();
@@ -407,7 +407,7 @@ impl Spreadsheet {
     }
 
     /// Apply all column filters to update visible_mask
-    fn apply_all_filters(&mut self) {
+    fn apply_all_filters(&mut self, cx: &App) {
         let Some((data_start, min_col, data_end, max_col)) = self.filter_state.data_range() else {
             // No filter range - all visible
             self.row_view.clear_filter();
@@ -433,7 +433,7 @@ impl Spreadsheet {
             for col in min_col..=max_col {
                 if let Some(col_filter) = self.filter_state.column_filters.get(&col) {
                     if col_filter.is_active() {
-                        let value = self.sheet().get_computed_value(data_row, col);
+                        let value = self.sheet(cx).get_computed_value(data_row, col);
                         let filter_key = visigrid_engine::filter::FilterKey::from_value(&value);
                         if !col_filter.passes(&filter_key) {
                             passes = false;
@@ -457,8 +457,8 @@ impl Spreadsheet {
     }
 
     /// Find the last non-empty column in a row
-    fn find_last_data_col(&self, row: usize) -> usize {
-        let sheet = self.sheet();
+    fn find_last_data_col(&self, row: usize, cx: &App) -> usize {
+        let sheet = self.sheet(cx);
         let mut last_col = 0;
         for col in 0..256 {
             let cell = sheet.get_cell(row, col);
@@ -482,7 +482,7 @@ impl Spreadsheet {
 
             // Record undo action (no provenance for clear)
             self.history.record_action_with_provenance(crate::history::UndoAction::SortCleared {
-                sheet_index: self.workbook.active_sheet_index(),
+                sheet_index: self.sheet_index(cx),
                 previous_row_order,
                 previous_sort_state,
             }, None);

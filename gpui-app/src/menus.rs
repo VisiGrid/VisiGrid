@@ -27,7 +27,7 @@ pub fn set_app_menus(cx: &mut App) {
         Menu {
             name: "File".into(),
             items: vec![
-                MenuItem::action("New", NewFile),
+                MenuItem::action("New Workbook", NewWindow),
                 MenuItem::action("Open...", OpenFile),
                 MenuItem::separator(),
                 MenuItem::action("Save", Save),
@@ -40,8 +40,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Export Provenance Script (.lua)...", ExportProvenance),
                 MenuItem::separator(),
-                MenuItem::action("Close", CloseWindow),
-                MenuItem::action("Quit", Quit),
+                MenuItem::action("Close Window", CloseWindow),
             ],
         },
         // Edit menu
@@ -101,6 +100,18 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Fill Right", FillRight),
                 MenuItem::separator(),
                 MenuItem::action("Validation...", ShowDataValidation),
+            ],
+        },
+        // Window menu
+        Menu {
+            name: "Window".into(),
+            items: vec![
+                MenuItem::action("Minimize", Minimize),
+                MenuItem::action("Zoom", Zoom),
+                MenuItem::separator(),
+                MenuItem::action("Switch Window...", SwitchWindow),
+                MenuItem::separator(),
+                MenuItem::action("Bring All to Front", BringAllToFront),
             ],
         },
         // Help menu

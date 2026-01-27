@@ -7,7 +7,7 @@
 //!
 //! Core hint generation and resolution logic is in hints.rs.
 
-use gpui::*;
+use gpui::{*};
 use crate::app::{Spreadsheet, NUM_COLS};
 use crate::mode::Mode;
 
@@ -207,7 +207,7 @@ impl Spreadsheet {
             "$" => {
                 // Move to last column with data in current row (or last visible)
                 let row = self.view_state.selected.0;
-                let last_col = self.find_last_data_col_in_row(row);
+                let last_col = self.find_last_data_col_in_row(row, cx);
                 self.view_state.selected = (row, last_col);
                 self.view_state.selection_end = None;
                 self.ensure_cell_visible(row, last_col);
@@ -229,8 +229,8 @@ impl Spreadsheet {
     }
 
     /// Find the last column with data in a given row.
-    fn find_last_data_col_in_row(&self, row: usize) -> usize {
-        let sheet = self.workbook.active_sheet();
+    fn find_last_data_col_in_row(&self, row: usize, cx: &App) -> usize {
+        let sheet = self.sheet(cx);
         for col in (0..NUM_COLS).rev() {
             let cell = sheet.get_cell(row, col);
             if !cell.value.raw_display().is_empty() {

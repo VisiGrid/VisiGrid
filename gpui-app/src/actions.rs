@@ -98,7 +98,8 @@ actions!(clipboard, [
 
 // File actions
 actions!(file, [
-    NewFile,
+    NewWindow,         // Ctrl+N: Open a new window with blank workbook (safe)
+    NewInPlace,        // Replace current workbook in-place (dangerous, not bound by default)
     OpenFile,
     Save,
     SaveAs,
@@ -136,6 +137,23 @@ actions!(view, [
     FreezeFirstColumn, // Freeze first column only
     FreezePanes,       // Freeze rows/cols above and left of current cell
     UnfreezePanes,     // Clear all freeze panes
+    // Split view
+    SplitRight,        // Ctrl+\ - Split view horizontally (50/50)
+    CloseSplit,        // Close split view, keep active pane
+    FocusOtherPane,    // Ctrl+] - Focus the other pane when split
+    // Dependency tracing
+    ToggleTrace,       // Alt+T - Toggle trace mode (highlight precedents/dependents)
+    CycleTracePrecedent,  // Alt+[ - Jump to next precedent (shift for reverse)
+    CycleTraceDependent,  // Alt+] - Jump to next dependent (shift for reverse)
+    ReturnToTraceSource,  // F5 (Win/Linux), Alt+Enter (macOS) - Jump back to trace source
+]);
+
+// Window actions (macOS standard Window menu)
+actions!(window, [
+    Minimize,          // Cmd+M: Minimize current window
+    Zoom,              // Toggle window zoom (maximize/restore)
+    BringAllToFront,   // Bring all app windows to front
+    SwitchWindow,      // Cmd+` / Ctrl+`: Open window switcher palette
 ]);
 
 // Format actions

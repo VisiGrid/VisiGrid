@@ -1,6 +1,6 @@
 //! Extract Named Range - extract range literals from formulas into named ranges
 
-use gpui::*;
+use gpui::{*};
 use crate::app::{Spreadsheet, CreateNameFocus};
 use crate::history::UndoAction;
 use crate::mode::Mode;
@@ -14,7 +14,7 @@ impl Spreadsheet {
     pub fn show_extract_named_range(&mut self, cx: &mut Context<Self>) {
         // Get the current cell's formula
         let (row, col) = self.view_state.selected;
-        let cell = self.sheet().get_cell(row, col);
+        let cell = self.sheet(cx).get_cell(row, col);
         let formula_opt = self.get_formula_source(&cell.value);
 
         let formula = match formula_opt {
@@ -27,7 +27,7 @@ impl Spreadsheet {
         };
 
         // Detect range literals in the formula
-        let range_literal = match self.detect_range_literal(&formula) {
+        let range_literal = match self.detect_range_literal(&formula, cx) {
             Some(r) => r,
             None => {
                 self.status_message = Some("No range literal found in formula.".to_string());
@@ -37,17 +37,17 @@ impl Spreadsheet {
         };
 
         // Check if this range is already a named range
-        if self.workbook.get_named_range(&range_literal).is_some() {
+        if self.wb(cx).get_named_range(&range_literal).is_some() {
             self.status_message = Some(format!("'{}' is already a named range.", range_literal));
             cx.notify();
             return;
         }
 
         // Find all cells containing this range literal
-        let (affected_cells, occurrence_count) = self.find_cells_with_range(&range_literal);
+        let (affected_cells, occurrence_count) = self.find_cells_with_range(&range_literal, cx);
 
         // Generate a suggested name (Range_1, Range_2, etc.)
-        let suggested_name = self.generate_unique_range_name();
+        let suggested_name = self.generate_unique_range_name(cx);
 
         self.extract_range_literal = range_literal;
         self.extract_name = suggested_name;
@@ -62,11 +62,11 @@ impl Spreadsheet {
     }
 
     /// Generate a unique name like Range_1, Range_2, etc.
-    fn generate_unique_range_name(&self) -> String {
+    fn generate_unique_range_name(&self, cx: &App) -> String {
         let mut i = 1;
         loop {
             let name = format!("Range_{}", i);
-            if self.workbook.get_named_range(&name).is_none() {
+            if self.wb(cx).get_named_range(&name).is_none() {
                 return name;
             }
             i += 1;
@@ -81,7 +81,7 @@ impl Spreadsheet {
     }
 
     /// Detect a range literal in a formula (e.g., A1:B10, $A$1:$B$10)
-    fn detect_range_literal(&self, formula: &str) -> Option<String> {
+    fn detect_range_literal(&self, formula: &str, cx: &App) -> Option<String> {
         // Simple regex-like pattern matching for range literals
         // Matches: A1:B10, $A$1:$B$10, A1, $A$1, etc.
         let chars: Vec<char> = formula.chars().collect();
@@ -91,7 +91,7 @@ impl Spreadsheet {
             // Look for start of a cell reference
             if let Some(range) = self.try_parse_range_at(&chars, i) {
                 // Skip named ranges (already defined)
-                if self.workbook.get_named_range(&range).is_none() {
+                if self.wb(cx).get_named_range(&range).is_none() {
                     // Make sure it's actually a range (contains :) or a single cell
                     return Some(range);
                 }
@@ -185,12 +185,12 @@ impl Spreadsheet {
     }
 
     /// Find all cells containing a specific range literal and count occurrences
-    fn find_cells_with_range(&self, range_literal: &str) -> (Vec<(usize, usize)>, usize) {
+    fn find_cells_with_range(&self, range_literal: &str, cx: &App) -> (Vec<(usize, usize)>, usize) {
         let range_upper = range_literal.to_uppercase();
         let mut cells = Vec::new();
         let mut total_count = 0;
 
-        for ((row, col), cell) in self.sheet().cells_iter() {
+        for ((row, col), cell) in self.sheet(cx).cells_iter() {
             let raw = cell.value.raw_display();
             if !raw.starts_with('=') {
                 continue;
@@ -257,7 +257,7 @@ impl Spreadsheet {
     }
 
     /// Validate the extract name
-    fn validate_extract_name(&mut self) {
+    fn validate_extract_name(&mut self, cx: &App) {
         if self.extract_name.is_empty() {
             self.extract_validation_error = Some("Name cannot be empty".to_string());
             return;
@@ -286,7 +286,7 @@ impl Spreadsheet {
         }
 
         // Check for existing named range
-        if self.workbook.get_named_range(&self.extract_name).is_some() {
+        if self.wb(cx).get_named_range(&self.extract_name).is_some() {
             self.extract_validation_error = Some("A named range with this name already exists".to_string());
             return;
         }
@@ -324,7 +324,7 @@ impl Spreadsheet {
             self.extract_select_all = false;
         }
         self.extract_name.push(c);
-        self.validate_extract_name();
+        self.validate_extract_name(cx);
         cx.notify();
     }
 
@@ -332,7 +332,7 @@ impl Spreadsheet {
     pub fn extract_name_backspace(&mut self, cx: &mut Context<Self>) {
         self.extract_select_all = false;
         self.extract_name.pop();
-        self.validate_extract_name();
+        self.validate_extract_name(cx);
         cx.notify();
     }
 
@@ -356,7 +356,7 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
-        self.validate_extract_name();
+        self.validate_extract_name(cx);
         if self.extract_validation_error.is_some() {
             cx.notify();
             return;
@@ -377,21 +377,21 @@ impl Spreadsheet {
         let clean_range = range_literal.replace('$', "");
         let parts: Vec<&str> = clean_range.split(':').collect();
 
-        let sheet = self.workbook.active_sheet_index();
+        let sheet = self.sheet_index(cx);
         let result: Result<(), String> = if parts.len() == 2 {
             // Range reference like A1:B10
             if let (Some(start), Some(end)) = (
                 Self::parse_cell_ref(parts[0]),
                 Self::parse_cell_ref(parts[1]),
             ) {
-                self.workbook.define_name_for_range(&name, sheet, start.0, start.1, end.0, end.1)
+                self.wb_mut(cx, |wb| wb.define_name_for_range(&name, sheet, start.0, start.1, end.0, end.1))
             } else {
                 Err("Invalid cell reference".to_string())
             }
         } else {
             // Single cell reference like A1
             if let Some((row, col)) = Self::parse_cell_ref(&clean_range) {
-                self.workbook.define_name_for_cell(&name, sheet, row, col)
+                self.wb_mut(cx, |wb| wb.define_name_for_cell(&name, sheet, row, col))
             } else {
                 Err("Invalid cell reference".to_string())
             }
@@ -405,23 +405,25 @@ impl Spreadsheet {
 
         // Add description if provided
         if let Some(desc) = description {
-            if let Some(nr) = self.workbook.named_ranges_mut().get(&name).cloned() {
-                let mut updated = nr;
-                updated.description = Some(desc);
-                let _ = self.workbook.named_ranges_mut().set(updated);
-            }
+            self.wb_mut(cx, |wb| {
+                if let Some(nr) = wb.named_ranges_mut().get(&name).cloned() {
+                    let mut updated = nr;
+                    updated.description = Some(desc);
+                    let _ = wb.named_ranges_mut().set(updated);
+                }
+            });
         }
 
         // 2. Replace range literal with name in all affected cells
         let mut cell_changes = Vec::new();
         for (row, col) in &affected_cells {
-            let cell = self.sheet().get_cell(*row, *col);
+            let cell = self.sheet(cx).get_cell(*row, *col);
             let old_value = cell.value.raw_display();
             if old_value.starts_with('=') {
                 let new_value = self.replace_range_in_formula(&old_value, &range_literal, &name);
                 if new_value != old_value {
                     // Apply the change
-                    self.sheet_mut().set_value(*row, *col, &new_value);
+                    self.active_sheet_mut(cx, |s| s.set_value(*row, *col, &new_value));
                     cell_changes.push(crate::history::CellChange {
                         row: *row,
                         col: *col,
@@ -434,7 +436,7 @@ impl Spreadsheet {
 
         // 3. Record undo action (group)
         // Get the full named range we just created for the undo action
-        let created_range = self.workbook.get_named_range(&name)
+        let created_range = self.wb(cx).get_named_range(&name)
             .cloned()
             .expect("Named range was just created");
         let mut actions = vec![
