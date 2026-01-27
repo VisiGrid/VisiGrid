@@ -131,6 +131,10 @@ fn render_sort_indicator(app: &Spreadsheet, col: usize) -> Option<impl IntoEleme
     )
 }
 
+/// Width reserved for header chrome (filter button + padding)
+/// This ensures text doesn't overlap with icons on narrow columns
+const HEADER_CHROME_WIDTH: f32 = 16.0;
+
 /// Render a single column header with resize handle and selection support
 fn render_column_header(
     app: &Spreadsheet,
@@ -144,6 +148,9 @@ fn render_column_header(
     let header_text = app.token(TokenKey::HeaderTextMuted);
     let accent = app.token(TokenKey::Accent);
     let selection_bg = app.token(TokenKey::SelectionBg);
+
+    // Reserve right padding when filter button is shown to prevent text/icon overlap
+    let has_filter_button = app.filter_state.is_enabled() && app.filter_state.contains_column(col);
 
     div()
         .id(ElementId::NamedInteger("col-header".into(), col as u64))
@@ -163,10 +170,13 @@ fn render_column_header(
         .cursor_pointer()
         .hover(|s| s.bg(selection_bg.opacity(0.3)))
         // Column letter with optional sort indicator
+        // Add right padding when filter button is shown to prevent overlap
         .child(
             div()
                 .flex()
                 .items_center()
+                .overflow_hidden()
+                .when(has_filter_button, |d| d.pr(px(HEADER_CHROME_WIDTH)))
                 .child(Spreadsheet::col_letter(col))
                 .when_some(render_sort_indicator(app, col), |d, indicator| d.child(indicator))
         )

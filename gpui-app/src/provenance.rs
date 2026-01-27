@@ -143,6 +143,12 @@ impl UndoAction {
                     ascending
                 ))
             }
+            UndoAction::SortCleared { sheet_index, .. } => {
+                Some(format!(
+                    "grid.clear_sort{{ sheet={} }}",
+                    sheet_index + 1
+                ))
+            }
             UndoAction::ValidationSet { sheet_index, range, new_rule, .. } => {
                 Some(validation_set_to_lua(*sheet_index, range, new_rule))
             }
@@ -563,6 +569,7 @@ fn action_affects_sheet(action: &UndoAction, sheet_index: usize) -> bool {
         UndoAction::ColsInserted { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::ColsDeleted { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::SortApplied { sheet_index: s, .. } => *s == sheet_index,
+        UndoAction::SortCleared { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::ValidationSet { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::ValidationCleared { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::ValidationExcluded { sheet_index: s, .. } => *s == sheet_index,

@@ -178,6 +178,15 @@ pub enum UndoAction {
         /// New sort state (column and direction) for redo
         new_sort_state: (usize, bool), // (column, is_ascending)
     },
+    /// Sort cleared (for undo: restore previous sort state)
+    SortCleared {
+        /// Sheet where sort was cleared
+        sheet_index: usize,
+        /// Previous row order before clearing
+        previous_row_order: Vec<usize>,
+        /// Previous sort state (column, is_ascending)
+        previous_sort_state: (usize, bool),
+    },
     /// Validation rule set (for undo: restore previous rules)
     ValidationSet {
         sheet_index: usize,
@@ -301,6 +310,9 @@ impl UndoAction {
             UndoAction::SortApplied { .. } => {
                 "Sort".to_string()
             }
+            UndoAction::SortCleared { .. } => {
+                "Clear sort".to_string()
+            }
             UndoAction::ValidationSet { range, .. } => {
                 let count = range.cell_count();
                 if count == 1 {
@@ -366,6 +378,12 @@ impl UndoAction {
                 let col_letter = col_to_letter(*col);
                 let dir = if *is_asc { "ascending" } else { "descending" };
                 Some(format!("Column {} {}", col_letter, dir))
+            }
+            UndoAction::SortCleared { previous_sort_state, .. } => {
+                let (col, is_asc) = previous_sort_state;
+                let col_letter = col_to_letter(*col);
+                let dir = if *is_asc { "ascending" } else { "descending" };
+                Some(format!("Was column {} {}", col_letter, dir))
             }
             UndoAction::RowsInserted { at_row, count, .. } => {
                 Some(format!("{} row(s) at row {}", count, at_row + 1))
@@ -1220,6 +1238,18 @@ impl History {
                 sheet_view.row_order = Some(new_row_order.clone());
                 sheet_view.sort = Some(*new_sort_state);
             }
+            UndoAction::SortCleared { sheet_index, .. } => {
+                // Validate sheet exists
+                if *sheet_index >= view_state.per_sheet.len() {
+                    return Err(PreviewBuildError::InvariantViolation(
+                        format!("SortCleared action references invalid sheet {}", sheet_index)
+                    ));
+                }
+                // Clear sort in preview view state
+                let sheet_view = &mut view_state.per_sheet[*sheet_index];
+                sheet_view.row_order = None;
+                sheet_view.sort = None;
+            }
             UndoAction::ValidationSet { sheet_index, range, new_rule, .. } => {
                 // Replace-in-range semantics: clear overlaps THEN set
                 // This matches the live app behavior in dialogs.rs
@@ -1278,6 +1308,7 @@ pub enum UndoActionKind {
     ColsInserted,
     ColsDeleted,
     SortApplied,
+    SortCleared,
     ValidationSet,
     ValidationCleared,
     ValidationExcluded,
@@ -1310,6 +1341,7 @@ impl UndoActionKind {
 
             // Supported via PreviewViewState (Phase 8B)
             UndoActionKind::SortApplied => true,
+            UndoActionKind::SortCleared => true,
 
             // Rewind is audit-only - should never appear in replay paths
             // (Rewind truncates history, so nothing follows it to replay)
@@ -1332,6 +1364,7 @@ impl UndoActionKind {
             UndoActionKind::ColsInserted => "Insert columns",
             UndoActionKind::ColsDeleted => "Delete columns",
             UndoActionKind::SortApplied => "Sort",
+            UndoActionKind::SortCleared => "Clear sort",
             UndoActionKind::ValidationSet => "Set validation",
             UndoActionKind::ValidationCleared => "Clear validation",
             UndoActionKind::ValidationExcluded => "Exclude validation",
@@ -1357,6 +1390,7 @@ impl UndoActionKind {
             UndoActionKind::ColsInserted => 0x0A,
             UndoActionKind::ColsDeleted => 0x0B,
             UndoActionKind::SortApplied => 0x0C,
+            UndoActionKind::SortCleared => 0x11,
             UndoActionKind::ValidationSet => 0x0D,
             UndoActionKind::ValidationCleared => 0x0E,
             UndoActionKind::ValidationExcluded => 0x0F,
@@ -1382,6 +1416,7 @@ impl UndoAction {
             UndoAction::ColsInserted { .. } => UndoActionKind::ColsInserted,
             UndoAction::ColsDeleted { .. } => UndoActionKind::ColsDeleted,
             UndoAction::SortApplied { .. } => UndoActionKind::SortApplied,
+            UndoAction::SortCleared { .. } => UndoActionKind::SortCleared,
             UndoAction::ValidationSet { .. } => UndoActionKind::ValidationSet,
             UndoAction::ValidationCleared { .. } => UndoActionKind::ValidationCleared,
             UndoAction::ValidationExcluded { .. } => UndoActionKind::ValidationExcluded,
@@ -1623,6 +1658,7 @@ mod tests {
             UndoActionKind::ColsInserted,
             UndoActionKind::ColsDeleted,
             UndoActionKind::SortApplied,
+            UndoActionKind::SortCleared,
             UndoActionKind::ValidationSet,
             UndoActionKind::ValidationCleared,
             UndoActionKind::ValidationExcluded,

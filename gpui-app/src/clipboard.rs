@@ -56,27 +56,38 @@ impl Spreadsheet {
         }
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+        let is_filtered = self.row_view.is_filtered();
 
         // Build tab-separated raw values (formulas) for system clipboard and normal paste
+        // When filtered, only include visible rows
         let mut raw_tsv = String::new();
-        for row in min_row..=max_row {
+        let mut values = Vec::new();
+        let mut first_row = true;
+        let mut source_row = min_row; // Track first visible row for source
+
+        for view_row in min_row..=max_row {
+            // Skip hidden rows when filtered
+            if is_filtered && !self.row_view.is_view_row_visible(view_row) {
+                continue;
+            }
+
+            // Convert view row to data row for sheet access
+            let data_row = self.row_view.view_to_data(view_row);
+
+            if first_row {
+                source_row = view_row;
+                first_row = false;
+            } else {
+                raw_tsv.push('\n');
+            }
+
+            let mut row_values = Vec::new();
             for col in min_col..=max_col {
                 if col > min_col {
                     raw_tsv.push('\t');
                 }
-                raw_tsv.push_str(&self.sheet().get_raw(row, col));
-            }
-            if row < max_row {
-                raw_tsv.push('\n');
-            }
-        }
-
-        // Build 2D grid of typed computed values for Paste Values
-        let mut values = Vec::new();
-        for row in min_row..=max_row {
-            let mut row_values = Vec::new();
-            for col in min_col..=max_col {
-                row_values.push(self.sheet().get_computed_value(row, col));
+                raw_tsv.push_str(&self.sheet().get_raw(data_row, col));
+                row_values.push(self.sheet().get_computed_value(data_row, col));
             }
             values.push(row_values);
         }
@@ -87,13 +98,18 @@ impl Spreadsheet {
         self.internal_clipboard = Some(InternalClipboard {
             raw_tsv: raw_tsv.clone(),
             values,
-            source: (min_row, min_col),
+            source: (source_row, min_col),
             id,
         });
         // Write clipboard with metadata ID for reliable internal detection
         let id_json = format!("\"{}\"", id);
         cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(raw_tsv, id_json));
-        self.status_message = Some("Copied to clipboard".to_string());
+
+        if is_filtered {
+            self.status_message = Some("Copied visible rows to clipboard".to_string());
+        } else {
+            self.status_message = Some("Copied to clipboard".to_string());
+        }
         cx.notify();
     }
 
@@ -103,24 +119,40 @@ impl Spreadsheet {
 
         self.copy(cx);
 
-        // Clear the selected cells and record history
+        // Clear the selected cells and record history (visible rows only when filtered)
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+        let is_filtered = self.row_view.is_filtered();
         let mut changes = Vec::new();
-        for row in min_row..=max_row {
+
+        for view_row in min_row..=max_row {
+            // Skip hidden rows when filtered
+            if is_filtered && !self.row_view.is_view_row_visible(view_row) {
+                continue;
+            }
+
+            // Convert view row to data row for sheet access
+            let data_row = self.row_view.view_to_data(view_row);
+
             for col in min_col..=max_col {
-                let old_value = self.sheet().get_raw(row, col);
+                let old_value = self.sheet().get_raw(data_row, col);
                 if !old_value.is_empty() {
                     changes.push(CellChange {
-                        row, col, old_value, new_value: String::new(),
+                        row: data_row, col, old_value, new_value: String::new(),
                     });
                 }
-                self.sheet_mut().set_value(row, col, "");
+                self.sheet_mut().set_value(data_row, col, "");
             }
         }
+
         self.history.record_batch(self.sheet_index(), changes);
         self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
-        self.status_message = Some("Cut to clipboard".to_string());
+
+        if is_filtered {
+            self.status_message = Some("Cut visible rows to clipboard".to_string());
+        } else {
+            self.status_message = Some("Cut to clipboard".to_string());
+        }
         cx.notify();
     }
 
@@ -158,6 +190,7 @@ impl Spreadsheet {
 
         if let Some(text) = text {
             let (start_row, start_col) = self.view_state.selected;
+            let is_filtered = self.row_view.is_filtered();
             let mut changes = Vec::new();
 
             // Check if clipboard is a single cell (1 line, no tabs)
@@ -168,29 +201,38 @@ impl Spreadsheet {
             if is_single_cell && self.is_multi_selection() {
                 let single_value = lines[0].to_string();
                 let primary_cell = self.view_state.selected;
+                let primary_data_row = self.row_view.view_to_data(primary_cell.0);
 
-                // Collect all target cells
+                // Collect all target cells (view_row, col) -> (data_row, col)
                 let mut target_cells: Vec<(usize, usize)> = Vec::new();
 
-                // Primary selection rectangle
+                // Primary selection rectangle (filter to visible rows)
                 let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-                for row in min_row..=max_row {
+                for view_row in min_row..=max_row {
+                    if is_filtered && !self.row_view.is_view_row_visible(view_row) {
+                        continue;
+                    }
+                    let data_row = self.row_view.view_to_data(view_row);
                     for col in min_col..=max_col {
-                        target_cells.push((row, col));
+                        target_cells.push((data_row, col));
                     }
                 }
 
-                // Additional selections (Ctrl+Click)
+                // Additional selections (Ctrl+Click) - filter to visible rows
                 for (sel_start, sel_end) in &self.view_state.additional_selections {
                     let end = sel_end.unwrap_or(*sel_start);
                     let min_r = sel_start.0.min(end.0);
                     let max_r = sel_start.0.max(end.0);
                     let min_c = sel_start.1.min(end.1);
                     let max_c = sel_start.1.max(end.1);
-                    for row in min_r..=max_r {
+                    for view_row in min_r..=max_r {
+                        if is_filtered && !self.row_view.is_view_row_visible(view_row) {
+                            continue;
+                        }
+                        let data_row = self.row_view.view_to_data(view_row);
                         for col in min_c..=max_c {
-                            if !target_cells.contains(&(row, col)) {
-                                target_cells.push((row, col));
+                            if !target_cells.contains(&(data_row, col)) {
+                                target_cells.push((data_row, col));
                             }
                         }
                     }
@@ -199,12 +241,12 @@ impl Spreadsheet {
                 let is_formula = single_value.starts_with('=');
                 let mut values_grid: Vec<Vec<String>> = Vec::new();
 
-                for (row, col) in &target_cells {
-                    let old_value = self.sheet().get_raw(*row, *col);
+                for (data_row, col) in &target_cells {
+                    let old_value = self.sheet().get_raw(*data_row, *col);
 
-                    // For formulas, shift relative references based on delta from primary cell
+                    // For formulas, shift relative references based on delta from primary cell (data coords)
                     let new_value = if is_formula && is_internal {
-                        let delta_row = *row as i32 - primary_cell.0 as i32;
+                        let delta_row = *data_row as i32 - primary_data_row as i32;
                         let delta_col = *col as i32 - primary_cell.1 as i32;
                         self.adjust_formula_refs(&single_value, delta_row, delta_col)
                     } else {
@@ -213,10 +255,10 @@ impl Spreadsheet {
 
                     if old_value != new_value {
                         changes.push(CellChange {
-                            row: *row, col: *col, old_value, new_value: new_value.clone(),
+                            row: *data_row, col: *col, old_value, new_value: new_value.clone(),
                         });
                     }
-                    self.sheet_mut().set_value(*row, *col, &new_value);
+                    self.sheet_mut().set_value(*data_row, *col, &new_value);
                 }
 
                 // Build values grid for provenance
@@ -226,9 +268,10 @@ impl Spreadsheet {
 
                 // Record with provenance
                 if !changes.is_empty() {
+                    let data_start_row = self.row_view.view_to_data(start_row);
                     let provenance = MutationOp::Paste {
                         sheet: self.sheet().id,
-                        dst_row: start_row,
+                        dst_row: data_start_row,
                         dst_col: start_col,
                         values: values_grid,
                         mode: PasteMode::Both,
@@ -246,11 +289,15 @@ impl Spreadsheet {
             }
 
             // Standard paste (multi-cell clipboard or single cell to single selection)
+            // When filtered, paste to consecutive visible rows
+            let data_start_row = self.row_view.view_to_data(start_row);
+
             // Calculate delta from source if this is an internal paste
             let (delta_row, delta_col) = if is_internal {
                 if let Some(ic) = &self.internal_clipboard {
                     let (src_row, src_col) = ic.source;
-                    (start_row as i32 - src_row as i32, start_col as i32 - src_col as i32)
+                    let src_data_row = self.row_view.view_to_data(src_row);
+                    (data_start_row as i32 - src_data_row as i32, start_col as i32 - src_col as i32)
                 } else {
                     (0, 0)
                 }
@@ -258,21 +305,53 @@ impl Spreadsheet {
                 (0, 0)  // External clipboard - no adjustment
             };
 
+            // For filtered paste: find the starting visible index
+            let visible_start_idx = if is_filtered {
+                self.row_view.visible_rows().iter().position(|&vr| vr == start_row)
+            } else {
+                None
+            };
+
             // Parse tab-separated values and build values grid for provenance
             let mut values_grid: Vec<Vec<String>> = Vec::new();
-            let mut end_row = start_row;
+            let mut end_data_row = data_start_row;
             let mut end_col = start_col;
+
             for (row_offset, line) in text.lines().enumerate() {
+                // Determine target view row for this clipboard row
+                let (_target_view_row, target_data_row) = if is_filtered {
+                    if let Some(start_idx) = visible_start_idx {
+                        // Get the nth visible row from the starting position
+                        if let Some(view_row) = self.row_view.nth_visible(start_idx + row_offset) {
+                            let data_row = self.row_view.view_to_data(view_row);
+                            (view_row, data_row)
+                        } else {
+                            // No more visible rows - skip this line
+                            continue;
+                        }
+                    } else {
+                        // Start row not visible - skip
+                        continue;
+                    }
+                } else {
+                    // No filtering - direct mapping
+                    let view_row = start_row + row_offset;
+                    if view_row >= NUM_ROWS {
+                        continue;
+                    }
+                    (view_row, view_row)
+                };
+
                 let mut row_values: Vec<String> = Vec::new();
                 for (col_offset, value) in line.split('\t').enumerate() {
-                    let row = start_row + row_offset;
                     let col = start_col + col_offset;
-                    if row < NUM_ROWS && col < NUM_COLS {
-                        let old_value = self.sheet().get_raw(row, col);
+                    if target_data_row < NUM_ROWS && col < NUM_COLS {
+                        let old_value = self.sheet().get_raw(target_data_row, col);
 
-                        // Adjust formula references if this is a formula and we have internal source
+                        // Adjust formula references based on data row delta
+                        let formula_delta_row = target_data_row as i32 - data_start_row as i32;
                         let new_value = if value.starts_with('=') && is_internal {
-                            self.adjust_formula_refs(value, delta_row, delta_col)
+                            self.adjust_formula_refs(value, delta_row + formula_delta_row, delta_col + col_offset as i32)
                         } else {
                             value.to_string()
                         };
@@ -281,13 +360,13 @@ impl Spreadsheet {
 
                         if old_value != new_value {
                             changes.push(CellChange {
-                                row, col, old_value, new_value: new_value.clone(),
+                                row: target_data_row, col, old_value, new_value: new_value.clone(),
                             });
                         }
-                        self.sheet_mut().set_value(row, col, &new_value);
+                        self.sheet_mut().set_value(target_data_row, col, &new_value);
 
-                        // Track paste bounds
-                        end_row = end_row.max(row);
+                        // Track paste bounds (in data coordinates)
+                        end_data_row = end_data_row.max(target_data_row);
                         end_col = end_col.max(col);
                     }
                 }
@@ -300,7 +379,7 @@ impl Spreadsheet {
             if !changes.is_empty() {
                 let provenance = MutationOp::Paste {
                     sheet: self.sheet().id,
-                    dst_row: start_row,
+                    dst_row: data_start_row,
                     dst_col: start_col,
                     values: values_grid,
                     mode: PasteMode::Both,  // Regular paste includes formulas
@@ -311,11 +390,11 @@ impl Spreadsheet {
                 self.is_modified = true;
             }
 
-            // Validate pasted range and report failures
+            // Validate pasted range and report failures (using data coordinates)
             let failures = self.workbook.validate_range(
-                self.sheet_index(), start_row, start_col, end_row, end_col
+                self.sheet_index(), data_start_row, start_col, end_data_row, end_col
             );
-            let total_cells = (end_row - start_row + 1) * (end_col - start_col + 1);
+            let total_cells = (end_data_row - data_start_row + 1) * (end_col - start_col + 1);
             if failures.count > 0 {
                 self.store_validation_failures(&failures);
                 self.status_message = Some(format!(
@@ -367,6 +446,7 @@ impl Spreadsheet {
 
     /// Paste Values: paste computed values only (no formulas).
     /// Uses typed values from internal clipboard, or parses external clipboard with leading-zero guard.
+    /// When filtered, pastes to consecutive visible rows only.
     pub fn paste_values(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
@@ -394,34 +474,73 @@ impl Spreadsheet {
         });
 
         let (start_row, start_col) = self.view_state.selected;
+        let is_filtered = self.row_view.is_filtered();
+        let data_start_row = self.row_view.view_to_data(start_row);
         let mut changes = Vec::new();
         let mut values_grid: Vec<Vec<String>> = Vec::new();
-        let mut end_row = start_row;
+        let mut end_data_row = data_start_row;
         let mut end_col = start_col;
+
+        // For filtered paste: find the starting visible index
+        let visible_start_idx = if is_filtered {
+            self.row_view.visible_rows().iter().position(|&vr| vr == start_row)
+        } else {
+            None
+        };
+
+        /// Helper to get the nth target row (returns data_row)
+        fn get_target_data_row(
+            row_view: &visigrid_engine::filter::RowView,
+            is_filtered: bool,
+            visible_start_idx: Option<usize>,
+            start_row: usize,
+            row_offset: usize,
+        ) -> Option<usize> {
+            if is_filtered {
+                if let Some(start_idx) = visible_start_idx {
+                    if let Some(view_row) = row_view.nth_visible(start_idx + row_offset) {
+                        return Some(row_view.view_to_data(view_row));
+                    }
+                }
+                None
+            } else {
+                let view_row = start_row + row_offset;
+                if view_row < NUM_ROWS {
+                    Some(view_row)
+                } else {
+                    None
+                }
+            }
+        }
 
         if use_internal_values {
             // Use typed values from internal clipboard (clone to avoid borrow issues)
             let values = self.internal_clipboard.as_ref().map(|ic| ic.values.clone());
             if let Some(values) = values {
                 for (row_offset, row_values) in values.iter().enumerate() {
+                    let Some(target_data_row) = get_target_data_row(
+                        &self.row_view, is_filtered, visible_start_idx, start_row, row_offset
+                    ) else {
+                        continue;
+                    };
+
                     let mut grid_row: Vec<String> = Vec::new();
                     for (col_offset, value) in row_values.iter().enumerate() {
-                        let row = start_row + row_offset;
                         let col = start_col + col_offset;
-                        if row < NUM_ROWS && col < NUM_COLS {
-                            let old_value = self.sheet().get_raw(row, col);
+                        if target_data_row < NUM_ROWS && col < NUM_COLS {
+                            let old_value = self.sheet().get_raw(target_data_row, col);
                             let new_value = Self::value_to_canonical_string(value);
 
                             grid_row.push(new_value.clone());
 
                             if old_value != new_value {
                                 changes.push(CellChange {
-                                    row, col, old_value, new_value: new_value.clone(),
+                                    row: target_data_row, col, old_value, new_value: new_value.clone(),
                                 });
                             }
-                            self.sheet_mut().set_value(row, col, &new_value);
+                            self.sheet_mut().set_value(target_data_row, col, &new_value);
 
-                            end_row = end_row.max(row);
+                            end_data_row = end_data_row.max(target_data_row);
                             end_col = end_col.max(col);
                         }
                     }
@@ -433,12 +552,17 @@ impl Spreadsheet {
         } else if let Some(text) = system_text {
             // Parse external clipboard with leading-zero guard
             for (row_offset, line) in text.lines().enumerate() {
+                let Some(target_data_row) = get_target_data_row(
+                    &self.row_view, is_filtered, visible_start_idx, start_row, row_offset
+                ) else {
+                    continue;
+                };
+
                 let mut grid_row: Vec<String> = Vec::new();
                 for (col_offset, cell_text) in line.split('\t').enumerate() {
-                    let row = start_row + row_offset;
                     let col = start_col + col_offset;
-                    if row < NUM_ROWS && col < NUM_COLS {
-                        let old_value = self.sheet().get_raw(row, col);
+                    if target_data_row < NUM_ROWS && col < NUM_COLS {
+                        let old_value = self.sheet().get_raw(target_data_row, col);
                         let parsed_value = Self::parse_external_value(cell_text);
                         let new_value = Self::value_to_canonical_string(&parsed_value);
 
@@ -446,12 +570,12 @@ impl Spreadsheet {
 
                         if old_value != new_value {
                             changes.push(CellChange {
-                                row, col, old_value, new_value: new_value.clone(),
+                                row: target_data_row, col, old_value, new_value: new_value.clone(),
                             });
                         }
-                        self.sheet_mut().set_value(row, col, &new_value);
+                        self.sheet_mut().set_value(target_data_row, col, &new_value);
 
-                        end_row = end_row.max(row);
+                        end_data_row = end_data_row.max(target_data_row);
                         end_col = end_col.max(col);
                     }
                 }
@@ -464,7 +588,7 @@ impl Spreadsheet {
         if !changes.is_empty() {
             let provenance = MutationOp::Paste {
                 sheet: self.sheet().id,
-                dst_row: start_row,
+                dst_row: data_start_row,
                 dst_col: start_col,
                 values: values_grid,
                 mode: PasteMode::Values,
@@ -478,11 +602,11 @@ impl Spreadsheet {
             self.maybe_smoke_recalc();
         }
 
-        // Validate pasted range and report failures
+        // Validate pasted range and report failures (using data coordinates)
         let failures = self.workbook.validate_range(
-            self.sheet_index(), start_row, start_col, end_row, end_col
+            self.sheet_index(), data_start_row, start_col, end_data_row, end_col
         );
-        let total_cells = (end_row - start_row + 1) * (end_col - start_col + 1);
+        let total_cells = (end_data_row - data_start_row + 1) * (end_col - start_col + 1);
         if failures.count > 0 {
             self.store_validation_failures(&failures);
             self.status_message = Some(format!(
@@ -618,26 +742,35 @@ impl Spreadsheet {
 
         let mut changes = Vec::new();
         let mut skipped_spill_receivers = false;
+        let is_filtered = self.row_view.is_filtered();
 
         // Delete from all selection ranges (including discontiguous Ctrl+Click selections)
+        // When filtered, only delete from visible rows
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
-            // Only get cells that actually have data (efficient for large selections)
-            let cells_to_delete = self.sheet().cells_in_range(min_row, max_row, min_col, max_col);
-
-            for (row, col) in cells_to_delete {
-                // Skip spill receivers - only the parent formula can be deleted
-                if self.sheet().is_spill_receiver(row, col) {
-                    skipped_spill_receivers = true;
+            for view_row in min_row..=max_row {
+                // Skip hidden rows when filtered
+                if is_filtered && !self.row_view.is_view_row_visible(view_row) {
                     continue;
                 }
 
-                let old_value = self.sheet().get_raw(row, col);
-                if !old_value.is_empty() {
-                    changes.push(CellChange {
-                        row, col, old_value, new_value: String::new(),
-                    });
+                // Convert view row to data row for sheet access
+                let data_row = self.row_view.view_to_data(view_row);
+
+                for col in min_col..=max_col {
+                    // Skip spill receivers - only the parent formula can be deleted
+                    if self.sheet().is_spill_receiver(data_row, col) {
+                        skipped_spill_receivers = true;
+                        continue;
+                    }
+
+                    let old_value = self.sheet().get_raw(data_row, col);
+                    if !old_value.is_empty() {
+                        changes.push(CellChange {
+                            row: data_row, col, old_value, new_value: String::new(),
+                        });
+                    }
+                    self.sheet_mut().clear_cell(data_row, col);
                 }
-                self.sheet_mut().clear_cell(row, col);
             }
         }
 
@@ -646,11 +779,14 @@ impl Spreadsheet {
             // Only attach provenance for single contiguous selection
             let provenance = if self.view_state.additional_selections.is_empty() {
                 let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+                // Use data rows for provenance
+                let data_min_row = self.row_view.view_to_data(min_row);
+                let data_max_row = self.row_view.view_to_data(max_row);
                 Some(MutationOp::Clear {
                     sheet: self.sheet().id,
-                    start_row: min_row,
+                    start_row: data_min_row,
                     start_col: min_col,
-                    end_row: max_row,
+                    end_row: data_max_row,
                     end_col: max_col,
                     mode: ClearMode::All,
                 }.to_provenance(&self.sheet().name))

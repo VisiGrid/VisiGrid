@@ -8,11 +8,69 @@
 //! - Row/column header selection
 //! - Scrolling
 //! - Selection helpers
+//!
+//! ## Filter-Aware Navigation
+//!
+//! When filtering is active, navigation operates in VIEW space:
+//! - Arrow keys skip hidden rows (move through visible_rows)
+//! - Ctrl+Arrow stops at visible boundaries
+//! - Page Up/Down move by visible rows
+//!
+//! The `visible_rows` cache in RowView provides O(1) access to the next/previous
+//! visible row via binary search.
 
 use gpui::*;
 use crate::app::{Spreadsheet, NUM_ROWS, NUM_COLS};
 
 impl Spreadsheet {
+    // =========================================================================
+    // Filter-Aware Navigation Helpers
+    // =========================================================================
+
+    /// Find the next visible row in a direction.
+    /// Returns the new view row, or the current row if at boundary.
+    ///
+    /// - `current_row`: Current view row
+    /// - `delta`: Direction (+1 for down, -1 for up)
+    fn next_visible_row(&self, current_row: usize, delta: i32) -> usize {
+        let visible = self.row_view.visible_rows();
+
+        // If not filtered, simple arithmetic
+        if !self.row_view.is_filtered() {
+            return (current_row as i32 + delta).max(0).min(NUM_ROWS as i32 - 1) as usize;
+        }
+
+        // Find current position in visible_rows
+        // Use binary search since visible_rows is sorted
+        let current_idx = match visible.binary_search(&current_row) {
+            Ok(idx) => idx,
+            Err(idx) => {
+                // Current row is hidden - find nearest visible
+                if delta > 0 {
+                    // Moving down: use the row at insertion point (or last)
+                    idx.min(visible.len().saturating_sub(1))
+                } else {
+                    // Moving up: use the row before insertion point (or first)
+                    idx.saturating_sub(1)
+                }
+            }
+        };
+
+        // Move by delta steps in visible_rows
+        let new_idx = if delta > 0 {
+            (current_idx + delta as usize).min(visible.len().saturating_sub(1))
+        } else {
+            current_idx.saturating_sub((-delta) as usize)
+        };
+
+        visible.get(new_idx).copied().unwrap_or(current_row)
+    }
+
+    /// Check if a view row is visible (not hidden by filter)
+    fn is_row_visible(&self, view_row: usize) -> bool {
+        self.row_view.is_view_row_visible(view_row)
+    }
+
     // =========================================================================
     // Cell Movement
     // =========================================================================
@@ -27,8 +85,17 @@ impl Spreadsheet {
         );
 
         let (row, col) = self.view_state.selected;
-        let new_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
+
+        // For vertical movement, use filter-aware navigation
+        let new_row = if dr != 0 {
+            self.next_visible_row(row, dr)
+        } else {
+            row
+        };
+
+        // For horizontal movement, simple arithmetic (columns aren't filtered)
         let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+
         self.view_state.selected = (new_row, new_col);
         self.view_state.selection_end = None;  // Clear range selection
         self.view_state.additional_selections.clear();  // Clear discontiguous selections
@@ -40,8 +107,17 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
 
         let (row, col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
-        let new_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
+
+        // For vertical movement, use filter-aware navigation
+        let new_row = if dr != 0 {
+            self.next_visible_row(row, dr)
+        } else {
+            row
+        };
+
+        // For horizontal movement, simple arithmetic
         let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+
         self.view_state.selection_end = Some((new_row, new_col));
 
         self.ensure_visible(cx);
@@ -49,14 +125,16 @@ impl Spreadsheet {
 
     pub fn page_up(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
-        let visible_rows = self.visible_rows() as i32;
-        self.move_selection(-visible_rows, 0, cx);
+        // Move by screen-visible rows, but through filter-visible rows
+        let page_size = self.visible_rows() as i32;
+        self.move_selection(-page_size, 0, cx);
     }
 
     pub fn page_down(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
-        let visible_rows = self.visible_rows() as i32;
-        self.move_selection(visible_rows, 0, cx);
+        // Move by screen-visible rows, but through filter-visible rows
+        let page_size = self.visible_rows() as i32;
+        self.move_selection(page_size, 0, cx);
     }
 
     // =========================================================================
@@ -64,18 +142,86 @@ impl Spreadsheet {
     // =========================================================================
 
     /// Find the data boundary in a direction (used by Ctrl+Arrow and Ctrl+Shift+Arrow)
+    /// When filtering is active, only considers visible rows.
     pub(crate) fn find_data_boundary(&self, start_row: usize, start_col: usize, dr: i32, dc: i32) -> (usize, usize) {
         let mut row = start_row;
         let mut col = start_col;
-        let current_empty = self.sheet().get_cell(row, col).value.raw_display().is_empty();
 
-        // Check if next cell exists and what it contains
+        // Get cell value, converting view row to data row
+        let get_cell_value = |view_row: usize, c: usize| -> bool {
+            let data_row = self.row_view.view_to_data(view_row);
+            self.sheet().get_cell(data_row, c).value.raw_display().is_empty()
+        };
+
+        let current_empty = get_cell_value(row, col);
+
+        // For vertical movement with filtering, use visible rows
+        if dr != 0 && self.row_view.is_filtered() {
+            let visible = self.row_view.visible_rows();
+
+            // Find current position in visible_rows
+            let current_idx = match visible.binary_search(&row) {
+                Ok(idx) => idx,
+                Err(idx) => idx.min(visible.len().saturating_sub(1)),
+            };
+
+            // Peek at next visible row
+            let peek_idx = if dr > 0 {
+                (current_idx + 1).min(visible.len().saturating_sub(1))
+            } else {
+                current_idx.saturating_sub(1)
+            };
+            let peek_row = visible.get(peek_idx).copied().unwrap_or(row);
+            let next_empty = if peek_row == row {
+                true // At edge
+            } else {
+                get_cell_value(peek_row, col)
+            };
+
+            let looking_for_nonempty = current_empty || next_empty;
+
+            // Scan through visible rows only
+            let mut idx = current_idx;
+            loop {
+                let next_idx = if dr > 0 {
+                    idx + 1
+                } else {
+                    if idx == 0 { break; }
+                    idx - 1
+                };
+
+                if next_idx >= visible.len() {
+                    break;
+                }
+
+                let next_row = visible[next_idx];
+                let cell_empty = get_cell_value(next_row, col);
+
+                if looking_for_nonempty {
+                    row = next_row;
+                    idx = next_idx;
+                    if !cell_empty {
+                        break;
+                    }
+                } else {
+                    if cell_empty {
+                        break;
+                    }
+                    row = next_row;
+                    idx = next_idx;
+                }
+            }
+
+            return (row, col);
+        }
+
+        // Horizontal movement or no filtering - original logic
         let peek_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
         let peek_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
         let next_empty = if peek_row == row && peek_col == col {
             true // At edge
         } else {
-            self.sheet().get_cell(peek_row, peek_col).value.raw_display().is_empty()
+            get_cell_value(peek_row, peek_col)
         };
 
         // Determine search mode: looking for non-empty or looking for empty
@@ -90,7 +236,13 @@ impl Spreadsheet {
                 break;
             }
 
-            let cell_empty = self.sheet().get_cell(next_row, next_col).value.raw_display().is_empty();
+            // Skip hidden rows when moving vertically
+            if dr != 0 && !self.is_row_visible(next_row) {
+                row = next_row;
+                continue;
+            }
+
+            let cell_empty = get_cell_value(next_row, next_col);
 
             if looking_for_nonempty {
                 // Scanning through empty space: stop at first non-empty or edge
@@ -113,107 +265,29 @@ impl Spreadsheet {
     }
 
     /// Jump to edge of data region or sheet boundary (Excel-style Ctrl+Arrow)
+    /// When filtering is active, stops at visible row boundaries.
     pub fn jump_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
-        let (mut row, mut col) = self.view_state.selected;
-        let current_empty = self.sheet().get_cell(row, col).value.raw_display().is_empty();
+        let (row, col) = self.view_state.selected;
+        let (new_row, new_col) = self.find_data_boundary(row, col, dr, dc);
 
-        // Check if next cell exists and what it contains
-        let peek_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
-        let peek_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
-        let next_empty = if peek_row == row && peek_col == col {
-            true // At edge
-        } else {
-            self.sheet().get_cell(peek_row, peek_col).value.raw_display().is_empty()
-        };
-
-        // Determine search mode: looking for non-empty or looking for empty
-        let looking_for_nonempty = current_empty || next_empty;
-
-        loop {
-            let next_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
-            let next_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
-
-            // Stop if we hit the edge
-            if next_row == row && next_col == col {
-                break;
-            }
-
-            let cell_empty = self.sheet().get_cell(next_row, next_col).value.raw_display().is_empty();
-
-            if looking_for_nonempty {
-                // Scanning through empty space: stop at first non-empty or edge
-                row = next_row;
-                col = next_col;
-                if !cell_empty {
-                    break;
-                }
-            } else {
-                // Scanning through data: stop at last non-empty before empty
-                if cell_empty {
-                    break;
-                }
-                row = next_row;
-                col = next_col;
-            }
-        }
-
-        self.view_state.selected = (row, col);
+        self.view_state.selected = (new_row, new_col);
         self.view_state.selection_end = None;
         self.ensure_visible(cx);
     }
 
     /// Extend selection to edge of data region (Excel-style Ctrl+Shift+Arrow)
+    /// When filtering is active, stops at visible row boundaries.
     pub fn extend_jump_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
         // Start from current selection end (or selected if no selection)
-        let (mut row, mut col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
-        let current_empty = self.sheet().get_cell(row, col).value.raw_display().is_empty();
-
-        // Check if next cell exists and what it contains
-        let peek_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
-        let peek_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
-        let next_empty = if peek_row == row && peek_col == col {
-            true // At edge
-        } else {
-            self.sheet().get_cell(peek_row, peek_col).value.raw_display().is_empty()
-        };
-
-        // Determine search mode: looking for non-empty or looking for empty
-        let looking_for_nonempty = current_empty || next_empty;
-
-        loop {
-            let next_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
-            let next_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
-
-            // Stop if we hit the edge
-            if next_row == row && next_col == col {
-                break;
-            }
-
-            let cell_empty = self.sheet().get_cell(next_row, next_col).value.raw_display().is_empty();
-
-            if looking_for_nonempty {
-                // Scanning through empty space: stop at first non-empty or edge
-                row = next_row;
-                col = next_col;
-                if !cell_empty {
-                    break;
-                }
-            } else {
-                // Scanning through data: stop at last non-empty before empty
-                if cell_empty {
-                    break;
-                }
-                row = next_row;
-                col = next_col;
-            }
-        }
+        let (row, col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
+        let (new_row, new_col) = self.find_data_boundary(row, col, dr, dc);
 
         // Extend selection to this point (don't move selected, just selection_end)
-        self.view_state.selection_end = Some((row, col));
+        self.view_state.selection_end = Some((new_row, new_col));
         self.ensure_visible(cx);
     }
 

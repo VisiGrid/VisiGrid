@@ -91,6 +91,12 @@ pub fn set_app_menus(cx: &mut App) {
         Menu {
             name: "Data".into(),
             items: vec![
+                MenuItem::action("Sort Ascending (A→Z)", SortAscending),
+                MenuItem::action("Sort Descending (Z→A)", SortDescending),
+                MenuItem::action("Clear Sort", ClearSort),
+                MenuItem::separator(),
+                MenuItem::action("Toggle AutoFilter", ToggleAutoFilter),
+                MenuItem::separator(),
                 MenuItem::action("Fill Down", FillDown),
                 MenuItem::action("Fill Right", FillRight),
                 MenuItem::separator(),

@@ -471,6 +471,23 @@ impl Spreadsheet {
 
     /// Clear sort (restore original data order)
     pub fn clear_sort(&mut self, cx: &mut Context<Self>) {
+        // Only record undo if there's actually a sort to clear
+        if let Some(sort_state) = &self.filter_state.sort {
+            // Capture previous state for undo
+            let previous_row_order = self.row_view.row_order().to_vec();
+            let previous_sort_state = (
+                sort_state.column,
+                sort_state.direction == visigrid_engine::filter::SortDirection::Ascending,
+            );
+
+            // Record undo action (no provenance for clear)
+            self.history.record_action_with_provenance(crate::history::UndoAction::SortCleared {
+                sheet_index: self.workbook.active_sheet_index(),
+                previous_row_order,
+                previous_sort_state,
+            }, None);
+        }
+
         self.row_view.clear_sort();
         self.filter_state.sort = None;
         self.is_modified = true;

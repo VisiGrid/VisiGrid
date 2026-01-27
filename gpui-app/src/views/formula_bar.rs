@@ -7,6 +7,10 @@ use crate::app::{
 use crate::theme::TokenKey;
 use crate::formula_context::{tokenize_for_highlight, TokenType, char_index_to_byte_offset};
 
+/// Maximum number of TextRuns to render with syntax highlighting.
+/// If exceeded, fall back to plain text to avoid performance issues with complex formulas.
+const MAX_RENDER_NODES: usize = 64;
+
 /// Render the formula bar (cell reference + formula/value input)
 pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let cell_ref = app.cell_ref();
@@ -476,6 +480,82 @@ fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, ed
         display_text.len(),
         "TextRun lengths don't match text length"
     );
+
+    // Span cap: if too many runs, fall back to plain text rendering
+    // This prevents performance issues with extremely complex formulas
+    if runs.len() > MAX_RENDER_NODES {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[formula_bar] Formula too complex to highlight: {} runs (max {})",
+            runs.len(),
+            MAX_RENDER_NODES
+        );
+
+        // Fall back to plain text rendering (same as non-formula path)
+        let text_str = raw_value.to_string();
+        let text_shared: SharedString = text_str.clone().into();
+        let text_len = text_shared.len();
+
+        let shaped = window.text_system().shape_line(
+            text_shared.clone(),
+            px(14.0),
+            &[TextRun {
+                len: text_len,
+                font: Font::default(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+
+        return div()
+            .relative()
+            .overflow_hidden()
+            .when_some(selection_range, |d, (sel_start, sel_end)| {
+                let sel_start = sel_start.min(text_len);
+                let sel_end = sel_end.min(text_len);
+                let sel_start_x: f32 = shaped.x_for_index(sel_start).into();
+                let sel_end_x: f32 = shaped.x_for_index(sel_end).into();
+                let visual_start_x = sel_start_x + scroll_x;
+                let visual_end_x = sel_end_x + scroll_x;
+                let sel_width = (visual_end_x - visual_start_x).max(0.0);
+
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(visual_start_x))
+                        .top(px(2.0))
+                        .w(px(sel_width))
+                        .h(px(16.0))
+                        .bg(selection_bg)
+                )
+            })
+            .child(
+                div()
+                    .relative()
+                    .left(px(scroll_x))
+                    .text_color(text_primary)
+                    .child(text_str)
+            )
+            .when(editing && app.caret_visible && !has_selection, |d| {
+                let byte_index = app.edit_cursor.min(text_len);
+                let caret_x: f32 = shaped.x_for_index(byte_index).into();
+                let visual_caret_x = caret_x + scroll_x;
+
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(visual_caret_x))
+                        .top(px(2.0))
+                        .w(px(1.5))
+                        .h(px(16.0))
+                        .bg(text_primary)
+                )
+            })
+            .into_any_element();
+    }
 
     // Build the styled text element
     let shared_text: SharedString = display_text.clone().into();

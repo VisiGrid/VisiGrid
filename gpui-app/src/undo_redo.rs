@@ -190,6 +190,22 @@ impl Spreadsheet {
                     self.clamp_selection();
                     self.status_message = Some("Undo: sort".to_string());
                 }
+                UndoAction::SortCleared { previous_row_order, previous_sort_state, .. } => {
+                    // Undo: restore previous sort state
+                    self.row_view.apply_sort(previous_row_order);
+                    let (col, is_ascending) = previous_sort_state;
+                    self.filter_state.sort = Some(visigrid_engine::filter::SortState {
+                        column: col,
+                        direction: if is_ascending {
+                            visigrid_engine::filter::SortDirection::Ascending
+                        } else {
+                            visigrid_engine::filter::SortDirection::Descending
+                        },
+                    });
+                    self.filter_state.invalidate_all_caches();
+                    self.clamp_selection();
+                    self.status_message = Some("Undo: clear sort".to_string());
+                }
                 UndoAction::ValidationSet { sheet_index, range, previous_rules, .. } => {
                     // Undo: clear the new rule, restore previous rules
                     if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
@@ -397,6 +413,21 @@ impl Spreadsheet {
                 self.filter_state.invalidate_all_caches();
                 self.clamp_selection();
             }
+            UndoAction::SortCleared { previous_row_order, previous_sort_state, .. } => {
+                // Undo: restore previous sort state
+                self.row_view.apply_sort(previous_row_order);
+                let (col, is_ascending) = previous_sort_state;
+                self.filter_state.sort = Some(visigrid_engine::filter::SortState {
+                    column: col,
+                    direction: if is_ascending {
+                        visigrid_engine::filter::SortDirection::Ascending
+                    } else {
+                        visigrid_engine::filter::SortDirection::Descending
+                    },
+                });
+                self.filter_state.invalidate_all_caches();
+                self.clamp_selection();
+            }
             UndoAction::ValidationSet { sheet_index, range, previous_rules, .. } => {
                 // Undo: clear the new rule, restore previous rules
                 if let Some(sheet) = self.workbook.sheet_mut(sheet_index) {
@@ -569,6 +600,13 @@ impl Spreadsheet {
                         visigrid_engine::filter::SortDirection::Descending
                     },
                 });
+                self.filter_state.invalidate_all_caches();
+                self.clamp_selection();
+            }
+            UndoAction::SortCleared { .. } => {
+                // Redo: clear the sort again
+                self.row_view.clear_sort();
+                self.filter_state.sort = None;
                 self.filter_state.invalidate_all_caches();
                 self.clamp_selection();
             }
@@ -764,6 +802,14 @@ impl Spreadsheet {
                     // Clamp selection to valid bounds after row order change
                     self.clamp_selection();
                     self.status_message = Some("Redo: sort".to_string());
+                }
+                UndoAction::SortCleared { .. } => {
+                    // Redo: clear the sort again
+                    self.row_view.clear_sort();
+                    self.filter_state.sort = None;
+                    self.filter_state.invalidate_all_caches();
+                    self.clamp_selection();
+                    self.status_message = Some("Redo: clear sort".to_string());
                 }
                 UndoAction::ValidationSet { sheet_index, range, new_rule, .. } => {
                     // Redo: full replace pipeline - clear overlaps then set rule

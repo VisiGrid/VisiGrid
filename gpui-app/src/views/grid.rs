@@ -1,8 +1,9 @@
 use gpui::*;
 use gpui::StyledText;
 use gpui::prelude::FluentBuilder;
-use crate::app::Spreadsheet;
+use crate::app::{Spreadsheet, REF_COLORS};
 use crate::fill::{FILL_HANDLE_BORDER, FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_SIZE};
+use crate::formula_refs::RefKey;
 use crate::mode::Mode;
 use crate::settings::{user_settings, Setting};
 use crate::theme::TokenKey;
@@ -74,6 +75,8 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                         })
                     )
             )
+            // Dashed borders overlay for formula references (above cells, below popups)
+            .child(render_formula_ref_borders(app))
             // Popup overlay layer - positioned relative to grid, not window chrome
             .child(render_popup_overlay(app, cx))
             .into_any_element();
@@ -196,6 +199,8 @@ pub fn render_grid(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spre
                         )
                 )
         )
+        // Dashed borders overlay for formula references (above cells, below popups)
+        .child(render_formula_ref_borders(app))
         // Popup overlay layer - positioned relative to grid, not window chrome
         .child(render_popup_overlay(app, cx))
         .into_any_element()
@@ -468,18 +473,11 @@ fn render_cell(
         // 2px solid border for spill parent and blocked cells
         cell.border_2()
     } else if is_spill_receiver {
-        // 1px border for spill receivers (ideally dashed, but gpui doesn't support that)
+        // 1px border for spill receivers
         cell.border_1()
-    } else if is_formula_ref {
-        // Get which borders to draw for this formula ref cell
-        let (top, right, bottom, left) = app.formula_ref_borders(view_row, col);
-        let mut c = cell;
-        if top { c = c.border_t_1(); }
-        if right { c = c.border_r_1(); }
-        if bottom { c = c.border_b_1(); }
-        if left { c = c.border_l_1(); }
-        c
     } else {
+        // Formula ref borders are drawn as dashed overlays (render_formula_ref_borders)
+        // so formula ref cells fall through here for normal gridline/user border handling
         // Check for user-defined borders first (stored per data cell)
         let (user_top, user_right, user_bottom, user_left) = app.cell_user_borders(data_row, col);
         let has_user_border = user_top || user_right || user_bottom || user_left;
@@ -955,16 +953,15 @@ fn ref_color_hsla(color_idx: usize) -> Hsla {
     rgb(color).into()
 }
 
-fn cell_border(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected: bool, formula_ref_color: Option<usize>) -> Hsla {
+fn cell_border(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected: bool, _formula_ref_color: Option<usize>) -> Hsla {
     // Selection border ALWAYS wins over formula ref (user needs to see what they've selected)
+    // Formula ref borders are now drawn as dashed overlays (render_formula_ref_borders)
     if is_editing || is_active {
         app.token(TokenKey::CellBorderFocus)
     } else if is_selected {
         app.token(TokenKey::SelectionBorder)
-    } else if let Some(color_idx) = formula_ref_color {
-        // Formula ref border uses per-ref color
-        ref_color_hsla(color_idx)
     } else {
+        // Formula refs use dashed border overlay, not per-cell solid borders
         app.token(TokenKey::GridLines)
     }
 }
@@ -983,6 +980,121 @@ fn cell_text_color(app: &Spreadsheet, is_editing: bool, is_selected: bool, is_mu
     } else {
         app.token(TokenKey::CellText)
     }
+}
+
+/// Render dashed borders around formula reference ranges.
+/// Uses canvas to draw dashed rectangles around each unique referenced range.
+/// Only renders when in formula edit mode with at least one reference.
+fn render_formula_ref_borders(app: &Spreadsheet) -> impl IntoElement {
+    // Only render in formula edit mode
+    if !app.mode.is_formula() && !(app.mode.is_editing() && app.is_formula_content()) {
+        return div().into_any_element();
+    }
+
+    let refs = &app.formula_highlighted_refs;
+    if refs.is_empty() {
+        return div().into_any_element();
+    }
+
+    // Collect unique ranges with their color indices
+    // We deduplicate by RefKey so each range gets one border
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut ranges: Vec<(RefKey, usize)> = Vec::new();
+
+    for fref in refs {
+        if seen_keys.insert(fref.key.clone()) {
+            ranges.push((fref.key.clone(), fref.color_index));
+        }
+    }
+
+    // Compute bounds for each range
+    let scroll_row = app.view_state.scroll_row;
+    let scroll_col = app.view_state.scroll_col;
+
+    let range_bounds: Vec<(Bounds<Pixels>, Hsla)> = ranges
+        .iter()
+        .filter_map(|(key, color_idx)| {
+            let (r1, c1, r2, c2) = match key {
+                RefKey::Cell { row, col } => (*row, *col, *row, *col),
+                RefKey::Range { r1, c1, r2, c2 } => (*r1, *c1, *r2, *c2),
+            };
+
+            // Check if any part of the range is visible
+            let visible_rows = app.visible_rows();
+            let visible_cols = app.visible_cols();
+
+            // Skip if entirely off-screen
+            if r2 < scroll_row || c2 < scroll_col {
+                return None;
+            }
+            if r1 >= scroll_row + visible_rows || c1 >= scroll_col + visible_cols {
+                return None;
+            }
+
+            // Get bounds of the range using cell_rect
+            // cell_rect returns positions relative to the cell grid (after row header)
+            // We need to add header_w offset since canvas covers entire grid div
+            let top_left = app.cell_rect(r1, c1);
+            let bottom_right = app.cell_rect(r2, c2);
+            let header_w = app.metrics.header_w;
+
+            let x = top_left.x + header_w;
+            let y = top_left.y;
+            let width = (bottom_right.x + bottom_right.width) - top_left.x;
+            let height = (bottom_right.y + bottom_right.height) - top_left.y;
+
+            let bounds = Bounds {
+                origin: Point::new(px(x), px(y)),
+                size: Size {
+                    width: px(width),
+                    height: px(height),
+                },
+            };
+
+            // Ensure full opacity for borders (rgb() should produce opaque, but be explicit)
+            let mut color: Hsla = rgb(REF_COLORS[*color_idx % 8]).into();
+            color.a = 1.0;
+
+            Some((bounds, color))
+        })
+        .collect();
+
+    if range_bounds.is_empty() {
+        return div().into_any_element();
+    }
+
+    // Use canvas to paint dashed borders
+    canvas(
+        // Prepaint: pass range_bounds to paint
+        move |_bounds, _window, _cx| range_bounds,
+        // Paint: draw dashed borders
+        // paint_quad uses window-relative coordinates, so we add canvas origin
+        move |canvas_bounds, range_bounds, window, _cx| {
+            for (cell_bounds, color) in &range_bounds {
+                // Offset by canvas origin to convert from grid-relative to window-relative
+                let adjusted_bounds = Bounds {
+                    origin: Point::new(
+                        canvas_bounds.origin.x + cell_bounds.origin.x,
+                        canvas_bounds.origin.y + cell_bounds.origin.y,
+                    ),
+                    size: cell_bounds.size,
+                };
+                let quad = gpui::quad(
+                    adjusted_bounds,
+                    px(0.0), // no corner radius
+                    gpui::transparent_black(), // no fill (keep existing cell fills)
+                    px(2.0), // 2px border width
+                    *color,
+                    BorderStyle::Dashed,
+                );
+                window.paint_quad(quad);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+    .into_any_element()
 }
 
 /// Render the popup overlay layer for autocomplete, signature help, and error banners.
