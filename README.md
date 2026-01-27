@@ -1,96 +1,48 @@
 # VisiGrid
 
-**The spreadsheet that behaves like code.**
+**A spreadsheet that behaves like code.**
 
-VisiGrid is a desktop spreadsheet built for people who need to move fast without losing correctness.
+VisiGrid is a native desktop spreadsheet designed for correctness under change.
 
-You can see where numbers come from.
-You can tell why they changed.
-You can clean and transform data without breaking everything else.
+It makes causality explicit: you can see where numbers come from, why they changed, and whether values are fully up to date. Structural edits are traceable, recomputation is deterministic, and circular dependencies are caught at edit-time.
 
-Every formula is traceable.
-Every change has provenance.
-Every recompute is deterministic and verifiable.
-
-Built as a native desktop app in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)), VisiGrid opens instantly, stays responsive at scale, and never hides what's happening.
+Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)).
 
 ## Why VisiGrid
 
 Most spreadsheets fail quietly.
 
-A wrong reference.
-A missed row.
-A filter changed weeks ago.
-
+A wrong reference. A missed row. A filter changed weeks ago.
 The number still looks right — until it isn't.
 
-VisiGrid is designed to make causality visible and changes safe, so you can trust your work even as it evolves.
+VisiGrid is built to make these failures visible before they matter.
 
-## Core Pillars
+- **Causality is explicit**: precedents, dependents, and evaluation order are inspectable.
+- **Changes are safe**: structural edits generate provenance you can review and replay.
+- **State is verifiable**: you always know whether values are current or stale.
 
-### Trust your numbers
+## What Makes VisiGrid Explainable
 
-- See precedents, dependents, and evaluation order
-- Know when values are fully up to date
-- Catch circular dependencies at edit-time
-- Inspect why a value exists — not just what it is
+- **Verified Mode (F9)** — guarantees all values are current.
+- **Cell Inspector** — view formulas, values, precedents, dependents, and recompute timestamps.
+- **Path Tracing** — follow data flow across sheets and ranges.
+- **Provenance History** — structural edits emit replayable Lua.
+- **Cycle Detection** — circular dependencies caught at edit-time.
 
-### Clean data safely
-
-- Validate columns against rules (types, ranges, allowed values)
-- Find and fix problems before they ripple through formulas
-- Preview transforms before committing
-- Undo restores the entire change, not just one cell
-
-### Work at the speed of thought
+## Everyday Work, Without Friction
 
 - Command palette for every action
 - Keyboard-first navigation and editing
 - Multi-select editing across non-adjacent cells
-- Instant startup, smooth scrolling, no UI freezes
-
-These aren't separate modes.
-They're properties of the same system.
-
-## What Makes It Explainable
-
-**Verified Mode (F9)**
-Guarantee all values are current. No hidden stale cells.
-
-**Cell Inspector**
-See formulas, values, precedents, dependents, and recompute timestamps.
-
-**Path Tracing**
-Click any input to see exactly how data flows to outputs — across sheets.
-
-**Provenance History**
-Structural edits (paste, fill, sort, transform) generate replayable Lua code.
-
-**Cycle Detection**
-Circular dependencies are caught at edit-time, not buried in #VALUE!.
+- 100+ formula functions with autocomplete
+- Instant startup and smooth scrolling
 
 ## Design Principles
 
 - **Local-first**: Your data lives on your machine. No accounts required.
 - **Native performance**: GPU-accelerated rendering. Smooth at any scale.
-- **Explainable by default**: Trust is free. Causality is visible.
-- **No lock-in**: Files are standard formats. Export freely.
-
-## Features (Free)
-
-**Trust:**
-- Verified Mode with status bar assertion
-- Edit-time cycle detection
-- Inspector: type, value, 1-hop dependency counts
-
-**Core:**
-- Full grid, selection, multi-selection, and editing
-- 100+ formula functions with autocomplete
-- Command palette and keyboard-driven navigation
-- Import/export: CSV, TSV, JSON, XLSX
-- Cross-platform: macOS, Windows, Linux
-
-See the [Roadmap](ROADMAP.md) for what's next.
+- **Explainable by default**: Causality is visible. Trust is earned.
+- **No lock-in**: Standard formats. Export freely.
 
 ## Download
 
@@ -101,6 +53,16 @@ Get the latest release from [Releases](https://github.com/VisiGrid/VisiGrid/rele
 | macOS (Universal) | `.dmg` |
 | Windows (x64) | `.zip` |
 | Linux (x86_64) | `.tar.gz` / `.AppImage` |
+
+Or via package manager:
+
+```bash
+# macOS
+brew install visigrid/visigrid/visigrid
+
+# Arch Linux
+yay -S visigrid-bin
+```
 
 ## Build from Source
 
@@ -121,41 +83,33 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
   libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
 ```
 
-## VisiGrid Pro
+## Formats
 
-For power users who need to explain and defend their work.
+- Import/export: CSV, TSV, JSON, XLSX, XLS, ODS
+- Cross-platform: macOS, Windows, Linux
 
-Everything in Free, plus:
+## Commercial Editions
 
-- **Deep Inspector** (DAG visualization, full path tracing)
-- **Full provenance history** (view Lua code for every operation)
-- **Named range intelligence** and dependency tracking
-- Advanced transforms (clean, split, dedupe, fill)
-- Scripting and automation (Lua console)
-- Large-file performance optimizations
+VisiGrid is fully usable for real work in its open-source edition.
 
-**$12/month · $99/year · $249 perpetual**
+A commercial license is available for users and organizations that need advanced inspection, provenance, automation, and large-file support.
 
-One license.
-No account.
-No telemetry.
+Commercial features include:
 
-[Get Pro →](https://visigrid.app)
+- Deep dependency inspection and full path tracing
+- Complete provenance history with replayable operations
+- Advanced data transforms and scripting
+- Performance optimizations for large workbooks
 
-## VisiGrid Pro+
+Licenses are per-user, perpetual options are available, and no account or telemetry is required.
 
-For workflows that need continuity.
+See [visigrid.app](https://visigrid.app) for details.
 
-Everything in Pro, plus:
+## VisiHub Integration
 
-- Cloud sync and backups (via VisiHub)
-- Version history
-- Dataset publishing
-- Priority support
+VisiGrid integrates with [VisiHub](https://visihub.io), a public-first publishing service for versioned datasets.
 
-**$19/month · $149/year**
-
-[Get Pro+ →](https://visigrid.app)
+VisiHub is optional and not required to use VisiGrid.
 
 ## License
 
@@ -168,3 +122,5 @@ See [LICENSE.md](LICENSE.md) for details.
 ## Contributing
 
 Issues and pull requests are welcome.
+
+See the [Roadmap](ROADMAP.md) for what's next.
