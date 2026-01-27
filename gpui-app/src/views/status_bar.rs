@@ -48,7 +48,6 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
     let sheet_names = app.workbook.sheet_names();
     let active_index = app.workbook.active_sheet_index();
     let renaming_sheet = app.renaming_sheet;
-    let rename_input = app.sheet_rename_input.clone();
     let context_menu_sheet = app.sheet_context_menu;
 
     // Theme colors
@@ -83,8 +82,7 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                         let is_active = idx == active_index;
                         let is_renaming = renaming_sheet == Some(idx);
                         let name_str = name.to_string();
-                        let input_str = rename_input.clone();
-                        sheet_tab_wrapper(app, name_str, input_str, idx, is_active, is_renaming, cx)
+                        sheet_tab_wrapper(app, name_str, idx, is_active, is_renaming, cx)
                     })
                 )
                 // Add sheet button
@@ -189,14 +187,13 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
 fn sheet_tab_wrapper(
     app: &Spreadsheet,
     name: String,
-    rename_input: String,
     index: usize,
     is_active: bool,
     is_renaming: bool,
     cx: &mut Context<Spreadsheet>,
 ) -> Stateful<Div> {
     if is_renaming {
-        sheet_tab_editing(app, rename_input, index)
+        sheet_tab_editing(app, cx)
     } else {
         sheet_tab(app, name, index, is_active, cx)
     }
@@ -226,11 +223,17 @@ fn sheet_tab(app: &Spreadsheet, name: String, index: usize, is_active: bool, cx:
             d.text_color(text_muted)
                 .hover(move |s| s.bg(header_bg).text_color(text_primary))
         })
-        // Click to switch sheet
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            this.goto_sheet(index, cx);
+        // Click to switch sheet, double-click to rename
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            if event.click_count == 2 {
+                // Double-click: start rename
+                this.start_sheet_rename(index, cx);
+            } else {
+                // Single click: switch to sheet
+                this.goto_sheet(index, cx);
+            }
         }))
-        // Right-click for context menu
+        // Right-click for context menu (macOS: also ctrl+click)
         .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
             this.show_sheet_context_menu(index, cx);
         }))
@@ -238,16 +241,52 @@ fn sheet_tab(app: &Spreadsheet, name: String, index: usize, is_active: bool, cx:
 }
 
 /// Render a sheet tab in editing/rename mode
-fn sheet_tab_editing(app: &Spreadsheet, current_value: String, index: usize) -> Stateful<Div> {
-    let display_value = if current_value.is_empty() {
-        " ".to_string()
-    } else {
-        current_value
-    };
+fn sheet_tab_editing(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> Stateful<Div> {
+    let input = &app.sheet_rename_input;
+    let cursor_pos = app.sheet_rename_cursor;
+    let select_all = app.sheet_rename_select_all;
+    let caret_visible = app.caret_visible;
 
     let app_bg = app.token(TokenKey::AppBg);
     let accent = app.token(TokenKey::Accent);
     let text_primary = app.token(TokenKey::TextPrimary);
+    let selection_bg = app.token(TokenKey::SelectionBg);
+
+    // Build content with cursor
+    let content = if select_all {
+        // Show all text highlighted (selected)
+        div()
+            .flex()
+            .child(
+                div()
+                    .bg(selection_bg)
+                    .text_color(text_primary)
+                    .child(if input.is_empty() { " ".to_string() } else { input.clone() })
+            )
+    } else {
+        // Show text with cursor at position
+        let (before, after) = if cursor_pos <= input.len() {
+            (input[..cursor_pos].to_string(), input[cursor_pos..].to_string())
+        } else {
+            (input.clone(), String::new())
+        };
+
+        div()
+            .flex()
+            .child(div().text_color(text_primary).child(before))
+            .when(caret_visible, |d| {
+                d.child(
+                    div()
+                        .w(px(1.0))
+                        .h(px(14.0))
+                        .bg(text_primary)
+                )
+            })
+            .child(div().text_color(text_primary).child(after))
+    };
+
+    // Click outside to confirm (on the editing tab itself does nothing special)
+    let index = app.renaming_sheet.unwrap_or(0);
 
     div()
         .id(ElementId::Name(format!("sheet-tab-edit-{}", index).into()))
@@ -257,11 +296,18 @@ fn sheet_tab_editing(app: &Spreadsheet, current_value: String, index: usize) -> 
         .border_1()
         .border_color(accent)
         .rounded_sm()
+        // Click on the tab while editing - deselect all and place cursor at end
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            if this.sheet_rename_select_all {
+                this.sheet_rename_select_all = false;
+                this.sheet_rename_cursor = this.sheet_rename_input.len();
+                cx.notify();
+            }
+        }))
         .child(
             div()
                 .min_w(px(40.0))
-                .text_color(text_primary)
-                .child(display_value)
+                .child(content)
         )
 }
 

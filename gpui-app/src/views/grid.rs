@@ -512,6 +512,10 @@ fn render_cell(
         .text_color(cell_text_color(app, is_editing, is_selected, is_multi_edit_preview))
         .text_size(px(app.metrics.font_size))  // Scaled font size for zoom
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            // Clicking on grid while renaming sheet: confirm and continue
+            if this.renaming_sheet.is_some() {
+                this.confirm_sheet_rename(cx);
+            }
             // Don't handle clicks if modal/overlay is visible
             if this.inspector_visible || this.filter_dropdown_col.is_some() {
                 return;

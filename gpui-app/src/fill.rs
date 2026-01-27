@@ -249,11 +249,8 @@ impl Spreadsheet {
         if let Some((start, end)) = detected_range {
             use crate::app::{RefKey, FormulaRef};
             let (r1, c1) = start;
-            let key = if let Some((r2, c2)) = end {
-                RefKey::Range { r1, c1, r2, c2 }
-            } else {
-                RefKey::Cell { row: r1, col: c1 }
-            };
+            let (r2, c2) = end.unwrap_or(start);
+            let key = RefKey::new(r1, c1, r2, c2);  // collapses single-cell to Cell variant
             // For AutoSum, the range text spans the whole formula argument
             // e.g., "=SUM(A1:A5)" - the text range would be 5..10
             let text_start = 5; // After "=SUM("
@@ -263,7 +260,7 @@ impl Spreadsheet {
                 start,
                 end,
                 color_index: 0,
-                text_range: text_start..text_end,
+                text_byte_range: text_start..text_end,
             }];
         } else {
             self.formula_highlighted_refs.clear();

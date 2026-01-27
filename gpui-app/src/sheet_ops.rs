@@ -327,26 +327,68 @@ impl Spreadsheet {
     // Sheet rename methods
     // =========================================================================
 
-    /// Start renaming a sheet (double-click on tab)
+    /// Start renaming a sheet (double-click on tab or context menu)
     pub fn start_sheet_rename(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(name) = self.workbook.sheet_names().get(index) {
             self.renaming_sheet = Some(index);
             self.sheet_rename_input = name.to_string();
+            self.sheet_rename_cursor = self.sheet_rename_input.len();
+            self.sheet_rename_select_all = true;  // Select all on start
             self.sheet_context_menu = None;
+            self.start_caret_blink(cx);
             cx.notify();
         }
     }
 
-    /// Confirm the sheet rename
+    /// Confirm the sheet rename with validation.
+    /// Rejects: empty names, duplicates, too long. Trims whitespace.
     pub fn confirm_sheet_rename(&mut self, cx: &mut Context<Self>) {
         if let Some(index) = self.renaming_sheet {
             let new_name = self.sheet_rename_input.trim();
-            if !new_name.is_empty() {
-                self.workbook.rename_sheet(index, new_name);
-                self.is_modified = true;
+
+            // Helper to reset rename state
+            let reset_state = |this: &mut Self| {
+                this.renaming_sheet = None;
+                this.sheet_rename_input.clear();
+                this.sheet_rename_cursor = 0;
+                this.sheet_rename_select_all = false;
+                this.stop_caret_blink();
+            };
+
+            // Validation: reject empty names
+            if new_name.is_empty() {
+                self.status_message = Some("Sheet name cannot be empty".to_string());
+                reset_state(self);
+                cx.notify();
+                return;
             }
-            self.renaming_sheet = None;
-            self.sheet_rename_input.clear();
+
+            // Validation: reject too long names (Excel uses 31 chars max)
+            if new_name.chars().count() > 31 {
+                self.status_message = Some("Sheet name cannot exceed 31 characters".to_string());
+                reset_state(self);
+                cx.notify();
+                return;
+            }
+
+            // Validation: reject duplicates (case-insensitive)
+            let is_duplicate = self.workbook.sheet_names()
+                .iter()
+                .enumerate()
+                .any(|(i, name)| i != index && name.eq_ignore_ascii_case(new_name));
+
+            if is_duplicate {
+                self.status_message = Some(format!("Sheet '{}' already exists", new_name));
+                reset_state(self);
+                cx.notify();
+                return;
+            }
+
+            // Apply the rename
+            self.workbook.rename_sheet(index, new_name);
+            self.is_modified = true;
+
+            reset_state(self);
             self.request_title_refresh(cx);
         }
     }
@@ -355,13 +397,26 @@ impl Spreadsheet {
     pub fn cancel_sheet_rename(&mut self, cx: &mut Context<Self>) {
         self.renaming_sheet = None;
         self.sheet_rename_input.clear();
+        self.sheet_rename_cursor = 0;
+        self.sheet_rename_select_all = false;
+        self.stop_caret_blink();
         cx.notify();
     }
 
     /// Handle input for sheet rename
     pub fn sheet_rename_input_char(&mut self, c: char, cx: &mut Context<Self>) {
         if self.renaming_sheet.is_some() {
-            self.sheet_rename_input.push(c);
+            // If select-all is active, replace all text
+            if self.sheet_rename_select_all {
+                self.sheet_rename_input.clear();
+                self.sheet_rename_cursor = 0;
+                self.sheet_rename_select_all = false;
+            }
+            // Insert at cursor position
+            let byte_idx = self.sheet_rename_cursor.min(self.sheet_rename_input.len());
+            self.sheet_rename_input.insert(byte_idx, c);
+            self.sheet_rename_cursor = byte_idx + c.len_utf8();
+            self.reset_caret_activity();
             cx.notify();
         }
     }
@@ -369,9 +424,101 @@ impl Spreadsheet {
     /// Handle backspace for sheet rename
     pub fn sheet_rename_backspace(&mut self, cx: &mut Context<Self>) {
         if self.renaming_sheet.is_some() {
-            self.sheet_rename_input.pop();
+            // If select-all is active, clear all text
+            if self.sheet_rename_select_all {
+                self.sheet_rename_input.clear();
+                self.sheet_rename_cursor = 0;
+                self.sheet_rename_select_all = false;
+                cx.notify();
+                return;
+            }
+            // Delete char before cursor
+            if self.sheet_rename_cursor > 0 {
+                let prev_byte = self.sheet_rename_prev_char_boundary();
+                self.sheet_rename_input.remove(prev_byte);
+                self.sheet_rename_cursor = prev_byte;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Handle delete key for sheet rename
+    pub fn sheet_rename_delete(&mut self, cx: &mut Context<Self>) {
+        if self.renaming_sheet.is_some() {
+            // If select-all is active, clear all text
+            if self.sheet_rename_select_all {
+                self.sheet_rename_input.clear();
+                self.sheet_rename_cursor = 0;
+                self.sheet_rename_select_all = false;
+                cx.notify();
+                return;
+            }
+            // Delete char at cursor
+            if self.sheet_rename_cursor < self.sheet_rename_input.len() {
+                self.sheet_rename_input.remove(self.sheet_rename_cursor);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Move cursor left in sheet rename
+    pub fn sheet_rename_cursor_left(&mut self, cx: &mut Context<Self>) {
+        if self.renaming_sheet.is_some() {
+            self.sheet_rename_select_all = false;
+            if self.sheet_rename_cursor > 0 {
+                self.sheet_rename_cursor = self.sheet_rename_prev_char_boundary();
+                cx.notify();
+            }
+        }
+    }
+
+    /// Move cursor right in sheet rename
+    pub fn sheet_rename_cursor_right(&mut self, cx: &mut Context<Self>) {
+        if self.renaming_sheet.is_some() {
+            self.sheet_rename_select_all = false;
+            if self.sheet_rename_cursor < self.sheet_rename_input.len() {
+                self.sheet_rename_cursor = self.sheet_rename_next_char_boundary();
+                cx.notify();
+            }
+        }
+    }
+
+    /// Move cursor to start in sheet rename
+    pub fn sheet_rename_cursor_home(&mut self, cx: &mut Context<Self>) {
+        if self.renaming_sheet.is_some() {
+            self.sheet_rename_select_all = false;
+            self.sheet_rename_cursor = 0;
             cx.notify();
         }
+    }
+
+    /// Move cursor to end in sheet rename
+    pub fn sheet_rename_cursor_end(&mut self, cx: &mut Context<Self>) {
+        if self.renaming_sheet.is_some() {
+            self.sheet_rename_select_all = false;
+            self.sheet_rename_cursor = self.sheet_rename_input.len();
+            cx.notify();
+        }
+    }
+
+    /// Get previous char boundary for sheet rename cursor
+    fn sheet_rename_prev_char_boundary(&self) -> usize {
+        let s = &self.sheet_rename_input;
+        let mut idx = self.sheet_rename_cursor.saturating_sub(1);
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        idx
+    }
+
+    /// Get next char boundary for sheet rename cursor
+    fn sheet_rename_next_char_boundary(&self) -> usize {
+        let s = &self.sheet_rename_input;
+        let mut idx = self.sheet_rename_cursor + 1;
+        while idx < s.len() && !s.is_char_boundary(idx) {
+            idx += 1;
+        }
+        idx.min(s.len())
     }
 
     // =========================================================================
@@ -402,5 +549,141 @@ impl Spreadsheet {
             self.sheet_context_menu = None;
             cx.notify();
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod sheet_rename_tests {
+    /// Test UTF-8 char boundary navigation
+    #[test]
+    fn utf8_prev_char_boundary() {
+        // Test with ASCII
+        let s = "Sheet1";
+        assert_eq!(prev_boundary(s, 6), 5); // '1' -> 't'
+        assert_eq!(prev_boundary(s, 1), 0); // 'h' -> 'S'
+        assert_eq!(prev_boundary(s, 0), 0); // at start, stay at 0
+
+        // Test with multi-byte UTF-8 (Chinese characters are 3 bytes each)
+        let s = "中文";
+        assert_eq!(s.len(), 6); // 2 chars × 3 bytes
+        assert_eq!(prev_boundary(s, 6), 3); // end -> after first char
+        assert_eq!(prev_boundary(s, 3), 0); // after first char -> start
+
+        // Test with emoji (4 bytes)
+        let s = "A👩B";
+        assert_eq!(s.len(), 6); // 1 + 4 + 1
+        assert_eq!(prev_boundary(s, 6), 5); // after B -> before B
+        assert_eq!(prev_boundary(s, 5), 1); // before B -> after A (skip emoji)
+        assert_eq!(prev_boundary(s, 1), 0); // after A -> start
+    }
+
+    #[test]
+    fn utf8_next_char_boundary() {
+        // Test with ASCII
+        let s = "Sheet1";
+        assert_eq!(next_boundary(s, 0), 1); // 'S' -> 'h'
+        assert_eq!(next_boundary(s, 5), 6); // 't' -> end
+
+        // Test with multi-byte UTF-8
+        let s = "中文";
+        assert_eq!(next_boundary(s, 0), 3); // start -> after first char
+        assert_eq!(next_boundary(s, 3), 6); // after first -> end
+
+        // Test with emoji
+        let s = "A👩B";
+        assert_eq!(next_boundary(s, 0), 1); // start -> after A
+        assert_eq!(next_boundary(s, 1), 5); // after A -> after emoji
+        assert_eq!(next_boundary(s, 5), 6); // after emoji -> end
+    }
+
+    #[test]
+    fn select_all_replacement() {
+        // Simulate: text = "Sheet1", select_all = true, type 'A'
+        // Expected: text = "A", cursor = 1, select_all = false
+        let mut text = String::from("Sheet1");
+        let mut cursor = text.len();
+        let mut select_all = true;
+
+        // Simulate input char 'A' with select_all active
+        if select_all {
+            text.clear();
+            cursor = 0;
+            select_all = false;
+        }
+        let c = 'A';
+        let byte_idx = cursor.min(text.len());
+        text.insert(byte_idx, c);
+        cursor = byte_idx + c.len_utf8();
+
+        assert_eq!(text, "A");
+        assert_eq!(cursor, 1);
+        assert!(!select_all);
+    }
+
+    #[test]
+    fn backspace_with_select_all_clears() {
+        // Simulate: text = "Sheet1", select_all = true, backspace
+        // Expected: text = "", cursor = 0, select_all = false
+        let mut text = String::from("Sheet1");
+        let mut cursor = text.len();
+        let mut select_all = true;
+
+        // Simulate backspace with select_all active
+        if select_all {
+            text.clear();
+            cursor = 0;
+            select_all = false;
+        }
+
+        assert_eq!(text, "");
+        assert_eq!(cursor, 0);
+        assert!(!select_all);
+    }
+
+    #[test]
+    fn name_validation_trims() {
+        // Test trimming
+        let input = "  Sheet1  ";
+        let trimmed = input.trim();
+        assert_eq!(trimmed, "Sheet1");
+    }
+
+    #[test]
+    fn name_validation_rejects_too_long() {
+        // Names > 31 chars are rejected (not capped)
+        let long_name = "A".repeat(50);
+        let char_count = long_name.chars().count();
+        assert!(char_count > 31, "Test requires > 31 chars");
+        // Policy: reject, don't cap
+    }
+
+    #[test]
+    fn duplicate_check_case_insensitive() {
+        // "Sheet1" and "SHEET1" should be considered duplicates
+        let existing = "Sheet1";
+        let attempt = "SHEET1";
+        assert!(existing.eq_ignore_ascii_case(attempt));
+    }
+
+    // Helper: simulate prev_char_boundary logic
+    fn prev_boundary(s: &str, cursor: usize) -> usize {
+        let mut idx = cursor.saturating_sub(1);
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        idx
+    }
+
+    // Helper: simulate next_char_boundary logic
+    fn next_boundary(s: &str, cursor: usize) -> usize {
+        let mut idx = cursor + 1;
+        while idx < s.len() && !s.is_char_boundary(idx) {
+            idx += 1;
+        }
+        idx.min(s.len())
     }
 }

@@ -1,3 +1,17 @@
+/// Formula editing submode: determines how arrow keys behave in formula mode
+///
+/// Excel-like behavior: switches automatically based on caret position.
+/// - Point mode: caret is at a ref insertion point (after `(`, `,`, operators)
+/// - Caret mode: caret is inside a token (editing existing text)
+///
+/// F2 manually toggles between modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FormulaNavMode {
+    #[default]
+    Point,   // Arrows move grid selection (ref-pick) - default when typing `=`
+    Caret,   // Arrows move text cursor inside formula - default when F2 on existing formula
+}
+
 /// Application modes determine how keyboard input is handled
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {

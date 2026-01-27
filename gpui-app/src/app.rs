@@ -1078,6 +1078,8 @@ pub struct Spreadsheet {
     // Sheet tab state
     pub renaming_sheet: Option<usize>,     // Index of sheet being renamed
     pub sheet_rename_input: String,        // Current rename input value
+    pub sheet_rename_cursor: usize,        // Cursor position (byte index)
+    pub sheet_rename_select_all: bool,     // Text is fully selected (typing replaces all)
     pub sheet_context_menu: Option<usize>, // Index of sheet with open context menu
 
     // Font picker state
@@ -1108,10 +1110,17 @@ pub struct Spreadsheet {
     pub formula_ref_cell: Option<(usize, usize)>,      // Current reference cell (or range start)
     pub formula_ref_end: Option<(usize, usize)>,       // Range end (None = single cell)
     pub formula_ref_start_cursor: usize,               // Cursor position where reference started
+    pub formula_nav_mode: crate::mode::FormulaNavMode, // Caret vs Point submode in Formula mode
+    pub formula_nav_manual_override: Option<crate::mode::FormulaNavMode>, // F2 toggle latch - wins over auto-switch
 
     // Highlighted formula references (for existing formulas when editing)
     // Each entry has color index, cell bounds, and text position for formula bar coloring
     pub formula_highlighted_refs: Vec<FormulaRef>,
+
+    // Persistent color assignment for formula references during editing
+    // Ensures colors don't "jump" as user types - same RefKey keeps same color
+    pub formula_ref_color_map: std::collections::HashMap<RefKey, usize>,
+    pub formula_ref_next_color: usize,
 
     // Formula bar display cache (avoids re-parsing on every render)
     // Only used when NOT editing - caches parsed refs for the currently selected cell
@@ -1414,6 +1423,8 @@ impl Spreadsheet {
             open_menu: None,
             renaming_sheet: None,
             sheet_rename_input: String::new(),
+            sheet_rename_cursor: 0,
+            sheet_rename_select_all: false,
             sheet_context_menu: None,
             available_fonts: Self::enumerate_fonts(),
             font_picker_query: String::new(),
@@ -1430,7 +1441,11 @@ impl Spreadsheet {
             formula_ref_cell: None,
             formula_ref_end: None,
             formula_ref_start_cursor: 0,
+            formula_nav_mode: crate::mode::FormulaNavMode::default(),
+            formula_nav_manual_override: None,
             formula_highlighted_refs: Vec::new(),
+            formula_ref_color_map: std::collections::HashMap::new(),
+            formula_ref_next_color: 0,
             formula_bar_cache_cell: None,
             formula_bar_cache_formula: String::new(),
             formula_bar_cache_refs: Vec::new(),

@@ -5,21 +5,114 @@
 //! - Edit cursor movement and selection (character, word, home/end navigation)
 //! - Formula bar hit-testing and caching
 //! - Reference cycling (F4 to toggle $A$1 styles)
+//! - Formula nav mode auto-switching (Caret vs Point)
 
 use gpui::*;
 use crate::app::Spreadsheet;
+use crate::mode::FormulaNavMode;
 
 /// Maximum rows in the spreadsheet
 const NUM_ROWS: usize = 1_000_000;
 /// Maximum columns in the spreadsheet
 const NUM_COLS: usize = 16_384;
 
+/// Determine if the caret is at a position where a cell reference can be inserted.
+///
+/// Returns `true` (Point mode) when the previous non-whitespace character is:
+/// - `(` - function argument start
+/// - `,` - argument separator
+/// - `+ - * / ^ & = < > :` - operators
+/// - Start of formula (caret at position 1 after `=` or `+`)
+///
+/// Returns `false` (Caret mode) when inside a token (reference, number, text).
+///
+/// This heuristic enables Excel-like auto-switching: arrows do ref-pick at insertion
+/// points, but move caret when editing existing content.
+fn can_insert_ref_at_caret(buffer: &str, caret_byte_pos: usize) -> bool {
+    // Empty or at start of formula (after = or +)
+    if caret_byte_pos <= 1 {
+        return true;
+    }
+
+    // Get the portion before the caret
+    let before = &buffer[..caret_byte_pos.min(buffer.len())];
+
+    // Find the last non-whitespace character
+    let trimmed = before.trim_end();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let last_char = trimmed.chars().last().unwrap();
+
+    // Insertion point characters - ready for a new reference
+    matches!(last_char, '(' | ',' | '+' | '-' | '*' | '/' | '^' | '&' | '=' | '<' | '>' | ':' | ';')
+}
+
 impl Spreadsheet {
+    // ========================================================================
+    // Formula Nav Mode (Caret vs Point)
+    // ========================================================================
+
+    /// Update formula nav mode based on caret position (auto-switch heuristic).
+    ///
+    /// Called after any edit buffer change or caret movement.
+    /// Switches to Point mode at ref insertion points, Caret mode otherwise.
+    ///
+    /// Respects manual override from F2 toggle - if set, uses that instead.
+    /// Buffer mutations clear the manual override.
+    pub fn update_formula_nav_mode(&mut self) {
+        if !self.mode.is_formula() {
+            return;
+        }
+        // Manual override from F2 takes precedence
+        if let Some(override_mode) = self.formula_nav_manual_override {
+            self.formula_nav_mode = override_mode;
+            return;
+        }
+        // Auto-switch based on caret position
+        self.formula_nav_mode = if can_insert_ref_at_caret(&self.edit_value, self.edit_cursor) {
+            FormulaNavMode::Point
+        } else {
+            FormulaNavMode::Caret
+        };
+    }
+
+    /// Clear the formula nav manual override (called on buffer mutations).
+    pub fn clear_formula_nav_override(&mut self) {
+        self.formula_nav_manual_override = None;
+    }
+
+    /// Toggle formula nav mode (F2 manual override).
+    ///
+    /// Sets a manual override latch that wins over auto-switching until
+    /// the buffer is mutated (typing, delete, etc.).
+    pub fn toggle_formula_nav_mode(&mut self, cx: &mut Context<Self>) {
+        if !self.mode.is_formula() {
+            return;
+        }
+        let toggled = match self.formula_nav_mode {
+            FormulaNavMode::Point => FormulaNavMode::Caret,
+            FormulaNavMode::Caret => FormulaNavMode::Point,
+        };
+        self.formula_nav_mode = toggled;
+        self.formula_nav_manual_override = Some(toggled);
+        cx.notify();
+    }
+
+    /// Check if formula mode should use caret movement (vs ref-pick).
+    pub fn formula_is_caret_mode(&self) -> bool {
+        self.mode.is_formula() && self.formula_nav_mode == FormulaNavMode::Caret
+    }
+
     // ========================================================================
     // Formula Mode Reference Selection
     // ========================================================================
 
     /// Move formula reference with arrow keys (inserts or updates reference)
+    ///
+    /// Only active when `formula_nav_mode` is Point. In Caret mode, arrows
+    /// should call `move_edit_cursor_*` instead.
     pub fn formula_move_ref(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if !self.mode.is_formula() {
             return;
@@ -280,6 +373,8 @@ impl Spreadsheet {
             self.edit_selection_anchor = None;  // Clear selection
             self.edit_scroll_dirty = true;
             self.reset_caret_activity();
+            // Auto-switch nav mode based on new caret position
+            self.update_formula_nav_mode();
             cx.notify();
         }
     }
@@ -292,6 +387,8 @@ impl Spreadsheet {
                 self.edit_selection_anchor = None;  // Clear selection
                 self.edit_scroll_dirty = true;
                 self.reset_caret_activity();
+                // Auto-switch nav mode based on new caret position
+                self.update_formula_nav_mode();
                 cx.notify();
             }
         }
@@ -984,5 +1081,56 @@ impl Spreadsheet {
 
             cx.notify();
         }
+    }
+}
+
+#[cfg(test)]
+mod formula_nav_mode_tests {
+    use super::can_insert_ref_at_caret;
+
+    #[test]
+    fn test_insertion_point_after_open_paren() {
+        // =SUM(| -> can insert
+        assert!(can_insert_ref_at_caret("=SUM(", 5));
+    }
+
+    #[test]
+    fn test_insertion_point_after_comma() {
+        // =SUM(A1,| -> can insert
+        assert!(can_insert_ref_at_caret("=SUM(A1,", 8));
+        // =SUM(A1, | (with space) -> can insert
+        assert!(can_insert_ref_at_caret("=SUM(A1, ", 9));
+    }
+
+    #[test]
+    fn test_insertion_point_after_operator() {
+        // =A1+| -> can insert
+        assert!(can_insert_ref_at_caret("=A1+", 4));
+        // =A1*| -> can insert
+        assert!(can_insert_ref_at_caret("=A1*", 4));
+        // =A1-| -> can insert
+        assert!(can_insert_ref_at_caret("=A1-", 4));
+    }
+
+    #[test]
+    fn test_insertion_point_at_formula_start() {
+        // =| -> can insert (right after =)
+        assert!(can_insert_ref_at_caret("=", 1));
+        // Empty or at very start
+        assert!(can_insert_ref_at_caret("=", 0));
+    }
+
+    #[test]
+    fn test_caret_mode_inside_reference() {
+        // =SUM(A|1) -> inside token, caret mode
+        assert!(!can_insert_ref_at_caret("=SUM(A1)", 6)); // inside A1
+        // =SUM(A1|) -> just after A1, before ), still looks like inside token
+        assert!(!can_insert_ref_at_caret("=SUM(A1)", 7)); // after "1" but before ")"
+    }
+
+    #[test]
+    fn test_caret_mode_inside_function_name() {
+        // =SU|M(A1) -> inside SUM, caret mode
+        assert!(!can_insert_ref_at_caret("=SUM(A1)", 3)); // inside "SUM"
     }
 }

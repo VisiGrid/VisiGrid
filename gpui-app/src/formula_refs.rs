@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use crate::app::Spreadsheet;
-use crate::formula_context::{tokenize_for_highlight, TokenType, char_to_byte};
+use crate::formula_context::{tokenize_for_highlight, TokenType, char_index_to_byte_offset};
 
 // ============================================================================
 // Types
@@ -22,6 +22,18 @@ pub enum RefKey {
     Range { r1: usize, c1: usize, r2: usize, c2: usize },  // normalized min/max
 }
 
+impl RefKey {
+    /// Construct a RefKey, collapsing single-cell ranges to Cell variant.
+    /// Coordinates are normalized (min/max) for ranges.
+    pub fn new(r1: usize, c1: usize, r2: usize, c2: usize) -> Self {
+        if r1 == r2 && c1 == c2 {
+            RefKey::Cell { row: r1, col: c1 }
+        } else {
+            RefKey::Range { r1, c1, r2, c2 }
+        }
+    }
+}
+
 /// Formula reference with color assignment and text position
 #[derive(Clone, Debug)]
 pub struct FormulaRef {
@@ -29,7 +41,7 @@ pub struct FormulaRef {
     pub start: (usize, usize),                // top-left of range
     pub end: Option<(usize, usize)>,          // bottom-right (None for single cell)
     pub color_index: usize,                   // 0-7 rotating
-    pub text_range: std::ops::Range<usize>,   // char range in formula text
+    pub text_byte_range: std::ops::Range<usize>,  // byte range in formula text
 }
 
 /// Color palette for formula references (Excel-like)
@@ -285,15 +297,15 @@ impl Spreadsheet {
         Some((row, col))
     }
 
-    /// Parse all cell references from a formula with deterministic color assignment.
-    /// Returns FormulaRef entries sorted by text position, with first-seen refs getting unique colors.
-    pub(crate) fn parse_formula_refs(formula: &str) -> Vec<FormulaRef> {
+    /// Parse all cell references from a formula WITHOUT color assignment.
+    /// Returns raw parsed refs sorted by text position, for use with assign_ref_colors().
+    pub(crate) fn parse_formula_refs_raw(formula: &str) -> Vec<(RefKey, (usize, usize), Option<(usize, usize)>, std::ops::Range<usize>)> {
         if !formula.starts_with('=') && !formula.starts_with('+') {
             return Vec::new();
         }
 
         let tokens = tokenize_for_highlight(formula);
-        // Collect raw refs with text ranges: (RefKey, start, end, text_range)
+        // Collect raw refs with text ranges: (RefKey, start, end, text_byte_range)
         let mut parsed_refs: Vec<(RefKey, (usize, usize), Option<(usize, usize)>, std::ops::Range<usize>)> = Vec::new();
         let mut i = 0;
 
@@ -302,8 +314,8 @@ impl Spreadsheet {
 
             if *token_type == TokenType::CellRef {
                 // Convert char indices to byte indices for safe slicing
-                let byte_start = char_to_byte(formula, range.start);
-                let byte_end = char_to_byte(formula, range.end);
+                let byte_start = char_index_to_byte_offset(formula, range.start);
+                let byte_end = char_index_to_byte_offset(formula, range.end);
                 let cell_text = &formula[byte_start..byte_end];
                 // Strip any $ signs for absolute references
                 let cell_text_clean: String = cell_text.chars().filter(|c| *c != '$').collect();
@@ -316,8 +328,8 @@ impl Spreadsheet {
 
                         if *next_type == TokenType::Colon && *next_next_type == TokenType::CellRef {
                             // Convert char indices to byte indices for safe slicing
-                            let byte_start2 = char_to_byte(formula, range2.start);
-                            let byte_end2 = char_to_byte(formula, range2.end);
+                            let byte_start2 = char_index_to_byte_offset(formula, range2.start);
+                            let byte_end2 = char_index_to_byte_offset(formula, range2.end);
                             let end_text = &formula[byte_start2..byte_end2];
                             let end_text_clean: String = end_text.chars().filter(|c| *c != '$').collect();
 
@@ -327,9 +339,11 @@ impl Spreadsheet {
                                 let c1 = start_cell.1.min(end_cell.1);
                                 let r2 = start_cell.0.max(end_cell.0);
                                 let c2 = start_cell.1.max(end_cell.1);
-                                let key = RefKey::Range { r1, c1, r2, c2 };
-                                let text_range = range.start..range2.end;
-                                parsed_refs.push((key, (r1, c1), Some((r2, c2)), text_range));
+                                let key = RefKey::new(r1, c1, r2, c2);  // collapses A1:A1 to Cell
+                                let text_byte_range = range.start..range2.end;
+                                // For collapsed single-cell ranges, end should be None
+                                let end = if r1 == r2 && c1 == c2 { None } else { Some((r2, c2)) };
+                                parsed_refs.push((key, (r1, c1), end, text_byte_range));
                                 i += 3;  // Skip the whole range
                                 continue;
                             }
@@ -344,19 +358,128 @@ impl Spreadsheet {
         }
 
         // Sort by text position (left-to-right in formula) for deterministic color assignment
-        parsed_refs.sort_by_key(|(_, _, _, text_range)| text_range.start);
+        parsed_refs.sort_by_key(|(_, _, _, text_byte_range)| text_byte_range.start);
+        parsed_refs
+    }
 
-        // Assign colors: first-seen order, deduplicate by RefKey (same ref = same color)
-        let mut color_map: HashMap<RefKey, usize> = HashMap::new();
-        let mut next_color = 0;
+    /// Assign colors to parsed refs using a persistent color map.
+    /// Refs that were previously seen keep their colors; new refs get the next available color.
+    /// Also performs garbage collection - removes refs from map that are no longer in the formula.
+    pub(crate) fn assign_ref_colors(
+        parsed: Vec<(RefKey, (usize, usize), Option<(usize, usize)>, std::ops::Range<usize>)>,
+        color_map: &mut HashMap<RefKey, usize>,
+        next_color: &mut usize,
+    ) -> Vec<FormulaRef> {
+        use std::collections::HashSet;
 
-        parsed_refs.into_iter().map(|(key, start, end, text_range)| {
+        // Garbage collect: remove keys no longer present in formula
+        let present_keys: HashSet<RefKey> = parsed.iter().map(|(key, _, _, _)| key.clone()).collect();
+        color_map.retain(|k, _| present_keys.contains(k));
+
+        // Assign colors: existing refs keep their colors, new refs get next available
+        parsed.into_iter().map(|(key, start, end, text_byte_range)| {
             let color_index = *color_map.entry(key.clone()).or_insert_with(|| {
-                let c = next_color;
-                next_color = (next_color + 1) % 8;
+                let c = *next_color;
+                *next_color = (*next_color + 1) % 8;
                 c
             });
-            FormulaRef { key, start, end, color_index, text_range }
+            FormulaRef { key, start, end, color_index, text_byte_range }
         }).collect()
+    }
+
+    /// Parse and assign colors using persistent map from self.
+    /// This is the main entry point for formula editing.
+    pub(crate) fn update_formula_refs(&mut self) {
+        let parsed = Self::parse_formula_refs_raw(&self.edit_value);
+        self.formula_highlighted_refs = Self::assign_ref_colors(
+            parsed,
+            &mut self.formula_ref_color_map,
+            &mut self.formula_ref_next_color,
+        );
+    }
+
+    /// Parse and assign colors with a fresh (non-persistent) color map.
+    /// Used for non-editing contexts (e.g., formula bar cache, read-only display).
+    pub(crate) fn parse_formula_refs(formula: &str) -> Vec<FormulaRef> {
+        let parsed = Self::parse_formula_refs_raw(formula);
+        let mut color_map: HashMap<RefKey, usize> = HashMap::new();
+        let mut next_color = 0;
+        Self::assign_ref_colors(parsed, &mut color_map, &mut next_color)
+    }
+
+    /// Clear the persistent color map (call when edit session ends).
+    pub(crate) fn clear_formula_ref_colors(&mut self) {
+        self.formula_ref_color_map.clear();
+        self.formula_ref_next_color = 0;
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_token_stability() {
+        // =A1 + A1 → two entries, same key, same color
+        let refs = Spreadsheet::parse_formula_refs("=A1 + A1");
+        assert_eq!(refs.len(), 2, "Both occurrences should be kept");
+        assert_eq!(refs[0].key, refs[1].key, "Same cell = same key");
+        assert_eq!(refs[0].color_index, refs[1].color_index, "Same key = same color");
+    }
+
+    #[test]
+    fn order_defines_color() {
+        // =B1 + A1 → B1 gets 0 (first in text), A1 gets 1
+        let refs = Spreadsheet::parse_formula_refs("=B1 + A1");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].color_index, 0, "B1 first in text = color 0");
+        assert_eq!(refs[1].color_index, 1, "A1 second in text = color 1");
+    }
+
+    #[test]
+    fn range_normalization() {
+        // =B2:A1 and =A1:B2 produce same key (normalized to min/max)
+        let refs1 = Spreadsheet::parse_formula_refs("=B2:A1");
+        let refs2 = Spreadsheet::parse_formula_refs("=A1:B2");
+        assert_eq!(refs1[0].key, refs2[0].key, "Ranges should normalize to same key");
+    }
+
+    #[test]
+    fn single_cell_range_collapse() {
+        // =A1:A1 collapses to Cell key, same as =A1
+        let refs1 = Spreadsheet::parse_formula_refs("=A1");
+        let refs2 = Spreadsheet::parse_formula_refs("=A1:A1");
+        assert_eq!(refs1[0].key, refs2[0].key, "A1:A1 should collapse to A1");
+        assert!(matches!(refs1[0].key, RefKey::Cell { .. }), "=A1 should be Cell");
+        assert!(matches!(refs2[0].key, RefKey::Cell { .. }), "=A1:A1 should collapse to Cell");
+    }
+
+    #[test]
+    fn persistent_map_no_jump() {
+        // Simulate incremental typing - colors must not jump
+        let mut color_map: HashMap<RefKey, usize> = HashMap::new();
+        let mut next_color = 0usize;
+
+        // Type "=A1" → A1 gets color 0
+        let parsed1 = Spreadsheet::parse_formula_refs_raw("=A1");
+        let refs1 = Spreadsheet::assign_ref_colors(parsed1, &mut color_map, &mut next_color);
+        assert_eq!(refs1[0].color_index, 0, "A1 should get color 0");
+
+        // Type "=A1+B1" → A1 stays 0, B1 gets 1
+        let parsed2 = Spreadsheet::parse_formula_refs_raw("=A1+B1");
+        let refs2 = Spreadsheet::assign_ref_colors(parsed2, &mut color_map, &mut next_color);
+        assert_eq!(refs2[0].color_index, 0, "A1 should stay 0");
+        assert_eq!(refs2[1].color_index, 1, "B1 should get 1");
+
+        // Type "=A1+B1+C1" → A1 stays 0, B1 stays 1, C1 gets 2
+        let parsed3 = Spreadsheet::parse_formula_refs_raw("=A1+B1+C1");
+        let refs3 = Spreadsheet::assign_ref_colors(parsed3, &mut color_map, &mut next_color);
+        assert_eq!(refs3[0].color_index, 0, "A1 should stay 0");
+        assert_eq!(refs3[1].color_index, 1, "B1 should stay 1");
+        assert_eq!(refs3[2].color_index, 2, "C1 should get 2");
     }
 }

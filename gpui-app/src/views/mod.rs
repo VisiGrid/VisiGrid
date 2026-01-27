@@ -98,7 +98,16 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 cx.notify();
                 return;
             }
-            // Autocomplete navigation takes priority
+            // Formula mode: Point submode does ref-pick, Caret submode is no-op for Up/Down
+            if this.mode.is_formula() {
+                if this.formula_is_caret_mode() {
+                    // Caret mode: Up/Down are no-op (single-line editor)
+                    return;
+                }
+                this.formula_move_ref(-1, 0, cx);
+                return;
+            }
+            // Autocomplete navigation (Edit mode only, not Formula)
             if this.autocomplete_visible {
                 this.autocomplete_up(cx);
                 return;
@@ -107,7 +116,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 Mode::Command => this.palette_up(cx),
                 Mode::FontPicker => this.font_picker_up(cx),
                 Mode::ThemePicker => this.theme_picker_up(cx),
-                Mode::Formula => this.formula_move_ref(-1, 0, cx),
+                // Edit mode: commit-on-arrow (fast data entry, Excel-like)
+                Mode::Edit => this.confirm_edit_up(cx),
                 _ => this.move_selection(-1, 0, cx),
             }
         }))
@@ -126,7 +136,16 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 cx.notify();
                 return;
             }
-            // Autocomplete navigation takes priority
+            // Formula mode: Point submode does ref-pick, Caret submode is no-op for Up/Down
+            if this.mode.is_formula() {
+                if this.formula_is_caret_mode() {
+                    // Caret mode: Up/Down are no-op (single-line editor)
+                    return;
+                }
+                this.formula_move_ref(1, 0, cx);
+                return;
+            }
+            // Autocomplete navigation (Edit mode only, not Formula)
             if this.autocomplete_visible {
                 this.autocomplete_down(cx);
                 return;
@@ -135,7 +154,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 Mode::Command => this.palette_down(cx),
                 Mode::FontPicker => this.font_picker_down(cx),
                 Mode::ThemePicker => this.theme_picker_down(cx),
-                Mode::Formula => this.formula_move_ref(1, 0, cx),
+                // Edit mode: commit-on-arrow (fast data entry, Excel-like)
+                Mode::Edit => this.confirm_edit(cx),
                 _ => this.move_selection(1, 0, cx),
             }
         }))
@@ -147,13 +167,20 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 return;
             }
             if this.mode.is_formula() {
-                this.formula_move_ref(0, -1, cx);
+                if this.formula_is_caret_mode() {
+                    // Caret mode: move cursor in formula text
+                    this.move_edit_cursor_left(cx);
+                    this.update_edit_scroll(window);
+                } else {
+                    // Point mode: ref-picking
+                    this.formula_move_ref(0, -1, cx);
+                }
             } else if this.mode.is_editing() {
-                this.move_edit_cursor_left(cx);
+                // Edit mode: commit-on-arrow (fast data entry, Excel-like)
+                this.confirm_edit_and_move_left(cx);
             } else {
                 this.move_selection(0, -1, cx);
             }
-            this.update_edit_scroll(window);
         }))
         .on_action(cx.listener(|this, _: &MoveRight, window, cx| {
             // Lua console: cursor right
@@ -163,13 +190,20 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 return;
             }
             if this.mode.is_formula() {
-                this.formula_move_ref(0, 1, cx);
+                if this.formula_is_caret_mode() {
+                    // Caret mode: move cursor in formula text
+                    this.move_edit_cursor_right(cx);
+                    this.update_edit_scroll(window);
+                } else {
+                    // Point mode: ref-picking
+                    this.formula_move_ref(0, 1, cx);
+                }
             } else if this.mode.is_editing() {
-                this.move_edit_cursor_right(cx);
+                // Edit mode: commit-on-arrow (fast data entry, Excel-like)
+                this.confirm_edit_and_move_right(cx);
             } else {
                 this.move_selection(0, 1, cx);
             }
-            this.update_edit_scroll(window);
         }))
         .on_action(cx.listener(|this, _: &JumpUp, _, cx| {
             if this.mode.is_formula() {
@@ -399,6 +433,18 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.update_title_if_needed(window);
         }))
         .on_action(cx.listener(|this, _: &Paste, window, cx| {
+            // Sheet rename: paste text
+            if this.renaming_sheet.is_some() {
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        // Filter out control chars and newlines
+                        for c in text.chars().filter(|c| !c.is_control() && *c != '\n' && *c != '\r') {
+                            this.sheet_rename_input_char(c, cx);
+                        }
+                    }
+                }
+                return;
+            }
             // Special handling for HubPasteToken mode - paste into token input
             if this.mode == Mode::HubPasteToken {
                 if let Some(item) = cx.read_from_clipboard() {
@@ -457,13 +503,24 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.update_title_if_needed(window);
         }))
         // Editing actions
+        // F2: Start edit (Navigation) or toggle Caret/Point mode (Formula)
         .on_action(cx.listener(|this, _: &StartEdit, window, cx| {
+            if this.mode.is_formula() {
+                // In Formula mode: F2 toggles between Caret and Point submode
+                this.toggle_formula_nav_mode(cx);
+                return;
+            }
             this.start_edit(cx);
             this.update_edit_scroll(window);
             // On macOS, show tip about enabling F2 (catches Ctrl+U and menu-driven edit)
             this.maybe_show_f2_tip(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
+            // Sheet rename: Enter confirms
+            if this.renaming_sheet.is_some() {
+                this.confirm_sheet_rename(cx);
+                return;
+            }
             // Validation dropdown: Enter commits selected item
             if this.is_validation_dropdown_open() {
                 if let Some(state) = this.validation_dropdown.as_open() {
@@ -523,6 +580,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &CancelEdit, window, cx| {
+            // Sheet rename: Escape cancels
+            if this.renaming_sheet.is_some() {
+                this.cancel_sheet_rename(cx);
+                return;
+            }
             // Validation dropdown: Escape closes without committing
             if this.is_validation_dropdown_open() {
                 this.close_validation_dropdown(
@@ -625,6 +687,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &BackspaceChar, window, cx| {
+            // Sheet rename: handle backspace
+            if this.renaming_sheet.is_some() {
+                this.sheet_rename_backspace(cx);
+                return;
+            }
             // Dialog modes handle backspace themselves
             if this.mode == Mode::CreateNamedRange {
                 this.create_name_backspace(cx);
@@ -652,6 +719,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &DeleteChar, window, cx| {
+            // Sheet rename: handle delete
+            if this.renaming_sheet.is_some() {
+                this.sheet_rename_delete(cx);
+                return;
+            }
             // Lua console handles its own delete
             if this.lua_console.visible {
                 this.lua_console.delete();
@@ -1203,6 +1275,26 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     }
                     "backspace" => {
                         this.sheet_rename_backspace(cx);
+                        return;
+                    }
+                    "delete" => {
+                        this.sheet_rename_delete(cx);
+                        return;
+                    }
+                    "left" => {
+                        this.sheet_rename_cursor_left(cx);
+                        return;
+                    }
+                    "right" => {
+                        this.sheet_rename_cursor_right(cx);
+                        return;
+                    }
+                    "home" => {
+                        this.sheet_rename_cursor_home(cx);
+                        return;
+                    }
+                    "end" => {
+                        this.sheet_rename_cursor_end(cx);
                         return;
                     }
                     _ => {}

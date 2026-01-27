@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.1
+
+Editing & Keyboard Polish
+
+### Formula Editing
+
+- **Multi-color reference highlighting** in the grid and formula bar with stable colors while typing (no color jumping during edit sessions)
+- **Caret vs Point mode** for formula navigation:
+  - Caret mode: arrow keys move the text cursor inside the formula
+  - Point mode: arrow keys pick cell references
+  - Auto-switching detects when you're at a ref insertion point (after `(`, `,`, operators)
+  - F2 toggles modes with override latch (toggle sticks until you type)
+- Arrow keys in formula mode now behave consistently across all directions
+
+### Data Entry
+
+- **Commit-on-arrow**: typing a value and pressing an arrow key commits the edit and moves selection — faster grid entry without extra keystrokes
+
+### Clipboard
+
+- **Multi-selection paste**: copying a single cell and pasting into a selected region fills all selected cells
+- Formulas pasted to multiple cells adjust references relative to each destination cell
+
+### Bug Fixes
+
+- Sheet tab renaming is now reliable: double-click rename, cursor movement, selection, backspace/delete, enter/escape, click-away confirm all work correctly
+- Fixed formula mode not activating immediately when typing `=`
+- Fixed arrow keys not working after confirming a formula (no longer requires Escape first)
+
+---
+
 ## 0.3.0
 
 Preview the past. Rewind the workbook. Verify it in CI.

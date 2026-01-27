@@ -1111,7 +1111,7 @@ pub fn get_functions_by_prefix(prefix: &str) -> Vec<&'static FunctionInfo> {
 }
 
 /// Convert char index to byte offset
-pub fn char_to_byte(s: &str, char_idx: usize) -> usize {
+pub fn char_index_to_byte_offset(s: &str, char_idx: usize) -> usize {
     s.char_indices()
         .nth(char_idx)
         .map(|(i, _)| i)
@@ -1846,8 +1846,8 @@ mod tests {
 
         // Verify char→byte conversion works
         for (range, _) in &tokens {
-            let byte_start = char_to_byte(formula, range.start);
-            let byte_end = char_to_byte(formula, range.end);
+            let byte_start = char_index_to_byte_offset(formula, range.start);
+            let byte_end = char_index_to_byte_offset(formula, range.end);
             // This should not panic - proves char indices are valid
             let _slice = &formula[byte_start..byte_end];
         }
@@ -1873,8 +1873,8 @@ mod tests {
 
         // Both should extract to "A1"
         for (range, _) in &cell_refs {
-            let byte_start = char_to_byte(formula, range.start);
-            let byte_end = char_to_byte(formula, range.end);
+            let byte_start = char_index_to_byte_offset(formula, range.start);
+            let byte_end = char_index_to_byte_offset(formula, range.end);
             let text = &formula[byte_start..byte_end];
             assert_eq!(text, "A1", "Both refs should be A1");
         }
@@ -1903,8 +1903,8 @@ mod tests {
 
         // Verify extraction works for all tokens
         for (range, _) in &tokens {
-            let byte_start = char_to_byte(formula, range.start);
-            let byte_end = char_to_byte(formula, range.end);
+            let byte_start = char_index_to_byte_offset(formula, range.start);
+            let byte_end = char_index_to_byte_offset(formula, range.end);
             // Should not panic
             let _text = &formula[byte_start..byte_end];
         }
@@ -1912,8 +1912,8 @@ mod tests {
         // Verify the cell ref texts
         let ref_texts: Vec<_> = cell_refs.iter()
             .map(|(range, _)| {
-                let byte_start = char_to_byte(formula, range.start);
-                let byte_end = char_to_byte(formula, range.end);
+                let byte_start = char_index_to_byte_offset(formula, range.start);
+                let byte_end = char_index_to_byte_offset(formula, range.end);
                 &formula[byte_start..byte_end]
             })
             .collect();
@@ -1924,18 +1924,18 @@ mod tests {
     }
 
     #[test]
-    fn test_char_to_byte_with_unicode() {
+    fn test_char_index_to_byte_offset_with_unicode() {
         // Direct test of char→byte conversion
         let s = "=Ü+A1";  // Ü is 2 bytes in UTF-8
 
         // Char indices: = is 0, Ü is 1, + is 2, A is 3, 1 is 4
         // Byte indices: = is 0, Ü is 1-2 (2 bytes), + is 3, A is 4, 1 is 5
 
-        assert_eq!(char_to_byte(s, 0), 0);  // '='
-        assert_eq!(char_to_byte(s, 1), 1);  // 'Ü' starts at byte 1
-        assert_eq!(char_to_byte(s, 2), 3);  // '+' starts at byte 3 (after 2-byte Ü)
-        assert_eq!(char_to_byte(s, 3), 4);  // 'A'
-        assert_eq!(char_to_byte(s, 4), 5);  // '1'
-        assert_eq!(char_to_byte(s, 5), 6);  // end of string
+        assert_eq!(char_index_to_byte_offset(s, 0), 0);  // '='
+        assert_eq!(char_index_to_byte_offset(s, 1), 1);  // 'Ü' starts at byte 1
+        assert_eq!(char_index_to_byte_offset(s, 2), 3);  // '+' starts at byte 3 (after 2-byte Ü)
+        assert_eq!(char_index_to_byte_offset(s, 3), 4);  // 'A'
+        assert_eq!(char_index_to_byte_offset(s, 4), 5);  // '1'
+        assert_eq!(char_index_to_byte_offset(s, 5), 6);  // end of string
     }
 }

@@ -160,6 +160,92 @@ impl Spreadsheet {
             let (start_row, start_col) = self.view_state.selected;
             let mut changes = Vec::new();
 
+            // Check if clipboard is a single cell (1 line, no tabs)
+            let lines: Vec<&str> = text.lines().collect();
+            let is_single_cell = lines.len() == 1 && !lines[0].contains('\t');
+
+            // If single cell and multi-selection, broadcast to all selected cells
+            if is_single_cell && self.is_multi_selection() {
+                let single_value = lines[0].to_string();
+                let primary_cell = self.view_state.selected;
+
+                // Collect all target cells
+                let mut target_cells: Vec<(usize, usize)> = Vec::new();
+
+                // Primary selection rectangle
+                let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+                for row in min_row..=max_row {
+                    for col in min_col..=max_col {
+                        target_cells.push((row, col));
+                    }
+                }
+
+                // Additional selections (Ctrl+Click)
+                for (sel_start, sel_end) in &self.view_state.additional_selections {
+                    let end = sel_end.unwrap_or(*sel_start);
+                    let min_r = sel_start.0.min(end.0);
+                    let max_r = sel_start.0.max(end.0);
+                    let min_c = sel_start.1.min(end.1);
+                    let max_c = sel_start.1.max(end.1);
+                    for row in min_r..=max_r {
+                        for col in min_c..=max_c {
+                            if !target_cells.contains(&(row, col)) {
+                                target_cells.push((row, col));
+                            }
+                        }
+                    }
+                }
+
+                let is_formula = single_value.starts_with('=');
+                let mut values_grid: Vec<Vec<String>> = Vec::new();
+
+                for (row, col) in &target_cells {
+                    let old_value = self.sheet().get_raw(*row, *col);
+
+                    // For formulas, shift relative references based on delta from primary cell
+                    let new_value = if is_formula && is_internal {
+                        let delta_row = *row as i32 - primary_cell.0 as i32;
+                        let delta_col = *col as i32 - primary_cell.1 as i32;
+                        self.adjust_formula_refs(&single_value, delta_row, delta_col)
+                    } else {
+                        single_value.clone()
+                    };
+
+                    if old_value != new_value {
+                        changes.push(CellChange {
+                            row: *row, col: *col, old_value, new_value: new_value.clone(),
+                        });
+                    }
+                    self.sheet_mut().set_value(*row, *col, &new_value);
+                }
+
+                // Build values grid for provenance
+                if !target_cells.is_empty() {
+                    values_grid.push(vec![single_value.clone()]);
+                }
+
+                // Record with provenance
+                if !changes.is_empty() {
+                    let provenance = MutationOp::Paste {
+                        sheet: self.sheet().id,
+                        dst_row: start_row,
+                        dst_col: start_col,
+                        values: values_grid,
+                        mode: PasteMode::Both,
+                    }.to_provenance(&self.sheet().name);
+
+                    self.history.record_batch_with_provenance(self.sheet_index(), changes, Some(provenance));
+                    self.bump_cells_rev();
+                    self.is_modified = true;
+                }
+
+                self.status_message = Some(format!("Pasted to {} cells", target_cells.len()));
+                self.maybe_smoke_recalc();
+                cx.notify();
+                return;
+            }
+
+            // Standard paste (multi-cell clipboard or single cell to single selection)
             // Calculate delta from source if this is an internal paste
             let (delta_row, delta_col) = if is_internal {
                 if let Some(ic) = &self.internal_clipboard {

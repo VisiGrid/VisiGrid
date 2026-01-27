@@ -13,6 +13,38 @@ use crate::mode::Mode;
 
 impl Spreadsheet {
     // =========================================================================
+    // Edit Mode Management
+    // =========================================================================
+
+    /// Recompute edit mode based on current edit buffer content.
+    /// Call this after every edit buffer change to keep mode in sync.
+    /// - If edit buffer starts with '=' or '+', mode is Formula (ref-pick enabled)
+    /// - Otherwise, mode is Edit (plain text)
+    pub(crate) fn recompute_edit_mode(&mut self) {
+        if !self.mode.is_editing() {
+            return; // Only relevant when editing
+        }
+
+        let is_formula = self.edit_value.starts_with('=') || self.edit_value.starts_with('+');
+        let should_be_formula = is_formula;
+        let currently_formula = self.mode.is_formula();
+
+        if should_be_formula && !currently_formula {
+            // Transition Edit -> Formula
+            self.mode = Mode::Formula;
+            // User just typed '=' - start in Point mode (ready to pick refs)
+            self.formula_nav_mode = crate::mode::FormulaNavMode::Point;
+        } else if !should_be_formula && currently_formula {
+            // Transition Formula -> Edit (user deleted the '=')
+            self.mode = Mode::Edit;
+            // Clear formula-specific state
+            self.formula_ref_cell = None;
+            self.formula_ref_end = None;
+            self.formula_highlighted_refs.clear();
+        }
+    }
+
+    // =========================================================================
     // Editing
     // =========================================================================
 
@@ -49,14 +81,21 @@ impl Spreadsheet {
             self.edit_cursor, self.edit_value.len()
         );
 
+        // Set mode based on content: Formula if starts with '=' or '+', else Edit
+        let is_formula = self.edit_value.starts_with('=') || self.edit_value.starts_with('+');
+        self.mode = if is_formula { Mode::Formula } else { Mode::Edit };
+
         // Parse and highlight formula references if editing a formula
-        if self.edit_value.starts_with('=') || self.edit_value.starts_with('+') {
-            self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+        // Clear color map for fresh edit session
+        self.clear_formula_ref_colors();
+        if is_formula {
+            self.update_formula_refs();
+            // F2 on existing formula: start in Caret mode (user wants to edit text)
+            self.formula_nav_mode = crate::mode::FormulaNavMode::Caret;
         } else {
             self.formula_highlighted_refs.clear();
         }
 
-        self.mode = Mode::Edit;
         self.start_caret_blink(cx);
         cx.notify();
     }
@@ -86,12 +125,25 @@ impl Spreadsheet {
         self.formula_bar_scroll_x = 0.0;
         self.active_editor = EditorSurface::Cell;  // Default to cell editor
         self.edit_selection_anchor = None;
-        self.formula_highlighted_refs.clear();  // No formula to highlight
+        // Clear formula state - fresh edit session with empty buffer
+        self.clear_formula_ref_colors();
+        self.formula_highlighted_refs.clear();
+        self.formula_ref_cell = None;
+        self.formula_ref_end = None;
         self.mode = Mode::Edit;
         self.start_caret_blink(cx);
         cx.notify();
     }
 
+    /// Commit edit and move down (Enter, or Down arrow in Edit mode)
+    ///
+    /// Multi-edit: If multiple cells selected, applies to all (the "wow" moment).
+    /// Single cell: commits and moves down.
+    ///
+    /// # Commit-on-Arrow Policy (Excel-like fast data entry)
+    ///
+    /// In Mode::Edit (non-formula): Arrow keys commit the edit and move selection.
+    /// In Mode::Formula: Arrow keys do ref-picking (Option A), NOT commit.
     pub fn confirm_edit(&mut self, cx: &mut Context<Self>) {
         // Multi-edit: If multiple cells selected, apply to all (the "wow" moment)
         if self.is_multi_selection() {
@@ -101,6 +153,9 @@ impl Spreadsheet {
         }
     }
 
+    /// Commit edit and move up (Shift+Enter, or Up arrow in Edit mode)
+    ///
+    /// See `confirm_edit` for commit-on-arrow policy.
     pub fn confirm_edit_up(&mut self, cx: &mut Context<Self>) {
         self.confirm_edit_and_move(-1, 0, cx);  // Shift+Enter moves up
     }
@@ -222,12 +277,24 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Commit edit and move right (Tab, or Right arrow in Edit mode)
+    ///
+    /// # Commit-on-Arrow Policy (Excel-like fast data entry)
+    ///
+    /// In Mode::Edit (non-formula): Arrow keys commit the edit and move selection.
+    /// This enables fast grid data entry without pressing Enter after each cell.
+    ///
+    /// In Mode::Formula: Arrow keys do ref-picking (Option A), NOT commit.
+    /// Exit formula mode with Enter (confirm) or Escape (cancel).
     pub fn confirm_edit_and_move_right(&mut self, cx: &mut Context<Self>) {
-        self.confirm_edit_and_move(0, 1, cx);  // Tab moves right
+        self.confirm_edit_and_move(0, 1, cx);
     }
 
+    /// Commit edit and move left (Shift+Tab, or Left arrow in Edit mode)
+    ///
+    /// See `confirm_edit_and_move_right` for commit-on-arrow policy.
     pub fn confirm_edit_and_move_left(&mut self, cx: &mut Context<Self>) {
-        self.confirm_edit_and_move(0, -1, cx);  // Shift+Tab moves left
+        self.confirm_edit_and_move(0, -1, cx);
     }
 
     /// Ctrl+Enter: Multi-edit commit / Fill selection / Open link
@@ -357,6 +424,8 @@ impl Spreadsheet {
         self.formula_ref_cell = None;
         self.formula_ref_end = None;
         self.formula_highlighted_refs.clear();
+        self.clear_formula_ref_colors();
+        self.autocomplete_visible = false;
         self.bump_cells_rev();
         self.is_modified = true;
         self.maybe_smoke_recalc();
@@ -376,6 +445,8 @@ impl Spreadsheet {
         self.formula_ref_cell = None;
         self.formula_ref_end = None;
         self.formula_highlighted_refs.clear();
+        self.clear_formula_ref_colors();
+        self.autocomplete_visible = false;
         self.stop_caret_blink();
         cx.notify();
     }
@@ -405,12 +476,13 @@ impl Spreadsheet {
 
                 // Update caret visibility
                 let should_continue = this.update(cx, |this, cx| {
-                    // Don't blink if not editing
-                    if !this.mode.is_editing() {
+                    // Don't blink if not editing (cell or sheet rename)
+                    let is_sheet_renaming = this.renaming_sheet.is_some() && !this.sheet_rename_select_all;
+                    if !this.mode.is_editing() && !is_sheet_renaming {
                         return false;
                     }
 
-                    // Don't blink if there's a text selection
+                    // Don't blink if there's a text selection (cell edit only)
                     if this.edit_selection_anchor.is_some() {
                         this.caret_visible = true;
                         cx.notify();
@@ -484,9 +556,13 @@ impl Spreadsheet {
 
             // If there's a selection, delete it
             if self.delete_edit_selection() {
+                // Recompute mode (deleting '=' at start should exit formula mode)
+                self.recompute_edit_mode();
                 // Update highlighted refs for formulas
-                if self.is_formula_content() {
-                    self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+                if self.mode.is_formula() {
+                    self.update_formula_refs();
+                    self.clear_formula_nav_override();
+                    self.update_formula_nav_mode();
                 }
                 self.edit_scroll_dirty = true;
                 self.formula_bar_cache_dirty = true;
@@ -500,9 +576,13 @@ impl Spreadsheet {
                 let curr_byte = self.edit_cursor.min(self.edit_value.len());
                 self.edit_value.replace_range(prev_byte..curr_byte, "");
                 self.edit_cursor = prev_byte;
+                // Recompute mode (deleting '=' at start should exit formula mode)
+                self.recompute_edit_mode();
                 // Update highlighted refs for formulas
-                if self.is_formula_content() {
-                    self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+                if self.mode.is_formula() {
+                    self.update_formula_refs();
+                    self.clear_formula_nav_override();
+                    self.update_formula_nav_mode();
                 }
                 self.edit_scroll_dirty = true;
                 self.formula_bar_cache_dirty = true;
@@ -524,9 +604,13 @@ impl Spreadsheet {
 
             // If there's a selection, delete it
             if self.delete_edit_selection() {
+                // Recompute mode (deleting '=' at start should exit formula mode)
+                self.recompute_edit_mode();
                 // Update highlighted refs for formulas
-                if self.is_formula_content() {
-                    self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+                if self.mode.is_formula() {
+                    self.update_formula_refs();
+                    self.clear_formula_nav_override();
+                    self.update_formula_nav_mode();
                 }
                 self.edit_scroll_dirty = true;
                 self.formula_bar_cache_dirty = true;
@@ -541,9 +625,13 @@ impl Spreadsheet {
                 let next_byte = self.next_char_boundary(curr_byte);
                 self.edit_value.replace_range(curr_byte..next_byte, "");
                 // Cursor stays at same byte position (deleted forward)
+                // Recompute mode (deleting '=' at start should exit formula mode)
+                self.recompute_edit_mode();
                 // Update highlighted refs for formulas
-                if self.is_formula_content() {
-                    self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+                if self.mode.is_formula() {
+                    self.update_formula_refs();
+                    self.clear_formula_nav_override();
+                    self.update_formula_nav_mode();
                 }
                 self.edit_scroll_dirty = true;
                 self.formula_bar_cache_dirty = true;
@@ -574,9 +662,15 @@ impl Spreadsheet {
             self.edit_value.insert(byte_idx, c);
             self.edit_cursor = byte_idx + c.len_utf8();  // Advance by byte length of char
 
+            // Recompute mode: typing '=' at start should transition to Formula mode
+            self.recompute_edit_mode();
+
             // Update highlighted refs for formulas
-            if self.is_formula_content() {
-                self.formula_highlighted_refs = Self::parse_formula_refs(&self.edit_value);
+            if self.mode.is_formula() {
+                self.update_formula_refs();
+                // Buffer mutation clears F2 override, then auto-switch based on caret
+                self.clear_formula_nav_override();
+                self.update_formula_nav_mode();
             }
 
             // Text edit: clear suppression so autocomplete can reopen
@@ -687,6 +781,9 @@ impl Spreadsheet {
         self.formula_ref_start_cursor = 0;
         // Clear formula highlighting state
         self.formula_highlighted_refs.clear();
+        self.clear_formula_ref_colors();
+        // Close autocomplete
+        self.autocomplete_visible = false;
         // Reset editor surface
         self.active_editor = EditorSurface::Cell;
         // Stop caret blinking

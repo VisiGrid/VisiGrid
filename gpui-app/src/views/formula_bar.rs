@@ -5,7 +5,7 @@ use crate::app::{
     FORMULA_BAR_CELL_REF_WIDTH, FORMULA_BAR_FX_WIDTH,
 };
 use crate::theme::TokenKey;
-use crate::formula_context::{tokenize_for_highlight, TokenType, char_to_byte};
+use crate::formula_context::{tokenize_for_highlight, TokenType, char_index_to_byte_offset};
 
 /// Render the formula bar (cell reference + formula/value input)
 pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -91,6 +91,10 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 .cursor_text()
                 // formula_bar_text_rect is calculated during render in app.rs
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    // Clicking on formula bar while renaming sheet: confirm and continue
+                    if this.renaming_sheet.is_some() {
+                        this.confirm_sheet_rename(cx);
+                    }
                     // Start editing if not already
                     if !this.mode.is_editing() {
                         this.start_edit(cx);
@@ -351,7 +355,7 @@ fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, ed
         for fref in formula_refs {
             // Check if this token's range overlaps with the ref's text_range
             // For exact matches or containment
-            if token_range.start >= fref.text_range.start && token_range.end <= fref.text_range.end {
+            if token_range.start >= fref.text_byte_range.start && token_range.end <= fref.text_byte_range.end {
                 return Some(rgb(REF_COLORS[fref.color_index % 8]).into());
             }
         }
@@ -401,7 +405,7 @@ fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, ed
         // Fill gap before this token (if any) with default color
         if range.start > last_end_char {
             let gap_start_byte = last_end_byte;
-            let gap_end_byte = char_to_byte(raw_value, range.start);
+            let gap_end_byte = char_index_to_byte_offset(raw_value, range.start);
             let gap_text = &raw_value[gap_start_byte..gap_end_byte];
             let gap_len = gap_text.len();
             if gap_len > 0 {
@@ -417,8 +421,8 @@ fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, ed
         }
 
         // Add this token's text run
-        let token_start_byte = char_to_byte(raw_value, range.start);
-        let token_end_byte = char_to_byte(raw_value, range.end);
+        let token_start_byte = char_index_to_byte_offset(raw_value, range.start);
+        let token_end_byte = char_index_to_byte_offset(raw_value, range.end);
         let token_text = &raw_value[token_start_byte..token_end_byte];
         let token_len = token_text.len();
 
