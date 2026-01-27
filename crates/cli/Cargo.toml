@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 visigrid-engine = { path = "../engine" }
 visigrid-io = { path = "../io" }
+visigrid-config = { path = "../config" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 csv = "1"

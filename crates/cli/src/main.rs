@@ -17,6 +17,11 @@ pub const EXIT_IO_ERROR: u8 = 3;
 pub const EXIT_PARSE_ERROR: u8 = 4;
 pub const EXIT_FORMAT_ERROR: u8 = 5;
 
+// AI-specific exit codes
+pub const EXIT_AI_DISABLED: u8 = 10;      // AI disabled (provider=none) - not an error
+pub const EXIT_AI_MISSING_KEY: u8 = 11;   // Provider configured but key missing
+pub const EXIT_AI_KEYCHAIN_ERR: u8 = 12;  // Keychain error
+
 #[derive(Parser)]
 #[command(name = "visigrid-cli")]
 #[command(about = "Fast, native spreadsheet (CLI mode, headless)")]
@@ -119,6 +124,26 @@ enum Commands {
         #[arg(long, short = 'q')]
         quiet: bool,
     },
+
+    /// AI configuration and diagnostics
+    Ai {
+        #[command(subcommand)]
+        command: AiCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AiCommands {
+    /// Check AI configuration and connectivity
+    Doctor {
+        /// Output as JSON for machine parsing
+        #[arg(long)]
+        json: bool,
+
+        /// Test provider connectivity (requires network)
+        #[arg(long)]
+        test: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -174,6 +199,9 @@ fn main() -> ExitCode {
             fingerprint,
             quiet,
         }) => cmd_replay(script, verify, output, format, fingerprint, quiet),
+        Some(Commands::Ai { command }) => match command {
+            AiCommands::Doctor { json, test } => cmd_ai_doctor(json, test),
+        },
     };
 
     match result {
@@ -969,6 +997,186 @@ fn cmd_open(file: Option<PathBuf>) -> Result<(), CliError> {
 // ============================================================================
 // replay (Phase 9B)
 // ============================================================================
+
+// ============================================================================
+// ai doctor
+// ============================================================================
+
+fn cmd_ai_doctor(json: bool, test: bool) -> Result<(), CliError> {
+    use visigrid_config::settings::{Settings, AIProvider};
+    use visigrid_config::ai::{self, KeySource};
+
+    let settings = Settings::load();
+    let ai_settings = &settings.ai;
+
+    // Get key status
+    let provider_str = match ai_settings.provider {
+        AIProvider::None => "none",
+        AIProvider::Local => "local",
+        AIProvider::OpenAI => "openai",
+        AIProvider::Anthropic => "anthropic",
+    };
+
+    let key_lookup = if ai_settings.provider.is_enabled() && !matches!(ai_settings.provider, AIProvider::Local) {
+        ai::get_api_key(provider_str)
+    } else {
+        ai::KeyLookup {
+            key: None,
+            source: KeySource::None,
+        }
+    };
+
+    let enabled = ai_settings.provider.is_enabled();
+    let model = ai_settings.effective_model();
+    let keychain_available = ai::keychain_available();
+
+    // Build diagnostics
+    let diag = AIDoctorReport {
+        enabled,
+        provider: provider_str.to_string(),
+        model: model.to_string(),
+        privacy_mode: ai_settings.privacy_mode,
+        allow_proposals: ai_settings.allow_proposals,
+        key_present: key_lookup.key.is_some(),
+        key_source: key_lookup.source,
+        keychain_available,
+        endpoint: if matches!(ai_settings.provider, AIProvider::Local) {
+            Some(ai_settings.effective_endpoint().to_string())
+        } else {
+            None
+        },
+        test_skipped: !test,
+        test_result: None,
+    };
+
+    // Run connectivity test if requested
+    let diag = if test && enabled {
+        run_ai_test(diag, ai_settings)
+    } else {
+        diag
+    };
+
+    // Output
+    if json {
+        let json_output = serde_json::json!({
+            "enabled": diag.enabled,
+            "provider": diag.provider,
+            "model": diag.model,
+            "privacy_mode": diag.privacy_mode,
+            "allow_proposals": diag.allow_proposals,
+            "key": if diag.key_present { "present" } else { "missing" },
+            "key_source": diag.key_source.as_str(),
+            "keychain": if diag.keychain_available { "ok" } else { "unavailable" },
+            "endpoint": diag.endpoint,
+            "test": if diag.test_skipped { "skipped" } else {
+                diag.test_result.as_deref().unwrap_or("unknown")
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
+    } else {
+        println!("AI Doctor");
+        println!("---------");
+        println!("enabled:         {}", if diag.enabled { "true" } else { "false" });
+        println!("provider:        {}", diag.provider);
+        println!("model:           {}", if diag.model.is_empty() { "(default)" } else { &diag.model });
+        println!("privacy_mode:    {}", diag.privacy_mode);
+        println!("allow_proposals: {}", diag.allow_proposals);
+        println!("key:             {}", if diag.key_present { "present" } else { "missing" });
+        println!("key_source:      {}", diag.key_source.as_str());
+        println!("keychain:        {}", if diag.keychain_available { "ok" } else { "unavailable" });
+        if let Some(endpoint) = &diag.endpoint {
+            println!("endpoint:        {}", endpoint);
+        }
+        if diag.test_skipped {
+            println!("test:            skipped (use --test)");
+        } else if let Some(result) = &diag.test_result {
+            println!("test:            {}", result);
+        }
+
+        // Actionable fix suggestions
+        if !diag.enabled {
+            println!();
+            println!("AI is disabled. To enable:");
+            println!("  Set ai.provider in ~/.config/visigrid/settings.json");
+        } else if !diag.key_present && !matches!(ai_settings.provider, AIProvider::Local) {
+            println!();
+            println!("Fix: set {} or store key in keychain", format!("VISIGRID_{}_KEY", provider_str.to_uppercase()));
+        }
+    }
+
+    // Determine exit code
+    if !enabled {
+        // AI disabled is not an error, but distinct for scripts
+        return Err(CliError { code: EXIT_AI_DISABLED, message: "AI is disabled".to_string() });
+    }
+
+    // For cloud providers, check key
+    if !matches!(ai_settings.provider, AIProvider::Local) && !diag.key_present {
+        return Err(CliError { code: EXIT_AI_MISSING_KEY, message: "API key missing".to_string() });
+    }
+
+    Ok(())
+}
+
+struct AIDoctorReport {
+    enabled: bool,
+    provider: String,
+    model: String,
+    privacy_mode: bool,
+    allow_proposals: bool,
+    key_present: bool,
+    key_source: visigrid_config::ai::KeySource,
+    keychain_available: bool,
+    endpoint: Option<String>,
+    test_skipped: bool,
+    test_result: Option<String>,
+}
+
+fn run_ai_test(mut diag: AIDoctorReport, ai_settings: &visigrid_config::settings::AISettings) -> AIDoctorReport {
+    use visigrid_config::settings::AIProvider;
+
+    diag.test_skipped = false;
+
+    match ai_settings.provider {
+        AIProvider::Local => {
+            // Try to reach Ollama endpoint
+            let endpoint = ai_settings.effective_endpoint();
+            let url = format!("{}/api/tags", endpoint);
+
+            // Simple HTTP check with timeout
+            match std::process::Command::new("curl")
+                .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "2", &url])
+                .output()
+            {
+                Ok(output) => {
+                    let code = String::from_utf8_lossy(&output.stdout);
+                    if code.trim() == "200" {
+                        diag.test_result = Some("ok (ollama reachable)".to_string());
+                    } else {
+                        diag.test_result = Some(format!("failed (HTTP {})", code.trim()));
+                    }
+                }
+                Err(e) => {
+                    diag.test_result = Some(format!("failed ({})", e));
+                }
+            }
+        }
+        AIProvider::OpenAI | AIProvider::Anthropic => {
+            // For cloud providers, we'd need to make an API call
+            // For now, just report that key is present
+            if diag.key_present {
+                diag.test_result = Some("ok (key present, API not tested)".to_string());
+            } else {
+                diag.test_result = Some("failed (no key)".to_string());
+            }
+        }
+        AIProvider::None => {
+            diag.test_result = Some("skipped (AI disabled)".to_string());
+        }
+    }
+
+    diag
+}
 
 fn cmd_replay(
     script: PathBuf,

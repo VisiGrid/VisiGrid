@@ -6447,6 +6447,7 @@ dependencies = [
  "mlua",
  "serde_json",
  "shellexpand",
+ "visigrid-config",
  "visigrid-engine",
  "visigrid-io",
  "which 6.0.3",
