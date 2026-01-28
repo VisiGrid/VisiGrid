@@ -120,6 +120,11 @@ pub enum CommandId {
     // Borders
     BordersAll,
     BordersOutline,
+    BordersInside,
+    BordersTop,
+    BordersBottom,
+    BordersLeft,
+    BordersRight,
     BordersClear,
 
     // File
@@ -241,6 +246,11 @@ impl CommandId {
             Self::BackgroundCyan => "Background: Cyan",
             Self::BordersAll => "Borders: All",
             Self::BordersOutline => "Borders: Outline",
+            Self::BordersInside => "Borders: Inside",
+            Self::BordersTop => "Borders: Top",
+            Self::BordersBottom => "Borders: Bottom",
+            Self::BordersLeft => "Borders: Left",
+            Self::BordersRight => "Borders: Right",
             Self::BordersClear => "Borders: Clear",
             Self::NewWindow => "New Workbook",
             Self::OpenFile => "Open File",
@@ -406,6 +416,11 @@ impl CommandId {
             Self::BackgroundCyan => "format fill color highlight",
             Self::BordersAll => "format border grid lines box",
             Self::BordersOutline => "format border box outline perimeter frame",
+            Self::BordersInside => "format border inside internal inner grid",
+            Self::BordersTop => "format border top edge upper",
+            Self::BordersBottom => "format border bottom edge lower",
+            Self::BordersLeft => "format border left edge",
+            Self::BordersRight => "format border right edge",
             Self::BordersClear => "format border clear remove none",
             Self::NewWindow => "create workbook file window blank",
             Self::OpenFile => "load",
@@ -507,6 +522,11 @@ impl CommandId {
             Self::BackgroundCyan,
             Self::BordersAll,
             Self::BordersOutline,
+            Self::BordersInside,
+            Self::BordersTop,
+            Self::BordersBottom,
+            Self::BordersLeft,
+            Self::BordersRight,
             Self::BordersClear,
             Self::NewWindow,
             Self::OpenFile,
@@ -652,6 +672,11 @@ impl CommandId {
             | Self::BackgroundCyan
             | Self::BordersAll
             | Self::BordersOutline
+            | Self::BordersInside
+            | Self::BordersTop
+            | Self::BordersBottom
+            | Self::BordersLeft
+            | Self::BordersRight
             | Self::BordersClear => Some(MenuCategory::Format),
 
             // Data menu

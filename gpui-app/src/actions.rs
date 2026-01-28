@@ -188,6 +188,11 @@ actions!(format, [
     // Borders
     BordersAll,      // Apply borders to all edges of selected cells
     BordersOutline,  // Apply borders only to outer perimeter of selection
+    BordersInside,   // Apply borders only to internal edges
+    BordersTop,      // Apply border to top edge of selection
+    BordersBottom,   // Apply border to bottom edge of selection
+    BordersLeft,     // Apply border to left edge of selection
+    BordersRight,    // Apply border to right edge of selection
     BordersClear,    // Clear all borders from selected cells
 ]);
 

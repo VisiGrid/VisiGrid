@@ -1178,6 +1178,26 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.apply_borders(BorderApplyMode::Outline, cx);
             this.update_title_if_needed(window, cx);
         }))
+        .on_action(cx.listener(|this, _: &BordersInside, window, cx| {
+            this.apply_borders(BorderApplyMode::Inside, cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &BordersTop, window, cx| {
+            this.apply_borders(BorderApplyMode::Top, cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &BordersBottom, window, cx| {
+            this.apply_borders(BorderApplyMode::Bottom, cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &BordersLeft, window, cx| {
+            this.apply_borders(BorderApplyMode::Left, cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &BordersRight, window, cx| {
+            this.apply_borders(BorderApplyMode::Right, cx);
+            this.update_title_if_needed(window, cx);
+        }))
         .on_action(cx.listener(|this, _: &BordersClear, window, cx| {
             this.apply_borders(BorderApplyMode::Clear, cx);
             this.update_title_if_needed(window, cx);

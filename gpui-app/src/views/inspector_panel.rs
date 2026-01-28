@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, SelectionFormatState, TriState};
+use crate::formatting::BorderApplyMode;
 use crate::mode::InspectorTab;
 use crate::theme::TokenKey;
 use visigrid_engine::formula::parser::{parse, extract_cell_refs};
@@ -1248,6 +1249,8 @@ fn render_format_tab(
         .child(render_text_style_section(&state, text_primary, text_muted, accent, panel_border, cx))
         // Background color section
         .child(render_background_color_section(&state, text_primary, text_muted, accent, panel_border, cx))
+        // Borders section
+        .child(render_borders_section(text_primary, text_muted, panel_border, cx))
         // Font section
         .child(render_font_section(&state, text_primary, text_muted, panel_border, cx))
         // Divider + Clear Formatting
@@ -2363,6 +2366,120 @@ fn render_font_section(
                         .child("Clear")
                 )
         )
+}
+
+fn render_borders_section(
+    text_primary: Hsla,
+    text_muted: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let hint: &str = if cfg!(target_os = "macos") {
+        "\u{2318}\u{21e7}7 Outline \u{00b7} \u{2318}\u{21e7}- Clear"
+    } else {
+        "Ctrl+Shift+7 Outline \u{00b7} Ctrl+Shift+- Clear"
+    };
+
+    section("Borders", panel_border, text_primary)
+        // Row 1: None | Outline | All | Inside
+        .child(
+            div()
+                .flex()
+                .gap_1()
+                .child(
+                    border_preset_btn("None", text_primary, text_muted, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::Clear, cx);
+                        }))
+                )
+                .child(
+                    border_preset_btn("Out", text_primary, text_muted, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::Outline, cx);
+                        }))
+                )
+                .child(
+                    border_preset_btn("All", text_primary, text_muted, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::All, cx);
+                        }))
+                )
+                .child(
+                    border_preset_btn("In", text_primary, text_muted, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::Inside, cx);
+                        }))
+                )
+        )
+        // Row 2: Top | Bottom | Left | Right + Style label
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    border_preset_btn("T", text_primary, text_muted, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::Top, cx);
+                        }))
+                )
+                .child(
+                    border_preset_btn("B", text_primary, text_muted, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::Bottom, cx);
+                        }))
+                )
+                .child(
+                    border_preset_btn("L", text_primary, text_muted, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::Left, cx);
+                        }))
+                )
+                .child(
+                    border_preset_btn("R", text_primary, text_muted, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::Right, cx);
+                        }))
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_size(px(9.0))
+                        .text_color(text_muted.opacity(0.5))
+                        .child("Style: Thin")
+                )
+        )
+        // Shortcut hints
+        .child(
+            div()
+                .text_size(px(9.0))
+                .text_color(text_muted.opacity(0.6))
+                .child(hint)
+        )
+}
+
+fn border_preset_btn(
+    label: &'static str,
+    text_primary: Hsla,
+    _text_muted: Hsla,
+    panel_border: Hsla,
+) -> Stateful<Div> {
+    div()
+        .w(px(24.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(panel_border)
+        .text_size(px(10.0))
+        .text_color(text_primary)
+        .bg(gpui::transparent_black())
+        .hover(|s| s.bg(panel_border.opacity(0.5)))
+        .child(label)
+        .id(SharedString::from(format!("border-{}", label)))
 }
 
 fn render_number_format_section(

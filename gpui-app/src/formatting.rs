@@ -15,6 +15,16 @@ pub enum BorderApplyMode {
     All,
     /// Apply thin black borders only to the outer perimeter of the selection
     Outline,
+    /// Apply thin black borders only to internal edges (not outer perimeter)
+    Inside,
+    /// Apply thin black border to the top edge of the selection
+    Top,
+    /// Apply thin black border to the bottom edge of the selection
+    Bottom,
+    /// Apply thin black border to the left edge of the selection
+    Left,
+    /// Apply thin black border to the right edge of the selection
+    Right,
     /// Clear all borders from selected cells
     Clear,
 }
@@ -482,6 +492,74 @@ impl Spreadsheet {
                         }
                     }
                 }
+                BorderApplyMode::Inside => {
+                    // Internal edges only: vertical internals as right edges,
+                    // horizontal internals as bottom edges (precedence-aligned).
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            let is_internal_h = row < max_row;
+                            let is_internal_v = col < max_col;
+                            if !is_internal_h && !is_internal_v {
+                                continue;
+                            }
+                            let before = self.sheet(cx).get_format(row, col);
+                            if is_internal_h {
+                                self.active_sheet_mut(cx, |s| s.set_border_bottom(row, col, thin));
+                            }
+                            if is_internal_v {
+                                self.active_sheet_mut(cx, |s| s.set_border_right(row, col, thin));
+                            }
+                            let after = self.sheet(cx).get_format(row, col);
+                            if before != after {
+                                patches.push(CellFormatPatch { row, col, before, after });
+                            }
+                        }
+                    }
+                }
+                BorderApplyMode::Top => {
+                    // Top edge of selection: set top border on cells in min_row
+                    for col in min_col..=max_col {
+                        let before = self.sheet(cx).get_format(min_row, col);
+                        self.active_sheet_mut(cx, |s| s.set_border_top(min_row, col, thin));
+                        let after = self.sheet(cx).get_format(min_row, col);
+                        if before != after {
+                            patches.push(CellFormatPatch { row: min_row, col, before, after });
+                        }
+                    }
+                }
+                BorderApplyMode::Bottom => {
+                    // Bottom edge of selection: set bottom border on cells in max_row
+                    for col in min_col..=max_col {
+                        let before = self.sheet(cx).get_format(max_row, col);
+                        self.active_sheet_mut(cx, |s| s.set_border_bottom(max_row, col, thin));
+                        let after = self.sheet(cx).get_format(max_row, col);
+                        if before != after {
+                            patches.push(CellFormatPatch { row: max_row, col, before, after });
+                        }
+                    }
+                }
+                BorderApplyMode::Left => {
+                    // Left edge of selection: set left border on cells in min_col
+                    for row in min_row..=max_row {
+                        let before = self.sheet(cx).get_format(row, min_col);
+                        self.active_sheet_mut(cx, |s| s.set_border_left(row, min_col, thin));
+                        let after = self.sheet(cx).get_format(row, min_col);
+                        if before != after {
+                            patches.push(CellFormatPatch { row, col: min_col, before, after });
+                        }
+                    }
+                }
+                BorderApplyMode::Right => {
+                    // Right edge of selection: set right border on cells in max_col
+                    for row in min_row..=max_row {
+                        let before = self.sheet(cx).get_format(row, max_col);
+                        self.active_sheet_mut(cx, |s| s.set_border_right(row, max_col, thin));
+                        let after = self.sheet(cx).get_format(row, max_col);
+                        if before != after {
+                            patches.push(CellFormatPatch { row, col: max_col, before, after });
+                        }
+                    }
+                }
                 BorderApplyMode::Clear => {
                     // Clear all 4 edges on each cell
                     for row in min_row..=max_row {
@@ -553,6 +631,11 @@ impl Spreadsheet {
             let desc = match mode {
                 BorderApplyMode::All => "All borders",
                 BorderApplyMode::Outline => "Outline",
+                BorderApplyMode::Inside => "Inside borders",
+                BorderApplyMode::Top => "Top border",
+                BorderApplyMode::Bottom => "Bottom border",
+                BorderApplyMode::Left => "Left border",
+                BorderApplyMode::Right => "Right border",
                 BorderApplyMode::Clear => "Clear borders",
             };
             self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Border, desc.to_string());

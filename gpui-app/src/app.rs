@@ -2933,6 +2933,11 @@ impl Spreadsheet {
             // Borders
             CommandId::BordersAll => self.apply_borders(BorderApplyMode::All, cx),
             CommandId::BordersOutline => self.apply_borders(BorderApplyMode::Outline, cx),
+            CommandId::BordersInside => self.apply_borders(BorderApplyMode::Inside, cx),
+            CommandId::BordersTop => self.apply_borders(BorderApplyMode::Top, cx),
+            CommandId::BordersBottom => self.apply_borders(BorderApplyMode::Bottom, cx),
+            CommandId::BordersLeft => self.apply_borders(BorderApplyMode::Left, cx),
+            CommandId::BordersRight => self.apply_borders(BorderApplyMode::Right, cx),
             CommandId::BordersClear => self.apply_borders(BorderApplyMode::Clear, cx),
 
             // File
