@@ -86,6 +86,7 @@ pub enum FormatActionKind {
     Bold,
     Italic,
     Underline,
+    Strikethrough,
     Font,
     Alignment,
     VerticalAlignment,

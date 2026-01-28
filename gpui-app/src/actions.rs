@@ -137,6 +137,7 @@ actions!(view, [
     ShowAbout,
     ShowLicense,
     ShowFontPicker,
+    ShowColorPicker,    // Fill Color picker modal
     ShowKeyTips,        // Alt+Space (macOS) - Show keyboard accelerator hints
     // Freeze panes
     FreezeTopRow,      // Freeze first row only
@@ -167,6 +168,7 @@ actions!(format, [
     ToggleBold,
     ToggleItalic,
     ToggleUnderline,
+    ToggleStrikethrough,
     AlignLeft,
     AlignCenter,
     AlignRight,

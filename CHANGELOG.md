@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Color Picker
+
+Full color picker modal replaces the fixed swatch row in the inspector.
+
+- **Fill Color picker** — 6x10 theme grid (tints/shades), 10 standard colors, No Fill, recent colors, hex input
+- **Hex input** — type `#RRGGBB`, `#RGB`, or `rgb(R,G,B)` and press Enter to apply
+- **Smart paste** — paste CSS like `color: #ff6600;` and the color token is extracted automatically
+- **Shift+click** — apply a swatch without closing the picker
+- **Recent colors** — last 10 picks, deduplicated, session-scoped
+- **Pre-populated input** — hex field shows the current cell's color on open
+- **Reusable architecture** — `ColorTarget` enum ready for text color and border color
+
+### Internal
+
+- **`UiState` boundary** — transient picker/dialog state separated from document view-model on `Spreadsheet`
+- **`ui::text_input` helper** — shared input handling (typing, backspace, select-all, paste) for manual text fields
+- **Removed ellipsis overlay** — cells clip silently via `overflow_hidden()`, matching Excel behavior
+
 ## 0.3.5
 
 AI as witness, not author. Explainability without automation.

@@ -106,6 +106,7 @@ pub enum CommandId {
     FormatPercent,
     FormatCells,
     // Background colors
+    FillColor,
     ClearBackground,
     BackgroundYellow,
     BackgroundGreen,
@@ -226,6 +227,7 @@ impl CommandId {
             Self::FormatCurrency => "Format as Currency",
             Self::FormatPercent => "Format as Percent",
             Self::FormatCells => "Format Cells...",
+            Self::FillColor => "Fill Color...",
             Self::ClearBackground => "Background: None",
             Self::BackgroundYellow => "Background: Yellow",
             Self::BackgroundGreen => "Background: Green",
@@ -389,6 +391,7 @@ impl CommandId {
             Self::FormatCurrency => "format number money dollar",
             Self::FormatPercent => "format number percentage",
             Self::FormatCells => "format style number date currency",
+            Self::FillColor => "background color fill paint picker format",
             Self::ClearBackground => "format fill color none clear",
             Self::BackgroundYellow => "format fill color highlight",
             Self::BackgroundGreen => "format fill color highlight",
@@ -488,6 +491,7 @@ impl CommandId {
             Self::FormatCurrency,
             Self::FormatPercent,
             Self::FormatCells,
+            Self::FillColor,
             Self::ClearBackground,
             Self::BackgroundYellow,
             Self::BackgroundGreen,
@@ -631,6 +635,7 @@ impl CommandId {
             | Self::FormatPercent
             | Self::FormatCells
             | Self::SelectFont
+            | Self::FillColor
             | Self::ClearBackground
             | Self::BackgroundYellow
             | Self::BackgroundGreen

@@ -6,6 +6,7 @@ mod ai;
 mod app;
 mod autocomplete;
 mod clipboard;
+mod color_palette;
 mod command_palette;
 mod default_app;
 mod default_app_prompt;

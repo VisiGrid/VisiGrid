@@ -300,6 +300,7 @@ fn format_to_lua(
         FormatActionKind::Bold => format!("bold={}", first.after.bold),
         FormatActionKind::Italic => format!("italic={}", first.after.italic),
         FormatActionKind::Underline => format!("underline={}", first.after.underline),
+        FormatActionKind::Strikethrough => format!("strikethrough={}", first.after.strikethrough),
         FormatActionKind::Font => {
             if let Some(ref font) = first.after.font_family {
                 format!("font={}", lua_escape(font))
@@ -335,6 +336,7 @@ fn format_to_lua(
             if first.after.bold { props.push("bold=true"); }
             if first.after.italic { props.push("italic=true"); }
             if first.after.underline { props.push("underline=true"); }
+            if first.after.strikethrough { props.push("strikethrough=true"); }
             if first.after.background_color.is_some() { props.push("bg=..."); }
             if !props.is_empty() {
                 props.join(", ")

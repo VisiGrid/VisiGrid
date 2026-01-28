@@ -751,6 +751,11 @@ impl Sheet {
         cell.format.underline = value;
     }
 
+    pub fn set_strikethrough(&mut self, row: usize, col: usize, value: bool) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.strikethrough = value;
+    }
+
     pub fn set_alignment(&mut self, row: usize, col: usize, alignment: Alignment) {
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format.alignment = alignment;

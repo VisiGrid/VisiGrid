@@ -549,7 +549,7 @@ impl Spreadsheet {
         // Query empty and no scope - do nothing (Esc closes palette)
     }
 
-    pub fn palette_execute(&mut self, cx: &mut Context<Self>) {
+    pub fn palette_execute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = self.palette_results.get(self.palette_selected).cloned() {
             // Clear palette state - don't restore since we're executing
             self.palette_query.clear();
@@ -557,7 +557,7 @@ impl Spreadsheet {
             self.palette_results.clear();
             self.palette_previewing = false;  // Clear previewing flag
 
-            self.dispatch_action(item.action, cx);
+            self.dispatch_action(item.action, window, cx);
             // Only return to Navigation if action didn't change mode
             if self.mode == Mode::Command {
                 self.mode = Mode::Navigation;
@@ -569,7 +569,7 @@ impl Spreadsheet {
     }
 
     /// Execute secondary action (Ctrl+Enter) for selected palette item
-    pub fn palette_execute_secondary(&mut self, cx: &mut Context<Self>) {
+    pub fn palette_execute_secondary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = self.palette_results.get(self.palette_selected).cloned() {
             if let Some(secondary) = item.secondary_action {
                 // Clear palette state
@@ -578,7 +578,7 @@ impl Spreadsheet {
                 self.palette_results.clear();
                 self.palette_previewing = false;
 
-                self.dispatch_action(secondary, cx);
+                self.dispatch_action(secondary, window, cx);
                 if self.mode == Mode::Command {
                     self.mode = Mode::Navigation;
                 }
@@ -592,11 +592,14 @@ impl Spreadsheet {
     }
 
     // Font Picker
-    pub fn show_font_picker(&mut self, cx: &mut Context<Self>) {
+    pub fn show_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.lua_console.visible = false;
         self.mode = Mode::FontPicker;
         self.font_picker_query.clear();
         self.font_picker_selected = 0;
+        self.font_picker_scroll_offset = 0;
+        // Focus the picker so first click is an activation click, not a focus click
+        window.focus(&self.font_picker_focus, cx);
         cx.notify();
     }
 
@@ -604,12 +607,20 @@ impl Spreadsheet {
         self.mode = Mode::Navigation;
         self.font_picker_query.clear();
         self.font_picker_selected = 0;
+        self.font_picker_scroll_offset = 0;
         cx.notify();
     }
+
+    /// Maximum visible items in the font list
+    const FONT_PICKER_VISIBLE: usize = 12;
 
     pub fn font_picker_up(&mut self, cx: &mut Context<Self>) {
         if self.font_picker_selected > 0 {
             self.font_picker_selected -= 1;
+            // Keep selected item visible
+            if self.font_picker_selected < self.font_picker_scroll_offset {
+                self.font_picker_scroll_offset = self.font_picker_selected;
+            }
             cx.notify();
         }
     }
@@ -618,19 +629,38 @@ impl Spreadsheet {
         let filtered = self.filter_fonts();
         if self.font_picker_selected + 1 < filtered.len() {
             self.font_picker_selected += 1;
+            // Keep selected item visible
+            if self.font_picker_selected >= self.font_picker_scroll_offset + Self::FONT_PICKER_VISIBLE {
+                self.font_picker_scroll_offset = self.font_picker_selected + 1 - Self::FONT_PICKER_VISIBLE;
+            }
             cx.notify();
         }
+    }
+
+    pub fn font_picker_scroll(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let filtered_len = self.filter_fonts().len();
+        let max_offset = filtered_len.saturating_sub(Self::FONT_PICKER_VISIBLE);
+        if delta > 0 {
+            // Scroll down
+            self.font_picker_scroll_offset = (self.font_picker_scroll_offset + delta as usize).min(max_offset);
+        } else {
+            // Scroll up
+            self.font_picker_scroll_offset = self.font_picker_scroll_offset.saturating_sub((-delta) as usize);
+        }
+        cx.notify();
     }
 
     pub fn font_picker_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
         self.font_picker_query.push(c);
         self.font_picker_selected = 0;
+        self.font_picker_scroll_offset = 0;
         cx.notify();
     }
 
     pub fn font_picker_backspace(&mut self, cx: &mut Context<Self>) {
         self.font_picker_query.pop();
         self.font_picker_selected = 0;
+        self.font_picker_scroll_offset = 0;
         cx.notify();
     }
 
@@ -656,40 +686,100 @@ impl Spreadsheet {
             .collect()
     }
 
-    /// Apply font to all cells in current selection
+    /// Apply font to all cells in current selection (with history)
     pub fn apply_font_to_selection(&mut self, font_name: &str, cx: &mut Context<Self>) {
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
         let font = if font_name.is_empty() { None } else { Some(font_name.to_string()) };
+        self.set_font_family_selection(font, cx);
+    }
 
-        self.active_sheet_mut(cx, |sheet| {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    sheet.set_font_family(row, col, font.clone());
-                }
-            }
-        });
+    /// Clear font from selection (reset to default, with history)
+    pub fn clear_font_from_selection(&mut self, cx: &mut Context<Self>) {
+        self.set_font_family_selection(None, cx);
+    }
 
-        self.is_modified = true;
-        let cell_count = (max_row - min_row + 1) * (max_col - min_col + 1);
-        self.status_message = Some(format!("Applied font '{}' to {} cell(s)", font_name, cell_count));
+    // Color Picker
+    pub fn show_color_picker(&mut self, target: crate::color_palette::ColorTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.lua_console.visible = false;
+        self.mode = Mode::ColorPicker;
+        self.ui.color_picker.target = target;
+        self.ui.color_picker.reset();
+        // Pre-populate hex input with current cell's color
+        let (row, col) = self.view_state.selected;
+        let current = self.sheet(cx).get_background_color(row, col);
+        if let Some(color) = current {
+            self.ui.color_picker.hex_input = crate::color_palette::to_hex(color);
+        }
+        window.focus(&self.ui.color_picker.focus, cx);
         cx.notify();
     }
 
-    /// Clear font from selection (reset to default)
-    pub fn clear_font_from_selection(&mut self, cx: &mut Context<Self>) {
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-
-        self.active_sheet_mut(cx, |sheet| {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    sheet.set_font_family(row, col, None);
-                }
-            }
-        });
-
-        self.is_modified = true;
-        self.status_message = Some("Cleared font from selection".to_string());
+    pub fn hide_color_picker(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        self.ui.color_picker.reset();
         cx.notify();
+    }
+
+    pub fn apply_color_from_picker(&mut self, color: Option<[u8; 4]>, window: &mut Window, cx: &mut Context<Self>) {
+        match self.ui.color_picker.target {
+            crate::color_palette::ColorTarget::Fill => {
+                self.set_background_color(color, cx);
+            }
+        }
+        if let Some(c) = color {
+            self.ui.color_picker.push_recent(c);
+        }
+        window.focus(&self.ui.color_picker.focus, cx);
+    }
+
+    /// Handle a key-down event while the color picker is focused.
+    ///
+    /// Returns `true` if the event was consumed.
+    pub fn color_picker_handle_key(
+        &mut self,
+        key: &str,
+        key_char: Option<&str>,
+        has_modifier: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::ui::text_input::{handle_input_key, InputAction};
+        let cp = &mut self.ui.color_picker;
+        match handle_input_key(&mut cp.hex_input, &mut cp.all_selected, key, key_char, has_modifier) {
+            InputAction::Changed => { cx.notify(); true }
+            InputAction::Submit => { self.color_picker_execute(window, cx); true }
+            InputAction::Cancel => { self.hide_color_picker(cx); true }
+            InputAction::Ignored => false,
+        }
+    }
+
+    pub fn color_picker_paste(&mut self, cx: &mut Context<Self>) {
+        if let Some(item) = cx.read_from_clipboard() {
+            if let Some(text) = item.text() {
+                // Smart extraction: if pasted text contains a color token, use just that
+                let to_insert = crate::color_palette::extract_color_token(&text)
+                    .unwrap_or_else(|| {
+                        text.trim().chars().filter(|c| !c.is_control()).collect()
+                    });
+                crate::ui::text_input::handle_input_paste(
+                    &mut self.ui.color_picker.hex_input,
+                    &mut self.ui.color_picker.all_selected,
+                    &to_insert,
+                );
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn color_picker_select_all(&mut self, cx: &mut Context<Self>) {
+        crate::ui::text_input::handle_input_select_all(&mut self.ui.color_picker.all_selected);
+        cx.notify();
+    }
+
+    pub fn color_picker_execute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(color) = crate::color_palette::parse_hex_color(&self.ui.color_picker.hex_input) {
+            self.apply_color_from_picker(Some(color), window, cx);
+        }
+        self.hide_color_picker(cx);
     }
 
     // Theme Picker

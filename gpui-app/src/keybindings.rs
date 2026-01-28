@@ -172,6 +172,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Format
         KeyBinding::new(&kb(m, "b"), ToggleBold, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "i"), ToggleItalic, Some("Spreadsheet")),
+        KeyBinding::new(&kb(m, "5"), ToggleStrikethrough, Some("Spreadsheet")),  // Excel: Ctrl+5
 
         // Number formats (Mod+Shift+4 = $, Mod+Shift+5 = %)
         KeyBinding::new(&kb_shift(m, "4"), FormatCurrency, Some("Spreadsheet")),

@@ -463,6 +463,7 @@ pub struct SelectionFormatState {
     pub bold: TriState<bool>,
     pub italic: TriState<bool>,
     pub underline: TriState<bool>,
+    pub strikethrough: TriState<bool>,
     pub font_family: TriState<Option<String>>,
     pub alignment: TriState<Alignment>,
     pub vertical_alignment: TriState<VerticalAlignment>,
@@ -479,6 +480,7 @@ impl Default for SelectionFormatState {
             bold: TriState::Empty,
             italic: TriState::Empty,
             underline: TriState::Empty,
+            strikethrough: TriState::Empty,
             font_family: TriState::Empty,
             alignment: TriState::Empty,
             vertical_alignment: TriState::Empty,
@@ -1428,6 +1430,23 @@ impl CellRect {
     }
 }
 
+/// Transient UI state that is never serialized.
+///
+/// Non-persisted, ephemeral view state for pickers and dialogs.
+///
+/// **Rule:** Focus handles, query strings, cursor positions, selection
+/// indices, and recent-item lists belong here — NOT on `Spreadsheet`.
+/// `Spreadsheet` owns the document view-model (workbook, history,
+/// selection, scroll, mode). `UiState` owns transient dialog chrome
+/// that is never serialized and has no undo semantics.
+///
+/// Color picker is the first occupant. Font picker, theme picker,
+/// goto/find dialogs, command palette, etc. should migrate here
+/// incrementally (opportunistic, not a scheduled refactor).
+pub struct UiState {
+    pub color_picker: crate::color_palette::ColorPickerState,
+}
+
 pub struct Spreadsheet {
     // Core data
     /// The shared workbook entity. All mutations must go through update(cx, ...).
@@ -1560,6 +1579,11 @@ pub struct Spreadsheet {
     pub available_fonts: Vec<String>,      // System fonts
     pub font_picker_query: String,         // Filter query
     pub font_picker_selected: usize,       // Selected item index
+    pub font_picker_scroll_offset: usize,  // First visible item in list
+    pub font_picker_focus: FocusHandle,    // Focus handle for the picker dialog
+
+    // Transient UI state (not serialized — see UiState doc)
+    pub ui: UiState,
 
     // Theme picker state
     pub theme_picker_query: String,        // Filter query
@@ -1855,6 +1879,10 @@ impl Spreadsheet {
 
         let focus_handle = cx.focus_handle();
         let console_focus_handle = cx.focus_handle();
+        let font_picker_focus = cx.focus_handle();
+        let ui = UiState {
+            color_picker: crate::color_palette::ColorPickerState::new(cx.focus_handle()),
+        };
         window.focus(&focus_handle, cx);
         let window_size = window.viewport_size();
         let window_handle = window.window_handle();
@@ -1929,6 +1957,8 @@ impl Spreadsheet {
             pending_title_refresh: false,
             focus_handle,
             console_focus_handle,
+            font_picker_focus,
+            ui,
             status_message: None,
             window_size,
             cached_window_bounds: Some(window.window_bounds()),
@@ -1949,6 +1979,7 @@ impl Spreadsheet {
             available_fonts: Self::enumerate_fonts(),
             font_picker_query: String::new(),
             font_picker_selected: 0,
+            font_picker_scroll_offset: 0,
             theme_picker_query: String::new(),
             theme_picker_selected: 0,
             dragging_selection: false,
@@ -2615,24 +2646,96 @@ impl Spreadsheet {
         format!("{}%", percent)
     }
 
-    /// Enumerate available system fonts
+    /// Enumerate available system fonts.
+    ///
+    /// Uses platform-native APIs where available (macOS Core Text, Linux fontconfig),
+    /// with hardcoded fallbacks for safety.
     fn enumerate_fonts() -> Vec<String> {
-        // Fonts commonly installed on Linux systems
-        // TODO: Could use fontconfig to enumerate dynamically
+        let mut fonts = Self::enumerate_system_fonts();
+        fonts.sort();
+        fonts.dedup();
+        // Filter out hidden/internal fonts (starting with '.' or '#')
+        fonts.retain(|f| !f.starts_with('.') && !f.starts_with('#') && !f.is_empty());
+        fonts
+    }
+
+    #[cfg(target_os = "macos")]
+    fn enumerate_system_fonts() -> Vec<String> {
+        use core_text::font_manager;
+
+        let cf_names = font_manager::copy_available_font_family_names();
+        let count = cf_names.len();
+        let mut names = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            if let Some(name) = cf_names.get(i) {
+                let s: String = name.to_string();
+                if !s.is_empty() {
+                    names.push(s);
+                }
+            }
+        }
+
+        if names.is_empty() {
+            // Fallback if Core Text fails
+            return vec![
+                "Menlo".into(), "Monaco".into(), "Courier New".into(),
+                "Helvetica".into(), "Arial".into(), "Times New Roman".into(),
+                "Georgia".into(), "Verdana".into(),
+            ];
+        }
+
+        names
+    }
+
+    #[cfg(target_os = "linux")]
+    fn enumerate_system_fonts() -> Vec<String> {
+        // Use fontconfig CLI (standard on Linux desktops)
+        if let Ok(output) = std::process::Command::new("fc-list")
+            .args([":family", "--format=%{family}\n"])
+            .output()
+        {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let names: Vec<String> = text
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    // fc-list returns comma-separated variants; take first
+                    .map(|l| l.split(',').next().unwrap_or(l).trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                if !names.is_empty() {
+                    return names;
+                }
+            }
+        }
+
+        // Fallback
         vec![
-            "Adwaita Mono".to_string(),
-            "Adwaita Sans".to_string(),
-            "CaskaydiaMono Nerd Font".to_string(),
-            "iA Writer Mono S".to_string(),
-            "iA Writer Duo S".to_string(),
-            "iA Writer Quattro S".to_string(),
-            "Liberation Mono".to_string(),
-            "Liberation Sans".to_string(),
-            "Liberation Serif".to_string(),
-            "Nimbus Mono PS".to_string(),
-            "Nimbus Sans".to_string(),
-            "Nimbus Roman".to_string(),
-            "Noto Sans Mono".to_string(),
+            "DejaVu Sans".into(), "DejaVu Sans Mono".into(), "DejaVu Serif".into(),
+            "Liberation Mono".into(), "Liberation Sans".into(), "Liberation Serif".into(),
+            "Noto Sans".into(), "Noto Sans Mono".into(),
+        ]
+    }
+
+    #[cfg(target_os = "windows")]
+    fn enumerate_system_fonts() -> Vec<String> {
+        // No easy zero-dep enumeration on Windows; use safe defaults
+        // These fonts ship with every Windows installation since Vista+
+        vec![
+            "Consolas".into(), "Cascadia Mono".into(), "Courier New".into(),
+            "Arial".into(), "Calibri".into(), "Cambria".into(),
+            "Times New Roman".into(), "Georgia".into(), "Verdana".into(),
+            "Segoe UI".into(), "Tahoma".into(), "Trebuchet MS".into(),
+            "Lucida Console".into(), "Comic Sans MS".into(),
+        ]
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    fn enumerate_system_fonts() -> Vec<String> {
+        vec![
+            "Courier New".into(), "Arial".into(), "Times New Roman".into(),
+            "Georgia".into(), "Verdana".into(),
         ]
     }
 
@@ -2684,9 +2787,9 @@ impl Spreadsheet {
     }
 
     /// Execute a search action from the command palette
-    pub fn dispatch_action(&mut self, action: SearchAction, cx: &mut Context<Self>) {
+    pub fn dispatch_action(&mut self, action: SearchAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            SearchAction::RunCommand(cmd) => self.dispatch_command(cmd, cx),
+            SearchAction::RunCommand(cmd) => self.dispatch_command(cmd, window, cx),
             SearchAction::JumpToCell { row, col } => {
                 self.view_state.selected = (row, col);
                 self.view_state.selection_end = None;
@@ -2762,7 +2865,7 @@ impl Spreadsheet {
     }
 
     /// Execute a command by its stable ID
-    pub fn dispatch_command(&mut self, cmd: CommandId, cx: &mut Context<Self>) {
+    pub fn dispatch_command(&mut self, cmd: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         // Track as recently used command
         self.add_recent_command(cmd.clone());
 
@@ -2812,6 +2915,7 @@ impl Spreadsheet {
             }
 
             // Background colors
+            CommandId::FillColor => self.show_color_picker(crate::color_palette::ColorTarget::Fill, window, cx),
             CommandId::ClearBackground => self.set_background_color(None, cx),
             CommandId::BackgroundYellow => self.set_background_color(Some([255, 255, 0, 255]), cx),
             CommandId::BackgroundGreen => self.set_background_color(Some([198, 239, 206, 255]), cx),
@@ -2839,7 +2943,7 @@ impl Spreadsheet {
 
             // Appearance
             CommandId::SelectTheme => self.show_theme_picker(cx),
-            CommandId::SelectFont => self.show_font_picker(cx),
+            CommandId::SelectFont => self.show_font_picker(window, cx),
 
             // View
             CommandId::ToggleInspector => {
@@ -3642,6 +3746,18 @@ impl Spreadsheet {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     self.active_sheet_mut(cx, |s| s.toggle_underline(row, col));
+                }
+            }
+        }
+        self.is_modified = true;
+        cx.notify();
+    }
+
+    pub fn toggle_strikethrough(&mut self, cx: &mut Context<Self>) {
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    self.active_sheet_mut(cx, |s| s.toggle_strikethrough(row, col));
                 }
             }
         }

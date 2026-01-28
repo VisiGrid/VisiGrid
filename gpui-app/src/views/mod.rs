@@ -1,6 +1,7 @@
 mod about_dialog;
 mod ai_settings_dialog;
 mod ask_ai_dialog;
+mod color_picker;
 pub mod command_palette;
 mod hub_dialogs;
 mod export_report_dialog;
@@ -78,6 +79,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_ask_ai = app.mode == Mode::AskAI;
     let show_explain_diff = app.mode == Mode::ExplainDiff;
     let show_paste_special = app.mode == Mode::PasteSpecial;
+    let show_color_picker = app.mode == Mode::ColorPicker;
     let show_keytips = app.keytips_active;
     let show_rewind_confirm = app.rewind_confirm.visible;
     let show_rewind_success = app.rewind_success.visible;
@@ -394,6 +396,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.update_edit_scroll(window);
         }))
         .on_action(cx.listener(|this, _: &SelectAll, window, cx| {
+            if this.mode == Mode::ColorPicker {
+                this.color_picker_select_all(cx);
+                return;
+            }
             if this.mode == Mode::Edit {
                 this.select_all_edit(cx);
             } else {
@@ -527,6 +533,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
                 return;
             }
+            // Color picker: paste into hex input
+            if this.mode == Mode::ColorPicker {
+                this.color_picker_paste(cx);
+                return;
+            }
             this.paste(cx);
             this.update_edit_scroll(window);
             this.update_title_if_needed(window, cx);
@@ -628,9 +639,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
             // Handle Enter key based on current mode
             match this.mode {
+                Mode::ColorPicker => this.color_picker_execute(window, cx),
                 Mode::ThemePicker => this.theme_picker_execute(cx),
                 Mode::FontPicker => this.font_picker_execute(cx),
-                Mode::Command => this.palette_execute(cx),
+                Mode::Command => this.palette_execute(window, cx),
                 Mode::GoTo => this.confirm_goto(cx),
                 Mode::CreateNamedRange => this.confirm_create_named_range(cx),
                 _ => {
@@ -693,6 +705,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.hide_find(cx);
             } else if this.mode == Mode::FontPicker {
                 this.hide_font_picker(cx);
+            } else if this.mode == Mode::ColorPicker {
+                this.hide_color_picker(cx);
             } else if this.mode == Mode::ThemePicker {
                 this.hide_theme_picker(cx);
             } else if this.mode == Mode::About {
@@ -802,7 +816,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 cx.notify();
                 return;
             }
-            if this.mode == Mode::Command {
+            if this.mode == Mode::ColorPicker {
+                this.color_picker_handle_key("backspace", None, false, window, cx);
+            } else if this.mode == Mode::Command {
                 this.palette_backspace(cx);
             } else if this.mode == Mode::GoTo {
                 this.goto_backspace(cx);
@@ -1100,6 +1116,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.toggle_underline(cx);
             this.update_title_if_needed(window, cx);
         }))
+        .on_action(cx.listener(|this, _: &ToggleStrikethrough, window, cx| {
+            this.toggle_strikethrough(cx);
+            this.update_title_if_needed(window, cx);
+        }))
         .on_action(cx.listener(|this, _: &FormatCurrency, window, cx| {
             this.format_currency(cx);
             this.update_title_if_needed(window, cx);
@@ -1235,8 +1255,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &ShowLicense, _, cx| {
             this.show_license(cx);
         }))
-        .on_action(cx.listener(|this, _: &ShowFontPicker, _, cx| {
-            this.show_font_picker(cx);
+        .on_action(cx.listener(|this, _: &ShowFontPicker, window, cx| {
+            this.show_font_picker(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ShowColorPicker, window, cx| {
+            this.show_color_picker(crate::color_palette::ColorTarget::Fill, window, cx);
         }))
         .on_action(cx.listener(|this, _: &ShowKeyTips, _, cx| {
             this.toggle_keytips(cx);
@@ -1616,13 +1639,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     "enter" => {
                         if event.keystroke.modifiers.control {
                             // Ctrl+Enter = secondary action (copy path, copy ref, show help)
-                            this.palette_execute_secondary(cx);
+                            this.palette_execute_secondary(window, cx);
                         } else if event.keystroke.modifiers.shift {
                             // Shift+Enter = preview (apply without closing)
                             this.palette_preview(cx);
                         } else {
                             // Plain Enter = execute and close
-                            this.palette_execute(cx);
+                            this.palette_execute(window, cx);
                         }
                         return;
                     }
@@ -1692,6 +1715,23 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                         }
                         return;
                     }
+                }
+            }
+
+            // Handle Color Picker mode
+            if this.mode == Mode::ColorPicker {
+                let has_modifier = event.keystroke.modifiers.control
+                    || event.keystroke.modifiers.alt
+                    || event.keystroke.modifiers.platform;
+                let key_char = event.keystroke.key_char.as_deref();
+                if this.color_picker_handle_key(
+                    event.keystroke.key.as_str(),
+                    key_char,
+                    has_modifier,
+                    window,
+                    cx,
+                ) {
+                    return;
                 }
             }
 
@@ -2541,6 +2581,37 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(!zen_mode, |div| {
             div.child(status_bar::render_status_bar(app, editing, cx))
         })
+        // Inspector panel (right-side drawer) with click-outside-to-close backdrop.
+        // Rendered BEFORE modal overlays so modals sit on top in z-order.
+        .when(show_inspector, |d| {
+            d.child(
+                gpui::div()
+                    .id("inspector-backdrop")
+                    .absolute()
+                    .inset_0()
+                    // Transparent background makes the element "hit testable" - without this,
+                    // GPUI may pass events through to elements behind it
+                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
+                    // Click backdrop to close inspector (outside the panel)
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        // Don't close inspector when a modal overlay is open -
+                        // the modal should handle the click, not us
+                        if this.mode.is_overlay() {
+                            return;
+                        }
+                        // Stop propagation first to prevent grid from receiving this event
+                        cx.stop_propagation();
+                        this.inspector_visible = false;
+                        cx.notify();
+                    }))
+                    // Also stop mouse up to prevent any grid selection from completing
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    // The panel itself stops propagation so clicks on it don't close
+                    .child(inspector_panel::render_inspector_panel(app, cx))
+            )
+        })
         .when(show_goto, |div| {
             div.child(goto_dialog::render_goto_dialog(app))
         })
@@ -2552,6 +2623,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_font_picker, |div| {
             div.child(font_picker::render_font_picker(app, cx))
+        })
+        .when(show_color_picker, |div| {
+            div.child(color_picker::render_color_picker(app, cx))
         })
         .when(show_theme_picker, |div| {
             div.child(theme_picker::render_theme_picker(app, cx))
@@ -2658,32 +2732,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when_some(validation_dropdown_view::render_validation_dropdown(app, cx), |div, dropdown| {
             div.child(dropdown)
         })
-        // Inspector panel (right-side drawer) with click-outside-to-close backdrop
-        // The backdrop captures all mouse events to prevent grid interaction
-        .when(show_inspector, |d| {
-            d.child(
-                gpui::div()
-                    .id("inspector-backdrop")
-                    .absolute()
-                    .inset_0()
-                    // Transparent background makes the element "hit testable" - without this,
-                    // GPUI may pass events through to elements behind it
-                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
-                    // Click backdrop to close inspector (outside the panel)
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        // Stop propagation first to prevent grid from receiving this event
-                        cx.stop_propagation();
-                        this.inspector_visible = false;
-                        cx.notify();
-                    }))
-                    // Also stop mouse up to prevent any grid selection from completing
-                    .on_mouse_up(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    // The panel itself stops propagation so clicks on it don't close
-                    .child(inspector_panel::render_inspector_panel(app, cx))
-            )
-        })
+        // Inspector panel was moved above modal overlays (rendered after status bar)
+        // so that modals sit on top in z-order and receive clicks first.
         // NOTE: Autocomplete, signature help, and error banner popups are now rendered
         // in the grid overlay layer (grid.rs::render_popup_overlay) where they can be
         // positioned relative to the cell rect without menu/formula bar offset math.

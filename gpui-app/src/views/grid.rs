@@ -894,17 +894,18 @@ fn render_cell(
         if !use_spill_overlay {
             let text_content: SharedString = value.clone().into();
 
-            // Check if any formatting is applied
-            let has_formatting = format.bold || format.italic || format.underline;
+            // Check if any formatting is applied (font_family IS formatting)
+            let has_formatting = format.bold
+                || format.italic
+                || format.underline
+                || format.strikethrough
+                || format.font_family.is_some();
 
             if has_formatting {
-                // Get base text style from window and apply cell formatting
+                // Build text style with ALL formatting properties
                 let mut text_style = window.text_style();
                 text_style.color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
 
-                // Note: Bold/italic font variants may not render on Linux due to gpui limitations
-                // with cosmic-text font selection. Underline works because it's drawn separately.
-                // See: https://github.com/zed-industries/zed - Linux text system TODOs
                 if format.bold {
                     text_style.font_weight = FontWeight::BOLD;
                 }
@@ -917,6 +918,16 @@ fn render_cell(
                         ..Default::default()
                     });
                 }
+                if format.strikethrough {
+                    text_style.strikethrough = Some(StrikethroughStyle {
+                        thickness: px(1.),
+                        ..Default::default()
+                    });
+                }
+                // Font family must be on text_style for StyledText to use it
+                if let Some(ref family) = format.font_family {
+                    text_style.font_family = family.clone().into();
+                }
 
                 cell = cell.child(StyledText::new(text_content).with_default_highlights(&text_style, []));
             } else {
@@ -924,38 +935,6 @@ fn render_cell(
                 cell = cell.child(text_content);
             }
 
-            // Show ellipsis indicator when text is clipped (overflows but doesn't spill).
-            // This makes it clear the text is truncated, not missing.
-            // Excel-accurate: only left-aligned text spills, center/right is clipped.
-            //
-            // Conditions for ellipsis:
-            // - Text overflows cell width (is_text_overflow)
-            // - Cell is NOT in edit mode (already true - we're in the else branch)
-            // - Spill is NOT active (already true - we're in !use_spill_overlay block)
-            let is_clipped = is_text_overflow(&value, col_width, app, window);
-            if is_clipped {
-                // Ellipsis with cell background for fade effect, text at 70% opacity for visibility
-                let bg = cell_base_background(app, is_editing, format.background_color);
-                let text_color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
-                let ellipsis_color = text_color.opacity(0.7); // Visible but subtle
-
-                cell = cell.child(
-                    div()
-                        .absolute()
-                        .right(px(1.0))  // Inside border
-                        .top(px(1.0))
-                        .bottom(px(1.0))
-                        .w(px(14.0))
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .pr(px(2.0))
-                        .bg(bg)  // Fade effect using cell background
-                        .text_color(ellipsis_color)
-                        .text_size(px(10.0))
-                        .child("…")
-                );
-            }
         }
         // If use_spill_overlay is true, text is rendered by render_text_spill_overlay() instead
     }
@@ -1236,46 +1215,6 @@ fn calculate_text_spill(
     } else {
         None
     }
-}
-
-/// Check if text overflows the cell width (used for ellipsis indicator).
-/// Returns true if text is wider than available cell width.
-#[inline]
-fn is_text_overflow(
-    text: &str,
-    cell_width: f32,
-    app: &Spreadsheet,
-    window: &Window,
-) -> bool {
-    if text.is_empty() {
-        return false;
-    }
-
-    let text_shared: SharedString = text.to_string().into();
-    let text_len = text_shared.len();
-    if text_len == 0 {
-        return false;
-    }
-
-    let shaped = window.text_system().shape_line(
-        text_shared,
-        px(app.metrics.font_size),
-        &[TextRun {
-            len: text_len,
-            font: Font::default(),
-            color: Hsla::default(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        }],
-        None,
-    );
-
-    let text_width: f32 = shaped.width.into();
-    let padding = 8.0; // px_1 = 4px each side
-    let available_width = cell_width - padding;
-
-    text_width > available_width
 }
 
 /// Check if a cell's text should be rendered by the spill overlay instead of the normal cell.
@@ -1888,16 +1827,3 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
 // Tests for spill logic are in visigrid-engine/src/sheet.rs (test_text_spill_*)
 // because the binary crate doesn't support unit tests well.
 //
-// ELLIPSIS SEMANTICS (locked):
-// Ellipsis ("…") shows when ALL of these are true:
-// 1. text_width > cell_width - padding (text overflows)
-// 2. Cell is NOT in edit mode
-// 3. Spill overlay is NOT active for this cell
-//
-// Ellipsis does NOT show when:
-// - Text fits in cell (no overflow)
-// - Cell is being edited (edit mode shows full text)
-// - Spill overlay is active (text is visible via spillover)
-//
-// This matches Excel behavior: only left-aligned text spills,
-// center/right aligned text is clipped with ellipsis indicator.

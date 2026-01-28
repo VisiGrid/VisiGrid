@@ -1247,7 +1247,7 @@ fn render_format_tab(
         // Text style toggles
         .child(render_text_style_section(&state, text_primary, text_muted, accent, panel_border, cx))
         // Background color section
-        .child(render_background_color_section(&state, text_primary, text_muted, accent, panel_border, cx))
+        .child(render_background_color_section(app, text_primary, text_muted, accent, panel_border, cx))
         // Font section
         .child(render_font_section(&state, text_primary, text_muted, panel_border, cx))
 }
@@ -2021,6 +2021,8 @@ fn render_text_style_section(
     let italic_mixed = state.italic.is_mixed();
     let underline_active = matches!(state.underline, TriState::Uniform(true));
     let underline_mixed = state.underline.is_mixed();
+    let strikethrough_active = matches!(state.strikethrough, TriState::Uniform(true));
+    let strikethrough_mixed = state.strikethrough.is_mixed();
 
     section("Text Style", panel_border, text_primary)
         .child(
@@ -2052,6 +2054,15 @@ fn render_text_style_section(
                             let state = this.selection_format_state(cx);
                             let new_value = !matches!(state.underline, TriState::Uniform(true));
                             this.set_underline(new_value, cx);
+                        }))
+                )
+                // Strikethrough button
+                .child(
+                    format_toggle_btn("S", strikethrough_active, strikethrough_mixed, false, text_primary, text_muted, accent, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            let state = this.selection_format_state(cx);
+                            let new_value = !matches!(state.strikethrough, TriState::Uniform(true));
+                            this.set_strikethrough(new_value, cx);
                         }))
                 )
         )
@@ -2099,7 +2110,7 @@ fn format_toggle_btn(
 
     btn = btn.hover(|s| s.bg(panel_border.opacity(0.5)));
 
-    // Apply bold/italic/underline styling to the button label itself
+    // Apply bold/italic/underline/strikethrough styling to the button label itself
     if is_bold_style {
         btn = btn.font_weight(FontWeight::BOLD);
     }
@@ -2109,6 +2120,9 @@ fn format_toggle_btn(
     if label == "U" {
         btn = btn.underline();
     }
+    if label == "S" {
+        btn = btn.line_through();
+    }
 
     // Add child and id last (id converts to Stateful<Div>)
     btn.child(if is_mixed { "—" } else { label })
@@ -2116,56 +2130,77 @@ fn format_toggle_btn(
 }
 
 fn render_background_color_section(
-    _state: &SelectionFormatState,
+    app: &Spreadsheet,
     text_primary: Hsla,
-    _text_muted: Hsla,
-    accent: Hsla,
+    text_muted: Hsla,
+    _accent: Hsla,
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    // Color palette: None + 8 colors
-    let colors: &[(&str, Option<[u8; 4]>)] = &[
-        ("None", None),
-        ("Yellow", Some([255, 255, 0, 255])),
-        ("Green", Some([198, 239, 206, 255])),
-        ("Blue", Some([189, 215, 238, 255])),
-        ("Red", Some([255, 199, 206, 255])),
-        ("Orange", Some([255, 235, 156, 255])),
-        ("Purple", Some([204, 192, 218, 255])),
-        ("Gray", Some([217, 217, 217, 255])),
-        ("Cyan", Some([183, 222, 232, 255])),
-    ];
+    // Get current cell's background color for the chip
+    let (row, col) = app.view_state.selected;
+    let current_bg = app.sheet(cx).get_background_color(row, col);
+    let chip_bg = current_bg
+        .map(|[r, g, b, _]| Hsla::from(gpui::Rgba {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: 1.0,
+        }))
+        .unwrap_or(hsla(0.0, 0.0, 1.0, 1.0));
 
     section("Background", panel_border, text_primary)
         .child(
             div()
                 .flex()
-                .flex_wrap()
-                .gap_1()
-                .children(colors.iter().map(|(name, color)| {
-                    let color_value = *color;
-                    let swatch_bg = color.map(|[r, g, b, _]| {
-                        Hsla::from(gpui::Rgba {
-                            r: r as f32 / 255.0,
-                            g: g as f32 / 255.0,
-                            b: b as f32 / 255.0,
-                            a: 1.0,
-                        })
-                    }).unwrap_or(hsla(0.0, 0.0, 1.0, 1.0));
-
+                .items_center()
+                .gap_2()
+                // Color chip showing current bg
+                .child(
                     div()
-                        .id(SharedString::from(format!("bg-color-{}", name)))
                         .size(px(24.0))
                         .rounded_sm()
                         .border_1()
                         .border_color(panel_border)
-                        .bg(swatch_bg)
+                        .bg(chip_bg)
+                        .flex_shrink_0()
+                )
+                // "Fill Color..." button
+                .child(
+                    div()
+                        .id("format-fill-color-btn")
+                        .flex_1()
+                        .px_2()
+                        .py_1()
+                        .bg(panel_border.opacity(0.2))
+                        .border_1()
+                        .border_color(panel_border)
+                        .rounded_sm()
                         .cursor_pointer()
-                        .hover(|s| s.border_color(accent))
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                            this.set_background_color(color_value, cx);
+                        .text_size(px(11.0))
+                        .text_color(text_primary)
+                        .hover(|s| s.bg(panel_border.opacity(0.4)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                            this.show_color_picker(crate::color_palette::ColorTarget::Fill, window, cx);
                         }))
-                }))
+                        .child("Fill Color...")
+                )
+                // Clear button
+                .child(
+                    div()
+                        .id("format-fill-clear")
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_size(px(10.0))
+                        .text_color(text_muted)
+                        .hover(|s| s.bg(panel_border.opacity(0.4)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.set_background_color(None, cx);
+                        }))
+                        .child("Clear")
+                )
         )
 }
 
@@ -2204,8 +2239,8 @@ fn render_font_section(
                         .text_size(px(11.0))
                         .text_color(text_primary)
                         .hover(|s| s.bg(panel_border.opacity(0.4)))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.show_font_picker(cx);
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                            this.show_font_picker(window, cx);
                         }))
                         .child(SharedString::from(font_display))
                 )

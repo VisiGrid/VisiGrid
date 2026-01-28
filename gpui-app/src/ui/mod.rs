@@ -6,6 +6,7 @@
 mod button;
 mod dialog_frame;
 mod modal;
+pub mod text_input;
 
 pub use button::Button;
 pub use dialog_frame::{DialogFrame, DialogSize, dialog_header_simple, dialog_header_with_subtitle};

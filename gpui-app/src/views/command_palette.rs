@@ -80,8 +80,8 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 .on_action(cx.listener(|this, _: &PaletteDown, _, cx| {
                     this.palette_down(cx);
                 }))
-                .on_action(cx.listener(|this, _: &PaletteExecute, _, cx| {
-                    this.palette_execute(cx);
+                .on_action(cx.listener(|this, _: &PaletteExecute, window, cx| {
+                    this.palette_execute(window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &PalettePreview, _, cx| {
                     this.palette_preview(cx);
@@ -419,10 +419,10 @@ fn render_search_item(
         .py(px(6.0))
         .cursor_pointer()
         .bg(bg_color)
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
             // Select this item and execute
             this.palette_selected = idx;
-            this.palette_execute(cx);
+            this.palette_execute(window, cx);
         }))
         .child(
             div()

@@ -39,6 +39,7 @@ impl Spreadsheet {
                         state.bold = TriState::Uniform(format.bold);
                         state.italic = TriState::Uniform(format.italic);
                         state.underline = TriState::Uniform(format.underline);
+                        state.strikethrough = TriState::Uniform(format.strikethrough);
                         state.font_family = TriState::Uniform(format.font_family.clone());
                         state.alignment = TriState::Uniform(format.alignment);
                         state.vertical_alignment = TriState::Uniform(format.vertical_alignment);
@@ -51,6 +52,7 @@ impl Spreadsheet {
                         state.bold = state.bold.combine(&format.bold);
                         state.italic = state.italic.combine(&format.italic);
                         state.underline = state.underline.combine(&format.underline);
+                        state.strikethrough = state.strikethrough.combine(&format.strikethrough);
                         state.font_family = state.font_family.combine(&format.font_family);
                         state.alignment = state.alignment.combine(&format.alignment);
                         state.vertical_alignment = state.vertical_alignment.combine(&format.vertical_alignment);
@@ -139,6 +141,31 @@ impl Spreadsheet {
         if count > 0 {
             let desc = format!("Underline {}", if value { "on" } else { "off" });
             self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Underline, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Set strikethrough on all selected cells (explicit value, not toggle)
+    pub fn set_strikethrough(&mut self, value: bool, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_strikethrough(row, col, value));
+                    let after = self.sheet(cx).get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let desc = format!("Strikethrough {}", if value { "on" } else { "off" });
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Strikethrough, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
