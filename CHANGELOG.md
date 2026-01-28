@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.6
 
 ### Tab-Chain Return (Excel-Style)
 
@@ -14,11 +14,12 @@ When you Tab across a row entering values, Enter returns you to the next row und
 
 ### Navigation Snappiness
 
-Keystroke-to-paint latency improvements for held-key navigation.
+Improved keyboard navigation responsiveness. Arrow-key navigation now coalesces scroll updates per frame, reducing latency and improving feel — especially on Windows.
 
-- **Latency instrumentation** — debug ring buffer logging key-down → state update → render timestamps (p50/p95)
-- **Scroll coalescing** — scroll adjustment deferred to render start; multiple arrow events per frame compute viewport once
-- **Measured validation** — hold Right Arrow for 2 seconds on a dense sheet; smooth glide, no hitching
+- **Repeat batching** — multiple arrow key repeats within a single frame batch into up to 4 cell moves, matching Excel cursor travel speed during held keys
+- **Scroll coalescing** — scroll adjustment deferred to render start; multiple moves per frame compute viewport once
+- **Latency instrumentation** — debug ring buffer (p50/p95) enabled via `VISIGRID_PERF=nav`, report via command palette with one-click copy
+- **Measured** — key→render p50 ~5ms, p95 ~15ms; state update ~1µs
 
 ### Format Inspector Polish
 
