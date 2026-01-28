@@ -469,6 +469,7 @@ pub struct SelectionFormatState {
     pub vertical_alignment: TriState<VerticalAlignment>,
     pub text_overflow: TriState<TextOverflow>,
     pub number_format: TriState<NumberFormat>,
+    pub background_color: TriState<Option<[u8; 4]>>,
 }
 
 impl Default for SelectionFormatState {
@@ -486,6 +487,7 @@ impl Default for SelectionFormatState {
             vertical_alignment: TriState::Empty,
             text_overflow: TriState::Empty,
             number_format: TriState::Empty,
+            background_color: TriState::Empty,
         }
     }
 }

@@ -45,6 +45,7 @@ impl Spreadsheet {
                         state.vertical_alignment = TriState::Uniform(format.vertical_alignment);
                         state.text_overflow = TriState::Uniform(format.text_overflow);
                         state.number_format = TriState::Uniform(format.number_format);
+                        state.background_color = TriState::Uniform(format.background_color);
                         last_display = Some(display);
                         first = false;
                     } else {
@@ -58,6 +59,7 @@ impl Spreadsheet {
                         state.vertical_alignment = state.vertical_alignment.combine(&format.vertical_alignment);
                         state.text_overflow = state.text_overflow.combine(&format.text_overflow);
                         state.number_format = state.number_format.combine(&format.number_format);
+                        state.background_color = state.background_color.combine(&format.background_color);
                         last_display = Some(display);
                     }
                 }

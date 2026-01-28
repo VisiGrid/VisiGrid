@@ -1247,7 +1247,7 @@ fn render_format_tab(
         // Text style toggles
         .child(render_text_style_section(&state, text_primary, text_muted, accent, panel_border, cx))
         // Background color section
-        .child(render_background_color_section(app, text_primary, text_muted, accent, panel_border, cx))
+        .child(render_background_color_section(&state, text_primary, text_muted, accent, panel_border, cx))
         // Font section
         .child(render_font_section(&state, text_primary, text_muted, panel_border, cx))
 }
@@ -1886,7 +1886,17 @@ fn render_selection_summary(
         TriState::Empty => "Values: —",
     };
 
-    let format_state = if state.number_format.is_mixed() || state.alignment.is_mixed() {
+    let format_state = if state.bold.is_mixed()
+        || state.italic.is_mixed()
+        || state.underline.is_mixed()
+        || state.strikethrough.is_mixed()
+        || state.font_family.is_mixed()
+        || state.alignment.is_mixed()
+        || state.vertical_alignment.is_mixed()
+        || state.text_overflow.is_mixed()
+        || state.number_format.is_mixed()
+        || state.background_color.is_mixed()
+    {
         "Formats: mixed"
     } else {
         "Formats: uniform"
@@ -2130,25 +2140,54 @@ fn format_toggle_btn(
 }
 
 fn render_background_color_section(
-    app: &Spreadsheet,
+    state: &SelectionFormatState,
     text_primary: Hsla,
     text_muted: Hsla,
     _accent: Hsla,
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    // Get current cell's background color for the chip
-    let (row, col) = app.view_state.selected;
-    let current_bg = app.sheet(cx).get_background_color(row, col);
-    let chip_bg = current_bg
-        .map(|[r, g, b, _]| Hsla::from(gpui::Rgba {
-            r: r as f32 / 255.0,
-            g: g as f32 / 255.0,
-            b: b as f32 / 255.0,
-            a: 1.0,
-        }))
-        .unwrap_or(hsla(0.0, 0.0, 1.0, 1.0));
+    // Build color chip based on tri-state
+    let chip_bg = match &state.background_color {
+        TriState::Uniform(Some(c)) => {
+            let [r, g, b, _] = *c;
+            Some(Hsla::from(gpui::Rgba {
+                r: r as f32 / 255.0,
+                g: g as f32 / 255.0,
+                b: b as f32 / 255.0,
+                a: 1.0,
+            }))
+        }
+        TriState::Uniform(None) | TriState::Empty => Some(hsla(0.0, 0.0, 1.0, 1.0)),
+        TriState::Mixed => None,
+    };
 
+    // Chip element: solid when uniform, checkerboard when mixed
+    let chip = if let Some(bg) = chip_bg {
+        div()
+            .size(px(24.0))
+            .rounded_sm()
+            .border_1()
+            .border_color(panel_border)
+            .bg(bg)
+            .flex_shrink_0()
+    } else {
+        // Mixed: 2x2 checkerboard
+        let dark = panel_border.opacity(0.3);
+        let light = hsla(0.0, 0.0, 1.0, 1.0);
+        div()
+            .size(px(24.0))
+            .rounded_sm()
+            .border_1()
+            .border_color(panel_border)
+            .flex_shrink_0()
+            .flex()
+            .flex_wrap()
+            .child(div().w(px(11.0)).h(px(11.0)).bg(dark))
+            .child(div().w(px(11.0)).h(px(11.0)).bg(light))
+            .child(div().w(px(11.0)).h(px(11.0)).bg(light))
+            .child(div().w(px(11.0)).h(px(11.0)).bg(dark))
+    };
     section("Background", panel_border, text_primary)
         .child(
             div()
@@ -2156,15 +2195,7 @@ fn render_background_color_section(
                 .items_center()
                 .gap_2()
                 // Color chip showing current bg
-                .child(
-                    div()
-                        .size(px(24.0))
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(panel_border)
-                        .bg(chip_bg)
-                        .flex_shrink_0()
-                )
+                .child(chip)
                 // "Fill Color..." button
                 .child(
                     div()
@@ -2211,12 +2242,20 @@ fn render_font_section(
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
+    let is_font_mixed = state.font_family.is_mixed();
     let font_display = match &state.font_family {
         TriState::Uniform(Some(f)) => f.clone(),
         TriState::Uniform(None) => "(Default)".to_string(),
         TriState::Mixed => "(Mixed)".to_string(),
         TriState::Empty => "(Default)".to_string(),
     };
+
+    let font_btn_bg = if is_font_mixed {
+        panel_border.opacity(0.3)
+    } else {
+        panel_border.opacity(0.2)
+    };
+    let font_btn_text = if is_font_mixed { text_muted } else { text_primary };
 
     section("Font", panel_border, text_primary)
         .child(
@@ -2231,13 +2270,14 @@ fn render_font_section(
                         .flex_1()
                         .px_2()
                         .py_1()
-                        .bg(panel_border.opacity(0.2))
+                        .bg(font_btn_bg)
                         .border_1()
                         .border_color(panel_border)
                         .rounded_sm()
                         .cursor_pointer()
                         .text_size(px(11.0))
-                        .text_color(text_primary)
+                        .text_color(font_btn_text)
+                        .when(is_font_mixed, |el| el.italic())
                         .hover(|s| s.bg(panel_border.opacity(0.4)))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
                             this.show_font_picker(window, cx);
