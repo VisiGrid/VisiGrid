@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Format Inspector Polish
+
+Excel-grade formatting controls in the inspector panel.
+
+- **Mixed-state visuals** — multi-cell selections show checkerboard fill chip, italic "(Mixed)" font, and "—" toggles when properties differ across cells
+- **"Formats: mixed"** now checks all 10 user-facing properties (bold, italic, underline, strikethrough, font, alignment, vertical alignment, wrap, number format, background color)
+- **Compact layout** — alignment section condensed to 2 rows (H-align + Wrap inline, V-align below), value preview collapses for empty cells, tighter gaps and padding
+- **Keyboard hints** — platform-aware shortcut labels below Text Style (⌘B · ⌘I · ⌘U · ⌘⇧X) and Borders (⌘⇧7 Outline · ⌘⇧- Clear)
+- **Clear Formatting** — resets all format properties to default, single undo step, command palette entry
+
+### Borders Inspector
+
+8 border presets accessible from the Format tab, matching Excel semantics.
+
+- **Preset buttons** — None, Outline, All, Inside, Top, Bottom, Left, Right in a compact 2-row grid
+- **Inside mode** — internal edges only (vertical separators as right edges, horizontal as bottom — aligned with precedence rules)
+- **Single-edge presets** — Top/Bottom/Left/Right apply to the corresponding selection perimeter
+- **Clear canonicalization** — clears inward-facing neighbor edges to prevent ghost borders
+- **"Style: Thin" label** — signals future Medium/Thick support without UI overhead
+
+### Format Painter
+
+Copy formatting from one cell and apply it to others with a single click.
+
+- **Click to capture** — reads the active cell's full CellFormat (bold, italic, fill, borders, number format, font, alignment — everything)
+- **Click to apply** — next cell click applies the captured format and exits the mode
+- **Esc to cancel** — exits painter mode without applying
+- **Single undo step** — one Ctrl+Z reverses the entire paint operation
+- **Command palette** — "Format Painter" with keywords: paint, format, brush
+- **Inspector button** — side by side with Clear Formatting at the bottom of the Format tab
+
 ### Color Picker
 
 Full color picker modal replaces the fixed swatch row in the inspector.
