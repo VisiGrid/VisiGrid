@@ -1696,6 +1696,11 @@ pub struct Spreadsheet {
     pub metrics: GridMetrics,
     zoom_wheel_accumulator: f32,  // For smooth wheel zoom debounce
 
+    // Navigation coalescing: scroll adjustment deferred to render start
+    pub(crate) nav_scroll_dirty: bool,
+    // Navigation latency instrumentation (env VISIGRID_PERF=nav)
+    pub(crate) nav_perf: crate::perf::NavLatencyTracker,
+
     // Link opening state (debounce rapid Ctrl+Enter)
     pub link_open_in_flight: bool,
 
@@ -2098,6 +2103,8 @@ impl Spreadsheet {
             f1_help_visible: false,
             metrics: GridMetrics::default(),
             zoom_wheel_accumulator: 0.0,
+            nav_scroll_dirty: false,
+            nav_perf: crate::perf::NavLatencyTracker::default(),
             link_open_in_flight: false,
 
             lua_runtime: crate::scripting::LuaRuntime::default(),
@@ -2983,6 +2990,12 @@ impl Spreadsheet {
             CommandId::ReturnToTraceSource => self.return_to_trace_source(cx),
             CommandId::ToggleVerifiedMode => self.toggle_verified_mode(cx),
             CommandId::Recalculate => self.recalculate(cx),
+            CommandId::NavPerfReport => {
+                let msg = self.nav_perf.report()
+                    .unwrap_or_else(|| "Nav perf tracking disabled. Set VISIGRID_PERF=nav and restart.".into());
+                self.status_message = Some(msg);
+                cx.notify();
+            }
 
             // Window - dispatch to App-level handler
             CommandId::SwitchWindow => cx.dispatch_action(&crate::actions::SwitchWindow),
@@ -4418,6 +4431,11 @@ impl Spreadsheet {
 
 impl Render for Spreadsheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Flush deferred scroll adjustment (coalesces multiple nav moves per frame)
+        self.flush_nav_scroll();
+        // Record render timestamp for latency instrumentation
+        self.nav_perf.mark_render();
+
         // One-shot title refresh (triggered by async operations without window access)
         if self.pending_title_refresh {
             self.pending_title_refresh = false;

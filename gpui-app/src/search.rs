@@ -159,6 +159,7 @@ pub enum CommandId {
     ReturnToTraceSource,
     ToggleVerifiedMode,
     Recalculate,
+    NavPerfReport,
 
     // Window
     SwitchWindow,
@@ -280,6 +281,7 @@ impl CommandId {
             Self::ReturnToTraceSource => "Return to Trace Source",
             Self::ToggleVerifiedMode => "Toggle Verified Mode",
             Self::Recalculate => "Recalculate All",
+            Self::NavPerfReport => "Navigation Latency Report",
             Self::SwitchWindow => "Switch Window...",
             Self::ExtractNamedRange => "Extract to Named Range...",
             Self::ShowShortcuts => "Show Keyboard Shortcuts",
@@ -481,6 +483,7 @@ impl CommandId {
             Self::ReturnToTraceSource => "trace back return source origin home",
             Self::ToggleVerifiedMode => "verified deterministic recalc audit trust",
             Self::Recalculate => "recalc refresh calculate formulas f9",
+            Self::NavPerfReport => "navigation latency perf performance timing",
         }
     }
 
@@ -588,6 +591,7 @@ impl CommandId {
             Self::HubSignIn,
             Self::HubSignOut,
             Self::HubLinkDialog,
+            Self::NavPerfReport,
         ]
     }
 
@@ -653,7 +657,8 @@ impl CommandId {
             | Self::CycleTraceDependent
             | Self::ReturnToTraceSource
             | Self::ToggleVerifiedMode
-            | Self::AskAI => Some(MenuCategory::Tools),
+            | Self::AskAI
+            | Self::NavPerfReport => Some(MenuCategory::Tools),
 
             // Format menu
             Self::ToggleBold

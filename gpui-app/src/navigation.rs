@@ -101,6 +101,7 @@ impl Spreadsheet {
         view_state.selection_end = None;  // Clear range selection
         view_state.additional_selections.clear();  // Clear discontiguous selections
 
+        self.nav_perf.mark_state_updated();
         self.ensure_visible(cx);
     }
 
@@ -297,7 +298,24 @@ impl Spreadsheet {
     // Visibility / Scrolling
     // =========================================================================
 
+    /// Mark that the scroll position needs to be adjusted to keep the
+    /// selection visible. The actual adjustment is deferred to the start
+    /// of the next render pass, which naturally coalesces multiple
+    /// navigation events within a single frame into one scroll update.
     pub fn ensure_visible(&mut self, cx: &mut Context<Self>) {
+        self.nav_scroll_dirty = true;
+        cx.notify();
+    }
+
+    /// Perform the actual scroll adjustment to keep the active cell visible.
+    /// Called once at the start of `Render::render()` to flush any deferred
+    /// scroll updates — this is the coalescing point.
+    pub(crate) fn flush_nav_scroll(&mut self) {
+        if !self.nav_scroll_dirty {
+            return;
+        }
+        self.nav_scroll_dirty = false;
+
         let visible_rows = self.visible_rows();
         let visible_cols = self.visible_cols();
 
@@ -331,8 +349,6 @@ impl Spreadsheet {
         // Ensure scroll positions don't go below freeze bounds
         view_state.scroll_row = view_state.scroll_row.max(view_state.frozen_rows);
         view_state.scroll_col = view_state.scroll_col.max(view_state.frozen_cols);
-
-        cx.notify();
     }
 
     pub fn scroll(&mut self, delta_rows: i32, delta_cols: i32, cx: &mut Context<Self>) {

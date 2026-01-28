@@ -128,6 +128,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 return;
             }
             // Arrow keys break the tab-chain (only Tab/Enter preserve it)
+            this.nav_perf.mark_key_action();
             this.tab_chain_origin_col = None;
             match this.mode {
                 Mode::Command => this.palette_up(cx),
@@ -172,6 +173,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 return;
             }
             // Arrow keys break the tab-chain (only Tab/Enter preserve it)
+            this.nav_perf.mark_key_action();
             this.tab_chain_origin_col = None;
             match this.mode {
                 Mode::Command => this.palette_down(cx),
@@ -217,9 +219,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
             } else if this.mode.is_editing() {
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
+                this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.confirm_edit_and_move_left(cx);
             } else {
+                this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.move_selection(0, -1, cx);
             }
@@ -259,9 +263,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
             } else if this.mode.is_editing() {
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
+                this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.confirm_edit_and_move_right(cx);
             } else {
+                this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.move_selection(0, 1, cx);
             }
@@ -947,6 +953,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         .on_action(cx.listener(|this, _: &Recalculate, _, cx| {
             this.recalculate(cx);
+        }))
+        .on_action(cx.listener(|this, _: &NavPerfReport, _, cx| {
+            let msg = this.nav_perf.report()
+                .unwrap_or_else(|| "Nav perf tracking disabled. Set VISIGRID_PERF=nav and restart.".into());
+            this.status_message = Some(msg);
+            cx.notify();
         }))
         // Zoom
         .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {

@@ -17,7 +17,7 @@ When you Tab across a row entering values, Enter returns you to the next row und
 Keystroke-to-paint latency improvements for held-key navigation.
 
 - **Latency instrumentation** — debug ring buffer logging key-down → state update → render timestamps (p50/p95)
-- **Repeat coalescing** — multiple arrow key repeats within a single frame collapsed to one selection move
+- **Scroll coalescing** — scroll adjustment deferred to render start; multiple arrow events per frame compute viewport once
 - **Measured validation** — hold Right Arrow for 2 seconds on a dense sheet; smooth glide, no hitching
 
 ### Format Inspector Polish
