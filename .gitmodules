@@ -1,0 +1,3 @@
+[submodule "homebrew-tap"]
+	path = homebrew-tap
+	url = git@github.com:VisiGrid/homebrew-tap.git
