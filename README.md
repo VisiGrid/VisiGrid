@@ -44,6 +44,44 @@ VisiGrid is built to make these failures visible before they matter.
 - **Explainable by default**: Causality is visible. Trust is earned.
 - **No lock-in**: Standard formats. Export freely.
 
+## AI Without Sacrificing Trust
+
+Most AI tools trade explainability for convenience. VisiGrid doesn't.
+
+**The problem**: AI in spreadsheets typically means black-box automation — formulas appear, values change, and you're expected to trust the result. When something goes wrong, there's no audit trail.
+
+**VisiGrid's approach**: AI is a witness, not an author.
+
+### Three Layers of Explainability
+
+1. **Cell-level truth** — Inspector shows formula, value, inputs, dependents. Deterministic, local, zero AI involvement.
+
+2. **Change-level accountability** — Every mutation is tagged: Human vs AI (with provider and timestamp). The diff engine surfaces net effects. AI-touched filter exposes exactly where AI participated.
+
+3. **Narrative understanding** — "Explain this change" and "Explain differences" describe what happened in plain language. Both are optional, bounded, and never modify data.
+
+### What AI Can Do
+
+- Answer questions about your data with formula proposals
+- Summarize what changed between two points in history
+- Explain individual cell changes in 2-4 sentences
+
+### What AI Cannot Do
+
+- Edit cells without your explicit approval
+- Run automatically or in the background
+- Hide its participation (provenance is always visible)
+- Suggest changes from the audit view
+
+### Why This Matters
+
+When you open a workbook six months from now, you can answer:
+- Which values came from AI?
+- What exactly did it change?
+- Can I verify the formula it suggested?
+
+The answer to all three is yes. That's what "explainable" means.
+
 ## Download
 
 Get the latest release from [Releases](https://github.com/VisiGrid/VisiGrid/releases).

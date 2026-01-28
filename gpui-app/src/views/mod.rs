@@ -1,4 +1,6 @@
 mod about_dialog;
+mod ai_settings_dialog;
+mod ask_ai_dialog;
 pub mod command_palette;
 mod hub_dialogs;
 mod export_report_dialog;
@@ -70,6 +72,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_hub_link = app.mode == Mode::HubLink;
     let show_hub_publish_confirm = app.mode == Mode::HubPublishConfirm;
     let show_validation_dialog = app.mode == Mode::ValidationDialog;
+    let show_ai_settings = app.mode == Mode::AISettings;
+    let show_ask_ai = app.mode == Mode::AskAI;
+    let show_explain_diff = app.mode == Mode::ExplainDiff;
     let show_rewind_confirm = app.rewind_confirm.visible;
     let show_rewind_success = app.rewind_success.visible;
     let show_import_overlay = app.import_overlay_visible;
@@ -84,6 +89,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .track_focus(&app.focus_handle)
         // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
+            // Let AI dialogs handle their own keys
+            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+                return;
+            }
             // Validation dropdown navigation takes priority
             if this.is_validation_dropdown_open() {
                 if let Some(state) = this.validation_dropdown.as_open_mut() {
@@ -122,6 +131,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
+            // Let AI dialogs handle their own keys
+            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+                return;
+            }
             // Validation dropdown navigation takes priority
             if this.is_validation_dropdown_open() {
                 if let Some(state) = this.validation_dropdown.as_open_mut() {
@@ -160,6 +173,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &MoveLeft, window, cx| {
+            // Let AI dialogs handle their own keys
+            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+                return;
+            }
             // Lua console: cursor left
             if this.lua_console.visible {
                 this.lua_console.cursor_left();
@@ -196,6 +213,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &MoveRight, window, cx| {
+            // Let AI dialogs handle their own keys
+            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+                return;
+            }
             // Lua console: cursor right
             if this.lua_console.visible {
                 this.lua_console.cursor_right();
@@ -461,6 +482,15 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &Paste, window, cx| {
+            // AI dialogs handle their own paste
+            if this.mode == Mode::AISettings {
+                this.ai_settings_paste(cx);
+                return;
+            }
+            if this.mode == Mode::AskAI {
+                this.ask_ai_paste(cx);
+                return;
+            }
             // Sheet rename: paste text
             if this.renaming_sheet.is_some() {
                 if let Some(item) = cx.read_from_clipboard() {
@@ -544,6 +574,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.maybe_show_f2_tip(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
+            // Let AI dialogs handle their own keys
+            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+                return;
+            }
             // Sheet rename: Enter confirms
             if this.renaming_sheet.is_some() {
                 this.confirm_sheet_rename(cx);
@@ -663,6 +697,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.hide_extract_named_range(cx);
             } else if this.mode == Mode::ImportReport {
                 this.hide_import_report(cx);
+            } else if this.mode == Mode::ExplainDiff {
+                this.close_explain_diff(cx);
+            } else if this.history_context_menu_entry_id.is_some() {
+                this.hide_history_context_menu(cx);
             } else if this.mode == Mode::Preferences {
                 this.hide_preferences(cx);
             } else if this.mode == Mode::License {
@@ -688,6 +726,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &TabNext, window, cx| {
+            // Let AI dialogs handle their own keys
+            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+                return;
+            }
             // Dialog modes handle Tab themselves
             if this.mode == Mode::CreateNamedRange {
                 this.create_name_tab(cx);
@@ -707,6 +749,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &TabPrev, window, cx| {
+            // Let AI dialogs handle their own keys
+            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+                return;
+            }
             if this.mode.is_editing() {
                 this.confirm_edit_and_move_left(cx);
                 this.update_title_if_needed(window, cx);
@@ -715,6 +761,15 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &BackspaceChar, window, cx| {
+            // AI dialogs handle their own backspace
+            if this.mode == Mode::AISettings {
+                this.ai_settings_backspace(cx);
+                return;
+            }
+            if this.mode == Mode::AskAI {
+                this.ask_ai_backspace(cx);
+                return;
+            }
             // Sheet rename: handle backspace
             if this.renaming_sheet.is_some() {
                 this.sheet_rename_backspace(cx);
@@ -762,6 +817,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         .on_action(cx.listener(|this, _: &DeleteChar, window, cx| {
+            // Let AI dialogs handle their own keys
+            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+                return;
+            }
             // Sheet rename: handle delete
             if this.renaming_sheet.is_some() {
                 this.sheet_rename_delete(cx);
@@ -805,6 +864,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             // TODO: Show data validation dialog
             this.status_message = Some("Data validation dialog not yet implemented".to_string());
             cx.notify();
+        }))
+        // Ask AI
+        .on_action(cx.listener(|this, _: &AskAI, _, cx| {
+            this.show_ask_ai(cx);
         }))
         .on_action(cx.listener(|this, _: &OpenValidationDropdown, _, cx| {
             this.open_validation_dropdown(cx);
@@ -996,6 +1059,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.cycle_reference(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEditInPlace, _, cx| {
+            // Ask AI dialog: Cmd/Ctrl+Enter submits
+            if this.mode == Mode::AskAI {
+                this.ask_ai_submit(cx);
+                return;
+            }
             // Lua console handles its own Ctrl+Enter (execute)
             if this.lua_console.visible {
                 crate::views::lua_console::execute_console(this, cx);
@@ -1313,6 +1381,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         // Character input (handles editing, goto, find, and command modes)
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            // Let AI dialogs handle their own keys
+            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+                return;
+            }
+
             // Route keys to Lua console when visible
             if this.lua_console.visible {
                 crate::views::lua_console::handle_console_key_from_main(this, event, window, cx);
@@ -2465,6 +2538,23 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_validation_dialog, |div| {
             div.child(validation_dialog::render_validation_dialog(app, cx))
+        })
+        .when(show_ai_settings, |div| {
+            div.child(ai_settings_dialog::render_ai_settings_dialog(app, cx))
+        })
+        .when(show_ask_ai, |div| {
+            div.child(ask_ai_dialog::render_ask_ai_dialog(app, cx))
+        })
+        // Ask AI context menu (rendered as overlay above the dialog)
+        .when_some(ask_ai_dialog::render_ask_ai_context_menu(app, cx), |div, menu| {
+            div.child(menu)
+        })
+        .when(show_explain_diff, |div| {
+            div.child(inspector_panel::render_explain_diff_dialog(app, cx))
+        })
+        // History entry context menu (right-click menu)
+        .when_some(inspector_panel::render_history_context_menu(app, cx), |div, menu| {
+            div.child(menu)
         })
         .when(show_rewind_confirm, |div| {
             div.child(render_rewind_confirm_dialog(app, cx))

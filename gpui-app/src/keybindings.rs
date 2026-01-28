@@ -95,6 +95,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Alt+Down - open validation dropdown (Excel behavior)
         KeyBinding::new("alt-down", OpenValidationDropdown, Some("Spreadsheet")),
 
+        // AI
+        KeyBinding::new(&kb_shift(m, "a"), AskAI, Some("Spreadsheet")),
+
         // Selection
         KeyBinding::new(&kb(m, "a"), SelectAll, Some("Spreadsheet")),
         KeyBinding::new("shift-space", SelectRow, Some("Spreadsheet")),

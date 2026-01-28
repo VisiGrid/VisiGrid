@@ -42,6 +42,9 @@ pub enum Mode {
     HubLink,           // VisiHub: Link workbook to dataset
     HubPublishConfirm, // VisiHub: Confirm publish when diverged
     ValidationDialog,  // Data validation dialog (Data > Validation)
+    AISettings,        // AI configuration dialog (Help > AI Settings)
+    AskAI,             // Ask AI dialog (Data > AI > Ask AI)
+    ExplainDiff,       // Explain Differences dialog (History right-click)
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -87,6 +90,6 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog)
+        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff)
     }
 }

@@ -414,6 +414,40 @@ pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                                 )
                         )
                         // =========================================================
+                        // AI section
+                        // =========================================================
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(section_header("AI", text_primary))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(row_label("AI assistant", text_muted))
+                                        .child(
+                                            div()
+                                                .id("pref-ai-settings-btn")
+                                                .px_3()
+                                                .py(px(4.0))
+                                                .bg(accent.opacity(0.15))
+                                                .rounded_md()
+                                                .cursor_pointer()
+                                                .text_size(px(11.0))
+                                                .text_color(text_primary)
+                                                .hover(|s| s.bg(accent.opacity(0.25)))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.hide_preferences(cx);
+                                                    this.show_ai_settings(cx);
+                                                }))
+                                                .child("Configure AI...")
+                                        )
+                                )
+                        )
+                        // =========================================================
                         // Advanced section
                         // =========================================================
                         .child(

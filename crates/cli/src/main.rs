@@ -1003,85 +1003,64 @@ fn cmd_open(file: Option<PathBuf>) -> Result<(), CliError> {
 // ============================================================================
 
 fn cmd_ai_doctor(json: bool, test: bool) -> Result<(), CliError> {
-    use visigrid_config::settings::{Settings, AIProvider};
-    use visigrid_config::ai::{self, KeySource};
+    use visigrid_config::settings::Settings;
+    use visigrid_config::ai::{self, ResolvedAIConfig, AIConfigStatus};
 
+    // Use the single source of truth
+    let config = ResolvedAIConfig::load();
     let settings = Settings::load();
     let ai_settings = &settings.ai;
 
-    // Get key status
-    let provider_str = match ai_settings.provider {
-        AIProvider::None => "none",
-        AIProvider::Local => "local",
-        AIProvider::OpenAI => "openai",
-        AIProvider::Anthropic => "anthropic",
-    };
-
-    let key_lookup = if ai_settings.provider.is_enabled() && !matches!(ai_settings.provider, AIProvider::Local) {
-        ai::get_api_key(provider_str)
-    } else {
-        ai::KeyLookup {
-            key: None,
-            source: KeySource::None,
-        }
-    };
-
-    let enabled = ai_settings.provider.is_enabled();
+    let enabled = config.provider.is_enabled();
     let model_configured = !ai_settings.model.is_empty();
     let model_effective = if enabled {
-        ai_settings.effective_model().to_string()
+        config.model.clone()
     } else {
         "(none)".to_string()
     };
     let keychain_available = ai::keychain_available();
 
-    // Determine status and blocking reason
-    let (status, blocking_reason) = if !enabled {
-        (AIDoctorStatus::Disabled, Some("provider=none".to_string()))
-    } else if !matches!(ai_settings.provider, AIProvider::Local) && !key_lookup.key.is_some() {
-        (AIDoctorStatus::Misconfigured, Some("missing_api_key".to_string()))
-    } else {
-        (AIDoctorStatus::Ready, None)
+    // Map AIConfigStatus to AIDoctorStatus
+    let (status, blocking_reason) = match config.status {
+        AIConfigStatus::Disabled => (AIDoctorStatus::Disabled, Some("provider=none".to_string())),
+        AIConfigStatus::Ready => (AIDoctorStatus::Ready, None),
+        AIConfigStatus::NotImplemented => (AIDoctorStatus::Ready, Some("provider not yet implemented".to_string())),
+        AIConfigStatus::MissingKey => (AIDoctorStatus::Misconfigured, Some("missing_api_key".to_string())),
+        AIConfigStatus::Error => (AIDoctorStatus::Misconfigured, config.blocking_reason.clone()),
     };
 
-    // Context policy based on privacy mode
-    let context_policy = if ai_settings.privacy_mode {
+    // Context policy from resolved config
+    let context_policy = if config.privacy_mode {
         "minimal_values_only"
     } else {
         "values_and_formulas"
     };
 
-    // Build diagnostics
+    // Build diagnostics from resolved config
     let diag = AIDoctorReport {
         enabled,
-        provider: provider_str.to_string(),
+        provider: config.provider_name().to_string(),
         model_configured,
         model_effective,
-        privacy_mode: ai_settings.privacy_mode,
+        privacy_mode: config.privacy_mode,
         context_policy: context_policy.to_string(),
-        allow_proposals: ai_settings.allow_proposals,
-        key_present: key_lookup.key.is_some(),
-        key_source: key_lookup.source,
+        allow_proposals: config.allow_proposals,
+        key_present: config.api_key.is_some(),
+        key_source: config.key_source,
         keychain_available,
-        endpoint: if matches!(ai_settings.provider, AIProvider::Local) {
-            Some(ai_settings.effective_endpoint().to_string())
-        } else {
-            None
-        },
+        endpoint: config.endpoint.clone(),
         status,
         blocking_reason,
         test_skipped: !test,
         test_result: None,
     };
 
-    // Run connectivity test if requested (skip if disabled)
-    let diag = if test && enabled {
-        run_ai_test(diag, ai_settings)
-    } else if test && !enabled {
-        // --test with provider=none just skips, not fails
+    // Run config validation if requested
+    let diag = if test {
+        let result = config.validate_config();
         let mut d = diag;
         d.test_skipped = false;
-        d.test_result = Some("skipped (AI disabled)".to_string());
+        d.test_result = Some(result.as_str().to_string());
         d
     } else {
         diag
@@ -1144,7 +1123,7 @@ fn cmd_ai_doctor(json: bool, test: bool) -> Result<(), CliError> {
                 }
                 "missing_api_key" => {
                     println!("Fix: set {} or store key in keychain",
-                        format!("VISIGRID_{}_KEY", provider_str.to_uppercase()));
+                        format!("VISIGRID_{}_KEY", diag.provider.to_uppercase()));
                 }
                 _ => {}
             }
@@ -1197,52 +1176,6 @@ impl AIDoctorStatus {
             AIDoctorStatus::Ready => "ready",
         }
     }
-}
-
-fn run_ai_test(mut diag: AIDoctorReport, ai_settings: &visigrid_config::settings::AISettings) -> AIDoctorReport {
-    use visigrid_config::settings::AIProvider;
-
-    diag.test_skipped = false;
-
-    match ai_settings.provider {
-        AIProvider::Local => {
-            // Try to reach Ollama endpoint
-            let endpoint = ai_settings.effective_endpoint();
-            let url = format!("{}/api/tags", endpoint);
-
-            // Simple HTTP check with timeout
-            match std::process::Command::new("curl")
-                .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "2", &url])
-                .output()
-            {
-                Ok(output) => {
-                    let code = String::from_utf8_lossy(&output.stdout);
-                    if code.trim() == "200" {
-                        diag.test_result = Some("ok (ollama reachable)".to_string());
-                    } else {
-                        diag.test_result = Some(format!("failed (HTTP {})", code.trim()));
-                    }
-                }
-                Err(e) => {
-                    diag.test_result = Some(format!("failed ({})", e));
-                }
-            }
-        }
-        AIProvider::OpenAI | AIProvider::Anthropic => {
-            // For cloud providers, we'd need to make an API call
-            // For now, just report that key is present
-            if diag.key_present {
-                diag.test_result = Some("ok (key present, API not tested)".to_string());
-            } else {
-                diag.test_result = Some("failed (no key)".to_string());
-            }
-        }
-        AIProvider::None => {
-            diag.test_result = Some("skipped (AI disabled)".to_string());
-        }
-    }
-
-    diag
 }
 
 fn cmd_replay(

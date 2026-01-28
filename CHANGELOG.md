@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.3.5
+
+AI as witness, not author. Explainability without automation.
+
+### Ask AI
+
+Natural language questions about your data, answered with formulas you can verify.
+
+- **Ask AI** (`Ctrl+Shift+A`) — describe what you want, get a formula proposal
+- **Formula proposals, not edits** — AI suggests, you review, then insert with one click
+- **Provenance tags** — every AI-inserted formula is marked with `MutationSource::Ai`
+- **Inspector shows source** — purple "AI" badge and provider info visible in cell inspector
+- **No hidden network calls** — AI only runs when you explicitly ask
+
+### Explain Differences
+
+Audit what changed since any point in history.
+
+- **Right-click history entry → "Explain changes since..."** — opens diff dialog
+- **Net change computation** — shows final state, not intermediate churn (A→B→C becomes A→C)
+- **Grouped by type** — Values, Formulas, Structural, Named Ranges, Validation
+- **AI-touched filter** — toggle to show only changes made by AI (purple badges)
+- **Click to jump** — select any change to navigate to that cell
+- **Copy Report** — plain text summary for Slack, email, or audit logs
+
+### AI Summary (Optional)
+
+- **Generate Summary** button — produces 4-8 sentence description of changes
+- **Manual trigger only** — no surprise API calls
+- **Copy button** — share summaries easily
+
+### Explain This Change
+
+- **Explain button** on selected diff entry — 2-4 sentence description of what changed
+- **Cached per-entry** — no redundant API calls
+- **Copy button** on each explanation
+- **Tight prompt discipline** — describes only, never suggests edits
+
+### Trust Model
+
+Three concentric layers of explainability:
+
+1. **Cell-level truth** — Inspector shows formula, value, inputs, dependents (deterministic, zero AI)
+2. **Change-level accountability** — Every mutation tagged Human vs AI with metadata
+3. **Narrative understanding** — AI describes changes but never modifies data from this context
+
+AI is a witness, not an actor. It can explain what happened but cannot edit cells from the diff view.
+
+### Configuration
+
+- OpenAI provider support (more providers planned)
+- API key stored in `~/.config/visigrid/settings.json`
+- No telemetry, no account required
+
+---
+
 ## 0.3.4
 
 Excel-accurate behavior. Keyboard-first navigation. Layout is now auditable.

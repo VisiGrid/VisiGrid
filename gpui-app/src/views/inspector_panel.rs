@@ -3365,6 +3365,7 @@ fn render_history_entry(
     let is_undoable = entry.is_undoable;
     let location = entry.location.clone();
     let sheet_idx = entry.sheet_index;
+    let ai_source = entry.ai_source.clone();
 
     // Capture highlight info for click handler
     let highlight_range = entry.sheet_index.and_then(|si| {
@@ -3373,6 +3374,9 @@ fn render_history_entry(
 
     // Format relative time
     let time_str = format_instant_relative(entry.timestamp);
+
+    // AI badge color (purple/magenta for AI)
+    let ai_badge_color = hsla(0.8, 0.6, 0.55, 1.0);
 
     div()
         .id(SharedString::from(format!("history-entry-{}", entry.id)))
@@ -3387,6 +3391,8 @@ fn render_history_entry(
         .border_color(panel_border.opacity(0.3))
         .hover(|s| s.bg(panel_border.opacity(0.3)))
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            // Hide context menu on left click
+            this.history_context_menu_entry_id = None;
             // Toggle selection and highlight
             if this.selected_history_id == Some(entry_id) {
                 this.selected_history_id = None;
@@ -3396,6 +3402,10 @@ fn render_history_entry(
                 this.history_highlight_range = highlight_range;
             }
             cx.notify();
+        }))
+        .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
+            // Show context menu for this entry
+            this.show_history_context_menu(entry_id, cx);
         }))
         // Top row: label + time
         .child(
@@ -3421,6 +3431,17 @@ fn render_history_entry(
                                     .text_size(px(10.0))
                                     .text_color(text_muted)
                                     .child("(undone)")
+                            )
+                        })
+                        .when(ai_source.is_some(), |el| {
+                            el.child(
+                                div()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .bg(ai_badge_color.opacity(0.2))
+                                    .text_size(px(9.0))
+                                    .text_color(ai_badge_color)
+                                    .child(SharedString::from(ai_source.clone().unwrap()))
                             )
                         })
                 )
@@ -3501,8 +3522,12 @@ fn render_history_detail(
     let lua_code = entry.lua.clone();
     let generated_lua = entry.generated_lua.clone();
     let summary = entry.summary.clone();
+    let ai_source = entry.ai_source.clone();
     let has_changes = !entry.affected_cells.is_empty();
     let entry_is_undoable = entry.is_undoable;
+
+    // AI badge color
+    let ai_badge_color = hsla(0.8, 0.6, 0.55, 1.0);
 
     // Determine which Lua to use (explicit provenance takes priority)
     let copyable_lua = lua_code.clone().or_else(|| generated_lua.clone());
@@ -3536,6 +3561,37 @@ fn render_history_detail(
         .flex_col()
         .max_h(px(250.0))
         .overflow_hidden()
+        // AI source (when this is an AI-generated mutation)
+        .when(ai_source.is_some(), |el: Div| {
+            let source_label = ai_source.clone().unwrap();
+            el.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(panel_border)
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(text_muted)
+                            .child("Source")
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(ai_badge_color.opacity(0.15))
+                            .text_size(px(11.0))
+                            .text_color(ai_badge_color)
+                            .child(SharedString::from(source_label))
+                    )
+            )
+        })
         // Action summary (when available)
         .when(summary.is_some(), |el: Div| {
             let summary_text = summary.clone().unwrap();
@@ -3757,4 +3813,764 @@ fn format_instant_relative(instant: std::time::Instant) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
+}
+
+/// Render history entry context menu overlay (right-click menu)
+pub fn render_history_context_menu(
+    app: &Spreadsheet,
+    cx: &mut Context<Spreadsheet>,
+) -> Option<impl IntoElement> {
+    use crate::theme::TokenKey;
+
+    let entry_id = app.history_context_menu_entry_id?;
+
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+
+    // Check entry is still valid
+    let entry_index = app.history.global_index_for_id(entry_id)?;
+    let is_in_undo_stack = app.history.entry_at(entry_index).is_some();
+
+    // Menu items depend on whether entry is in undo stack (can diff) or redo stack
+    let can_explain_diff = is_in_undo_stack && entry_index < app.history.undo_count().saturating_sub(1);
+
+    Some(div()
+        .id("history-context-menu")
+        .absolute()
+        .right(px(10.0))
+        .top(px(100.0))
+        .w(px(200.0))
+        .bg(panel_bg)
+        .border_1()
+        .border_color(panel_border)
+        .rounded_md()
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .py_1()
+        // Click outside to close
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            this.hide_history_context_menu(cx);
+        }))
+        // Explain changes since this
+        .when(can_explain_diff, |el| {
+            el.child(
+                div()
+                    .id("explain-diff-item")
+                    .px_3()
+                    .py_1()
+                    .text_size(px(12.0))
+                    .text_color(text_primary)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(panel_border.opacity(0.3)))
+                    .child("Explain changes since this...")
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                        this.show_explain_diff(entry_id, cx);
+                    }))
+            )
+        })
+        .when(!can_explain_diff, |el| {
+            el.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(12.0))
+                    .text_color(text_muted)
+                    .child("(No changes after this entry)")
+            )
+        })
+    )
+}
+
+/// Render the Explain Differences dialog
+pub fn render_explain_diff_dialog(
+    app: &Spreadsheet,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    use crate::theme::TokenKey;
+
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+
+    let report = match &app.diff_report {
+        Some(r) => r.clone(),
+        None => return div().into_any_element(),
+    };
+
+    let ai_only = app.diff_ai_only_filter;
+    let selected_entry = app.diff_selected_entry;
+    let ai_count = report.ai_touched_count();
+    let has_ai_changes = ai_count > 0;
+
+    // Get sheet names for formatting addresses
+    let sheet_names: Vec<String> = app.wb(cx).sheet_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    // AI badge color
+    let ai_badge_color = hsla(0.8, 0.6, 0.55, 1.0);
+
+    // Filter changes based on AI filter
+    let value_changes: Vec<&crate::diff::DiffEntry> = report.value_changes_filtered(ai_only);
+    let formula_changes: Vec<&crate::diff::DiffEntry> = report.formula_changes_filtered(ai_only);
+    let value_changes_empty = value_changes.is_empty();
+    let formula_changes_empty = formula_changes.is_empty();
+
+    // AI summary state
+    let ai_summary = app.diff_ai_summary.clone();
+    let ai_summary_loading = app.diff_ai_summary_loading;
+    let ai_summary_error = app.diff_ai_summary_error.clone();
+
+    // Check if AI summary is available (provider configured with ask capability)
+    let ai_config = visigrid_config::ai::ResolvedAIConfig::load();
+    let ai_summary_available = ai_config.provider.capabilities().ask;
+    let ai_explain_available = ai_config.provider.capabilities().ask;
+
+    // Entry explanation state
+    let entry_explanations = app.diff_entry_explanations.clone();
+    let explaining_entry = app.diff_explaining_entry;
+
+    div()
+        .id("explain-diff-dialog")
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(0.0, 0.0, 0.0, 0.5))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.close_explain_diff(cx);
+        }))
+        .child(
+            div()
+                .id("explain-diff-content")
+                .w(px(600.0))
+                .max_h(px(500.0))
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .rounded_lg()
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                // Header
+                .child(
+                    div()
+                        .px_4()
+                        .py_3()
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(text_primary)
+                                        .child("Changes since")
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(text_muted)
+                                        .child(SharedString::from(format!(
+                                            "\"{}\" ({} actions)",
+                                            report.since_entry_label,
+                                            report.entries_spanned
+                                        )))
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(text_muted.opacity(0.7))
+                                        .child("Click to jump • Enter to close")
+                                )
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                // Copy Report button
+                                .child(
+                                    div()
+                                        .id("copy-diff-report")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .text_size(px(11.0))
+                                        .text_color(text_muted)
+                                        .cursor_pointer()
+                                        .bg(panel_border.opacity(0.2))
+                                        .hover(|s| s.bg(panel_border.opacity(0.4)).text_color(text_primary))
+                                        .child("Copy Report")
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            this.copy_diff_report(cx);
+                                        }))
+                                )
+                                // Close button
+                                .child(
+                                    div()
+                                        .id("close-explain-diff")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .text_size(px(12.0))
+                                        .text_color(text_muted)
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(panel_border.opacity(0.3)).text_color(text_primary))
+                                        .child("×")
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            this.close_explain_diff(cx);
+                                        }))
+                                )
+                        )
+                )
+                // Keyboard handling: Enter = jump + close
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "enter" {
+                        this.diff_jump_and_close(cx);
+                    }
+                }))
+                // AI filter toggle
+                .when(has_ai_changes, |el| {
+                    el.child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(panel_border)
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("ai-filter-toggle")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .bg(if ai_only { ai_badge_color.opacity(0.2) } else { panel_border.opacity(0.2) })
+                                    .text_size(px(11.0))
+                                    .text_color(if ai_only { ai_badge_color } else { text_muted })
+                                    .hover(|s| s.bg(ai_badge_color.opacity(0.3)))
+                                    .child(SharedString::from(format!("AI-touched only ({})", ai_count)))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                        this.toggle_diff_ai_filter(cx);
+                                    }))
+                            )
+                    )
+                })
+                // AI Summary section (collapsible)
+                .when(ai_summary_available, |el| {
+                    el.child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(panel_border)
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            // Header row with button
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(text_primary)
+                                            .child("AI Summary")
+                                    )
+                                    .when(ai_summary.is_none() && !ai_summary_loading, |el| {
+                                        el.child(
+                                            div()
+                                                .id("generate-summary-btn")
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_size(px(10.0))
+                                                .text_color(ai_badge_color)
+                                                .cursor_pointer()
+                                                .bg(ai_badge_color.opacity(0.1))
+                                                .hover(|s| s.bg(ai_badge_color.opacity(0.2)))
+                                                .child("Generate Summary")
+                                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                                    this.generate_diff_summary(cx);
+                                                }))
+                                        )
+                                    })
+                                    .when(ai_summary_loading, |el| {
+                                        el.child(
+                                            div()
+                                                .text_size(px(10.0))
+                                                .text_color(text_muted)
+                                                .child("Generating...")
+                                        )
+                                    })
+                                    .when(ai_summary.is_some(), |el| {
+                                        el.child(
+                                            div()
+                                                .id("copy-summary-btn")
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_size(px(10.0))
+                                                .text_color(text_muted)
+                                                .cursor_pointer()
+                                                .bg(panel_border.opacity(0.2))
+                                                .hover(|s| s.bg(panel_border.opacity(0.4)).text_color(text_primary))
+                                                .child("Copy")
+                                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                                    this.copy_diff_summary(cx);
+                                                }))
+                                        )
+                                    })
+                            )
+                            // Error display
+                            .when(ai_summary_error.is_some(), |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(hsla(0.0, 0.7, 0.5, 1.0))  // Red
+                                        .child(SharedString::from(ai_summary_error.clone().unwrap()))
+                                )
+                            })
+                            // Summary text
+                            .when(ai_summary.is_some(), |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(text_muted)
+                                        .child(SharedString::from(ai_summary.clone().unwrap()))
+                                )
+                            })
+                    )
+                })
+                // Content area
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        // Stats summary
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_muted)
+                                .child(SharedString::from(format!(
+                                    "{} value changes, {} formula changes, {} structural, {} format",
+                                    report.value_changes.len(),
+                                    report.formula_changes.len(),
+                                    report.structural_changes.len() + report.named_range_changes.len() + report.validation_changes.len(),
+                                    report.format_change_count
+                                )))
+                        )
+                        // Value changes section
+                        .when(!value_changes_empty, |el| {
+                            let sheet_names_clone = sheet_names.clone();
+                            let explanations_clone = entry_explanations.clone();
+                            el.child(render_diff_section(
+                                "Values",
+                                value_changes,
+                                sheet_names_clone,
+                                selected_entry,
+                                accent,
+                                text_primary,
+                                text_muted,
+                                ai_badge_color,
+                                panel_border,
+                                ai_explain_available,
+                                explanations_clone,
+                                explaining_entry,
+                                cx,
+                            ))
+                        })
+                        // Formula changes section
+                        .when(!formula_changes_empty, |el| {
+                            let sheet_names_clone = sheet_names.clone();
+                            let explanations_clone = entry_explanations.clone();
+                            el.child(render_diff_section(
+                                "Formulas",
+                                formula_changes,
+                                sheet_names_clone,
+                                selected_entry,
+                                accent,
+                                text_primary,
+                                text_muted,
+                                ai_badge_color,
+                                panel_border,
+                                ai_explain_available,
+                                explanations_clone,
+                                explaining_entry,
+                                cx,
+                            ))
+                        })
+                        // Structural changes section
+                        .when(!report.structural_changes.is_empty(), |el| {
+                            el.child(render_structural_section(
+                                &report.structural_changes,
+                                text_primary,
+                                text_muted,
+                                panel_border,
+                            ))
+                        })
+                        // Named range changes
+                        .when(!report.named_range_changes.is_empty(), |el| {
+                            el.child(render_named_range_section(
+                                &report.named_range_changes,
+                                text_primary,
+                                text_muted,
+                                panel_border,
+                            ))
+                        })
+                        // Validation changes
+                        .when(!report.validation_changes.is_empty(), |el| {
+                            el.child(render_validation_section(
+                                &report.validation_changes,
+                                text_primary,
+                                text_muted,
+                                panel_border,
+                            ))
+                        })
+                        // Empty state
+                        .when(ai_only && value_changes_empty && formula_changes_empty, |el| {
+                            el.child(
+                                div()
+                                    .p_4()
+                                    .text_size(px(12.0))
+                                    .text_color(text_muted)
+                                    .child("No AI-touched changes in this range.")
+                            )
+                        })
+                        .when(!ai_only && report.total_changes() == 0, |el| {
+                            el.child(
+                                div()
+                                    .p_4()
+                                    .text_size(px(12.0))
+                                    .text_color(text_muted)
+                                    .child("No changes since this point.")
+                            )
+                        })
+                )
+        )
+        .into_any_element()
+}
+
+/// Render a section of cell changes (values or formulas)
+fn render_diff_section(
+    title: &str,
+    entries: Vec<&crate::diff::DiffEntry>,
+    sheet_names: Vec<String>,
+    selected_entry: Option<(usize, usize, usize)>,
+    accent: Hsla,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    ai_badge_color: Hsla,
+    panel_border: Hsla,
+    ai_explain_available: bool,
+    entry_explanations: std::collections::HashMap<(usize, usize, usize), String>,
+    explaining_entry: Option<(usize, usize, usize)>,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(text_primary)
+                .child(SharedString::from(format!("{} ({})", title, entries.len())))
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(entries.into_iter().take(50).map(|entry| {
+                    let sheet_idx = entry.sheet_index;
+                    let row = entry.row;
+                    let col = entry.col;
+                    let address = entry.full_address(&sheet_names);
+                    let old_val = entry.old_value.clone();
+                    let new_val = entry.new_value.clone();
+                    let is_ai = entry.ai_touched;
+                    let ai_source = entry.ai_source.clone();
+                    let is_selected = selected_entry == Some((sheet_idx, row, col));
+                    let key = (sheet_idx, row, col);
+                    let explanation = entry_explanations.get(&key).cloned();
+                    let is_explaining = explaining_entry == Some(key);
+                    let has_explanation = explanation.is_some();
+
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        // Main entry row
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("diff-{}-{}-{}", sheet_idx, row, col)))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(if is_selected { accent.opacity(0.3) } else { panel_border.opacity(0.1) })
+                                .border_1()
+                                .border_color(if is_selected { accent } else { gpui::transparent_black() })
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(if is_selected { accent.opacity(0.4) } else { panel_border.opacity(0.3) }))
+                                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    this.diff_jump_to_cell(sheet_idx, row, col, cx);
+                                }))
+                                // Address
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(text_primary)
+                                        .min_w(px(80.0))
+                                        .child(SharedString::from(address))
+                                )
+                                // Change: old → new
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(11.0))
+                                        .text_color(text_muted)
+                                        .overflow_hidden()
+                                        .child(SharedString::from(format!(
+                                            "{} → {}",
+                                            if old_val.is_empty() { "(empty)" } else { &old_val },
+                                            if new_val.is_empty() { "(empty)" } else { &new_val }
+                                        )))
+                                )
+                                // AI badge
+                                .when(is_ai, |el| {
+                                    el.child(
+                                        div()
+                                            .px_1()
+                                            .rounded_sm()
+                                            .bg(ai_badge_color.opacity(0.2))
+                                            .text_size(px(9.0))
+                                            .text_color(ai_badge_color)
+                                            .child("AI")
+                                    )
+                                })
+                                // Explain button (only on selected entry, if AI available, and not already explained)
+                                .when(is_selected && ai_explain_available && !has_explanation && !is_explaining, |el| {
+                                    let old_for_explain = old_val.clone();
+                                    let new_for_explain = new_val.clone();
+                                    let ai_source_for_explain = ai_source.clone();
+                                    el.child(
+                                        div()
+                                            .id(SharedString::from(format!("explain-{}-{}-{}", sheet_idx, row, col)))
+                                            .px_2()
+                                            .py_px()
+                                            .rounded_sm()
+                                            .text_size(px(9.0))
+                                            .text_color(ai_badge_color)
+                                            .cursor_pointer()
+                                            .bg(ai_badge_color.opacity(0.1))
+                                            .hover(|s| s.bg(ai_badge_color.opacity(0.2)))
+                                            .child("Explain")
+                                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                                this.explain_diff_entry(
+                                                    sheet_idx,
+                                                    row,
+                                                    col,
+                                                    old_for_explain.clone(),
+                                                    new_for_explain.clone(),
+                                                    is_ai,
+                                                    ai_source_for_explain.clone(),
+                                                    cx,
+                                                );
+                                            }))
+                                    )
+                                })
+                                // Loading indicator
+                                .when(is_explaining, |el| {
+                                    el.child(
+                                        div()
+                                            .text_size(px(9.0))
+                                            .text_color(text_muted)
+                                            .child("...")
+                                    )
+                                })
+                        )
+                        // Inline explanation (below entry, if available)
+                        .when(has_explanation, |el| {
+                            let explanation_text = explanation.clone().unwrap_or_default();
+                            let explanation_for_copy = explanation_text.clone();
+                            el.child(
+                                div()
+                                    .ml_2()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(ai_badge_color.opacity(0.05))
+                                    .border_l_2()
+                                    .border_color(ai_badge_color.opacity(0.3))
+                                    .flex()
+                                    .items_start()
+                                    .gap_2()
+                                    // Explanation text
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(10.0))
+                                            .text_color(text_muted)
+                                            .child(SharedString::from(explanation_text))
+                                    )
+                                    // Copy button
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("copy-explain-{}-{}-{}", sheet_idx, row, col)))
+                                            .px_1()
+                                            .py_px()
+                                            .rounded_sm()
+                                            .text_size(px(9.0))
+                                            .text_color(text_muted)
+                                            .cursor_pointer()
+                                            .bg(panel_border.opacity(0.2))
+                                            .hover(|s| s.bg(panel_border.opacity(0.4)).text_color(text_primary))
+                                            .child("Copy")
+                                            .on_mouse_down(MouseButton::Left, cx.listener(move |_this, _: &MouseDownEvent, _, cx| {
+                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(explanation_for_copy.clone()));
+                                            }))
+                                    )
+                            )
+                        })
+                }))
+        )
+}
+
+/// Render structural changes section
+fn render_structural_section(
+    changes: &[crate::diff::StructuralChange],
+    text_primary: Hsla,
+    text_muted: Hsla,
+    panel_border: Hsla,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(text_primary)
+                .child(SharedString::from(format!("Structural ({})", changes.len())))
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(changes.iter().map(|change| {
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(panel_border.opacity(0.1))
+                        .text_size(px(11.0))
+                        .text_color(text_muted)
+                        .child(SharedString::from(change.description()))
+                }))
+        )
+}
+
+/// Render named range changes section
+fn render_named_range_section(
+    changes: &[crate::diff::NamedRangeChange],
+    text_primary: Hsla,
+    text_muted: Hsla,
+    panel_border: Hsla,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(text_primary)
+                .child(SharedString::from(format!("Named Ranges ({})", changes.len())))
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(changes.iter().map(|change| {
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(panel_border.opacity(0.1))
+                        .text_size(px(11.0))
+                        .text_color(text_muted)
+                        .child(SharedString::from(change.description()))
+                }))
+        )
+}
+
+/// Render validation changes section
+fn render_validation_section(
+    changes: &[crate::diff::ValidationChange],
+    text_primary: Hsla,
+    text_muted: Hsla,
+    panel_border: Hsla,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(text_primary)
+                .child(SharedString::from(format!("Validation ({})", changes.len())))
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(changes.iter().map(|change| {
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(panel_border.opacity(0.1))
+                        .text_size(px(11.0))
+                        .text_color(text_muted)
+                        .child(SharedString::from(change.description()))
+                }))
+        )
 }

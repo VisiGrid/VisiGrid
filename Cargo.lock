@@ -4713,7 +4713,9 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -6439,7 +6441,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visigrid-cli"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "blake3",
  "clap",
@@ -6455,7 +6457,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-config"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "dirs 5.0.1",
  "keyring",
@@ -6466,14 +6468,14 @@ dependencies = [
 
 [[package]]
 name = "visigrid-core"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "visigrid-engine"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "ordered-float",
  "rustc-hash 2.1.1",
@@ -6483,7 +6485,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-gpui"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "blake3",
  "core-text",
@@ -6508,7 +6510,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-io"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "calamine",
  "csv",
@@ -6525,7 +6527,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-license"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "base64",
  "chrono",

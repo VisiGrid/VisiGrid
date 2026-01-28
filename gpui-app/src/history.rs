@@ -59,6 +59,8 @@ pub struct HistoryDisplayEntry {
     pub affected_cells: Vec<(usize, usize, String, String)>,
     /// Bounding box of affected cells (start_row, start_col, end_row, end_col)
     pub affected_range: Option<(usize, usize, usize, usize)>,
+    /// AI source label if this was an AI-generated mutation (e.g., "AI: OpenAI gpt-4o")
+    pub ai_source: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -550,6 +552,40 @@ fn format_constraint_value(value: &visigrid_engine::validation::ConstraintValue)
     }
 }
 
+/// Source of a mutation (for provenance tracking)
+#[derive(Clone, Debug, Default)]
+pub enum MutationSource {
+    /// Human entered value manually (default)
+    #[default]
+    Human,
+    /// AI-generated (Ask AI feature)
+    Ai(AiMutationMeta),
+}
+
+/// Metadata for AI-generated mutations (minimal, no prompts/context stored)
+#[derive(Clone, Debug)]
+pub struct AiMutationMeta {
+    /// Provider used (e.g., "openai")
+    pub provider: String,
+    /// Model used
+    pub model: String,
+    /// Whether privacy mode was enabled
+    pub privacy_mode: bool,
+    /// Request ID for correlation (optional)
+    pub request_id: Option<String>,
+    /// Context selection mode ("selection", "region", "used_range")
+    pub context_mode: String,
+    /// Truncation applied ("none", "rows", "cols", "both")
+    pub truncation: String,
+}
+
+impl AiMutationMeta {
+    /// Short label for display (e.g., "AI: OpenAI gpt-4o")
+    pub fn label(&self) -> String {
+        format!("AI: {} {}", self.provider, self.model)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HistoryEntry {
     /// Stable ID for this entry (monotonic, survives undo/redo moves)
@@ -558,6 +594,8 @@ pub struct HistoryEntry {
     pub timestamp: Instant,
     /// Lua provenance for multi-cell operations (Phase 4)
     pub provenance: Option<Provenance>,
+    /// Source of mutation (human or AI) for provenance tracking
+    pub source: MutationSource,
 }
 
 /// Coalescing window for rapid format changes (e.g., decimal +/-)
@@ -612,8 +650,21 @@ impl History {
         self.save_point
     }
 
-    /// Record a single cell value change
+    /// Record a single cell value change (human source)
     pub fn record_change(&mut self, sheet_index: usize, row: usize, col: usize, old_value: String, new_value: String) {
+        self.record_change_with_source(sheet_index, row, col, old_value, new_value, MutationSource::Human);
+    }
+
+    /// Record a single cell value change with explicit source
+    pub fn record_change_with_source(
+        &mut self,
+        sheet_index: usize,
+        row: usize,
+        col: usize,
+        old_value: String,
+        new_value: String,
+        source: MutationSource,
+    ) {
         if old_value == new_value {
             return;
         }
@@ -627,6 +678,7 @@ impl History {
             },
             timestamp: Instant::now(),
             provenance: None,  // Single cell edits don't need Lua provenance
+            source,
         };
         self.push_entry(entry);
     }
@@ -648,6 +700,7 @@ impl History {
             action: UndoAction::Values { sheet_index, changes },
             timestamp: Instant::now(),
             provenance,
+            source: MutationSource::Human,
         };
         self.push_entry(entry);
     }
@@ -690,6 +743,7 @@ impl History {
             action: UndoAction::Format { sheet_index, patches, kind, description },
             timestamp: now,
             provenance: None,  // Format changes don't need Lua provenance
+            source: MutationSource::Human,
         };
         self.push_entry(entry);
     }
@@ -707,6 +761,7 @@ impl History {
             action,
             timestamp: Instant::now(),
             provenance,
+            source: MutationSource::Human,
         };
         self.push_entry(entry);
     }
@@ -836,6 +891,12 @@ impl History {
         // Generate Lua from action (Phase 9A provenance export)
         let generated_lua = entry.action.to_lua();
 
+        // Extract AI source label if applicable
+        let ai_source = match &entry.source {
+            MutationSource::Human => None,
+            MutationSource::Ai(meta) => Some(meta.label()),
+        };
+
         HistoryDisplayEntry {
             id: entry.id,  // Use stable entry ID, not position
             label,
@@ -850,6 +911,7 @@ impl History {
             sheet_index,
             affected_cells,
             affected_range,
+            ai_source,
         }
     }
 
@@ -1098,6 +1160,7 @@ impl History {
             action: rewind_action,
             timestamp: std::time::Instant::now(),
             provenance: None,
+            source: MutationSource::Human,  // Rewind is always user-initiated
         };
         self.undo_stack.push(entry);
 

@@ -198,6 +198,24 @@ What's built, what's next, and what's not planned.
 - Uses `duti` when available, falls back to System Settings
 - See: [docs/features/title-bar-and-menus.md](docs/features/title-bar-and-menus.md)
 
+### Data Validation (v0.3.4+)
+- Dropdown lists (comma-separated or range reference)
+- Numeric constraints (between, greater than, less than, equals)
+- Invalid cell highlighting (red circle marker)
+- Jump to next invalid (F8)
+- Validation exclusions (exempt cells from rules)
+- Command palette integration
+- See: [docs/features/data-validation-spec.md](docs/features/data-validation-spec.md)
+
+### AI Integration (v0.3.5+)
+- **Ask AI** (`Ctrl+Shift+A`) — natural language to formula proposals
+- **Provenance tracking** — every AI-inserted cell tagged with `MutationSource::Ai`
+- **Explain Differences** — right-click history → diff report with AI-touched filter
+- **Explain This Change** — 2-4 sentence descriptions of individual changes
+- **AI Summary** — optional, manual-trigger summaries of change sets
+- **Trust model**: AI describes but never modifies from audit context
+- See: [docs/features/future/ai-reconciliation-spec.md](docs/features/future/ai-reconciliation-spec.md)
+
 ---
 
 ## Planned
@@ -210,16 +228,13 @@ What's built, what's next, and what's not planned.
   - Months: Jan, Feb → Mar, Apr...
   - Weekdays: Mon, Tue → Wed, Thu...
   - Custom step sizes
-- Data validation (dropdowns, constraints)
 - Conditional formatting (basic rules)
 - Comments/notes on cells
 - Print to PDF
 
 ### Medium-term
-- AutoFilter and Sort (see [docs/features/autofilter-sort-spec.md](docs/features/autofilter-sort-spec.md))
 - Cell context menu (right-click)
 - Merged cells
-- Split view (Ctrl+\)
 - Problems panel (Ctrl+Shift+M) - all formula errors
 
 ### Explainability Initiative
@@ -265,16 +280,6 @@ Target sources:
 - QuickBooks / accounting systems
 - Bank feeds
 - Database exports
-
-### Long-term: AI Reconciliation
-
-AI helps you reason about data without modifying it.
-
-AI proposes operations (compare, flag, explain). User reviews and approves. VisiGrid executes deterministically. Every step visible and auditable.
-
-**AI can:** Compare records, explain differences, flag anomalies, summarize discrepancies
-
-**AI cannot:** Edit cells without approval, fetch data directly, hide steps, invent values
 
 ### Long-term: Extensibility
 - Plugin architecture (WASM-based)

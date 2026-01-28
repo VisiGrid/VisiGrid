@@ -108,7 +108,6 @@ impl<B: IntoElement> IntoElement for DialogFrame<B> {
             .border_color(self.panel_border)
             .rounded_lg()
             .shadow_xl()
-            .overflow_hidden()
             .flex()
             .flex_col();
 

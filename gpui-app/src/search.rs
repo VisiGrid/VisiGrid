@@ -161,6 +161,8 @@ pub enum CommandId {
     ShowAbout,
     TourNamedRanges,
     ShowRefactorLog,
+    ShowAISettings,
+    AskAI,
 
     // Sheets
     NextSheet,
@@ -263,6 +265,8 @@ impl CommandId {
             Self::ShowAbout => "About VisiGrid",
             Self::TourNamedRanges => "Tour: Named Ranges & Refactoring",
             Self::ShowRefactorLog => "Show Refactor Log",
+            Self::ShowAISettings => "AI Settings",
+            Self::AskAI => "Ask AI...",
             Self::NextSheet => "Next Sheet",
             Self::PrevSheet => "Previous Sheet",
             Self::AddSheet => "Add Sheet",
@@ -409,6 +413,8 @@ impl CommandId {
             Self::ShowAbout => "version info",
             Self::TourNamedRanges => "tour guide walkthrough refactor learn onboarding",
             Self::ShowRefactorLog => "audit history changes log refactor",
+            Self::ShowAISettings => "ai openai anthropic ollama local llm api key model provider",
+            Self::AskAI => "ai ask question explain formula help gpt claude llm",
             Self::NextSheet => "tab worksheet",
             Self::PrevSheet => "tab worksheet",
             Self::AddSheet => "new tab worksheet",
@@ -511,6 +517,8 @@ impl CommandId {
             Self::ShowAbout,
             Self::TourNamedRanges,
             Self::ShowRefactorLog,
+            Self::ShowAISettings,
+            Self::AskAI,
             Self::NextSheet,
             Self::PrevSheet,
             Self::AddSheet,
@@ -629,7 +637,8 @@ impl CommandId {
             | Self::ExcludeFromValidation
             | Self::ClearValidationExclusions
             | Self::CircleInvalidData
-            | Self::ClearInvalidCircles => Some(MenuCategory::Data),
+            | Self::ClearInvalidCircles
+            | Self::AskAI => Some(MenuCategory::Data),
 
             // Help menu
             Self::ShowShortcuts
@@ -647,7 +656,8 @@ impl CommandId {
             | Self::SwitchWindow
             | Self::NextSheet
             | Self::PrevSheet
-            | Self::AddSheet => None,
+            | Self::AddSheet
+            | Self::ShowAISettings => None,
         }
     }
 }

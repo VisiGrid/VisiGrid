@@ -221,6 +221,11 @@ actions!(data, [
     ClearValidationExclusions, // Clear exclusions in selection
 ]);
 
+// AI actions
+actions!(ai, [
+    AskAI,              // Ctrl+Shift+A - Ask AI about selected data
+]);
+
 // Command palette actions
 actions!(palette, [
     PaletteUp,

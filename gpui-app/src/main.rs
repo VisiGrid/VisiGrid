@@ -2,6 +2,7 @@
 #![windows_subsystem = "windows"]
 
 mod actions;
+mod ai;
 mod app;
 mod autocomplete;
 mod clipboard;
@@ -9,6 +10,7 @@ mod command_palette;
 mod default_app;
 mod default_app_prompt;
 mod dialogs;
+mod diff;
 mod editing;
 mod file_ops;
 mod fill;

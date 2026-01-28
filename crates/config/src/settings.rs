@@ -20,6 +20,10 @@ pub enum AIProvider {
     OpenAI,
     /// Anthropic API
     Anthropic,
+    /// Google Gemini API
+    Gemini,
+    /// xAI Grok API
+    Grok,
 }
 
 impl AIProvider {
@@ -33,9 +37,94 @@ impl AIProvider {
         match self {
             AIProvider::None => "",
             AIProvider::Local => "llama3:8b",
-            AIProvider::OpenAI => "gpt-4o",
+            AIProvider::OpenAI => "gpt-4o-mini",
             AIProvider::Anthropic => "claude-sonnet-4-20250514",
+            AIProvider::Gemini => "gemini-2.0-flash",
+            AIProvider::Grok => "grok-3-mini-fast-beta",
         }
+    }
+
+    /// Returns the provider name for display and key lookup
+    pub fn name(&self) -> &'static str {
+        match self {
+            AIProvider::None => "none",
+            AIProvider::Local => "local",
+            AIProvider::OpenAI => "openai",
+            AIProvider::Anthropic => "anthropic",
+            AIProvider::Gemini => "gemini",
+            AIProvider::Grok => "grok",
+        }
+    }
+
+    /// Returns the capabilities implemented for this provider.
+    /// Selecting a provider only configures credentials and defaults.
+    /// Feature availability depends on implemented capabilities.
+    pub fn capabilities(&self) -> ProviderCapabilities {
+        match self {
+            AIProvider::None => ProviderCapabilities::none(),
+            // TODO: Enable as providers are implemented
+            AIProvider::Local => ProviderCapabilities::none(),      // Phase 1: implement Ollama client
+            AIProvider::OpenAI => ProviderCapabilities::ask_only(), // Implemented: Ask AI
+            AIProvider::Anthropic => ProviderCapabilities::none(),  // Phase 1: implement Anthropic client
+            AIProvider::Gemini => ProviderCapabilities::none(),     // Future: OpenAI-compatible?
+            AIProvider::Grok => ProviderCapabilities::none(),       // Future: OpenAI-compatible?
+        }
+    }
+
+    /// Returns true if this provider requires an API key
+    pub fn needs_api_key(&self) -> bool {
+        matches!(
+            self,
+            AIProvider::OpenAI | AIProvider::Anthropic | AIProvider::Gemini | AIProvider::Grok
+        )
+    }
+}
+
+/// Capabilities implemented for a provider.
+/// This gates what features are actually available, not just configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProviderCapabilities {
+    /// Can use "Ask AI" to answer questions about data
+    pub ask: bool,
+    /// Can explain differences between snapshots
+    pub explain_diffs: bool,
+    /// Can propose cell changes (gated additionally by user setting)
+    pub propose: bool,
+}
+
+impl ProviderCapabilities {
+    /// No capabilities - provider not yet implemented
+    pub const fn none() -> Self {
+        Self {
+            ask: false,
+            explain_diffs: false,
+            propose: false,
+        }
+    }
+
+    /// Basic capabilities - Ask AI only
+    #[allow(dead_code)]
+    pub const fn ask_only() -> Self {
+        Self {
+            ask: true,
+            explain_diffs: false,
+            propose: false,
+        }
+    }
+
+    /// Full v1 capabilities
+    #[allow(dead_code)]
+    pub const fn full_v1() -> Self {
+        Self {
+            ask: true,
+            explain_diffs: true,
+            propose: true,
+        }
+    }
+
+    /// Returns true if any capability is implemented
+    pub fn any_implemented(&self) -> bool {
+        self.ask || self.explain_diffs || self.propose
     }
 }
 
@@ -203,11 +292,12 @@ impl Default for Settings {
 
 impl Settings {
     /// Get the settings file path
+    /// Note: Uses ai_config.json to avoid conflicts with gpui-app's settings.json
     pub fn config_path() -> PathBuf {
         let config_dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("visigrid");
-        config_dir.join("settings.json")
+        config_dir.join("ai_config.json")
     }
 
     /// Load settings from disk, falling back to defaults
