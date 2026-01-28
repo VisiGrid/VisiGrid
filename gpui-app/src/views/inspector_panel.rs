@@ -1232,10 +1232,10 @@ fn render_format_tab(
     let state = app.selection_format_state(cx);
 
     div()
-        .p_3()
+        .p_2()
         .flex()
         .flex_col()
-        .gap_4()
+        .gap_3()
         // Selection summary (with value/format state)
         .child(render_selection_summary(&state, text_muted, panel_border))
         // Value preview (raw + display)
@@ -1934,6 +1934,16 @@ fn render_value_preview(
     text_muted: Hsla,
     panel_border: Hsla,
 ) -> impl IntoElement {
+    // Only show preview if there's something meaningful to show
+    let show_preview = !matches!(state.raw_value, TriState::Empty);
+
+    // Collapse to single line when uniform empty
+    let is_empty_uniform = matches!(&state.raw_value, TriState::Uniform(v) if v.is_empty())
+        && match &state.display_value {
+            None => true,
+            Some(d) => d.is_empty(),
+        };
+
     let raw_display = match &state.raw_value {
         TriState::Uniform(v) if v.is_empty() => "(empty)".to_string(),
         TriState::Uniform(v) => v.clone(),
@@ -1948,11 +1958,21 @@ fn render_value_preview(
         _ => "—".to_string(),
     };
 
-    // Only show preview if there's something meaningful to show
-    let show_preview = !matches!(state.raw_value, TriState::Empty);
-
     div()
-        .when(show_preview, |el| {
+        .when(show_preview && is_empty_uniform, |el| {
+            // Collapsed single-line for empty cells
+            el.child(
+                section("Value Preview", panel_border, text_primary)
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(text_muted)
+                            .child("(empty)")
+                    )
+            )
+        })
+        .when(show_preview && !is_empty_uniform, |el| {
+            // Full two-row layout for non-empty or mixed values
             el.child(
                 section("Value Preview", panel_border, text_primary)
                     .child(
@@ -2585,99 +2605,36 @@ fn render_alignment_section(
     let wrap_mixed = text_overflow.is_mixed();
 
     section("Alignment", panel_border, text_primary)
-        // Horizontal alignment row
+        // Row 1: H-align buttons + spacer + Wrap toggle
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap_2()
+                .gap_1()
+                // Left
                 .child(
-                    div()
-                        .w(px(50.0))
-                        .text_size(px(10.0))
-                        .text_color(text_muted)
-                        .child("Horiz.")
+                    align_btn("L", matches!(h_align, TriState::Uniform(Alignment::Left)), h_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.set_alignment_selection(Alignment::Left, cx);
+                        }))
                 )
+                // Center
                 .child(
-                    div()
-                        .flex()
-                        .gap_1()
-                        // Left
-                        .child(
-                            align_btn("L", matches!(h_align, TriState::Uniform(Alignment::Left)), h_align.is_mixed(), text_primary, text_muted, accent, panel_border)
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.set_alignment_selection(Alignment::Left, cx);
-                                }))
-                        )
-                        // Center
-                        .child(
-                            align_btn("C", matches!(h_align, TriState::Uniform(Alignment::Center)), h_align.is_mixed(), text_primary, text_muted, accent, panel_border)
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.set_alignment_selection(Alignment::Center, cx);
-                                }))
-                        )
-                        // Right
-                        .child(
-                            align_btn("R", matches!(h_align, TriState::Uniform(Alignment::Right)), h_align.is_mixed(), text_primary, text_muted, accent, panel_border)
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.set_alignment_selection(Alignment::Right, cx);
-                                }))
-                        )
+                    align_btn("C", matches!(h_align, TriState::Uniform(Alignment::Center)), h_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.set_alignment_selection(Alignment::Center, cx);
+                        }))
                 )
-        )
-        // Vertical alignment row
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
+                // Right
                 .child(
-                    div()
-                        .w(px(50.0))
-                        .text_size(px(10.0))
-                        .text_color(text_muted)
-                        .child("Vert.")
+                    align_btn("R", matches!(h_align, TriState::Uniform(Alignment::Right)), h_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.set_alignment_selection(Alignment::Right, cx);
+                        }))
                 )
-                .child(
-                    div()
-                        .flex()
-                        .gap_1()
-                        // Top
-                        .child(
-                            align_btn("T", matches!(v_align, TriState::Uniform(VerticalAlignment::Top)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.set_vertical_alignment_selection(VerticalAlignment::Top, cx);
-                                }))
-                        )
-                        // Middle
-                        .child(
-                            align_btn("M", matches!(v_align, TriState::Uniform(VerticalAlignment::Middle)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.set_vertical_alignment_selection(VerticalAlignment::Middle, cx);
-                                }))
-                        )
-                        // Bottom
-                        .child(
-                            align_btn("B", matches!(v_align, TriState::Uniform(VerticalAlignment::Bottom)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.set_vertical_alignment_selection(VerticalAlignment::Bottom, cx);
-                                }))
-                        )
-                )
-        )
-        // Wrap text toggle
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(50.0))
-                        .text_size(px(10.0))
-                        .text_color(text_muted)
-                        .child("Wrap")
-                )
+                // Spacer
+                .child(div().flex_1())
+                // Wrap toggle inline
                 .child(
                     wrap_toggle_btn(wrap_active, wrap_mixed, text_primary, text_muted, accent, panel_border)
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
@@ -2688,6 +2645,34 @@ fn render_alignment_section(
                                 TextOverflow::Wrap
                             };
                             this.set_text_overflow_selection(new_overflow, cx);
+                        }))
+                )
+        )
+        // Row 2: V-align buttons
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                // Top
+                .child(
+                    align_btn("T", matches!(v_align, TriState::Uniform(VerticalAlignment::Top)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.set_vertical_alignment_selection(VerticalAlignment::Top, cx);
+                        }))
+                )
+                // Middle
+                .child(
+                    align_btn("M", matches!(v_align, TriState::Uniform(VerticalAlignment::Middle)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.set_vertical_alignment_selection(VerticalAlignment::Middle, cx);
+                        }))
+                )
+                // Bottom
+                .child(
+                    align_btn("B", matches!(v_align, TriState::Uniform(VerticalAlignment::Bottom)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.set_vertical_alignment_selection(VerticalAlignment::Bottom, cx);
                         }))
                 )
         )
@@ -2777,7 +2762,7 @@ fn section(title: &'static str, _border_color: Hsla, text_color: Hsla) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap_2()
+        .gap_1()
         .child(
             div()
                 .text_size(px(11.0))
