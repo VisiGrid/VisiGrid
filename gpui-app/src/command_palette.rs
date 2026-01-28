@@ -14,7 +14,7 @@ use crate::app::{Spreadsheet, PaletteScope};
 use crate::mode::Mode;
 use crate::search::{
     MenuCategory, ReferenceEntry, ReferencesProvider, SearchProvider, SearchQuery,
-    SearchAction, SearchItem, CommandId, PrecedentEntry, PrecedentsProvider,
+    SearchAction, SearchItem, SearchKind, CommandId, PrecedentEntry, PrecedentsProvider,
     CellSearchProvider, RecentFilesProvider, NamedRangeSearchProvider, NamedRangeEntry,
 };
 use crate::user_keybindings;
@@ -30,7 +30,9 @@ impl Spreadsheet {
         }
     }
 
-    pub fn show_palette(&mut self, cx: &mut Context<Self>) {
+    /// Open the command palette with an optional scope.
+    /// Shared logic for show_palette(), show_quick_open(), and apply_menu_scope().
+    pub fn show_palette_with_scope(&mut self, scope: Option<PaletteScope>, cx: &mut Context<Self>) {
         // Close validation dropdown when opening modal
         self.close_validation_dropdown(
             crate::validation_dropdown::DropdownCloseReason::ModalOpened,
@@ -38,36 +40,9 @@ impl Spreadsheet {
         );
         self.lua_console.visible = false;
         self.tab_chain_origin_col = None;  // Dialog breaks tab chain
-        // Save pre-palette state for restore on Esc
-        self.palette_pre_selection = self.view_state.selected;
-        self.palette_pre_selection_end = self.view_state.selection_end;
-        self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
-        self.palette_previewing = false;
 
-        self.mode = Mode::Command;
-        self.palette_query.clear();
-        self.palette_selected = 0;
-        self.palette_scope = None;  // Clear scope for normal palette
-        self.update_palette_results(cx);
-
-        // One-time KeyTips discovery hint (macOS only, once per session)
-        #[cfg(target_os = "macos")]
-        if !self.keytips_hint_shown {
-            self.keytips_hint_shown = true;
-            self.status_message = Some("Tip: ⌥Space shows KeyTips (F/E/V/O/D/T/H)".into());
-        }
-
-        cx.notify();
-    }
-
-    /// Apply a menu scope filter (for Alt accelerators).
-    /// Works whether palette is already open or not.
-    pub fn apply_menu_scope(&mut self, category: MenuCategory, cx: &mut Context<Self>) {
-        use crate::app::PaletteScope;
-
-        // If palette not already open, save pre-state
+        // Save pre-palette state for restore on Esc (only if not already in palette)
         if self.mode != Mode::Command {
-            self.lua_console.visible = false;
             self.palette_pre_selection = self.view_state.selected;
             self.palette_pre_selection_end = self.view_state.selection_end;
             self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
@@ -77,9 +52,31 @@ impl Spreadsheet {
         self.mode = Mode::Command;
         self.palette_query.clear();
         self.palette_selected = 0;
-        self.palette_scope = Some(PaletteScope::Menu(category));
+        self.palette_scope = scope;
         self.update_palette_results(cx);
         cx.notify();
+    }
+
+    pub fn show_palette(&mut self, cx: &mut Context<Self>) {
+        self.show_palette_with_scope(None, cx);
+
+        // One-time KeyTips discovery hint (macOS only, once per session)
+        #[cfg(target_os = "macos")]
+        if !self.keytips_hint_shown {
+            self.keytips_hint_shown = true;
+            self.status_message = Some("Tip: ⌥Space shows KeyTips (F/E/V/O/D/T/H)".into());
+        }
+    }
+
+    /// Open palette scoped to recent files (Ctrl+K / Cmd+K)
+    pub fn show_quick_open(&mut self, cx: &mut Context<Self>) {
+        self.show_palette_with_scope(Some(PaletteScope::QuickOpen), cx);
+    }
+
+    /// Apply a menu scope filter (for Alt accelerators).
+    /// Works whether palette is already open or not.
+    pub fn apply_menu_scope(&mut self, category: MenuCategory, cx: &mut Context<Self>) {
+        self.show_palette_with_scope(Some(PaletteScope::Menu(category)), cx);
     }
 
     /// Clear palette scope (backspace with empty query).
@@ -429,17 +426,23 @@ impl Spreadsheet {
             results.extend(cell_results);
         }
 
-        // Filter by palette scope if set (Alt accelerator menu filtering)
-        if let Some(scope) = &self.palette_scope {
-            match scope {
-                PaletteScope::Menu(category) => {
-                    results.retain(|item| {
-                        if let SearchAction::RunCommand(cmd) = &item.action {
-                            cmd.menu_category() == Some(*category)
-                        } else {
-                            false // Non-command items filtered out in menu scope
-                        }
-                    });
+        // Filter by palette scope if set, but prefix overrides scope.
+        // Typing ":B5" in QuickOpen routes to GoToCell, not filtered out.
+        if query.prefix.is_none() {
+            if let Some(scope) = &self.palette_scope {
+                match scope {
+                    PaletteScope::Menu(category) => {
+                        results.retain(|item| {
+                            if let SearchAction::RunCommand(cmd) = &item.action {
+                                cmd.menu_category() == Some(*category)
+                            } else {
+                                false // Non-command items filtered out in menu scope
+                            }
+                        });
+                    }
+                    PaletteScope::QuickOpen => {
+                        results.retain(|item| item.kind == SearchKind::RecentFile);
+                    }
                 }
             }
         }

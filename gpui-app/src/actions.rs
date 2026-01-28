@@ -119,6 +119,7 @@ actions!(file, [
 // View actions
 actions!(view, [
     ToggleCommandPalette,
+    QuickOpen,  // Ctrl+K / Cmd+K - Open palette scoped to recent files
     ToggleInspector,
     ShowHistoryPanel,  // Ctrl+H - opens inspector with History tab
     ShowFormatPanel,  // Ctrl+1 - opens inspector with Format tab

@@ -101,7 +101,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Selection
         KeyBinding::new(&kb(m, "a"), SelectAll, Some("Spreadsheet")),
         KeyBinding::new("shift-space", SelectRow, Some("Spreadsheet")),
-        KeyBinding::new(&kb(m, "space"), SelectColumn, Some("Spreadsheet")),
+        // Ctrl+Space is the Excel standard for column selection on all platforms.
+        // Not routed through kb() — always ctrl, never cmd (cmd-space = Spotlight on macOS).
+        KeyBinding::new("ctrl-space", SelectColumn, Some("Spreadsheet")),
         KeyBinding::new("shift-up", ExtendUp, Some("Spreadsheet")),
         KeyBinding::new("shift-down", ExtendDown, Some("Spreadsheet")),
         KeyBinding::new("shift-left", ExtendLeft, Some("Spreadsheet")),
@@ -129,6 +131,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
 
         // View
         KeyBinding::new(&kb_shift(m, "p"), ToggleCommandPalette, Some("Spreadsheet")),
+        KeyBinding::new(&kb(m, "k"), QuickOpen, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "i"), ToggleInspector, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "y"), ShowHistoryPanel, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "1"), ShowFormatPanel, Some("Spreadsheet")),

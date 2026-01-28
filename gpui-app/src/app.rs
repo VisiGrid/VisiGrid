@@ -68,7 +68,8 @@ pub(crate) fn is_smoke_recalc_enabled() -> bool {
 pub enum PaletteScope {
     /// Filter to commands in a specific menu category (Alt accelerators)
     Menu(MenuCategory),
-    // Future: Selection, Context, History, etc.
+    /// Ctrl+K / Cmd+K: default provider = recent files
+    QuickOpen,
 }
 
 // ============================================================================

@@ -1317,6 +1317,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &ToggleCommandPalette, _, cx| {
             this.toggle_palette(cx);
         }))
+        .on_action(cx.listener(|this, _: &QuickOpen, _, cx| {
+            if this.mode.is_editing() || this.mode.is_formula() {
+                return;  // Don't steal Ctrl+K during cell editing
+            }
+            this.show_quick_open(cx);
+        }))
         // View actions (for native macOS menus)
         .on_action(cx.listener(|this, _: &ShowAbout, _, cx| {
             this.show_about(cx);

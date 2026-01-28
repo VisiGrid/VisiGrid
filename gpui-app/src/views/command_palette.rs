@@ -23,7 +23,8 @@ fn scope_name(scope: &PaletteScope) -> &'static str {
             MenuCategory::Data => "DATA",
             MenuCategory::Tools => "TOOLS",
             MenuCategory::Help => "HELP",
-        }
+        },
+        PaletteScope::QuickOpen => "FILES",
     }
 }
 
@@ -132,7 +133,10 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                         .child(if has_query {
                                             query.clone()
                                         } else if has_scope {
-                                            format!("{} commands...", scope.map(scope_name).unwrap_or(""))
+                                            match scope {
+                                                Some(PaletteScope::QuickOpen) => "Open file...".to_string(),
+                                                _ => format!("{} commands...", scope.map(scope_name).unwrap_or("")),
+                                            }
                                         } else {
                                             "Execute a command...".to_string()
                                         })
@@ -157,6 +161,10 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                 )
                         )
                 )
+                // Prefix hint chips (clickable, context-aware)
+                .when(!has_query && !matches!(scope, Some(PaletteScope::Menu(_))), |d| {
+                    d.child(render_prefix_chips(scope, text_muted, text_disabled, toolbar_hover, panel_border, cx))
+                })
                 // Result list
                 .child({
                     let mut list = div()
@@ -210,22 +218,6 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                             })
                                         )
                                 )
-                                // Search prefix hints
-                                .child(
-                                    div().flex().gap_4()
-                                        .child(div().child(">  commands"))
-                                        .child(div().child(":  go to cell"))
-                                )
-                                .child(
-                                    div().flex().gap_4()
-                                        .child(div().child("@  search cells"))
-                                        .child(div().child("=  functions"))
-                                )
-                                .child(
-                                    div().flex().gap_4()
-                                        .child(div().child("#  settings"))
-                                        .child(div().child("$  named ranges"))
-                                )
                                 .child(
                                     div()
                                         .mt_2()
@@ -244,15 +236,33 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                         })
                     );
 
-                    if results.is_empty() && has_query {
-                        list.child(
-                            div()
-                                .px_4()
-                                .py_6()
-                                .text_color(text_muted)
-                                .text_size(px(14.0))
-                                .child("No matching commands")
-                        )
+                    if results.is_empty() && (has_query || has_scope) {
+                        let (title, hint) = if matches!(scope, Some(PaletteScope::QuickOpen)) {
+                            ("No recent files yet", Some("Open a workbook to see it here."))
+                        } else {
+                            ("No matching commands", None)
+                        };
+                        let mut empty = div()
+                            .px_4()
+                            .py_6()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_color(text_muted)
+                                    .text_size(px(14.0))
+                                    .child(title)
+                            );
+                        if let Some(h) = hint {
+                            empty = empty.child(
+                                div()
+                                    .text_color(text_disabled)
+                                    .text_size(px(12.0))
+                                    .child(h)
+                            );
+                        }
+                        list.child(empty)
                     } else {
                         list
                     }
@@ -324,6 +334,77 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                         )
                 )
         )
+}
+
+/// Render clickable prefix hint chips (shown when query is empty).
+/// Context-aware: FILES scope shows file-relevant prefixes, default shows all.
+fn render_prefix_chips(
+    scope: Option<&PaletteScope>,
+    text_muted: Hsla,
+    text_disabled: Hsla,
+    toolbar_hover: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let hints: Vec<(&str, &str, char)> = if matches!(scope, Some(PaletteScope::QuickOpen)) {
+        vec![
+            (":A1", "go to cell", ':'),
+            ("$name", "named range", '$'),
+            (">", "commands", '>'),
+        ]
+    } else {
+        vec![
+            (">", "commands", '>'),
+            (":A1", "go to cell", ':'),
+            ("$name", "named range", '$'),
+            ("=", "functions", '='),
+            ("@", "search cells", '@'),
+        ]
+    };
+
+    let mut row = div()
+        .flex()
+        .items_center()
+        .flex_wrap()
+        .gap_1()
+        .px_3()
+        .py(px(5.0))
+        .border_b_1()
+        .border_color(panel_border);
+
+    for (prefix, label, ch) in hints {
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("hint-{}", ch)))
+                .flex()
+                .items_center()
+                .gap_1()
+                .px(px(6.0))
+                .py(px(2.0))
+                .rounded_sm()
+                .cursor_pointer()
+                .hover(move |s| s.bg(toolbar_hover))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.palette_insert_char(ch, cx);
+                }))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(text_muted)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(prefix.to_string())
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(text_disabled)
+                        .child(label.to_string())
+                )
+        );
+    }
+
+    row
 }
 
 /// Render text with highlighted spans
