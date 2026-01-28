@@ -53,6 +53,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Cut", Cut),
                 MenuItem::action("Copy", Copy),
                 MenuItem::action("Paste", Paste),
+                MenuItem::action("Paste Special...", PasteSpecial),
                 MenuItem::separator(),
                 MenuItem::action("Delete", DeleteCell),
                 MenuItem::action("Select All", SelectAll),
@@ -118,6 +119,8 @@ pub fn set_app_menus(cx: &mut App) {
         Menu {
             name: "Help".into(),
             items: vec![
+                MenuItem::action("Keyboard Shortcuts...", ShowKeyTips),
+                MenuItem::separator(),
                 MenuItem::action("About VisiGrid", ShowAbout),
                 MenuItem::action("License...", ShowLicense),
             ],

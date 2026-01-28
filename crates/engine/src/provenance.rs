@@ -83,6 +83,7 @@ pub enum MutationOp {
 pub enum PasteMode {
     Values,
     Formulas,
+    Formats,
     Both,
 }
 
@@ -148,6 +149,7 @@ impl MutationOp {
                 let mode_str = match mode {
                     PasteMode::Values => "values",
                     PasteMode::Formulas => "formulas",
+                    PasteMode::Formats => "formats",
                     PasteMode::Both => "both",
                 };
 

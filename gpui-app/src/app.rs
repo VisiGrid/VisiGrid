@@ -425,8 +425,10 @@ pub enum FillDrag {
     #[default]
     None,
     Dragging {
-        /// The active cell when drag started (source of fill)
+        /// The start of source range when drag started
         anchor: (usize, usize),
+        /// The end of source range (same as anchor for single cell)
+        source_end: (usize, usize),
         /// Current hover cell during drag
         current: (usize, usize),
         /// Axis lock (None until threshold crossed, then locked)
@@ -561,6 +563,60 @@ impl NumericOperatorOption {
     pub fn needs_two_values(&self) -> bool {
         matches!(self, Self::Between | Self::NotBetween)
     }
+}
+
+/// Paste Special type selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PasteType {
+    #[default]
+    All,      // Normal paste (values + formulas)
+    Values,   // Computed values only
+    Formulas, // Raw formulas with reference adjustment
+    Formats,  // Cell formatting only
+}
+
+impl PasteType {
+    /// All available paste types in display order
+    pub fn all() -> &'static [PasteType] {
+        &[PasteType::All, PasteType::Values, PasteType::Formulas, PasteType::Formats]
+    }
+
+    /// Display name for UI
+    pub fn label(&self) -> &'static str {
+        match self {
+            PasteType::All => "All",
+            PasteType::Values => "Values",
+            PasteType::Formulas => "Formulas",
+            PasteType::Formats => "Formats",
+        }
+    }
+
+    /// Keyboard accelerator for this paste type
+    pub fn accelerator(&self) -> char {
+        match self {
+            PasteType::All => 'A',
+            PasteType::Values => 'V',
+            PasteType::Formulas => 'F',
+            PasteType::Formats => 'O', // fOrmats (Excel convention)
+        }
+    }
+
+    /// Description for UI
+    pub fn description(&self) -> &'static str {
+        match self {
+            PasteType::All => "Paste everything (formulas, values, and formats)",
+            PasteType::Values => "Paste computed values only (no formulas)",
+            PasteType::Formulas => "Paste formulas with reference adjustment",
+            PasteType::Formats => "Paste cell formatting only (no values)",
+        }
+    }
+}
+
+/// State for the Paste Special dialog
+#[derive(Debug, Clone, Default)]
+pub struct PasteSpecialDialogState {
+    /// Currently selected paste type
+    pub selected: PasteType,
 }
 
 /// Which field in the validation dialog has focus
@@ -1420,6 +1476,16 @@ pub struct Spreadsheet {
     pub caret_last_activity: std::time::Instant,
     pub(crate) caret_blink_task: Option<gpui::Task<()>>,
 
+    // KeyTips state (macOS Option+Space accelerator hints)
+    /// True when KeyTips overlay is visible
+    pub keytips_active: bool,
+    /// Auto-dismiss deadline (3 seconds after activation)
+    pub keytips_deadline_at: Option<std::time::Instant>,
+    /// Last scope opened via KeyTips (for Enter/Space repeat)
+    pub last_keytips_scope: Option<crate::search::MenuCategory>,
+    /// True after KeyTips discovery hint has been shown (once per session)
+    pub keytips_hint_shown: bool,
+
     pub goto_input: String,
     pub find_input: String,
     pub find_results: Vec<MatchHit>,
@@ -1723,6 +1789,11 @@ pub struct Spreadsheet {
     // Validation dialog state (Phase 4: Data > Validation menu)
     pub validation_dialog: ValidationDialogState,
 
+    // Paste Special dialog state (Ctrl+Alt+V)
+    pub paste_special_dialog: PasteSpecialDialogState,
+    /// Last selected paste type for session memory (remembered within session)
+    pub last_paste_special_mode: PasteType,
+
     // Validation failure navigation (Phase 6B: F8/Shift+F8 to cycle through invalid cells)
     pub validation_failures: Vec<(usize, usize)>,  // (row, col) of failed cells
     pub validation_failure_index: usize,           // Current index for cycling
@@ -1825,6 +1896,10 @@ impl Spreadsheet {
             caret_visible: true,
             caret_last_activity: std::time::Instant::now(),
             caret_blink_task: None,
+            keytips_active: false,
+            keytips_deadline_at: None,
+            last_keytips_scope: None,
+            keytips_hint_shown: false,
             goto_input: String::new(),
             find_input: String::new(),
             find_results: Vec::new(),
@@ -2023,6 +2098,9 @@ impl Spreadsheet {
             validation_dropdown: crate::validation_dropdown::ValidationDropdownState::default(),
 
             validation_dialog: ValidationDialogState::default(),
+
+            paste_special_dialog: PasteSpecialDialogState::default(),
+            last_paste_special_mode: PasteType::All,
 
             validation_failures: Vec::new(),
             validation_failure_index: 0,
@@ -2716,6 +2794,9 @@ impl Spreadsheet {
             CommandId::Cut => self.cut(cx),
             CommandId::Paste => self.paste(cx),
             CommandId::PasteValues => self.paste_values(cx),
+            CommandId::PasteSpecial => self.show_paste_special(cx),
+            CommandId::PasteFormulas => self.paste_formulas(cx),
+            CommandId::PasteFormats => self.paste_formats(cx),
 
             // Formatting
             CommandId::ToggleBold => self.toggle_bold(cx),
@@ -3240,6 +3321,146 @@ impl Spreadsheet {
     #[inline]
     pub fn should_block_grid_navigation(&self) -> bool {
         self.mode.is_overlay() || self.lua_console.visible
+    }
+
+    // =========================================================================
+    // KeyTips (macOS Option double-tap accelerators)
+    // =========================================================================
+
+    /// Toggle KeyTips overlay (Option+Space on macOS).
+    /// Shows keyboard accelerator hints for menu navigation.
+    #[cfg(target_os = "macos")]
+    pub fn toggle_keytips(&mut self, cx: &mut Context<Self>) {
+        // Don't show KeyTips if text input is active
+        if !self.should_handle_option_accelerators() {
+            return;
+        }
+
+        if self.keytips_active {
+            self.dismiss_keytips(cx);
+            return;
+        }
+
+        // Show KeyTips overlay
+        self.keytips_active = true;
+        let now = std::time::Instant::now();
+        self.keytips_deadline_at = Some(now + std::time::Duration::from_secs(3));
+        cx.notify();
+
+        // Schedule auto-dismiss after 3 seconds
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.keytips_active {
+                    this.dismiss_keytips(cx);
+                }
+            });
+        }).detach();
+    }
+
+    /// Stub for non-macOS (KeyTips is macOS-only)
+    #[cfg(not(target_os = "macos"))]
+    pub fn toggle_keytips(&mut self, _cx: &mut Context<Self>) {}
+
+    /// Dismiss KeyTips overlay
+    pub fn dismiss_keytips(&mut self, cx: &mut Context<Self>) {
+        if self.keytips_active {
+            self.keytips_active = false;
+            self.keytips_deadline_at = None;
+            cx.notify();
+        }
+    }
+
+    /// Handle key press while KeyTips is active.
+    /// Returns true if the key was handled (caller should stop propagation).
+    pub fn keytips_handle_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if !self.keytips_active {
+            return false;
+        }
+
+        // Map key to menu category
+        // STABLE MAPPING: These letters are locked and will not change.
+        // Users build muscle memory; changing mappings breaks trust.
+        let category = match key.to_lowercase().as_str() {
+            "f" => Some(crate::search::MenuCategory::File),
+            "e" => Some(crate::search::MenuCategory::Edit),
+            "v" => Some(crate::search::MenuCategory::View),
+            "o" => Some(crate::search::MenuCategory::Format),  // O for fOrmat (F taken by File)
+            "d" => Some(crate::search::MenuCategory::Data),
+            "t" => Some(crate::search::MenuCategory::Tools),
+            "h" => Some(crate::search::MenuCategory::Help),
+            // Enter or Space: repeat last scope (power-user speed)
+            "enter" | "space" => {
+                self.keytips_active = false;
+                self.keytips_deadline_at = None;
+                if let Some(scope) = self.last_keytips_scope {
+                    self.apply_menu_scope(scope, cx);
+                } else {
+                    // No previous scope - just dismiss
+                    cx.notify();
+                }
+                return true;
+            }
+            "escape" => {
+                self.dismiss_keytips(cx);
+                return true;
+            }
+            _ => {
+                // Unknown key - dismiss (snappy, avoids stuck overlay)
+                self.dismiss_keytips(cx);
+                return true;
+            }
+        };
+
+        // Dismiss and open scoped palette
+        self.keytips_active = false;
+        self.keytips_deadline_at = None;
+
+        if let Some(cat) = category {
+            // Store for repeat-last-scope
+            self.last_keytips_scope = Some(cat);
+            self.apply_menu_scope(cat, cx);
+        }
+
+        true
+    }
+
+    /// Check if Option+letter accelerators should be handled.
+    /// Returns false if any text input is active, preventing conflicts
+    /// with macOS character composition (accents, special characters).
+    ///
+    /// This is the central guard for all Option-based accelerators on macOS.
+    /// When this returns false, Option+letter events should pass through
+    /// to the OS for normal text input handling.
+    #[inline]
+    pub fn should_handle_option_accelerators(&self) -> bool {
+        // Block if mode has text input
+        if self.mode.has_text_input() {
+            return false;
+        }
+
+        // Block if Lua console is visible (has text input)
+        if self.lua_console.visible {
+            return false;
+        }
+
+        // Block if filter dropdown search is active
+        if self.filter_dropdown_col.is_some() && !self.filter_search_text.is_empty() {
+            return false;
+        }
+
+        // Block if sheet rename is active
+        if self.renaming_sheet.is_some() {
+            return false;
+        }
+
+        // Block if validation dropdown is open (may have text)
+        if self.is_validation_dropdown_open() {
+            return false;
+        }
+
+        // Safe to handle Option accelerators
+        true
     }
 
     /// Calculate which borders to draw for a selected cell.

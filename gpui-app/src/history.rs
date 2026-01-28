@@ -94,6 +94,7 @@ pub enum FormatActionKind {
     DecimalPlaces,  // Special: coalesces rapidly
     BackgroundColor,
     Border,
+    PasteFormats,  // Paste Special > Formats
 }
 
 /// An undoable action
@@ -743,6 +744,30 @@ impl History {
             action: UndoAction::Format { sheet_index, patches, kind, description },
             timestamp: now,
             provenance: None,  // Format changes don't need Lua provenance
+            source: MutationSource::Human,
+        };
+        self.push_entry(entry);
+    }
+
+    /// Record format changes with optional Lua provenance (for Paste Formats)
+    pub fn record_format_with_provenance(
+        &mut self,
+        sheet_index: usize,
+        patches: Vec<CellFormatPatch>,
+        kind: FormatActionKind,
+        description: String,
+        provenance: Option<Provenance>,
+    ) {
+        if patches.is_empty() {
+            return;
+        }
+
+        let id = self.next_entry_id();
+        let entry = HistoryEntry {
+            id,
+            action: UndoAction::Format { sheet_index, patches, kind, description },
+            timestamp: Instant::now(),
+            provenance,
             source: MutationSource::Human,
         };
         self.push_entry(entry);

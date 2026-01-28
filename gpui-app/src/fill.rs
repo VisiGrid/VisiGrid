@@ -8,17 +8,27 @@ use regex::Regex;
 use crate::app::{Spreadsheet, FillDrag, FillAxis};
 use crate::history::CellChange;
 use crate::mode::Mode;
+use crate::series_fill::{self, FillPattern, DetectedSource};
+use crate::settings::{user_settings, update_user_settings, TipId};
+use visigrid_engine::formula::eval::Value;
 use visigrid_engine::provenance::{MutationOp, FillDirection, FillMode};
 
 /// Hit area size for fill handle (logical pixels, unscaled by zoom)
-pub const FILL_HANDLE_HIT_SIZE: f32 = 14.0;
+/// Deliberately larger than visual size for easier targeting (Fitts's Law)
+pub const FILL_HANDLE_HIT_SIZE: f32 = 18.0;
 
 /// Visual size for fill handle (logical pixels, unscaled by zoom)
-/// Excel uses approximately 6x6 pixels
-pub const FILL_HANDLE_VISUAL_SIZE: f32 = 6.0;
+/// 10px reads as "grab handle" not "pixel artifact" on modern displays
+pub const FILL_HANDLE_VISUAL_SIZE: f32 = 10.0;
 
 /// Border width for fill handle (gives it the Excel-style white outline)
 pub const FILL_HANDLE_BORDER: f32 = 1.0;
+
+/// Hover glow size (additional pixels around visual handle on hover)
+pub const FILL_HANDLE_HOVER_GLOW: f32 = 3.0;
+
+/// Inward overlap: handle overlaps selection border by this much (feels like corner cap)
+pub const FILL_HANDLE_INWARD_OVERLAP: f32 = 1.0;
 
 impl Spreadsheet {
     // Fill operations
@@ -502,19 +512,50 @@ impl Spreadsheet {
         matches!(self.fill_drag, FillDrag::Dragging { .. })
     }
 
-    /// Start fill handle drag from the active cell
+    /// Get the source_end position during fill drag (for keeping handle visible)
+    pub fn fill_drag_source_end(&self) -> Option<(usize, usize)> {
+        if let FillDrag::Dragging { anchor, source_end, .. } = self.fill_drag {
+            // Return the bottom-right of the source range
+            let max_row = anchor.0.max(source_end.0);
+            let max_col = anchor.1.max(source_end.1);
+            Some((max_row, max_col))
+        } else {
+            None
+        }
+    }
+
+    /// Start fill handle drag from the selection
     pub fn start_fill_drag(&mut self, cx: &mut Context<Self>) {
-        // Only allow from single cell (v1 limitation)
-        if self.view_state.selection_end.is_some() || !self.view_state.additional_selections.is_empty() {
-            self.status_message = Some("Fill handle works from single cell".into());
+        // Disallow additional (Ctrl+click) selections - only contiguous ranges
+        if !self.view_state.additional_selections.is_empty() {
+            self.status_message = Some("Fill handle works from contiguous selection".into());
             cx.notify();
             return;
         }
 
+        // Show one-time tip on first fill handle use
+        if !user_settings(cx).is_tip_dismissed(TipId::FillHandle) {
+            update_user_settings(cx, |settings| {
+                settings.dismiss_tip(TipId::FillHandle);
+            });
+            #[cfg(target_os = "macos")]
+            {
+                self.status_message = Some("Drag to fill · Hold Cmd to toggle series/copy".into());
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.status_message = Some("Drag to fill · Hold Ctrl to toggle series/copy".into());
+            }
+        }
+
+        // Anchor is the selection start, range end is selection_end (or same as anchor for single cell)
         let anchor = self.view_state.selected;
+        let range_end = self.view_state.selection_end.unwrap_or(anchor);
+
         self.fill_drag = FillDrag::Dragging {
             anchor,
-            current: anchor,
+            source_end: range_end,
+            current: range_end,
             axis: None,
         };
         cx.notify();
@@ -522,19 +563,20 @@ impl Spreadsheet {
 
     /// Continue fill handle drag - update current position and axis lock
     pub fn continue_fill_drag(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
-        if let FillDrag::Dragging { anchor, current, axis } = self.fill_drag {
+        if let FillDrag::Dragging { anchor, source_end, current, axis } = self.fill_drag {
             // Skip if position unchanged
             if (row, col) == current {
                 return;
             }
 
+            // Use source_end for axis calculation (the end of the source range)
             let new_axis = if axis.is_some() {
                 // Axis already locked - keep it
                 axis
             } else {
-                // Determine axis from movement direction
-                let delta_row = (row as i32 - anchor.0 as i32).abs();
-                let delta_col = (col as i32 - anchor.1 as i32).abs();
+                // Determine axis from movement direction relative to source_end
+                let delta_row = (row as i32 - source_end.0 as i32).abs();
+                let delta_col = (col as i32 - source_end.1 as i32).abs();
 
                 if delta_row >= 1 || delta_col >= 1 {
                     // Lock axis based on primary direction
@@ -553,13 +595,14 @@ impl Spreadsheet {
 
             // Constrain current position to locked axis
             let constrained = match new_axis {
-                Some(FillAxis::Row) => (row, anchor.1),  // Lock to anchor column
-                Some(FillAxis::Col) => (anchor.0, col),  // Lock to anchor row
+                Some(FillAxis::Row) => (row, source_end.1),  // Lock to source column
+                Some(FillAxis::Col) => (source_end.0, col),  // Lock to source row
                 None => (row, col),
             };
 
             self.fill_drag = FillDrag::Dragging {
                 anchor,
+                source_end,
                 current: constrained,
                 axis: new_axis,
             };
@@ -568,12 +611,15 @@ impl Spreadsheet {
     }
 
     /// End fill handle drag - execute the fill operation
-    pub fn end_fill_drag(&mut self, cx: &mut Context<Self>) {
-        if let FillDrag::Dragging { anchor, current, axis } = self.fill_drag {
+    ///
+    /// # Arguments
+    /// * `ctrl_held` - Whether Ctrl was held at release time (toggles copy/series behavior)
+    pub fn end_fill_drag(&mut self, ctrl_held: bool, cx: &mut Context<Self>) {
+        if let FillDrag::Dragging { anchor, source_end, current, axis } = self.fill_drag {
             self.fill_drag = FillDrag::None;
 
-            // No-op if current == anchor
-            if current == anchor {
+            // No-op if current hasn't moved beyond source range
+            if current == source_end {
                 cx.notify();
                 return;
             }
@@ -581,10 +627,10 @@ impl Spreadsheet {
             // Execute fill based on axis
             match axis {
                 Some(FillAxis::Row) => {
-                    self.execute_fill_handle_vertical(anchor, current, cx);
+                    self.execute_fill_handle_vertical(anchor, source_end, current, ctrl_held, cx);
                 }
                 Some(FillAxis::Col) => {
-                    self.execute_fill_handle_horizontal(anchor, current, cx);
+                    self.execute_fill_handle_horizontal(anchor, source_end, current, ctrl_held, cx);
                 }
                 None => {
                     // No axis determined - shouldn't happen, but no-op
@@ -606,62 +652,139 @@ impl Spreadsheet {
     fn execute_fill_handle_vertical(
         &mut self,
         anchor: (usize, usize),
+        source_end: (usize, usize),
         end: (usize, usize),
+        ctrl_held: bool,
         cx: &mut Context<Self>,
     ) {
-        let (anchor_row, col) = anchor;
+        let col = anchor.1;
+        let src_min_row = anchor.0.min(source_end.0);
+        let src_max_row = anchor.0.max(source_end.0);
         let end_row = end.0;
 
-        if anchor_row == end_row {
+        // No-op if end is within source range
+        if end_row >= src_min_row && end_row <= src_max_row {
             return;
         }
 
-        let source = self.sheet(cx).get_raw(anchor_row, col);
         let mut changes = Vec::new();
 
-        // Determine fill direction and range (excluding anchor)
-        let fill_range: Vec<usize> = if end_row > anchor_row {
+        // Collect source values and check for formulas
+        let mut source_raws: Vec<String> = Vec::new();
+        let mut has_formula = false;
+        for row in src_min_row..=src_max_row {
+            let raw = self.sheet(cx).get_raw(row, col);
+            if raw.starts_with('=') {
+                has_formula = true;
+            }
+            source_raws.push(raw);
+        }
+
+        // Determine fill range (excluding source)
+        let fill_range: Vec<usize> = if end_row > src_max_row {
             // Fill down
-            ((anchor_row + 1)..=end_row).collect()
+            ((src_max_row + 1)..=end_row).collect()
         } else {
             // Fill up
-            (end_row..anchor_row).collect()
+            (end_row..src_min_row).rev().collect()
         };
 
-        for row in &fill_range {
-            let delta_row = *row as i32 - anchor_row as i32;
-            let old_value = self.sheet(cx).get_raw(*row, col);
-            let new_value = if source.starts_with('=') {
-                self.adjust_formula_refs(&source, delta_row, 0)
-            } else {
-                source.clone()
-            };
+        // Formulas use existing ref-adjustment path (cycle through source formulas)
+        if has_formula {
+            let source_len = source_raws.len();
+            for (i, row) in fill_range.iter().enumerate() {
+                let src_idx = i % source_len;
+                let source = &source_raws[src_idx];
+                let src_row = src_min_row + src_idx;
+                let delta_row = *row as i32 - src_row as i32;
+                let old_value = self.sheet(cx).get_raw(*row, col);
+                let new_value = if source.starts_with('=') {
+                    self.adjust_formula_refs(source, delta_row, 0)
+                } else {
+                    source.clone()
+                };
 
-            if old_value != new_value {
-                changes.push(CellChange {
-                    row: *row,
-                    col,
-                    old_value,
-                    new_value: new_value.clone(),
-                });
+                if old_value != new_value {
+                    changes.push(CellChange {
+                        row: *row,
+                        col,
+                        old_value,
+                        new_value: new_value.clone(),
+                    });
+                }
+                self.set_cell_value(*row, col, &new_value, cx);
             }
-            self.set_cell_value(*row, col, &new_value, cx);
+        } else {
+            // Use series fill for non-formula values
+            let source_values: Vec<Value> = (src_min_row..=src_max_row)
+                .map(|row| self.cell_to_value(row, col, cx))
+                .collect();
+            let source_len = source_values.len();
+
+            // Check if single source is a list item (for intent determination)
+            let single_is_list = source_len == 1 && self.is_list_item(&source_raws[0]);
+
+            let intent = series_fill::fill_intent(ctrl_held, source_len, single_is_list);
+            let detected = DetectedSource {
+                values: source_values,
+                text_tokens: source_raws.iter().map(|s| Some(s.clone())).collect(),
+            };
+            let pattern = series_fill::detect_pattern(&detected, intent);
+
+            match &pattern {
+                FillPattern::Copy => {
+                    // Simple copy (cycle through source values)
+                    for (i, row) in fill_range.iter().enumerate() {
+                        let src_idx = i % source_len;
+                        let source_raw = &source_raws[src_idx];
+                        let old_value = self.sheet(cx).get_raw(*row, col);
+                        if old_value != *source_raw {
+                            changes.push(CellChange {
+                                row: *row,
+                                col,
+                                old_value,
+                                new_value: source_raw.clone(),
+                            });
+                        }
+                        self.set_cell_value(*row, col, source_raw, cx);
+                    }
+                }
+                _ => {
+                    // Series generation
+                    for (i, row) in fill_range.iter().enumerate() {
+                        let k = i + 1; // 1-indexed for generate()
+                        let generated = series_fill::generate(&pattern, k);
+                        let new_value = self.value_to_string(&generated);
+                        let old_value = self.sheet(cx).get_raw(*row, col);
+
+                        if old_value != new_value {
+                            changes.push(CellChange {
+                                row: *row,
+                                col,
+                                old_value,
+                                new_value: new_value.clone(),
+                            });
+                        }
+                        self.set_cell_value(*row, col, &new_value, cx);
+                    }
+                }
+            }
         }
 
         let count = fill_range.len();
         if !changes.is_empty() {
-            let direction = if end_row > anchor_row { FillDirection::Down } else { FillDirection::Up };
-            let (dst_start, dst_end) = if end_row > anchor_row {
-                (anchor_row + 1, end_row)
+            let direction = if end_row > src_max_row { FillDirection::Down } else { FillDirection::Up };
+            let (dst_start, dst_end) = if end_row > src_max_row {
+                (src_max_row + 1, end_row)
             } else {
-                (end_row, anchor_row - 1)
+                (end_row, src_min_row - 1)
             };
 
             let provenance = MutationOp::Fill {
                 sheet: self.sheet(cx).id,
-                src_start_row: anchor_row,
+                src_start_row: src_min_row,
                 src_start_col: col,
-                src_end_row: anchor_row,
+                src_end_row: src_max_row,
                 src_end_col: col,
                 dst_start_row: dst_start,
                 dst_start_col: col,
@@ -690,63 +813,140 @@ impl Spreadsheet {
     fn execute_fill_handle_horizontal(
         &mut self,
         anchor: (usize, usize),
+        source_end: (usize, usize),
         end: (usize, usize),
+        ctrl_held: bool,
         cx: &mut Context<Self>,
     ) {
-        let (row, anchor_col) = anchor;
+        let row = anchor.0;
+        let src_min_col = anchor.1.min(source_end.1);
+        let src_max_col = anchor.1.max(source_end.1);
         let end_col = end.1;
 
-        if anchor_col == end_col {
+        // No-op if end is within source range
+        if end_col >= src_min_col && end_col <= src_max_col {
             return;
         }
 
-        let source = self.sheet(cx).get_raw(row, anchor_col);
         let mut changes = Vec::new();
 
-        // Determine fill direction and range (excluding anchor)
-        let fill_range: Vec<usize> = if end_col > anchor_col {
+        // Collect source values and check for formulas
+        let mut source_raws: Vec<String> = Vec::new();
+        let mut has_formula = false;
+        for col in src_min_col..=src_max_col {
+            let raw = self.sheet(cx).get_raw(row, col);
+            if raw.starts_with('=') {
+                has_formula = true;
+            }
+            source_raws.push(raw);
+        }
+
+        // Determine fill range (excluding source)
+        let fill_range: Vec<usize> = if end_col > src_max_col {
             // Fill right
-            ((anchor_col + 1)..=end_col).collect()
+            ((src_max_col + 1)..=end_col).collect()
         } else {
             // Fill left
-            (end_col..anchor_col).collect()
+            (end_col..src_min_col).rev().collect()
         };
 
-        for col in &fill_range {
-            let delta_col = *col as i32 - anchor_col as i32;
-            let old_value = self.sheet(cx).get_raw(row, *col);
-            let new_value = if source.starts_with('=') {
-                self.adjust_formula_refs(&source, 0, delta_col)
-            } else {
-                source.clone()
-            };
+        // Formulas use existing ref-adjustment path (cycle through source formulas)
+        if has_formula {
+            let source_len = source_raws.len();
+            for (i, col) in fill_range.iter().enumerate() {
+                let src_idx = i % source_len;
+                let source = &source_raws[src_idx];
+                let src_col = src_min_col + src_idx;
+                let delta_col = *col as i32 - src_col as i32;
+                let old_value = self.sheet(cx).get_raw(row, *col);
+                let new_value = if source.starts_with('=') {
+                    self.adjust_formula_refs(source, 0, delta_col)
+                } else {
+                    source.clone()
+                };
 
-            if old_value != new_value {
-                changes.push(CellChange {
-                    row,
-                    col: *col,
-                    old_value,
-                    new_value: new_value.clone(),
-                });
+                if old_value != new_value {
+                    changes.push(CellChange {
+                        row,
+                        col: *col,
+                        old_value,
+                        new_value: new_value.clone(),
+                    });
+                }
+                self.set_cell_value(row, *col, &new_value, cx);
             }
-            self.set_cell_value(row, *col, &new_value, cx);
+        } else {
+            // Use series fill for non-formula values
+            let source_values: Vec<Value> = (src_min_col..=src_max_col)
+                .map(|col| self.cell_to_value(row, col, cx))
+                .collect();
+            let source_len = source_values.len();
+
+            // Check if single source is a list item (for intent determination)
+            let single_is_list = source_len == 1 && self.is_list_item(&source_raws[0]);
+
+            let intent = series_fill::fill_intent(ctrl_held, source_len, single_is_list);
+            let detected = DetectedSource {
+                values: source_values,
+                text_tokens: source_raws.iter().map(|s| Some(s.clone())).collect(),
+            };
+            let pattern = series_fill::detect_pattern(&detected, intent);
+
+            match &pattern {
+                FillPattern::Copy => {
+                    // Simple copy (cycle through source values)
+                    for (i, col) in fill_range.iter().enumerate() {
+                        let src_idx = i % source_len;
+                        let source_raw = &source_raws[src_idx];
+                        let old_value = self.sheet(cx).get_raw(row, *col);
+                        if old_value != *source_raw {
+                            changes.push(CellChange {
+                                row,
+                                col: *col,
+                                old_value,
+                                new_value: source_raw.clone(),
+                            });
+                        }
+                        self.set_cell_value(row, *col, source_raw, cx);
+                    }
+                }
+                _ => {
+                    // Series generation
+                    for (i, col) in fill_range.iter().enumerate() {
+                        let k = i + 1; // 1-indexed for generate()
+                        let generated = series_fill::generate(&pattern, k);
+                        let new_value = self.value_to_string(&generated);
+                        let old_value = self.sheet(cx).get_raw(row, *col);
+
+                        if old_value != new_value {
+                            changes.push(CellChange {
+                                row,
+                                col: *col,
+                                old_value,
+                                new_value: new_value.clone(),
+                            });
+                        }
+                        self.set_cell_value(row, *col, &new_value, cx);
+                    }
+                }
+            }
         }
 
         let count = fill_range.len();
         if !changes.is_empty() {
-            let direction = if end_col > anchor_col { FillDirection::Right } else { FillDirection::Left };
-            let (dst_start, dst_end) = if end_col > anchor_col {
-                (anchor_col + 1, end_col)
+            let direction = if end_col > src_max_col { FillDirection::Right } else { FillDirection::Left };
+            let (dst_start, dst_end) = if end_col > src_max_col {
+                (src_max_col + 1, end_col)
             } else {
-                (end_col, anchor_col - 1)
+                (end_col, src_min_col - 1)
             };
 
             let provenance = MutationOp::Fill {
                 sheet: self.sheet(cx).id,
                 src_start_row: row,
-                src_start_col: anchor_col,
+                src_start_col: src_min_col,
                 src_end_row: row,
-                src_end_col: anchor_col,
+                src_end_col: src_max_col,
                 dst_start_row: row,
                 dst_start_col: dst_start,
                 dst_end_row: row,
@@ -771,34 +971,50 @@ impl Spreadsheet {
     }
 
     /// Get the fill preview target range (for rendering overlay)
-    /// Returns None if not dragging or anchor == current
-    /// Returns (min_row, min_col, max_row, max_col) excluding the anchor cell
+    /// Returns None if not dragging or current is within source range
+    /// Returns (min_row, min_col, max_row, max_col) of the destination area only
     pub fn fill_drag_target_range(&self) -> Option<(usize, usize, usize, usize)> {
-        if let FillDrag::Dragging { anchor, current, axis } = self.fill_drag {
-            if current == anchor || axis.is_none() {
+        if let FillDrag::Dragging { anchor, source_end, current, axis } = self.fill_drag {
+            if current == source_end || axis.is_none() {
                 return None;
             }
 
             match axis {
                 Some(FillAxis::Row) => {
-                    let (anchor_row, col) = anchor;
+                    let col = anchor.1;
+                    let src_min_row = anchor.0.min(source_end.0);
+                    let src_max_row = anchor.0.max(source_end.0);
                     let end_row = current.0;
-                    if anchor_row == end_row {
+
+                    // Check if current is outside source range
+                    if end_row >= src_min_row && end_row <= src_max_row {
                         return None;
                     }
-                    let min_row = anchor_row.min(end_row);
-                    let max_row = anchor_row.max(end_row);
-                    Some((min_row, col, max_row, col))
+
+                    // Return destination range only (excluding source)
+                    if end_row > src_max_row {
+                        Some((src_max_row + 1, col, end_row, col))
+                    } else {
+                        Some((end_row, col, src_min_row - 1, col))
+                    }
                 }
                 Some(FillAxis::Col) => {
-                    let (row, anchor_col) = anchor;
+                    let row = anchor.0;
+                    let src_min_col = anchor.1.min(source_end.1);
+                    let src_max_col = anchor.1.max(source_end.1);
                     let end_col = current.1;
-                    if anchor_col == end_col {
+
+                    // Check if current is outside source range
+                    if end_col >= src_min_col && end_col <= src_max_col {
                         return None;
                     }
-                    let min_col = anchor_col.min(end_col);
-                    let max_col = anchor_col.max(end_col);
-                    Some((row, min_col, row, max_col))
+
+                    // Return destination range only (excluding source)
+                    if end_col > src_max_col {
+                        Some((row, src_max_col + 1, row, end_col))
+                    } else {
+                        Some((row, end_col, row, src_min_col - 1))
+                    }
                 }
                 None => None,
             }
@@ -807,11 +1023,16 @@ impl Spreadsheet {
         }
     }
 
-    /// Check if a cell is in the fill preview range (excluding anchor)
+    /// Check if a cell is in the fill preview range (excluding source range)
     pub fn is_fill_preview_cell(&self, row: usize, col: usize) -> bool {
-        if let FillDrag::Dragging { anchor, .. } = self.fill_drag {
-            // Never highlight anchor
-            if (row, col) == anchor {
+        if let FillDrag::Dragging { anchor, source_end, .. } = self.fill_drag {
+            // Never highlight source range
+            let src_min_row = anchor.0.min(source_end.0);
+            let src_max_row = anchor.0.max(source_end.0);
+            let src_min_col = anchor.1.min(source_end.1);
+            let src_max_col = anchor.1.max(source_end.1);
+
+            if row >= src_min_row && row <= src_max_row && col >= src_min_col && col <= src_max_col {
                 return false;
             }
 
@@ -820,5 +1041,136 @@ impl Spreadsheet {
             }
         }
         false
+    }
+
+    // ========================================================================
+    // Series Fill Helpers
+    // ========================================================================
+
+    /// Convert a cell's content to a series_fill Value
+    fn cell_to_value(&self, row: usize, col: usize, cx: &App) -> Value {
+        let raw = self.sheet(cx).get_raw(row, col);
+
+        if raw.is_empty() {
+            return Value::Empty;
+        }
+
+        // Try to parse as number
+        if let Ok(n) = raw.parse::<f64>() {
+            return Value::Number(n);
+        }
+
+        // Otherwise it's text
+        Value::Text(raw)
+    }
+
+    /// Check if a string matches a pattern that should series by default:
+    /// - Built-in lists (months, weekdays, quarters)
+    /// - Alphanumeric patterns (Item1, Row Z, etc.)
+    fn is_list_item(&self, text: &str) -> bool {
+        let lower = text.to_lowercase();
+        let trimmed = lower.trim();
+
+        // Skip formulas
+        if trimmed.starts_with('=') {
+            return false;
+        }
+
+        // Months (short)
+        const MONTHS_SHORT: [&str; 12] = [
+            "jan", "feb", "mar", "apr", "may", "jun",
+            "jul", "aug", "sep", "oct", "nov", "dec",
+        ];
+        if MONTHS_SHORT.contains(&trimmed) {
+            return true;
+        }
+
+        // Months (long)
+        const MONTHS_LONG: [&str; 12] = [
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december",
+        ];
+        if MONTHS_LONG.contains(&trimmed) {
+            return true;
+        }
+
+        // Weekdays (short)
+        const WEEKDAYS_SHORT: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+        if WEEKDAYS_SHORT.contains(&trimmed) {
+            return true;
+        }
+
+        // Weekdays (long)
+        const WEEKDAYS_LONG: [&str; 7] = [
+            "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        ];
+        if WEEKDAYS_LONG.contains(&trimmed) {
+            return true;
+        }
+
+        // Quarters (Q1-Q4, with or without year)
+        if (trimmed.starts_with('q') || trimmed.starts_with('Q'))
+            && trimmed.len() >= 2
+        {
+            let rest = &trimmed[1..];
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if let Some(first) = parts.first() {
+                if let Ok(q) = first.parse::<i32>() {
+                    if (1..=4).contains(&q) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Alphanumeric with trailing number (Item1, Row-5, etc.)
+        // Must have a non-digit prefix and trailing digits
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() >= 2 {
+            // Check for trailing digits
+            let has_trailing_digits = chars.last().map_or(false, |c| c.is_ascii_digit());
+            let has_prefix = !chars.first().map_or(false, |c| c.is_ascii_digit() || *c == '-');
+            if has_trailing_digits && has_prefix {
+                return true;
+            }
+
+            // Check for trailing letters with a non-letter prefix (Row A, Item Z)
+            let last_is_letter = chars.last().map_or(false, |c| c.is_ascii_alphabetic());
+            if last_is_letter {
+                // Find where the trailing letter sequence starts
+                let mut letter_start = chars.len();
+                for i in (0..chars.len()).rev() {
+                    if chars[i].is_ascii_alphabetic() {
+                        letter_start = i;
+                    } else {
+                        break;
+                    }
+                }
+                // Must have at least one non-letter before the trailing letters
+                if letter_start > 0 && !chars[letter_start - 1].is_ascii_alphabetic() {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Convert a series_fill Value to a cell string
+    fn value_to_string(&self, value: &Value) -> String {
+        match value {
+            Value::Number(n) => {
+                // Format without unnecessary decimal places
+                if n.fract() == 0.0 && n.abs() < 1e15 {
+                    format!("{}", *n as i64)
+                } else {
+                    format!("{}", n)
+                }
+            }
+            Value::Text(s) => s.clone(),
+            Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            Value::Empty => String::new(),
+            Value::Error(e) => format!("{}", e),
+        }
     }
 }

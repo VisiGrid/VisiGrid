@@ -94,6 +94,9 @@ pub enum CommandId {
     Cut,
     Paste,
     PasteValues,
+    PasteSpecial,
+    PasteFormulas,
+    PasteFormats,
 
     // Formatting
     ToggleBold,
@@ -214,6 +217,9 @@ impl CommandId {
             Self::Cut => "Cut",
             Self::Paste => "Paste",
             Self::PasteValues => "Paste Values",
+            Self::PasteSpecial => "Paste Special...",
+            Self::PasteFormulas => "Paste Formulas",
+            Self::PasteFormats => "Paste Formats",
             Self::ToggleBold => "Toggle Bold",
             Self::ToggleItalic => "Toggle Italic",
             Self::ToggleUnderline => "Toggle Underline",
@@ -308,6 +314,10 @@ impl CommandId {
             Self::Cut => Some("Ctrl+X"),
             Self::Paste => Some("Ctrl+V"),
             Self::PasteValues => Some("Ctrl+Shift+V"),
+            #[cfg(target_os = "macos")]
+            Self::PasteSpecial => Some("Cmd+Option+V"),
+            #[cfg(not(target_os = "macos"))]
+            Self::PasteSpecial => Some("Ctrl+Alt+V"),
             Self::ToggleBold => Some("Ctrl+B"),
             Self::ToggleItalic => Some("Ctrl+I"),
             Self::ToggleUnderline => Some("Ctrl+U"),
@@ -370,6 +380,9 @@ impl CommandId {
             Self::Cut => "clipboard",
             Self::Paste => "clipboard",
             Self::PasteValues => "clipboard special values only",
+            Self::PasteSpecial => "clipboard special dialog formulas formats values",
+            Self::PasteFormulas => "clipboard special formulas reference adjust",
+            Self::PasteFormats => "clipboard special formatting style",
             Self::ToggleBold => "format style",
             Self::ToggleItalic => "format style",
             Self::ToggleUnderline => "format style",
@@ -466,6 +479,9 @@ impl CommandId {
             Self::Cut,
             Self::Paste,
             Self::PasteValues,
+            Self::PasteSpecial,
+            Self::PasteFormulas,
+            Self::PasteFormats,
             Self::ToggleBold,
             Self::ToggleItalic,
             Self::ToggleUnderline,
@@ -577,6 +593,9 @@ impl CommandId {
             | Self::Copy
             | Self::Paste
             | Self::PasteValues
+            | Self::PasteSpecial
+            | Self::PasteFormulas
+            | Self::PasteFormats
             | Self::ClearCells
             | Self::SelectAll
             | Self::FindInCells
@@ -596,12 +615,13 @@ impl CommandId {
             | Self::CloseSplit
             | Self::Recalculate => Some(MenuCategory::View),
 
-            // Tools menu (trace, explain, audit)
+            // Tools menu (trace, explain, audit, AI)
             Self::ToggleTrace
             | Self::CycleTracePrecedent
             | Self::CycleTraceDependent
             | Self::ReturnToTraceSource
-            | Self::ToggleVerifiedMode => Some(MenuCategory::Tools),
+            | Self::ToggleVerifiedMode
+            | Self::AskAI => Some(MenuCategory::Tools),
 
             // Format menu
             Self::ToggleBold
@@ -637,8 +657,7 @@ impl CommandId {
             | Self::ExcludeFromValidation
             | Self::ClearValidationExclusions
             | Self::CircleInvalidData
-            | Self::ClearInvalidCircles
-            | Self::AskAI => Some(MenuCategory::Data),
+            | Self::ClearInvalidCircles => Some(MenuCategory::Data),
 
             // Help menu
             Self::ShowShortcuts

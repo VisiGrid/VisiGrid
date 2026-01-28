@@ -138,10 +138,20 @@ What's built, what's next, and what's not planned.
 - 8-level bar heights using Unicode block characters (▁▂▃▄▅▆▇█)
 - Auto-scales to data min/max
 
-### Fill Handle Improvements (v0.2.3+)
-- Excel-style rendering: solid fill with contrasting border
+### Fill Handle & Series Fill (v0.2.3+, enhanced v0.3.5)
+- Excel-style rendering: solid dark fill with contrasting border (10px visual, 18px hit area)
+- Corner cap positioning: handle overlaps selection border by 1px inward
+- Hover feedback: subtle glow + crosshair cursor
 - Shows at bottom-right corner of range selections (not just single cells)
-- Smaller, more precise hit target (6px visual, 14px hit area)
+- **Series Fill (v0.3.5):**
+  - Single numbers copy by default; hold Ctrl/Cmd for series (1→2→3)
+  - Built-in lists auto-extend: months, weekdays, quarters
+  - Two+ cell selections detect linear step (1,3→5,7,9)
+  - Alphanumeric patterns: Item1→Item2, Row Z→Row AA
+  - Leading zeros preserved: 001→002→003
+  - Drag preview: border-only (no fill) for clear action feedback
+  - First-use tip in status bar
+- See: [docs/features/done/series-fill-spec.md](docs/features/done/series-fill-spec.md)
 
 ### macOS Keyboard (v0.2.3+)
 - Modifier key preference: choose Cmd (default) or Ctrl for shortcuts
@@ -222,12 +232,7 @@ What's built, what's next, and what's not planned.
 
 ### Near-term
 - Paste Special expansion (formulas, transpose, operations)
-- Series Fill (smart pattern detection)
-  - Numbers: 1, 2, 3 → 4, 5, 6
-  - Dates: Jan 1 → Jan 2, Jan 3...
-  - Months: Jan, Feb → Mar, Apr...
-  - Weekdays: Mon, Tue → Wed, Thu...
-  - Custom step sizes
+- Date pattern fill (Jan 1 → Jan 2, Jan 3...)
 - Conditional formatting (basic rules)
 - Comments/notes on cells
 - Print to PDF
@@ -268,6 +273,10 @@ See full spec: [docs/features/explainability-roadmap.md](docs/features/explainab
   - Eliminates "menu on 2nd line" non-native feel
   - See [docs/features/windows-titlebar-spec.md](docs/features/windows-titlebar-spec.md)
   - Windows-first, behind feature flag, with acceptance checklist
+- Fill handle refinements
+  - Zoom-adaptive size (9px at ≤90%, 10px at 100–150%, 11px at ≥175%)
+  - Optional 1px border radius (if UI language moves to softened edges)
+  - Post-fill dropdown affordance ("I meant copy, not series")
 
 ### Long-term: Systems of Record
 
@@ -297,6 +306,7 @@ Fixes we may contribute to dependencies:
 |---------|-------|---------|
 | gpui/Zed | Linux font rendering | Bold, italic, per-cell fonts don't render. See [docs/font-rendering-issue.md](docs/font-rendering-issue.md) |
 | gpui/Zed | Nested submenu support | Cross-platform nested menus for context menus and menu bar. See [#19837](https://github.com/zed-industries/zed/issues/19837) |
+| gpui/Zed | Modifier-only key release events | `KeyUpEvent` not sent when releasing modifier keys (Option/Alt/Ctrl/Cmd) without other keys. Prevents Excel-style double-tap Option for KeyTips. Workaround: Option+Space trigger instead. **Decision: Only implement double-tap Option if gpui adds modifier-only key release events; otherwise KeyTips stays Option+Space.** |
 
 ---
 

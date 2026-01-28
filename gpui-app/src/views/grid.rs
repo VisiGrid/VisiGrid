@@ -2,7 +2,7 @@ use gpui::*;
 use gpui::StyledText;
 use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, REF_COLORS};
-use crate::fill::{FILL_HANDLE_BORDER, FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_SIZE};
+use crate::fill::{FILL_HANDLE_BORDER, FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_SIZE, FILL_HANDLE_HOVER_GLOW, FILL_HANDLE_INWARD_OVERLAP};
 use crate::formula_refs::RefKey;
 use crate::mode::Mode;
 use crate::settings::{user_settings, Setting};
@@ -723,14 +723,16 @@ fn render_cell(
                 }
             }
         }))
-        .on_mouse_up(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+        .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, cx| {
             // Don't handle if modal/overlay is visible
             if this.inspector_visible || this.filter_dropdown_col.is_some() {
                 return;
             }
             // End fill handle drag if active (commits the fill)
+            // Ctrl modifier toggles copy/series behavior
             if this.is_fill_dragging() {
-                this.end_fill_drag(cx);
+                let ctrl_held = event.modifiers.control || event.modifiers.platform;
+                this.end_fill_drag(ctrl_held, cx);
                 return;
             }
             // End drag selection (works for both normal and formula mode)
@@ -1001,11 +1003,11 @@ fn render_cell(
     // Check if this cell is in fill preview range
     let is_fill_preview = app.is_fill_preview_cell(view_row, col);
 
-    // Apply fill preview styling (dashed-like effect via different border color)
+    // Apply fill preview styling: border-only (no fill) for clear action feedback
+    // Uses darker/more opaque border than selection to signal "action in progress"
     if is_fill_preview {
-        let fill_preview_bg = app.token(TokenKey::SelectionBg).opacity(0.4);
         let fill_preview_border = app.token(TokenKey::Accent);
-        cell = cell.bg(fill_preview_bg).border_1().border_color(fill_preview_border);
+        cell = cell.border_1().border_color(fill_preview_border);
     }
 
     // Phase 6C: Invalid cell corner triangle (data validation)
@@ -1029,9 +1031,13 @@ fn render_cell(
     // - For single cell: show on active cell
     // - For range selection: show on cell at (max_row, max_col)
     // - No additional selections (Ctrl+Click multi-select)
-    // - Not editing, not in hint mode, not already fill dragging
+    // - Not editing, not in hint mode
+    // - During drag: keep visible at source_end to anchor spatial understanding
     // Use pane-specific view state for selection info
-    let is_fill_handle_cell = if view_state.selection_end.is_some() {
+    let is_fill_handle_cell = if app.is_fill_dragging() {
+        // During drag: show at source_end (bottom-right of source range)
+        app.fill_drag_source_end() == Some((view_row, col))
+    } else if view_state.selection_end.is_some() {
         // Range selection: fill handle goes on bottom-right corner
         let ((_min_row, _min_col), (max_row, max_col)) = selection_range_for_pane(view_state);
         view_row == max_row && col == max_col
@@ -1042,8 +1048,7 @@ fn render_cell(
     let show_fill_handle = is_fill_handle_cell
         && !is_editing
         && app.mode != Mode::Hint
-        && view_state.additional_selections.is_empty()
-        && !app.is_fill_dragging();
+        && view_state.additional_selections.is_empty();
 
     // Wrap in relative container for absolute positioning (hint badges, fill handle)
     let mut wrapper = div()
@@ -1054,19 +1059,29 @@ fn render_cell(
         .child(cell);
 
     // Add fill handle at bottom-right corner of active cell
-    // Excel-style: solid opaque square with contrasting border
+    // Excel-style: solid dark square that overlaps selection border (corner cap feel)
     if show_fill_handle {
-        // Use opaque Accent color (not semi-transparent SelectionBorder)
-        let handle_fill = app.token(TokenKey::Accent);
+        // Solid dark fill - darker than selection border for contrast
+        // Use selection border color darkened, or fall back to accent
+        let handle_fill = app.token(TokenKey::SelectionBorder);
         // Use cell background for border (white on light themes, dark on dark themes)
         let handle_border = app.token(TokenKey::CellBg);
+        // Hover glow: subtle accent halo
+        let hover_glow = app.token(TokenKey::Accent).opacity(0.25);
         let zoom = app.metrics.zoom;
         let visual_size = FILL_HANDLE_VISUAL_SIZE * zoom;
         let border_width = FILL_HANDLE_BORDER * zoom;
         let hit_size = FILL_HANDLE_HIT_SIZE * zoom;
-        // Offset to center the hit area on the corner, with visual centered inside
-        let hit_offset = hit_size / 2.0;
+        let glow_size = FILL_HANDLE_HOVER_GLOW * zoom;
+        let inward_overlap = FILL_HANDLE_INWARD_OVERLAP * zoom;
+
+        // Position hit area so visual handle overlaps inward by 1px
+        // hit_offset positions the hit area center relative to cell corner
+        // Reduce offset to move handle inward
+        let hit_offset = (hit_size / 2.0) - inward_overlap;
         let visual_offset = (hit_size - visual_size) / 2.0;
+        let glow_offset = visual_offset - glow_size;
+        let glow_total_size = visual_size + glow_size * 2.0;
 
         wrapper = wrapper.child(
             div()
@@ -1081,7 +1096,18 @@ fn render_cell(
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _event: &MouseDownEvent, _, cx| {
                     this.start_fill_drag(cx);
                 }))
-                // Visual handle (smaller, centered in hit area) with Excel-style appearance
+                // Hover glow layer (invisible until hover)
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(glow_offset))
+                        .left(px(glow_offset))
+                        .w(px(glow_total_size))
+                        .h(px(glow_total_size))
+                        .rounded(px(2.0))
+                        .hover(move |style| style.bg(hover_glow))
+                )
+                // Visual handle: solid, dark, overlaps border like a corner cap
                 .child(
                     div()
                         .absolute()

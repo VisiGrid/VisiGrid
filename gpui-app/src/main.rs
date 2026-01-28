@@ -43,6 +43,7 @@ mod named_ranges;
 mod provenance;
 mod ref_target;
 mod search;
+mod series_fill;
 mod session;
 mod settings;
 mod sheet_ops;

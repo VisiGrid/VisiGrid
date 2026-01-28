@@ -7,11 +7,12 @@
 //! - Delete selection
 
 use gpui::*;
+use visigrid_engine::cell::CellFormat;
 use visigrid_engine::formula::eval::Value;
 use visigrid_engine::provenance::{MutationOp, PasteMode, ClearMode};
 
 use crate::app::Spreadsheet;
-use crate::history::CellChange;
+use crate::history::{CellChange, CellFormatPatch, FormatActionKind};
 
 /// Maximum rows in the spreadsheet
 const NUM_ROWS: usize = 1_000_000;
@@ -26,6 +27,9 @@ pub struct InternalClipboard {
     pub raw_tsv: String,
     /// Typed computed values for Paste Values (2D grid aligned to copied rectangle)
     pub values: Vec<Vec<Value>>,
+    /// Cell formats for Paste Formats (2D grid with same dimensions as values)
+    /// Every position gets a CellFormat, even if default (rectangular, not sparse).
+    pub formats: Vec<Vec<CellFormat>>,
     /// Top-left cell position of the copied region (for reference adjustment)
     pub source: (usize, usize),
     /// Unique ID written to clipboard metadata for reliable internal detection.
@@ -62,6 +66,7 @@ impl Spreadsheet {
         // When filtered, only include visible rows
         let mut raw_tsv = String::new();
         let mut values = Vec::new();
+        let mut formats = Vec::new();
         let mut first_row = true;
         let mut source_row = min_row; // Track first visible row for source
 
@@ -82,14 +87,18 @@ impl Spreadsheet {
             }
 
             let mut row_values = Vec::new();
+            let mut row_formats = Vec::new();
             for col in min_col..=max_col {
                 if col > min_col {
                     raw_tsv.push('\t');
                 }
                 raw_tsv.push_str(&self.sheet(cx).get_raw(data_row, col));
                 row_values.push(self.sheet(cx).get_computed_value(data_row, col));
+                // Capture format for every cell position (rectangular, not sparse)
+                row_formats.push(self.sheet(cx).get_format(data_row, col).clone());
             }
             values.push(row_values);
+            formats.push(row_formats);
         }
 
         // Generate unique nonce for clipboard matching
@@ -98,6 +107,7 @@ impl Spreadsheet {
         self.internal_clipboard = Some(InternalClipboard {
             raw_tsv: raw_tsv.clone(),
             values,
+            formats,
             source: (source_row, min_col),
             id,
         });
@@ -734,6 +744,248 @@ impl Spreadsheet {
                 cx.notify();
             }
         }
+    }
+
+    /// Paste Formulas: paste raw formulas with reference adjustment.
+    /// - Internal clipboard: uses raw_tsv (formulas) with reference adjustment
+    /// - External clipboard: falls back to normal paste() (no way to distinguish formula vs text)
+    pub fn paste_formulas(&mut self, cx: &mut Context<Self>) {
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
+
+        // If editing, paste into edit buffer
+        if self.mode.is_editing() {
+            self.paste_into_edit(cx);
+            return;
+        }
+
+        // Check if we have an internal clipboard with matching ID
+        let clipboard_item = cx.read_from_clipboard();
+        let metadata = clipboard_item.as_ref().and_then(|item| item.metadata().cloned());
+
+        let is_internal = self.internal_clipboard.as_ref().map_or(false, |ic| {
+            let expected_id = format!("\"{}\"", ic.id);
+            metadata.as_ref().map_or(false, |m| m == &expected_id)
+        });
+
+        if !is_internal {
+            // External clipboard - fall back to normal paste
+            // (No way to reliably distinguish "formula" vs "text starting with =" from external)
+            self.paste(cx);
+            return;
+        }
+
+        // Internal paste - use raw_tsv with reference adjustment
+        let (start_row, start_col) = self.view_state.selected;
+        let is_filtered = self.row_view.is_filtered();
+        let data_start_row = self.row_view.view_to_data(start_row);
+        let mut changes = Vec::new();
+        let mut values_grid: Vec<Vec<String>> = Vec::new();
+        let mut end_data_row = data_start_row;
+        let mut end_col = start_col;
+
+        // Get source position and raw_tsv from internal clipboard
+        let (src_row, src_col) = self.internal_clipboard.as_ref().map(|ic| ic.source).unwrap_or((0, 0));
+        let raw_tsv = self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()).unwrap_or_default();
+        let src_data_row = self.row_view.view_to_data(src_row);
+        let (delta_row, delta_col) = (data_start_row as i32 - src_data_row as i32, start_col as i32 - src_col as i32);
+
+        // For filtered paste: find the starting visible index
+        let visible_start_idx = if is_filtered {
+            self.row_view.visible_rows().iter().position(|&vr| vr == start_row)
+        } else {
+            None
+        };
+
+        for (row_offset, line) in raw_tsv.lines().enumerate() {
+            // Determine target view row for this clipboard row
+            let target_data_row = if is_filtered {
+                if let Some(start_idx) = visible_start_idx {
+                    if let Some(view_row) = self.row_view.nth_visible(start_idx + row_offset) {
+                        self.row_view.view_to_data(view_row)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                let view_row = start_row + row_offset;
+                if view_row >= NUM_ROWS { continue; }
+                view_row
+            };
+
+            let mut row_values: Vec<String> = Vec::new();
+            for (col_offset, value) in line.split('\t').enumerate() {
+                let col = start_col + col_offset;
+                if target_data_row < NUM_ROWS && col < NUM_COLS {
+                    let old_value = self.sheet(cx).get_raw(target_data_row, col);
+
+                    // Adjust formula references
+                    let formula_delta_row = target_data_row as i32 - data_start_row as i32;
+                    let new_value = if value.starts_with('=') {
+                        self.adjust_formula_refs(value, delta_row + formula_delta_row, delta_col + col_offset as i32)
+                    } else {
+                        value.to_string()
+                    };
+
+                    row_values.push(new_value.clone());
+
+                    if old_value != new_value {
+                        changes.push(CellChange {
+                            row: target_data_row, col, old_value, new_value: new_value.clone(),
+                        });
+                    }
+                    self.active_sheet_mut(cx, |s| s.set_value(target_data_row, col, &new_value));
+
+                    end_data_row = end_data_row.max(target_data_row);
+                    end_col = end_col.max(col);
+                }
+            }
+            if !row_values.is_empty() {
+                values_grid.push(row_values);
+            }
+        }
+
+        // Record with provenance (PasteMode::Formulas)
+        if !changes.is_empty() {
+            let provenance = MutationOp::Paste {
+                sheet: self.sheet(cx).id,
+                dst_row: data_start_row,
+                dst_col: start_col,
+                values: values_grid,
+                mode: PasteMode::Formulas,
+            }.to_provenance(&self.sheet(cx).name);
+
+            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+            self.bump_cells_rev();
+            self.is_modified = true;
+        }
+
+        self.status_message = Some("Pasted formulas".to_string());
+        self.maybe_smoke_recalc(cx);
+        cx.notify();
+    }
+
+    /// Paste Formats: paste cell formatting only (no values).
+    /// - Internal clipboard only: applies formats from copied range
+    /// - External clipboard: no-op with status message (no format data available)
+    pub fn paste_formats(&mut self, cx: &mut Context<Self>) {
+        // Block during preview mode
+        if self.block_if_previewing(cx) { return; }
+
+        // Paste Formats doesn't make sense in edit mode
+        if self.mode.is_editing() {
+            self.status_message = Some("Exit edit mode to paste formats".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Check if we have an internal clipboard with matching ID
+        let clipboard_item = cx.read_from_clipboard();
+        let metadata = clipboard_item.as_ref().and_then(|item| item.metadata().cloned());
+
+        let is_internal = self.internal_clipboard.as_ref().map_or(false, |ic| {
+            let expected_id = format!("\"{}\"", ic.id);
+            metadata.as_ref().map_or(false, |m| m == &expected_id)
+        });
+
+        if !is_internal {
+            // External clipboard - no format data available
+            self.status_message = Some("Paste Formats requires VisiGrid clipboard".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Get formats from internal clipboard
+        let formats = match &self.internal_clipboard {
+            Some(ic) if !ic.formats.is_empty() => ic.formats.clone(),
+            _ => {
+                self.status_message = Some("No formats in clipboard".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        let (start_row, start_col) = self.view_state.selected;
+        let is_filtered = self.row_view.is_filtered();
+        let data_start_row = self.row_view.view_to_data(start_row);
+
+        // For filtered paste: find the starting visible index
+        let visible_start_idx = if is_filtered {
+            self.row_view.visible_rows().iter().position(|&vr| vr == start_row)
+        } else {
+            None
+        };
+
+        let mut format_patches = Vec::new();
+
+        for (row_offset, row_formats) in formats.iter().enumerate() {
+            // Determine target data row
+            let target_data_row = if is_filtered {
+                if let Some(start_idx) = visible_start_idx {
+                    if let Some(view_row) = self.row_view.nth_visible(start_idx + row_offset) {
+                        self.row_view.view_to_data(view_row)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                let view_row = start_row + row_offset;
+                if view_row >= NUM_ROWS { continue; }
+                view_row
+            };
+
+            for (col_offset, format) in row_formats.iter().enumerate() {
+                let col = start_col + col_offset;
+                if target_data_row < NUM_ROWS && col < NUM_COLS {
+                    // Get old format for history
+                    let old_format = self.sheet(cx).get_format(target_data_row, col).clone();
+
+                    // Apply format (full replace)
+                    self.active_sheet_mut(cx, |s| {
+                        s.set_format(target_data_row, col, format.clone());
+                    });
+
+                    // Track change for history
+                    if old_format != *format {
+                        format_patches.push(CellFormatPatch {
+                            row: target_data_row,
+                            col,
+                            before: old_format,
+                            after: format.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Record format changes in history with provenance
+        if !format_patches.is_empty() {
+            let provenance = MutationOp::Paste {
+                sheet: self.sheet(cx).id,
+                dst_row: data_start_row,
+                dst_col: start_col,
+                values: vec![], // No value changes
+                mode: PasteMode::Formats,
+            }.to_provenance(&self.sheet(cx).name);
+
+            self.history.record_format_with_provenance(
+                self.sheet_index(cx),
+                format_patches,
+                FormatActionKind::PasteFormats,
+                "Paste Formats".to_string(),
+                Some(provenance),
+            );
+            self.is_modified = true;
+        }
+
+        let rows = formats.len();
+        let cols = formats.first().map(|r| r.len()).unwrap_or(0);
+        self.status_message = Some(format!("Pasted formats to {}x{} range", rows, cols));
+        cx.notify();
     }
 
     pub fn delete_selection(&mut self, cx: &mut Context<Self>) {

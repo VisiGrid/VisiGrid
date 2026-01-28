@@ -116,6 +116,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "x"), Cut, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "v"), Paste, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "v"), PasteValues, Some("Spreadsheet")),
+        KeyBinding::new(&format!("{}-alt-v", primary_mod(m)), PasteSpecial, Some("Spreadsheet")),
 
         // File
         // Note: NewWindow is handled at App level (main.rs) to open a new window
@@ -224,6 +225,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Ctrl+U starts edit on Mac (F2 is often brightness)
         bindings.push(KeyBinding::new("ctrl-u", StartEdit, Some("Spreadsheet")));
 
+        // KeyTips: Option+Space shows keyboard accelerator hints overlay
+        // (Option+letter conflicts with character composition, so we use Option+Space as trigger)
+        bindings.push(KeyBinding::new("alt-space", ShowKeyTips, Some("Spreadsheet")));
+
         // Note: On Mac, the Delete key (above Return) sends "backspace"
         // BackspaceChar handler now handles both edit mode (character delete)
         // and navigation mode (clear cell contents), so no separate DeleteCell binding needed
@@ -251,7 +256,21 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
 ///
 /// This is the default behavior when Alt accelerators setting is disabled.
 /// Opens Excel 2003-style dropdown menus from the menu bar.
+///
+/// NOTE: On macOS, this is a no-op because:
+/// 1. macOS uses native system menu bar (can't be opened programmatically)
+/// 2. Option+letter conflicts with character composition (accents, special chars)
+/// 3. The dropdown UI is only rendered on non-macOS platforms
 pub fn register_menu_accelerators(cx: &mut App) {
+    // On macOS, menu dropdowns don't render (native menu bar is used instead)
+    // Binding these keys would create "dead" shortcuts that do nothing visible
+    #[cfg(target_os = "macos")]
+    {
+        let _ = cx;
+        return;
+    }
+
+    #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         KeyBinding::new("alt-f", OpenFileMenu, Some("Spreadsheet")),
         KeyBinding::new("alt-e", OpenEditMenu, Some("Spreadsheet")),

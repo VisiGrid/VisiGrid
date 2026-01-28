@@ -184,6 +184,8 @@ pub enum TipId {
     DefaultAppPrompt,
     /// Window switcher shortcut tip (shown when 2nd window opens)
     WindowSwitcher,
+    /// Fill handle usage tip (shown on first drag)
+    FillHandle,
 }
 
 /// Collection of dismissed tips

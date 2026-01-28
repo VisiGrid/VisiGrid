@@ -15,6 +15,7 @@ pub mod impact_preview;
 mod import_overlay;
 mod import_report_dialog;
 pub mod inspector_panel;
+mod keytips_overlay;
 #[cfg(feature = "pro")]
 mod lua_console;
 #[cfg(not(feature = "pro"))]
@@ -22,6 +23,7 @@ mod lua_console_stub;
 #[cfg(not(feature = "pro"))]
 use lua_console_stub as lua_console;
 pub mod license_dialog;
+mod paste_special_dialog;
 mod preferences_panel;
 pub mod refactor_log;
 mod menu_bar;
@@ -75,6 +77,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_ai_settings = app.mode == Mode::AISettings;
     let show_ask_ai = app.mode == Mode::AskAI;
     let show_explain_diff = app.mode == Mode::ExplainDiff;
+    let show_paste_special = app.mode == Mode::PasteSpecial;
+    let show_keytips = app.keytips_active;
     let show_rewind_confirm = app.rewind_confirm.visible;
     let show_rewind_success = app.rewind_success.visible;
     let show_import_overlay = app.import_overlay_visible;
@@ -530,6 +534,18 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &PasteValues, window, cx| {
             this.paste_values(cx);
             this.update_edit_scroll(window);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &PasteSpecial, _, cx| {
+            this.show_paste_special(cx);
+        }))
+        .on_action(cx.listener(|this, _: &PasteFormulas, window, cx| {
+            this.paste_formulas(cx);
+            this.update_edit_scroll(window);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &PasteFormats, window, cx| {
+            this.paste_formats(cx);
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &DeleteCell, window, cx| {
@@ -1222,6 +1238,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &ShowFontPicker, _, cx| {
             this.show_font_picker(cx);
         }))
+        .on_action(cx.listener(|this, _: &ShowKeyTips, _, cx| {
+            this.toggle_keytips(cx);
+        }))
         .on_action(cx.listener(|this, _: &ShowPreferences, _, cx| {
             this.show_preferences(cx);
         }))
@@ -1333,39 +1352,40 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.toggle_menu(crate::mode::Menu::Help, cx);
         }))
         // Alt accelerators (open Command Palette scoped to menu category)
-        // These only fire when enabled via settings and in Navigation/Command mode
+        // Guarded by should_handle_option_accelerators() to avoid conflicts with
+        // macOS character composition (accents, special characters) when typing.
         .on_action(cx.listener(|this, _: &AltFile, _, cx| {
-            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+            if this.should_handle_option_accelerators() {
                 this.apply_menu_scope(MenuCategory::File, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &AltEdit, _, cx| {
-            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+            if this.should_handle_option_accelerators() {
                 this.apply_menu_scope(MenuCategory::Edit, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &AltView, _, cx| {
-            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+            if this.should_handle_option_accelerators() {
                 this.apply_menu_scope(MenuCategory::View, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &AltFormat, _, cx| {
-            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+            if this.should_handle_option_accelerators() {
                 this.apply_menu_scope(MenuCategory::Format, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &AltData, _, cx| {
-            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+            if this.should_handle_option_accelerators() {
                 this.apply_menu_scope(MenuCategory::Data, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &AltTools, _, cx| {
-            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+            if this.should_handle_option_accelerators() {
                 this.apply_menu_scope(MenuCategory::Tools, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &AltHelp, _, cx| {
-            if this.mode == Mode::Navigation || this.mode == Mode::Command {
+            if this.should_handle_option_accelerators() {
                 this.apply_menu_scope(MenuCategory::Help, cx);
             }
         }))
@@ -1381,6 +1401,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         // Character input (handles editing, goto, find, and command modes)
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            // KeyTips: if active, route key to handler (takes precedence)
+            if this.keytips_active {
+                if this.keytips_handle_key(&event.keystroke.key, cx) {
+                    return;
+                }
+            }
+
             // Let AI dialogs handle their own keys
             if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
                 return;
@@ -2150,8 +2177,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
             }
         }))
-        // F1 hold-to-peek: hide help when F1 is released
-        // Space hold-to-peek: exit preview when Space is released
+        // Key release handling:
+        // - F1 hold-to-peek: hide help when F1 is released
+        // - Space hold-to-peek: exit preview when Space is released
+        // - Option double-tap: KeyTips detection (macOS only)
         .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
             if event.keystroke.key == "f1" && this.f1_help_visible {
                 this.f1_help_visible = false;
@@ -2532,6 +2561,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_about, |div| {
             div.child(about_dialog::render_about_dialog(app, cx))
+        })
+        .when(show_paste_special, |div| {
+            div.child(paste_special_dialog::render_paste_special_dialog(app, cx))
+        })
+        // KeyTips overlay (macOS Option double-tap accelerators)
+        .when(show_keytips, |div| {
+            div.child(keytips_overlay::render_keytips_overlay(app, cx))
         })
         .when(show_license, |div| {
             div.child(license_dialog::render_license_dialog(app, cx))

@@ -54,6 +54,52 @@ AI is a witness, not an actor. It can explain what happened but cannot edit cell
 - API key stored in `~/.config/visigrid/settings.json`
 - No telemetry, no account required
 
+### Series Fill via Fill Handle
+
+Excel-compatible series fill for non-formula cells.
+
+**Pattern Detection:**
+- **Single numbers copy by default** — drag `1` down → `1,1,1`. Hold **Ctrl** (Windows/Linux) or **Cmd** (macOS) to fill as series → `2,3,4`
+- **Built-in lists auto-extend** — drag `Jan` → `Feb,Mar,Apr`. Hold modifier to copy instead
+- **Two+ cell selections detect step** — select `1,3` and drag → `5,7,9`. Hold modifier to repeat pattern
+- **Alphanumeric sequences** — `Item1` → `Item2,Item3`; negatives work (`Item-1` → `Item0`); leading zeros preserved (`001` → `002`)
+- **Letter overflow** — `Row Z` → `Row AA,Row AB`; case preserved
+- **Quarter/year patterns** — `Q4 2026` → `Q1 2027,Q2 2027`
+- **Formulas unchanged** — `=A1` drag still uses reference adjustment (`=A2,=A3...`)
+- **Single undo step** — any fill operation reverts in one undo
+
+**Fill Handle UX Overhaul:**
+- **Larger, easier to grab** — 10px visual size, 18px hit target (Fitts's Law)
+- **Corner cap positioning** — handle overlaps selection border by 1px inward (feels like part of selection)
+- **Solid dark fill** — uses selection border color, no transparency
+- **Hover feedback** — subtle glow appears on hover, crosshair cursor confirms target
+- **Border-only drag preview** — destination cells show outline only (clear "action in progress" signal)
+- **Handle stays visible during drag** — anchors spatial understanding at source
+- **First-use tip** — status bar hint on first drag ("Hold Ctrl/Cmd to toggle series/copy")
+
+Behavior backed by 45 fill-related tests covering all core patterns and edge cases.
+
+### KeyTips (macOS)
+
+Excel-style keyboard accelerators for menu navigation, adapted for macOS:
+
+- **Option+Space** opens KeyTips overlay showing accelerator hints
+- Press a letter key to open scoped command palette for that category:
+  - `F` → File (New, Open, Save, Export, VisiHub)
+  - `E` → Edit (Undo, Redo, Cut, Copy, Paste, Find, Go To)
+  - `V` → View (Inspector, Zen Mode, Zoom, Freeze Panes, Split)
+  - `O` → Format (Bold, Italic, Fonts, Backgrounds, Borders)
+  - `D` → Data (Fill, Sort, Filter, Validation)
+  - `T` → Tools (Trace, Verified Mode, Ask AI)
+  - `H` → Help (Shortcuts, About, Tour)
+- **Stable mapping** — these letters are locked; commands may be added but categories won't move
+- **Repeat last scope** — Enter or Space reopens last scoped palette (power-user speed)
+- **Discovery hint** — first command palette open shows "Tip: ⌥Space shows KeyTips" (once per session)
+- Auto-dismisses after 3 seconds or on Escape
+- Discoverable via **Help > Keyboard Shortcuts** menu
+
+Note: Uses Option+Space instead of double-tap Option due to gpui framework limitation (modifier-only key releases don't generate events). See ROADMAP.md for upstream tracking.
+
 ---
 
 ## 0.3.4

@@ -95,6 +95,9 @@ actions!(clipboard, [
     Cut,
     Paste,
     PasteValues,
+    PasteSpecial,    // Ctrl+Alt+V / Cmd+Option+V - opens Paste Special dialog
+    PasteFormulas,   // Paste formulas only (with reference adjustment)
+    PasteFormats,    // Paste formatting only (no values)
 ]);
 
 // File actions
@@ -134,6 +137,7 @@ actions!(view, [
     ShowAbout,
     ShowLicense,
     ShowFontPicker,
+    ShowKeyTips,        // Alt+Space (macOS) - Show keyboard accelerator hints
     // Freeze panes
     FreezeTopRow,      // Freeze first row only
     FreezeFirstColumn, // Freeze first column only

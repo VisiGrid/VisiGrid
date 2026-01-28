@@ -329,6 +329,19 @@ fn format_to_lua(
         FormatActionKind::Border => {
             "border=true".to_string() // Simplified; full border state is complex
         }
+        FormatActionKind::PasteFormats => {
+            // Full format paste - show multiple properties
+            let mut props = Vec::new();
+            if first.after.bold { props.push("bold=true"); }
+            if first.after.italic { props.push("italic=true"); }
+            if first.after.underline { props.push("underline=true"); }
+            if first.after.background_color.is_some() { props.push("bg=..."); }
+            if !props.is_empty() {
+                props.join(", ")
+            } else {
+                "format=default".to_string()
+            }
+        }
     };
 
     format!(

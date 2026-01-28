@@ -48,6 +48,14 @@ impl Spreadsheet {
         self.palette_selected = 0;
         self.palette_scope = None;  // Clear scope for normal palette
         self.update_palette_results(cx);
+
+        // One-time KeyTips discovery hint (macOS only, once per session)
+        #[cfg(target_os = "macos")]
+        if !self.keytips_hint_shown {
+            self.keytips_hint_shown = true;
+            self.status_message = Some("Tip: ⌥Space shows KeyTips (F/E/V/O/D/T/H)".into());
+        }
+
         cx.notify();
     }
 

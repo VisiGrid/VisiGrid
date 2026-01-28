@@ -191,6 +191,72 @@ impl Spreadsheet {
     }
 
     // =========================================================================
+    // Paste Special dialog
+    // =========================================================================
+
+    pub fn show_paste_special(&mut self, cx: &mut Context<Self>) {
+        // Close validation dropdown when opening modal
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::ModalOpened,
+            cx,
+        );
+        self.lua_console.visible = false;
+
+        // Initialize with last selected mode (session memory)
+        self.paste_special_dialog.selected = self.last_paste_special_mode;
+        self.mode = Mode::PasteSpecial;
+        cx.notify();
+    }
+
+    pub fn hide_paste_special(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
+    /// Move selection up in the Paste Special dialog
+    pub fn paste_special_up(&mut self, cx: &mut Context<Self>) {
+        use crate::app::PasteType;
+        let types = PasteType::all();
+        let current_idx = types.iter().position(|t| *t == self.paste_special_dialog.selected).unwrap_or(0);
+        if current_idx > 0 {
+            self.paste_special_dialog.selected = types[current_idx - 1];
+            cx.notify();
+        }
+    }
+
+    /// Move selection down in the Paste Special dialog
+    pub fn paste_special_down(&mut self, cx: &mut Context<Self>) {
+        use crate::app::PasteType;
+        let types = PasteType::all();
+        let current_idx = types.iter().position(|t| *t == self.paste_special_dialog.selected).unwrap_or(0);
+        if current_idx < types.len() - 1 {
+            self.paste_special_dialog.selected = types[current_idx + 1];
+            cx.notify();
+        }
+    }
+
+    /// Execute the selected paste type and close the dialog
+    pub fn apply_paste_special(&mut self, cx: &mut Context<Self>) {
+        use crate::app::PasteType;
+
+        // Remember selection for next time (session memory)
+        self.last_paste_special_mode = self.paste_special_dialog.selected;
+
+        // Close dialog first
+        self.mode = Mode::Navigation;
+
+        // Execute the selected paste operation
+        match self.paste_special_dialog.selected {
+            PasteType::All => self.paste(cx),
+            PasteType::Values => self.paste_values(cx),
+            PasteType::Formulas => self.paste_formulas(cx),
+            PasteType::Formats => self.paste_formats(cx),
+        }
+
+        cx.notify();
+    }
+
+    // =========================================================================
     // License dialog
     // =========================================================================
 

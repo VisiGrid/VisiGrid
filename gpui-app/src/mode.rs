@@ -45,6 +45,7 @@ pub enum Mode {
     AISettings,        // AI configuration dialog (Help > AI Settings)
     AskAI,             // Ask AI dialog (Data > AI > Ask AI)
     ExplainDiff,       // Explain Differences dialog (History right-click)
+    PasteSpecial,      // Paste Special dialog (Ctrl+Alt+V)
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -90,6 +91,29 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff)
+        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial)
+    }
+
+    /// True if this mode has text input active (typing should work normally).
+    /// Used to guard Option+letter accelerators on macOS to avoid
+    /// conflicting with character composition (accents, special chars).
+    pub fn has_text_input(&self) -> bool {
+        matches!(
+            self,
+            Mode::Edit
+                | Mode::Formula
+                | Mode::GoTo           // GoTo cell input
+                | Mode::Find           // Find/Replace input
+                | Mode::Command        // Command palette input
+                | Mode::RenameSymbol   // Rename dialog
+                | Mode::CreateNamedRange // Named range dialog
+                | Mode::EditDescription  // Description input
+                | Mode::ExtractNamedRange // Extract dialog
+                | Mode::License        // License key input
+                | Mode::HubPasteToken  // Hub token input
+                | Mode::HubLink        // Hub link input
+                | Mode::AISettings     // API key input
+                | Mode::AskAI          // AI prompt input
+        )
     }
 }
