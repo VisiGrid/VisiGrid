@@ -1696,6 +1696,9 @@ pub struct Spreadsheet {
     pub metrics: GridMetrics,
     zoom_wheel_accumulator: f32,  // For smooth wheel zoom debounce
 
+    // Navigation batching: accumulate repeat arrow events, flush at render start
+    pub(crate) pending_nav_dx: i32,
+    pub(crate) pending_nav_dy: i32,
     // Navigation coalescing: scroll adjustment deferred to render start
     pub(crate) nav_scroll_dirty: bool,
     // Navigation latency instrumentation (env VISIGRID_PERF=nav)
@@ -2103,6 +2106,8 @@ impl Spreadsheet {
             f1_help_visible: false,
             metrics: GridMetrics::default(),
             zoom_wheel_accumulator: 0.0,
+            pending_nav_dx: 0,
+            pending_nav_dy: 0,
             nav_scroll_dirty: false,
             nav_perf: crate::perf::NavLatencyTracker::default(),
             link_open_in_flight: false,
@@ -4431,6 +4436,8 @@ impl Spreadsheet {
 
 impl Render for Spreadsheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Flush batched navigation moves (multiple arrow repeats → one batch per frame)
+        self.flush_pending_nav_moves(cx);
         // Flush deferred scroll adjustment (coalesces multiple nav moves per frame)
         self.flush_nav_scroll();
         // Record render timestamp for latency instrumentation

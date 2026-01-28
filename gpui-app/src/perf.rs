@@ -30,6 +30,8 @@ struct LatencySample {
     key_to_state_us: u64,
     /// Number of key events coalesced into this render frame.
     events_this_frame: u32,
+    /// Number of cell moves applied in this render frame.
+    moves_this_frame: u32,
 }
 
 /// Tracks navigation keystroke-to-paint latency.
@@ -47,11 +49,13 @@ pub struct NavLatencyTracker {
     frame_key_time: Option<Instant>,
     frame_state_time: Option<Instant>,
     frame_event_count: u32,
+    frame_moves: u32,
 
     /// Lifetime counters.
     total_frames: u64,
     total_events: u64,
     total_coalesced: u64,
+    total_moves: u64,
 }
 
 impl Default for NavLatencyTracker {
@@ -62,9 +66,11 @@ impl Default for NavLatencyTracker {
             frame_key_time: None,
             frame_state_time: None,
             frame_event_count: 0,
+            frame_moves: 0,
             total_frames: 0,
             total_events: 0,
             total_coalesced: 0,
+            total_moves: 0,
         }
     }
 }
@@ -104,6 +110,7 @@ impl NavLatencyTracker {
                 key_to_render_us: key_to_render,
                 key_to_state_us: key_to_state,
                 events_this_frame: self.frame_event_count,
+                moves_this_frame: self.frame_moves,
             };
 
             if self.samples.len() < RING_SIZE {
@@ -122,12 +129,15 @@ impl NavLatencyTracker {
         // Reset for next frame
         self.frame_state_time = None;
         self.frame_event_count = 0;
+        self.frame_moves = 0;
     }
 
-    /// Called when a navigation event is coalesced (scroll deferred).
-    pub fn mark_coalesced(&mut self) {
-        if !is_nav_perf_enabled() { return; }
-        self.total_coalesced += 1;
+    /// Called after flushing batched navigation moves.
+    /// `count` is the number of move_selection calls applied this frame.
+    pub fn mark_moves_applied(&mut self, count: u32) {
+        if !is_nav_perf_enabled() || count == 0 { return; }
+        self.frame_moves += count;
+        self.total_moves += count as u64;
     }
 
     /// Generate a human-readable report of latency stats.
@@ -147,24 +157,38 @@ impl NavLatencyTracker {
         let mut k2s: Vec<u64> = self.samples.iter().map(|s| s.key_to_state_us).collect();
         k2s.sort_unstable();
 
-        // Collect events-per-frame
-        let mut epf: Vec<u32> = self.samples.iter().map(|s| s.events_this_frame).collect();
-        epf.sort_unstable();
+        // Collect moves-per-frame (only frames that had moves)
+        let mut mpf: Vec<u32> = self.samples.iter()
+            .map(|s| s.moves_this_frame)
+            .filter(|&m| m > 0)
+            .collect();
+        mpf.sort_unstable();
 
         let p50 = |v: &[u64]| v[v.len() / 2];
         let p95 = |v: &[u64]| v[(v.len() as f64 * 0.95) as usize];
-        let p50u = |v: &[u32]| v[v.len() / 2];
-        let p95u = |v: &[u32]| v[(v.len() as f64 * 0.95) as usize];
+
+        // Format as ms with one decimal place
+        let us_to_ms = |us: u64| -> String {
+            if us < 1000 {
+                format!("{}µs", us)
+            } else {
+                format!("{:.1}ms", us as f64 / 1000.0)
+            }
+        };
+
+        let moves_str = if mpf.is_empty() {
+            "0".to_string()
+        } else {
+            let avg = self.total_moves as f64 / self.total_frames.max(1) as f64;
+            format!("{:.1}/f ({}tot)", avg, self.total_moves)
+        };
 
         Some(format!(
-            "Nav latency ({} samples, {} frames, {} events, {} coalesced)\n\
-             key→render: p50={} µs  p95={} µs\n\
-             key→state:  p50={} µs  p95={} µs\n\
-             events/frame: p50={}  p95={}",
-            n, self.total_frames, self.total_events, self.total_coalesced,
-            p50(&k2r), p95(&k2r),
-            p50(&k2s), p95(&k2s),
-            p50u(&epf), p95u(&epf),
+            "Nav p50={} p95={} | state={} | moves={} | {} frames, {} coalesced",
+            us_to_ms(p50(&k2r)), us_to_ms(p95(&k2r)),
+            us_to_ms(p50(&k2s)),
+            moves_str,
+            self.total_frames, self.total_coalesced,
         ))
     }
 }

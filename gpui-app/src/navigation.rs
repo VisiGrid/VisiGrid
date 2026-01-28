@@ -295,6 +295,49 @@ impl Spreadsheet {
     }
 
     // =========================================================================
+    // Navigation Batching
+    // =========================================================================
+
+    /// Maximum cell moves applied per render frame during key repeat.
+    /// Higher = faster cursor travel when holding an arrow key.
+    const MAX_STEPS_PER_FRAME: i32 = 4;
+
+    /// Flush accumulated arrow key repeats into actual cell moves.
+    /// Called once at the start of each render pass. Multiple key events
+    /// between frames are batched into up to MAX_STEPS_PER_FRAME moves,
+    /// giving Excel-like cursor travel speed during held keys.
+    pub(crate) fn flush_pending_nav_moves(&mut self, cx: &mut Context<Self>) {
+        if self.pending_nav_dx == 0 && self.pending_nav_dy == 0 {
+            return;
+        }
+
+        let mut steps: i32 = 0;
+
+        // Process horizontal moves
+        while self.pending_nav_dx != 0 && steps < Self::MAX_STEPS_PER_FRAME {
+            let dc = self.pending_nav_dx.signum();
+            self.move_selection(0, dc, cx);
+            self.pending_nav_dx -= dc;
+            steps += 1;
+        }
+
+        // Process vertical moves
+        while self.pending_nav_dy != 0 && steps < Self::MAX_STEPS_PER_FRAME {
+            let dr = self.pending_nav_dy.signum();
+            self.move_selection(dr, 0, cx);
+            self.pending_nav_dy -= dr;
+            steps += 1;
+        }
+
+        self.nav_perf.mark_moves_applied(steps as u32);
+
+        // If steps remain, schedule another render to continue
+        if self.pending_nav_dx != 0 || self.pending_nav_dy != 0 {
+            cx.notify();
+        }
+    }
+
+    // =========================================================================
     // Visibility / Scrolling
     // =========================================================================
 

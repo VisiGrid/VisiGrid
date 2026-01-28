@@ -436,8 +436,13 @@ fn render_status_message(
         mode_text.to_string()
     };
 
+    // Show a copy icon when there's a status message (perf reports, etc.)
+    let show_copy = app.status_message.is_some() && hint_buffer.is_none();
+    let copy_msg = if show_copy { Some(message.clone()) } else { None };
+    let panel_border = app.token(TokenKey::PanelBorder);
+
     // If there's an import result, make the message clickable
-    if has_import_result && app.status_message.is_some() {
+    let msg_el: AnyElement = if has_import_result && app.status_message.is_some() {
         div()
             .id("status-message")
             .text_color(accent)
@@ -459,7 +464,32 @@ fn render_status_message(
             .text_color(text_muted)
             .child(message)
             .into_any_element()
-    }
+    };
+
+    let row = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(msg_el)
+        .when(show_copy, |d| {
+            d.child(
+                div()
+                    .id("status-copy-btn")
+                    .cursor_pointer()
+                    .px_1()
+                    .rounded_sm()
+                    .text_color(text_muted)
+                    .hover(move |s| s.text_color(accent).bg(panel_border))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |_this, _, _window, cx| {
+                        if let Some(msg) = &copy_msg {
+                            cx.write_to_clipboard(ClipboardItem::new_string(msg.clone()));
+                        }
+                    }))
+                    .child("⧉")
+            )
+        });
+
+    row.into_any_element()
 }
 
 /// Maximum number of cells to analyze for statistics (prevents UI freeze on large selections)

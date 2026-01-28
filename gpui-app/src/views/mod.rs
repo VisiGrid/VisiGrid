@@ -136,7 +136,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 Mode::ThemePicker => this.theme_picker_up(cx),
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
                 Mode::Edit => this.confirm_edit_up(cx),
-                _ => this.move_selection(-1, 0, cx),
+                _ => {
+                    // Batch: accumulate for flush at render start
+                    this.pending_nav_dy -= 1;
+                    cx.notify();
+                }
             }
         }))
         .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
@@ -181,7 +185,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 Mode::ThemePicker => this.theme_picker_down(cx),
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
                 Mode::Edit => this.confirm_edit(cx),
-                _ => this.move_selection(1, 0, cx),
+                _ => {
+                    // Batch: accumulate for flush at render start
+                    this.pending_nav_dy += 1;
+                    cx.notify();
+                }
             }
         }))
         .on_action(cx.listener(|this, _: &MoveLeft, window, cx| {
@@ -225,7 +233,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
-                this.move_selection(0, -1, cx);
+                // Batch: accumulate for flush at render start
+                this.pending_nav_dx -= 1;
+                cx.notify();
             }
         }))
         .on_action(cx.listener(|this, _: &MoveRight, window, cx| {
@@ -269,7 +279,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             } else {
                 this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
-                this.move_selection(0, 1, cx);
+                // Batch: accumulate for flush at render start
+                this.pending_nav_dx += 1;
+                cx.notify();
             }
         }))
         .on_action(cx.listener(|this, _: &JumpUp, _, cx| {
