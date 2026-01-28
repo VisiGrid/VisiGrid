@@ -175,6 +175,7 @@ actions!(format, [
     FormatCurrency,
     FormatPercent,
     ClearFormatting,  // Reset all format properties to default
+    FormatPainter,    // Activate Format Painter mode
     // Background colors
     ClearBackground,
     BackgroundYellow,

@@ -1253,7 +1253,7 @@ fn render_format_tab(
         .child(render_borders_section(text_primary, text_muted, panel_border, cx))
         // Font section
         .child(render_font_section(&state, text_primary, text_muted, panel_border, cx))
-        // Divider + Clear Formatting
+        // Divider + Format Painter + Clear Formatting
         .child(
             div()
                 .flex()
@@ -1266,20 +1266,44 @@ fn render_format_tab(
                 )
                 .child(
                     div()
-                        .id("clear-formatting-btn")
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .border_1()
-                        .border_color(panel_border)
-                        .text_size(px(11.0))
-                        .text_color(text_muted)
-                        .hover(|s| s.bg(panel_border.opacity(0.4)))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.clear_formatting_selection(cx);
-                        }))
-                        .child("Clear Formatting")
+                        .flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("format-painter-btn")
+                                .flex_1()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .border_1()
+                                .border_color(panel_border)
+                                .text_size(px(11.0))
+                                .text_color(text_muted)
+                                .hover(|s| s.bg(panel_border.opacity(0.4)))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.start_format_painter(cx);
+                                }))
+                                .child("Format Painter")
+                        )
+                        .child(
+                            div()
+                                .id("clear-formatting-btn")
+                                .flex_1()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .border_1()
+                                .border_color(panel_border)
+                                .text_size(px(11.0))
+                                .text_color(text_muted)
+                                .hover(|s| s.bg(panel_border.opacity(0.4)))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.clear_formatting_selection(cx);
+                                }))
+                                .child("Clear Formatting")
+                        )
                 )
         )
 }

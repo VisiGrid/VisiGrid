@@ -402,6 +402,56 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Start Format Painter: capture the active cell's format.
+    pub fn start_format_painter(&mut self, cx: &mut Context<Self>) {
+        let (row, col) = self.view_state.selected;
+        let format = self.sheet(cx).get_format(row, col);
+        self.format_painter_format = Some(format);
+        self.mode = crate::mode::Mode::FormatPainter;
+        self.status_message = Some("Format Painter: click a cell to apply \u{00b7} Esc to cancel".to_string());
+        cx.notify();
+    }
+
+    /// Apply Format Painter: set captured format on current selection.
+    pub fn apply_format_painter(&mut self, cx: &mut Context<Self>) {
+        let format = match self.format_painter_format.take() {
+            Some(f) => f,
+            None => return,
+        };
+        self.mode = crate::mode::Mode::Navigation;
+
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet(cx).get_format(row, col);
+                    if before != format {
+                        self.active_sheet_mut(cx, |s| s.set_format(row, col, format.clone()));
+                        let after = self.sheet(cx).get_format(row, col);
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::PasteFormats, "Format Painter".to_string());
+            self.is_modified = true;
+            self.status_message = Some(format!("Format Painter → {} cell{}", count, if count == 1 { "" } else { "s" }));
+        } else {
+            self.status_message = None;
+        }
+        cx.notify();
+    }
+
+    /// Cancel Format Painter mode.
+    pub fn cancel_format_painter(&mut self, cx: &mut Context<Self>) {
+        self.format_painter_format = None;
+        self.mode = crate::mode::Mode::Navigation;
+        self.status_message = None;
+        cx.notify();
+    }
+
     /// Clear all formatting on selected cells, resetting to CellFormat::default().
     /// Records a single undo step regardless of cell count.
     pub fn clear_formatting_selection(&mut self, cx: &mut Context<Self>) {

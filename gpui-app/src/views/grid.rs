@@ -686,6 +686,13 @@ fn render_cell(
                 return;
             }
 
+            // Format Painter mode: apply captured format to clicked cell
+            if this.mode == crate::mode::Mode::FormatPainter {
+                this.select_cell(target_row, target_col, false, cx);
+                this.apply_format_painter(cx);
+                return;
+            }
+
             // Normal mode handling
             if event.click_count == 2 {
                 // Double-click to edit

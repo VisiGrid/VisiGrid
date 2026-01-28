@@ -47,6 +47,7 @@ pub enum Mode {
     ExplainDiff,       // Explain Differences dialog (History right-click)
     PasteSpecial,      // Paste Special dialog (Ctrl+Alt+V)
     ColorPicker,       // Color picker modal (Fill Color)
+    FormatPainter,     // Format Painter: next click applies captured format
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)

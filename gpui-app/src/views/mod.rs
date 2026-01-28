@@ -707,6 +707,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.hide_font_picker(cx);
             } else if this.mode == Mode::ColorPicker {
                 this.hide_color_picker(cx);
+            } else if this.mode == Mode::FormatPainter {
+                this.cancel_format_painter(cx);
             } else if this.mode == Mode::ThemePicker {
                 this.hide_theme_picker(cx);
             } else if this.mode == Mode::About {
@@ -1136,6 +1138,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .on_action(cx.listener(|this, _: &ClearFormatting, window, cx| {
             this.clear_formatting_selection(cx);
             this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FormatPainter, _, cx| {
+            this.start_format_painter(cx);
         }))
         .on_action(cx.listener(|this, _: &BackgroundYellow, window, cx| {
             this.set_background_color(Some([255, 255, 0, 255]), cx);
