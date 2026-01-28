@@ -2498,4 +2498,236 @@ mod tests {
         // With Left alignment but blocked neighbor, spill is NOT possible
         // In UI layer: text_overflows=true, spill_eligible=false (blocked) → ellipsis shows
     }
+
+    // =========================================================================
+    // Border ship-gate tests (match apply_borders semantics)
+    // =========================================================================
+
+    /// Helper: apply "Outline" borders on selection (min_row..=max_row, min_col..=max_col)
+    fn apply_outline(sheet: &mut Sheet, min_row: usize, min_col: usize, max_row: usize, max_col: usize) {
+        let thin = CellBorder::thin();
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                if row == min_row { sheet.set_border_top(row, col, thin); }
+                if row == max_row { sheet.set_border_bottom(row, col, thin); }
+                if col == min_col { sheet.set_border_left(row, col, thin); }
+                if col == max_col { sheet.set_border_right(row, col, thin); }
+            }
+        }
+    }
+
+    /// Helper: apply "All" borders on selection
+    fn apply_all(sheet: &mut Sheet, min_row: usize, min_col: usize, max_row: usize, max_col: usize) {
+        let thin = CellBorder::thin();
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                sheet.set_borders(row, col, thin, thin, thin, thin);
+            }
+        }
+    }
+
+    /// Helper: apply "Inside" borders on selection (internal edges only)
+    fn apply_inside(sheet: &mut Sheet, min_row: usize, min_col: usize, max_row: usize, max_col: usize) {
+        let thin = CellBorder::thin();
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                if row < max_row { sheet.set_border_bottom(row, col, thin); }
+                if col < max_col { sheet.set_border_right(row, col, thin); }
+            }
+        }
+    }
+
+    /// Helper: apply "Clear" borders on selection + canonicalize neighbors
+    fn apply_clear(sheet: &mut Sheet, min_row: usize, min_col: usize, max_row: usize, max_col: usize) {
+        let none = CellBorder::default();
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                sheet.set_borders(row, col, none, none, none, none);
+            }
+        }
+        // Canonicalize: clear inward-facing edges of neighbors
+        if min_row > 0 {
+            for col in min_col..=max_col {
+                sheet.set_border_bottom(min_row - 1, col, none);
+            }
+        }
+        for col in min_col..=max_col {
+            if max_row + 1 < sheet.rows {
+                sheet.set_border_top(max_row + 1, col, none);
+            }
+        }
+        if min_col > 0 {
+            for row in min_row..=max_row {
+                sheet.set_border_right(row, min_col - 1, none);
+            }
+        }
+        for row in min_row..=max_row {
+            if max_col + 1 < sheet.cols {
+                sheet.set_border_left(row, max_col + 1, none);
+            }
+        }
+    }
+
+    #[test]
+    fn test_border_outline_single_cell_full_box() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        apply_outline(&mut sheet, 2, 3, 2, 3);
+        let f = sheet.get_format(2, 3);
+        assert!(f.border_top.is_set(), "top");
+        assert!(f.border_right.is_set(), "right");
+        assert!(f.border_bottom.is_set(), "bottom");
+        assert!(f.border_left.is_set(), "left");
+    }
+
+    #[test]
+    fn test_border_inside_1xn_vertical_only() {
+        // 1×3 selection: (0,0)-(0,2) — inside should produce vertical separators only
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        apply_inside(&mut sheet, 0, 0, 0, 2);
+        // No outer edges
+        assert!(!sheet.get_format(0, 0).border_top.is_set(), "no top");
+        assert!(!sheet.get_format(0, 0).border_left.is_set(), "no left");
+        assert!(!sheet.get_format(0, 0).border_bottom.is_set(), "no bottom on (0,0)");
+        assert!(!sheet.get_format(0, 2).border_right.is_set(), "no right on last");
+        assert!(!sheet.get_format(0, 2).border_top.is_set(), "no top on last");
+        assert!(!sheet.get_format(0, 2).border_bottom.is_set(), "no bottom on last");
+        // Internal verticals (written as right edges per precedence)
+        assert!(sheet.get_format(0, 0).border_right.is_set(), "right on (0,0)");
+        assert!(sheet.get_format(0, 1).border_right.is_set(), "right on (0,1)");
+    }
+
+    #[test]
+    fn test_border_inside_nx1_horizontal_only() {
+        // 3×1 selection: (0,0)-(2,0) — inside should produce horizontal separators only
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        apply_inside(&mut sheet, 0, 0, 2, 0);
+        // No outer edges
+        assert!(!sheet.get_format(0, 0).border_top.is_set(), "no top");
+        assert!(!sheet.get_format(0, 0).border_left.is_set(), "no left");
+        assert!(!sheet.get_format(0, 0).border_right.is_set(), "no right on (0,0)");
+        assert!(!sheet.get_format(2, 0).border_bottom.is_set(), "no bottom on last");
+        assert!(!sheet.get_format(2, 0).border_left.is_set(), "no left on last");
+        assert!(!sheet.get_format(2, 0).border_right.is_set(), "no right on last");
+        // Internal horizontals (written as bottom edges per precedence)
+        assert!(sheet.get_format(0, 0).border_bottom.is_set(), "bottom on (0,0)");
+        assert!(sheet.get_format(1, 0).border_bottom.is_set(), "bottom on (1,0)");
+    }
+
+    #[test]
+    fn test_border_2x2_inside_cross_outline_box_all_both() {
+        // 2×2 selection: (0,0)-(1,1)
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // --- Inside: cross only ---
+        apply_inside(&mut sheet, 0, 0, 1, 1);
+        // Vertical internal: right edge on column 0
+        assert!(sheet.get_format(0, 0).border_right.is_set(), "inside: (0,0) right");
+        assert!(sheet.get_format(1, 0).border_right.is_set(), "inside: (1,0) right");
+        // Horizontal internal: bottom edge on row 0
+        assert!(sheet.get_format(0, 0).border_bottom.is_set(), "inside: (0,0) bottom");
+        assert!(sheet.get_format(0, 1).border_bottom.is_set(), "inside: (0,1) bottom");
+        // No outer edges
+        assert!(!sheet.get_format(0, 0).border_top.is_set(), "inside: no top");
+        assert!(!sheet.get_format(0, 0).border_left.is_set(), "inside: no left");
+        assert!(!sheet.get_format(1, 1).border_bottom.is_set(), "inside: no bottom");
+        assert!(!sheet.get_format(1, 1).border_right.is_set(), "inside: no right");
+
+        // Reset
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // --- Outline: box only ---
+        apply_outline(&mut sheet, 0, 0, 1, 1);
+        // Outer edges
+        assert!(sheet.get_format(0, 0).border_top.is_set(), "outline: top-left top");
+        assert!(sheet.get_format(0, 0).border_left.is_set(), "outline: top-left left");
+        assert!(sheet.get_format(1, 1).border_bottom.is_set(), "outline: bot-right bottom");
+        assert!(sheet.get_format(1, 1).border_right.is_set(), "outline: bot-right right");
+        // No internal edges
+        assert!(!sheet.get_format(0, 0).border_right.is_set(), "outline: no internal right");
+        assert!(!sheet.get_format(0, 0).border_bottom.is_set(), "outline: no internal bottom");
+
+        // Reset
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // --- All: box + cross ---
+        apply_all(&mut sheet, 0, 0, 1, 1);
+        for row in 0..=1 {
+            for col in 0..=1 {
+                let f = sheet.get_format(row, col);
+                assert!(f.border_top.is_set(), "all: ({},{}) top", row, col);
+                assert!(f.border_right.is_set(), "all: ({},{}) right", row, col);
+                assert!(f.border_bottom.is_set(), "all: ({},{}) bottom", row, col);
+                assert!(f.border_left.is_set(), "all: ({},{}) left", row, col);
+            }
+        }
+    }
+
+    #[test]
+    fn test_border_clear_canonicalizes_neighbors() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        let thin = CellBorder::thin();
+
+        // Set up: borders on (1,1) and its neighbors
+        sheet.set_borders(1, 1, thin, thin, thin, thin);
+        // Neighbor above has bottom border pointing into selection
+        sheet.set_border_bottom(0, 1, thin);
+        // Neighbor below has top border pointing into selection
+        sheet.set_border_top(2, 1, thin);
+        // Neighbor left has right border pointing into selection
+        sheet.set_border_right(1, 0, thin);
+        // Neighbor right has left border pointing into selection
+        sheet.set_border_left(1, 2, thin);
+
+        // Clear selection (1,1)-(1,1)
+        apply_clear(&mut sheet, 1, 1, 1, 1);
+
+        // Selection cell cleared
+        let f = sheet.get_format(1, 1);
+        assert!(!f.border_top.is_set(), "sel top cleared");
+        assert!(!f.border_right.is_set(), "sel right cleared");
+        assert!(!f.border_bottom.is_set(), "sel bottom cleared");
+        assert!(!f.border_left.is_set(), "sel left cleared");
+
+        // Neighbor inward edges cleared (canonicalization)
+        assert!(!sheet.get_format(0, 1).border_bottom.is_set(), "above bottom cleared");
+        assert!(!sheet.get_format(2, 1).border_top.is_set(), "below top cleared");
+        assert!(!sheet.get_format(1, 0).border_right.is_set(), "left right cleared");
+        assert!(!sheet.get_format(1, 2).border_left.is_set(), "right left cleared");
+    }
+
+    #[test]
+    fn test_border_undo_restores_via_set_format() {
+        // Simulates undo by saving before/after format and restoring
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Record "before" format
+        let before_00 = sheet.get_format(0, 0);
+        let before_01 = sheet.get_format(0, 1);
+        let before_10 = sheet.get_format(1, 0);
+        let before_11 = sheet.get_format(1, 1);
+
+        // Apply All borders to 2×2
+        apply_all(&mut sheet, 0, 0, 1, 1);
+
+        // Verify borders are set
+        assert!(sheet.get_format(0, 0).border_top.is_set());
+        assert!(sheet.get_format(1, 1).border_bottom.is_set());
+
+        // Simulate undo: restore "before" formats
+        sheet.set_format(0, 0, before_00.clone());
+        sheet.set_format(0, 1, before_01.clone());
+        sheet.set_format(1, 0, before_10.clone());
+        sheet.set_format(1, 1, before_11.clone());
+
+        // All borders removed (back to default)
+        for row in 0..=1 {
+            for col in 0..=1 {
+                let f = sheet.get_format(row, col);
+                assert!(!f.border_top.is_set(), "undo ({},{}) top", row, col);
+                assert!(!f.border_right.is_set(), "undo ({},{}) right", row, col);
+                assert!(!f.border_bottom.is_set(), "undo ({},{}) bottom", row, col);
+                assert!(!f.border_left.is_set(), "undo ({},{}) left", row, col);
+            }
+        }
+    }
 }
