@@ -1133,6 +1133,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             this.set_background_color(None, cx);
             this.update_title_if_needed(window, cx);
         }))
+        .on_action(cx.listener(|this, _: &ClearFormatting, window, cx| {
+            this.clear_formatting_selection(cx);
+            this.update_title_if_needed(window, cx);
+        }))
         .on_action(cx.listener(|this, _: &BackgroundYellow, window, cx| {
             this.set_background_color(Some([255, 255, 0, 255]), cx);
             this.update_title_if_needed(window, cx);

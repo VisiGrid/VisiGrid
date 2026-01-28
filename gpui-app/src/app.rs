@@ -2916,6 +2916,8 @@ impl Spreadsheet {
                 cx.notify();
             }
 
+            CommandId::ClearFormatting => self.clear_formatting_selection(cx),
+
             // Background colors
             CommandId::FillColor => self.show_color_picker(crate::color_palette::ColorTarget::Fill, window, cx),
             CommandId::ClearBackground => self.set_background_color(None, cx),

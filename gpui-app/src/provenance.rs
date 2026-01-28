@@ -344,6 +344,9 @@ fn format_to_lua(
                 "format=default".to_string()
             }
         }
+        FormatActionKind::ClearFormatting => {
+            "format=default".to_string()
+        }
     };
 
     format!(

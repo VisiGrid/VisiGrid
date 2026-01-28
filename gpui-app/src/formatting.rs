@@ -3,7 +3,7 @@
 //! This module contains all format setters (bold, italic, alignment, etc.)
 
 use gpui::*;
-use visigrid_engine::cell::{Alignment, CellBorder, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, CellBorder, CellFormat, NumberFormat, TextOverflow, VerticalAlignment};
 
 use crate::app::{Spreadsheet, TriState, SelectionFormatState};
 use crate::history::{CellFormatPatch, FormatActionKind};
@@ -386,6 +386,33 @@ impl Spreadsheet {
         if count > 0 {
             let desc = if color.is_some() { "Background color" } else { "Clear background" };
             self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::BackgroundColor, desc.to_string());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Clear all formatting on selected cells, resetting to CellFormat::default().
+    /// Records a single undo step regardless of cell count.
+    pub fn clear_formatting_selection(&mut self, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        let default = CellFormat::default();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet(cx).get_format(row, col);
+                    if before != default {
+                        self.active_sheet_mut(cx, |s| s.set_format(row, col, default.clone()));
+                        let after = self.sheet(cx).get_format(row, col);
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let desc = "Clear Formatting".to_string();
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::ClearFormatting, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }

@@ -1250,6 +1250,35 @@ fn render_format_tab(
         .child(render_background_color_section(&state, text_primary, text_muted, accent, panel_border, cx))
         // Font section
         .child(render_font_section(&state, text_primary, text_muted, panel_border, cx))
+        // Divider + Clear Formatting
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .h(px(1.0))
+                        .bg(panel_border)
+                )
+                .child(
+                    div()
+                        .id("clear-formatting-btn")
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .border_1()
+                        .border_color(panel_border)
+                        .text_size(px(11.0))
+                        .text_color(text_muted)
+                        .hover(|s| s.bg(panel_border.opacity(0.4)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.clear_formatting_selection(cx);
+                        }))
+                        .child("Clear Formatting")
+                )
+        )
 }
 
 fn render_names_tab(
@@ -2054,6 +2083,12 @@ fn render_text_style_section(
     let strikethrough_active = matches!(state.strikethrough, TriState::Uniform(true));
     let strikethrough_mixed = state.strikethrough.is_mixed();
 
+    let hint: &str = if cfg!(target_os = "macos") {
+        "\u{2318}B \u{00b7} \u{2318}I \u{00b7} \u{2318}U \u{00b7} \u{2318}\u{21e7}X"
+    } else {
+        "Ctrl+B \u{00b7} Ctrl+I \u{00b7} Ctrl+U \u{00b7} Ctrl+Shift+X"
+    };
+
     section("Text Style", panel_border, text_primary)
         .child(
             div()
@@ -2095,6 +2130,13 @@ fn render_text_style_section(
                             this.set_strikethrough(new_value, cx);
                         }))
                 )
+        )
+        // Shortcut hints
+        .child(
+            div()
+                .text_size(px(9.0))
+                .text_color(text_muted.opacity(0.6))
+                .child(hint)
         )
 }
 

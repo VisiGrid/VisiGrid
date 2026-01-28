@@ -96,6 +96,7 @@ pub enum FormatActionKind {
     BackgroundColor,
     Border,
     PasteFormats,  // Paste Special > Formats
+    ClearFormatting,
 }
 
 /// An undoable action

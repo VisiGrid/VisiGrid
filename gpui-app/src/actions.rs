@@ -174,6 +174,7 @@ actions!(format, [
     AlignRight,
     FormatCurrency,
     FormatPercent,
+    ClearFormatting,  // Reset all format properties to default
     // Background colors
     ClearBackground,
     BackgroundYellow,
