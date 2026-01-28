@@ -200,6 +200,8 @@ impl Spreadsheet {
         self.formula_ref_end = None;
         self.formula_ref_start_cursor = 0;
         self.formula_highlighted_refs.clear();
+        // Non-Enter commit breaks tab chain (Save/Export path)
+        self.tab_chain_origin_col = None;
 
         // Smoke mode: trigger full ordered recompute for dogfooding
         self.maybe_smoke_recalc(cx);
@@ -308,7 +310,7 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Commit edit and move right (Tab, or Right arrow in Edit mode)
+    /// Commit edit and move right (Right arrow in Edit mode)
     ///
     /// # Commit-on-Arrow Policy (Excel-like fast data entry)
     ///
@@ -321,11 +323,84 @@ impl Spreadsheet {
         self.confirm_edit_and_move(0, 1, cx);
     }
 
-    /// Commit edit and move left (Shift+Tab, or Left arrow in Edit mode)
+    /// Commit edit and move left (Left arrow in Edit mode)
     ///
     /// See `confirm_edit_and_move_right` for commit-on-arrow policy.
     pub fn confirm_edit_and_move_left(&mut self, cx: &mut Context<Self>) {
         self.confirm_edit_and_move(0, -1, cx);
+    }
+
+    /// Tab commit-and-move-right: records the tab-chain origin column,
+    /// then commits the current edit and moves right.
+    ///
+    /// The origin column is used by `confirm_edit_enter` to return the
+    /// cursor to the starting column when Enter is pressed (Excel behavior).
+    pub fn confirm_edit_and_tab_right(&mut self, cx: &mut Context<Self>) {
+        if self.tab_chain_origin_col.is_none() {
+            self.tab_chain_origin_col = Some(self.view_state.selected.1);
+        }
+        self.confirm_edit_and_move(0, 1, cx);
+    }
+
+    /// Shift+Tab commit-and-move-left: records the tab-chain origin column,
+    /// then commits the current edit and moves left.
+    pub fn confirm_edit_and_tab_left(&mut self, cx: &mut Context<Self>) {
+        if self.tab_chain_origin_col.is_none() {
+            self.tab_chain_origin_col = Some(self.view_state.selected.1);
+        }
+        self.confirm_edit_and_move(0, -1, cx);
+    }
+
+    /// Enter key: confirm edit and move down, with tab-chain return.
+    ///
+    /// If the user tabbed across cells entering data, Enter returns the cursor
+    /// to the origin column on the next row instead of staying in the current
+    /// column. This matches Excel's Tab-chain return behavior.
+    pub fn confirm_edit_enter(&mut self, cx: &mut Context<Self>) {
+        if self.is_multi_selection() && self.mode.is_editing() {
+            self.tab_chain_origin_col = None;
+            self.confirm_edit_in_place(cx);
+            return;
+        }
+
+        if let Some(origin_col) = self.tab_chain_origin_col.take() {
+            // Commit the edit if currently editing
+            self.commit_current_edit(cx);
+            // Move to next row at the origin column
+            let (row, _) = self.active_view_state().selected;
+            let new_row = self.next_visible_row(row, 1);
+            self.close_validation_dropdown(
+                crate::validation_dropdown::DropdownCloseReason::SelectionChanged,
+                cx,
+            );
+            let view_state = self.active_view_state_mut();
+            view_state.selected = (new_row, origin_col);
+            view_state.selection_end = None;
+            view_state.additional_selections.clear();
+            self.ensure_visible(cx);
+        } else {
+            self.confirm_edit(cx);
+        }
+    }
+
+    /// Shift+Enter key: confirm edit and move up, with tab-chain return.
+    pub fn confirm_edit_up_enter(&mut self, cx: &mut Context<Self>) {
+        if let Some(origin_col) = self.tab_chain_origin_col.take() {
+            self.commit_current_edit(cx);
+            let (row, _) = self.active_view_state().selected;
+            let new_row = self.next_visible_row(row, -1);
+            self.close_validation_dropdown(
+                crate::validation_dropdown::DropdownCloseReason::SelectionChanged,
+                cx,
+            );
+            let view_state = self.active_view_state_mut();
+            view_state.selected = (new_row, origin_col);
+            view_state.selection_end = None;
+            view_state.additional_selections.clear();
+            self.ensure_visible(cx);
+        } else {
+            self.confirm_edit_up(cx);
+        }
     }
 
     /// Ctrl+Enter: Multi-edit commit / Fill selection / Open link
@@ -485,6 +560,7 @@ impl Spreadsheet {
         self.formula_highlighted_refs.clear();
         self.clear_formula_ref_colors();
         self.autocomplete_visible = false;
+        self.tab_chain_origin_col = None;  // Escape breaks tab chain
         self.stop_caret_blink();
         cx.notify();
     }
@@ -778,11 +854,12 @@ impl Spreadsheet {
     // Edit Movement and Link Opening
     // =========================================================================
 
-    fn confirm_edit_and_move(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
+    /// Commit the current edit without moving the cursor or changing selection.
+    /// Returns true if an edit was actually committed (was in editing mode).
+    /// Used by `confirm_edit_and_move` and `confirm_edit_enter`.
+    fn commit_current_edit(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.mode.is_editing() {
-            // Not editing - just move (Excel behavior)
-            self.move_selection(dr, dc, cx);
-            return;
+            return false;
         }
 
         let (row, col) = self.view_state.selected;
@@ -807,11 +884,11 @@ impl Spreadsheet {
         }
 
         self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
-        self.set_cell_value(row, col, &new_value, cx);  // Use helper that updates dep graph
+        self.set_cell_value(row, col, &new_value, cx);
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
-        self.bump_cells_rev();  // Invalidate cell search cache
+        self.bump_cells_rev();
         self.is_modified = true;
         // Clear formula reference state
         self.formula_ref_cell = None;
@@ -829,6 +906,18 @@ impl Spreadsheet {
 
         // Smoke mode: trigger full ordered recompute for dogfooding
         self.maybe_smoke_recalc(cx);
+
+        true
+    }
+
+    fn confirm_edit_and_move(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
+        if !self.mode.is_editing() {
+            // Not editing - just move (Excel behavior)
+            self.move_selection(dr, dc, cx);
+            return;
+        }
+
+        self.commit_current_edit(cx);
 
         // Move after confirming
         self.move_selection(dr, dc, cx);

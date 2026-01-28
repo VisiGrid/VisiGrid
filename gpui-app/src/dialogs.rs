@@ -32,6 +32,7 @@ impl Spreadsheet {
             cx,
         );
         self.lua_console.visible = false;
+        self.tab_chain_origin_col = None;  // Dialog breaks tab chain
         self.mode = Mode::GoTo;
         self.goto_input.clear();
         cx.notify();

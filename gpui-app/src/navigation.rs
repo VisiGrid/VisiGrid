@@ -32,7 +32,7 @@ impl Spreadsheet {
     ///
     /// - `current_row`: Current view row
     /// - `delta`: Direction (+1 for down, -1 for up)
-    fn next_visible_row(&self, current_row: usize, delta: i32) -> usize {
+    pub(crate) fn next_visible_row(&self, current_row: usize, delta: i32) -> usize {
         let visible = self.row_view.visible_rows();
 
         // If not filtered, simple arithmetic
@@ -369,6 +369,8 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn select_cell(&mut self, row: usize, col: usize, extend: bool, cx: &mut Context<Self>) {
+        // Mouse click breaks the tab-chain
+        self.tab_chain_origin_col = None;
         if extend {
             self.active_view_state_mut().selection_end = Some((row, col));
         } else {

@@ -61,6 +61,7 @@ impl Spreadsheet {
 
         // Fresh open: clear state
         self.lua_console.visible = false;
+        self.tab_chain_origin_col = None;  // Dialog breaks tab chain
         self.mode = Mode::Find;
         self.find_input.clear();
         self.replace_input.clear();
@@ -89,6 +90,7 @@ impl Spreadsheet {
 
         // Fresh open: clear state
         self.lua_console.visible = false;
+        self.tab_chain_origin_col = None;  // Dialog breaks tab chain
         self.mode = Mode::Find;
         self.find_input.clear();
         self.replace_input.clear();

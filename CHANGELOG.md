@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Tab-Chain Return (Excel-Style)
+
+When you Tab across a row entering values, Enter returns you to the next row under the starting column — so you always know where you are in a model.
+
+- **Origin tracking** — first Tab records the starting column; subsequent Tabs preserve it
+- **Enter returns to origin** — moves down one row and snaps back to the column where the chain began
+- **Shift+Enter returns upward** — same origin snap, one row up
+- **Explicit chain breakers** — arrow keys, mouse clicks, Escape, dialog open, and sheet switch all reset the chain cleanly
+- **Works in edit and navigation mode** — Tab without editing also builds a chain
+
+### Navigation Snappiness
+
+Keystroke-to-paint latency improvements for held-key navigation.
+
+- **Latency instrumentation** — debug ring buffer logging key-down → state update → render timestamps (p50/p95)
+- **Repeat coalescing** — multiple arrow key repeats within a single frame collapsed to one selection move
+- **Measured validation** — hold Right Arrow for 2 seconds on a dense sheet; smooth glide, no hitching
+
 ### Format Inspector Polish
 
 Excel-grade formatting controls in the inspector panel.

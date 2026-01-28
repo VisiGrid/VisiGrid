@@ -433,6 +433,7 @@ impl Spreadsheet {
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();
+        self.tab_chain_origin_col = None;  // Sheet switch breaks tab chain
     }
 
     // =========================================================================

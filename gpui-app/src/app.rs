@@ -1655,6 +1655,7 @@ pub struct Spreadsheet {
     pub inspector_tab: crate::mode::InspectorTab,
     pub inspector_pinned: Option<(usize, usize)>,  // Pinned cell (None = follows selection)
     pub format_painter_format: Option<visigrid_engine::cell::CellFormat>,  // Captured format for Format Painter
+    pub tab_chain_origin_col: Option<usize>,  // Tab-chain return: origin column for Enter key
     pub inspector_hover_cell: Option<(usize, usize)>,  // Cell being hovered in inspector (for grid highlight)
     pub inspector_trace_path: Option<Vec<visigrid_engine::cell_id::CellId>>,  // Path trace highlight (Phase 3.5b)
     pub inspector_trace_incomplete: bool,  // True if trace has dynamic refs or was truncated
@@ -2021,6 +2022,7 @@ impl Spreadsheet {
             inspector_tab: crate::mode::InspectorTab::default(),
             inspector_pinned: None,
             format_painter_format: None,
+            tab_chain_origin_col: None,
             inspector_hover_cell: None,
             inspector_trace_path: None,
             inspector_trace_incomplete: false,

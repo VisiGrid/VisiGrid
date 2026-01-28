@@ -37,6 +37,7 @@ impl Spreadsheet {
             cx,
         );
         self.lua_console.visible = false;
+        self.tab_chain_origin_col = None;  // Dialog breaks tab chain
         // Save pre-palette state for restore on Esc
         self.palette_pre_selection = self.view_state.selected;
         self.palette_pre_selection_end = self.view_state.selection_end;

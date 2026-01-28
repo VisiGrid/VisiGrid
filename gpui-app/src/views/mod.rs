@@ -127,6 +127,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.autocomplete_up(cx);
                 return;
             }
+            // Arrow keys break the tab-chain (only Tab/Enter preserve it)
+            this.tab_chain_origin_col = None;
             match this.mode {
                 Mode::Command => this.palette_up(cx),
                 Mode::FontPicker => this.font_picker_up(cx),
@@ -169,6 +171,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.autocomplete_down(cx);
                 return;
             }
+            // Arrow keys break the tab-chain (only Tab/Enter preserve it)
+            this.tab_chain_origin_col = None;
             match this.mode {
                 Mode::Command => this.palette_down(cx),
                 Mode::FontPicker => this.font_picker_down(cx),
@@ -213,8 +217,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
             } else if this.mode.is_editing() {
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
+                this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.confirm_edit_and_move_left(cx);
             } else {
+                this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.move_selection(0, -1, cx);
             }
         }))
@@ -253,8 +259,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 }
             } else if this.mode.is_editing() {
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
+                this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.confirm_edit_and_move_right(cx);
             } else {
+                this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.move_selection(0, 1, cx);
             }
         }))
@@ -646,7 +654,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 Mode::GoTo => this.confirm_goto(cx),
                 Mode::CreateNamedRange => this.confirm_create_named_range(cx),
                 _ => {
-                    this.confirm_edit(cx);
+                    this.confirm_edit_enter(cx);
                     this.update_title_if_needed(window, cx);
                 }
             }
@@ -664,7 +672,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     // Shift+Enter does nothing special in these modes
                 }
                 _ => {
-                    this.confirm_edit_up(cx);
+                    this.confirm_edit_up_enter(cx);
                     this.update_title_if_needed(window, cx);
                 }
             }
@@ -774,9 +782,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 return;
             }
             if this.mode.is_editing() {
-                this.confirm_edit_and_move_right(cx);
+                this.confirm_edit_and_tab_right(cx);
                 this.update_title_if_needed(window, cx);
             } else {
+                // Nav mode: Tab also sets origin for tab-chain return
+                if this.tab_chain_origin_col.is_none() {
+                    this.tab_chain_origin_col = Some(this.view_state.selected.1);
+                }
                 this.move_selection(0, 1, cx);
             }
         }))
@@ -786,9 +798,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 return;
             }
             if this.mode.is_editing() {
-                this.confirm_edit_and_move_left(cx);
+                this.confirm_edit_and_tab_left(cx);
                 this.update_title_if_needed(window, cx);
             } else {
+                // Nav mode: Shift+Tab also sets origin for tab-chain return
+                if this.tab_chain_origin_col.is_none() {
+                    this.tab_chain_origin_col = Some(this.view_state.selected.1);
+                }
                 this.move_selection(0, -1, cx);
             }
         }))
