@@ -142,6 +142,58 @@ pub fn is_valid_sheet_name(name: &str) -> bool {
 }
 
 // =============================================================================
+// MergedRegion
+// =============================================================================
+
+/// A rectangular merged cell region in a sheet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MergedRegion {
+    /// Top-left corner (row, col)
+    pub start: (usize, usize),
+    /// Bottom-right corner (row, col)
+    pub end: (usize, usize),
+}
+
+impl MergedRegion {
+    pub fn new(start_row: usize, start_col: usize, end_row: usize, end_col: usize) -> Self {
+        Self {
+            start: (start_row, start_col),
+            end: (end_row, end_col),
+        }
+    }
+
+    /// Number of rows spanned
+    pub fn rows(&self) -> usize {
+        self.end.0 - self.start.0 + 1
+    }
+
+    /// Number of columns spanned
+    pub fn cols(&self) -> usize {
+        self.end.1 - self.start.1 + 1
+    }
+
+    /// Whether (row, col) is inside this region
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        row >= self.start.0 && row <= self.end.0 && col >= self.start.1 && col <= self.end.1
+    }
+
+    /// The top-left (origin) cell
+    pub fn top_left(&self) -> (usize, usize) {
+        self.start
+    }
+
+    /// A degenerate merge spans only 1 cell (1×1) — should be removed
+    pub fn is_degenerate(&self) -> bool {
+        self.rows() <= 1 && self.cols() <= 1
+    }
+
+    /// Total number of cells in the region
+    pub fn cell_count(&self) -> usize {
+        self.rows() * self.cols()
+    }
+}
+
+// =============================================================================
 // Sheet
 // =============================================================================
 
@@ -161,9 +213,20 @@ pub struct Sheet {
     /// Spilled values from array formulas: (row, col) -> Value
     #[serde(skip)]
     spill_values: HashMap<(usize, usize), Value>,
+    /// Computed value cache: populated during topological recalc, read during evaluation.
+    /// Stores typed Value (not String) to avoid lossy conversions.
+    /// Getters NEVER evaluate on cache miss — only the topo recalc pass populates this.
+    #[serde(skip)]
+    computed_cache: RefCell<HashMap<(usize, usize), Value>>,
     /// Data validation rules for cells
     #[serde(default)]
     pub validations: ValidationStore,
+    /// Merged cell regions
+    #[serde(default)]
+    pub merged_regions: Vec<MergedRegion>,
+    /// Fast lookup: (row, col) → index into merged_regions
+    #[serde(skip)]
+    merge_index: HashMap<(usize, usize), usize>,
 }
 
 impl CellLookup for Sheet {
@@ -183,10 +246,23 @@ impl CellLookup for Sheet {
             return spill_value.to_number().unwrap_or(0.0);
         }
 
-        self.cells
-            .get(&(row, col))
-            .map(|c| self.evaluate_cell_value(&c.value, row, col))
-            .unwrap_or(0.0)
+        match self.cells.get(&(row, col)) {
+            Some(cell) => match &cell.value {
+                CellValue::Empty => 0.0,
+                CellValue::Number(n) => *n,
+                CellValue::Text(s) => s.parse().unwrap_or(0.0),
+                CellValue::Formula { ast: Some(_), .. } => {
+                    // Cache-only: never evaluate on cache miss.
+                    // Topo recalc populates the cache; miss means not yet computed.
+                    let cache = self.computed_cache.borrow();
+                    cache.get(&(row, col))
+                        .map(|v| v.to_number().unwrap_or(0.0))
+                        .unwrap_or(0.0)
+                }
+                CellValue::Formula { ast: None, .. } => 0.0,
+            },
+            None => 0.0,
+        }
     }
 
     fn get_text(&self, row: usize, col: usize) -> String {
@@ -215,19 +291,25 @@ impl CellLookup for Sheet {
                         format!("{}", n)
                     }
                 }
-                CellValue::Formula { ast: Some(ast), .. } => {
-                    // Track that we're evaluating this cell
-                    EVALUATING.with(|eval| eval.borrow_mut().insert((row, col)));
-                    let lookup = LookupWithContext::new(self, row, col);
-                    let bound_ast = bind_expr_same_sheet(ast);
-                    let result = eval::evaluate(&bound_ast, &lookup).to_text();
-                    EVALUATING.with(|eval| eval.borrow_mut().remove(&(row, col)));
-                    result
+                CellValue::Formula { ast: Some(_), .. } => {
+                    // Cache-only: never evaluate on cache miss.
+                    // Topo recalc populates the cache; miss means not yet computed.
+                    let cache = self.computed_cache.borrow();
+                    cache.get(&(row, col))
+                        .map(|v| v.to_text())
+                        .unwrap_or_default()
                 }
                 CellValue::Formula { ast: None, .. } => String::new(),
             },
             None => String::new(),
         }
+    }
+
+    fn debug_context(&self) -> String {
+        format!(
+            "Sheet(name=\"{}\", ptr={:p}, cache_len={})",
+            self.name, self as *const Sheet, self.computed_cache_len()
+        )
     }
 }
 
@@ -244,7 +326,10 @@ impl Sheet {
             rows,
             cols,
             spill_values: HashMap::new(),
+            computed_cache: RefCell::new(HashMap::new()),
             validations: ValidationStore::new(),
+            merged_regions: Vec::new(),
+            merge_index: HashMap::new(),
         }
     }
 
@@ -260,8 +345,28 @@ impl Sheet {
             rows,
             cols,
             spill_values: HashMap::new(),
+            computed_cache: RefCell::new(HashMap::new()),
             validations: ValidationStore::new(),
+            merged_regions: Vec::new(),
+            merge_index: HashMap::new(),
         }
+    }
+
+    /// Cache a computed Value for a formula cell.
+    /// Called ONLY during topological recalc (workbook.evaluate_cell).
+    /// Getters read from this cache but never write to it.
+    pub fn cache_computed(&self, row: usize, col: usize, value: Value) {
+        self.computed_cache.borrow_mut().insert((row, col), value);
+    }
+
+    /// Get the number of entries in the computed cache (for diagnostics).
+    pub fn computed_cache_len(&self) -> usize {
+        self.computed_cache.borrow().len()
+    }
+
+    /// Clear the computed value cache (before a new recalc pass).
+    pub fn clear_computed_cache(&self) {
+        self.computed_cache.borrow_mut().clear();
     }
 
     /// Update the sheet name (also updates name_key)
@@ -274,6 +379,9 @@ impl Sheet {
     pub fn set_value(&mut self, row: usize, col: usize, value: &str) {
         // Clear any existing spill from this cell before setting new value
         self.clear_spill_from(row, col);
+
+        // Invalidate computed cache (cell changed, dependents may need recompute)
+        self.computed_cache.borrow_mut().remove(&(row, col));
 
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.set(value);
@@ -309,6 +417,11 @@ impl Sheet {
         let lookup = LookupWithContext::new(self, row, col);
         let bound_ast = bind_expr_same_sheet(&ast);
         let result = eval::evaluate(&bound_ast, &lookup);
+
+        // Cache the scalar result so getters can read it without re-evaluating.
+        // For arrays, the top-left value is cached; spill receivers are stored in spill_values.
+        // Topo recalc (workbook.evaluate_cell) will overwrite this with the authoritative result.
+        self.cache_computed(row, col, result.to_value());
 
         // If it's an array, try to apply spill
         if let EvalResult::Array(array) = result {
@@ -545,34 +658,28 @@ impl Sheet {
                 if cell.spill_error.is_some() {
                     return "#SPILL!".to_string();
                 }
-                // Get the result for formatting
-                let result = match &cell.value {
-                    CellValue::Number(n) => EvalResult::Number(*n),
-                    CellValue::Formula { ast: Some(ast), .. } => {
-                        let lookup = LookupWithContext::new(self, row, col);
-                        let bound_ast = bind_expr_same_sheet(ast);
-                        eval::evaluate(&bound_ast, &lookup)
+                // Get the cached Value for formatting (never evaluate on cache miss)
+                let value = match &cell.value {
+                    CellValue::Number(n) => Value::Number(*n),
+                    CellValue::Formula { ast: Some(_), .. } => {
+                        // Cache-only: never evaluate on cache miss.
+                        let cache = self.computed_cache.borrow();
+                        cache.get(&(row, col)).cloned().unwrap_or(Value::Empty)
                     }
-                    CellValue::Text(s) => EvalResult::Text(s.clone()),
+                    CellValue::Text(s) => Value::Text(s.clone()),
                     CellValue::Empty => return String::new(),
                     CellValue::Formula { ast: None, .. } => return "#ERR".to_string(),
                 };
 
-                match result {
-                    EvalResult::Number(n) => {
+                match value {
+                    Value::Number(n) => {
                         // Apply number formatting
                         CellValue::format_number(n, &cell.format.number_format)
                     }
-                    EvalResult::Text(s) => s,
-                    EvalResult::Boolean(b) => if b { "TRUE".to_string() } else { "FALSE".to_string() },
-                    EvalResult::Error(e) => format!("#ERR: {}", e),
-                    EvalResult::Array(arr) => {
-                        // Array: display top-left value (spill handles rest)
-                        match arr.top_left() {
-                            Value::Number(n) => CellValue::format_number(n, &cell.format.number_format),
-                            other => other.to_text(),
-                        }
-                    }
+                    Value::Text(s) => s,
+                    Value::Boolean(b) => if b { "TRUE".to_string() } else { "FALSE".to_string() },
+                    Value::Error(e) => e,
+                    Value::Empty => String::new(),
                 }
             }
             None => String::new(),
@@ -605,16 +712,10 @@ impl Sheet {
                     CellValue::Empty => Value::Empty,
                     CellValue::Text(s) => Value::Text(s.clone()),
                     CellValue::Number(n) => Value::Number(*n),
-                    CellValue::Formula { ast: Some(ast), .. } => {
-                        let lookup = LookupWithContext::new(self, row, col);
-                        let bound_ast = bind_expr_same_sheet(ast);
-                        match eval::evaluate(&bound_ast, &lookup) {
-                            EvalResult::Number(n) => Value::Number(n),
-                            EvalResult::Text(s) => Value::Text(s),
-                            EvalResult::Boolean(b) => Value::Boolean(b),
-                            EvalResult::Error(e) => Value::Error(e),
-                            EvalResult::Array(arr) => arr.top_left().clone(),
-                        }
+                    CellValue::Formula { ast: Some(_), .. } => {
+                        // Cache-only: never evaluate on cache miss.
+                        let cache = self.computed_cache.borrow();
+                        cache.get(&(row, col)).cloned().unwrap_or(Value::Empty)
                     }
                     CellValue::Formula { ast: None, .. } => Value::Error("#ERR".to_string()),
                 }
@@ -631,26 +732,6 @@ impl Sheet {
             .unwrap_or_default()
     }
 
-    fn evaluate_cell_value(&self, value: &CellValue, row: usize, col: usize) -> f64 {
-        match value {
-            CellValue::Empty => 0.0,
-            CellValue::Number(n) => *n,
-            CellValue::Text(s) => s.parse().unwrap_or(0.0),
-            CellValue::Formula { ast: Some(ast), .. } => {
-                let lookup = LookupWithContext::new(self, row, col);
-                let bound_ast = bind_expr_same_sheet(ast);
-                match eval::evaluate(&bound_ast, &lookup) {
-                    EvalResult::Number(n) => n,
-                    EvalResult::Boolean(b) => if b { 1.0 } else { 0.0 },
-                    EvalResult::Text(s) => s.parse().unwrap_or(0.0),
-                    EvalResult::Error(_) => 0.0,
-                    EvalResult::Array(arr) => arr.top_left().to_number().unwrap_or(0.0),
-                }
-            }
-            CellValue::Formula { ast: None, .. } => 0.0,
-        }
-    }
-
     fn display_cell_value(&self, value: &CellValue, row: usize, col: usize) -> String {
         match value {
             CellValue::Empty => String::new(),
@@ -662,21 +743,20 @@ impl Sheet {
                     format!("{:.2}", n)
                 }
             }
-            CellValue::Formula { ast: Some(ast), .. } => {
-                let lookup = LookupWithContext::new(self, row, col);
-                let bound_ast = bind_expr_same_sheet(ast);
-                match eval::evaluate(&bound_ast, &lookup) {
-                    EvalResult::Number(n) => {
+            CellValue::Formula { ast: Some(_), .. } => {
+                // Cache-only: never evaluate on cache miss.
+                let cache = self.computed_cache.borrow();
+                match cache.get(&(row, col)) {
+                    Some(Value::Number(n)) => {
                         if n.fract() == 0.0 {
-                            format!("{}", n as i64)
+                            format!("{}", *n as i64)
                         } else {
                             format!("{:.2}", n)
                         }
                     }
-                    EvalResult::Text(s) => s,
-                    EvalResult::Boolean(b) => if b { "TRUE".to_string() } else { "FALSE".to_string() },
-                    EvalResult::Error(e) => format!("#ERR: {}", e),
-                    EvalResult::Array(arr) => arr.top_left().to_text(),
+                    Some(Value::Error(e)) => e.clone(),
+                    Some(v) => v.to_text(),
+                    None => String::new(),
                 }
             }
             CellValue::Formula { ast: None, .. } => "#ERR".to_string(),
@@ -712,6 +792,19 @@ impl Sheet {
     }
 
     pub fn set_format(&mut self, row: usize, col: usize, format: CellFormat) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format = format;
+    }
+
+    /// Set the style_id on a cell (imported style provenance).
+    pub fn set_style_id(&mut self, row: usize, col: usize, style_id: u32) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.style_id = Some(style_id);
+    }
+
+    /// Set format from import: applies the full CellFormat as the resolved format
+    /// and does NOT touch style_id (caller sets that separately).
+    pub fn set_format_from_import(&mut self, row: usize, col: usize, format: CellFormat) {
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format = format;
     }
@@ -779,7 +872,7 @@ impl Sheet {
     pub fn get_number_format(&self, row: usize, col: usize) -> NumberFormat {
         self.cells
             .get(&(row, col))
-            .map(|c| c.format.number_format)
+            .map(|c| c.format.number_format.clone())
             .unwrap_or_default()
     }
 
@@ -846,6 +939,125 @@ impl Sheet {
         cell.format.border_left = border;
     }
 
+    // =========================================================================
+    // Merged Regions
+    // =========================================================================
+
+    /// Rebuild the merge_index from merged_regions (O(total cells in merges)).
+    /// Must be called after any mutation of merged_regions.
+    pub fn rebuild_merge_index(&mut self) {
+        self.merge_index.clear();
+        for (idx, region) in self.merged_regions.iter().enumerate() {
+            for r in region.start.0..=region.end.0 {
+                for c in region.start.1..=region.end.1 {
+                    self.merge_index.insert((r, c), idx);
+                }
+            }
+        }
+    }
+
+    /// O(1) lookup: get the merged region containing (row, col), if any.
+    pub fn get_merge(&self, row: usize, col: usize) -> Option<&MergedRegion> {
+        self.merge_index
+            .get(&(row, col))
+            .and_then(|&idx| self.merged_regions.get(idx))
+    }
+
+    /// Is (row, col) the top-left origin of a merged region?
+    pub fn is_merge_origin(&self, row: usize, col: usize) -> bool {
+        self.get_merge(row, col)
+            .map(|m| m.start == (row, col))
+            .unwrap_or(false)
+    }
+
+    /// Is (row, col) inside a merge but NOT the origin (i.e., should be hidden)?
+    pub fn is_merge_hidden(&self, row: usize, col: usize) -> bool {
+        self.get_merge(row, col)
+            .map(|m| m.start != (row, col))
+            .unwrap_or(false)
+    }
+
+    /// Add a merged region. Returns Err if it overlaps an existing merge.
+    pub fn add_merge(&mut self, region: MergedRegion) -> Result<(), String> {
+        if region.is_degenerate() {
+            return Ok(()); // silently ignore 1×1 merges
+        }
+        // Check for overlaps
+        for r in region.start.0..=region.end.0 {
+            for c in region.start.1..=region.end.1 {
+                if self.merge_index.contains_key(&(r, c)) {
+                    return Err(format!(
+                        "merge ({},{})→({},{}) overlaps existing merge at ({},{})",
+                        region.start.0, region.start.1, region.end.0, region.end.1, r, c
+                    ));
+                }
+            }
+        }
+        // Incremental index update — no full rebuild
+        let idx = self.merged_regions.len();
+        for r in region.start.0..=region.end.0 {
+            for c in region.start.1..=region.end.1 {
+                self.merge_index.insert((r, c), idx);
+            }
+        }
+        self.merged_regions.push(region);
+        Ok(())
+    }
+
+    /// Remove the merge whose origin is `start`. Returns the removed region, if any.
+    pub fn remove_merge(&mut self, start: (usize, usize)) -> Option<MergedRegion> {
+        if let Some(pos) = self
+            .merged_regions
+            .iter()
+            .position(|m| m.start == start)
+        {
+            let removed = self.merged_regions.remove(pos);
+            // Incremental: clear removed region's entries, then fix indices
+            // shifted by the Vec::remove. Cheaper than full rebuild for small
+            // merge counts; normalize_merges still does full rebuild for bulk ops.
+            for r in removed.start.0..=removed.end.0 {
+                for c in removed.start.1..=removed.end.1 {
+                    self.merge_index.remove(&(r, c));
+                }
+            }
+            // Indices above `pos` shifted down by 1 after Vec::remove
+            for v in self.merge_index.values_mut() {
+                if *v > pos {
+                    *v -= 1;
+                }
+            }
+            Some(removed)
+        } else {
+            None
+        }
+    }
+
+    /// Remove degenerate (1×1) merges and rebuild the index.
+    pub fn normalize_merges(&mut self) {
+        self.merged_regions.retain(|m| !m.is_degenerate());
+        self.rebuild_merge_index();
+        #[cfg(debug_assertions)]
+        self.debug_assert_no_merge_overlap();
+    }
+
+    /// Debug-only: assert that no two merges overlap.
+    #[cfg(debug_assertions)]
+    fn debug_assert_no_merge_overlap(&self) {
+        let mut seen: HashSet<(usize, usize)> = HashSet::new();
+        for region in &self.merged_regions {
+            for r in region.start.0..=region.end.0 {
+                for c in region.start.1..=region.end.1 {
+                    assert!(
+                        seen.insert((r, c)),
+                        "merge overlap detected at ({}, {})",
+                        r,
+                        c
+                    );
+                }
+            }
+        }
+    }
+
     /// Insert rows at the specified position, shifting existing rows down
     pub fn insert_rows(&mut self, at_row: usize, count: usize) {
         // Collect all cells that need to be shifted
@@ -866,12 +1078,27 @@ impl Sheet {
                 self.cells.insert((r + count, c), cell);
             }
         }
+
+        // Adjust merged regions (grid-line semantics)
+        for m in &mut self.merged_regions {
+            if at_row <= m.start.0 {
+                // Insertion at or above merge → shift entire merge down
+                m.start.0 += count;
+                m.end.0 += count;
+            } else if at_row <= m.end.0 {
+                // Insertion inside merge → expand merge
+                m.end.0 += count;
+            }
+        }
+        self.normalize_merges();
     }
 
     /// Delete rows at the specified position, shifting remaining rows up
     pub fn delete_rows(&mut self, start_row: usize, count: usize) {
+        let end_row = start_row + count; // exclusive
+
         // Remove cells in the deleted rows
-        for row in start_row..start_row + count {
+        for row in start_row..end_row {
             for col in 0..self.cols {
                 self.cells.remove(&(row, col));
             }
@@ -880,7 +1107,7 @@ impl Sheet {
         // Collect cells that need to be shifted up
         let cells_to_shift: Vec<_> = self.cells
             .iter()
-            .filter(|((r, _), _)| *r >= start_row + count)
+            .filter(|((r, _), _)| *r >= end_row)
             .map(|((r, c), cell)| ((*r, *c), cell.clone()))
             .collect();
 
@@ -893,6 +1120,33 @@ impl Sheet {
         for ((r, c), cell) in cells_to_shift {
             self.cells.insert((r - count, c), cell);
         }
+
+        // Adjust merged regions (grid-line semantics)
+        for m in &mut self.merged_regions {
+            if end_row <= m.start.0 {
+                // Deletion entirely above → shift up
+                m.start.0 -= count;
+                m.end.0 -= count;
+            } else if start_row > m.end.0 {
+                // Deletion entirely below → no effect
+            } else if start_row <= m.start.0 && end_row > m.end.0 {
+                // Deletion engulfs entire merge → mark degenerate
+                m.start.0 = start_row;
+                m.end.0 = m.start.0;
+                m.end.1 = m.start.1;
+            } else if start_row <= m.start.0 {
+                // Deletion clips top of merge; surviving rows shift up by count
+                m.start.0 = start_row;
+                m.end.0 -= count;
+            } else if end_row > m.end.0 {
+                // Deletion clips bottom of merge
+                m.end.0 = start_row - 1;
+            } else {
+                // Deletion entirely inside merge → shrink
+                m.end.0 -= count;
+            }
+        }
+        self.normalize_merges();
     }
 
     /// Insert columns at the specified position, shifting existing columns right
@@ -915,12 +1169,25 @@ impl Sheet {
                 self.cells.insert((r, c + count), cell);
             }
         }
+
+        // Adjust merged regions (grid-line semantics)
+        for m in &mut self.merged_regions {
+            if at_col <= m.start.1 {
+                m.start.1 += count;
+                m.end.1 += count;
+            } else if at_col <= m.end.1 {
+                m.end.1 += count;
+            }
+        }
+        self.normalize_merges();
     }
 
     /// Delete columns at the specified position, shifting remaining columns left
     pub fn delete_cols(&mut self, start_col: usize, count: usize) {
+        let end_col = start_col + count; // exclusive
+
         // Remove cells in the deleted columns
-        for col in start_col..start_col + count {
+        for col in start_col..end_col {
             for row in 0..self.rows {
                 self.cells.remove(&(row, col));
             }
@@ -929,7 +1196,7 @@ impl Sheet {
         // Collect cells that need to be shifted left
         let cells_to_shift: Vec<_> = self.cells
             .iter()
-            .filter(|((_, c), _)| *c >= start_col + count)
+            .filter(|((_, c), _)| *c >= end_col)
             .map(|((r, c), cell)| ((*r, *c), cell.clone()))
             .collect();
 
@@ -942,6 +1209,33 @@ impl Sheet {
         for ((r, c), cell) in cells_to_shift {
             self.cells.insert((r, c - count), cell);
         }
+
+        // Adjust merged regions (grid-line semantics)
+        for m in &mut self.merged_regions {
+            if end_col <= m.start.1 {
+                // Deletion entirely left → shift left
+                m.start.1 -= count;
+                m.end.1 -= count;
+            } else if start_col > m.end.1 {
+                // Deletion entirely right → no effect
+            } else if start_col <= m.start.1 && end_col > m.end.1 {
+                // Deletion engulfs entire merge → mark degenerate
+                m.start.1 = start_col;
+                m.end.1 = m.start.1;
+                m.end.0 = m.start.0;
+            } else if start_col <= m.start.1 {
+                // Deletion clips left side; surviving cols shift left by count
+                m.start.1 = start_col;
+                m.end.1 -= count;
+            } else if end_col > m.end.1 {
+                // Deletion clips right side
+                m.end.1 = start_col - 1;
+            } else {
+                // Deletion entirely inside merge → shrink
+                m.end.1 -= count;
+            }
+        }
+        self.normalize_merges();
     }
 
     // =========================================================================
@@ -2729,5 +3023,275 @@ mod tests {
                 assert!(!f.border_left.is_set(), "undo ({},{}) left", row, col);
             }
         }
+    }
+
+    // =========================================================================
+    // Merged Regions
+    // =========================================================================
+
+    #[test]
+    fn test_merged_region_basic() {
+        let m = MergedRegion::new(1, 2, 3, 5);
+        assert_eq!(m.top_left(), (1, 2));
+        assert_eq!(m.rows(), 3);
+        assert_eq!(m.cols(), 4);
+        assert_eq!(m.cell_count(), 12);
+        assert!(!m.is_degenerate());
+
+        assert!(m.contains(1, 2));
+        assert!(m.contains(3, 5));
+        assert!(m.contains(2, 3));
+        assert!(!m.contains(0, 2));
+        assert!(!m.contains(1, 6));
+        assert!(!m.contains(4, 2));
+
+        let single = MergedRegion::new(0, 0, 0, 0);
+        assert!(single.is_degenerate());
+    }
+
+    #[test]
+    fn test_merge_index_lookup() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(0, 0, 2, 2)).unwrap();
+
+        // All 9 cells in the 3×3 region should find the merge
+        for r in 0..=2 {
+            for c in 0..=2 {
+                assert!(
+                    sheet.get_merge(r, c).is_some(),
+                    "expected merge at ({}, {})",
+                    r,
+                    c
+                );
+            }
+        }
+        // Outside the region
+        assert!(sheet.get_merge(3, 0).is_none());
+        assert!(sheet.get_merge(0, 3).is_none());
+
+        // Origin vs hidden
+        assert!(sheet.is_merge_origin(0, 0));
+        assert!(!sheet.is_merge_hidden(0, 0));
+        assert!(!sheet.is_merge_origin(1, 1));
+        assert!(sheet.is_merge_hidden(1, 1));
+    }
+
+    #[test]
+    fn test_add_merge_overlap_rejected() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(0, 0, 2, 2)).unwrap();
+
+        // Overlapping merge should fail
+        let result = sheet.add_merge(MergedRegion::new(1, 1, 3, 3));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("overlaps"));
+
+        // Non-overlapping merge should succeed
+        assert!(sheet.add_merge(MergedRegion::new(0, 3, 2, 5)).is_ok());
+    }
+
+    #[test]
+    fn test_add_merge_degenerate_ignored() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        // 1×1 merge is silently ignored
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 0)).unwrap();
+        assert!(sheet.merged_regions.is_empty());
+    }
+
+    #[test]
+    fn test_remove_merge() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(0, 0, 2, 2)).unwrap();
+        assert_eq!(sheet.merged_regions.len(), 1);
+
+        let removed = sheet.remove_merge((0, 0));
+        assert!(removed.is_some());
+        assert!(sheet.merged_regions.is_empty());
+        assert!(sheet.get_merge(0, 0).is_none());
+
+        // Removing non-existent merge returns None
+        assert!(sheet.remove_merge((5, 5)).is_none());
+    }
+
+    #[test]
+    fn test_merge_insert_row_shift() {
+        let mut sheet = Sheet::new(SheetId(1), 20, 10);
+        // Merge at rows 5-7
+        sheet.add_merge(MergedRegion::new(5, 0, 7, 2)).unwrap();
+
+        // Insert 2 rows at row 3 (above merge) → merge shifts to 7-9
+        sheet.insert_rows(3, 2);
+        let m = &sheet.merged_regions[0];
+        assert_eq!(m.start, (7, 0));
+        assert_eq!(m.end, (9, 2));
+    }
+
+    #[test]
+    fn test_merge_insert_row_expand() {
+        let mut sheet = Sheet::new(SheetId(1), 20, 10);
+        // Merge at rows 5-7
+        sheet.add_merge(MergedRegion::new(5, 0, 7, 2)).unwrap();
+
+        // Insert 2 rows at row 6 (inside merge) → merge expands to 5-9
+        sheet.insert_rows(6, 2);
+        let m = &sheet.merged_regions[0];
+        assert_eq!(m.start, (5, 0));
+        assert_eq!(m.end, (9, 2));
+    }
+
+    #[test]
+    fn test_merge_insert_row_below() {
+        let mut sheet = Sheet::new(SheetId(1), 20, 10);
+        sheet.add_merge(MergedRegion::new(5, 0, 7, 2)).unwrap();
+
+        // Insert below merge → no change
+        sheet.insert_rows(8, 2);
+        let m = &sheet.merged_regions[0];
+        assert_eq!(m.start, (5, 0));
+        assert_eq!(m.end, (7, 2));
+    }
+
+    #[test]
+    fn test_merge_delete_row_shrink() {
+        let mut sheet = Sheet::new(SheetId(1), 20, 10);
+        // Merge at rows 5-9 (5 rows)
+        sheet.add_merge(MergedRegion::new(5, 0, 9, 2)).unwrap();
+
+        // Delete 2 rows at row 6 (inside merge) → merge shrinks to 5-7
+        sheet.delete_rows(6, 2);
+        let m = &sheet.merged_regions[0];
+        assert_eq!(m.start, (5, 0));
+        assert_eq!(m.end, (7, 2));
+    }
+
+    #[test]
+    fn test_merge_delete_row_degenerate() {
+        let mut sheet = Sheet::new(SheetId(1), 20, 10);
+        // Merge at rows 5-6, cols 0-0 (2×1)
+        sheet.add_merge(MergedRegion::new(5, 0, 6, 0)).unwrap();
+
+        // Delete row 5 → merge becomes 1×1 → removed as degenerate
+        sheet.delete_rows(5, 1);
+        assert!(sheet.merged_regions.is_empty());
+    }
+
+    #[test]
+    fn test_merge_delete_row_above() {
+        let mut sheet = Sheet::new(SheetId(1), 20, 10);
+        sheet.add_merge(MergedRegion::new(5, 0, 7, 2)).unwrap();
+
+        // Delete 2 rows above merge → merge shifts up
+        sheet.delete_rows(2, 2);
+        let m = &sheet.merged_regions[0];
+        assert_eq!(m.start, (3, 0));
+        assert_eq!(m.end, (5, 2));
+    }
+
+    #[test]
+    fn test_merge_insert_col_shift() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 20);
+        sheet.add_merge(MergedRegion::new(0, 5, 2, 7)).unwrap();
+
+        // Insert 2 cols at col 3 (left of merge) → merge shifts right
+        sheet.insert_cols(3, 2);
+        let m = &sheet.merged_regions[0];
+        assert_eq!(m.start, (0, 7));
+        assert_eq!(m.end, (2, 9));
+    }
+
+    #[test]
+    fn test_merge_insert_col_expand() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 20);
+        sheet.add_merge(MergedRegion::new(0, 5, 2, 7)).unwrap();
+
+        // Insert 2 cols at col 6 (inside merge) → merge expands
+        sheet.insert_cols(6, 2);
+        let m = &sheet.merged_regions[0];
+        assert_eq!(m.start, (0, 5));
+        assert_eq!(m.end, (2, 9));
+    }
+
+    #[test]
+    fn test_merge_delete_col_shrink() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 20);
+        sheet.add_merge(MergedRegion::new(0, 5, 2, 9)).unwrap();
+
+        // Delete 2 cols at col 6 (inside merge) → merge shrinks
+        sheet.delete_cols(6, 2);
+        let m = &sheet.merged_regions[0];
+        assert_eq!(m.start, (0, 5));
+        assert_eq!(m.end, (2, 7));
+    }
+
+    #[test]
+    fn test_merge_delete_band_clips_top() {
+        let mut sheet = Sheet::new(SheetId(1), 20, 10);
+        // Merge at rows 5-9, cols 0-2
+        sheet.add_merge(MergedRegion::new(5, 0, 9, 2)).unwrap();
+
+        // Delete rows 3-6 (band starts above merge, extends into it)
+        sheet.delete_rows(3, 4);
+        let m = &sheet.merged_regions[0];
+        // Top rows clipped: merge origin moves to row 3, bottom shifts up by 4
+        assert_eq!(m.start, (3, 0));
+        assert_eq!(m.end, (5, 2));
+        assert_eq!(m.rows(), 3); // 5 rows → lost 2 inside → 3 remain
+    }
+
+    #[test]
+    fn test_merge_delete_band_clips_bottom() {
+        let mut sheet = Sheet::new(SheetId(1), 20, 10);
+        // Merge at rows 5-9, cols 0-2
+        sheet.add_merge(MergedRegion::new(5, 0, 9, 2)).unwrap();
+
+        // Delete rows 8-11 (band starts inside merge, extends below)
+        sheet.delete_rows(8, 4);
+        let m = &sheet.merged_regions[0];
+        assert_eq!(m.start, (5, 0));
+        assert_eq!(m.end, (7, 2));
+        assert_eq!(m.rows(), 3); // bottom clipped
+    }
+
+    #[test]
+    fn test_merge_delete_band_degenerates_wide() {
+        let mut sheet = Sheet::new(SheetId(1), 20, 10);
+        // 3×4 merge
+        sheet.add_merge(MergedRegion::new(5, 0, 7, 3)).unwrap();
+
+        // Delete all 3 rows of the merge → fully consumed → gone
+        sheet.delete_rows(5, 3);
+        assert!(sheet.merged_regions.is_empty());
+    }
+
+    #[test]
+    fn test_merge_delete_col_band_degenerates() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 20);
+        // 2×2 merge
+        sheet.add_merge(MergedRegion::new(0, 5, 1, 6)).unwrap();
+
+        // Delete both columns → degenerate → removed
+        sheet.delete_cols(5, 2);
+        assert!(sheet.merged_regions.is_empty());
+    }
+
+    #[test]
+    fn test_merge_serde_roundtrip() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(0, 0, 2, 3)).unwrap();
+        sheet.add_merge(MergedRegion::new(5, 5, 7, 8)).unwrap();
+
+        let json = serde_json::to_string(&sheet).unwrap();
+        let mut loaded: Sheet = serde_json::from_str(&json).unwrap();
+
+        // merged_regions should be preserved
+        assert_eq!(loaded.merged_regions.len(), 2);
+        assert_eq!(loaded.merged_regions[0], MergedRegion::new(0, 0, 2, 3));
+        assert_eq!(loaded.merged_regions[1], MergedRegion::new(5, 5, 7, 8));
+
+        // merge_index is serde(skip), so rebuild it
+        loaded.rebuild_merge_index();
+        assert!(loaded.get_merge(0, 0).is_some());
+        assert!(loaded.get_merge(6, 6).is_some());
+        assert!(loaded.get_merge(3, 3).is_none());
     }
 }

@@ -10,6 +10,8 @@ pub enum Alignment {
     Left,
     Center,
     Right,
+    /// Center text across selected columns (Excel: Center Across Selection)
+    CenterAcrossSelection,
 }
 
 /// Vertical text alignment
@@ -40,7 +42,7 @@ pub enum DateStyle {
 }
 
 /// Number format type
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub enum NumberFormat {
     #[default]
     General,
@@ -50,6 +52,8 @@ pub enum NumberFormat {
     Date { style: DateStyle },
     Time,      // HH:MM:SS (fractional day → time of day)
     DateTime,  // Date + Time combined
+    /// Raw Excel format code (e.g. "#,##0.00", "$#,##0")
+    Custom(String),
 }
 
 /// Border style (line thickness)
@@ -120,6 +124,12 @@ pub struct CellFormat {
     pub text_overflow: TextOverflow,
     pub number_format: NumberFormat,
     pub font_family: Option<String>,  // None = inherit from settings
+    /// Font size in points. None = inherit from settings.
+    #[serde(default)]
+    pub font_size: Option<f32>,
+    /// Font color as RGBA. None = inherit from theme.
+    #[serde(default)]
+    pub font_color: Option<[u8; 4]>,
     /// Background fill color as RGBA. None = transparent/default.
     #[serde(default)]
     pub background_color: Option<[u8; 4]>,
@@ -135,6 +145,98 @@ pub struct CellFormat {
     /// Left edge border
     #[serde(default)]
     pub border_left: CellBorder,
+}
+
+impl CellFormat {
+    /// Merge a CellFormatOverride on top of this base format.
+    /// Override fields that are `Some` replace the base; `None` fields keep the base value.
+    pub fn merge_override(&self, ovr: &CellFormatOverride) -> CellFormat {
+        CellFormat {
+            bold: ovr.bold.unwrap_or(self.bold),
+            italic: ovr.italic.unwrap_or(self.italic),
+            underline: ovr.underline.unwrap_or(self.underline),
+            strikethrough: ovr.strikethrough.unwrap_or(self.strikethrough),
+            alignment: ovr.alignment.unwrap_or(self.alignment),
+            vertical_alignment: ovr.vertical_alignment.unwrap_or(self.vertical_alignment),
+            text_overflow: ovr.text_overflow.unwrap_or(self.text_overflow),
+            number_format: ovr.number_format.clone().unwrap_or_else(|| self.number_format.clone()),
+            font_family: ovr.font_family.clone().unwrap_or_else(|| self.font_family.clone()),
+            font_size: ovr.font_size.unwrap_or(self.font_size),
+            font_color: ovr.font_color.unwrap_or(self.font_color),
+            background_color: ovr.background_color.unwrap_or(self.background_color),
+            border_top: ovr.border_top.unwrap_or(self.border_top),
+            border_right: ovr.border_right.unwrap_or(self.border_right),
+            border_bottom: ovr.border_bottom.unwrap_or(self.border_bottom),
+            border_left: ovr.border_left.unwrap_or(self.border_left),
+        }
+    }
+}
+
+/// Partial format override with all-Option fields.
+/// Used during XLSX import to represent style deltas.
+/// `None` = "not overridden, use base style"; `Some(v)` = "explicitly set to v".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CellFormatOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<Alignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_alignment: Option<VerticalAlignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_overflow: Option<TextOverflow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_format: Option<NumberFormat>,
+    /// None = not overridden; Some(None) = explicitly inherit; Some(Some(s)) = explicitly set
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<Option<String>>,
+    /// None = not overridden; Some(None) = explicitly inherit; Some(Some(v)) = explicitly set
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<Option<f32>>,
+    /// None = not overridden; Some(None) = explicitly inherit; Some(Some(v)) = explicitly set
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_color: Option<Option<[u8; 4]>>,
+    /// None = not overridden; Some(None) = explicitly inherit; Some(Some(v)) = explicitly set
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<Option<[u8; 4]>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_top: Option<CellBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_right: Option<CellBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_bottom: Option<CellBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_left: Option<CellBorder>,
+}
+
+impl CellFormatOverride {
+    /// Convert a full CellFormat into an override where all fields are `Some`.
+    pub fn from_format(format: &CellFormat) -> Self {
+        Self {
+            bold: Some(format.bold),
+            italic: Some(format.italic),
+            underline: Some(format.underline),
+            strikethrough: Some(format.strikethrough),
+            alignment: Some(format.alignment),
+            vertical_alignment: Some(format.vertical_alignment),
+            text_overflow: Some(format.text_overflow),
+            number_format: Some(format.number_format.clone()),
+            font_family: Some(format.font_family.clone()),
+            font_size: Some(format.font_size),
+            font_color: Some(format.font_color),
+            background_color: Some(format.background_color),
+            border_top: Some(format.border_top),
+            border_right: Some(format.border_right),
+            border_bottom: Some(format.border_bottom),
+            border_left: Some(format.border_left),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,6 +404,193 @@ pub fn time_to_serial(hours: u32, minutes: u32, seconds: u32) -> f64 {
     total_seconds as f64 / 86400.0
 }
 
+/// Format a number using a raw Excel format code string.
+///
+/// Covers common finance patterns:
+/// - `#,##0` / `#,##0.00` → thousands separator with decimals
+/// - `(#,##0.00)` → negative parentheses
+/// - `$#,##0` / `$#,##0.00` → dollar + thousands
+/// - `0%` / `0.00%` → percent
+/// - Unknown codes → plain formatted number
+pub fn format_with_custom_code(n: f64, code: &str) -> String {
+    // Step 1: Strip quoted literal text from the format code.
+    // Excel wraps literal characters in double quotes: "$"#,##0 or #,##0.00" USD"
+    // Also handle backslash-escaped single characters: \$ → $
+    // We extract prefix/suffix literals and a clean numeric pattern.
+    let clean_code = strip_format_quotes(code);
+
+    // Strip accounting padding characters (_ and *) and surrounding whitespace
+    // _ followed by a char means "leave space equal to that char's width" → strip both
+    // * followed by a char means "repeat that char to fill" → strip both
+    let clean = strip_accounting_padding(&clean_code);
+
+    // Check for multi-section format (positive;negative;zero)
+    // Must split carefully: semicolons inside quotes were already resolved above
+    let section = if clean.contains(';') {
+        let sections: Vec<&str> = clean.split(';').collect();
+        if n < 0.0 && sections.len() >= 2 {
+            sections[1].trim()
+        } else if n == 0.0 && sections.len() >= 3 {
+            sections[2].trim()
+        } else {
+            sections[0].trim()
+        }
+    } else {
+        clean.as_str()
+    };
+
+    // Detect negative parentheses pattern: e.g. "(#,##0.00)" or "($#,##0.00)"
+    let (use_parens, inner) = if section.starts_with('(') && section.ends_with(')') {
+        (true, &section[1..section.len() - 1])
+    } else {
+        (false, section)
+    };
+
+    // Split into: prefix literals, numeric pattern, suffix literals
+    // e.g. "$#,##0.00 USD" → prefix="$", pattern="#,##0.00", suffix=" USD"
+    let (prefix, pattern, suffix) = split_format_parts(inner);
+
+    // Detect percent suffix (in the numeric pattern or suffix)
+    let (is_percent, pattern, suffix) = if pattern.ends_with('%') {
+        (true, &pattern[..pattern.len() - 1], suffix)
+    } else if suffix.starts_with('%') {
+        (true, pattern, &suffix[1..])
+    } else {
+        (false, pattern, suffix)
+    };
+
+    // If pattern has no number format characters (#, 0), treat as literal text
+    if !pattern.contains('#') && !pattern.contains('0') {
+        return section.to_string();
+    }
+
+    let value = if is_percent { n * 100.0 } else { n.abs() };
+
+    // Count decimal places from pattern
+    let decimals = if let Some(dot_pos) = pattern.find('.') {
+        pattern[dot_pos + 1..].chars().take_while(|&c| c == '0' || c == '#').count()
+    } else {
+        0
+    };
+
+    // Check for thousands separator
+    let use_thousands = pattern.contains(',');
+
+    // Format the number
+    let formatted_num = if use_thousands {
+        format_with_thousands(value, decimals)
+    } else {
+        format!("{:.*}", decimals, value)
+    };
+
+    // Assemble result with prefix and suffix
+    let pct = if is_percent { "%" } else { "" };
+    let abs_result = format!("{}{}{}{}", prefix, formatted_num, pct, suffix);
+
+    if use_parens && n < 0.0 {
+        format!("({})", abs_result)
+    } else if !use_parens && n < 0.0 && !is_percent {
+        format!("-{}", abs_result)
+    } else {
+        abs_result
+    }
+}
+
+/// Strip double-quoted literal text and backslash-escaped characters from a format code.
+/// Replaces "text" with the literal text (no quotes) and \c with c.
+fn strip_format_quotes(code: &str) -> String {
+    let mut result = String::with_capacity(code.len());
+    let mut chars = code.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                // Consume everything until closing quote
+                while let Some(inner) = chars.next() {
+                    if inner == '"' {
+                        break;
+                    }
+                    result.push(inner);
+                }
+            }
+            '\\' => {
+                // Next character is a literal
+                if let Some(escaped) = chars.next() {
+                    result.push(escaped);
+                }
+            }
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
+/// Strip accounting padding characters: _X (space for width of X) and *X (repeat X to fill).
+/// Both consume the next character after them.
+fn strip_accounting_padding(code: &str) -> String {
+    let mut result = String::with_capacity(code.len());
+    let mut chars = code.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '_' | '*' => {
+                // Skip the next character (the padding/fill character)
+                chars.next();
+            }
+            _ => result.push(c),
+        }
+    }
+    result.trim().to_string()
+}
+
+/// Split a format section into prefix literals, numeric pattern, and suffix literals.
+/// The numeric pattern is the portion containing #, 0, comma, dot.
+/// Everything before the first format char is prefix; everything after the last is suffix.
+/// e.g. "$#,##0.00 USD" → ("$", "#,##0.00", " USD")
+fn split_format_parts(section: &str) -> (&str, &str, &str) {
+    let format_chars = |c: char| matches!(c, '#' | '0' | ',' | '.');
+
+    let first = section.find(format_chars);
+    let last = section.rfind(format_chars);
+
+    match (first, last) {
+        (Some(f), Some(l)) => {
+            let prefix = &section[..f];
+            let pattern = &section[f..=l];
+            let suffix = &section[l + 1..];
+            (prefix, pattern, suffix)
+        }
+        _ => {
+            // No format characters found — treat entire section as literal
+            (section, "", "")
+        }
+    }
+}
+
+/// Format a number with thousands separators
+fn format_with_thousands(n: f64, decimals: usize) -> String {
+    let abs = n.abs();
+    let integer_part = abs.trunc() as u64;
+    let int_str = integer_part.to_string();
+
+    // Insert commas every 3 digits from the right
+    let mut with_commas = String::with_capacity(int_str.len() + int_str.len() / 3);
+    for (i, ch) in int_str.chars().enumerate() {
+        if i > 0 && (int_str.len() - i) % 3 == 0 {
+            with_commas.push(',');
+        }
+        with_commas.push(ch);
+    }
+
+    if decimals > 0 {
+        let frac = abs.fract();
+        let frac_str = format!("{:.*}", decimals, frac);
+        // frac_str is like "0.12", take everything after the dot
+        let dot_pos = frac_str.find('.').unwrap_or(1);
+        format!("{}.{}", with_commas, &frac_str[dot_pos + 1..])
+    } else {
+        with_commas
+    }
+}
+
 /// Try to parse a date string, returns serial number if successful
 pub fn parse_date(input: &str) -> Option<f64> {
     let trimmed = input.trim();
@@ -408,6 +697,15 @@ impl CellValue {
                 let time_part = format_time(n);
                 format!("{} {}", date_part, time_part)
             }
+            NumberFormat::Custom(ref code) => {
+                // Use ssfmt for full ECMA-376 format code rendering (accounting,
+                // multi-section, date/time tokens, etc.). Falls back to our
+                // simpler formatter if ssfmt can't parse the code.
+                match ssfmt::format_default(n, code) {
+                    Ok(s) => s,
+                    Err(_) => format_with_custom_code(n, code),
+                }
+            }
         }
     }
 
@@ -457,6 +755,11 @@ pub struct SpillError {
 pub struct Cell {
     pub value: CellValue,
     pub format: CellFormat,
+    /// Index into workbook.style_table — tracks the base style from XLSX import.
+    /// User edits modify `format` directly; this field preserves import provenance
+    /// for future "reset to imported style" functionality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_id: Option<u32>,
     /// If this cell receives spill data, points to the parent formula cell (row, col)
     #[serde(skip)]
     pub spill_parent: Option<(usize, usize)>,
@@ -726,5 +1029,305 @@ mod tests {
         set.insert(CellBorder { style: BorderStyle::Medium, color: None });
         set.insert(CellBorder { style: BorderStyle::Thin, color: Some([255, 0, 0, 255]) });
         assert_eq!(set.len(), 4);
+    }
+
+    // ======== Phase 1A: New fields and format primitives ========
+
+    #[test]
+    fn test_cell_format_new_field_defaults() {
+        let format = CellFormat::default();
+        assert_eq!(format.font_size, None);
+        assert_eq!(format.font_color, None);
+    }
+
+    #[test]
+    fn test_cell_format_serde_backward_compat() {
+        // Old .vgrid files won't have font_size, font_color, or style_id.
+        // Verify deserialization fills defaults.
+        let json = r#"{"bold":true,"italic":false,"underline":false,"strikethrough":false,"alignment":"General","vertical_alignment":"Middle","text_overflow":"Clip","number_format":"General"}"#;
+        let format: CellFormat = serde_json::from_str(json).unwrap();
+        assert!(format.bold);
+        assert_eq!(format.font_size, None);
+        assert_eq!(format.font_color, None);
+    }
+
+    #[test]
+    fn test_cell_style_id_serde_backward_compat() {
+        let json = r#"{"value":{"Empty":null},"format":{"bold":false,"italic":false,"underline":false,"strikethrough":false,"alignment":"General","vertical_alignment":"Middle","text_overflow":"Clip","number_format":"General"}}"#;
+        let cell: Cell = serde_json::from_str(json).unwrap();
+        assert_eq!(cell.style_id, None);
+    }
+
+    #[test]
+    fn test_cell_style_id_roundtrip() {
+        let mut cell = Cell::default();
+        cell.style_id = Some(42);
+        let json = serde_json::to_string(&cell).unwrap();
+        let restored: Cell = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.style_id, Some(42));
+    }
+
+    #[test]
+    fn test_merge_override_empty() {
+        let base = CellFormat {
+            bold: true,
+            font_size: Some(14.0),
+            font_color: Some([255, 0, 0, 255]),
+            ..Default::default()
+        };
+        let ovr = CellFormatOverride::default();
+        let merged = base.merge_override(&ovr);
+        assert_eq!(merged.bold, true);
+        assert_eq!(merged.font_size, Some(14.0));
+        assert_eq!(merged.font_color, Some([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn test_merge_override_replaces_fields() {
+        let base = CellFormat {
+            bold: true,
+            font_size: Some(14.0),
+            ..Default::default()
+        };
+        let ovr = CellFormatOverride {
+            bold: Some(false),
+            font_size: Some(Some(18.0)),
+            font_color: Some(Some([0, 0, 255, 255])),
+            ..Default::default()
+        };
+        let merged = base.merge_override(&ovr);
+        assert_eq!(merged.bold, false);
+        assert_eq!(merged.font_size, Some(18.0));
+        assert_eq!(merged.font_color, Some([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn test_merge_override_clears_option_fields() {
+        let base = CellFormat {
+            font_size: Some(14.0),
+            font_color: Some([255, 0, 0, 255]),
+            ..Default::default()
+        };
+        // Some(None) means "explicitly reset to inherit"
+        let ovr = CellFormatOverride {
+            font_size: Some(None),
+            font_color: Some(None),
+            ..Default::default()
+        };
+        let merged = base.merge_override(&ovr);
+        assert_eq!(merged.font_size, None);
+        assert_eq!(merged.font_color, None);
+    }
+
+    #[test]
+    fn test_from_format_roundtrip() {
+        let format = CellFormat {
+            bold: true,
+            italic: true,
+            font_size: Some(16.0),
+            font_color: Some([128, 0, 255, 255]),
+            number_format: NumberFormat::Currency { decimals: 2 },
+            ..Default::default()
+        };
+        let ovr = CellFormatOverride::from_format(&format);
+        let base = CellFormat::default();
+        let merged = base.merge_override(&ovr);
+        assert_eq!(merged, format);
+    }
+
+    #[test]
+    fn test_has_formatting_font_size() {
+        let mut format = CellFormat::default();
+        assert!(!format.bold && format.font_size.is_none());
+        format.font_size = Some(16.0);
+        assert!(format.font_size.is_some());
+    }
+
+    #[test]
+    fn test_has_formatting_font_color() {
+        let mut format = CellFormat::default();
+        assert!(format.font_color.is_none());
+        format.font_color = Some([255, 0, 0, 255]);
+        assert!(format.font_color.is_some());
+    }
+
+    #[test]
+    fn test_center_across_selection_alignment() {
+        let format = CellFormat {
+            alignment: Alignment::CenterAcrossSelection,
+            ..Default::default()
+        };
+        assert_eq!(format.alignment, Alignment::CenterAcrossSelection);
+        assert_ne!(format.alignment, Alignment::Center);
+    }
+
+    #[test]
+    fn test_number_format_custom() {
+        let nf = NumberFormat::Custom("#,##0.00".to_string());
+        assert_eq!(nf, NumberFormat::Custom("#,##0.00".to_string()));
+        assert_ne!(nf, NumberFormat::General);
+    }
+
+    // ======== Custom number format tests ========
+
+    #[test]
+    fn test_custom_format_thousands_no_decimals() {
+        assert_eq!(format_with_custom_code(1234567.0, "#,##0"), "1,234,567");
+    }
+
+    #[test]
+    fn test_custom_format_thousands_two_decimals() {
+        assert_eq!(format_with_custom_code(1234567.89, "#,##0.00"), "1,234,567.89");
+    }
+
+    #[test]
+    fn test_custom_format_currency() {
+        assert_eq!(format_with_custom_code(5000.0, "$#,##0"), "$5,000");
+    }
+
+    #[test]
+    fn test_custom_format_currency_decimals() {
+        assert_eq!(format_with_custom_code(1234.5, "$#,##0.00"), "$1,234.50");
+    }
+
+    #[test]
+    fn test_custom_format_negative_parentheses() {
+        assert_eq!(format_with_custom_code(-1234.0, "(#,##0.00)"), "(1,234.00)");
+    }
+
+    #[test]
+    fn test_custom_format_negative_parentheses_positive() {
+        // Positive number should not get parens
+        assert_eq!(format_with_custom_code(1234.0, "(#,##0.00)"), "1,234.00");
+    }
+
+    #[test]
+    fn test_custom_format_percent() {
+        assert_eq!(format_with_custom_code(0.15, "0%"), "15%");
+    }
+
+    #[test]
+    fn test_custom_format_percent_two_decimals() {
+        assert_eq!(format_with_custom_code(0.1567, "0.00%"), "15.67%");
+    }
+
+    #[test]
+    fn test_custom_format_no_thousands() {
+        assert_eq!(format_with_custom_code(1234.56, "0.00"), "1234.56");
+    }
+
+    #[test]
+    fn test_custom_format_zero() {
+        assert_eq!(format_with_custom_code(0.0, "#,##0.00"), "0.00");
+    }
+
+    #[test]
+    fn test_custom_format_negative_currency() {
+        assert_eq!(format_with_custom_code(-500.0, "$#,##0.00"), "-$500.00");
+    }
+
+    #[test]
+    fn test_custom_format_multi_section() {
+        // positive;negative;zero format
+        let code = "#,##0.00;(#,##0.00);-";
+        assert_eq!(format_with_custom_code(1234.5, code), "1,234.50");
+        assert_eq!(format_with_custom_code(-1234.5, code), "(1,234.50)");
+        assert_eq!(format_with_custom_code(0.0, code), "-");
+    }
+
+    #[test]
+    fn test_custom_format_quoted_dollar() {
+        // Excel stores "$"#,##0 — dollar in quotes
+        let code = r##""$"#,##0"##;
+        assert_eq!(format_with_custom_code(44100.0, code), "$44,100");
+        assert_eq!(format_with_custom_code(1235160.0, code), "$1,235,160");
+    }
+
+    #[test]
+    fn test_custom_format_quoted_dollar_decimals() {
+        let code = r##""$"#,##0.00"##;
+        assert_eq!(format_with_custom_code(1234.5, code), "$1,234.50");
+    }
+
+    #[test]
+    fn test_custom_format_quoted_negative_dollar() {
+        // Negative with quoted dollar in parens: ("$"#,##0.00)
+        let code = r##""$"#,##0.00;("$"#,##0.00)"##;
+        assert_eq!(format_with_custom_code(1234.5, code), "$1,234.50");
+        assert_eq!(format_with_custom_code(-1234.5, code), "($1,234.50)");
+    }
+
+    #[test]
+    fn test_custom_format_quoted_suffix() {
+        // Number with quoted suffix: #,##0" USD"
+        let code = r##"#,##0" USD""##;
+        assert_eq!(format_with_custom_code(5000.0, code), "5,000 USD");
+    }
+
+    #[test]
+    fn test_custom_format_backslash_escape() {
+        // Backslash-escaped literal: \$#,##0
+        assert_eq!(format_with_custom_code(5000.0, r#"\$#,##0"#), "$5,000");
+    }
+
+    #[test]
+    fn test_custom_format_accounting_padding() {
+        // Accounting format with _ padding: _("$"* #,##0.00_)
+        // The _ and * chars should be stripped, leaving ($#,##0.00)
+        let code = r##"_("$"* #,##0.00_)"##;
+        assert_eq!(format_with_custom_code(1234.5, code), "$1,234.50");
+    }
+
+    // --- ssfmt integration tests (via format_number → NumberFormat::Custom) ---
+
+    #[test]
+    fn test_ssfmt_accounting_zero_shows_dash() {
+        // Accounting format: zero section should show "-" not "$-??"
+        let code = r##"_("$"* #,##0.00_);_("$"* \(#,##0.00\);_("$"* "-"??_);_(@_)"##;
+        let result = CellValue::format_number(0.0, &NumberFormat::Custom(code.to_string()));
+        // ssfmt should select the zero section and render a dash
+        assert!(!result.contains("??"), "zero should not show raw ?? placeholders: got {}", result);
+        assert!(result.contains("-"), "zero section should contain a dash: got {}", result);
+    }
+
+    #[test]
+    fn test_ssfmt_accounting_positive() {
+        let code = r##"_("$"* #,##0.00_);_("$"* \(#,##0.00\);_("$"* "-"??_);_(@_)"##;
+        let result = CellValue::format_number(1234.5, &NumberFormat::Custom(code.to_string()));
+        assert!(result.contains("1,234.50"), "positive value should be formatted: got {}", result);
+    }
+
+    #[test]
+    fn test_ssfmt_percent_basic() {
+        let result = CellValue::format_number(0.1, &NumberFormat::Custom("0%".to_string()));
+        assert_eq!(result, "10%");
+    }
+
+    #[test]
+    fn test_ssfmt_thousands_decimals() {
+        let result = CellValue::format_number(1234567.89, &NumberFormat::Custom("#,##0.00".to_string()));
+        assert_eq!(result, "1,234,567.89");
+    }
+
+    #[test]
+    fn test_strip_format_quotes() {
+        assert_eq!(strip_format_quotes(r##""$"#,##0"##), "$#,##0");
+        assert_eq!(strip_format_quotes(r##"#,##0" USD""##), "#,##0 USD");
+        assert_eq!(strip_format_quotes(r##""$"#,##0.00;("$"#,##0.00)"##), "$#,##0.00;($#,##0.00)");
+        assert_eq!(strip_format_quotes(r#"\$#,##0"#), "$#,##0");
+        assert_eq!(strip_format_quotes("#,##0"), "#,##0"); // no quotes, unchanged
+    }
+
+    #[test]
+    fn test_split_format_parts() {
+        assert_eq!(split_format_parts("$#,##0.00"), ("$", "#,##0.00", ""));
+        assert_eq!(split_format_parts("#,##0 USD"), ("", "#,##0", " USD"));
+        assert_eq!(split_format_parts("$#,##0.00 USD"), ("$", "#,##0.00", " USD"));
+        assert_eq!(split_format_parts("#,##0"), ("", "#,##0", ""));
+        // No format chars → treat as literal
+        let (p, pat, s) = split_format_parts("-");
+        assert_eq!(p, "-");
+        assert_eq!(pat, "");
+        assert_eq!(s, "");
     }
 }

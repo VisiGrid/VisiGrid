@@ -1,4 +1,5 @@
 use gpui::*;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use visigrid_engine::workbook::Workbook;
@@ -84,6 +85,7 @@ impl Spreadsheet {
         }
 
         // Non-Excel files: synchronous load (fast, no need for background)
+        let load_start = Instant::now();
         let result: Result<Workbook, String> = match ext_lower.as_str() {
             "csv" => csv::import(path)
                 .map(|sheet| Workbook::from_sheets(vec![sheet], 0)),
@@ -143,10 +145,19 @@ impl Spreadsheet {
 
                 let named_count = self.wb(cx).list_named_ranges().len();
 
-                let status = if named_count > 0 {
-                    format!("Opened: {} ({} named ranges)", path.display(), named_count)
+                let duration_ms = load_start.elapsed().as_millis();
+                let duration_str = if duration_ms >= 1000 {
+                    format!("{:.2}s", duration_ms as f64 / 1000.0)
                 } else {
-                    format!("Opened: {}", path.display())
+                    format!("{}ms", duration_ms)
+                };
+                let filename = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file");
+                let status = if named_count > 0 {
+                    format!("Opened {} in {} ({} named ranges)", filename, duration_str, named_count)
+                } else {
+                    format!("Opened {} in {}", filename, duration_str)
                 };
                 self.status_message = Some(status);
             }
@@ -239,17 +250,34 @@ impl Spreadsheet {
                             format!("{}ms", duration_ms)
                         };
 
-                        let status = format!(
-                            "Opened {} in {}",
-                            filename_for_completion,
-                            duration_str
-                        );
+                        let total_errors = result.recalc_errors + result.recalc_circular;
+                        let status = if total_errors > 0 {
+                            format!(
+                                "Opened {} in {} \u{2014} {} errors (Import Report)",
+                                filename_for_completion, duration_str, total_errors
+                            )
+                        } else {
+                            format!(
+                                "Opened {} in {} \u{2014} 0 errors",
+                                filename_for_completion, duration_str
+                            )
+                        };
 
                         // Store the duration we measured (more accurate than import's internal timing
                         // since it includes workbook construction)
                         result.import_duration_ms = duration_ms;
+                        let has_recalc_errors = result.recalc_errors > 0 || result.recalc_circular > 0;
+
+                        // Apply imported column widths and row heights
+                        this.apply_imported_layouts(&result, cx);
+
                         this.import_result = Some(result);
                         this.status_message = Some(status);
+
+                        // Auto-show import report when recalc errors are detected
+                        if has_recalc_errors {
+                            this.show_import_report(cx);
+                        }
                     }
                     Err(e) => {
                         this.import_result = None;
@@ -304,15 +332,32 @@ impl Spreadsheet {
                     format!("{}ms", duration_ms)
                 };
 
-                let status = format!(
-                    "Opened {} in {}",
-                    filename,
-                    duration_str
-                );
+                let total_errors = result.recalc_errors + result.recalc_circular;
+                let status = if total_errors > 0 {
+                    format!(
+                        "Opened {} in {} \u{2014} {} errors (Import Report)",
+                        filename, duration_str, total_errors
+                    )
+                } else {
+                    format!(
+                        "Opened {} in {} \u{2014} 0 errors",
+                        filename, duration_str
+                    )
+                };
 
                 result.import_duration_ms = duration_ms;
+                let has_recalc_errors = result.recalc_errors > 0 || result.recalc_circular > 0;
+
+                // Apply imported column widths and row heights
+                self.apply_imported_layouts(&result, cx);
+
                 self.import_result = Some(result);
                 self.status_message = Some(status);
+
+                // Auto-show import report when recalc errors are detected
+                if has_recalc_errors {
+                    self.show_import_report(cx);
+                }
             }
             Err(e) => {
                 self.import_result = None;
@@ -322,6 +367,47 @@ impl Spreadsheet {
             }
         }
         cx.notify();
+    }
+
+    /// Apply imported column widths and row heights from XLSX formatting.
+    /// Converts raw Excel units to pixel values used by the app.
+    fn apply_imported_layouts(&mut self, result: &xlsx::ImportResult, cx: &mut Context<Self>) {
+        for (sheet_idx, layout) in result.imported_layouts.iter().enumerate() {
+            if layout.col_widths.is_empty() && layout.row_heights.is_empty() {
+                continue;
+            }
+            // Get the SheetId for this sheet index
+            let sheet_id = match self.wb(cx).sheet(sheet_idx) {
+                Some(s) => s.id,
+                None => continue,
+            };
+
+            // Apply column widths: Excel character width → pixels
+            // Excel formula: pixels = width * max_digit_width + padding
+            // For Calibri 11pt at 96 DPI: max_digit_width ≈ 7, padding ≈ 5
+            if !layout.col_widths.is_empty() {
+                let widths = self.col_widths.entry(sheet_id).or_insert_with(HashMap::new);
+                for (&col, &excel_width) in &layout.col_widths {
+                    let px_width = (excel_width * 7.0 + 5.0) as f32;
+                    let clamped = px_width.max(20.0).min(500.0);
+                    if (clamped - crate::app::CELL_WIDTH).abs() >= 1.0 {
+                        widths.insert(col, clamped);
+                    }
+                }
+            }
+
+            // Apply row heights: Excel points * (96/72) → pixels at 96 DPI
+            if !layout.row_heights.is_empty() {
+                let heights = self.row_heights.entry(sheet_id).or_insert_with(HashMap::new);
+                for (&row, &excel_height) in &layout.row_heights {
+                    let px_height = (excel_height / 0.75) as f32;
+                    let clamped = px_height.max(12.0).min(200.0);
+                    if (clamped - crate::app::CELL_HEIGHT).abs() >= 1.0 {
+                        heights.insert(row, clamped);
+                    }
+                }
+            }
+        }
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {

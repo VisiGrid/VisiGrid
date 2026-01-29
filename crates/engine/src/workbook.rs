@@ -1,6 +1,6 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use crate::cell::CellValue;
+use crate::cell::{CellFormat, CellValue};
 use crate::cell_id::CellId;
 use crate::dep_graph::DepGraph;
 use crate::sheet::{Sheet, SheetId, normalize_sheet_name, is_valid_sheet_name};
@@ -64,6 +64,11 @@ pub struct Workbook {
     #[serde(default)]
     named_ranges: NamedRangeStore,
 
+    /// Workbook-global deduplicated style table.
+    /// Cell.style_id indexes into this table to reference the base imported style.
+    #[serde(default)]
+    pub style_table: Vec<CellFormat>,
+
     /// Dependency graph for formula cells.
     /// Rebuilt on load, updated incrementally on cell changes.
     #[serde(skip)]
@@ -89,8 +94,21 @@ impl Workbook {
             active_sheet: 0,
             next_sheet_id: 2, // Next ID will be 2
             named_ranges: NamedRangeStore::new(),
+            style_table: Vec::new(),
             dep_graph: DepGraph::new(),
         }
+    }
+
+    /// Intern a CellFormat into the workbook-global style table.
+    /// Returns the index (style_id) for the format, deduplicating if an identical style exists.
+    pub fn intern_style(&mut self, format: CellFormat) -> u32 {
+        // Check for existing identical style
+        if let Some(idx) = self.style_table.iter().position(|s| s == &format) {
+            return idx as u32;
+        }
+        let idx = self.style_table.len() as u32;
+        self.style_table.push(format);
+        idx
     }
 
     /// Generate a new unique SheetId (monotonically increasing, never reused)
@@ -321,6 +339,7 @@ impl Workbook {
             active_sheet,
             next_sheet_id: max_id + 1,
             named_ranges: NamedRangeStore::new(),
+            style_table: Vec::new(),
             dep_graph: DepGraph::new(),
         }
     }
@@ -334,6 +353,7 @@ impl Workbook {
             active_sheet,
             next_sheet_id,
             named_ranges: NamedRangeStore::new(),
+            style_table: Vec::new(),
             dep_graph: DepGraph::new(),
         }
     }
@@ -1139,6 +1159,11 @@ impl Workbook {
         let start = Instant::now();
         let mut report = RecalcReport::new();
 
+        // Clear computed value caches from previous recalc
+        for sheet in &self.sheets {
+            sheet.clear_computed_cache();
+        }
+
         // Get topo order (or detect cycles)
         let (order, cycle_cells) = match self.dep_graph.topo_order_all_formulas() {
             Ok(order) => (order, Vec::new()),
@@ -1276,6 +1301,10 @@ impl Workbook {
             let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
             let lookup = WorkbookLookup::with_cell_context(self, cell_id.sheet, cell_id.row, cell_id.col);
             let result = evaluate(&bound, &lookup);
+
+            // Cache the typed Value so subsequent lookups use the topo-consistent value
+            // This is the ONLY place values are written to the cache.
+            sheet.cache_computed(cell_id.row, cell_id.col, result.to_value());
 
             // Check for error result
             if let crate::formula::eval::EvalResult::Error(e) = result {
@@ -1443,11 +1472,7 @@ impl<'a> WorkbookLookup<'a> {
 impl<'a> CellLookup for WorkbookLookup<'a> {
     fn get_value(&self, row: usize, col: usize) -> f64 {
         self.current_sheet()
-            .map(|sheet| {
-                // Use the sheet's get_text to handle formulas, then parse
-                let text = sheet.get_text(row, col);
-                text.parse().unwrap_or(0.0)
-            })
+            .map(|sheet| sheet.get_value(row, col))
             .unwrap_or(0.0)
     }
 
@@ -1459,23 +1484,7 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
 
     fn get_value_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Value {
         match self.workbook.sheet_by_id(sheet_id) {
-            Some(sheet) => {
-                let text = sheet.get_text(row, col);
-                if text.is_empty() {
-                    Value::Empty
-                } else if text.starts_with('#') {
-                    // Error value (e.g., #REF!, #VALUE!)
-                    Value::Error(text)
-                } else if let Ok(n) = text.parse::<f64>() {
-                    Value::Number(n)
-                } else if text.eq_ignore_ascii_case("TRUE") {
-                    Value::Boolean(true)
-                } else if text.eq_ignore_ascii_case("FALSE") {
-                    Value::Boolean(false)
-                } else {
-                    Value::Text(text)
-                }
-            }
+            Some(sheet) => sheet.get_computed_value(row, col),
             None => Value::Error("#REF!".to_string()),
         }
     }
@@ -1508,6 +1517,13 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
 
     fn current_cell(&self) -> Option<(usize, usize)> {
         self.current_cell
+    }
+
+    fn debug_context(&self) -> String {
+        let sheet_info = self.current_sheet()
+            .map(|s| format!("sheet=\"{}\", sheet_ptr={:p}, cache_len={}", s.name, s as *const Sheet, s.computed_cache_len()))
+            .unwrap_or_else(|| "sheet=<none>".to_string());
+        format!("WorkbookLookup(wb_ptr={:p}, {})", self.workbook as *const Workbook, sheet_info)
     }
 }
 
@@ -2469,5 +2485,76 @@ mod tests {
         // The two ValidationFailures are independent - simulates UI overwrite
         // (This test just verifies the engine returns independent results)
         assert_ne!(failures1.count, failures2.count);
+    }
+
+    // ======== Phase 1A: Style table and intern_style ========
+
+    #[test]
+    fn test_style_table_empty_by_default() {
+        let wb = Workbook::new();
+        assert!(wb.style_table.is_empty());
+    }
+
+    #[test]
+    fn test_intern_style_basic() {
+        let mut wb = Workbook::new();
+        let fmt = CellFormat {
+            bold: true,
+            ..Default::default()
+        };
+        let id = wb.intern_style(fmt.clone());
+        assert_eq!(id, 0);
+        assert_eq!(wb.style_table.len(), 1);
+        assert_eq!(wb.style_table[0], fmt);
+    }
+
+    #[test]
+    fn test_intern_style_deduplication() {
+        let mut wb = Workbook::new();
+        let fmt = CellFormat {
+            bold: true,
+            font_size: Some(14.0),
+            ..Default::default()
+        };
+        let id1 = wb.intern_style(fmt.clone());
+        let id2 = wb.intern_style(fmt.clone());
+        assert_eq!(id1, id2);
+        assert_eq!(wb.style_table.len(), 1);
+    }
+
+    #[test]
+    fn test_intern_style_different_formats() {
+        let mut wb = Workbook::new();
+        let fmt1 = CellFormat {
+            bold: true,
+            ..Default::default()
+        };
+        let fmt2 = CellFormat {
+            italic: true,
+            ..Default::default()
+        };
+        let id1 = wb.intern_style(fmt1);
+        let id2 = wb.intern_style(fmt2);
+        assert_ne!(id1, id2);
+        assert_eq!(wb.style_table.len(), 2);
+    }
+
+    #[test]
+    fn test_intern_style_with_font_color() {
+        let mut wb = Workbook::new();
+        let fmt = CellFormat {
+            font_color: Some([255, 0, 0, 255]),
+            ..Default::default()
+        };
+        let id = wb.intern_style(fmt.clone());
+        assert_eq!(wb.style_table[id as usize].font_color, Some([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn test_style_table_serde_backward_compat() {
+        // Old .vgrid files won't have style_table
+        let json = r#"{"sheets":[{"id":1,"name":"Sheet1","cells":{},"rows":100,"cols":26}],"active_sheet":0}"#;
+        let wb: Workbook = serde_json::from_str(json).unwrap();
+        assert!(wb.style_table.is_empty());
     }
 }

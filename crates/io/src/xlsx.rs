@@ -12,9 +12,29 @@ use calamine::{open_workbook_auto, Data, Reader, Sheets};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, FormatUnderline, Workbook as XlsxWorkbook, Worksheet};
 use visigrid_engine::cell::{Alignment, BorderStyle, CellFormat, CellValue, DateStyle, NumberFormat, VerticalAlignment};
 use visigrid_engine::formula::analyze::tally_unknown_functions;
+use visigrid_engine::formula::eval::Value;
 use visigrid_engine::formula::parser::parse as parse_formula;
-use visigrid_engine::sheet::{Sheet, SheetId};
+use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
+use crate::xlsx_styles;
+
+/// A concrete example of a post-recalc error, for the import report
+#[derive(Debug, Clone)]
+pub struct RecalcErrorExample {
+    /// Sheet name where the error occurred
+    pub sheet: String,
+    /// Cell address (e.g., "B5")
+    pub address: String,
+    /// Error category: "circular" or "error"
+    pub kind: &'static str,
+    /// The error message (e.g., "#REF!", "#CYCLE!")
+    pub error: String,
+    /// The original formula, if available
+    pub formula: Option<String>,
+}
+
+/// Maximum number of error examples to collect for the import report
+const MAX_ERROR_EXAMPLES: usize = 5;
 
 /// Per-sheet import statistics
 #[derive(Debug, Default, Clone)]
@@ -28,6 +48,8 @@ pub struct SheetStats {
     pub times_imported: usize,
     pub truncated_rows: usize,
     pub truncated_cols: usize,
+    pub recalc_errors: usize,             // Formula errors after recalc
+    pub recalc_circular: usize,           // Circular reference errors after recalc
 }
 
 /// Result of an Excel import operation
@@ -61,6 +83,44 @@ pub struct ImportResult {
     pub validations_imported: usize,
     /// Total validations skipped (unsupported types)
     pub validations_skipped: usize,
+    /// Total formula errors after recalc (Value::Error from evaluation)
+    pub recalc_errors: usize,
+    /// Total circular reference errors after recalc
+    pub recalc_circular: usize,
+    /// Number of shared formula groups detected in XLSX XML
+    pub shared_formula_groups: usize,
+    /// Sample formulas that failed to parse (for diagnostics, up to 10)
+    pub parse_error_samples: Vec<String>,
+    /// Top error examples for the import report (up to MAX_ERROR_EXAMPLES)
+    pub recalc_error_examples: Vec<RecalcErrorExample>,
+    /// Number of cells that received a style_id from XLSX formatting
+    pub styles_imported: usize,
+    /// Number of unique styles in the workbook style table
+    pub unique_styles: usize,
+    /// Unsupported formatting features encountered during import
+    pub unsupported_format_features: Vec<String>,
+    /// Per-sheet imported layout (column widths, row heights) in raw Excel units.
+    /// Indexed by sheet position (same order as sheets in workbook).
+    pub imported_layouts: Vec<ImportedLayout>,
+    /// Formula cells in XLSX XML that had no cached <v> value (calamine may skip these)
+    pub formula_cells_without_values: usize,
+    /// Value cells backfilled from XLSX XML (shared strings, inline strings, numbers calamine missed)
+    pub value_cells_backfilled: usize,
+    /// Total merged cell regions imported
+    pub merges_imported: usize,
+    /// Merged regions dropped due to overlap with existing merges
+    pub merges_dropped_overlap: usize,
+    /// Merged regions dropped due to invalid cell references
+    pub merges_dropped_invalid: usize,
+}
+
+/// Column/row dimension data imported from XLSX, in raw Excel units.
+#[derive(Debug, Default, Clone)]
+pub struct ImportedLayout {
+    /// Column index → raw Excel character-width units
+    pub col_widths: HashMap<usize, f64>,
+    /// Row index → raw Excel point units
+    pub row_heights: HashMap<usize, f64>,
 }
 
 impl ImportResult {
@@ -73,12 +133,31 @@ impl ImportResult {
         if self.formulas_imported > 0 {
             parts.push(format!("{} formulas", self.formulas_imported));
         }
-        parts.join(", ")
+        if self.styles_imported > 0 {
+            parts.push(format!("Formatting: {} cells ({} styles)",
+                self.styles_imported, self.unique_styles));
+        }
+        if self.merges_imported > 0 {
+            let dropped = self.merges_dropped_overlap + self.merges_dropped_invalid;
+            if dropped > 0 {
+                parts.push(format!("{} merged regions ({} dropped)", self.merges_imported, dropped));
+            } else {
+                parts.push(format!("{} merged regions", self.merges_imported));
+            }
+        }
+        parts.join(" · ")
     }
 
     /// Returns true if there are actionable warnings
     pub fn has_warnings(&self) -> bool {
-        self.truncated || self.formulas_failed > 0 || !self.unsupported_functions.is_empty() || !self.warnings.is_empty()
+        self.truncated
+            || self.formulas_failed > 0
+            || !self.unsupported_functions.is_empty()
+            || !self.warnings.is_empty()
+            || self.recalc_errors > 0
+            || self.recalc_circular > 0
+            || self.merges_dropped_overlap > 0
+            || self.merges_dropped_invalid > 0
     }
 
     /// Returns a single-line warning for status bar (only actionable issues)
@@ -96,6 +175,18 @@ impl ImportResult {
         let unsupported_count: usize = self.unsupported_functions.values().sum();
         if unsupported_count > 0 {
             issues.push(format!("{} unsupported functions", unsupported_count));
+        }
+
+        if self.recalc_errors > 0 {
+            issues.push(format!("{} formula errors", self.recalc_errors));
+        }
+        if self.recalc_circular > 0 {
+            issues.push(format!("{} circular references", self.recalc_circular));
+        }
+
+        let merges_dropped = self.merges_dropped_overlap + self.merges_dropped_invalid;
+        if merges_dropped > 0 {
+            issues.push(format!("{} merged regions dropped", merges_dropped));
         }
 
         if issues.is_empty() {
@@ -184,13 +275,18 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
         let mut sheet = Sheet::new_with_name(SheetId(next_sheet_id), MAX_ROWS, MAX_COLS, sheet_name);
         next_sheet_id += 1;
 
+        // Range start offset (data may not begin at A1)
+        let (data_start_row, data_start_col) = range.start().unwrap_or((0, 0));
+
         for (row_idx, row) in range.rows().enumerate() {
-            if row_idx >= effective_rows {
+            let target_row = data_start_row as usize + row_idx;
+            if target_row >= effective_rows {
                 break;
             }
 
             for (col_idx, cell) in row.iter().enumerate() {
-                if col_idx >= effective_cols {
+                let target_col = data_start_col as usize + col_idx;
+                if target_col >= effective_cols {
                     break;
                 }
 
@@ -206,9 +302,6 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
                     }
                     break;
                 }
-
-                let target_row = row_idx;
-                let target_col = col_idx;
 
                 match cell {
                     Data::Empty => {
@@ -306,13 +399,18 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
         // Try to import formulas if available
         if !hit_cell_limit {
             if let Ok(formula_range) = workbook.worksheet_formula(sheet_name) {
+                // Formula range may start at a different offset than data range
+                let (formula_start_row, formula_start_col) = formula_range.start().unwrap_or((0, 0));
+
                 for (row_idx, row) in formula_range.rows().enumerate() {
-                    if row_idx >= effective_rows {
+                    let target_row = formula_start_row as usize + row_idx;
+                    if target_row >= effective_rows {
                         break;
                     }
 
                     for (col_idx, formula) in row.iter().enumerate() {
-                        if col_idx >= effective_cols {
+                        let target_col = formula_start_col as usize + col_idx;
+                        if target_col >= effective_cols {
                             break;
                         }
 
@@ -330,8 +428,6 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
                         }
 
                         if !formula.is_empty() {
-                            let target_row = row_idx;
-                            let target_col = col_idx;
 
                             // Check if this cell was empty before (formula adds a new cell)
                             let was_empty = sheet.get_raw(target_row, target_col).is_empty();
@@ -362,6 +458,14 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
                                 Err(_) => {
                                     // Formula failed to parse - track it
                                     stats.formulas_with_errors += 1;
+                                    if result.parse_error_samples.len() < 10 {
+                                        result.parse_error_samples.push(format!(
+                                            "{}!{}: {}",
+                                            sheet_name,
+                                            cell_address(target_row, target_col),
+                                            formula_str
+                                        ));
+                                    }
                                 }
                             }
 
@@ -411,10 +515,233 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
 
     let mut workbook = Workbook::from_sheets(sheets, 0);
 
+    // Import formatting from styles.xml and per-cell style IDs
+    import_formatting(path, &sheet_names, &mut workbook, &mut result);
+
+    // Detect shared formula groups from XLSX XML (diagnostic guardrail)
+    result.shared_formula_groups = count_shared_formula_groups(path);
+
+    // Extract formula-only cells from worksheet XML (cells with <f> but possibly no <v>).
+    // calamine may skip these, causing "phantom blank" cells where formulas should exist.
+    let xml_formulas = extract_xml_formula_cells(path);
+    let mut formula_backfill_count = 0usize;
+    for (sheet_idx, row, col, formula_text) in &xml_formulas {
+        if let Some(sheet) = workbook.sheet_mut(*sheet_idx) {
+            // Only backfill if the cell is currently empty (calamine didn't import it)
+            if sheet.get_raw(*row, *col).is_empty() {
+                let formula_str = if formula_text.starts_with('=') {
+                    formula_text.clone()
+                } else {
+                    format!("={}", formula_text)
+                };
+                eprintln!("[XLSX backfill] {}{}: ={}",
+                    col_to_letter(*col), *row + 1, formula_text);
+                sheet.set_value(*row, *col, &formula_str);
+                formula_backfill_count += 1;
+            }
+        }
+    }
+    result.formula_cells_without_values = formula_backfill_count;
+    if formula_backfill_count > 0 {
+        eprintln!("[XLSX import] Backfilled {} formula-only cells from XML ({} total XML formulas parsed)",
+            formula_backfill_count, xml_formulas.len());
+    }
+
+    // Backfill value-only cells from XLSX XML.
+    // calamine may skip cells stored as shared strings, inline strings, or numbers
+    // that it doesn't surface through its cell iterator.
+    let xml_values = extract_xml_value_cells(path);
+    let mut value_backfill_count = 0usize;
+    for (sheet_idx, row, col, value_text) in &xml_values {
+        if let Some(sheet) = workbook.sheet_mut(*sheet_idx) {
+            if sheet.get_raw(*row, *col).is_empty() {
+                eprintln!("[XLSX backfill] {}{}: value=\"{}\"",
+                    col_to_letter(*col), *row + 1, value_text);
+                sheet.set_value(*row, *col, value_text);
+                value_backfill_count += 1;
+            }
+        }
+    }
+    result.value_cells_backfilled = value_backfill_count;
+    if value_backfill_count > 0 {
+        eprintln!("[XLSX import] Backfilled {} value cells from XML ({} total XML value cells parsed)",
+            value_backfill_count, xml_values.len());
+    }
+
     // Rebuild dependency graph after loading all data
     workbook.rebuild_dep_graph();
 
+    // Recompute all formulas in topological order.
+    // Individual set_value() calls during import evaluated formulas at sheet level
+    // without proper dependency ordering — upstream cells may not have existed yet.
+    // This full ordered recompute clears stale caches and evaluates everything correctly.
+    let recalc_report = workbook.recompute_full_ordered();
+    eprintln!("[XLSX import] Recomputed {} formulas in topo order (cycles: {})",
+        recalc_report.cells_recomputed, recalc_report.had_cycles);
+
+    // Post-recalc error counting: detect circular refs and formula evaluation errors
+    for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
+        let mut sheet_errors = 0usize;
+        let mut sheet_circular = 0usize;
+        for ((_row, _col), cell) in sheet.cells_iter() {
+            // Circulars: structural graph property (set during dep graph cycle detection)
+            if cell.value.is_cycle_error() {
+                sheet_circular += 1;
+                if result.recalc_error_examples.len() < MAX_ERROR_EXAMPLES {
+                    result.recalc_error_examples.push(RecalcErrorExample {
+                        sheet: sheet.name.clone(),
+                        address: cell_address(*_row, *_col),
+                        kind: "circular",
+                        error: "#CYCLE!".to_string(),
+                        formula: None, // Source is lost when cycle is detected
+                    });
+                }
+                continue;
+            }
+            // Formula errors: evaluate formula cells, check for Value::Error
+            if cell.value.formula_ast().is_some() {
+                if let Value::Error(ref e) = sheet.get_computed_value(*_row, *_col) {
+                    sheet_errors += 1;
+                    if result.recalc_error_examples.len() < MAX_ERROR_EXAMPLES {
+                        let formula_source = match &cell.value {
+                            CellValue::Formula { source, .. } => Some(source.clone()),
+                            _ => None,
+                        };
+                        result.recalc_error_examples.push(RecalcErrorExample {
+                            sheet: sheet.name.clone(),
+                            address: cell_address(*_row, *_col),
+                            kind: "error",
+                            error: e.clone(),
+                            formula: formula_source,
+                        });
+                    }
+                }
+            }
+        }
+        if sheet_idx < result.sheet_stats.len() {
+            result.sheet_stats[sheet_idx].recalc_errors = sheet_errors;
+            result.sheet_stats[sheet_idx].recalc_circular = sheet_circular;
+        }
+        result.recalc_errors += sheet_errors;
+        result.recalc_circular += sheet_circular;
+    }
+
     Ok((workbook, result))
+}
+
+// =============================================================================
+// XLSX Formatting Import
+// =============================================================================
+
+/// Import formatting (styles, column widths, row heights) from XLSX into the workbook.
+/// This is called after calamine has imported cell data, to layer formatting on top.
+fn import_formatting(
+    path: &Path,
+    sheet_names: &[String],
+    workbook: &mut Workbook,
+    result: &mut ImportResult,
+) {
+    // Parse styles.xml and per-sheet formatting from the XLSX ZIP
+    let (style_table, sheet_formats, stats) = match xlsx_styles::parse_xlsx_formatting(path, sheet_names) {
+        Ok(data) => data,
+        Err(_) => return, // Graceful fallback: no formatting
+    };
+
+    if style_table.len() == 0 {
+        return; // No styles to apply
+    }
+
+    // Build a mapping from xlsx style index → workbook style_table index
+    // by interning each parsed style into the workbook's global table
+    let mut style_id_map: Vec<Option<u32>> = Vec::with_capacity(style_table.len());
+    for style in &style_table.styles {
+        if *style == CellFormat::default() {
+            style_id_map.push(None); // Default style, no need to store
+        } else {
+            style_id_map.push(Some(workbook.intern_style(style.clone())));
+        }
+    }
+
+    // Apply per-cell style IDs and handle styled-empty cells
+    for (sheet_idx, sheet_fmt) in sheet_formats.iter().enumerate() {
+        let sheet = match workbook.sheet_mut(sheet_idx) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        for &(row, col, xlsx_style_id) in &sheet_fmt.cell_styles {
+            // Look up the workbook style_id for this xlsx style index
+            let wb_style_id = match style_id_map.get(xlsx_style_id) {
+                Some(Some(id)) => *id,
+                _ => continue, // Default style or out of range
+            };
+
+            // Get the resolved format for this style
+            let resolved_format = match style_table.get(xlsx_style_id) {
+                Some(f) => f,
+                None => continue,
+            };
+
+            // Check if cell already has data (from calamine import)
+            let cell_exists = !matches!(sheet.get_cell(row, col).value, CellValue::Empty);
+
+            if cell_exists {
+                // Cell has data: apply the style and set format
+                sheet.set_style_id(row, col, wb_style_id);
+                sheet.set_format_from_import(row, col, resolved_format.clone());
+                result.styles_imported += 1;
+            } else if xlsx_styles::is_style_visually_relevant(resolved_format) {
+                // Styled-empty cell with visual formatting: materialize it
+                sheet.set_style_id(row, col, wb_style_id);
+                sheet.set_format_from_import(row, col, resolved_format.clone());
+                result.styles_imported += 1;
+            }
+            // Else: styled-empty with no visual formatting → skip
+        }
+    }
+
+    // Import merged cell regions
+    for (sheet_idx, sheet_fmt) in sheet_formats.iter().enumerate() {
+        if sheet_fmt.merged_regions.is_empty() {
+            continue;
+        }
+        let sheet = match workbook.sheet_mut(sheet_idx) {
+            Some(s) => s,
+            None => continue,
+        };
+        for &(sr, sc, er, ec) in &sheet_fmt.merged_regions {
+            // Validate ref bounds
+            if sr > er || sc > ec {
+                result.merges_dropped_invalid += 1;
+                continue;
+            }
+            let region = MergedRegion::new(sr, sc, er, ec);
+            match sheet.add_merge(region) {
+                Ok(()) => result.merges_imported += 1,
+                Err(msg) => {
+                    result.merges_dropped_overlap += 1;
+                    result.unsupported_format_features.push(format!("dropped merge: {}", msg));
+                }
+            }
+        }
+    }
+
+    result.unique_styles = workbook.style_table.len();
+    result.unsupported_format_features.extend(stats.unsupported_features);
+
+    // Add unsupported features as warnings
+    for feature in &result.unsupported_format_features {
+        result.warnings.push(format!("Unsupported formatting: {}", feature));
+    }
+
+    // Collect layout data for app-level application
+    result.imported_layouts = sheet_formats
+        .into_iter()
+        .map(|sf| ImportedLayout {
+            col_widths: sf.col_widths,
+            row_heights: sf.row_heights,
+        })
+        .collect();
 }
 
 // =============================================================================
@@ -486,6 +813,8 @@ pub struct ExportResult {
     pub export_duration_ms: u128,
     /// Warnings generated during export
     pub warnings: Vec<String>,
+    /// Total merged cell regions exported
+    pub merges_exported: usize,
 }
 
 impl ExportResult {
@@ -697,6 +1026,22 @@ pub fn export(
         result.validations_exported += exported;
         result.validations_skipped += skipped;
 
+        // Export merged cell regions
+        let merge_format = Format::new();
+        for merge in &sheet.merged_regions {
+            worksheet
+                .merge_range(
+                    merge.start.0 as u32,
+                    merge.start.1 as u16,
+                    merge.end.0 as u32,
+                    merge.end.1 as u16,
+                    "",
+                    &merge_format,
+                )
+                .map_err(|e| format!("Failed to write merge: {}", e))?;
+            result.merges_exported += 1;
+        }
+
         result.sheets_exported += 1;
     }
 
@@ -906,6 +1251,785 @@ fn import_validation_rules(
     }
 }
 
+/// Count shared formula groups in an XLSX file by scanning worksheet XML.
+///
+/// Shared formulas use `<f t="shared" ref="..." si="N">` master nodes.
+/// This function counts master nodes (those with both `t="shared"` and `ref=...`)
+/// across all worksheets. This serves as a diagnostic guardrail: if calamine
+/// doesn't expand shared formulas correctly, this count helps diagnose the issue.
+///
+/// Returns 0 for non-XLSX formats (xls, xlsb, ods) or on any error.
+fn count_shared_formula_groups(path: &Path) -> usize {
+    use zip::ZipArchive;
+
+    // Only works for XLSX files (ZIP-based XML)
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let mut archive = match ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => return 0,
+    };
+
+    // Parse workbook.xml to get sheet rIds
+    let workbook_xml = match read_zip_file_for_shared(&mut archive, "xl/workbook.xml") {
+        Some(s) => s,
+        None => return 0,
+    };
+    let rels_xml = match read_zip_file_for_shared(&mut archive, "xl/_rels/workbook.xml.rels") {
+        Some(s) => s,
+        None => return 0,
+    };
+
+    // Collect all worksheet XML paths
+    let worksheet_paths = resolve_worksheet_paths(&workbook_xml, &rels_xml);
+
+    let mut total_groups = 0;
+
+    for ws_path in worksheet_paths {
+        let xml = match read_zip_file_for_shared(&mut archive, &ws_path) {
+            Some(s) => s,
+            None => continue,
+        };
+        total_groups += count_shared_masters_in_xml(&xml);
+    }
+
+    total_groups
+}
+
+/// Read a file from a ZIP archive, returning None on error.
+fn read_zip_file_for_shared<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    path: &str,
+) -> Option<String> {
+    use std::io::Read;
+    let mut file = archive.by_name(path).ok()?;
+    let mut content = String::new();
+    file.read_to_string(&mut content).ok()?;
+    Some(content)
+}
+
+/// Resolve worksheet XML paths from workbook.xml + workbook.xml.rels
+fn resolve_worksheet_paths(workbook_xml: &str, rels_xml: &str) -> Vec<String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut paths = Vec::new();
+
+    // Step 1: Parse workbook.xml to get sheet rIds
+    let mut rids = Vec::new();
+    let mut reader = Reader::from_str(workbook_xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) if e.name().as_ref() == b"sheet" => {
+                for attr in e.attributes().flatten() {
+                    if attr.key.as_ref() == b"r:id" {
+                        rids.push(String::from_utf8_lossy(&attr.value).to_string());
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    // Step 2: Parse rels to resolve rId → target path
+    let mut rid_to_target: HashMap<String, String> = HashMap::new();
+    let mut reader = Reader::from_str(rels_xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e))
+                if e.name().as_ref() == b"Relationship" =>
+            {
+                let mut id = None;
+                let mut target = None;
+                for attr in e.attributes().flatten() {
+                    match attr.key.as_ref() {
+                        b"Id" => id = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                        b"Target" => target = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                        _ => {}
+                    }
+                }
+                if let (Some(id), Some(target)) = (id, target) {
+                    rid_to_target.insert(id, target);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    // Step 3: Resolve each rId to a full path
+    for rid in &rids {
+        if let Some(target) = rid_to_target.get(rid) {
+            // Only include worksheet targets (skip chartsheets, etc.)
+            if target.contains("worksheet") {
+                paths.push(format!("xl/{}", target));
+            }
+        }
+    }
+
+    paths
+}
+
+/// Count shared formula master nodes in a single worksheet XML.
+/// Masters have both `t="shared"` and `ref="..."` attributes on `<f>` elements.
+fn count_shared_masters_in_xml(xml: &str) -> usize {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut count = 0;
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) if e.name().as_ref() == b"f" => {
+                let mut is_shared = false;
+                let mut has_ref = false;
+                for attr in e.attributes().flatten() {
+                    match attr.key.as_ref() {
+                        b"t" if attr.value.as_ref() == b"shared" => is_shared = true,
+                        b"ref" => has_ref = true,
+                        _ => {}
+                    }
+                }
+                if is_shared && has_ref {
+                    count += 1;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    count
+}
+
+/// Extract all formula cells from worksheet XML, including those with no cached <v> value.
+/// Returns: Vec<(sheet_index, row, col, formula_text)>
+/// sheet_index corresponds to the order in which sheets appear in workbook.xml.
+fn extract_xml_formula_cells(path: &Path) -> Vec<(usize, usize, usize, String)> {
+    use zip::ZipArchive;
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let mut archive = match ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
+
+    let workbook_xml = match read_zip_file_for_shared(&mut archive, "xl/workbook.xml") {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let rels_xml = match read_zip_file_for_shared(&mut archive, "xl/_rels/workbook.xml.rels") {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let worksheet_paths = resolve_worksheet_paths(&workbook_xml, &rels_xml);
+
+    let mut all_formulas = Vec::new();
+
+    for (sheet_idx, ws_path) in worksheet_paths.iter().enumerate() {
+        let xml = match read_zip_file_for_shared(&mut archive, ws_path) {
+            Some(s) => s,
+            None => continue,
+        };
+        extract_formulas_from_xml(&xml, sheet_idx, &mut all_formulas);
+    }
+
+    all_formulas
+}
+
+/// Shared formula definition collected from worksheet XML.
+struct SharedFormulaDef {
+    /// The base cell (row, col) where the master formula lives
+    base_row: usize,
+    base_col: usize,
+    /// The master formula text (without '=')
+    formula: String,
+}
+
+/// Parse a single worksheet XML and extract all formula cells, including
+/// shared formula followers that have no formula text.
+///
+/// 2-pass approach:
+/// Pass 1: Collect all <f> elements — masters have formula text, followers have si only.
+///         Build shared formula definition map (si -> SharedFormulaDef).
+/// Pass 2: For each follower, compute the row/col offset from the master's base cell,
+///         and shift the formula references accordingly.
+fn extract_formulas_from_xml(
+    xml: &str,
+    sheet_idx: usize,
+    out: &mut Vec<(usize, usize, usize, String)>,
+) {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    // Intermediate struct for raw parsed formula entries
+    struct FormulaEntry {
+        row: usize,
+        col: usize,
+        formula_text: Option<String>,   // Some for masters, None for followers
+        shared_si: Option<String>,       // shared index if t="shared"
+    }
+
+    let mut entries: Vec<FormulaEntry> = Vec::new();
+    let mut shared_defs: HashMap<String, SharedFormulaDef> = HashMap::new();
+
+    // --- Pass 1: Parse all <f> elements ---
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+
+    let mut current_cell_ref: Option<String> = None;
+    // Track formula element attributes for the current <f>
+    let mut in_formula = false;
+    let mut current_f_shared: bool = false;
+    let mut current_f_si: Option<String> = None;
+    let mut current_f_has_ref: bool = false;
+    let mut current_f_text: Option<String> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                match e.name().as_ref() {
+                    b"c" => {
+                        current_cell_ref = None;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"r" {
+                                current_cell_ref = Some(
+                                    String::from_utf8_lossy(&attr.value).to_string()
+                                );
+                            }
+                        }
+                    }
+                    b"f" => {
+                        in_formula = true;
+                        current_f_shared = false;
+                        current_f_si = None;
+                        current_f_has_ref = false;
+                        current_f_text = None;
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"t" if attr.value.as_ref() == b"shared" => {
+                                    current_f_shared = true;
+                                }
+                                b"si" => {
+                                    current_f_si = Some(
+                                        String::from_utf8_lossy(&attr.value).to_string()
+                                    );
+                                }
+                                b"ref" => {
+                                    current_f_has_ref = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(ref e)) if in_formula => {
+                let text = String::from_utf8_lossy(e.as_ref()).to_string();
+                if !text.is_empty() {
+                    current_f_text = Some(text);
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                match e.name().as_ref() {
+                    b"f" => {
+                        // End of <f>...</f> — record the entry
+                        if let Some(ref cell_ref) = current_cell_ref {
+                            if let Some((row, col)) = parse_xlsx_cell_ref(cell_ref) {
+                                let is_master = current_f_shared && current_f_has_ref && current_f_text.is_some();
+                                if is_master {
+                                    // Shared formula master: store definition
+                                    if let Some(ref si) = current_f_si {
+                                        shared_defs.insert(si.clone(), SharedFormulaDef {
+                                            base_row: row,
+                                            base_col: col,
+                                            formula: current_f_text.clone().unwrap(),
+                                        });
+                                    }
+                                }
+                                entries.push(FormulaEntry {
+                                    row,
+                                    col,
+                                    formula_text: current_f_text.take(),
+                                    shared_si: current_f_si.take(),
+                                });
+                            }
+                        }
+                        in_formula = false;
+                    }
+                    b"c" => {
+                        current_cell_ref = None;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(ref e)) if e.name().as_ref() == b"f" => {
+                // <f t="shared" si="N"/> — shared formula follower (empty element)
+                let mut si = None;
+                let mut is_shared = false;
+                for attr in e.attributes().flatten() {
+                    match attr.key.as_ref() {
+                        b"t" if attr.value.as_ref() == b"shared" => {
+                            is_shared = true;
+                        }
+                        b"si" => {
+                            si = Some(String::from_utf8_lossy(&attr.value).to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                if is_shared {
+                    if let Some(ref cell_ref) = current_cell_ref {
+                        if let Some((row, col)) = parse_xlsx_cell_ref(cell_ref) {
+                            entries.push(FormulaEntry {
+                                row,
+                                col,
+                                formula_text: None, // follower — no text
+                                shared_si: si,
+                            });
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    // --- Pass 2: Resolve followers using shared formula definitions ---
+    for entry in &entries {
+        let formula = if let Some(ref text) = entry.formula_text {
+            // Master or normal formula — use as-is
+            text.clone()
+        } else if let Some(ref si) = entry.shared_si {
+            // Follower — look up master and shift references
+            if let Some(def) = shared_defs.get(si) {
+                let row_delta = entry.row as i32 - def.base_row as i32;
+                let col_delta = entry.col as i32 - def.base_col as i32;
+                if row_delta == 0 && col_delta == 0 {
+                    def.formula.clone()
+                } else {
+                    adjust_formula_refs_for_shared(&def.formula, row_delta, col_delta)
+                }
+            } else {
+                continue; // No master found — skip
+            }
+        } else {
+            continue; // No formula text and not shared — skip
+        };
+
+        out.push((sheet_idx, entry.row, entry.col, formula));
+    }
+}
+
+/// Adjust cell references in a formula by row/col deltas, respecting $ anchors.
+/// Used for expanding shared formula followers from their master definition.
+fn adjust_formula_refs_for_shared(formula: &str, row_delta: i32, col_delta: i32) -> String {
+    use regex::Regex;
+
+    // Match cell references: optional $ before col letters, col letters, optional $ before row, row digits
+    // Examples: A1, $A$1, A$1, $A1, AA100, R103
+    let re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
+
+    re.replace_all(formula, |caps: &regex::Captures| {
+        let col_absolute = &caps[1] == "$";
+        let col_letters = &caps[2];
+        let row_absolute = &caps[3] == "$";
+        let row_num: i32 = caps[4].parse().unwrap_or(1);
+
+        // Don't adjust function names that look like cell refs (they won't have digits though)
+        // The regex requires trailing digits, so function names like SUM, IF won't match.
+
+        // Parse column letters to 0-indexed number
+        let col = col_letters.to_uppercase().chars().fold(0i32, |acc, c| {
+            acc * 26 + (c as i32 - 'A' as i32 + 1)
+        }) - 1;
+
+        // Apply deltas (skip if absolute)
+        let new_col = if col_absolute { col } else { col + col_delta };
+        let new_row = if row_absolute { row_num } else { row_num + row_delta };
+
+        // Bounds check
+        if new_col < 0 || new_row < 1 {
+            return "#REF!".to_string();
+        }
+
+        // Convert column back to letters
+        let col_str = col_num_to_letters(new_col as usize);
+
+        format!(
+            "{}{}{}{}",
+            if col_absolute { "$" } else { "" },
+            col_str,
+            if row_absolute { "$" } else { "" },
+            new_row
+        )
+    })
+    .to_string()
+}
+
+/// Convert a 0-indexed column number to Excel column letters (0=A, 1=B, ..., 25=Z, 26=AA)
+fn col_num_to_letters(mut col: usize) -> String {
+    let mut result = String::new();
+    loop {
+        result.insert(0, (b'A' + (col % 26) as u8) as char);
+        if col < 26 {
+            break;
+        }
+        col = col / 26 - 1;
+    }
+    result
+}
+
+/// Extract value-only cells from XLSX XML that calamine may have missed.
+/// Parses shared strings (t="s"), inline strings (t="inlineStr"), and numeric values.
+/// Returns: Vec<(sheet_index, row, col, value_string)>
+fn extract_xml_value_cells(path: &Path) -> Vec<(usize, usize, usize, String)> {
+    use zip::ZipArchive;
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let mut archive = match ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
+
+    // Load shared strings table
+    let shared_strings = match read_zip_file_for_shared(&mut archive, "xl/sharedStrings.xml") {
+        Some(xml) => parse_shared_strings(&xml),
+        None => Vec::new(),
+    };
+
+    let workbook_xml = match read_zip_file_for_shared(&mut archive, "xl/workbook.xml") {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let rels_xml = match read_zip_file_for_shared(&mut archive, "xl/_rels/workbook.xml.rels") {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let worksheet_paths = resolve_worksheet_paths(&workbook_xml, &rels_xml);
+
+    let mut all_values = Vec::new();
+
+    for (sheet_idx, ws_path) in worksheet_paths.iter().enumerate() {
+        let xml = match read_zip_file_for_shared(&mut archive, ws_path) {
+            Some(s) => s,
+            None => continue,
+        };
+        extract_values_from_xml(&xml, sheet_idx, &shared_strings, &mut all_values);
+    }
+
+    all_values
+}
+
+/// Parse xl/sharedStrings.xml into a Vec of strings indexed by position.
+/// Each <si> element contains either <t>text</t> or <r><t>text</t></r> (rich text).
+fn parse_shared_strings(xml: &str) -> Vec<String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut strings = Vec::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false); // preserve whitespace in string values
+    let mut buf = Vec::new();
+
+    let mut in_si = false;
+    let mut in_t = false;
+    let mut current_text = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                match e.name().as_ref() {
+                    b"si" => {
+                        in_si = true;
+                        current_text.clear();
+                    }
+                    b"t" if in_si => {
+                        in_t = true;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(ref e)) if in_t => {
+                current_text.push_str(&String::from_utf8_lossy(e.as_ref()));
+            }
+            Ok(Event::End(ref e)) => {
+                match e.name().as_ref() {
+                    b"t" => {
+                        in_t = false;
+                    }
+                    b"si" => {
+                        strings.push(current_text.clone());
+                        in_si = false;
+                        current_text.clear();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    strings
+}
+
+/// Parse a single worksheet XML and extract value-only cells (no formula).
+/// Handles cell types: shared string (t="s"), inline string (t="inlineStr"),
+/// numeric (t="n" or no type), boolean (t="b"), string (t="str").
+fn extract_values_from_xml(
+    xml: &str,
+    sheet_idx: usize,
+    shared_strings: &[String],
+    out: &mut Vec<(usize, usize, usize, String)>,
+) {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+
+    let mut current_cell_ref: Option<String> = None;
+    let mut current_cell_type: Option<String> = None; // t attribute
+    let mut has_formula = false;
+    let mut in_value = false;     // inside <v>
+    let mut in_inline_t = false;  // inside <is><t>
+    let mut in_is = false;        // inside <is>
+    let mut value_text = String::new();
+    let mut inline_text = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                match e.name().as_ref() {
+                    b"c" => {
+                        current_cell_ref = None;
+                        current_cell_type = None;
+                        has_formula = false;
+                        value_text.clear();
+                        inline_text.clear();
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"r" => {
+                                    current_cell_ref = Some(
+                                        String::from_utf8_lossy(&attr.value).to_string()
+                                    );
+                                }
+                                b"t" => {
+                                    current_cell_type = Some(
+                                        String::from_utf8_lossy(&attr.value).to_string()
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"f" => {
+                        has_formula = true;
+                    }
+                    b"v" => {
+                        in_value = true;
+                        value_text.clear();
+                    }
+                    b"is" => {
+                        in_is = true;
+                    }
+                    b"t" if in_is => {
+                        in_inline_t = true;
+                        inline_text.clear();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(ref e)) => {
+                if in_value {
+                    value_text.push_str(&String::from_utf8_lossy(e.as_ref()));
+                } else if in_inline_t {
+                    inline_text.push_str(&String::from_utf8_lossy(e.as_ref()));
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                match e.name().as_ref() {
+                    b"v" => {
+                        in_value = false;
+                    }
+                    b"t" if in_is => {
+                        in_inline_t = false;
+                    }
+                    b"is" => {
+                        in_is = false;
+                    }
+                    b"c" => {
+                        // End of cell — emit value if no formula and has content
+                        if !has_formula {
+                            if let Some(ref cell_ref) = current_cell_ref {
+                                if let Some((row, col)) = parse_xlsx_cell_ref(cell_ref) {
+                                    let resolved = resolve_cell_value(
+                                        current_cell_type.as_deref(),
+                                        &value_text,
+                                        &inline_text,
+                                        shared_strings,
+                                    );
+                                    if let Some(val) = resolved {
+                                        out.push((sheet_idx, row, col, val));
+                                    }
+                                }
+                            }
+                        }
+                        current_cell_ref = None;
+                        current_cell_type = None;
+                        has_formula = false;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                match e.name().as_ref() {
+                    b"c" => {
+                        // Empty cell element <c r="..." .../> — no value, skip
+                    }
+                    b"f" => {
+                        has_formula = true;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// Resolve a cell value from its XLSX type and raw text.
+/// Returns None for empty/unresolvable cells.
+fn resolve_cell_value(
+    cell_type: Option<&str>,
+    value_text: &str,
+    inline_text: &str,
+    shared_strings: &[String],
+) -> Option<String> {
+    match cell_type {
+        Some("s") => {
+            // Shared string: value_text is the index into shared strings table
+            let idx: usize = value_text.parse().ok()?;
+            shared_strings.get(idx).cloned()
+        }
+        Some("inlineStr") => {
+            // Inline string: text is in <is><t>...</t></is>
+            if inline_text.is_empty() {
+                None
+            } else {
+                Some(inline_text.to_string())
+            }
+        }
+        Some("b") => {
+            // Boolean: 0 = FALSE, 1 = TRUE
+            match value_text {
+                "1" => Some("TRUE".to_string()),
+                "0" => Some("FALSE".to_string()),
+                _ => None,
+            }
+        }
+        Some("str") => {
+            // Cached string result of a formula — but we only emit non-formula cells
+            if value_text.is_empty() {
+                None
+            } else {
+                Some(value_text.to_string())
+            }
+        }
+        Some("n") | None => {
+            // Numeric (explicit or default): value_text is the number
+            if value_text.is_empty() {
+                None
+            } else {
+                // Clean up integer representation: "0.1" stays, "5" stays
+                Some(value_text.to_string())
+            }
+        }
+        Some("e") => {
+            // Error value
+            if value_text.is_empty() {
+                None
+            } else {
+                Some(value_text.to_string())
+            }
+        }
+        Some(_) => {
+            // Unknown type — try to preserve the value
+            if value_text.is_empty() {
+                None
+            } else {
+                Some(value_text.to_string())
+            }
+        }
+    }
+}
+
+/// Parse an XLSX cell reference like "R104" or "AA1" to (row, col) in 0-indexed.
+fn parse_xlsx_cell_ref(cell_ref: &str) -> Option<(usize, usize)> {
+    let mut col_part = String::new();
+    let mut row_part = String::new();
+
+    for ch in cell_ref.chars() {
+        if ch.is_ascii_alphabetic() {
+            col_part.push(ch.to_ascii_uppercase());
+        } else if ch.is_ascii_digit() {
+            row_part.push(ch);
+        }
+    }
+
+    if col_part.is_empty() || row_part.is_empty() {
+        return None;
+    }
+
+    // Convert column letters to 0-indexed number (A=0, B=1, ..., Z=25, AA=26)
+    let mut col: usize = 0;
+    for ch in col_part.chars() {
+        col = col * 26 + (ch as usize - 'A' as usize + 1);
+    }
+    col -= 1; // 0-indexed
+
+    // Convert row string to 0-indexed number
+    let row: usize = row_part.parse::<usize>().ok()? - 1;
+
+    Some((row, col))
+}
+
 /// Build an Excel Format from VisiGrid CellFormat
 fn build_excel_format(cell_format: &CellFormat) -> Format {
     let mut format = Format::new();
@@ -924,12 +2048,31 @@ fn build_excel_format(cell_format: &CellFormat) -> Format {
         format = format.set_font_strikethrough();
     }
 
+    // Font size
+    if let Some(size) = cell_format.font_size {
+        format = format.set_font_size(size as f64);
+    }
+
+    // Font color
+    if let Some([r, g, b, _]) = cell_format.font_color {
+        let color = rust_xlsxwriter::Color::RGB(
+            ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+        );
+        format = format.set_font_color(color);
+    }
+
+    // Font family
+    if let Some(ref family) = cell_format.font_family {
+        format = format.set_font_name(family);
+    }
+
     // Horizontal alignment
     format = match cell_format.alignment {
         Alignment::General => format, // Excel default: numbers right, text left
         Alignment::Left => format.set_align(FormatAlign::Left),
         Alignment::Center => format.set_align(FormatAlign::Center),
         Alignment::Right => format.set_align(FormatAlign::Right),
+        Alignment::CenterAcrossSelection => format.set_align(FormatAlign::CenterAcross),
     };
 
     // Vertical alignment
@@ -1018,6 +2161,7 @@ fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
         }
         NumberFormat::Time => format.set_num_format("h:mm:ss"),
         NumberFormat::DateTime => format.set_num_format("m/d/yyyy h:mm:ss"),
+        NumberFormat::Custom(code) => format.set_num_format(code),
     }
 }
 
@@ -1031,6 +2175,8 @@ fn has_formatting(format: &CellFormat) -> bool {
         || format.vertical_alignment != VerticalAlignment::Middle
         || format.number_format != NumberFormat::General
         || format.font_family.is_some()
+        || format.font_size.is_some()
+        || format.font_color.is_some()
         || format.background_color.is_some()
         || format.border_top.style != BorderStyle::None
         || format.border_right.style != BorderStyle::None
@@ -1076,11 +2222,11 @@ mod tests {
         result.cells_imported = 100;
         result.formulas_imported = 0;
 
-        assert_eq!(result.summary(), "1 sheet, 100 cells");
+        assert_eq!(result.summary(), "1 sheet · 100 cells");
 
         result.sheets_imported = 3;
         result.formulas_imported = 25;
-        assert_eq!(result.summary(), "3 sheets, 100 cells, 25 formulas");
+        assert_eq!(result.summary(), "3 sheets · 100 cells · 25 formulas");
     }
 
     #[test]
@@ -2490,5 +3636,563 @@ mod tests {
         println!("Decision guide:");
         println!("  - Small <50ms, Medium <250ms: Background import not needed");
         println!("  - Medium >250ms or Large freezes: Implement background import");
+    }
+
+    /// Test that import detects recalc errors and circular references
+    #[test]
+    fn test_import_recalc_error_counting() {
+        let mut result = ImportResult::default();
+        result.recalc_errors = 5;
+        result.recalc_circular = 2;
+
+        assert!(result.has_warnings());
+        let summary = result.warning_summary().unwrap();
+        assert!(summary.contains("5 formula errors"), "summary: {}", summary);
+        assert!(summary.contains("2 circular references"), "summary: {}", summary);
+    }
+
+    /// Test that import with no recalc errors reports clean
+    #[test]
+    fn test_import_no_recalc_errors() {
+        let result = ImportResult::default();
+        assert!(!result.has_warnings());
+        assert!(result.warning_summary().is_none());
+    }
+
+    /// Test shared formula XML detection
+    #[test]
+    fn test_count_shared_masters_in_xml() {
+        // Worksheet XML with 2 shared formula master groups
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet>
+            <sheetData>
+                <row r="1">
+                    <c r="A1"><v>10</v></c>
+                    <c r="B1"><f>A1*2</f><v>20</v></c>
+                </row>
+                <row r="2">
+                    <c r="A2"><v>20</v></c>
+                    <c r="B2"><f t="shared" ref="B2:B10" si="0">A2*2</f><v>40</v></c>
+                </row>
+                <row r="3">
+                    <c r="A3"><v>30</v></c>
+                    <c r="B3"><f t="shared" si="0"/><v>60</v></c>
+                </row>
+                <row r="4">
+                    <c r="C4"><f t="shared" ref="C4:C10" si="1">SUM(A4:B4)</f><v>0</v></c>
+                </row>
+                <row r="5">
+                    <c r="C5"><f t="shared" si="1"/><v>0</v></c>
+                </row>
+            </sheetData>
+        </worksheet>"#;
+
+        // Should count 2 masters (B2 with ref="B2:B10" and C4 with ref="C4:C10")
+        // B3 and C5 are dependents (no ref= attribute), so they don't count
+        let count = count_shared_masters_in_xml(xml);
+        assert_eq!(count, 2, "Should detect 2 shared formula master groups");
+    }
+
+    /// Test shared formula detection on a regular formula (no shared)
+    #[test]
+    fn test_count_shared_masters_no_shared() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet>
+            <sheetData>
+                <row r="1">
+                    <c r="A1"><f>SUM(B1:B10)</f><v>0</v></c>
+                </row>
+            </sheetData>
+        </worksheet>"#;
+
+        let count = count_shared_masters_in_xml(xml);
+        assert_eq!(count, 0, "Regular formulas should not count as shared");
+    }
+
+    /// Test that a simple XLSX roundtrip has zero recalc errors
+    #[test]
+    fn test_simple_xlsx_roundtrip_no_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.xlsx");
+
+        // Create a workbook with some formulas
+        let mut wb = Workbook::new();
+        let sheet = wb.sheet_mut(0).unwrap();
+        sheet.set_value(0, 0, "10");
+        sheet.set_value(1, 0, "20");
+        sheet.set_value(2, 0, "30");
+        sheet.set_value(0, 1, "=A1*2");
+        sheet.set_value(1, 1, "=A2*2");
+        sheet.set_value(2, 1, "=A3*2");
+        sheet.set_value(3, 0, "=SUM(A1:A3)");
+
+        // Export to XLSX
+        let export_result = export(&wb, &path, None).expect("Export should succeed");
+        assert!(export_result.formulas_exported > 0);
+
+        // Import back
+        let (imported_wb, result) = import(&path).expect("Import should succeed");
+
+        // No recalc errors
+        assert_eq!(result.recalc_errors, 0, "Should have 0 recalc errors");
+        assert_eq!(result.recalc_circular, 0, "Should have 0 circular refs");
+
+        // Verify some sentinel values
+        let sheet = &imported_wb.sheets()[0];
+        assert_eq!(sheet.get_display(0, 1), "20", "A1*2 should be 20");
+        assert_eq!(sheet.get_display(1, 1), "40", "A2*2 should be 40");
+        assert_eq!(sheet.get_display(3, 0), "60", "SUM(A1:A3) should be 60");
+    }
+
+    /// Test XLSX roundtrip with relative references and range copy-down.
+    ///
+    /// This exercises the patterns that shared formula expansion must handle:
+    /// relative cell refs that shift when copied down, and range references
+    /// that shift row-by-row. These are the patterns calamine 0.26 broke.
+    ///
+    /// Note: VisiGrid's formula parser does not yet support $ (absolute)
+    /// reference anchors. Formulas with $A$1, A$1, $A1 are tracked as parse
+    /// errors at import time. Absolute anchor support is a separate engine task.
+    #[test]
+    fn test_xlsx_roundtrip_relative_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rel_refs.xlsx");
+
+        let mut wb = Workbook::new();
+        let sheet = wb.sheet_mut(0).unwrap();
+
+        // Data column A: values 10, 20, 30, 40
+        sheet.set_value(0, 0, "10");  // A1
+        sheet.set_value(1, 0, "20");  // A2
+        sheet.set_value(2, 0, "30");  // A3
+        sheet.set_value(3, 0, "40");  // A4
+
+        // Data column B: values 1, 2, 3, 4
+        sheet.set_value(0, 1, "1");   // B1
+        sheet.set_value(1, 1, "2");   // B2
+        sheet.set_value(2, 1, "3");   // B3
+        sheet.set_value(3, 1, "4");   // B4
+
+        // Column C: relative ref copy-down (=A1*B1, =A2*B2, =A3*B3)
+        // This is the pattern shared formulas produce when expanded
+        sheet.set_value(0, 2, "=A1*B1");  // C1 = 10
+        sheet.set_value(1, 2, "=A2*B2");  // C2 = 40
+        sheet.set_value(2, 2, "=A3*B3");  // C3 = 90
+        sheet.set_value(3, 2, "=A4*B4");  // C4 = 160
+
+        // Column D: range SUM copied down (=SUM(A1:B1), =SUM(A2:B2), ...)
+        sheet.set_value(0, 3, "=SUM(A1:B1)");  // D1 = 11
+        sheet.set_value(1, 3, "=SUM(A2:B2)");  // D2 = 22
+        sheet.set_value(2, 3, "=SUM(A3:B3)");  // D3 = 33
+        sheet.set_value(3, 3, "=SUM(A4:B4)");  // D4 = 44
+
+        // Column E: cross-column ref (=C1+D1, =C2+D2, ...)
+        sheet.set_value(0, 4, "=C1+D1");  // E1 = 21
+        sheet.set_value(1, 4, "=C2+D2");  // E2 = 62
+        sheet.set_value(2, 4, "=C3+D3");  // E3 = 123
+
+        // Column F: nested function with relative range
+        sheet.set_value(0, 5, "=AVERAGE(A1:A4)");  // F1 = 25
+        sheet.set_value(1, 5, "=MAX(B1:B4)");      // F2 = 4
+        sheet.set_value(2, 5, "=MIN(A1:A4)");      // F3 = 10
+
+        // Export to XLSX
+        let export_result = export(&wb, &path, None).expect("Export should succeed");
+        assert!(export_result.formulas_exported >= 13, "Should export all formulas");
+
+        // Import back
+        let (imported_wb, result) = import(&path).expect("Import should succeed");
+
+        // Zero recalc errors — the critical assertion
+        assert_eq!(result.recalc_errors, 0,
+            "Relative refs should produce 0 errors, got {}. Examples: {:?}",
+            result.recalc_errors,
+            result.recalc_error_examples.iter().map(|e| format!("{}!{}: {}", e.sheet, e.address, e.error)).collect::<Vec<_>>()
+        );
+        assert_eq!(result.recalc_circular, 0, "Relative refs should produce 0 circulars");
+
+        let sheet = &imported_wb.sheets()[0];
+
+        // Verify relative multiplication copy-down
+        assert_eq!(sheet.get_display(0, 2), "10", "C1: =A1*B1 should be 10");
+        assert_eq!(sheet.get_display(1, 2), "40", "C2: =A2*B2 should be 40");
+        assert_eq!(sheet.get_display(2, 2), "90", "C3: =A3*B3 should be 90");
+        assert_eq!(sheet.get_display(3, 2), "160", "C4: =A4*B4 should be 160");
+
+        // Verify range SUM copy-down
+        assert_eq!(sheet.get_display(0, 3), "11", "D1: =SUM(A1:B1) should be 11");
+        assert_eq!(sheet.get_display(1, 3), "22", "D2: =SUM(A2:B2) should be 22");
+        assert_eq!(sheet.get_display(2, 3), "33", "D3: =SUM(A3:B3) should be 33");
+        assert_eq!(sheet.get_display(3, 3), "44", "D4: =SUM(A4:B4) should be 44");
+
+        // Verify cross-column references
+        assert_eq!(sheet.get_display(0, 4), "21", "E1: =C1+D1 should be 21");
+        assert_eq!(sheet.get_display(1, 4), "62", "E2: =C2+D2 should be 62");
+        assert_eq!(sheet.get_display(2, 4), "123", "E3: =C3+D3 should be 123");
+
+        // Verify nested functions
+        assert_eq!(sheet.get_display(0, 5), "25", "F1: =AVERAGE(A1:A4) should be 25");
+        assert_eq!(sheet.get_display(1, 5), "4", "F2: =MAX(B1:B4) should be 4");
+        assert_eq!(sheet.get_display(2, 5), "10", "F3: =MIN(A1:A4) should be 10");
+    }
+
+    #[test]
+    fn test_parse_xlsx_cell_ref() {
+        assert_eq!(parse_xlsx_cell_ref("A1"), Some((0, 0)));
+        assert_eq!(parse_xlsx_cell_ref("B2"), Some((1, 1)));
+        assert_eq!(parse_xlsx_cell_ref("Z1"), Some((0, 25)));
+        assert_eq!(parse_xlsx_cell_ref("AA1"), Some((0, 26)));
+        assert_eq!(parse_xlsx_cell_ref("R104"), Some((103, 17)));
+        assert_eq!(parse_xlsx_cell_ref("IV256"), Some((255, 255)));
+        assert_eq!(parse_xlsx_cell_ref(""), None);
+        assert_eq!(parse_xlsx_cell_ref("123"), None);
+        assert_eq!(parse_xlsx_cell_ref("ABC"), None);
+    }
+
+    #[test]
+    fn test_extract_formulas_from_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet>
+            <sheetData>
+                <row r="103">
+                    <c r="R103"><v>100</v></c>
+                </row>
+                <row r="104">
+                    <c r="R104"><f>R103*1.03</f></c>
+                </row>
+                <row r="105">
+                    <c r="R105"><f>R104*1.03</f><v>106.09</v></c>
+                </row>
+            </sheetData>
+        </worksheet>"#;
+
+        let mut formulas = Vec::new();
+        extract_formulas_from_xml(xml, 0, &mut formulas);
+
+        // Should find both formula cells (with and without <v>)
+        assert_eq!(formulas.len(), 2);
+
+        // R104 (row=103, col=17): formula without <v>
+        assert_eq!(formulas[0], (0, 103, 17, "R103*1.03".to_string()));
+
+        // R105 (row=104, col=17): formula with <v>
+        assert_eq!(formulas[1], (0, 104, 17, "R104*1.03".to_string()));
+    }
+
+    #[test]
+    fn test_extract_shared_formula_followers() {
+        // Simulates Excel's shared formula storage:
+        // R100 is the master: <f t="shared" si="5" ref="R100:R104">R99*1.03</f>
+        // R101-R104 are followers: <f t="shared" si="5"/>
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet>
+            <sheetData>
+                <row r="99"><c r="R99"><v>100</v></c></row>
+                <row r="100"><c r="R100"><f t="shared" si="5" ref="R100:R104">R99*1.03</f><v>103</v></c></row>
+                <row r="101"><c r="R101"><f t="shared" si="5"/></c></row>
+                <row r="102"><c r="R102"><f t="shared" si="5"/></c></row>
+                <row r="103"><c r="R103"><f t="shared" si="5"/></c></row>
+                <row r="104"><c r="R104"><f t="shared" si="5"/></c></row>
+            </sheetData>
+        </worksheet>"#;
+
+        let mut formulas = Vec::new();
+        extract_formulas_from_xml(xml, 0, &mut formulas);
+
+        // Should find 5 formula cells: 1 master + 4 followers
+        assert_eq!(formulas.len(), 5, "Expected 5 formulas, got {:?}", formulas);
+
+        // Master R100: R99*1.03
+        assert_eq!(formulas[0], (0, 99, 17, "R99*1.03".to_string()));
+
+        // Followers should have shifted references:
+        // R101 (offset +1 row): R100*1.03
+        assert_eq!(formulas[1], (0, 100, 17, "R100*1.03".to_string()));
+        // R102 (offset +2 rows): R101*1.03
+        assert_eq!(formulas[2], (0, 101, 17, "R101*1.03".to_string()));
+        // R103 (offset +3 rows): R102*1.03
+        assert_eq!(formulas[3], (0, 102, 17, "R102*1.03".to_string()));
+        // R104 (offset +4 rows): R103*1.03
+        assert_eq!(formulas[4], (0, 103, 17, "R103*1.03".to_string()));
+    }
+
+    #[test]
+    fn test_adjust_formula_refs_for_shared() {
+        // Simple row shift
+        assert_eq!(
+            adjust_formula_refs_for_shared("R99*1.03", 1, 0),
+            "R100*1.03"
+        );
+        assert_eq!(
+            adjust_formula_refs_for_shared("R99*1.03", 4, 0),
+            "R103*1.03"
+        );
+
+        // Column shift
+        assert_eq!(
+            adjust_formula_refs_for_shared("A1+B1", 0, 1),
+            "B1+C1"
+        );
+
+        // Both row and column
+        assert_eq!(
+            adjust_formula_refs_for_shared("A1*B2", 2, 1),
+            "B3*C4"
+        );
+
+        // Absolute refs should not shift
+        assert_eq!(
+            adjust_formula_refs_for_shared("$A$1*B2", 1, 1),
+            "$A$1*C3"
+        );
+
+        // Range ref
+        assert_eq!(
+            adjust_formula_refs_for_shared("SUM(A1:A10)", 5, 0),
+            "SUM(A6:A15)"
+        );
+
+        // col_num_to_letters
+        assert_eq!(col_num_to_letters(0), "A");
+        assert_eq!(col_num_to_letters(25), "Z");
+        assert_eq!(col_num_to_letters(26), "AA");
+        assert_eq!(col_num_to_letters(27), "AB");
+    }
+
+    #[test]
+    fn test_parse_shared_strings() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="4" uniqueCount="4">
+            <si><t>Hello</t></si>
+            <si><t>World</t></si>
+            <si><r><t>Rich</t></r><r><t> Text</t></r></si>
+            <si><t>10%</t></si>
+        </sst>"#;
+        let strings = parse_shared_strings(xml);
+        assert_eq!(strings.len(), 4);
+        assert_eq!(strings[0], "Hello");
+        assert_eq!(strings[1], "World");
+        assert_eq!(strings[2], "Rich Text");
+        assert_eq!(strings[3], "10%");
+    }
+
+    #[test]
+    fn test_resolve_cell_value() {
+        let shared = vec!["Vacancy Rate".to_string(), "$5.00".to_string()];
+
+        // Shared string lookup
+        assert_eq!(
+            resolve_cell_value(Some("s"), "0", "", &shared),
+            Some("Vacancy Rate".to_string())
+        );
+        assert_eq!(
+            resolve_cell_value(Some("s"), "1", "", &shared),
+            Some("$5.00".to_string())
+        );
+        // Out of bounds
+        assert_eq!(resolve_cell_value(Some("s"), "99", "", &shared), None);
+
+        // Numeric
+        assert_eq!(
+            resolve_cell_value(Some("n"), "0.1", "", &shared),
+            Some("0.1".to_string())
+        );
+        assert_eq!(
+            resolve_cell_value(None, "42", "", &shared),
+            Some("42".to_string())
+        );
+
+        // Boolean
+        assert_eq!(
+            resolve_cell_value(Some("b"), "1", "", &shared),
+            Some("TRUE".to_string())
+        );
+        assert_eq!(
+            resolve_cell_value(Some("b"), "0", "", &shared),
+            Some("FALSE".to_string())
+        );
+
+        // Inline string
+        assert_eq!(
+            resolve_cell_value(Some("inlineStr"), "", "inline text", &shared),
+            Some("inline text".to_string())
+        );
+
+        // Empty values
+        assert_eq!(resolve_cell_value(Some("n"), "", "", &shared), None);
+        assert_eq!(resolve_cell_value(Some("inlineStr"), "", "", &shared), None);
+    }
+
+    #[test]
+    fn test_extract_values_from_xml() {
+        let shared_strings = vec![
+            "Vacancy Rate".to_string(),
+            "$5.00".to_string(),
+        ];
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet>
+            <sheetData>
+                <row r="8">
+                    <c r="S8" t="s"><v>0</v></c>
+                    <c r="T8" t="n"><v>0.1</v></c>
+                </row>
+                <row r="9">
+                    <c r="S9" t="s"><v>1</v></c>
+                    <c r="T9"><v>5</v></c>
+                </row>
+                <row r="10">
+                    <c r="S10" t="inlineStr"><is><t>Inline</t></is></c>
+                </row>
+                <row r="11">
+                    <c r="T11"><f>SUM(A1:A10)</f><v>55</v></c>
+                </row>
+            </sheetData>
+        </worksheet>"#;
+
+        let mut out = Vec::new();
+        extract_values_from_xml(xml, 0, &shared_strings, &mut out);
+
+        // Should have 5 value cells (the formula cell T11 should be skipped)
+        assert_eq!(out.len(), 5);
+
+        // S8: shared string "Vacancy Rate"
+        assert_eq!(out[0], (0, 7, 18, "Vacancy Rate".to_string()));
+        // T8: numeric 0.1
+        assert_eq!(out[1], (0, 7, 19, "0.1".to_string()));
+        // S9: shared string "$5.00"
+        assert_eq!(out[2], (0, 8, 18, "$5.00".to_string()));
+        // T9: numeric 5 (no type = numeric)
+        assert_eq!(out[3], (0, 8, 19, "5".to_string()));
+        // S10: inline string "Inline"
+        assert_eq!(out[4], (0, 9, 18, "Inline".to_string()));
+        // Note: T11 has a formula, so it should NOT appear
+    }
+
+    #[test]
+    fn test_xlsx_roundtrip_formatting() {
+        use visigrid_engine::cell::{Alignment, CellFormat, CellBorder, BorderStyle, NumberFormat};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fmt_roundtrip.xlsx");
+
+        let mut wb = Workbook::new();
+        let sheet = wb.sheet_mut(0).unwrap();
+
+        // A1: bold + italic
+        sheet.set_value(0, 0, "Bold Italic");
+        let mut fmt = CellFormat::default();
+        fmt.bold = true;
+        fmt.italic = true;
+        sheet.set_format_from_import(0, 0, fmt);
+
+        // B1: font color (red) + font size 14
+        sheet.set_value(0, 1, "Red 14pt");
+        let mut fmt = CellFormat::default();
+        fmt.font_color = Some([255, 0, 0, 255]); // red RGBA
+        fmt.font_size = Some(14.0);
+        sheet.set_format_from_import(0, 1, fmt);
+
+        // C1: underline + strikethrough
+        sheet.set_value(0, 2, "U+S");
+        let mut fmt = CellFormat::default();
+        fmt.underline = true;
+        fmt.strikethrough = true;
+        sheet.set_format_from_import(0, 2, fmt);
+
+        // A2: CenterAcrossSelection alignment
+        sheet.set_value(1, 0, "Centered Title");
+        let mut fmt = CellFormat::default();
+        fmt.alignment = Alignment::CenterAcrossSelection;
+        sheet.set_format_from_import(1, 0, fmt);
+
+        // B2: also CenterAcrossSelection (empty continuation cell)
+        let mut fmt = CellFormat::default();
+        fmt.alignment = Alignment::CenterAcrossSelection;
+        sheet.set_format_from_import(1, 1, fmt);
+
+        // A3: background color (light blue)
+        sheet.set_value(2, 0, "Blue bg");
+        let mut fmt = CellFormat::default();
+        fmt.background_color = Some([173, 216, 230, 255]);
+        sheet.set_format_from_import(2, 0, fmt);
+
+        // B3: bottom border
+        sheet.set_value(2, 1, "Border");
+        let mut fmt = CellFormat::default();
+        fmt.border_bottom = CellBorder { style: BorderStyle::Thin, color: Some([0, 0, 0, 255]) };
+        sheet.set_format_from_import(2, 1, fmt);
+
+        // A4: custom number format
+        sheet.set_value(3, 0, "1234.5");
+        let mut fmt = CellFormat::default();
+        fmt.number_format = NumberFormat::Custom("#,##0.00".to_string());
+        sheet.set_format_from_import(3, 0, fmt);
+
+        // Export
+        let export_result = export(&wb, &path, None).expect("Export should succeed");
+        assert!(export_result.cells_exported > 0);
+
+        // Reimport
+        let (imported_wb, result) = import(&path).expect("Import should succeed");
+        assert!(result.styles_imported > 0, "Should import styles");
+        assert!(result.unique_styles > 0, "Should have unique styles");
+
+        let s = &imported_wb.sheets()[0];
+
+        // Verify bold + italic (A1)
+        let f = s.get_format(0, 0);
+        assert!(f.bold, "A1 should be bold");
+        assert!(f.italic, "A1 should be italic");
+
+        // Verify font color + size (B1)
+        let f = s.get_format(0, 1);
+        assert!(f.font_color.is_some(), "B1 should have font color");
+        if let Some(color) = f.font_color {
+            assert_eq!(color[0], 255, "B1 font color red channel");
+            assert_eq!(color[1], 0, "B1 font color green channel");
+            assert_eq!(color[2], 0, "B1 font color blue channel");
+        }
+        assert!(f.font_size.is_some(), "B1 should have font size");
+        if let Some(size) = f.font_size {
+            assert!((size - 14.0).abs() < 0.1, "B1 font size should be ~14, got {}", size);
+        }
+
+        // Verify underline + strikethrough (C1)
+        let f = s.get_format(0, 2);
+        assert!(f.underline, "C1 should be underlined");
+        assert!(f.strikethrough, "C1 should have strikethrough");
+
+        // Verify CenterAcrossSelection (A2)
+        let f = s.get_format(1, 0);
+        assert_eq!(f.alignment, Alignment::CenterAcrossSelection, "A2 should be CenterAcrossSelection");
+
+        // Verify CenterAcrossSelection continuation (B2)
+        let f = s.get_format(1, 1);
+        assert_eq!(f.alignment, Alignment::CenterAcrossSelection, "B2 should be CenterAcrossSelection");
+
+        // Verify background color (A3)
+        let f = s.get_format(2, 0);
+        assert!(f.background_color.is_some(), "A3 should have background color");
+
+        // Verify border (B3)
+        let f = s.get_format(2, 1);
+        assert!(f.border_bottom.style != BorderStyle::None, "B3 should have bottom border");
+
+        // Verify custom number format (A4)
+        let f = s.get_format(3, 0);
+        match &f.number_format {
+            NumberFormat::Custom(code) => {
+                assert!(code.contains("#,##0"), "A4 number format should contain '#,##0', got '{}'", code);
+            }
+            other => {
+                // May be mapped to a built-in format, which is also acceptable
+                // The key test is that the value displays correctly
+                let display = s.get_formatted_display(3, 0);
+                assert!(
+                    display.contains("1,234") || display.contains("1234"),
+                    "A4 should display formatted number, got '{}' (format: {:?})", display, other
+                );
+            }
+        }
     }
 }

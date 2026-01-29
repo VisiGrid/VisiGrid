@@ -3,6 +3,7 @@
 //! Shows detailed statistics and warnings after importing xlsx/xls/xlsb/ods files.
 
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use visigrid_io::xlsx::ImportResult;
 
 use crate::app::Spreadsheet;
@@ -126,6 +127,19 @@ fn render_summary_section(ir: &ImportResult, text_primary: Hsla, text_muted: Hsl
                 .child(stat_item("Cells", ir.cells_imported, text_muted))
                 .child(stat_item("Formulas", ir.formulas_imported, text_muted))
                 .child(stat_item("Dates/Times", ir.dates_imported, text_muted))
+                .when(ir.shared_formula_groups > 0, |d| {
+                    d.child(stat_item("Shared groups", ir.shared_formula_groups, text_muted))
+                })
+                .when(ir.formula_cells_without_values > 0, |d| {
+                    d.child(stat_item("Formula backfill", ir.formula_cells_without_values, text_muted))
+                })
+                .when(ir.value_cells_backfilled > 0, |d| {
+                    d.child(stat_item("Value backfill", ir.value_cells_backfilled, text_muted))
+                })
+                .when(ir.styles_imported > 0, |d| {
+                    d.child(stat_item("Styled cells", ir.styles_imported, text_muted))
+                        .child(stat_item("Unique styles", ir.unique_styles, text_muted))
+                })
         )
         .child(
             div()
@@ -158,7 +172,11 @@ fn render_quality_section(
     warning_color: Hsla,
     error_color: Hsla,
 ) -> impl IntoElement {
-    let has_issues = ir.formulas_failed > 0 || ir.formulas_with_unknowns > 0 || !ir.unsupported_functions.is_empty();
+    let has_issues = ir.formulas_failed > 0
+        || ir.formulas_with_unknowns > 0
+        || !ir.unsupported_functions.is_empty()
+        || ir.recalc_errors > 0
+        || ir.recalc_circular > 0;
 
     if !has_issues {
         return div().into_any_element();
@@ -188,6 +206,24 @@ fn render_quality_section(
                 .child(format!("Formula parse errors: {}", ir.formulas_failed))
                 .into_any_element()
         );
+
+        // Show sample formulas that failed to parse
+        if !ir.parse_error_samples.is_empty() {
+            children.push(
+                div()
+                    .ml_2()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .children(ir.parse_error_samples.iter().take(5).map(|sample| {
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(text_muted)
+                            .child(sample.clone())
+                    }))
+                    .into_any_element()
+            );
+        }
     }
 
     // Formulas with unknown functions
@@ -231,6 +267,73 @@ fn render_quality_section(
                                 .child(format!("{} ({})", name, count))
                         }))
                 )
+                .into_any_element()
+        );
+    }
+
+    // Post-recalc errors
+    if ir.recalc_errors > 0 {
+        children.push(
+            div()
+                .text_size(px(11.0))
+                .text_color(error_color)
+                .child(format!("Formula errors (post-recalc): {}", ir.recalc_errors))
+                .into_any_element()
+        );
+    }
+
+    // Circular references
+    if ir.recalc_circular > 0 {
+        children.push(
+            div()
+                .text_size(px(11.0))
+                .text_color(error_color)
+                .child(format!("Circular references: {}", ir.recalc_circular))
+                .into_any_element()
+        );
+    }
+
+    // Error examples (top N concrete cells)
+    if !ir.recalc_error_examples.is_empty() {
+        children.push(
+            div()
+                .mt_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(text_muted)
+                        .child("Examples:")
+                )
+                .children(ir.recalc_error_examples.iter().map(|ex| {
+                    let detail = if let Some(ref f) = ex.formula {
+                        format!("{}!{}  {}  {}  {}", ex.sheet, ex.address, ex.kind, ex.error, f)
+                    } else {
+                        format!("{}!{}  {}  {}", ex.sheet, ex.address, ex.kind, ex.error)
+                    };
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(error_color)
+                        .child(detail)
+                }))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(text_muted)
+                        .child("These errors occur when imported formulas cannot be evaluated correctly.")
+                )
+                .into_any_element()
+        );
+    } else if ir.recalc_errors > 0 || ir.recalc_circular > 0 {
+        // Explanatory text without examples (shouldn't happen, but defensive)
+        children.push(
+            div()
+                .mt_1()
+                .text_size(px(10.0))
+                .text_color(text_muted)
+                .child("These errors occur when imported formulas cannot be evaluated correctly.")
                 .into_any_element()
         );
     }
@@ -279,12 +382,14 @@ fn render_sheet_table(
                         .text_size(px(10.0))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(text_muted)
-                        .child(div().w(px(120.0)).px_2().py_1().child("Sheet"))
-                        .child(div().w(px(60.0)).px_2().py_1().text_right().child("Cells"))
-                        .child(div().w(px(60.0)).px_2().py_1().text_right().child("Formulas"))
-                        .child(div().w(px(50.0)).px_2().py_1().text_right().child("Errors"))
-                        .child(div().w(px(60.0)).px_2().py_1().text_right().child("Unknown"))
-                        .child(div().w(px(60.0)).px_2().py_1().child("Truncated"))
+                        .child(div().w(px(90.0)).px_2().py_1().child("Sheet"))
+                        .child(div().w(px(55.0)).px_2().py_1().text_right().child("Cells"))
+                        .child(div().w(px(55.0)).px_2().py_1().text_right().child("Formulas"))
+                        .child(div().w(px(45.0)).px_2().py_1().text_right().child("Parse"))
+                        .child(div().w(px(50.0)).px_2().py_1().text_right().child("Recalc"))
+                        .child(div().w(px(40.0)).px_2().py_1().text_right().child("Circ"))
+                        .child(div().w(px(50.0)).px_2().py_1().text_right().child("Unknown"))
+                        .child(div().w(px(45.0)).px_2().py_1().child("Trunc"))
                 )
                 // Data rows
                 .children(ir.sheet_stats.iter().enumerate().map(|(idx, stats)| {
@@ -303,18 +408,18 @@ fn render_sheet_table(
                         .text_color(text_muted)
                         .child(
                             div()
-                                .w(px(120.0))
+                                .w(px(90.0))
                                 .px_2()
                                 .py_1()
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .child(stats.name.clone())
                         )
-                        .child(div().w(px(60.0)).px_2().py_1().text_right().child(format_number(stats.cells_imported)))
-                        .child(div().w(px(60.0)).px_2().py_1().text_right().child(format_number(stats.formulas_imported)))
+                        .child(div().w(px(55.0)).px_2().py_1().text_right().child(format_number(stats.cells_imported)))
+                        .child(div().w(px(55.0)).px_2().py_1().text_right().child(format_number(stats.formulas_imported)))
                         .child(
                             div()
-                                .w(px(50.0))
+                                .w(px(45.0))
                                 .px_2()
                                 .py_1()
                                 .text_right()
@@ -323,7 +428,25 @@ fn render_sheet_table(
                         )
                         .child(
                             div()
-                                .w(px(60.0))
+                                .w(px(50.0))
+                                .px_2()
+                                .py_1()
+                                .text_right()
+                                .text_color(if stats.recalc_errors > 0 { text_primary } else { text_disabled })
+                                .child(format_number(stats.recalc_errors))
+                        )
+                        .child(
+                            div()
+                                .w(px(40.0))
+                                .px_2()
+                                .py_1()
+                                .text_right()
+                                .text_color(if stats.recalc_circular > 0 { text_primary } else { text_disabled })
+                                .child(format_number(stats.recalc_circular))
+                        )
+                        .child(
+                            div()
+                                .w(px(50.0))
                                 .px_2()
                                 .py_1()
                                 .text_right()
@@ -332,7 +455,7 @@ fn render_sheet_table(
                         )
                         .child(
                             div()
-                                .w(px(60.0))
+                                .w(px(45.0))
                                 .px_2()
                                 .py_1()
                                 .text_color(if truncated { text_primary } else { text_disabled })

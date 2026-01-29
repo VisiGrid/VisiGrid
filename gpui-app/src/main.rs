@@ -321,6 +321,8 @@ fn parse_args() -> CliArgs {
 }
 
 fn main() {
+    let startup_instant = std::time::Instant::now();
+
     let cli = parse_args();
 
     // Move cli values out for use in closure
@@ -474,6 +476,7 @@ fn main() {
                     move |window, cx| {
                         let entity = cx.new(|cx| {
                             let mut app = Spreadsheet::new(window, cx);
+                            app.startup_instant = Some(startup_instant);
 
                             // Load file if present and exists
                             if let Some(ref path) = window_session.file {
@@ -512,6 +515,7 @@ fn main() {
                 move |window, cx| {
                     let entity = cx.new(|cx| {
                         let mut app = Spreadsheet::new(window, cx);
+                        app.startup_instant = Some(startup_instant);
                         if path.exists() {
                             app.load_file(&path, cx);
                         } else {
@@ -537,7 +541,11 @@ fn main() {
             cx.open_window(
                 build_window_options(WindowBounds::Windowed(bounds)),
                 |window, cx| {
-                    let entity = cx.new(|cx| Spreadsheet::new(window, cx));
+                    let entity = cx.new(|cx| {
+                        let mut app = Spreadsheet::new(window, cx);
+                        app.startup_instant = Some(startup_instant);
+                        app
+                    });
                     // Register with window registry for window switcher
                     entity.update(cx, |spreadsheet, cx| {
                         spreadsheet.register_with_window_registry(cx);

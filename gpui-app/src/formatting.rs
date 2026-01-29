@@ -56,6 +56,8 @@ impl Spreadsheet {
                         state.text_overflow = TriState::Uniform(format.text_overflow);
                         state.number_format = TriState::Uniform(format.number_format);
                         state.background_color = TriState::Uniform(format.background_color);
+                        state.font_size = TriState::Uniform(format.font_size);
+                        state.font_color = TriState::Uniform(format.font_color);
                         last_display = Some(display);
                         first = false;
                     } else {
@@ -70,6 +72,8 @@ impl Spreadsheet {
                         state.text_overflow = state.text_overflow.combine(&format.text_overflow);
                         state.number_format = state.number_format.combine(&format.number_format);
                         state.background_color = state.background_color.combine(&format.background_color);
+                        state.font_size = state.font_size.combine(&format.font_size);
+                        state.font_color = state.font_color.combine(&format.font_color);
                         last_display = Some(display);
                     }
                 }
@@ -232,6 +236,7 @@ impl Spreadsheet {
                 Alignment::Left => "Left",
                 Alignment::Center => "Center",
                 Alignment::Right => "Right",
+                Alignment::CenterAcrossSelection => "Center Across",
             };
             let desc = format!("Align {}", align_name);
             self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Alignment, desc.clone());
@@ -308,7 +313,8 @@ impl Spreadsheet {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
-                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, format));
+                    let fmt = format.clone();
+                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, fmt));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });
@@ -318,7 +324,7 @@ impl Spreadsheet {
         }
         let count = patches.len();
         if count > 0 {
-            let format_name = match format {
+            let format_name = match &format {
                 NumberFormat::General => "General",
                 NumberFormat::Number { .. } => "Number",
                 NumberFormat::Currency { .. } => "Currency",
@@ -326,6 +332,7 @@ impl Spreadsheet {
                 NumberFormat::Date { .. } => "Date",
                 NumberFormat::Time => "Time",
                 NumberFormat::DateTime => "DateTime",
+                NumberFormat::Custom(_) => "Custom",
             };
             let desc = format!("{} format", format_name);
             self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::NumberFormat, desc.clone());
@@ -342,17 +349,17 @@ impl Spreadsheet {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
-                    let new_format = match before.number_format {
+                    let new_format = match &before.number_format {
                         NumberFormat::Number { decimals } => {
-                            let new_dec = (decimals as i8 + delta).clamp(0, 10) as u8;
+                            let new_dec = (*decimals as i8 + delta).clamp(0, 10) as u8;
                             Some(NumberFormat::Number { decimals: new_dec })
                         }
                         NumberFormat::Currency { decimals } => {
-                            let new_dec = (decimals as i8 + delta).clamp(0, 10) as u8;
+                            let new_dec = (*decimals as i8 + delta).clamp(0, 10) as u8;
                             Some(NumberFormat::Currency { decimals: new_dec })
                         }
                         NumberFormat::Percent { decimals } => {
-                            let new_dec = (decimals as i8 + delta).clamp(0, 10) as u8;
+                            let new_dec = (*decimals as i8 + delta).clamp(0, 10) as u8;
                             Some(NumberFormat::Percent { decimals: new_dec })
                         }
                         _ => None,

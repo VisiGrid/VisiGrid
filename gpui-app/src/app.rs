@@ -471,6 +471,8 @@ pub struct SelectionFormatState {
     pub text_overflow: TriState<TextOverflow>,
     pub number_format: TriState<NumberFormat>,
     pub background_color: TriState<Option<[u8; 4]>>,
+    pub font_size: TriState<Option<f32>>,
+    pub font_color: TriState<Option<[u8; 4]>>,
 }
 
 impl Default for SelectionFormatState {
@@ -489,6 +491,8 @@ impl Default for SelectionFormatState {
             text_overflow: TriState::Empty,
             number_format: TriState::Empty,
             background_color: TriState::Empty,
+            font_size: TriState::Empty,
+            font_color: TriState::Empty,
         }
     }
 }
@@ -1772,6 +1776,10 @@ pub struct Spreadsheet {
     pub import_overlay_visible: bool,
     pub import_started_at: Option<std::time::Instant>,
 
+    // Startup timing (cold start measurement)
+    pub startup_instant: Option<std::time::Instant>,
+    pub cold_start_ms: Option<u128>,
+
     // Export report state (for Excel exports with warnings)
     pub export_result: Option<visigrid_io::xlsx::ExportResult>,
     pub export_filename: Option<String>,  // Exported filename for display
@@ -2097,6 +2105,9 @@ impl Spreadsheet {
             import_in_progress: false,
             import_overlay_visible: false,
             import_started_at: None,
+
+            startup_instant: None,
+            cold_start_ms: None,
 
             export_result: None,
             export_filename: None,
@@ -3688,12 +3699,33 @@ impl Spreadsheet {
         rows.max(1).min(NUM_ROWS)
     }
 
-    /// Calculate visible columns based on window width
+    /// Calculate visible columns based on window width and actual column widths.
+    /// Sums real column widths starting from the current scroll position to determine
+    /// how many columns fit in the viewport. Adds 1 extra column for partial visibility.
     pub fn visible_cols(&self) -> usize {
         let width: f32 = self.window_size.width.into();
-        let available_width = width - self.metrics.header_w;  // Row header scales with zoom
-        let cols = (available_width / self.metrics.cell_w).floor() as usize;
-        cols.max(1).min(NUM_COLS)
+        let available_width = width - self.metrics.header_w;
+        let scroll_col = self.view_state.scroll_col;
+        let frozen_cols = self.view_state.frozen_cols;
+
+        // Account for frozen columns first (they consume space before scrollable area)
+        let mut used = 0.0_f32;
+        for fc in 0..frozen_cols {
+            used += self.metrics.col_width(self.col_width(fc));
+        }
+
+        // Sum actual column widths from scroll position until we exceed available width
+        let mut count = frozen_cols;
+        let mut col = scroll_col;
+        while used < available_width && col < NUM_COLS {
+            used += self.metrics.col_width(self.col_width(col));
+            count += 1;
+            col += 1;
+        }
+
+        // Add 1 extra for partially visible columns at the edge
+        count = count.saturating_add(1);
+        count.max(1).min(NUM_COLS)
     }
 
     /// Update window size (called on resize)
@@ -4443,6 +4475,18 @@ impl Render for Spreadsheet {
         self.flush_nav_scroll();
         // Record render timestamp for latency instrumentation
         self.nav_perf.mark_render();
+
+        // Cold start measurement (fires once on first render)
+        if self.cold_start_ms.is_none() {
+            if let Some(start) = self.startup_instant {
+                let ms = start.elapsed().as_millis();
+                self.cold_start_ms = Some(ms);
+                // Show for empty launches (no file loaded yet)
+                if self.current_file.is_none() && self.status_message.is_none() {
+                    self.status_message = Some(format!("Ready in {}ms", ms));
+                }
+            }
+        }
 
         // One-shot title refresh (triggered by async operations without window access)
         if self.pending_title_refresh {

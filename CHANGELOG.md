@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.3.7
+
+### XLSX Import Overhaul
+
+Importing Excel files with shared formulas, formula-only cells, and missing value cells now works correctly. Financial models that previously showed mass #CIRC! and #ERR errors now import cleanly.
+
+- **calamine 0.26 → 0.32** — fixes shared formula expansion for `t="shared"` cells with ranges, absolute references, and column/row ranges
+- **Topological recompute on import** — all formulas are re-evaluated in dependency order after the full graph is built, fixing stale cached values from per-cell evaluation during import
+- **XML formula backfill** — cells with `<f>` elements but no cached `<v>` value (skipped by calamine) are now extracted directly from worksheet XML and backfilled
+- **Shared formula follower expansion** — 2-pass XML parsing reconstructs follower formulas from master definitions with reference shifting (respects `$` absolute anchors)
+- **XML value backfill** — cells stored as shared strings, inline strings, or numeric values that calamine drops are recovered from worksheet XML via shared string table resolution
+- **Post-recalc error counting** — circular refs (`is_cycle_error()`) and formula errors (`Value::Error`) are counted after topo recalc, with up to 5 concrete examples in the import report
+- **Import report diagnostics** — shows formula backfill count, value backfill count, shared formula groups, recalc errors with cell addresses and formulas
+- **Status bar error count** — "Opened in Xms — 0 errors" or "Opened in Xms — N errors (Import Report)" with clickable access
+
+### XLSX Formatting Import
+
+Cell formatting from Excel files is now preserved on import.
+
+- **styles.xml parsing** — number formats, font styles, fills, borders, alignment, column widths, and row heights extracted from XLSX style tables
+- **Style deduplication** — `StyleTable` with `style_id` per cell, interning identical formats to minimize memory
+- **Theme color approximation** — Excel theme colors with tint modifiers approximated to RGB with import report warnings
+- **Column widths and row heights** — imported from XLSX and applied to sheet layout
+
+### Number Format Rendering (ssfmt)
+
+Custom Excel number format codes now render correctly via the `ssfmt` crate (ECMA-376 compliant, 99.99% SheetJS SSF compatibility).
+
+- **Accounting formats** — zero values show `-` instead of `$-??` garbage; `_` padding and `*` fill handled correctly
+- **Multi-section formats** — positive/negative/zero/text sections selected and rendered properly
+- **Full format code support** — thousands separators, decimals, percent, currency, date/time tokens, conditional sections
+- **Graceful fallback** — if ssfmt can't parse a code, falls back to VisiGrid's built-in formatter
+
+### Formula Engine Additions
+
+- **Unary plus** — `=+A1` parses correctly (common in financial models from Excel)
+- **Power operator** — `A1^2` with right-associative precedence and fractional exponents
+- **Percent operator** — `50%` → 0.5, works in expressions (`=A1*10%`)
+- **IRR / XIRR** — Internal Rate of Return with Newton-Raphson iteration and bisection fallback
+- **NPV** — Net Present Value
+- **PMT / IPMT / PPMT** — Loan payment functions (total, interest, principal)
+- **FV / PV** — Future Value and Present Value
+- **CUMIPMT / CUMPRINC** — Cumulative interest and principal over a period range
+- **IFNA / ISNA** — Error handling for #N/A values
+- **XLOOKUP** — Modern lookup with exact match and custom default
+- **TEXTJOIN** — Join text with delimiter and ignore-empty option
+- **AVERAGEIF / AVERAGEIFS** — Conditional averaging
+- **SPARKLINE** — Bar/line/winloss sparkline rendering in cells
+
+### Recalc Engine
+
+- **Value-typed computed cache** — `HashMap<(usize, usize), Value>` replaces String cache, eliminating lossy numeric conversions
+- **No evaluate-on-cache-miss** — all getter paths return defaults on cache miss; only topo recalc and `set_value()` populate the cache
+- **Correct recalc ordering** — workbook-level topological evaluation ensures upstream cells are computed before dependents
+
+### Internal
+
+- **Dependency upgrades** — calamine 0.32, quick-xml 0.38, zip 4, ssfmt 0.1, regex 1
+- **quick-xml 0.38 migration** — `unescape()` → `decode()` in validation parser
+
 ## 0.3.6
 
 ### Tab-Chain Return (Excel-Style)

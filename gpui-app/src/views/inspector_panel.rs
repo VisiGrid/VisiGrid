@@ -2525,6 +2525,7 @@ fn render_number_format_section(
         TriState::Uniform(NumberFormat::Date { style }) => ("Date", None, Some(*style)),
         TriState::Uniform(NumberFormat::Time) => ("Time", None, None),
         TriState::Uniform(NumberFormat::DateTime) => ("DateTime", None, None),
+        TriState::Uniform(NumberFormat::Custom(_)) => ("Custom", None, None),
         TriState::Mixed => ("Mixed", None, None),
         TriState::Empty => ("General", None, None),
     };

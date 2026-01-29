@@ -3200,6 +3200,7 @@ fn render_f1_help_overlay(app: &Spreadsheet, cx: &App) -> impl IntoElement {
             visigrid_engine::cell::NumberFormat::Date { .. } => format_badges.push("Date"),
             visigrid_engine::cell::NumberFormat::Time => format_badges.push("Time"),
             visigrid_engine::cell::NumberFormat::DateTime => format_badges.push("DateTime"),
+            visigrid_engine::cell::NumberFormat::Custom(_) => format_badges.push("Custom"),
             visigrid_engine::cell::NumberFormat::General => {}
         }
         if format.bold { format_badges.push("Bold"); }

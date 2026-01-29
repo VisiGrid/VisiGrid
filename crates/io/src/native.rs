@@ -5,7 +5,7 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 
 use visigrid_engine::cell::{Alignment, CellBorder, CellFormat, DateStyle, NumberFormat, TextOverflow, VerticalAlignment};
-use visigrid_engine::sheet::{Sheet, SheetId};
+use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
 
@@ -40,6 +40,14 @@ CREATE TABLE IF NOT EXISTS named_ranges (
     end_row INTEGER,               -- NULL for cell type
     end_col INTEGER,               -- NULL for cell type
     description TEXT
+);
+
+CREATE TABLE IF NOT EXISTS merged_regions (
+    start_row INTEGER NOT NULL,
+    start_col INTEGER NOT NULL,
+    end_row INTEGER NOT NULL,
+    end_col INTEGER NOT NULL,
+    PRIMARY KEY (start_row, start_col)
 );
 
 CREATE TABLE IF NOT EXISTS hub_link (
@@ -128,16 +136,17 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
                     Alignment::Left => 0,
                     Alignment::Center => 1,
                     Alignment::Right => 2,
+                    Alignment::CenterAcrossSelection => 1, // Stored as Center in native format
                 };
 
                 // Convert number format to integer + decimals
                 // Date uses decimals field to store style (0=Short, 1=Long, 2=Iso)
                 // Time = 5, DateTime = 6
-                let (number_type, decimals) = match format.number_format {
+                let (number_type, decimals) = match &format.number_format {
                     NumberFormat::General => (0, 2),
-                    NumberFormat::Number { decimals } => (1, decimals as i32),
-                    NumberFormat::Currency { decimals } => (2, decimals as i32),
-                    NumberFormat::Percent { decimals } => (3, decimals as i32),
+                    NumberFormat::Number { decimals } => (1, *decimals as i32),
+                    NumberFormat::Currency { decimals } => (2, *decimals as i32),
+                    NumberFormat::Percent { decimals } => (3, *decimals as i32),
                     NumberFormat::Date { style } => (4, match style {
                         DateStyle::Short => 0,
                         DateStyle::Long => 1,
@@ -145,6 +154,7 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
                     }),
                     NumberFormat::Time => (5, 0),
                     NumberFormat::DateTime => (6, 0),
+                    NumberFormat::Custom(_) => (0, 2), // Custom stored as General in native format
                 };
 
                 stmt.execute(params![
@@ -284,6 +294,8 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             text_overflow: TextOverflow::Clip,  // TODO: Add text_overflow column to database schema
             number_format,
             font_family: fmt_font_family,
+            font_size: None,
+            font_color: None,
             background_color: None,  // TODO: Add background_color column to database schema
             border_top: CellBorder::default(),     // TODO: Add border columns to database schema
             border_right: CellBorder::default(),
@@ -373,15 +385,16 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     Alignment::Left => 0,
                     Alignment::Center => 1,
                     Alignment::Right => 2,
+                    Alignment::CenterAcrossSelection => 1, // Stored as Center in native format
                 };
 
                 // Convert number format to integer + decimals
                 // Time = 5, DateTime = 6
-                let (number_type, decimals) = match format.number_format {
+                let (number_type, decimals) = match &format.number_format {
                     NumberFormat::General => (0, 2),
-                    NumberFormat::Number { decimals } => (1, decimals as i32),
-                    NumberFormat::Currency { decimals } => (2, decimals as i32),
-                    NumberFormat::Percent { decimals } => (3, decimals as i32),
+                    NumberFormat::Number { decimals } => (1, *decimals as i32),
+                    NumberFormat::Currency { decimals } => (2, *decimals as i32),
+                    NumberFormat::Percent { decimals } => (3, *decimals as i32),
                     NumberFormat::Date { style } => (4, match style {
                         DateStyle::Short => 0,
                         DateStyle::Long => 1,
@@ -389,6 +402,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     }),
                     NumberFormat::Time => (5, 0),
                     NumberFormat::DateTime => (6, 0),
+                    NumberFormat::Custom(_) => (0, 2), // Custom stored as General in native format
                 };
 
                 stmt.execute(params![
@@ -434,6 +448,22 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                 end_row,
                 end_col,
                 nr.description.as_deref()
+            ]).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Save merged regions
+    {
+        let mut stmt = conn.prepare(
+            "INSERT INTO merged_regions (start_row, start_col, end_row, end_col) VALUES (?1, ?2, ?3, ?4)"
+        ).map_err(|e| e.to_string())?;
+
+        for merge in &sheet.merged_regions {
+            stmt.execute(params![
+                merge.start.0 as i64,
+                merge.start.1 as i64,
+                merge.end.0 as i64,
+                merge.end.1 as i64,
             ]).map_err(|e| e.to_string())?;
         }
     }
@@ -511,6 +541,35 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
 
             // Add to workbook (using the internal method)
             let _ = workbook.named_ranges_mut().set(named_range);
+        }
+    }
+
+    // Load merged regions if the table exists (backward compatibility)
+    let has_merged_regions = conn
+        .prepare("SELECT start_row FROM merged_regions LIMIT 1")
+        .is_ok();
+
+    if has_merged_regions {
+        let mut stmt = conn.prepare(
+            "SELECT start_row, start_col, end_row, end_col FROM merged_regions"
+        ).map_err(|e| e.to_string())?;
+
+        let merge_iter = stmt
+            .query_map([], |row| {
+                let sr: i64 = row.get(0)?;
+                let sc: i64 = row.get(1)?;
+                let er: i64 = row.get(2)?;
+                let ec: i64 = row.get(3)?;
+                Ok((sr as usize, sc as usize, er as usize, ec as usize))
+            })
+            .map_err(|e| e.to_string())?;
+
+        if let Some(sheet) = workbook.sheet_mut(0) {
+            for merge_result in merge_iter {
+                let (sr, sc, er, ec) = merge_result.map_err(|e| e.to_string())?;
+                let region = MergedRegion::new(sr, sc, er, ec);
+                let _ = sheet.add_merge(region); // silently skip overlaps on load
+            }
         }
     }
 
@@ -782,6 +841,82 @@ mod tests {
 
         // Should also find case-insensitively
         assert!(loaded.get_named_range("mymixedcasename").is_some());
+    }
+
+    #[test]
+    fn test_merged_regions_persistence() {
+        let mut workbook = Workbook::new();
+        workbook.active_sheet_mut().set_value(0, 0, "Merged");
+
+        // Add merged regions
+        workbook
+            .active_sheet_mut()
+            .add_merge(MergedRegion::new(0, 0, 2, 3))
+            .unwrap();
+        workbook
+            .active_sheet_mut()
+            .add_merge(MergedRegion::new(5, 5, 7, 8))
+            .unwrap();
+
+        // Save
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+        save_workbook(&workbook, path).expect("Save should succeed");
+
+        // Load
+        let loaded = load_workbook(path).expect("Load should succeed");
+
+        // Verify merges preserved
+        let sheet = loaded.active_sheet();
+        assert_eq!(sheet.merged_regions.len(), 2);
+        assert_eq!(sheet.merged_regions[0], MergedRegion::new(0, 0, 2, 3));
+        assert_eq!(sheet.merged_regions[1], MergedRegion::new(5, 5, 7, 8));
+
+        // Verify index rebuilt
+        assert!(sheet.is_merge_origin(0, 0));
+        assert!(sheet.is_merge_hidden(1, 1));
+        assert!(sheet.get_merge(6, 6).is_some());
+        assert!(sheet.get_merge(3, 3).is_none());
+    }
+
+    #[test]
+    fn test_backward_compat_file_without_merged_regions() {
+        // Test loading a file without the merged_regions table
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(r#"
+                CREATE TABLE cells (
+                    row INTEGER NOT NULL,
+                    col INTEGER NOT NULL,
+                    value_type INTEGER NOT NULL,
+                    value_num REAL,
+                    value_text TEXT,
+                    fmt_bold INTEGER DEFAULT 0,
+                    fmt_italic INTEGER DEFAULT 0,
+                    fmt_underline INTEGER DEFAULT 0,
+                    fmt_alignment INTEGER DEFAULT 0,
+                    fmt_number_type INTEGER DEFAULT 0,
+                    fmt_decimals INTEGER DEFAULT 2,
+                    fmt_font_family TEXT,
+                    PRIMARY KEY (row, col)
+                );
+                CREATE TABLE meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO meta (key, value) VALUES ('sheet_name', 'Sheet1');
+                INSERT INTO meta (key, value) VALUES ('rows', '1000');
+                INSERT INTO meta (key, value) VALUES ('cols', '26');
+                INSERT INTO cells (row, col, value_type, value_text) VALUES (0, 0, 2, 'Hello');
+            "#).unwrap();
+        }
+
+        let loaded = load_workbook(path).expect("Should load old file without merged_regions table");
+        assert!(loaded.active_sheet().merged_regions.is_empty());
+        assert_eq!(loaded.active_sheet().get_raw(0, 0), "Hello");
     }
 
     #[test]

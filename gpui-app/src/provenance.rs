@@ -365,6 +365,7 @@ fn format_alignment(fmt: &visigrid_engine::cell::CellFormat) -> &'static str {
         Alignment::Left => "left",
         Alignment::Center => "center",
         Alignment::Right => "right",
+        Alignment::CenterAcrossSelection => "center_across",
     }
 }
 
@@ -404,6 +405,7 @@ fn format_number_format(fmt: &visigrid_engine::cell::NumberFormat) -> String {
         NumberFormat::Date { .. } => "number_format=\"date\"".to_string(),
         NumberFormat::Time => "number_format=\"time\"".to_string(),
         NumberFormat::DateTime => "number_format=\"datetime\"".to_string(),
+        NumberFormat::Custom(code) => format!("number_format=\"custom\", code=\"{}\"", code),
     }
 }
 

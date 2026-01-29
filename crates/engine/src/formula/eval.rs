@@ -1,7 +1,7 @@
 // Formula evaluator - evaluates bound expressions (after sheet name resolution)
 
 use crate::sheet::{SheetId, SheetRef};
-use super::parser::{BoundExpr, Expr, Op};
+use super::parser::{BoundExpr, Expr, Op, col_to_letters};
 
 /// Result of resolving a named range
 #[derive(Debug, Clone)]
@@ -32,6 +32,12 @@ pub trait CellLookup {
     /// Default implementation returns None (named ranges not supported).
     fn resolve_named_range(&self, _name: &str) -> Option<NamedRangeResolution> {
         None
+    }
+
+    /// Return diagnostic context info (for debugging recalc issues).
+    /// Default implementation returns empty string.
+    fn debug_context(&self) -> String {
+        String::new()
     }
 
     /// Get the current cell being evaluated (for ROW()/COLUMN() without args).
@@ -395,6 +401,55 @@ impl EvalResult {
     }
 }
 
+// =============================================================================
+// Financial helper functions
+// =============================================================================
+
+/// Compute PMT (payment for a loan with constant payments and interest rate)
+fn compute_pmt(rate: f64, nper: f64, pv: f64, fv: f64, pmt_type: f64) -> f64 {
+    if rate == 0.0 {
+        -(pv + fv) / nper
+    } else {
+        let pow = (1.0 + rate).powf(nper);
+        let p = (rate * (pv * pow + fv)) / (pow - 1.0);
+        if pmt_type != 0.0 {
+            -p / (1.0 + rate)
+        } else {
+            -p
+        }
+    }
+}
+
+/// Compute IPMT (interest portion of a payment for a specific period)
+/// Uses FV-based formula: IPMT = FV(rate, per-1, pmt, pv, type) * rate
+fn compute_ipmt(rate: f64, per: f64, nper: f64, pv: f64, fv: f64, pmt_type: f64) -> f64 {
+    if rate == 0.0 {
+        return 0.0;
+    }
+
+    let pmt = compute_pmt(rate, nper, pv, fv, pmt_type);
+
+    if pmt_type != 0.0 {
+        // Beginning of period payments
+        if per == 1.0 {
+            0.0
+        } else {
+            // FV after (per-2) periods with type=1
+            let k = per - 2.0;
+            let pow_k = (1.0 + rate).powf(k);
+            let fv_k = -pv * pow_k - pmt * (1.0 + rate) * (pow_k - 1.0) / rate;
+            fv_k * rate
+        }
+    } else {
+        // End of period payments
+        // FV after (per-1) periods with type=0
+        let k = per - 1.0;
+        let pow_k = (1.0 + rate).powf(k);
+        let fv_k = -pv * pow_k - pmt * (pow_k - 1.0) / rate;
+        fv_k * rate
+    }
+}
+
 pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
     match expr {
         Expr::Number(n) => EvalResult::Number(*n),
@@ -468,7 +523,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
 
             match op {
                 // Arithmetic operators - require numbers
-                Op::Add | Op::Sub | Op::Mul | Op::Div => {
+                Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Pow => {
                     let left_val = match left_result.to_number() {
                         Ok(n) => n,
                         Err(e) => return EvalResult::Error(e),
@@ -488,6 +543,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
                             }
                             left_val / right_val
                         }
+                        Op::Pow => left_val.powf(right_val),
                         _ => unreachable!(),
                     };
                     EvalResult::Number(result)
@@ -758,6 +814,193 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
             };
             EvalResult::Number(pmt)
         }
+        "IPMT" => {
+            // IPMT(rate, per, nper, pv, [fv], [type])
+            // Returns the interest portion of a payment for a given period
+            if args.len() < 4 || args.len() > 6 {
+                return EvalResult::Error("IPMT requires 4 to 6 arguments".to_string());
+            }
+            let rate = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let per = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let nper = match evaluate(&args[2], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let pv = match evaluate(&args[3], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let fv = if args.len() >= 5 {
+                match evaluate(&args[4], lookup).to_number() {
+                    Ok(n) => n,
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.0
+            };
+            let pmt_type = if args.len() >= 6 {
+                match evaluate(&args[5], lookup).to_number() {
+                    Ok(n) => if n != 0.0 { 1.0 } else { 0.0 },
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.0
+            };
+
+            if nper == 0.0 || per < 1.0 || per > nper {
+                return EvalResult::Error("#NUM!".to_string());
+            }
+
+            let ipmt = compute_ipmt(rate, per, nper, pv, fv, pmt_type);
+            EvalResult::Number(ipmt)
+        }
+        "PPMT" => {
+            // PPMT(rate, per, nper, pv, [fv], [type])
+            // Returns the principal portion of a payment for a given period
+            if args.len() < 4 || args.len() > 6 {
+                return EvalResult::Error("PPMT requires 4 to 6 arguments".to_string());
+            }
+            let rate = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let per = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let nper = match evaluate(&args[2], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let pv = match evaluate(&args[3], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let fv = if args.len() >= 5 {
+                match evaluate(&args[4], lookup).to_number() {
+                    Ok(n) => n,
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.0
+            };
+            let pmt_type = if args.len() >= 6 {
+                match evaluate(&args[5], lookup).to_number() {
+                    Ok(n) => if n != 0.0 { 1.0 } else { 0.0 },
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else {
+                0.0
+            };
+
+            if nper == 0.0 || per < 1.0 || per > nper {
+                return EvalResult::Error("#NUM!".to_string());
+            }
+
+            let pmt = compute_pmt(rate, nper, pv, fv, pmt_type);
+            let ipmt = compute_ipmt(rate, per, nper, pv, fv, pmt_type);
+            EvalResult::Number(pmt - ipmt)
+        }
+        "CUMPRINC" => {
+            // CUMPRINC(rate, nper, pv, start_period, end_period, type)
+            // Returns cumulative principal paid on a loan between two periods
+            if args.len() != 6 {
+                return EvalResult::Error("CUMPRINC requires 6 arguments".to_string());
+            }
+            let rate = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let nper = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let pv = match evaluate(&args[2], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let start_period = match evaluate(&args[3], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let end_period = match evaluate(&args[4], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let pmt_type = match evaluate(&args[5], lookup).to_number() {
+                Ok(n) => if n != 0.0 { 1.0 } else { 0.0 },
+                Err(e) => return EvalResult::Error(e),
+            };
+
+            if rate <= 0.0 || nper <= 0.0 || pv <= 0.0 {
+                return EvalResult::Error("#NUM!".to_string());
+            }
+            let sp = start_period as i64;
+            let ep = end_period as i64;
+            if sp < 1 || ep < sp || ep > nper as i64 {
+                return EvalResult::Error("#NUM!".to_string());
+            }
+
+            let pmt = compute_pmt(rate, nper, pv, 0.0, pmt_type);
+            let mut cum_princ = 0.0;
+            for per in sp..=ep {
+                let ipmt = compute_ipmt(rate, per as f64, nper, pv, 0.0, pmt_type);
+                cum_princ += pmt - ipmt;
+            }
+            EvalResult::Number(cum_princ)
+        }
+        "CUMIPMT" => {
+            // CUMIPMT(rate, nper, pv, start_period, end_period, type)
+            // Returns cumulative interest paid on a loan between two periods
+            if args.len() != 6 {
+                return EvalResult::Error("CUMIPMT requires 6 arguments".to_string());
+            }
+            let rate = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let nper = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let pv = match evaluate(&args[2], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let start_period = match evaluate(&args[3], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let end_period = match evaluate(&args[4], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let pmt_type = match evaluate(&args[5], lookup).to_number() {
+                Ok(n) => if n != 0.0 { 1.0 } else { 0.0 },
+                Err(e) => return EvalResult::Error(e),
+            };
+
+            if rate <= 0.0 || nper <= 0.0 || pv <= 0.0 {
+                return EvalResult::Error("#NUM!".to_string());
+            }
+            let sp = start_period as i64;
+            let ep = end_period as i64;
+            if sp < 1 || ep < sp || ep > nper as i64 {
+                return EvalResult::Error("#NUM!".to_string());
+            }
+
+            let mut cum_ipmt = 0.0;
+            for per in sp..=ep {
+                cum_ipmt += compute_ipmt(rate, per as f64, nper, pv, 0.0, pmt_type);
+            }
+            EvalResult::Number(cum_ipmt)
+        }
         "FV" => {
             // FV(rate, nper, pmt, [pv], [type])
             // Returns the future value of an investment
@@ -880,6 +1123,13 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
                         let (max_row, max_col) = (*start_row.max(end_row), *start_col.max(end_col));
                         for r in min_row..=max_row {
                             for c in min_col..=max_col {
+                                let text = lookup.get_text(r, c);
+                                if text.is_empty() {
+                                    continue; // Skip blanks
+                                }
+                                if text.starts_with('#') {
+                                    return EvalResult::Error(text); // Propagate errors
+                                }
                                 let val = lookup.get_value(r, c);
                                 if val.is_finite() {
                                     npv += val / (1.0 + rate).powi(period);
@@ -914,15 +1164,26 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
                     let (min_row, min_col) = (*start_row.min(end_row), *start_col.min(end_col));
                     let (max_row, max_col) = (*start_row.max(end_row), *start_col.max(end_col));
                     let mut vals = Vec::new();
+                    eprintln!("[IRR] context: {}", lookup.debug_context());
+                    eprintln!("[IRR] range {}{}:{}{} (0-indexed r{}:r{}, c{}:c{})",
+                        col_to_letters(min_col), min_row + 1,
+                        col_to_letters(max_col), max_row + 1,
+                        min_row, max_row, min_col, max_col);
                     for r in min_row..=max_row {
                         for c in min_col..=max_col {
+                            let text = lookup.get_text(r, c);
                             let val = lookup.get_value(r, c);
-                            if val.is_finite() && val != 0.0 {
+                            eprintln!("[IRR]   {}{}: get_value={}, get_text=\"{}\"",
+                                col_to_letters(c), r + 1, val, text);
+                            if text.is_empty() {
+                                continue; // Skip blanks (Excel ignores blanks in IRR)
+                            }
+                            if text.starts_with('#') {
+                                eprintln!("[IRR]   → error propagated: {}", text);
+                                return EvalResult::Error(text);
+                            }
+                            if val.is_finite() {
                                 vals.push(val);
-                            } else if lookup.get_text(r, c).is_empty() {
-                                // Skip empty cells
-                            } else if val == 0.0 {
-                                vals.push(0.0);
                             }
                         }
                     }
@@ -932,6 +1193,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
             };
 
             if values.len() < 2 {
+                eprintln!("[IRR] #NUM!: only {} cashflow(s) collected: {:?}", values.len(), values);
                 return EvalResult::Error("#NUM!".to_string());
             }
 
@@ -939,6 +1201,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
             let has_positive = values.iter().any(|&v| v > 0.0);
             let has_negative = values.iter().any(|&v| v < 0.0);
             if !has_positive || !has_negative {
+                eprintln!("[IRR] #NUM!: need both signs. cashflows: {:?}, has_pos={}, has_neg={}", values, has_positive, has_negative);
                 return EvalResult::Error("#NUM!".to_string());
             }
 
@@ -951,47 +1214,117 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
                 0.1 // Default guess of 10%
             };
 
-            // Newton-Raphson iteration to find IRR
-            let mut rate = guess;
-            let max_iterations = 100;
-            let tolerance = 1e-10;
+            // NPV at a given rate: sum(CF_i / (1+rate)^i)
+            let npv_at = |rate: f64| -> f64 {
+                values.iter().enumerate().map(|(i, &cf)| {
+                    cf / (1.0 + rate).powf(i as f64)
+                }).sum()
+            };
 
-            for _ in 0..max_iterations {
+            // Phase 1: Newton-Raphson (fast quadratic convergence when it works)
+            let mut rate = guess;
+            let mut newton_converged = false;
+
+            for _ in 0..100 {
                 let mut npv = 0.0;
-                let mut dnpv = 0.0; // derivative of NPV with respect to rate
+                let mut dnpv = 0.0;
 
                 for (i, &cf) in values.iter().enumerate() {
                     let t = i as f64;
-                    let divisor = (1.0 + rate).powf(t);
-                    if divisor == 0.0 {
-                        return EvalResult::Error("#NUM!".to_string());
-                    }
+                    let base = 1.0 + rate;
+                    let divisor = base.powf(t);
+                    if divisor.abs() < 1e-30 { break; }
                     npv += cf / divisor;
                     if t > 0.0 {
-                        dnpv -= t * cf / (1.0 + rate).powf(t + 1.0);
+                        dnpv -= t * cf / base.powf(t + 1.0);
                     }
                 }
 
-                if dnpv.abs() < 1e-30 {
-                    return EvalResult::Error("#NUM!".to_string());
-                }
+                if dnpv.abs() < 1e-30 { break; }
 
                 let new_rate = rate - npv / dnpv;
 
-                if (new_rate - rate).abs() < tolerance {
-                    return EvalResult::Number(new_rate);
+                if (new_rate - rate).abs() < 1e-10 {
+                    if new_rate > -1.0 && new_rate.is_finite() {
+                        rate = new_rate;
+                        newton_converged = true;
+                    }
+                    break;
                 }
 
                 rate = new_rate;
-
-                // Prevent divergence
-                if rate < -1.0 || rate > 10.0 || !rate.is_finite() {
-                    return EvalResult::Error("#NUM!".to_string());
+                if rate <= -1.0 || rate > 10.0 || !rate.is_finite() {
+                    break;
                 }
             }
 
-            // Failed to converge
-            EvalResult::Error("#NUM!".to_string())
+            if newton_converged {
+                return EvalResult::Number(rate);
+            }
+
+            // Phase 2: Bisection fallback — guaranteed convergence when bracket exists
+            let search_rates: &[f64] = &[
+                -0.99, -0.95, -0.9, -0.8, -0.5, -0.3, -0.1,
+                0.0, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 2.0, 5.0, 10.0,
+            ];
+
+            let mut lo = f64::NAN;
+            let mut hi = f64::NAN;
+            let mut npv_lo_val = 0.0_f64;
+
+            let mut prev_rate = f64::NAN;
+            let mut prev_npv = f64::NAN;
+
+            for &r in search_rates {
+                let npv = npv_at(r);
+                if !npv.is_finite() {
+                    prev_rate = f64::NAN;
+                    prev_npv = f64::NAN;
+                    continue;
+                }
+
+                if prev_npv.is_finite() && npv.signum() != prev_npv.signum() && prev_npv != 0.0 {
+                    lo = prev_rate;
+                    hi = r;
+                    npv_lo_val = prev_npv;
+                    break;
+                }
+
+                prev_rate = r;
+                prev_npv = npv;
+            }
+
+            if lo.is_nan() {
+                eprintln!("[IRR] #NUM!: no bracket found. cashflows: {:?}", values);
+                eprintln!("[IRR]   Newton guess={}, rate after Newton={}", guess, rate);
+                for &r in search_rates {
+                    let npv = npv_at(r);
+                    eprintln!("[IRR]   rate={:.4} → NPV={:.4}", r, npv);
+                }
+                return EvalResult::Error("#NUM!".to_string());
+            }
+
+            for _ in 0..200 {
+                let mid = (lo + hi) / 2.0;
+                let npv_mid = npv_at(mid);
+
+                if !npv_mid.is_finite() {
+                    return EvalResult::Error("#NUM!".to_string());
+                }
+
+                if npv_mid.abs() < 1e-10 || (hi - lo) < 1e-12 {
+                    return EvalResult::Number(mid);
+                }
+
+                if npv_mid.signum() == npv_lo_val.signum() {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+
+            // After 200 bisection iterations, return best midpoint
+            EvalResult::Number((lo + hi) / 2.0)
         }
         "SQRT" => {
             if args.len() != 1 {
@@ -4209,7 +4542,7 @@ mod tests {
         let expr = parse_and_bind("=IRR(A1:A5)");
         let result = evaluate(&expr, &lookup);
         match result {
-            EvalResult::Number(n) => assert!((n - 0.1728).abs() < 0.01), // ~17.28%
+            EvalResult::Number(n) => assert!((n - 0.1709).abs() < 0.01), // ~17.09%
             _ => panic!("Expected number, got {:?}", result),
         }
     }
@@ -4241,6 +4574,97 @@ mod tests {
         let expr = parse_and_bind("=IRR(A1:A2)");
         let result = evaluate(&expr, &lookup);
         assert!(matches!(result, EvalResult::Error(_)));
+    }
+
+    #[test]
+    fn test_irr_near_zero_return() {
+        let mut lookup = TestLookup::new();
+        // Cash flows that yield IRR very close to 0
+        lookup.set(0, 0, "-1000");
+        lookup.set(1, 0, "500");
+        lookup.set(2, 0, "500");
+
+        let expr = parse_and_bind("=IRR(A1:A3)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!(n.abs() < 0.01, "Expected ~0%, got {}", n),
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_irr_large_negative_initial() {
+        let mut lookup = TestLookup::new();
+        // Large initial outlay with small returns — low IRR
+        lookup.set(0, 0, "-10000");
+        lookup.set(1, 0, "100");
+        lookup.set(2, 0, "100");
+        lookup.set(3, 0, "100");
+        lookup.set(4, 0, "100");
+        lookup.set(5, 0, "100");
+        lookup.set(6, 0, "100");
+        lookup.set(7, 0, "100");
+        lookup.set(8, 0, "100");
+        lookup.set(9, 0, "10000");
+
+        let expr = parse_and_bind("=IRR(A1:A10)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                // Should converge to a valid rate (bisection fallback may be needed)
+                assert!(n > -1.0 && n.is_finite(), "Expected valid rate, got {}", n);
+            }
+            other => panic!("Expected number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_irr_haven_cashflows() {
+        // Exact cashflows from Haven Hilgard Pro Forma XLSX
+        // Expected IRR ≈ 34.9956% (verified in Excel/Google Sheets)
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "-2037280");
+        lookup.set(1, 0, "154388");
+        lookup.set(2, 0, "318040");
+        lookup.set(3, 0, "327581");
+        lookup.set(4, 0, "337409");
+        lookup.set(5, 0, "6786109");
+
+        let expr = parse_and_bind("=IRR(A1:A6)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                // Verify NPV at returned rate is ~0
+                let cashflows = [-2037280.0, 154388.0, 318040.0, 327581.0, 337409.0, 6786109.0];
+                let npv: f64 = cashflows.iter().enumerate()
+                    .map(|(i, &cf)| cf / (1.0 + n).powf(i as f64))
+                    .sum();
+                assert!(npv.abs() < 0.01,
+                    "IRR={:.6} but NPV(IRR)={:.6} (should be ~0)", n, npv);
+                assert!((n - 0.3500).abs() < 0.005,
+                    "Expected IRR ~35.00%, got {:.4}%", n * 100.0);
+            }
+            other => panic!("Expected number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_irr_error_propagation() {
+        // If a cell in the range has an error, IRR should propagate it
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "-1000");
+        lookup.set(1, 0, "200");
+        lookup.set(2, 0, "#DIV/0!");  // Error cell
+        lookup.set(3, 0, "400");
+
+        let expr = parse_and_bind("=IRR(A1:A4)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Error(e) => {
+                assert_eq!(e, "#DIV/0!", "Expected #DIV/0! propagation, got {:?}", e);
+            }
+            other => panic!("Expected error propagation, got {:?}", other),
+        }
     }
 
     #[test]
@@ -4502,5 +4926,554 @@ mod tests {
         let result = evaluate(&expr, &lookup);
         // Single value - should show middle bar
         assert_eq!(result, EvalResult::Text("▄".to_string()));
+    }
+
+    // =========================================================================
+    // Power (^) and Percent (%) operator tests
+    // =========================================================================
+
+    #[test]
+    fn test_power_simple() {
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=2^3");
+        assert_eq!(evaluate(&expr, &lookup), EvalResult::Number(8.0));
+    }
+
+    #[test]
+    fn test_power_right_associative() {
+        let lookup = TestLookup::new();
+        // 2^3^2 should be 2^(3^2) = 2^9 = 512 (right-associative)
+        let expr = parse_and_bind("=2^3^2");
+        assert_eq!(evaluate(&expr, &lookup), EvalResult::Number(512.0));
+    }
+
+    #[test]
+    fn test_power_precedence_over_multiply() {
+        let lookup = TestLookup::new();
+        // 3*2^3 = 3*(2^3) = 3*8 = 24
+        let expr = parse_and_bind("=3*2^3");
+        assert_eq!(evaluate(&expr, &lookup), EvalResult::Number(24.0));
+    }
+
+    #[test]
+    fn test_power_fractional_exponent() {
+        let lookup = TestLookup::new();
+        // 9^0.5 = 3
+        let expr = parse_and_bind("=9^0.5");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 3.0).abs() < 1e-10),
+            _ => panic!("Expected number"),
+        }
+    }
+
+    #[test]
+    fn test_percent_simple() {
+        let lookup = TestLookup::new();
+        // 50% = 0.5
+        let expr = parse_and_bind("=50%");
+        assert_eq!(evaluate(&expr, &lookup), EvalResult::Number(0.5));
+    }
+
+    #[test]
+    fn test_percent_in_expression() {
+        let lookup = TestLookup::new();
+        // 100*5% = 100*0.05 = 5
+        let expr = parse_and_bind("=100*5%");
+        assert_eq!(evaluate(&expr, &lookup), EvalResult::Number(5.0));
+    }
+
+    #[test]
+    fn test_percent_double() {
+        let lookup = TestLookup::new();
+        // 500%% = 500 * 0.01 * 0.01 = 0.05
+        let expr = parse_and_bind("=500%%");
+        assert_eq!(evaluate(&expr, &lookup), EvalResult::Number(0.05));
+    }
+
+    #[test]
+    fn test_percent_with_power() {
+        let lookup = TestLookup::new();
+        // 50%^2 = (0.5)^2 = 0.25 (% binds tighter than ^)
+        let expr = parse_and_bind("=50%^2");
+        assert_eq!(evaluate(&expr, &lookup), EvalResult::Number(0.25));
+    }
+
+    #[test]
+    fn test_negative_percent() {
+        let lookup = TestLookup::new();
+        // -5% = (-5)*0.01 = -0.05
+        let expr = parse_and_bind("=-5%");
+        assert_eq!(evaluate(&expr, &lookup), EvalResult::Number(-0.05));
+    }
+
+    #[test]
+    fn test_power_with_cell_ref() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "3"); // A1 = 3
+        let expr = parse_and_bind("=A1^2");
+        assert_eq!(evaluate(&expr, &lookup), EvalResult::Number(9.0));
+    }
+
+    #[test]
+    fn test_percent_with_cell_ref() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "200"); // A1 = 200
+        // A1*5% = 200*0.05 = 10
+        let expr = parse_and_bind("=A1*5%");
+        assert_eq!(evaluate(&expr, &lookup), EvalResult::Number(10.0));
+    }
+
+    // =========================================================================
+    // IPMT, PPMT, CUMPRINC, CUMIPMT tests
+    // =========================================================================
+
+    #[test]
+    fn test_ipmt_first_period() {
+        let lookup = TestLookup::new();
+        // IPMT(0.01, 1, 12, 100000) - interest on first period of 100k loan at 1%/period
+        let expr = parse_and_bind("=IPMT(0.01, 1, 12, 100000)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - (-1000.0)).abs() < 0.01, "Expected ~-1000, got {}", n),
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_ipmt_later_period() {
+        let lookup = TestLookup::new();
+        // IPMT decreases over time as principal is paid down
+        let expr1 = parse_and_bind("=IPMT(0.01, 1, 12, 100000)");
+        let expr6 = parse_and_bind("=IPMT(0.01, 6, 12, 100000)");
+        let r1 = evaluate(&expr1, &lookup);
+        let r6 = evaluate(&expr6, &lookup);
+        match (r1, r6) {
+            (EvalResult::Number(n1), EvalResult::Number(n6)) => {
+                // Interest should decrease as principal is paid
+                assert!(n6 > n1, "Interest should decrease (become less negative): per1={}, per6={}", n1, n6);
+            }
+            _ => panic!("Expected numbers"),
+        }
+    }
+
+    #[test]
+    fn test_ppmt_first_period() {
+        let lookup = TestLookup::new();
+        // PPMT(0.01, 1, 12, 100000) - principal portion of first payment
+        let expr = parse_and_bind("=PPMT(0.01, 1, 12, 100000)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                // PMT ~= -8884.88, IPMT(1) = -1000, so PPMT(1) ~= -7884.88
+                assert!((n - (-7884.88)).abs() < 1.0, "Expected ~-7884.88, got {}", n);
+            }
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_ipmt_plus_ppmt_equals_pmt() {
+        let lookup = TestLookup::new();
+        // IPMT + PPMT should equal PMT for any period
+        let pmt_expr = parse_and_bind("=PMT(0.01, 12, 100000)");
+        let ipmt_expr = parse_and_bind("=IPMT(0.01, 5, 12, 100000)");
+        let ppmt_expr = parse_and_bind("=PPMT(0.01, 5, 12, 100000)");
+
+        let pmt = evaluate(&pmt_expr, &lookup);
+        let ipmt = evaluate(&ipmt_expr, &lookup);
+        let ppmt = evaluate(&ppmt_expr, &lookup);
+
+        match (pmt, ipmt, ppmt) {
+            (EvalResult::Number(p), EvalResult::Number(i), EvalResult::Number(pp)) => {
+                assert!((p - (i + pp)).abs() < 1e-6, "PMT({}) != IPMT({}) + PPMT({})", p, i, pp);
+            }
+            _ => panic!("Expected numbers"),
+        }
+    }
+
+    #[test]
+    fn test_cumprinc_full_loan() {
+        let lookup = TestLookup::new();
+        // CUMPRINC over the entire loan should equal -(loan amount)
+        // CUMPRINC(0.01, 12, 100000, 1, 12, 0)
+        let expr = parse_and_bind("=CUMPRINC(0.01, 12, 100000, 1, 12, 0)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                // Total principal paid = -pv = -100000
+                assert!((n - (-100000.0)).abs() < 0.01, "Expected ~-100000, got {}", n);
+            }
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_cumprinc_partial() {
+        let lookup = TestLookup::new();
+        // CUMPRINC for first 3 periods of a 12-period loan
+        let expr = parse_and_bind("=CUMPRINC(0.01, 12, 100000, 1, 3, 0)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                // Should be negative (principal outflow) and less than total
+                assert!(n < 0.0, "Expected negative, got {}", n);
+                assert!(n > -100000.0, "Expected partial, got {}", n);
+            }
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_cumipmt_full_loan() {
+        let lookup = TestLookup::new();
+        // CUMIPMT over entire loan = total interest paid
+        let expr = parse_and_bind("=CUMIPMT(0.01, 12, 100000, 1, 12, 0)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                // Total payments = 12 * PMT(0.01,12,100000) ≈ 12 * (-8884.88) ≈ -106618.6
+                // Total interest = total payments - (-100000) ≈ -6618.6
+                assert!(n < 0.0, "Expected negative interest, got {}", n);
+                assert!((n - (-6618.55)).abs() < 1.0, "Expected ~-6618.55, got {}", n);
+            }
+            _ => panic!("Expected number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_cumprinc_plus_cumipmt_equals_total_payments() {
+        let lookup = TestLookup::new();
+        // CUMPRINC + CUMIPMT = total PMT * nperiods for the same range
+        let cp_expr = parse_and_bind("=CUMPRINC(0.01, 12, 100000, 1, 12, 0)");
+        let ci_expr = parse_and_bind("=CUMIPMT(0.01, 12, 100000, 1, 12, 0)");
+        let pmt_expr = parse_and_bind("=PMT(0.01, 12, 100000)");
+
+        let cp = evaluate(&cp_expr, &lookup);
+        let ci = evaluate(&ci_expr, &lookup);
+        let pmt = evaluate(&pmt_expr, &lookup);
+
+        match (cp, ci, pmt) {
+            (EvalResult::Number(c), EvalResult::Number(i), EvalResult::Number(p)) => {
+                let total = c + i;
+                let expected = p * 12.0;
+                assert!((total - expected).abs() < 0.01,
+                    "CUMPRINC({}) + CUMIPMT({}) = {} != PMT*12 = {}", c, i, total, expected);
+            }
+            _ => panic!("Expected numbers"),
+        }
+    }
+
+    #[test]
+    fn test_cumprinc_invalid_args() {
+        let lookup = TestLookup::new();
+        // start > end
+        let expr = parse_and_bind("=CUMPRINC(0.01, 12, 100000, 5, 3, 0)");
+        assert!(matches!(evaluate(&expr, &lookup), EvalResult::Error(_)));
+
+        // start < 1
+        let expr = parse_and_bind("=CUMPRINC(0.01, 12, 100000, 0, 3, 0)");
+        assert!(matches!(evaluate(&expr, &lookup), EvalResult::Error(_)));
+
+        // end > nper
+        let expr = parse_and_bind("=CUMPRINC(0.01, 12, 100000, 1, 15, 0)");
+        assert!(matches!(evaluate(&expr, &lookup), EvalResult::Error(_)));
+    }
+
+    // =========================================================================
+    // Excel golden value tests
+    //
+    // These tests pin exact outputs matching Excel's financial functions.
+    // Values computed from Excel's documented formulas at full precision.
+    // Pass criterion: within 0.01 for dollar amounts, 1e-6 for rates.
+    // =========================================================================
+
+    /// Helper: assert a formula evaluates to a number within epsilon of expected
+    fn assert_excel(formula: &str, lookup: &TestLookup, expected: f64, epsilon: f64) {
+        let expr = parse_and_bind(formula);
+        let result = evaluate(&expr, lookup);
+        match result {
+            EvalResult::Number(n) => {
+                assert!(
+                    (n - expected).abs() < epsilon,
+                    "Formula: {}\nExpected: {:.10}\nGot:      {:.10}\nDiff:     {:.2e}",
+                    formula, expected, n, (n - expected).abs()
+                );
+            }
+            other => panic!("Formula: {}\nExpected Number({}), got {:?}", formula, expected, other),
+        }
+    }
+
+    // --- Test case 1: $100,000 annual loan at 6% for 10 years ---
+    // Source: FinanceTrain, Excel documentation
+
+    #[test]
+    fn test_excel_pmt_annual_loan() {
+        let lookup = TestLookup::new();
+        // Excel: PMT(0.06, 10, 100000) = -13586.795524...
+        assert_excel("=PMT(0.06, 10, 100000)", &lookup, -13586.7955238, 0.01);
+    }
+
+    #[test]
+    fn test_excel_ipmt_period_1() {
+        let lookup = TestLookup::new();
+        // Excel: IPMT(0.06, 1, 10, 100000) = -6000.00
+        // First period interest = loan_amount * rate
+        assert_excel("=IPMT(0.06, 1, 10, 100000)", &lookup, -6000.00, 0.01);
+    }
+
+    #[test]
+    fn test_excel_ipmt_period_3() {
+        let lookup = TestLookup::new();
+        // Excel: IPMT(0.06, 3, 10, 100000) = -5062.27...
+        assert_excel("=IPMT(0.06, 3, 10, 100000)", &lookup, -5062.27, 0.01);
+    }
+
+    #[test]
+    fn test_excel_ppmt_period_3() {
+        let lookup = TestLookup::new();
+        // Excel: PPMT(0.06, 3, 10, 100000) = -8524.52...
+        assert_excel("=PPMT(0.06, 3, 10, 100000)", &lookup, -8524.52, 0.01);
+    }
+
+    #[test]
+    fn test_excel_cumprinc_periods_3_to_6() {
+        let lookup = TestLookup::new();
+        // Excel: CUMPRINC(0.06, 10, 100000, 3, 6, 0) = -37291.52...
+        assert_excel("=CUMPRINC(0.06, 10, 100000, 3, 6, 0)", &lookup, -37291.52, 0.01);
+    }
+
+    #[test]
+    fn test_excel_cumprinc_full_term() {
+        let lookup = TestLookup::new();
+        // Total principal over full loan = -pv
+        assert_excel("=CUMPRINC(0.06, 10, 100000, 1, 10, 0)", &lookup, -100000.00, 0.01);
+    }
+
+    #[test]
+    fn test_excel_cumipmt_full_term() {
+        let lookup = TestLookup::new();
+        // Total interest = nper * PMT - (-pv) = 10 * (-13586.80) + 100000 = -35867.96...
+        assert_excel("=CUMIPMT(0.06, 10, 100000, 1, 10, 0)", &lookup, -35867.95, 0.01);
+    }
+
+    // --- Test case 2: $10,000 monthly loan at 5%/12 for 60 months ---
+    // Source: Exceljet, Wall Street Prep
+
+    #[test]
+    fn test_excel_pmt_monthly_loan() {
+        let lookup = TestLookup::new();
+        // Excel: PMT(0.05/12, 60, 10000) = -188.712...
+        // Monthly rate = 0.004166667
+        assert_excel("=PMT(0.05/12, 60, 10000)", &lookup, -188.71, 0.01);
+    }
+
+    #[test]
+    fn test_excel_ipmt_monthly_period_1() {
+        let lookup = TestLookup::new();
+        // Excel: IPMT(0.05/12, 1, 60, 10000) = -41.67
+        // First month interest = 10000 * 0.05/12
+        assert_excel("=IPMT(0.05/12, 1, 60, 10000)", &lookup, -41.67, 0.01);
+    }
+
+    #[test]
+    fn test_excel_ppmt_monthly_period_1() {
+        let lookup = TestLookup::new();
+        // Excel: PPMT(0.05/12, 1, 60, 10000) = PMT - IPMT = -188.71 - (-41.67) = -147.05
+        assert_excel("=PPMT(0.05/12, 1, 60, 10000)", &lookup, -147.05, 0.01);
+    }
+
+    #[test]
+    fn test_excel_cumprinc_monthly_full() {
+        let lookup = TestLookup::new();
+        // Total principal over full loan = -10000
+        assert_excel("=CUMPRINC(0.05/12, 60, 10000, 1, 60, 0)", &lookup, -10000.00, 0.01);
+    }
+
+    // --- Test case 3: PMT edge cases ---
+
+    #[test]
+    fn test_excel_pmt_zero_rate() {
+        let lookup = TestLookup::new();
+        // PMT(0, 12, 1200) = -100.00
+        assert_excel("=PMT(0, 12, 1200)", &lookup, -100.00, 0.01);
+    }
+
+    #[test]
+    fn test_excel_pmt_with_fv() {
+        let lookup = TestLookup::new();
+        // PMT(0.08/12, 120, 0, 100000) — saving for $100K future value
+        // Excel: PMT(0.00666667, 120, 0, 100000) = -546.608...
+        assert_excel("=PMT(0.08/12, 120, 0, 100000)", &lookup, -546.61, 0.01);
+    }
+
+    // --- Test case 4: IRR golden values ---
+
+    #[test]
+    fn test_excel_irr_standard() {
+        let mut lookup = TestLookup::new();
+        // {-100, 30, 35, 40, 45} — IRR ≈ 17.09%
+        // Verify by computing NPV at the returned rate ≈ 0
+        lookup.set(0, 0, "-100");
+        lookup.set(1, 0, "30");
+        lookup.set(2, 0, "35");
+        lookup.set(3, 0, "40");
+        lookup.set(4, 0, "45");
+        let expr = parse_and_bind("=IRR(A1:A5)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                // Verify NPV at returned rate is ~0
+                let cashflows = [-100.0, 30.0, 35.0, 40.0, 45.0];
+                let npv: f64 = cashflows.iter().enumerate()
+                    .map(|(i, &cf)| cf / (1.0 + n).powf(i as f64))
+                    .sum();
+                assert!(npv.abs() < 1e-6,
+                    "IRR={:.10} but NPV(IRR)={:.10} (should be ~0)", n, npv);
+                assert!((n - 0.1709).abs() < 0.001,
+                    "IRR expected ~0.1709, got {}", n);
+            }
+            other => panic!("Expected number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_excel_irr_even_cashflows() {
+        let mut lookup = TestLookup::new();
+        // {-1000, 300, 300, 300, 300, 300} — annuity IRR
+        // NPV = -1000 + 300/r * (1 - 1/(1+r)^5) = 0
+        // Excel: IRR ≈ 15.24%
+        lookup.set(0, 0, "-1000");
+        lookup.set(1, 0, "300");
+        lookup.set(2, 0, "300");
+        lookup.set(3, 0, "300");
+        lookup.set(4, 0, "300");
+        lookup.set(5, 0, "300");
+        let expr = parse_and_bind("=IRR(A1:A6)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                assert!((n - 0.1524).abs() < 0.001,
+                    "IRR expected ~0.1524, got {}", n);
+            }
+            other => panic!("Expected number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_excel_irr_with_guess() {
+        let mut lookup = TestLookup::new();
+        // Same cashflows, explicit guess = 0.2
+        lookup.set(0, 0, "-1000");
+        lookup.set(1, 0, "200");
+        lookup.set(2, 0, "300");
+        lookup.set(3, 0, "400");
+        lookup.set(4, 0, "500");
+        let expr = parse_and_bind("=IRR(A1:A5, 0.2)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                // Should still converge to same root regardless of guess
+                assert!((n - 0.1283).abs() < 0.001,
+                    "IRR expected ~0.1283, got {}", n);
+            }
+            other => panic!("Expected number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_excel_irr_negative_result() {
+        let mut lookup = TestLookup::new();
+        // Losing investment: {-1000, 100, 200, 300}
+        // Total return = 600 < 1000 → negative IRR
+        lookup.set(0, 0, "-1000");
+        lookup.set(1, 0, "100");
+        lookup.set(2, 0, "200");
+        lookup.set(3, 0, "300");
+        let expr = parse_and_bind("=IRR(A1:A4)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => {
+                assert!(n < 0.0, "Expected negative IRR, got {}", n);
+                assert!(n > -1.0, "IRR should be > -1, got {}", n);
+            }
+            other => panic!("Expected number, got {:?}", other),
+        }
+    }
+
+    // --- Test case 5: IPMT + PPMT = PMT identity across all periods ---
+
+    #[test]
+    fn test_excel_ipmt_ppmt_sum_all_periods() {
+        let lookup = TestLookup::new();
+        // Verify IPMT(per) + PPMT(per) = PMT for every period
+        // $100,000 at 6% for 10 years
+        for per in 1..=10 {
+            let ipmt_formula = format!("=IPMT(0.06, {}, 10, 100000)", per);
+            let ppmt_formula = format!("=PPMT(0.06, {}, 10, 100000)", per);
+
+            let ipmt_expr = parse_and_bind(&ipmt_formula);
+            let ppmt_expr = parse_and_bind(&ppmt_formula);
+            let pmt_expr = parse_and_bind("=PMT(0.06, 10, 100000)");
+
+            let ipmt = evaluate(&ipmt_expr, &lookup);
+            let ppmt = evaluate(&ppmt_expr, &lookup);
+            let pmt = evaluate(&pmt_expr, &lookup);
+
+            match (ipmt, ppmt, pmt) {
+                (EvalResult::Number(i), EvalResult::Number(p), EvalResult::Number(total)) => {
+                    assert!(
+                        (i + p - total).abs() < 1e-8,
+                        "Period {}: IPMT({:.6}) + PPMT({:.6}) = {:.6} != PMT({:.6})",
+                        per, i, p, i + p, total
+                    );
+                }
+                _ => panic!("Period {}: expected numbers", per),
+            }
+        }
+    }
+
+    // --- Test case 6: CUMPRINC + CUMIPMT = total payments identity ---
+
+    #[test]
+    fn test_excel_cum_identity_partial() {
+        let lookup = TestLookup::new();
+        // CUMPRINC(3,6) + CUMIPMT(3,6) = PMT * 4 (periods 3 through 6)
+        let cp = parse_and_bind("=CUMPRINC(0.06, 10, 100000, 3, 6, 0)");
+        let ci = parse_and_bind("=CUMIPMT(0.06, 10, 100000, 3, 6, 0)");
+        let pmt = parse_and_bind("=PMT(0.06, 10, 100000)");
+
+        let cp_val = evaluate(&cp, &lookup);
+        let ci_val = evaluate(&ci, &lookup);
+        let pmt_val = evaluate(&pmt, &lookup);
+
+        match (cp_val, ci_val, pmt_val) {
+            (EvalResult::Number(c), EvalResult::Number(i), EvalResult::Number(p)) => {
+                let total = c + i;
+                let expected = p * 4.0; // 4 periods
+                assert!(
+                    (total - expected).abs() < 0.01,
+                    "CUMPRINC + CUMIPMT = {:.2} != PMT*4 = {:.2}",
+                    total, expected
+                );
+            }
+            _ => panic!("Expected numbers"),
+        }
+    }
+
+    // --- Test case 7: Power and percent in financial context ---
+
+    #[test]
+    fn test_excel_compound_growth() {
+        let lookup = TestLookup::new();
+        // 1000*(1+5%)^10 = 1000 * 1.05^10 = 1628.89...
+        assert_excel("=1000*(1+5%)^10", &lookup, 1628.89, 0.01);
+    }
+
+    #[test]
+    fn test_excel_discount_factor() {
+        let lookup = TestLookup::new();
+        // 1/(1+8%)^5 = 1/1.08^5 = 0.6806...
+        assert_excel("=1/(1+8%)^5", &lookup, 0.6806, 0.0001);
     }
 }

@@ -68,6 +68,8 @@ pub enum Op {
     NotEq,   // <>
     // String
     Concat,  // &
+    // Exponentiation
+    Pow,     // ^
 }
 
 /// Parse a formula string into an unbound AST (sheet names not yet resolved to IDs).
@@ -117,6 +119,9 @@ enum Token {
     NotEq,   // <>
     // String concatenation
     Ampersand, // &
+    // Exponentiation and percent
+    Caret,   // ^
+    Percent, // %
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, String> {
@@ -135,6 +140,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             ':' => { tokens.push(Token::Colon); chars.next(); }
             ',' => { tokens.push(Token::Comma); chars.next(); }
             '&' => { tokens.push(Token::Ampersand); chars.next(); }
+            '^' => { tokens.push(Token::Caret); chars.next(); }
+            '%' => { tokens.push(Token::Percent); chars.next(); }
             '<' => {
                 chars.next();
                 if let Some(&next) = chars.peek() {
@@ -401,12 +408,12 @@ fn parse_add_sub(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
 }
 
 fn parse_mul_div(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), String> {
-    let (mut left, mut pos) = parse_primary(tokens, pos)?;
+    let (mut left, mut pos) = parse_power(tokens, pos)?;
 
     while pos < tokens.len() {
         match &tokens[pos] {
             Token::Star => {
-                let (right, new_pos) = parse_primary(tokens, pos + 1)?;
+                let (right, new_pos) = parse_power(tokens, pos + 1)?;
                 left = Expr::BinaryOp {
                     op: Op::Mul,
                     left: Box::new(left),
@@ -415,7 +422,7 @@ fn parse_mul_div(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
                 pos = new_pos;
             }
             Token::Slash => {
-                let (right, new_pos) = parse_primary(tokens, pos + 1)?;
+                let (right, new_pos) = parse_power(tokens, pos + 1)?;
                 left = Expr::BinaryOp {
                     op: Op::Div,
                     left: Box::new(left),
@@ -428,6 +435,48 @@ fn parse_mul_div(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
     }
 
     Ok((left, pos))
+}
+
+// Exponentiation (^) - right-associative, higher precedence than * /
+fn parse_power(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), String> {
+    let (base, pos) = parse_percent(tokens, pos)?;
+
+    if pos < tokens.len() {
+        if let Token::Caret = &tokens[pos] {
+            // Right-associative: recurse into parse_power for the exponent
+            let (exponent, new_pos) = parse_power(tokens, pos + 1)?;
+            return Ok((
+                Expr::BinaryOp {
+                    op: Op::Pow,
+                    left: Box::new(base),
+                    right: Box::new(exponent),
+                },
+                new_pos,
+            ));
+        }
+    }
+
+    Ok((base, pos))
+}
+
+// Percent postfix (%) - highest precedence operator, desugars to * 0.01
+fn parse_percent(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), String> {
+    let (mut expr, mut pos) = parse_primary(tokens, pos)?;
+
+    while pos < tokens.len() {
+        if let Token::Percent = &tokens[pos] {
+            expr = Expr::BinaryOp {
+                op: Op::Mul,
+                left: Box::new(expr),
+                right: Box::new(Expr::Number(0.01)),
+            };
+            pos += 1;
+        } else {
+            break;
+        }
+    }
+
+    Ok((expr, pos))
 }
 
 fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), String> {
@@ -529,6 +578,10 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
                 Token::RParen => Ok((expr, pos + 1)),
                 _ => Err("Expected closing parenthesis".to_string()),
             }
+        }
+        Token::Plus => {
+            // Unary plus (no-op, just parse the next expression)
+            parse_primary(tokens, pos + 1)
         }
         Token::Minus => {
             // Unary minus
@@ -721,6 +774,7 @@ where
                 Op::GtEq => ">=",
                 Op::NotEq => "<>",
                 Op::Concat => "&",
+                Op::Pow => "^",
             };
             format!("{}{}{}", left_str, op_str, right_str)
         }
@@ -784,7 +838,7 @@ fn format_cell_addr(col: usize, row: usize, col_abs: bool, row_abs: bool) -> Str
 }
 
 /// Convert column index to letter(s): 0 -> A, 25 -> Z, 26 -> AA, etc.
-fn col_to_letters(col: usize) -> String {
+pub(crate) fn col_to_letters(col: usize) -> String {
     let mut result = String::new();
     let mut n = col + 1; // 1-indexed for calculation
     while n > 0 {
@@ -831,6 +885,329 @@ fn collect_cell_refs<S>(expr: &Expr<S>, refs: &mut Vec<(usize, usize)>) {
         Expr::BinaryOp { left, right, .. } => {
             collect_cell_refs(left, refs);
             collect_cell_refs(right, refs);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // Absolute reference ($) parsing tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_absolute_both() {
+        // =$A$1
+        let expr = parse("=$A$1").unwrap();
+        match expr {
+            Expr::CellRef { col, row, col_abs, row_abs, .. } => {
+                assert_eq!(col, 0);
+                assert_eq!(row, 0);
+                assert!(col_abs, "col should be absolute");
+                assert!(row_abs, "row should be absolute");
+            }
+            _ => panic!("Expected CellRef, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_absolute_col_only() {
+        // =$A1
+        let expr = parse("=$A1").unwrap();
+        match expr {
+            Expr::CellRef { col, row, col_abs, row_abs, .. } => {
+                assert_eq!(col, 0);
+                assert_eq!(row, 0);
+                assert!(col_abs, "col should be absolute");
+                assert!(!row_abs, "row should be relative");
+            }
+            _ => panic!("Expected CellRef, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_absolute_row_only() {
+        // =A$1
+        let expr = parse("=A$1").unwrap();
+        match expr {
+            Expr::CellRef { col, row, col_abs, row_abs, .. } => {
+                assert_eq!(col, 0);
+                assert_eq!(row, 0);
+                assert!(!col_abs, "col should be relative");
+                assert!(row_abs, "row should be absolute");
+            }
+            _ => panic!("Expected CellRef, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_relative() {
+        // =A1
+        let expr = parse("=A1").unwrap();
+        match expr {
+            Expr::CellRef { col_abs, row_abs, .. } => {
+                assert!(!col_abs, "col should be relative");
+                assert!(!row_abs, "row should be relative");
+            }
+            _ => panic!("Expected CellRef, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_absolute_multi_letter_col() {
+        // =$O$95 (column O = index 14)
+        let expr = parse("=$O$95").unwrap();
+        match expr {
+            Expr::CellRef { col, row, col_abs, row_abs, .. } => {
+                assert_eq!(col, 14); // O = 14
+                assert_eq!(row, 94); // 95 - 1 = 94
+                assert!(col_abs);
+                assert!(row_abs);
+            }
+            _ => panic!("Expected CellRef, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_absolute_range() {
+        // =$O$95:$O$100
+        let expr = parse("=$O$95:$O$100").unwrap();
+        match expr {
+            Expr::Range {
+                start_col, start_row, end_col, end_row,
+                start_col_abs, start_row_abs, end_col_abs, end_row_abs, ..
+            } => {
+                assert_eq!(start_col, 14);
+                assert_eq!(start_row, 94);
+                assert_eq!(end_col, 14);
+                assert_eq!(end_row, 99);
+                assert!(start_col_abs);
+                assert!(start_row_abs);
+                assert!(end_col_abs);
+                assert!(end_row_abs);
+            }
+            _ => panic!("Expected Range, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_mixed_range() {
+        // =$A1:A$5 (mixed absolute/relative)
+        let expr = parse("=$A1:A$5").unwrap();
+        match expr {
+            Expr::Range {
+                start_col_abs, start_row_abs, end_col_abs, end_row_abs, ..
+            } => {
+                assert!(start_col_abs, "$A");
+                assert!(!start_row_abs, "1 relative");
+                assert!(!end_col_abs, "A relative");
+                assert!(end_row_abs, "$5");
+            }
+            _ => panic!("Expected Range, got {:?}", expr),
+        }
+    }
+
+    // =========================================================================
+    // Round-trip: parse → format_expr → parse again
+    // =========================================================================
+
+    #[test]
+    fn test_roundtrip_absolute_both() {
+        let parsed = parse("=$A$1").unwrap();
+        let bound = bind_expr_same_sheet(&parsed);
+        let formatted = format_expr(&bound, |_| None);
+        assert_eq!(formatted, "=$A$1");
+    }
+
+    #[test]
+    fn test_roundtrip_absolute_col() {
+        let parsed = parse("=$A1").unwrap();
+        let bound = bind_expr_same_sheet(&parsed);
+        let formatted = format_expr(&bound, |_| None);
+        assert_eq!(formatted, "=$A1");
+    }
+
+    #[test]
+    fn test_roundtrip_absolute_row() {
+        let parsed = parse("=A$1").unwrap();
+        let bound = bind_expr_same_sheet(&parsed);
+        let formatted = format_expr(&bound, |_| None);
+        assert_eq!(formatted, "=A$1");
+    }
+
+    #[test]
+    fn test_roundtrip_absolute_range() {
+        let parsed = parse("=$O$95:$O$100").unwrap();
+        let bound = bind_expr_same_sheet(&parsed);
+        let formatted = format_expr(&bound, |_| None);
+        assert_eq!(formatted, "=$O$95:$O$100");
+    }
+
+    #[test]
+    fn test_roundtrip_mixed_range() {
+        let parsed = parse("=$A1:A$5").unwrap();
+        let bound = bind_expr_same_sheet(&parsed);
+        let formatted = format_expr(&bound, |_| None);
+        assert_eq!(formatted, "=$A1:A$5");
+    }
+
+    #[test]
+    fn test_absolute_in_formula() {
+        // =SUM($A$1:$A$10)+B2
+        let parsed = parse("=SUM($A$1:$A$10)+B2").unwrap();
+        let bound = bind_expr_same_sheet(&parsed);
+        let formatted = format_expr(&bound, |_| None);
+        assert_eq!(formatted, "=SUM($A$1:$A$10)+B2");
+    }
+
+    // =========================================================================
+    // Power (^) and Percent (%) parsing tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_power() {
+        let expr = parse("=2^3").unwrap();
+        match expr {
+            Expr::BinaryOp { op: Op::Pow, .. } => {}
+            _ => panic!("Expected Pow op, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_percent() {
+        // 50% desugars to 50*0.01
+        let expr = parse("=50%").unwrap();
+        match expr {
+            Expr::BinaryOp { op: Op::Mul, ref right, .. } => {
+                match right.as_ref() {
+                    Expr::Number(n) => assert_eq!(*n, 0.01),
+                    _ => panic!("Expected Number(0.01), got {:?}", right),
+                }
+            }
+            _ => panic!("Expected Mul op (desugared percent), got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_power() {
+        let parsed = parse("=A1^2").unwrap();
+        let bound = bind_expr_same_sheet(&parsed);
+        let formatted = format_expr(&bound, |_| None);
+        assert_eq!(formatted, "=A1^2");
+    }
+
+    // ── Unary plus tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_unary_plus_cell_ref() {
+        // =+A1 should parse to just A1 (unary plus is a no-op)
+        let expr = parse("=+A1").unwrap();
+        match &expr {
+            Expr::CellRef { col, row, .. } => {
+                assert_eq!(*col, 0); // A
+                assert_eq!(*row, 0); // 1
+            }
+            _ => panic!("Expected CellRef, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_unary_plus_number() {
+        // =+1 should parse to just 1
+        let expr = parse("=+1").unwrap();
+        match &expr {
+            Expr::Number(n) => assert_eq!(*n, 1.0),
+            _ => panic!("Expected Number(1), got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_unary_plus_minus() {
+        // =+-A1 should parse to unary minus of A1 (i.e. 0 - A1)
+        let expr = parse("=+-A1").unwrap();
+        match &expr {
+            Expr::BinaryOp { op: Op::Sub, left, right } => {
+                match left.as_ref() {
+                    Expr::Number(n) => assert_eq!(*n, 0.0),
+                    _ => panic!("Expected Number(0) on left"),
+                }
+                match right.as_ref() {
+                    Expr::CellRef { col, row, .. } => {
+                        assert_eq!(*col, 0);
+                        assert_eq!(*row, 0);
+                    }
+                    _ => panic!("Expected CellRef on right"),
+                }
+            }
+            _ => panic!("Expected Sub op (unary minus), got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_unary_plus_in_expression() {
+        // =+A1/B2 should parse as A1/B2
+        let expr = parse("=+A1/B2").unwrap();
+        match &expr {
+            Expr::BinaryOp { op: Op::Div, left, right } => {
+                match left.as_ref() {
+                    Expr::CellRef { col, row, .. } => {
+                        assert_eq!(*col, 0); // A
+                        assert_eq!(*row, 0); // 1
+                    }
+                    _ => panic!("Expected CellRef(A1) on left"),
+                }
+                match right.as_ref() {
+                    Expr::CellRef { col, row, .. } => {
+                        assert_eq!(*col, 1); // B
+                        assert_eq!(*row, 1); // 2
+                    }
+                    _ => panic!("Expected CellRef(B2) on right"),
+                }
+            }
+            _ => panic!("Expected Div op, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_unary_plus_chained() {
+        // =++1 should parse to just 1 (double unary plus)
+        let expr = parse("=++1").unwrap();
+        match &expr {
+            Expr::Number(n) => assert_eq!(*n, 1.0),
+            _ => panic!("Expected Number(1), got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_unary_plus_roundtrip_drops_plus() {
+        // Round-trip formatting should drop the unary plus (it's a no-op)
+        let parsed = parse("=+A1/B2").unwrap();
+        let bound = bind_expr_same_sheet(&parsed);
+        let formatted = format_expr(&bound, |_| None);
+        assert_eq!(formatted, "=A1/B2");
+    }
+
+    #[test]
+    fn test_unary_plus_with_function() {
+        // =+SUM(A1:A3) should parse as SUM(A1:A3)
+        let expr = parse("=+SUM(A1:A3)").unwrap();
+        match &expr {
+            Expr::Function { name, .. } => {
+                assert_eq!(name, "SUM");
+            }
+            _ => panic!("Expected FunctionCall(SUM), got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_unary_plus_multiplication() {
+        // =+H14*12 — real-world Excel formula from Haven import
+        let expr = parse("=+H14*12").unwrap();
+        match &expr {
+            Expr::BinaryOp { op: Op::Mul, .. } => {}
+            _ => panic!("Expected Mul op, got {:?}", expr),
         }
     }
 }

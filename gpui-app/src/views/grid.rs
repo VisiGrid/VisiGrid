@@ -546,6 +546,25 @@ fn render_cell(
         }
     }
 
+    // CenterAcrossSelection span computation:
+    // If this cell has text + CenterAcrossSelection, compute the total span width.
+    // If this cell is empty + CenterAcrossSelection and a cell to its left spans across it, suppress text.
+    let center_across_span = if !is_editing && format.alignment == Alignment::CenterAcrossSelection {
+        if !value.is_empty() {
+            // Source cell: scan right for empty cells with CenterAcrossSelection
+            Some(center_across_span_width(data_row, col, col_width, app, cx))
+        } else {
+            // Empty cell: check if a source cell to the left spans across us → suppress
+            if is_center_across_continuation(data_row, col, app, cx) {
+                Some(0.0) // sentinel: continuation cell, suppress text
+            } else {
+                None // isolated empty CenterAcross cell, render normally
+            }
+        }
+    } else {
+        None
+    };
+
     // Apply horizontal alignment
     // When editing, always left-align so caret positioning works correctly
     // General alignment: numbers right-align, text/empty left-aligns (Excel behavior)
@@ -563,6 +582,8 @@ fn render_cell(
             }
             Alignment::Left => cell.justify_start(),
             Alignment::Center => cell.justify_center(),
+            // CenterAcrossSelection: text is positioned by absolute overlay, not flex alignment
+            Alignment::CenterAcrossSelection => cell.justify_start(),
             Alignment::Right => cell.justify_end(),
         }
     };
@@ -898,7 +919,10 @@ fn render_cell(
             cx,
         );
 
-        if !use_spill_overlay {
+        // CenterAcrossSelection: continuation cells suppress text entirely
+        let suppress_text = matches!(center_across_span, Some(w) if w == 0.0);
+
+        if !use_spill_overlay && !suppress_text {
             let text_content: SharedString = value.clone().into();
 
             // Check if any formatting is applied (font_family IS formatting)
@@ -906,9 +930,12 @@ fn render_cell(
                 || format.italic
                 || format.underline
                 || format.strikethrough
-                || format.font_family.is_some();
+                || format.font_family.is_some()
+                || format.font_size.is_some()
+                || format.font_color.is_some();
 
-            if has_formatting {
+            // Build styled text element if needed
+            let text_element: AnyElement = if has_formatting {
                 // Build text style with ALL formatting properties
                 let mut text_style = window.text_style();
                 text_style.color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
@@ -935,11 +962,49 @@ fn render_cell(
                 if let Some(ref family) = format.font_family {
                     text_style.font_family = family.clone().into();
                 }
+                // Font size: scale by zoom factor, override default
+                if let Some(size) = format.font_size {
+                    text_style.font_size = px(size * app.metrics.zoom).into();
+                }
+                // Font color: only apply for non-editing/non-selected cells
+                if let Some(rgba) = format.font_color {
+                    if !is_editing && !is_selected && !is_multi_edit_preview {
+                        text_style.color = gpui::Hsla::from(gpui::Rgba {
+                            r: rgba[0] as f32 / 255.0,
+                            g: rgba[1] as f32 / 255.0,
+                            b: rgba[2] as f32 / 255.0,
+                            a: rgba[3] as f32 / 255.0,
+                        });
+                    }
+                }
 
-                cell = cell.child(StyledText::new(text_content).with_default_highlights(&text_style, []));
+                StyledText::new(text_content).with_default_highlights(&text_style, []).into_any_element()
             } else {
-                // No formatting - just add text directly
-                cell = cell.child(text_content);
+                text_content.into_any_element()
+            };
+
+            // CenterAcrossSelection source cell: render text centered across the full span
+            if let Some(total_width) = center_across_span {
+                if total_width > 0.0 {
+                    // Absolute overlay that extends across multiple columns, centered
+                    cell = cell.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(px(total_width))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .overflow_hidden()
+                            .child(text_element)
+                    );
+                } else {
+                    cell = cell.child(text_element);
+                }
+            } else {
+                cell = cell.child(text_element);
             }
 
         }
@@ -1138,8 +1203,79 @@ fn resolved_alignment(alignment: Alignment, is_number: bool) -> Alignment {
 fn should_alignment_spill(alignment: Alignment, is_number: bool) -> bool {
     match resolved_alignment(alignment, is_number) {
         Alignment::Left => true,
-        Alignment::Center | Alignment::Right | Alignment::General => false,
+        Alignment::Center | Alignment::Right | Alignment::General | Alignment::CenterAcrossSelection => false,
     }
+}
+
+/// Compute the total width of a CenterAcrossSelection span starting at (row, col).
+/// Scans rightward while adjacent cells are empty AND have CenterAcrossSelection alignment.
+/// Returns the total span width in pixels (starting from this cell's width).
+fn center_across_span_width(
+    row: usize,
+    col: usize,
+    col_width: f32,
+    app: &Spreadsheet,
+    cx: &App,
+) -> f32 {
+    let mut total_width = col_width;
+    let max_col = app.sheet(cx).cols.min(col + 50); // reasonable scan limit
+    let mut check_col = col + 1;
+    while check_col < max_col {
+        let adj_format = app.sheet(cx).get_format(row, check_col);
+        if adj_format.alignment != Alignment::CenterAcrossSelection {
+            break;
+        }
+        let adj_display = app.sheet(cx).get_formatted_display(row, check_col);
+        if !adj_display.is_empty() {
+            break; // adjacent cell has content — stop the span
+        }
+        let adj_width = app.metrics.col_width(app.col_width(check_col));
+        total_width += adj_width;
+        check_col += 1;
+    }
+    total_width
+}
+
+/// Check if an empty CenterAcrossSelection cell is a "continuation" of a span from the left.
+/// Scans leftward for a non-empty cell with CenterAcrossSelection whose span reaches this column.
+fn is_center_across_continuation(
+    row: usize,
+    col: usize,
+    app: &Spreadsheet,
+    cx: &App,
+) -> bool {
+    if col == 0 {
+        return false;
+    }
+    let mut check_col = col;
+    while check_col > 0 {
+        check_col -= 1;
+        let fmt = app.sheet(cx).get_format(row, check_col);
+        if fmt.alignment != Alignment::CenterAcrossSelection {
+            return false; // hit a non-CenterAcross cell — no span from the left
+        }
+        let display = app.sheet(cx).get_formatted_display(row, check_col);
+        if !display.is_empty() {
+            // Found a source cell. Check if its span reaches our column
+            // by re-scanning rightward from the source.
+            let mut scan_col = check_col + 1;
+            let max_col = app.sheet(cx).cols.min(check_col + 50);
+            while scan_col < max_col && scan_col <= col {
+                let sf = app.sheet(cx).get_format(row, scan_col);
+                if sf.alignment != Alignment::CenterAcrossSelection {
+                    break;
+                }
+                let sd = app.sheet(cx).get_formatted_display(row, scan_col);
+                if !sd.is_empty() {
+                    break;
+                }
+                scan_col += 1;
+            }
+            return scan_col > col;
+        }
+        // Empty CenterAcross cell — keep scanning left
+    }
+    false
 }
 
 /// Calculate how much a cell's text should spill into adjacent cells (Excel-style overflow).
@@ -1568,9 +1704,10 @@ fn render_text_spill_overlay(
                 continue;
             }
 
+            let effective_font_size = format.font_size.map(|s| s * metrics.zoom).unwrap_or(metrics.font_size);
             let shaped = window.text_system().shape_line(
                 text_shared,
-                px(metrics.font_size),
+                px(effective_font_size),
                 &[TextRun {
                     len: text_len,
                     font: Font::default(),
@@ -1631,8 +1768,17 @@ fn render_text_spill_overlay(
                 height: row_height,
                 text: text_owned,
                 text_width,                      // For alignment calculation
-                text_color: cell_text,
-                font_size: metrics.font_size,
+                text_color: if let Some(rgba) = format.font_color {
+                    gpui::Hsla::from(gpui::Rgba {
+                        r: rgba[0] as f32 / 255.0,
+                        g: rgba[1] as f32 / 255.0,
+                        b: rgba[2] as f32 / 255.0,
+                        a: rgba[3] as f32 / 255.0,
+                    })
+                } else {
+                    cell_text
+                },
+                font_size: format.font_size.map(|s| s * metrics.zoom).unwrap_or(metrics.font_size),
                 alignment: effective_alignment,  // Resolved alignment for text positioning
                 bold: format.bold,
                 italic: format.italic,
@@ -1678,7 +1824,7 @@ fn render_text_spill_overlay(
                         // Left-aligned: start at left edge + padding
                         padding
                     }
-                    Alignment::Center => {
+                    Alignment::Center | Alignment::CenterAcrossSelection => {
                         // Center within base cell (not spill area) - rare for spillable text
                         let available = run.base_width - (padding * 2.0);
                         padding + ((available - run.text_width) / 2.0).max(0.0)

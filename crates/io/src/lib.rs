@@ -4,6 +4,7 @@ pub mod csv;
 pub mod json;
 pub mod native;
 pub mod xlsx;
+pub mod xlsx_styles;
 pub mod xlsx_validation;
 
 /// Native .sheet format version

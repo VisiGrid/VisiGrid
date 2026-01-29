@@ -490,10 +490,10 @@ fn parse_validations_from_xml(xml: &str) -> Result<Vec<ImportedValidation>, Stri
                 in_formula2 = true;
             }
             Ok(Event::Text(ref e)) if in_formula1 => {
-                formula1 = Some(e.unescape().unwrap_or_default().to_string());
+                formula1 = Some(e.decode().unwrap_or_default().to_string());
             }
             Ok(Event::Text(ref e)) if in_formula2 => {
-                formula2 = Some(e.unescape().unwrap_or_default().to_string());
+                formula2 = Some(e.decode().unwrap_or_default().to_string());
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == b"formula1" => {
                 in_formula1 = false;
