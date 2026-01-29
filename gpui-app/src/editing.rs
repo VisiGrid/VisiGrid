@@ -54,7 +54,18 @@ impl Spreadsheet {
         // Block editing during preview mode
         if self.block_if_previewing(cx) { return; }
 
-        let (row, col) = self.view_state.selected;
+        let (mut row, mut col) = self.view_state.selected;
+
+        // If on a merge-hidden cell, redirect selection to the merge origin
+        let merge_redirect = self.sheet(cx).get_merge(row, col)
+            .filter(|m| m.start != (row, col))
+            .map(|m| (m.start, m.end));
+        if let Some((origin, end)) = merge_redirect {
+            row = origin.0;
+            col = origin.1;
+            self.view_state.selected = (row, col);
+            self.view_state.selection_end = Some(end);
+        }
 
         // Block editing spill receivers - show message and redirect to parent
         if let Some((parent_row, parent_col)) = self.sheet(cx).get_spill_parent(row, col) {
@@ -106,7 +117,18 @@ impl Spreadsheet {
         // Block editing during preview mode
         if self.block_if_previewing(cx) { return; }
 
-        let (row, col) = self.view_state.selected;
+        let (mut row, mut col) = self.view_state.selected;
+
+        // If on a merge-hidden cell, redirect selection to the merge origin
+        let merge_redirect = self.sheet(cx).get_merge(row, col)
+            .filter(|m| m.start != (row, col))
+            .map(|m| (m.start, m.end));
+        if let Some((origin, end)) = merge_redirect {
+            row = origin.0;
+            col = origin.1;
+            self.view_state.selected = (row, col);
+            self.view_state.selection_end = Some(end);
+        }
 
         // Block editing spill receivers - show message and redirect to parent
         if let Some((parent_row, parent_col)) = self.sheet(cx).get_spill_parent(row, col) {

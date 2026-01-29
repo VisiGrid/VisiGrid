@@ -112,6 +112,9 @@ pub enum TokenKey {
     TracePrecedentBg,      // Background tint for precedent cells (inputs)
     TraceDependentBg,      // Background tint for dependent cells (outputs)
     TraceSourceBorder,     // Border for the source cell being traced
+
+    // User-defined cell borders
+    UserBorder,            // Color for user-applied cell borders (themeable)
 }
 
 impl TokenKey {
@@ -201,6 +204,8 @@ impl TokenKey {
         TokenKey::TracePrecedentBg,
         TokenKey::TraceDependentBg,
         TokenKey::TraceSourceBorder,
+        // User-defined cell borders
+        TokenKey::UserBorder,
     ];
 }
 
@@ -406,6 +411,9 @@ pub fn ledger_dark_theme() -> Theme {
     tokens.insert(TokenKey::TraceDependentBg, rgba(0xb48efc18));  // Violet at ~9% - outputs
     tokens.insert(TokenKey::TraceSourceBorder, accent);           // Blue accent for source
 
+    // User-defined cell borders
+    tokens.insert(TokenKey::UserBorder, rgb(0xd6d9e0));  // Light text color (visible on dark bg)
+
     Theme {
         meta: ThemeMeta {
             id: "ledger-dark",
@@ -529,6 +537,9 @@ pub fn slate_dark_theme() -> Theme {
     tokens.insert(TokenKey::TracePrecedentBg, rgba(0x22c55e18));  // Green at ~9%
     tokens.insert(TokenKey::TraceDependentBg, rgba(0xa855f718));  // Purple at ~9%
     tokens.insert(TokenKey::TraceSourceBorder, accent);
+
+    // User-defined cell borders
+    tokens.insert(TokenKey::UserBorder, grid_200);  // Light text (visible on dark bg)
 
     Theme {
         meta: ThemeMeta {
@@ -667,6 +678,9 @@ pub fn ledger_light_theme() -> Theme {
     tokens.insert(TokenKey::TraceDependentBg, rgba(0x7c3aed20));  // Violet-600 at ~12%
     tokens.insert(TokenKey::TraceSourceBorder, accent);
 
+    // User-defined cell borders
+    tokens.insert(TokenKey::UserBorder, rgb(0x000000));  // Black (standard on light bg)
+
     Theme {
         meta: ThemeMeta {
             id: "ledger-light",
@@ -783,6 +797,9 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::TracePrecedentBg, rgba(0x00ff0020));   // Bright green at ~12%
     tokens.insert(TokenKey::TraceDependentBg, rgba(0xffff0020));   // Yellow at ~12%
     tokens.insert(TokenKey::TraceSourceBorder, green);
+
+    // User-defined cell borders
+    tokens.insert(TokenKey::UserBorder, green);  // Green (consistent with retro style)
 
     Theme {
         meta: ThemeMeta {
@@ -921,6 +938,9 @@ pub fn catppuccin_theme() -> Theme {
     tokens.insert(TokenKey::TracePrecedentBg, rgba(0x40a02b20));  // Green at ~12%
     tokens.insert(TokenKey::TraceDependentBg, rgba(0x8839ef20));  // Mauve at ~12%
     tokens.insert(TokenKey::TraceSourceBorder, lavender);
+
+    // User-defined cell borders (use text color, not pure black — softer on pastel palette)
+    tokens.insert(TokenKey::UserBorder, text);
 
     Theme {
         meta: ThemeMeta {

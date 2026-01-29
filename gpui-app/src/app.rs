@@ -437,7 +437,7 @@ pub enum FillDrag {
     },
 }
 
-use visigrid_engine::cell::{Alignment, VerticalAlignment, TextOverflow, NumberFormat};
+use visigrid_engine::cell::{Alignment, CellBorder, VerticalAlignment, TextOverflow, NumberFormat, max_border};
 
 /// State of the "set as default app" prompt in the title bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1363,9 +1363,13 @@ pub const DEFAULT_ZOOM: f32 = 1.0;
 
 /// Cached grid metrics scaled by zoom level.
 /// Single source of truth for all scaled geometry.
+/// Dimensions are pixel-snapped to the device scale factor to eliminate
+/// sub-pixel shimmer at fractional zoom levels.
 #[derive(Clone, Copy)]
 pub struct GridMetrics {
     pub zoom: f32,
+    /// Device scale factor (e.g. 2.0 on Retina). Used for pixel snapping.
+    pub scale: f32,
     pub cell_w: f32,
     pub cell_h: f32,
     pub header_w: f32,
@@ -1375,24 +1379,43 @@ pub struct GridMetrics {
 
 impl GridMetrics {
     pub fn new(zoom: f32) -> Self {
+        Self::with_scale(zoom, 1.0)
+    }
+
+    pub fn with_scale(zoom: f32, scale: f32) -> Self {
         Self {
             zoom,
-            cell_w: CELL_WIDTH * zoom,
-            cell_h: CELL_HEIGHT * zoom,
-            header_w: HEADER_WIDTH * zoom,
-            header_h: COLUMN_HEADER_HEIGHT * zoom,
-            font_size: 13.0 * zoom,
+            scale,
+            cell_w: Self::snap(CELL_WIDTH * zoom, scale),
+            cell_h: Self::snap(CELL_HEIGHT * zoom, scale),
+            header_w: Self::snap(HEADER_WIDTH * zoom, scale),
+            header_h: Self::snap(COLUMN_HEADER_HEIGHT * zoom, scale),
+            font_size: 13.0 * zoom, // font size doesn't snap
         }
     }
 
-    /// Get scaled width for a column (model width * zoom)
-    pub fn col_width(&self, model_width: f32) -> f32 {
-        model_width * self.zoom
+    /// Snap a logical dimension to the nearest device pixel boundary (round).
+    /// Use for widths/heights so cells have consistent integer-pixel sizes.
+    pub fn snap(logical: f32, scale: f32) -> f32 {
+        if scale <= 0.0 { return logical; }
+        (logical * scale).round() / scale
     }
 
-    /// Get scaled height for a row (model height * zoom)
+    /// Snap a logical position to a device pixel boundary (floor).
+    /// Use for accumulated offsets so positions are stable during scroll.
+    pub fn snap_floor(logical: f32, scale: f32) -> f32 {
+        if scale <= 0.0 { return logical; }
+        (logical * scale).floor() / scale
+    }
+
+    /// Get scaled width for a column (model width * zoom), pixel-snapped.
+    pub fn col_width(&self, model_width: f32) -> f32 {
+        Self::snap(model_width * self.zoom, self.scale)
+    }
+
+    /// Get scaled height for a row (model height * zoom), pixel-snapped.
     pub fn row_height(&self, model_height: f32) -> f32 {
-        model_height * self.zoom
+        Self::snap(model_height * self.zoom, self.scale)
     }
 }
 
@@ -1699,6 +1722,27 @@ pub struct Spreadsheet {
 
     // Zoom (zoom_level is in view_state, metrics is derived)
     pub metrics: GridMetrics,
+    /// Debug overlay: draws pixel-alignment reference lines on the grid.
+    /// Toggle via Cmd+Alt+Shift+G (dev use only — verifies cell boundary snapping).
+    pub debug_grid_alignment: bool,
+    /// Debug border instrumentation (only in debug builds).
+    /// Uses Cell for interior mutability since render_cell takes &Spreadsheet.
+    /// Toggle Cmd+Alt+Shift+G to print once/sec:
+    ///   borders_calls=… gridline_cells=… userborder_cells=… frames=…
+    #[cfg(debug_assertions)]
+    pub debug_border_call_count: std::cell::Cell<u32>,
+    #[cfg(debug_assertions)]
+    pub debug_gridline_cells: std::cell::Cell<u32>,
+    #[cfg(debug_assertions)]
+    pub debug_userborder_cells: std::cell::Cell<u32>,
+    #[cfg(debug_assertions)]
+    debug_border_frames: std::cell::Cell<u32>,
+    #[cfg(debug_assertions)]
+    debug_border_last_report: std::cell::Cell<std::time::Instant>,
+    /// Consecutive 1-second windows where has_any_borders=true but userborder_cells=0.
+    /// Triggers a loud warning at 3 consecutive hits (likely stale flag).
+    #[cfg(debug_assertions)]
+    debug_border_stale_streak: u32,
     zoom_wheel_accumulator: f32,  // For smooth wheel zoom debounce
 
     // Navigation batching: accumulate repeat arrow events, flush at render start
@@ -2117,6 +2161,19 @@ impl Spreadsheet {
             zen_mode: false,
             f1_help_visible: false,
             metrics: GridMetrics::default(),
+            debug_grid_alignment: false,
+            #[cfg(debug_assertions)]
+            debug_border_call_count: std::cell::Cell::new(0),
+            #[cfg(debug_assertions)]
+            debug_gridline_cells: std::cell::Cell::new(0),
+            #[cfg(debug_assertions)]
+            debug_userborder_cells: std::cell::Cell::new(0),
+            #[cfg(debug_assertions)]
+            debug_border_frames: std::cell::Cell::new(0),
+            #[cfg(debug_assertions)]
+            debug_border_last_report: std::cell::Cell::new(std::time::Instant::now()),
+            #[cfg(debug_assertions)]
+            debug_border_stale_streak: 0,
             zoom_wheel_accumulator: 0.0,
             pending_nav_dx: 0,
             pending_nav_dy: 0,
@@ -2629,7 +2686,7 @@ impl Spreadsheet {
             return; // No change
         }
         self.view_state.zoom_level = clamped;
-        self.metrics = GridMetrics::new(clamped);
+        self.metrics = GridMetrics::with_scale(clamped, self.metrics.scale);
         self.ensure_visible(cx);
         // Show status message
         let percent = (clamped * 100.0).round() as i32;
@@ -3272,7 +3329,7 @@ impl Spreadsheet {
         for col in self.view_state.scroll_col..target_col {
             x += self.metrics.col_width(self.col_width(col));
         }
-        x
+        GridMetrics::snap_floor(x, self.metrics.scale)
     }
 
     /// Get the Y position of a row's top edge (relative to start of grid, after column header)
@@ -3282,7 +3339,7 @@ impl Spreadsheet {
         for row in self.view_state.scroll_row..target_row {
             y += self.metrics.row_height(self.row_height(row));
         }
-        y
+        GridMetrics::snap_floor(y, self.metrics.scale)
     }
 
     /// Get the bounding rect of a cell in grid-relative coordinates.
@@ -3643,33 +3700,118 @@ impl Spreadsheet {
     /// - Own right and bottom: always draw if set
     /// - Own top: only draw if cell above has no bottom border
     /// - Own left: only draw if cell to left has no right border
-    pub fn cell_user_borders(&self, row: usize, col: usize, cx: &App) -> (bool, bool, bool, bool) {
-        let format = self.sheet(cx).get_format(row, col);
+    pub fn cell_user_borders(
+        &self, row: usize, col: usize, cx: &App,
+        boundary_bottom: bool, boundary_right: bool,
+    ) -> (bool, bool, bool, bool) {
+        #[cfg(debug_assertions)]
+        self.debug_border_call_count.set(self.debug_border_call_count.get() + 1);
 
-        // Right and bottom: always draw if set
-        let right = format.border_right.is_set();
-        let bottom = format.border_bottom.is_set();
+        // Single-ownership model: each cell draws only its TOP and LEFT borders.
+        // Right/bottom borders are drawn by the neighboring cell as their left/top.
+        // Each edge is resolved as max(own_side, neighbor_opposite_side) so both
+        // cells' border settings contribute, but only one cell draws the line.
+        //
+        // Exception: at the viewport boundary (last visible row/col), this cell
+        // also draws BOTTOM (boundary_bottom) or RIGHT (boundary_right) because
+        // the neighbor that would normally own that edge isn't rendered.
+        //
+        // For merged cells: interior cells draw nothing. Perimeter cells draw only
+        // top (if on merge top edge) and left (if on merge left edge), resolved
+        // with the neighboring cell/merge's opposing border. At viewport boundaries,
+        // perimeter cells also draw bottom/right for merge edges that touch the boundary.
 
-        // Top: only draw if cell above has no bottom border
-        let top = if format.border_top.is_set() {
-            if row > 0 {
-                let above_format = self.sheet(cx).get_format(row - 1, col);
-                !above_format.border_bottom.is_set()
+        let sheet = self.sheet(cx);
+
+        // Helper: effective border contribution for a cell on a given side,
+        // accounting for merges (interior cells contribute None, perimeter cells
+        // contribute the merge's resolved edge border).
+        let effective_side = |r: usize, c: usize, side: u8| -> CellBorder {
+            // side: 0=top, 1=right, 2=bottom, 3=left
+            if let Some(m) = sheet.get_merge(r, c) {
+                let on_perimeter = match side {
+                    0 => r == m.start.0,  // top
+                    1 => c == m.end.1,    // right
+                    2 => r == m.end.0,    // bottom
+                    3 => c == m.start.1,  // left
+                    _ => false,
+                };
+                if !on_perimeter {
+                    return CellBorder::default(); // interior: no contribution
+                }
+                let (rt, rr, rb, rl) = sheet.resolve_merge_borders(m);
+                match side {
+                    0 => rt,
+                    1 => rr,
+                    2 => rb,
+                    3 => rl,
+                    _ => CellBorder::default(),
+                }
             } else {
-                true // No cell above, draw top border
+                let fmt = sheet.get_format(r, c);
+                match side {
+                    0 => fmt.border_top,
+                    1 => fmt.border_right,
+                    2 => fmt.border_bottom,
+                    3 => fmt.border_left,
+                    _ => CellBorder::default(),
+                }
             }
+        };
+
+        // Check if this cell is a merge interior (not on any perimeter edge)
+        if let Some(m) = sheet.get_merge(row, col) {
+            let on_edge = row == m.start.0 || row == m.end.0
+                       || col == m.start.1 || col == m.end.1;
+            if !on_edge {
+                return (false, false, false, false); // interior: no borders
+            }
+        }
+
+        // Resolve TOP edge: max(my_top, above_neighbor_bottom)
+        let top = {
+            let my_top = effective_side(row, col, 0);
+            let above_bottom = if row > 0 {
+                effective_side(row - 1, col, 2)
+            } else {
+                CellBorder::default()
+            };
+            max_border(my_top, above_bottom).is_set()
+        };
+
+        // Resolve LEFT edge: max(my_left, left_neighbor_right)
+        let left = {
+            let my_left = effective_side(row, col, 3);
+            let left_right = if col > 0 {
+                effective_side(row, col - 1, 1)
+            } else {
+                CellBorder::default()
+            };
+            max_border(my_left, left_right).is_set()
+        };
+
+        // Resolve BOTTOM edge: only at viewport boundary (last visible row)
+        let bottom = if boundary_bottom {
+            let my_bottom = effective_side(row, col, 2);
+            let below_top = if row + 1 < NUM_ROWS {
+                effective_side(row + 1, col, 0)
+            } else {
+                CellBorder::default()
+            };
+            max_border(my_bottom, below_top).is_set()
         } else {
             false
         };
 
-        // Left: only draw if cell to left has no right border
-        let left = if format.border_left.is_set() {
-            if col > 0 {
-                let left_format = self.sheet(cx).get_format(row, col - 1);
-                !left_format.border_right.is_set()
+        // Resolve RIGHT edge: only at viewport boundary (last visible col)
+        let right = if boundary_right {
+            let my_right = effective_side(row, col, 1);
+            let right_left = if col + 1 < NUM_COLS {
+                effective_side(row, col + 1, 3)
             } else {
-                true // No cell to left, draw left border
-            }
+                CellBorder::default()
+            };
+            max_border(my_right, right_left).is_set()
         } else {
             false
         };
@@ -4502,6 +4644,52 @@ impl Render for Spreadsheet {
             if self.mode.is_editing() {
                 self.edit_scroll_dirty = true;
                 self.update_edit_scroll(window);
+            }
+        }
+
+        // Update grid metrics if display scale factor changed (e.g. window moved to Retina display)
+        let sf = window.scale_factor();
+        if (sf - self.metrics.scale).abs() > 0.001 {
+            self.metrics = GridMetrics::with_scale(self.metrics.zoom, sf);
+        }
+
+        // Debug: report border instrumentation (once per second, only when debug overlay is on).
+        // All counters accumulate across frames; reset only on print.
+        // 0 borders_calls = fast path active (sheet has no borders).
+        #[cfg(debug_assertions)]
+        if self.debug_grid_alignment {
+            self.debug_border_frames.set(self.debug_border_frames.get() + 1);
+            let now = std::time::Instant::now();
+            let last = self.debug_border_last_report.get();
+            if now.duration_since(last).as_secs() >= 1 {
+                let calls = self.debug_border_call_count.get();
+                let gridlines = self.debug_gridline_cells.get();
+                let overlays = self.debug_userborder_cells.get();
+                let frames = self.debug_border_frames.get();
+                let has_flag = self.sheet(cx).has_any_borders;
+                eprintln!(
+                    "[border-debug] borders_calls={} gridline_cells={} userborder_cells={} frames={} has_any_borders={}",
+                    calls, gridlines, overlays, frames, has_flag,
+                );
+                // Stale flag tripwire: has_any_borders=true but nothing actually drawn.
+                // 3 consecutive 1-second windows triggers a loud warning.
+                if has_flag && overlays == 0 && calls > 0 {
+                    self.debug_border_stale_streak += 1;
+                    if self.debug_border_stale_streak >= 3 {
+                        eprintln!(
+                            "[border-debug][WARN] has_any_borders=true but no user borders drawn \
+                             for {}s; likely stale flag. Consider scan_border_flag().",
+                            self.debug_border_stale_streak,
+                        );
+                    }
+                } else {
+                    self.debug_border_stale_streak = 0;
+                }
+                self.debug_border_call_count.set(0);
+                self.debug_gridline_cells.set(0);
+                self.debug_userborder_cells.set(0);
+                self.debug_border_frames.set(0);
+                self.debug_border_last_report.set(now);
             }
         }
 

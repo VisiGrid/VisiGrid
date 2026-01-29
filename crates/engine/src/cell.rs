@@ -66,6 +66,18 @@ pub enum BorderStyle {
     Thick,     // 3px
 }
 
+impl BorderStyle {
+    /// Numeric weight for precedence comparison: None(0) < Thin(1) < Medium(2) < Thick(3)
+    pub fn weight(self) -> u8 {
+        match self {
+            BorderStyle::None => 0,
+            BorderStyle::Thin => 1,
+            BorderStyle::Medium => 2,
+            BorderStyle::Thick => 3,
+        }
+    }
+}
+
 /// Border specification for a single cell edge
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct CellBorder {
@@ -97,6 +109,12 @@ pub fn effective_border(border_a: CellBorder, border_b: CellBorder) -> CellBorde
     } else {
         border_b
     }
+}
+
+/// Returns the border with the strongest style (None < Thin < Medium < Thick).
+/// Used for merged cell edge resolution: scan edge cells, keep the "thickest" border.
+pub fn max_border(a: CellBorder, b: CellBorder) -> CellBorder {
+    if a.style.weight() >= b.style.weight() { a } else { b }
 }
 
 /// Returns the border to actually draw (v0.2.2: normalize to Thin/black).
@@ -148,6 +166,12 @@ pub struct CellFormat {
 }
 
 impl CellFormat {
+    /// Returns true if any border edge is set (non-None style).
+    pub fn has_any_border(&self) -> bool {
+        self.border_top.is_set() || self.border_right.is_set()
+            || self.border_bottom.is_set() || self.border_left.is_set()
+    }
+
     /// Merge a CellFormatOverride on top of this base format.
     /// Override fields that are `Some` replace the base; `None` fields keep the base value.
     pub fn merge_override(&self, ovr: &CellFormatOverride) -> CellFormat {
@@ -991,6 +1015,35 @@ mod tests {
 
         // Both None returns None
         assert_eq!(effective_border(none, none), none);
+    }
+
+    #[test]
+    fn test_max_border_picks_strongest() {
+        let none = CellBorder::default();
+        let thin = CellBorder::thin();
+        let medium = CellBorder { style: BorderStyle::Medium, color: None };
+        let thick = CellBorder { style: BorderStyle::Thick, color: None };
+
+        // max_border always picks the stronger style
+        assert_eq!(max_border(none, thin), thin);
+        assert_eq!(max_border(thin, none), thin);
+        assert_eq!(max_border(thin, medium), medium);
+        assert_eq!(max_border(medium, thin), medium);
+        assert_eq!(max_border(medium, thick), thick);
+        assert_eq!(max_border(thick, medium), thick);
+        assert_eq!(max_border(none, none), none);
+        assert_eq!(max_border(thick, thick), thick);
+
+        // tie-break: first wins (both equal weight)
+        let thin_red = CellBorder { style: BorderStyle::Thin, color: Some([255, 0, 0, 255]) };
+        assert_eq!(max_border(thin, thin_red), thin); // a wins on tie
+    }
+
+    #[test]
+    fn test_border_style_weight_ordering() {
+        assert!(BorderStyle::None.weight() < BorderStyle::Thin.weight());
+        assert!(BorderStyle::Thin.weight() < BorderStyle::Medium.weight());
+        assert!(BorderStyle::Medium.weight() < BorderStyle::Thick.weight());
     }
 
     #[test]

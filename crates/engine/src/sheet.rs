@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::cell::{Alignment, Cell, CellBorder, CellFormat, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment};
+use super::cell::{Alignment, Cell, CellBorder, CellFormat, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment, max_border};
 use super::formula::eval::{self, Array2D, CellLookup, EvalResult, LookupWithContext, Value};
 use super::formula::parser::bind_expr_same_sheet;
 use super::validation::ValidationStore;
@@ -227,6 +227,11 @@ pub struct Sheet {
     /// Fast lookup: (row, col) → index into merged_regions
     #[serde(skip)]
     merge_index: HashMap<(usize, usize), usize>,
+    /// Conservative flag: true once any cell has had a non-None border set.
+    /// Never cleared (except by `scan_border_flag()`). Used by the renderer
+    /// to skip border computation on sheets that have never had borders.
+    #[serde(skip)]
+    pub has_any_borders: bool,
 }
 
 impl CellLookup for Sheet {
@@ -330,6 +335,7 @@ impl Sheet {
             validations: ValidationStore::new(),
             merged_regions: Vec::new(),
             merge_index: HashMap::new(),
+            has_any_borders: false,
         }
     }
 
@@ -349,6 +355,7 @@ impl Sheet {
             validations: ValidationStore::new(),
             merged_regions: Vec::new(),
             merge_index: HashMap::new(),
+            has_any_borders: false,
         }
     }
 
@@ -792,6 +799,9 @@ impl Sheet {
     }
 
     pub fn set_format(&mut self, row: usize, col: usize, format: CellFormat) {
+        if !self.has_any_borders && format.has_any_border() {
+            self.has_any_borders = true;
+        }
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format = format;
     }
@@ -805,6 +815,9 @@ impl Sheet {
     /// Set format from import: applies the full CellFormat as the resolved format
     /// and does NOT touch style_id (caller sets that separately).
     pub fn set_format_from_import(&mut self, row: usize, col: usize, format: CellFormat) {
+        if !self.has_any_borders && format.has_any_border() {
+            self.has_any_borders = true;
+        }
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format = format;
     }
@@ -908,6 +921,9 @@ impl Sheet {
         bottom: CellBorder,
         left: CellBorder,
     ) {
+        if !self.has_any_borders && (top.is_set() || right.is_set() || bottom.is_set() || left.is_set()) {
+            self.has_any_borders = true;
+        }
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format.border_top = top;
         cell.format.border_right = right;
@@ -917,26 +933,37 @@ impl Sheet {
 
     /// Set the top border on a cell
     pub fn set_border_top(&mut self, row: usize, col: usize, border: CellBorder) {
+        if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format.border_top = border;
     }
 
     /// Set the right border on a cell
     pub fn set_border_right(&mut self, row: usize, col: usize, border: CellBorder) {
+        if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format.border_right = border;
     }
 
     /// Set the bottom border on a cell
     pub fn set_border_bottom(&mut self, row: usize, col: usize, border: CellBorder) {
+        if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format.border_bottom = border;
     }
 
     /// Set the left border on a cell
     pub fn set_border_left(&mut self, row: usize, col: usize, border: CellBorder) {
+        if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format.border_left = border;
+    }
+
+    /// Rescan all cells to recompute `has_any_borders`.
+    /// Call after bulk operations that may have cleared borders (e.g., undo/redo
+    /// restoring a previous workbook snapshot).
+    pub fn scan_border_flag(&mut self) {
+        self.has_any_borders = self.cells.values().any(|c| c.format.has_any_border());
     }
 
     // =========================================================================
@@ -1058,6 +1085,43 @@ impl Sheet {
         }
     }
 
+    /// Compute the resolved border for each side of a merged region (edge consolidation).
+    ///
+    /// Scans edge cells along each side and returns the max-precedence border:
+    /// - Top: scan border_top of (start_row, col) for col in start_col..=end_col
+    /// - Right: scan border_right of (row, end_col) for row in start_row..=end_row
+    /// - Bottom: scan border_bottom of (end_row, col) for col in start_col..=end_col
+    /// - Left: scan border_left of (row, start_col) for row in start_row..=end_row
+    ///
+    /// Edge consolidation: the entire edge uses a single, consistent border style —
+    /// the strongest found on any cell along that edge. This differs from Excel's
+    /// per-cell-segment model but produces cleaner visuals for financial models.
+    ///
+    /// Returns (top, right, bottom, left) resolved borders.
+    pub fn resolve_merge_borders(&self, merge: &MergedRegion) -> (CellBorder, CellBorder, CellBorder, CellBorder) {
+        let mut top = CellBorder::default();
+        for c in merge.start.1..=merge.end.1 {
+            top = max_border(top, self.get_format(merge.start.0, c).border_top);
+        }
+
+        let mut right = CellBorder::default();
+        for r in merge.start.0..=merge.end.0 {
+            right = max_border(right, self.get_format(r, merge.end.1).border_right);
+        }
+
+        let mut bottom = CellBorder::default();
+        for c in merge.start.1..=merge.end.1 {
+            bottom = max_border(bottom, self.get_format(merge.end.0, c).border_bottom);
+        }
+
+        let mut left = CellBorder::default();
+        for r in merge.start.0..=merge.end.0 {
+            left = max_border(left, self.get_format(r, merge.start.1).border_left);
+        }
+
+        (top, right, bottom, left)
+    }
+
     /// Insert rows at the specified position, shifting existing rows down
     pub fn insert_rows(&mut self, at_row: usize, count: usize) {
         // Collect all cells that need to be shifted
@@ -1147,6 +1211,14 @@ impl Sheet {
             }
         }
         self.normalize_merges();
+        // Deleted rows may have removed the only bordered cells.
+        // Only rescan when the flag is currently true (can't flip false→false).
+        // TODO(perf): if delete_rows on a 50k+ row bordered sheet causes >16ms frame hitch
+        // in debug builds, add a per-row border bitset to check deleted band intersection
+        // before doing the full scan.
+        if self.has_any_borders {
+            self.scan_border_flag();
+        }
     }
 
     /// Insert columns at the specified position, shifting existing columns right
@@ -1236,6 +1308,14 @@ impl Sheet {
             }
         }
         self.normalize_merges();
+        // Deleted columns may have removed the only bordered cells.
+        // Only rescan when the flag is currently true (can't flip false→false).
+        // TODO(perf): if delete_cols on a 50k+ col bordered sheet causes >16ms frame hitch
+        // in debug builds, add a per-col border bitset to check deleted band intersection
+        // before doing the full scan.
+        if self.has_any_borders {
+            self.scan_border_flag();
+        }
     }
 
     // =========================================================================
@@ -3293,5 +3373,348 @@ mod tests {
         assert!(loaded.get_merge(0, 0).is_some());
         assert!(loaded.get_merge(6, 6).is_some());
         assert!(loaded.get_merge(3, 3).is_none());
+    }
+
+    // =========================================================================
+    // Merge border resolution tests
+    // =========================================================================
+
+    #[test]
+    fn test_resolve_merge_borders_no_borders() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(1, 1, 3, 3)).unwrap();
+        let merge = sheet.get_merge(1, 1).unwrap().clone();
+        let (top, right, bottom, left) = sheet.resolve_merge_borders(&merge);
+        assert!(!top.is_set());
+        assert!(!right.is_set());
+        assert!(!bottom.is_set());
+        assert!(!left.is_set());
+    }
+
+    #[test]
+    fn test_resolve_merge_borders_uniform_thin() {
+        use crate::cell::{CellBorder, BorderStyle};
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(1, 1, 3, 3)).unwrap();
+
+        // Set thin borders on all edge cells
+        for c in 1..=3 {
+            let mut fmt = sheet.get_format(1, c);
+            fmt.border_top = CellBorder::thin();
+            sheet.set_format(1, c, fmt);
+            let mut fmt = sheet.get_format(3, c);
+            fmt.border_bottom = CellBorder::thin();
+            sheet.set_format(3, c, fmt);
+        }
+        for r in 1..=3 {
+            let mut fmt = sheet.get_format(r, 1);
+            fmt.border_left = CellBorder::thin();
+            sheet.set_format(r, 1, fmt);
+            let mut fmt = sheet.get_format(r, 3);
+            fmt.border_right = CellBorder::thin();
+            sheet.set_format(r, 3, fmt);
+        }
+
+        let merge = sheet.get_merge(1, 1).unwrap().clone();
+        let (top, right, bottom, left) = sheet.resolve_merge_borders(&merge);
+        assert_eq!(top.style, BorderStyle::Thin);
+        assert_eq!(right.style, BorderStyle::Thin);
+        assert_eq!(bottom.style, BorderStyle::Thin);
+        assert_eq!(left.style, BorderStyle::Thin);
+    }
+
+    #[test]
+    fn test_resolve_merge_borders_mixed_precedence() {
+        use crate::cell::{CellBorder, BorderStyle};
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(2, 2, 4, 5)).unwrap();
+
+        // Top edge: col 2 = Thin, col 3 = Medium, col 4 = None, col 5 = Thick
+        let mut fmt = sheet.get_format(2, 2);
+        fmt.border_top = CellBorder::thin();
+        sheet.set_format(2, 2, fmt);
+
+        let mut fmt = sheet.get_format(2, 3);
+        fmt.border_top = CellBorder { style: BorderStyle::Medium, color: None };
+        sheet.set_format(2, 3, fmt);
+
+        // col 4: no border (default)
+
+        let mut fmt = sheet.get_format(2, 5);
+        fmt.border_top = CellBorder { style: BorderStyle::Thick, color: None };
+        sheet.set_format(2, 5, fmt);
+
+        let merge = sheet.get_merge(2, 2).unwrap().clone();
+        let (top, _right, _bottom, _left) = sheet.resolve_merge_borders(&merge);
+        // Thick wins: it's the strongest
+        assert_eq!(top.style, BorderStyle::Thick);
+    }
+
+    #[test]
+    fn test_resolve_merge_borders_single_styled_cell() {
+        use crate::cell::{CellBorder, BorderStyle};
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(0, 0, 2, 4)).unwrap();
+
+        // Only one cell on the right edge has a border
+        let mut fmt = sheet.get_format(1, 4);
+        fmt.border_right = CellBorder { style: BorderStyle::Medium, color: None };
+        sheet.set_format(1, 4, fmt);
+
+        let merge = sheet.get_merge(0, 0).unwrap().clone();
+        let (_top, right, _bottom, _left) = sheet.resolve_merge_borders(&merge);
+        // Medium wins even though other right-edge cells have no border
+        assert_eq!(right.style, BorderStyle::Medium);
+    }
+
+    #[test]
+    fn test_adjacent_merges_shared_border() {
+        use crate::cell::{CellBorder, BorderStyle};
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        // Merge A: (1,1)→(2,3), Merge B: (3,1)→(4,3) — share horizontal border
+        sheet.add_merge(MergedRegion::new(1, 1, 2, 3)).unwrap();
+        sheet.add_merge(MergedRegion::new(3, 1, 4, 3)).unwrap();
+
+        // Set bottom border on merge A (via edge cell)
+        let mut fmt = sheet.get_format(2, 2);
+        fmt.border_bottom = CellBorder { style: BorderStyle::Medium, color: None };
+        sheet.set_format(2, 2, fmt);
+
+        // Set top border on merge B (via edge cell) — thinner than A's bottom
+        let mut fmt = sheet.get_format(3, 1);
+        fmt.border_top = CellBorder::thin();
+        sheet.set_format(3, 1, fmt);
+
+        // Merge A's resolved bottom should be Medium
+        let merge_a = sheet.get_merge(1, 1).unwrap().clone();
+        let (_, _, a_bottom, _) = sheet.resolve_merge_borders(&merge_a);
+        assert_eq!(a_bottom.style, BorderStyle::Medium);
+
+        // Merge B's resolved top should be Thin
+        let merge_b = sheet.get_merge(3, 1).unwrap().clone();
+        let (b_top, _, _, _) = sheet.resolve_merge_borders(&merge_b);
+        assert_eq!(b_top.style, BorderStyle::Thin);
+
+        // At the renderer level, single-ownership (top+left) means:
+        // - Merge A's bottom cells never draw bottom (right+bottom not drawn)
+        // - Merge B's top cells draw top = max(B_resolved_top, A_resolved_bottom)
+        //   = max(Thin, Medium) = Medium
+        // This is validated in the app layer, not here. But the resolution data
+        // for both merges is independently correct.
+    }
+
+    #[test]
+    fn test_edge_consolidation_intentional() {
+        use crate::cell::{CellBorder, BorderStyle};
+        // Lock-in test: edge consolidation is deliberate.
+        // Only one cell on the top edge has Thick; the resolved top is Thick for
+        // the entire edge, not piecewise.
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(2, 2, 4, 6)).unwrap(); // 3×5 merge
+
+        // Only one cell on the top edge gets a thick border
+        let mut fmt = sheet.get_format(2, 4);
+        fmt.border_top = CellBorder { style: BorderStyle::Thick, color: None };
+        sheet.set_format(2, 4, fmt);
+
+        let merge = sheet.get_merge(2, 2).unwrap().clone();
+        let (top, _, _, _) = sheet.resolve_merge_borders(&merge);
+
+        // Edge consolidation: entire top edge is Thick (not just the segment at col 4)
+        assert_eq!(top.style, BorderStyle::Thick);
+    }
+
+    #[test]
+    fn test_outer_border_draw() {
+        use crate::cell::{CellBorder, BorderStyle, max_border};
+        // Verify that bottom/right borders are resolvable for cells at the boundary.
+        // In the single-ownership model, a cell normally doesn't draw its bottom/right.
+        // At the viewport boundary, we resolve bottom as max(own_bottom, below_top)
+        // and right as max(own_right, right_left). This test verifies the resolution.
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Set a bottom border on cell (5, 3)
+        let mut fmt = sheet.get_format(5, 3);
+        fmt.border_bottom = CellBorder { style: BorderStyle::Thin, color: None };
+        sheet.set_format(5, 3, fmt);
+
+        // Set a top border on cell (6, 3) — this would normally draw the shared edge
+        let mut fmt = sheet.get_format(6, 3);
+        fmt.border_top = CellBorder { style: BorderStyle::Medium, color: None };
+        sheet.set_format(6, 3, fmt);
+
+        // At the viewport boundary (row 5 is last visible), cell (5,3) must draw bottom.
+        // Resolution: max(own_bottom=Thin, below_top=Medium) = Medium
+        let own_bottom = sheet.get_format(5, 3).border_bottom;
+        let below_top = sheet.get_format(6, 3).border_top;
+        let resolved = max_border(own_bottom, below_top);
+        assert_eq!(resolved.style, BorderStyle::Medium);
+        assert!(resolved.is_set());
+
+        // Similarly for right border: set right on (3,5) and left on (3,6)
+        let mut fmt = sheet.get_format(3, 5);
+        fmt.border_right = CellBorder { style: BorderStyle::Thick, color: None };
+        sheet.set_format(3, 5, fmt);
+
+        let mut fmt = sheet.get_format(3, 6);
+        fmt.border_left = CellBorder { style: BorderStyle::Thin, color: None };
+        sheet.set_format(3, 6, fmt);
+
+        let own_right = sheet.get_format(3, 5).border_right;
+        let right_left = sheet.get_format(3, 6).border_left;
+        let resolved = max_border(own_right, right_left);
+        assert_eq!(resolved.style, BorderStyle::Thick);
+    }
+
+    #[test]
+    fn test_merge_at_viewport_boundary() {
+        use crate::cell::{CellBorder, BorderStyle};
+        // A merge touching the viewport edge must expose its resolved bottom/right
+        // borders for boundary drawing. The renderer calls resolve_merge_borders()
+        // and uses the bottom/right edges when the merge perimeter is at the boundary.
+        let mut sheet = Sheet::new(SheetId(1), 20, 20);
+        sheet.add_merge(MergedRegion::new(3, 5, 7, 9)).unwrap(); // 5×5 merge
+
+        // Set bottom border on the merge's bottom edge cells
+        let mut fmt = sheet.get_format(7, 6);
+        fmt.border_bottom = CellBorder { style: BorderStyle::Medium, color: None };
+        sheet.set_format(7, 6, fmt);
+
+        // Set right border on the merge's right edge cells
+        let mut fmt = sheet.get_format(5, 9);
+        fmt.border_right = CellBorder { style: BorderStyle::Thick, color: None };
+        sheet.set_format(5, 9, fmt);
+
+        let merge = sheet.get_merge(3, 5).unwrap().clone();
+        let (_, right, bottom, _) = sheet.resolve_merge_borders(&merge);
+
+        // Edge consolidation: the entire bottom edge gets Medium,
+        // the entire right edge gets Thick
+        assert_eq!(bottom.style, BorderStyle::Medium);
+        assert_eq!(right.style, BorderStyle::Thick);
+
+        // is_merge_hidden returns true for all non-origin cells (text suppression).
+        // The origin is (3,5); all others are hidden for text purposes.
+        assert!(sheet.is_merge_origin(3, 5));
+        assert!(!sheet.is_merge_origin(3, 6));
+        assert!(sheet.is_merge_hidden(6, 7)); // interior — text hidden
+        assert!(sheet.is_merge_hidden(7, 7)); // perimeter but not origin — text hidden
+
+        // Borders are drawn on perimeter cells by the renderer using
+        // get_merge() + resolve_merge_borders(), not is_merge_hidden().
+        // Verify perimeter cells are in the merge and can access resolved borders.
+        assert!(sheet.get_merge(7, 7).is_some()); // bottom-edge cell is in merge
+        assert!(sheet.get_merge(5, 9).is_some()); // right-edge cell is in merge
+    }
+
+    #[test]
+    fn test_gridline_suppression_boundary_guard() {
+        // Verify the invariants for gridline suppression at data boundaries:
+        // - At data_row == 0: no top gridline (header provides separation)
+        // - At col == 0: no left gridline (row header provides separation)
+        // These are renderer-level guards (data_row > 0, col > 0) documented here
+        // as regression protection. The boundary pass (is_last_visible_row/col)
+        // handles the opposite edge (viewport bottom/right).
+        let sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // At row 0: top border is structurally absent (no cell above)
+        // The renderer guards with `if data_row > 0 { draw top gridline }`
+        assert!(sheet.get_format(0, 0).border_top.style == crate::cell::BorderStyle::None);
+
+        // At col 0: left border is structurally absent (no cell left)
+        assert!(sheet.get_format(0, 0).border_left.style == crate::cell::BorderStyle::None);
+
+        // Merge at row 0: interior gridlines still suppressed
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(0, 0, 2, 2)).unwrap();
+        // Interior cell (1,1) is hidden — no gridlines drawn here
+        assert!(sheet.is_merge_hidden(1, 1));
+        // Origin (0,0) is not hidden — it's the merge anchor
+        assert!(!sheet.is_merge_hidden(0, 0));
+        // Perimeter cell (2,1) is hidden for text but borders are resolved
+        // via get_merge() in the renderer. Verify it's in the merge.
+        assert!(sheet.is_merge_hidden(2, 1)); // non-origin = hidden for text
+        let merge = sheet.get_merge(2, 1).unwrap();
+        assert_eq!(merge.start, (0, 0));
+        assert_eq!(merge.end, (2, 2));
+        // Bottom edge cell: renderer checks `data_row < merge.end.0` for interior suppression
+        // (2,1) has data_row == merge.end.0, so bottom_in_merge is false — gridline not suppressed
+        assert_eq!(2, merge.end.0); // at bottom edge, not interior
+    }
+
+    /// Deterministic test: has_any_borders goes true→false through clear paths.
+    /// Locks in the invariant that scan_border_flag() is called after border removal.
+    #[test]
+    fn test_has_any_borders_true_to_false() {
+        let mut sheet = Sheet::new(SheetId(99), 100, 100);
+        assert!(!sheet.has_any_borders, "new sheet should have no borders");
+
+        // Set a border → flag goes true
+        let thin = CellBorder::thin();
+        let none = CellBorder::default();
+        sheet.set_borders(3, 3, thin, none, none, none);
+        assert!(sheet.has_any_borders, "flag should be true after setting a border");
+
+        // Clear that border → flag should still be true (set_borders doesn't auto-clear flag)
+        sheet.set_borders(3, 3, none, none, none, none);
+        assert!(sheet.has_any_borders, "flag stays true until scan (conservative)");
+
+        // Rescan → flag goes false (the only bordered cell was cleared)
+        sheet.scan_border_flag();
+        assert!(!sheet.has_any_borders, "flag should be false after scan with no borders");
+
+        // Set border again, then clear via set_format(default) → same pattern
+        sheet.set_border_top(5, 5, thin);
+        assert!(sheet.has_any_borders);
+        sheet.set_format(5, 5, CellFormat::default());
+        sheet.scan_border_flag();
+        assert!(!sheet.has_any_borders, "flag should be false after clearing format + scan");
+
+        // Multiple bordered cells: clearing one leaves flag true
+        sheet.set_borders(0, 0, thin, thin, thin, thin);
+        sheet.set_borders(1, 1, thin, none, none, none);
+        assert!(sheet.has_any_borders);
+        sheet.set_borders(0, 0, none, none, none, none);
+        sheet.scan_border_flag();
+        assert!(sheet.has_any_borders, "flag stays true: cell (1,1) still has a border");
+        sheet.set_borders(1, 1, none, none, none, none);
+        sheet.scan_border_flag();
+        assert!(!sheet.has_any_borders, "flag false after all borders cleared + scan");
+    }
+
+    /// has_any_borders stays correct through delete_rows (which calls scan_border_flag).
+    #[test]
+    fn test_has_any_borders_after_delete_rows() {
+        let mut sheet = Sheet::new(SheetId(99), 100, 100);
+        let thin = CellBorder::thin();
+
+        // Border on row 5 only
+        sheet.set_border_top(5, 0, thin);
+        assert!(sheet.has_any_borders);
+
+        // Delete rows 0..5 (includes row 5) → border is gone, flag should clear
+        sheet.delete_rows(0, 6);
+        assert!(!sheet.has_any_borders, "flag should be false after deleting the only bordered row");
+
+        // Border on row 10, delete rows 0..3 (doesn't touch row 10) → flag stays true
+        sheet.set_border_top(10, 0, thin);
+        assert!(sheet.has_any_borders);
+        sheet.delete_rows(0, 3);
+        assert!(sheet.has_any_borders, "flag stays true: bordered row shifted but still exists");
+    }
+
+    /// has_any_borders stays correct through delete_cols (which calls scan_border_flag).
+    #[test]
+    fn test_has_any_borders_after_delete_cols() {
+        let mut sheet = Sheet::new(SheetId(99), 100, 100);
+        let thin = CellBorder::thin();
+
+        // Border on col 5 only
+        sheet.set_border_left(0, 5, thin);
+        assert!(sheet.has_any_borders);
+
+        // Delete cols 0..6 (includes col 5) → border is gone
+        sheet.delete_cols(0, 6);
+        assert!(!sheet.has_any_borders, "flag should be false after deleting the only bordered col");
     }
 }

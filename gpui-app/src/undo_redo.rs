@@ -50,6 +50,7 @@ impl Spreadsheet {
                             for patch in patches {
                                 sheet.set_format(patch.row, patch.col, patch.before);
                             }
+                            sheet.scan_border_flag();
                         }
                     });
                     self.status_message = Some(format!("Undo: {}", description));
@@ -348,6 +349,7 @@ impl Spreadsheet {
                         for patch in patches {
                             sheet.set_format(patch.row, patch.col, patch.before);
                         }
+                        sheet.scan_border_flag();
                     }
                 });
             }
@@ -592,6 +594,7 @@ impl Spreadsheet {
                     for patch in patches {
                         sheet.set_format(patch.row, patch.col, patch.after);
                     }
+                    sheet.scan_border_flag();
                 });
             }
             UndoAction::NamedRangeDeleted { named_range } => {
@@ -802,6 +805,7 @@ impl Spreadsheet {
                             for patch in patches {
                                 sheet.set_format(patch.row, patch.col, patch.after);
                             }
+                            sheet.scan_border_flag();
                         }
                     });
                     self.status_message = Some(format!("Redo: {}", description));

@@ -172,6 +172,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("f5", ReturnToTraceSource, Some("Spreadsheet")),
 
+        // Debug overlays (dev only)
+        KeyBinding::new("cmd-alt-shift-g", ToggleDebugGridAlignment, Some("Spreadsheet")),
+
         // Format
         KeyBinding::new(&kb(m, "b"), ToggleBold, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "i"), ToggleItalic, Some("Spreadsheet")),

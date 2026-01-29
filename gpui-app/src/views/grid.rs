@@ -15,6 +15,21 @@ use super::formula_bar;
 use visigrid_engine::cell::{Alignment, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
 
+/// Create a non-interactive overlay div (absolute-positioned, full cell coverage).
+///
+/// In gpui, elements without `.id()` do not participate in hit-testing and cannot
+/// intercept mouse events. This helper enforces that contract: callers style the
+/// returned `Div` but must **never** add `.id()` to it, or it will steal clicks
+/// from the cell underneath.
+///
+/// Used for: user border overlays, trace path overlays, and any visual-only layer
+/// that must not interfere with selection, drag, or editing.
+fn non_interactive_overlay() -> Div {
+    div()
+        .absolute()
+        .inset_0()
+}
+
 /// Get the view state for a specific pane.
 /// - `None` or `Some(SplitSide::Left)` → main view_state
 /// - `Some(SplitSide::Right)` → split_pane.view_state (falls back to main if no split)
@@ -137,6 +152,7 @@ pub fn render_grid(
                             // This respects both sort order AND filter visibility
                             let visible_index = scroll_row + screen_row;
                             let (view_row, data_row) = app.nth_visible_row(visible_index, cx)?;
+                            let is_last_visible_row = screen_row == total_visible_rows - 1;
                             Some(render_row(
                                 view_row,
                                 data_row,
@@ -147,6 +163,7 @@ pub fn render_grid(
                                 editing,
                                 &edit_value,
                                 show_gridlines,
+                                is_last_visible_row,
                                 app,
                                 window,
                                 cx,
@@ -160,6 +177,19 @@ pub fn render_grid(
             .child(render_formula_ref_borders(app, pane_side))
             // Popup overlay layer - positioned relative to grid, not window chrome
             .child(render_popup_overlay(app, cx))
+            // Debug: draw 1px reference lines to verify pixel alignment (Cmd+Alt+Shift+G).
+            // Red line at x=0 (grid origin), green line at first cell boundary.
+            // If these shimmer while scrolling, the origin or cell widths are fractional.
+            .when(app.debug_grid_alignment, |d| {
+                let first_col_w = app.metrics.col_width(app.col_width(scroll_col));
+                d.child(
+                    div().absolute().left_0().top_0().w(px(1.0)).h_full()
+                        .bg(gpui::rgb(0xff0000))
+                ).child(
+                    div().absolute().left(px(first_col_w + app.metrics.header_w)).top_0().w(px(1.0)).h_full()
+                        .bg(gpui::rgb(0x00ff00))
+                )
+            })
             .into_any_element();
     }
 
@@ -192,11 +222,12 @@ pub fn render_grid(
                                 // Row header for frozen row
                                 .child(render_row_header(app, view_row, cx))
                                 // Frozen corner cells (cols 0..frozen_cols)
+                                // No viewport boundary edges — dividers separate from scrollable regions
                                 .when(frozen_cols > 0, |d| {
                                     d.children(
                                         (0..frozen_cols).map(|col| {
                                             let col_width = metrics.col_width(app.col_width(col));
-                                            render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, app, window, cx)
+                                            render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, false, app, window, cx)
                                         })
                                     )
                                 })
@@ -210,11 +241,13 @@ pub fn render_grid(
                                     )
                                 })
                                 // Frozen row cells (cols scroll_col..scroll_col+scrollable_visible_cols)
+                                // Right boundary at viewport edge; no bottom boundary (divider below)
                                 .children(
                                     (0..scrollable_visible_cols).map(|visible_col| {
                                         let col = scroll_col + visible_col;
                                         let col_width = metrics.col_width(app.col_width(col));
-                                        render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, app, window, cx)
+                                        let is_last_col = visible_col == scrollable_visible_cols - 1;
+                                        render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, is_last_col, app, window, cx)
                                     })
                                 )
                         })
@@ -244,6 +277,7 @@ pub fn render_grid(
                                 let visible_index = frozen_rows + scroll_row + screen_row;
                                 let (view_row, data_row) = app.nth_visible_row(visible_index, cx)?;
                                 let row_height = metrics.row_height(app.row_height(view_row));
+                                let is_last_row = screen_row == scrollable_visible_rows - 1;
                                 Some(div()
                                     .flex()
                                     .flex_shrink_0()
@@ -251,11 +285,12 @@ pub fn render_grid(
                                     // Row header
                                     .child(render_row_header(app, view_row, cx))
                                     // Frozen column cells (cols 0..frozen_cols)
+                                    // Bottom boundary at viewport edge; no right boundary (divider separates)
                                     .when(frozen_cols > 0, |d| {
                                         d.children(
                                             (0..frozen_cols).map(|col| {
                                                 let col_width = metrics.col_width(app.col_width(col));
-                                                render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, app, window, cx)
+                                                render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, false, app, window, cx)
                                             })
                                         )
                                     })
@@ -268,12 +303,13 @@ pub fn render_grid(
                                                 .bg(divider_color)
                                         )
                                     })
-                                    // Main grid cells
+                                    // Main grid cells — both bottom and right boundary at viewport edge
                                     .children(
                                         (0..scrollable_visible_cols).map(|visible_col| {
                                             let col = scroll_col + visible_col;
                                             let col_width = metrics.col_width(app.col_width(col));
-                                            render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, app, window, cx)
+                                            let is_last_col = visible_col == scrollable_visible_cols - 1;
+                                            render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, is_last_col, app, window, cx)
                                         })
                                     ))
                             })
@@ -299,6 +335,7 @@ fn render_row(
     editing: bool,
     edit_value: &str,
     show_gridlines: bool,
+    is_last_visible_row: bool,
     app: &Spreadsheet,
     window: &Window,
     cx: &mut Context<Spreadsheet>,
@@ -315,8 +352,9 @@ fn render_row(
             (0..visible_cols).map(|visible_col| {
                 let col = scroll_col + visible_col;
                 let col_width = app.metrics.col_width(app.col_width(col));
+                let is_last_visible_col = visible_col == visible_cols - 1;
                 // view_row for selection/display, data_row for cell data access
-                render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, edit_value, show_gridlines, app, window, cx)
+                render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, edit_value, show_gridlines, is_last_visible_row, is_last_visible_col, app, window, cx)
             })
         )
 }
@@ -332,6 +370,8 @@ fn render_cell(
     editing: bool,
     edit_value: &str,
     show_gridlines: bool,
+    is_last_visible_row: bool,
+    is_last_visible_col: bool,
     app: &Spreadsheet,
     window: &Window,
     cx: &mut Context<Spreadsheet>,
@@ -382,6 +422,9 @@ fn render_cell(
         None
     };
 
+    // Merged cell: hidden cells suppress text and block editing
+    let is_merge_hidden = app.sheet(cx).is_merge_hidden(data_row, col);
+
     // Spill state detection - uses data_row (storage)
     let is_spill_parent = app.sheet(cx).is_spill_parent(data_row, col);
     let is_spill_receiver = app.sheet(cx).is_spill_receiver(data_row, col);
@@ -392,7 +435,10 @@ fn render_cell(
     let is_multi_edit_preview = multi_edit_preview.is_some();
 
     // Cell value: use data_row to access actual storage
-    let value = if is_editing {
+    // Merge-hidden cells display nothing (text is shown only at the origin)
+    let value = if is_merge_hidden {
+        String::new()
+    } else if is_editing {
         edit_value.to_string()
     } else if let Some(preview) = multi_edit_preview {
         // Show the preview value for cells in multi-selection during editing
@@ -549,7 +595,9 @@ fn render_cell(
     // CenterAcrossSelection span computation:
     // If this cell has text + CenterAcrossSelection, compute the total span width.
     // If this cell is empty + CenterAcrossSelection and a cell to its left spans across it, suppress text.
-    let center_across_span = if !is_editing && format.alignment == Alignment::CenterAcrossSelection {
+    // Priority: merge rules win — merged cells never use CenterAcrossSelection.
+    let is_in_merge = app.sheet(cx).get_merge(data_row, col).is_some();
+    let center_across_span = if !is_editing && !is_in_merge && format.alignment == Alignment::CenterAcrossSelection {
         if !value.is_empty() {
             // Source cell: scan right for empty cells with CenterAcrossSelection
             Some(center_across_span_width(data_row, col, col_width, app, cx))
@@ -636,32 +684,65 @@ fn render_cell(
     } else {
         // Formula ref borders are drawn as dashed overlays (render_formula_ref_borders)
         // so formula ref cells fall through here for normal gridline/user border handling
-        // Check for user-defined borders first (stored per data cell)
-        let (user_top, user_right, user_bottom, user_left) = app.cell_user_borders(data_row, col, cx);
-        let has_user_border = user_top || user_right || user_bottom || user_left;
+        let sheet_has_borders = app.sheet(cx).has_any_borders;
 
-        if has_user_border {
-            // Draw user-defined borders (black, 1px)
-            let border_color = rgb(0x000000);  // Black for user borders
-            let mut c = cell.border_color(border_color);
-            if user_top { c = c.border_t_1(); }
-            if user_right { c = c.border_r_1(); }
-            if user_bottom { c = c.border_b_1(); }
-            if user_left { c = c.border_l_1(); }
-            c
-        } else if show_gridlines {
-            // Normal gridlines (only when enabled in settings)
-            // Don't draw gridlines toward selected cells (selection borders handle those edges)
-            // Use pane-specific view state for selection checks
-            let cell_right_selected = is_selected_in_pane(view_state, view_row, col + 1);
-            let cell_below_selected = is_selected_in_pane(view_state, view_row + 1, col);
-            let mut c = cell;
-            if !cell_right_selected { c = c.border_r_1(); }
-            if !cell_below_selected { c = c.border_b_1(); }
-            c
-        } else {
-            // No gridlines and no user borders - plain cell
+        // Fast path: no gridlines and no borders on this sheet → skip all Tier 5 work
+        if !show_gridlines && !sheet_has_borders {
             cell
+        } else {
+            // Resolve user borders only when the sheet actually has borders (avoids
+            // calling cell_user_borders() on every visible cell every frame for sheets
+            // that have never had border formatting).
+            let (user_top, user_right, user_bottom, user_left) = if sheet_has_borders {
+                app.cell_user_borders(
+                    data_row, col, cx, is_last_visible_row, is_last_visible_col,
+                )
+            } else {
+                (false, false, false, false)
+            };
+            let has_user_border = user_top || user_right || user_bottom || user_left;
+
+            // Suppress interior gridlines within merged regions (computed once, used by gridlines)
+            let (top_in_merge, left_in_merge, bottom_in_merge, right_in_merge) = if let Some(merge) = app.sheet(cx).get_merge(data_row, col) {
+                (data_row > merge.start.0, col > merge.start.1, data_row < merge.end.0, col < merge.end.1)
+            } else {
+                (false, false, false, false)
+            };
+
+            // Gridlines: draw on edges WITHOUT resolved user borders.
+            // Border suppression order per edge: user border → selection → merge interior → boundary.
+            let mut c = cell;
+            #[cfg(debug_assertions)]
+            if show_gridlines {
+                app.debug_gridline_cells.set(app.debug_gridline_cells.get() + 1);
+            }
+            if show_gridlines {
+                let cell_above_selected = view_row > 0 && is_selected_in_pane(view_state, view_row - 1, col);
+                let cell_left_selected = col > 0 && is_selected_in_pane(view_state, view_row, col - 1);
+                if !user_top && data_row > 0 && !cell_above_selected && !top_in_merge { c = c.border_t_1(); }
+                if !user_left && col > 0 && !cell_left_selected && !left_in_merge { c = c.border_l_1(); }
+                if !user_bottom && is_last_visible_row && !bottom_in_merge { c = c.border_b_1(); }
+                if !user_right && is_last_visible_col && !right_in_merge { c = c.border_r_1(); }
+            }
+
+            // User borders: non-interactive overlay so explicit borders render on top of gridlines.
+            // Uses non_interactive_overlay() — must never have .id() or it will steal cell events.
+            #[cfg(debug_assertions)]
+            if has_user_border {
+                app.debug_userborder_cells.set(app.debug_userborder_cells.get() + 1);
+            }
+            if has_user_border {
+                let border_color = app.token(TokenKey::UserBorder);
+                c = c.child(
+                    non_interactive_overlay()
+                        .border_color(border_color)
+                        .when(user_top, |d| d.border_t_1())
+                        .when(user_right, |d| d.border_r_1())
+                        .when(user_bottom, |d| d.border_b_1())
+                        .when(user_left, |d| d.border_l_1())
+                );
+            }
+            c
         }
     };
 
@@ -694,6 +775,13 @@ fn render_cell(
                 (parent_row, parent_col)
             } else {
                 (cell_row, cell_col)
+            };
+
+            // If clicking a merged cell, redirect to merge origin and note merge extent
+            let (target_row, target_col, merge_end) = if let Some(merge) = this.sheet(cx).get_merge(target_row, target_col) {
+                (merge.start.0, merge.start.1, Some(merge.end))
+            } else {
+                (target_row, target_col, None)
             };
 
             // Formula mode: clicks insert cell references, drag for range
@@ -730,6 +818,18 @@ fn render_cell(
             } else {
                 // Start drag selection
                 this.start_drag_selection(target_row, target_col, cx);
+            }
+
+            // If the click target is a multi-cell merge, expand selection to cover full region
+            if let Some(merge_br) = merge_end {
+                if merge_br != (target_row, target_col) {
+                    let (anchor_row, anchor_col) = this.active_view_state().selected;
+                    // Pick the merge corner that, combined with anchor, covers the full region
+                    let far_row = if anchor_row <= target_row { merge_br.0 } else { target_row };
+                    let far_col = if anchor_col <= target_col { merge_br.1 } else { target_col };
+                    this.active_view_state_mut().selection_end = Some((far_row, far_col));
+                    cx.notify();
+                }
             }
         }))
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
@@ -1221,6 +1321,10 @@ fn center_across_span_width(
     let max_col = app.sheet(cx).cols.min(col + 50); // reasonable scan limit
     let mut check_col = col + 1;
     while check_col < max_col {
+        // Stop at merged cells — merge rules take priority over CenterAcross
+        if app.sheet(cx).get_merge(row, check_col).is_some() {
+            break;
+        }
         let adj_format = app.sheet(cx).get_format(row, check_col);
         if adj_format.alignment != Alignment::CenterAcrossSelection {
             break;
@@ -1250,6 +1354,10 @@ fn is_center_across_continuation(
     let mut check_col = col;
     while check_col > 0 {
         check_col -= 1;
+        // Stop at merged cells — merge rules take priority over CenterAcross
+        if app.sheet(cx).get_merge(row, check_col).is_some() {
+            return false;
+        }
         let fmt = app.sheet(cx).get_format(row, check_col);
         if fmt.alignment != Alignment::CenterAcrossSelection {
             return false; // hit a non-CenterAcross cell — no span from the left
@@ -1261,6 +1369,10 @@ fn is_center_across_continuation(
             let mut scan_col = check_col + 1;
             let max_col = app.sheet(cx).cols.min(check_col + 50);
             while scan_col < max_col && scan_col <= col {
+                // Stop at merged cells
+                if app.sheet(cx).get_merge(row, scan_col).is_some() {
+                    break;
+                }
                 let sf = app.sheet(cx).get_format(row, scan_col);
                 if sf.alignment != Alignment::CenterAcrossSelection {
                     break;

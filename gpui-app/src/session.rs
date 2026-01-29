@@ -662,13 +662,13 @@ impl Spreadsheet {
         self.inspector_visible = session.panels.inspector_visible;
         self.inspector_tab = session.panels.inspector_tab.into();
 
-        // Apply zoom level (clamp to valid range)
+        // Apply zoom level (clamp to valid range, preserve current scale factor)
         use crate::app::{ZOOM_STEPS, GridMetrics};
         let zoom = session.zoom_level
             .max(ZOOM_STEPS[0])
             .min(ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
         self.view_state.zoom_level = zoom;
-        self.metrics = GridMetrics::new(zoom);
+        self.metrics = GridMetrics::with_scale(zoom, self.metrics.scale);
     }
 }
 

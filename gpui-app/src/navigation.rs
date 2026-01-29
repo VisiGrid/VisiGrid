@@ -86,18 +86,42 @@ impl Spreadsheet {
 
         let (row, col) = self.active_view_state().selected;
 
-        // For vertical movement, use filter-aware navigation
-        let new_row = if dr != 0 {
-            self.next_visible_row(row, dr)
+        // Merge-aware navigation: if currently on a merge, move from the effective edge
+        // so the merge is treated as a single cell
+        let (eff_start_row, eff_start_col, eff_end_row, eff_end_col) =
+            if let Some(merge) = self.sheet(cx).get_merge(row, col) {
+                (merge.start.0, merge.start.1, merge.end.0, merge.end.1)
+            } else {
+                (row, col, row, col)
+            };
+
+        // For vertical movement, use filter-aware navigation from the effective edge
+        let new_row = if dr > 0 {
+            self.next_visible_row(eff_end_row, dr)
+        } else if dr < 0 {
+            self.next_visible_row(eff_start_row, dr)
         } else {
             row
         };
 
-        // For horizontal movement, simple arithmetic (columns aren't filtered)
-        let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+        // For horizontal movement, move from the effective edge
+        let new_col = if dc > 0 {
+            (eff_end_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize
+        } else if dc < 0 {
+            (eff_start_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize
+        } else {
+            col
+        };
+
+        // If we landed on a hidden merge cell, snap to its origin
+        let (final_row, final_col) = if let Some(merge) = self.sheet(cx).get_merge(new_row, new_col) {
+            merge.start
+        } else {
+            (new_row, new_col)
+        };
 
         let view_state = self.active_view_state_mut();
-        view_state.selected = (new_row, new_col);
+        view_state.selected = (final_row, final_col);
         view_state.selection_end = None;  // Clear range selection
         view_state.additional_selections.clear();  // Clear discontiguous selections
 
@@ -110,18 +134,44 @@ impl Spreadsheet {
 
         let view_state = self.active_view_state();
         let (row, col) = view_state.selection_end.unwrap_or(view_state.selected);
+        let (anchor_row, anchor_col) = view_state.selected;
 
-        // For vertical movement, use filter-aware navigation
-        let new_row = if dr != 0 {
-            self.next_visible_row(row, dr)
+        // Merge-aware: if extending from a merge, use the effective edge
+        let (eff_start_row, eff_start_col, eff_end_row, eff_end_col) =
+            if let Some(merge) = self.sheet(cx).get_merge(row, col) {
+                (merge.start.0, merge.start.1, merge.end.0, merge.end.1)
+            } else {
+                (row, col, row, col)
+            };
+
+        // For vertical movement, use filter-aware navigation from the effective edge
+        let new_row = if dr > 0 {
+            self.next_visible_row(eff_end_row, dr)
+        } else if dr < 0 {
+            self.next_visible_row(eff_start_row, dr)
         } else {
             row
         };
 
-        // For horizontal movement, simple arithmetic
-        let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+        // For horizontal movement, move from the effective edge
+        let new_col = if dc > 0 {
+            (eff_end_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize
+        } else if dc < 0 {
+            (eff_start_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize
+        } else {
+            col
+        };
 
-        self.active_view_state_mut().selection_end = Some((new_row, new_col));
+        // If we landed on a merge, extend to include the full merge region
+        let (final_row, final_col) = if let Some(merge) = self.sheet(cx).get_merge(new_row, new_col) {
+            let eff_row = if anchor_row <= merge.start.0 { merge.end.0 } else { merge.start.0 };
+            let eff_col = if anchor_col <= merge.start.1 { merge.end.1 } else { merge.start.1 };
+            (eff_row, eff_col)
+        } else {
+            (new_row, new_col)
+        };
+
+        self.active_view_state_mut().selection_end = Some((final_row, final_col));
 
         self.ensure_visible(cx);
     }
@@ -500,10 +550,19 @@ impl Spreadsheet {
         if !self.dragging_selection {
             return;
         }
-        // Only update if the cell changed to avoid unnecessary redraws
+        // If dragging over a merged cell, expand to include the full merge region
+        let effective = if let Some(merge) = self.sheet(cx).get_merge(row, col) {
+            let (anchor_row, anchor_col) = self.active_view_state().selected;
+            let eff_row = if anchor_row <= merge.start.0 { merge.end.0 } else { merge.start.0 };
+            let eff_col = if anchor_col <= merge.start.1 { merge.end.1 } else { merge.start.1 };
+            (eff_row, eff_col)
+        } else {
+            (row, col)
+        };
+        // Only update if the effective cell changed to avoid unnecessary redraws
         let view_state = self.active_view_state_mut();
-        if view_state.selection_end != Some((row, col)) {
-            view_state.selection_end = Some((row, col));
+        if view_state.selection_end != Some(effective) {
+            view_state.selection_end = Some(effective);
             cx.notify();
         }
     }

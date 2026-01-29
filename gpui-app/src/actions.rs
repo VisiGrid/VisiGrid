@@ -155,6 +155,8 @@ actions!(view, [
     CycleTracePrecedent,  // Alt+[ - Jump to next precedent (shift for reverse)
     CycleTraceDependent,  // Alt+] - Jump to next dependent (shift for reverse)
     ReturnToTraceSource,  // F5 (Win/Linux), Alt+Enter (macOS) - Jump back to trace source
+    // Debug overlays (dev only)
+    ToggleDebugGridAlignment,  // Cmd+Alt+Shift+G - Toggle pixel-alignment debug lines
 ]);
 
 // Window actions (macOS standard Window menu)

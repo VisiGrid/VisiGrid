@@ -478,6 +478,8 @@ impl Spreadsheet {
         }
         let count = patches.len();
         if count > 0 {
+            // Rescan border flag: clearing formats may have removed the only bordered cells
+            self.active_sheet_mut(cx, |s| s.scan_border_flag());
             let desc = "Clear Formatting".to_string();
             self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::ClearFormatting, desc.clone());
             self.is_modified = true;
@@ -681,6 +683,11 @@ impl Spreadsheet {
                     }
                 }
             }
+        }
+
+        // Rescan border flag after clearing: may have removed the only bordered cells
+        if matches!(mode, BorderApplyMode::Clear) && !patches.is_empty() {
+            self.active_sheet_mut(cx, |s| s.scan_border_flag());
         }
 
         let count = patches.len();
