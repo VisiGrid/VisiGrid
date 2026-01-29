@@ -2,6 +2,18 @@
 
 ## 0.3.7
 
+### views/mod.rs Split
+
+`views/mod.rs` (4,422 lines) split into 7 focused modules. The render function stays as a slim orchestrator (~690 lines) that delegates to extracted modules.
+
+- **`actions_nav.rs`** — 34 navigation/selection/search action handlers
+- **`actions_edit.rs`** — 30 editing/clipboard/cursor action handlers
+- **`actions_ui.rs`** — 108 file/format/view/menu action handlers
+- **`key_handler.rs`** — `on_key_down` dispatch (mode routing, character input)
+- **`f1_help.rs`** — F1 hold-to-peek context help overlay
+- **`named_range_dialogs.rs`** — rename, edit description, create, extract named range dialogs
+- **`rewind_dialogs.rs`** — rewind confirm dialog and success banner
+
 ### XLSX Import Overhaul
 
 Importing Excel files with shared formulas, formula-only cells, and missing value cells now works correctly. Financial models that previously showed mass #CIRC! and #ERR errors now import cleanly.
