@@ -395,8 +395,14 @@ impl Spreadsheet {
                 crate::validation_dropdown::DropdownCloseReason::SelectionChanged,
                 cx,
             );
+            // Snap to merge origin if landing on a merged cell
+            let (final_row, final_col) = if let Some(merge) = self.sheet(cx).get_merge(new_row, origin_col) {
+                merge.start
+            } else {
+                (new_row, origin_col)
+            };
             let view_state = self.active_view_state_mut();
-            view_state.selected = (new_row, origin_col);
+            view_state.selected = (final_row, final_col);
             view_state.selection_end = None;
             view_state.additional_selections.clear();
             self.ensure_visible(cx);
@@ -415,8 +421,14 @@ impl Spreadsheet {
                 crate::validation_dropdown::DropdownCloseReason::SelectionChanged,
                 cx,
             );
+            // Snap to merge origin if landing on a merged cell
+            let (final_row, final_col) = if let Some(merge) = self.sheet(cx).get_merge(new_row, origin_col) {
+                merge.start
+            } else {
+                (new_row, origin_col)
+            };
             let view_state = self.active_view_state_mut();
-            view_state.selected = (new_row, origin_col);
+            view_state.selected = (final_row, final_col);
             view_state.selection_end = None;
             view_state.additional_selections.clear();
             self.ensure_visible(cx);

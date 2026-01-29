@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Merged Cells Phase 3 — Navigation
+
+Merged cells now behave as single cells for all keyboard navigation. Arrow keys, Ctrl+Arrow data jumps, selection extension, Go To, and edit Tab/Enter flows correctly treat merges as atomic data units, snap to merge origins on landing, and expand selections to cover full merged regions.
+
+- **`find_data_boundary()` merge-aware** — cells inside a merge are treated as occupied (non-empty) for Ctrl+Arrow boundary detection, fixing data-edge scanning through hidden merge cells. Closure renamed `get_cell_value` → `is_cell_empty` to prevent boolean inversion bugs.
+- **`jump_selection()` merge-aware** — starts from the effective merge edge in the movement direction and snaps to merge origin on landing.
+- **`extend_jump_selection()` merge-aware** — same edge-start logic plus expands selection to include the full merge region on landing. Handles anchor-inside-merge edge case by normalizing anchor to `merge.start` before comparison.
+- **`confirm_goto()` merge-aware** — Go To a hidden merge cell redirects to merge origin, selects the full merge region, and clears additional selections.
+- **Tab-chain Enter merge-aware** — `confirm_edit_enter()` and `confirm_edit_up_enter()` snap to merge origin when the tab-chain return position lands on a merged cell.
+- **Engine invariant test** — `test_get_merge_returns_canonical_origin` locks the invariant that `get_merge(r, c).start` always equals the merge origin for every cell inside a merge.
+
 ## 0.3.8
 
 ### Merged Cells Phase 2 — Rendering

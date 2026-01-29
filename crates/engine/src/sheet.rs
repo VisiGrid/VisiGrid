@@ -4123,4 +4123,35 @@ mod tests {
         let rows: Vec<usize> = (m.start.0..=m.end.0).collect();
         assert_eq!(rows, vec![2, 3, 4, 5]);
     }
+
+    #[test]
+    fn test_get_merge_returns_canonical_origin() {
+        // For every cell (r, c) inside a merge, get_merge(r, c).unwrap().start
+        // must equal the merge origin. This is the invariant that navigation
+        // depends on: "snap to merge.start from any cell" always yields the origin.
+        let mut sheet = Sheet::new(SheetId(1), 20, 20);
+        sheet.add_merge(MergedRegion::new(1, 1, 3, 4)).unwrap(); // B2:E4
+        sheet.add_merge(MergedRegion::new(5, 0, 5, 2)).unwrap(); // A6:C6
+
+        // Every cell in first merge should resolve to origin (1, 1)
+        for r in 1..=3 {
+            for c in 1..=4 {
+                let merge = sheet.get_merge(r, c)
+                    .unwrap_or_else(|| panic!("get_merge({}, {}) should return Some", r, c));
+                assert_eq!(merge.start, (1, 1), "cell ({}, {}) should have origin (1, 1)", r, c);
+            }
+        }
+
+        // Every cell in second merge should resolve to origin (5, 0)
+        for c in 0..=2 {
+            let merge = sheet.get_merge(5, c)
+                .unwrap_or_else(|| panic!("get_merge(5, {}) should return Some", c));
+            assert_eq!(merge.start, (5, 0), "cell (5, {}) should have origin (5, 0)", c);
+        }
+
+        // Cell outside any merge should return None
+        assert!(sheet.get_merge(0, 0).is_none());
+        assert!(sheet.get_merge(4, 0).is_none());
+        assert!(sheet.get_merge(6, 0).is_none());
+    }
 }
