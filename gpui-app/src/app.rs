@@ -4093,6 +4093,21 @@ impl Spreadsheet {
         }
     }
 
+    /// Block a bulk operation when the active sheet contains merged cells.
+    /// Returns true (and sets status message) if merges exist, false otherwise.
+    /// `op_name` is a user-facing verb phrase like "sort", "fill", "replace".
+    pub fn block_if_merged(&mut self, op_name: &str, cx: &mut Context<Self>) -> bool {
+        if !self.sheet(cx).merged_regions.is_empty() {
+            self.status_message = Some(format!(
+                "Cannot {op_name}: this operation can't be applied to merged cells. Unmerge first."
+            ));
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Enter preview mode for the currently selected history entry
     pub fn enter_preview(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         // Must have a history highlight to preview

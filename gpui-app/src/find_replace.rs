@@ -386,6 +386,8 @@ impl Spreadsheet {
             return;
         }
 
+        if self.block_if_merged("replace all", cx) { return; }
+
         // Take a snapshot of matches before mutation
         let hits: Vec<MatchHit> = self.find_results.clone();
         let total = hits.len();

@@ -162,6 +162,9 @@ impl Spreadsheet {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
 
+        // TODO(engine): enforce in engine sort API too once available (UI guard is not sufficient for headless).
+        if self.block_if_merged("sort", cx) { return; }
+
         // Ensure filter range is set (use current selection if not)
         if self.filter_state.filter_range.is_none() {
             // Auto-detect range: from row 0 to last non-empty row in current column
@@ -263,6 +266,9 @@ impl Spreadsheet {
             self.filter_state.disable();
             self.status_message = Some("AutoFilter disabled".to_string());
         } else {
+            // TODO(engine): enforce in engine filter API too once available (UI guard is not sufficient for headless).
+            if self.block_if_merged("enable AutoFilter", cx) { return; }
+
             // Enable: set filter range based on selection or data region
             let (row, col) = self.view_state.selected;
             let max_row = self.find_last_data_row(col, cx);

@@ -302,6 +302,22 @@ impl Spreadsheet {
             // When filtered, paste to consecutive visible rows
             let data_start_row = self.row_view.view_to_data(start_row);
 
+            // Block if paste would split a merged region
+            {
+                let paste_rows = lines.len();
+                let paste_cols = lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1);
+                let dest_max_row = (data_start_row + paste_rows).saturating_sub(1);
+                let dest_max_col = (start_col + paste_cols).saturating_sub(1);
+                if let Some((mr, mc)) = self.paste_would_split_merge(data_start_row, start_col, dest_max_row, dest_max_col, cx) {
+                    self.status_message = Some(format!(
+                        "Cannot paste: would split merged cells at {}{}. Unmerge first.",
+                        Self::col_to_letter(mc), mr + 1,
+                    ));
+                    cx.notify();
+                    return;
+                }
+            }
+
             // Calculate delta from source if this is an internal paste
             let (delta_row, delta_col) = if is_internal {
                 if let Some(ic) = &self.internal_clipboard {
@@ -486,6 +502,32 @@ impl Spreadsheet {
         let (start_row, start_col) = self.view_state.selected;
         let is_filtered = self.row_view.is_filtered();
         let data_start_row = self.row_view.view_to_data(start_row);
+
+        // Block if paste would split a merged region
+        {
+            let (paste_rows, paste_cols) = if use_internal_values {
+                self.internal_clipboard.as_ref()
+                    .map(|ic| (ic.values.len(), ic.values.first().map_or(0, |r| r.len())))
+                    .unwrap_or((0, 0))
+            } else {
+                let text = system_text.as_deref().unwrap_or("");
+                let lines: Vec<&str> = text.lines().collect();
+                (lines.len(), lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1))
+            };
+            if paste_rows > 0 && paste_cols > 0 {
+                let dest_max_row = (data_start_row + paste_rows).saturating_sub(1);
+                let dest_max_col = (start_col + paste_cols).saturating_sub(1);
+                if let Some((mr, mc)) = self.paste_would_split_merge(data_start_row, start_col, dest_max_row, dest_max_col, cx) {
+                    self.status_message = Some(format!(
+                        "Cannot paste: would split merged cells at {}{}. Unmerge first.",
+                        Self::col_to_letter(mc), mr + 1,
+                    ));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
         let mut changes = Vec::new();
         let mut values_grid: Vec<Vec<String>> = Vec::new();
         let mut end_data_row = data_start_row;
@@ -779,6 +821,27 @@ impl Spreadsheet {
         let (start_row, start_col) = self.view_state.selected;
         let is_filtered = self.row_view.is_filtered();
         let data_start_row = self.row_view.view_to_data(start_row);
+
+        // Block if paste would split a merged region
+        {
+            let raw_tsv = self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.as_str()).unwrap_or("");
+            let lines: Vec<&str> = raw_tsv.lines().collect();
+            let paste_rows = lines.len();
+            let paste_cols = lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1);
+            if paste_rows > 0 && paste_cols > 0 {
+                let dest_max_row = (data_start_row + paste_rows).saturating_sub(1);
+                let dest_max_col = (start_col + paste_cols).saturating_sub(1);
+                if let Some((mr, mc)) = self.paste_would_split_merge(data_start_row, start_col, dest_max_row, dest_max_col, cx) {
+                    self.status_message = Some(format!(
+                        "Cannot paste: would split merged cells at {}{}. Unmerge first.",
+                        Self::col_to_letter(mc), mr + 1,
+                    ));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
         let mut changes = Vec::new();
         let mut values_grid: Vec<Vec<String>> = Vec::new();
         let mut end_data_row = data_start_row;
@@ -1055,5 +1118,28 @@ impl Spreadsheet {
         }
 
         cx.notify();
+    }
+
+    /// Check if pasting into (min_row..=max_row, min_col..=max_col) would split any merge.
+    /// Returns Some(merge_origin) for the first offending merge, or None if safe.
+    fn paste_would_split_merge(
+        &self, min_row: usize, min_col: usize,
+        max_row: usize, max_col: usize, cx: &App,
+    ) -> Option<(usize, usize)> {
+        let sheet = self.sheet(cx);
+        if sheet.merged_regions.is_empty() { return None; }
+
+        for merge in &sheet.merged_regions {
+            let intersects = merge.end.0 >= min_row && merge.start.0 <= max_row
+                          && merge.end.1 >= min_col && merge.start.1 <= max_col;
+            if !intersects { continue; }
+
+            let contained = merge.start.0 >= min_row && merge.end.0 <= max_row
+                          && merge.start.1 >= min_col && merge.end.1 <= max_col;
+            if !contained {
+                return Some(merge.start);
+            }
+        }
+        None
     }
 }

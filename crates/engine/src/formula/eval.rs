@@ -45,6 +45,16 @@ pub trait CellLookup {
     fn current_cell(&self) -> Option<(usize, usize)> {
         None
     }
+
+    /// Query merge origin for a cell on the current sheet. Returns None if not merged.
+    fn get_merge_start(&self, _row: usize, _col: usize) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// Query merge origin for a cell on another sheet. Returns None if not merged.
+    fn get_merge_start_sheet(&self, _sheet_id: SheetId, _row: usize, _col: usize) -> Option<(usize, usize)> {
+        None
+    }
 }
 
 /// A lookup that wraps another CellLookup and adds named range resolution
@@ -82,6 +92,14 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup 
 
     fn current_cell(&self) -> Option<(usize, usize)> {
         self.inner.current_cell()
+    }
+
+    fn get_merge_start(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        self.inner.get_merge_start(row, col)
+    }
+
+    fn get_merge_start_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Option<(usize, usize)> {
+        self.inner.get_merge_start_sheet(sheet_id, row, col)
     }
 }
 
@@ -121,6 +139,14 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
 
     fn current_cell(&self) -> Option<(usize, usize)> {
         Some((self.current_row, self.current_col))
+    }
+
+    fn get_merge_start(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        self.inner.get_merge_start(row, col)
+    }
+
+    fn get_merge_start_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Option<(usize, usize)> {
+        self.inner.get_merge_start_sheet(sheet_id, row, col)
     }
 }
 
@@ -407,10 +433,18 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
         Expr::Text(s) => EvalResult::Text(s.clone()),
         Expr::Boolean(b) => EvalResult::Boolean(*b),
         Expr::CellRef { sheet, col, row, .. } => {
-            // Get cell value, potentially from another sheet
+            // Get cell value, potentially from another sheet.
+            // Redirect hidden merge cells to origin so =B1 returns the
+            // merge origin's value when B1 is hidden inside a merge.
             let text = match sheet {
-                SheetRef::Current => lookup.get_text(*row, *col),
-                SheetRef::Id(sheet_id) => lookup.get_text_sheet(*sheet_id, *row, *col),
+                SheetRef::Current => {
+                    let (r, c) = lookup.get_merge_start(*row, *col).unwrap_or((*row, *col));
+                    lookup.get_text(r, c)
+                }
+                SheetRef::Id(sheet_id) => {
+                    let (r, c) = lookup.get_merge_start_sheet(*sheet_id, *row, *col).unwrap_or((*row, *col));
+                    lookup.get_text_sheet(*sheet_id, r, c)
+                }
                 SheetRef::RefError { .. } => return EvalResult::Error("#REF!".to_string()),
             };
             if text.is_empty() {

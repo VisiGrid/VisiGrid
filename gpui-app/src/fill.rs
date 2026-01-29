@@ -37,6 +37,7 @@ impl Spreadsheet {
     pub fn fill_down(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
+        if self.block_if_merged("fill down", cx) { return; }
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
@@ -120,6 +121,7 @@ impl Spreadsheet {
     pub fn fill_right(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
+        if self.block_if_merged("fill right", cx) { return; }
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
@@ -412,6 +414,8 @@ impl Spreadsheet {
 
     /// Trim whitespace from all cells in the selection
     pub fn trim_whitespace(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_merged("trim", cx) { return; }
+
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
         let mut changes = Vec::new();
@@ -657,6 +661,8 @@ impl Spreadsheet {
         ctrl_held: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.block_if_merged("fill", cx) { return; }
+
         let col = anchor.1;
         let src_min_row = anchor.0.min(source_end.0);
         let src_max_row = anchor.0.max(source_end.0);
@@ -818,6 +824,8 @@ impl Spreadsheet {
         ctrl_held: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.block_if_merged("fill", cx) { return; }
+
         let row = anchor.0;
         let src_min_col = anchor.1.min(source_end.1);
         let src_max_col = anchor.1.max(source_end.1);

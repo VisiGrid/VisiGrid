@@ -953,6 +953,8 @@ impl Spreadsheet {
         use crate::history::CellChange;
         use visigrid_engine::provenance::MutationOp;
 
+        if self.block_if_merged("fill selection", cx) { return; }
+
         let primary_cell = self.view_state.selected;
         let base_value = self.sheet(cx).get_raw(primary_cell.0, primary_cell.1);
 

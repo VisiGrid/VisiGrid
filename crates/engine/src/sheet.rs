@@ -316,6 +316,10 @@ impl CellLookup for Sheet {
             self.name, self as *const Sheet, self.computed_cache_len()
         )
     }
+
+    fn get_merge_start(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        self.get_merge(row, col).map(|m| m.start)
+    }
 }
 
 impl Sheet {
@@ -384,6 +388,9 @@ impl Sheet {
     }
 
     pub fn set_value(&mut self, row: usize, col: usize, value: &str) {
+        // Redirect hidden merge cells to the merge origin
+        let (row, col) = self.merge_origin_coord(row, col);
+
         // Clear any existing spill from this cell before setting new value
         self.clear_spill_from(row, col);
 
@@ -402,6 +409,9 @@ impl Sheet {
     /// Used when loading workbooks with circular references to mark
     /// participating cells without crashing.
     pub fn set_cycle_error(&mut self, row: usize, col: usize) {
+        // Redirect hidden merge cells to the merge origin
+        let (row, col) = self.merge_origin_coord(row, col);
+
         // Store #CYCLE! as the cell value while preserving the formula source
         // For now, we just set a text value - the original formula is lost
         // A future improvement could preserve the formula for editing
@@ -793,6 +803,9 @@ impl Sheet {
 
     /// Clear a cell completely (remove from HashMap)
     pub fn clear_cell(&mut self, row: usize, col: usize) {
+        // Redirect hidden merge cells to the merge origin
+        let (row, col) = self.merge_origin_coord(row, col);
+
         self.clear_spill_from(row, col);
         self.cells.remove(&(row, col));
         self.spill_values.remove(&(row, col));
@@ -988,6 +1001,17 @@ impl Sheet {
         self.merge_index
             .get(&(row, col))
             .and_then(|&idx| self.merged_regions.get(idx))
+    }
+
+    /// Redirect hidden merge cells to their origin for single-cell value writes
+    /// (set_value, clear_cell, set_cycle_error). Formula CellRef redirect is
+    /// handled separately in eval.rs. NOT for format ops or range iteration.
+    pub fn merge_origin_coord(&self, row: usize, col: usize) -> (usize, usize) {
+        if let Some(merge) = self.get_merge(row, col) {
+            merge.start
+        } else {
+            (row, col)
+        }
     }
 
     /// Is (row, col) the top-left origin of a merged region?
@@ -3716,5 +3740,142 @@ mod tests {
         // Delete cols 0..6 (includes col 5) → border is gone
         sheet.delete_cols(0, 6);
         assert!(!sheet.has_any_borders, "flag should be false after deleting the only bordered col");
+    }
+
+    // ========================================================================
+    // Merged cell redirect tests
+    // ========================================================================
+
+    #[test]
+    fn test_merge_origin_coord() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        // Merge A1:C1 (row 0, cols 0..2)
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // Non-merged cell passes through
+        assert_eq!(sheet.merge_origin_coord(5, 5), (5, 5));
+
+        // Merge origin passes through (start == coord, no-op)
+        assert_eq!(sheet.merge_origin_coord(0, 0), (0, 0));
+
+        // Hidden cells redirect to origin
+        assert_eq!(sheet.merge_origin_coord(0, 1), (0, 0));
+        assert_eq!(sheet.merge_origin_coord(0, 2), (0, 0));
+    }
+
+    #[test]
+    fn test_set_value_redirects_to_origin() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.set_value(0, 0, "Hello");
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // Write to hidden cell B1 — should land on A1
+        sheet.set_value(0, 1, "World");
+        assert_eq!(sheet.get_display(0, 0), "World"); // A1 changed
+        assert_eq!(sheet.get_display(0, 1), "");       // B1 stays empty
+    }
+
+    #[test]
+    fn test_clear_cell_redirects_to_origin() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.set_value(0, 0, "Hello");
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // Clear hidden cell B1 — should clear A1
+        sheet.clear_cell(0, 1);
+        assert_eq!(sheet.get_display(0, 0), ""); // A1 cleared
+    }
+
+    #[test]
+    fn test_set_value_preserves_hidden_style() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // Set bold on hidden cell B1
+        sheet.toggle_bold(0, 1);
+        assert!(sheet.get_format(0, 1).bold);
+
+        // Write value to B1 — redirects to A1
+        sheet.set_value(0, 1, "123");
+
+        // A1 has the value
+        assert_eq!(sheet.get_display(0, 0), "123");
+        // B1 still has bold format
+        assert!(sheet.get_format(0, 1).bold);
+        // B1 has no stored value
+        assert_eq!(sheet.get_display(0, 1), "");
+    }
+
+    #[test]
+    fn test_set_format_no_redirect() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // Set format on hidden cell B1 → should stay on B1, not redirect to A1
+        sheet.toggle_bold(0, 1);
+        assert!(sheet.get_format(0, 1).bold);
+        assert!(!sheet.get_format(0, 0).bold); // A1 is NOT affected
+    }
+
+    #[test]
+    fn test_clear_cell_preserves_hidden_style() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.set_value(0, 0, "Hello");
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // Set bold on hidden cell B1
+        sheet.toggle_bold(0, 1);
+        assert!(sheet.get_format(0, 1).bold);
+
+        // Clear B1 — redirects to A1, clears origin value
+        sheet.clear_cell(0, 1);
+
+        // A1 value cleared
+        assert_eq!(sheet.get_display(0, 0), "");
+        // B1 format still bold (clear_cell only removes value, not sibling formats)
+        assert!(sheet.get_format(0, 1).bold);
+    }
+
+    #[test]
+    fn test_set_cycle_error_preserves_hidden_style() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // Set bold on hidden cell B1
+        sheet.toggle_bold(0, 1);
+        assert!(sheet.get_format(0, 1).bold);
+
+        // Cycle error on B1 — redirects to origin A1
+        sheet.set_cycle_error(0, 1);
+
+        // Origin holds the cycle error
+        assert_eq!(sheet.get_display(0, 0), "#CYCLE!");
+        // B1 style unchanged
+        assert!(sheet.get_format(0, 1).bold);
+        // B1 has no stored value
+        assert_eq!(sheet.get_display(0, 1), "");
+    }
+
+    #[test]
+    fn test_range_clear_preserves_hidden_styles() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.set_value(0, 0, "Hello");
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // Set bold on hidden cell B1
+        sheet.toggle_bold(0, 1);
+        assert!(sheet.get_format(0, 1).bold);
+
+        // Simulate a range clear: clear each cell in A1:C1
+        // This is what delete_selection does (loops over selection calling clear_cell)
+        for col in 0..=2 {
+            sheet.clear_cell(0, col);
+        }
+
+        // A1 value should be cleared (cleared directly + redirects from B1/C1)
+        assert_eq!(sheet.get_display(0, 0), "");
+        // B1 format still bold — clear_cell only removes the value at origin,
+        // it does NOT touch sibling cell formats
+        assert!(sheet.get_format(0, 1).bold);
     }
 }

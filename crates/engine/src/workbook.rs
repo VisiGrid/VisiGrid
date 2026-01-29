@@ -1525,6 +1525,18 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
             .unwrap_or_else(|| "sheet=<none>".to_string());
         format!("WorkbookLookup(wb_ptr={:p}, {})", self.workbook as *const Workbook, sheet_info)
     }
+
+    fn get_merge_start(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        self.current_sheet()
+            .and_then(|s| s.get_merge(row, col))
+            .map(|m| m.start)
+    }
+
+    fn get_merge_start_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Option<(usize, usize)> {
+        self.workbook.sheet_by_id(sheet_id)
+            .and_then(|s| s.get_merge(row, col))
+            .map(|m| m.start)
+    }
 }
 
 #[cfg(test)]
@@ -2556,5 +2568,107 @@ mod tests {
         let json = r#"{"sheets":[{"id":1,"name":"Sheet1","cells":{},"rows":100,"cols":26}],"active_sheet":0}"#;
         let wb: Workbook = serde_json::from_str(json).unwrap();
         assert!(wb.style_table.is_empty());
+    }
+
+    // ========================================================================
+    // Merged cell formula redirect tests
+    // ========================================================================
+
+    #[test]
+    fn test_formula_single_ref_redirect() {
+        use crate::sheet::MergedRegion;
+
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // A1 = "Hello", merge A1:C1
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "Hello");
+        wb.sheet_mut(0).unwrap().add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // D1 = =B1 (B1 is hidden in merge, should redirect to A1)
+        wb.sheet_mut(0).unwrap().set_value(0, 3, "=B1");
+        wb.update_cell_deps(sheet_id, 0, 3);
+
+        // E1 = =C1 (C1 is hidden in merge, should redirect to A1)
+        wb.sheet_mut(0).unwrap().set_value(0, 4, "=C1");
+        wb.update_cell_deps(sheet_id, 0, 4);
+
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 3), "Hello"); // =B1 → "Hello"
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 4), "Hello"); // =C1 → "Hello"
+    }
+
+    #[test]
+    fn test_formula_range_hidden_empty() {
+        use crate::sheet::MergedRegion;
+
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // A1 = 10, merge A1:C1
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "10");
+        wb.sheet_mut(0).unwrap().add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // D1 = =SUM(A1:C1) → should be 10 (not 30; hidden cells are empty in ranges)
+        wb.sheet_mut(0).unwrap().set_value(0, 3, "=SUM(A1:C1)");
+        wb.update_cell_deps(sheet_id, 0, 3);
+
+        // E1 = =SUM(B1:C1) → should be 0 (both hidden, no values)
+        wb.sheet_mut(0).unwrap().set_value(0, 4, "=SUM(B1:C1)");
+        wb.update_cell_deps(sheet_id, 0, 4);
+
+        // F1 = =COUNTA(A1:C1) → should be 1 (only origin has value)
+        wb.sheet_mut(0).unwrap().set_value(0, 5, "=COUNTA(A1:C1)");
+        wb.update_cell_deps(sheet_id, 0, 5);
+
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 3), "10");  // SUM(A1:C1)
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 4), "0");   // SUM(B1:C1)
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 5), "1");   // COUNTA(A1:C1)
+    }
+
+    #[test]
+    fn test_formula_explicit_refs_redirect() {
+        use crate::sheet::MergedRegion;
+
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        // A1 = 10, merge A1:C1
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "10");
+        wb.sheet_mut(0).unwrap().add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // D1 = =A1+B1+C1 → each is a single-cell ref, each redirects to origin → 30
+        wb.sheet_mut(0).unwrap().set_value(0, 3, "=A1+B1+C1");
+        wb.update_cell_deps(sheet_id, 0, 3);
+
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 3), "30"); // 10+10+10
+    }
+
+    #[test]
+    fn test_formula_cross_sheet_ref_redirect() {
+        use crate::sheet::MergedRegion;
+
+        let mut wb = Workbook::new();
+
+        // Sheet1: merge A1:C1, A1 = "Hi"
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "Hi");
+        wb.sheet_mut(0).unwrap().add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        // Add Sheet2
+        let sheet2_idx = wb.add_sheet();
+        let sheet2_id = wb.sheet_id_at_idx(sheet2_idx).unwrap();
+
+        // Sheet2 A1 = =Sheet1!B1  (B1 is hidden in merge, should redirect to A1)
+        wb.sheet_mut(sheet2_idx).unwrap().set_value(0, 0, "=Sheet1!B1");
+        wb.update_cell_deps(sheet2_id, 0, 0);
+
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(sheet2_idx).unwrap().get_display(0, 0), "Hi");
     }
 }
