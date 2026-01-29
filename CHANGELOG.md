@@ -57,6 +57,7 @@ Custom Excel number format codes now render correctly via the `ssfmt` crate (ECM
 
 ### Internal
 
+- **Formula engine modularization** — split `eval.rs` (5,431 → 595 lines of non-test code) into 11 category modules (`eval_math`, `eval_logical`, `eval_text`, `eval_conditional`, `eval_lookup`, `eval_financial`, `eval_datetime`, `eval_trig`, `eval_statistical`, `eval_array`, `eval_helpers`). Dispatch via `Option::or_else` chain. No public API changes; all 444 engine tests pass.
 - **Dependency upgrades** — calamine 0.32, quick-xml 0.38, zip 4, ssfmt 0.1, regex 1
 - **quick-xml 0.38 migration** — `unescape()` → `decode()` in validation parser
 
