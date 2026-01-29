@@ -96,7 +96,8 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("alt-down", OpenValidationDropdown, Some("Spreadsheet")),
 
         // AI
-        KeyBinding::new(&kb_shift(m, "a"), AskAI, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "a"), InsertFormula, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "e"), Analyze, Some("Spreadsheet")),
 
         // Selection
         KeyBinding::new(&kb(m, "a"), SelectAll, Some("Spreadsheet")),

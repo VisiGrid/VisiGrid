@@ -174,7 +174,8 @@ pub enum CommandId {
     TourNamedRanges,
     ShowRefactorLog,
     ShowAISettings,
-    AskAI,
+    InsertFormulaAI,
+    AnalyzeAI,
 
     // Sheets
     NextSheet,
@@ -290,7 +291,8 @@ impl CommandId {
             Self::TourNamedRanges => "Tour: Named Ranges & Refactoring",
             Self::ShowRefactorLog => "Show Refactor Log",
             Self::ShowAISettings => "AI Settings",
-            Self::AskAI => "Ask AI...",
+            Self::InsertFormulaAI => "Insert Formula with AI...",
+            Self::AnalyzeAI => "Analyze with AI...",
             Self::NextSheet => "Next Sheet",
             Self::PrevSheet => "Previous Sheet",
             Self::AddSheet => "Add Sheet",
@@ -375,6 +377,8 @@ impl CommandId {
             #[cfg(not(target_os = "macos"))]
             Self::ReturnToTraceSource => Some("F5"),
             Self::Recalculate => Some("F9"),
+            Self::InsertFormulaAI => Some("Ctrl+Shift+A"),
+            Self::AnalyzeAI => Some("Ctrl+Shift+E"),
             _ => None,
         }
     }
@@ -453,7 +457,8 @@ impl CommandId {
             Self::TourNamedRanges => "tour guide walkthrough refactor learn onboarding",
             Self::ShowRefactorLog => "audit history changes log refactor",
             Self::ShowAISettings => "ai openai anthropic ollama local llm api key model provider",
-            Self::AskAI => "ai ask question explain formula help gpt claude llm",
+            Self::InsertFormulaAI => "ai ask question formula help gpt claude llm insert",
+            Self::AnalyzeAI => "ai analyze question explain data patterns anomalies summarize",
             Self::NextSheet => "tab worksheet",
             Self::PrevSheet => "tab worksheet",
             Self::AddSheet => "new tab worksheet",
@@ -569,7 +574,8 @@ impl CommandId {
             Self::TourNamedRanges,
             Self::ShowRefactorLog,
             Self::ShowAISettings,
-            Self::AskAI,
+            Self::InsertFormulaAI,
+            Self::AnalyzeAI,
             Self::NextSheet,
             Self::PrevSheet,
             Self::AddSheet,
@@ -657,7 +663,8 @@ impl CommandId {
             | Self::CycleTraceDependent
             | Self::ReturnToTraceSource
             | Self::ToggleVerifiedMode
-            | Self::AskAI
+            | Self::InsertFormulaAI
+            | Self::AnalyzeAI
             | Self::NavPerfReport => Some(MenuCategory::Tools),
 
             // Format menu

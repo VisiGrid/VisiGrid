@@ -1,13 +1,13 @@
-//! Ask AI Dialog
+//! AI Dialog (Insert Formula + Analyze)
 //!
-//! Allows users to ask questions about their data and receive
-//! explanations and reproducible formulas.
+//! Unified dialog for AI verbs. Branches on AiVerb to show
+//! Insert Formula (single-cell write) or Analyze (read-only).
 //! Uses the design system components from `ui/`.
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use std::time::Duration;
-use crate::app::{Spreadsheet, AskAIStatus, AskAIContextMode};
+use crate::app::{Spreadsheet, AiVerb, AskAIStatus, AskAIContextMode};
 use crate::theme::TokenKey;
 use crate::ui::{DialogFrame, DialogSize, Button};
 
@@ -25,6 +25,7 @@ pub fn render_ask_ai_dialog(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>
 
     // Extract state
     let state = &app.ask_ai;
+    let verb = state.verb;
     let question = state.question.clone();
     let context_summary = state.context_summary.clone();
     let context_mode = state.context_mode;
@@ -36,6 +37,7 @@ pub fn render_ask_ai_dialog(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>
     let formula = state.formula.clone();
     let formula_valid = state.formula_valid;
     let formula_error = state.formula_error.clone();
+    let response_text = state.response_text.clone();
     let warnings = state.warnings.clone();
     let error = state.error.clone();
     let last_insertion = state.last_insertion.clone();
@@ -44,7 +46,7 @@ pub fn render_ask_ai_dialog(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>
     let is_loading = state.is_loading();
     let has_response = matches!(status, AskAIStatus::Success);
     let has_error = matches!(status, AskAIStatus::Error(_));
-    let can_insert = state.can_insert();
+    let can_insert = verb == AiVerb::InsertFormula && state.can_insert();
     let can_retry = state.can_retry() && (has_response || has_error);
 
     // Backdrop (centered)
@@ -74,11 +76,12 @@ pub fn render_ask_ai_dialog(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>
                 .child(
                     DialogFrame::new(
                         render_body(
-                            panel_bg, panel_border, text_primary, text_muted, accent,
+                            verb, panel_bg, panel_border, text_primary, text_muted, accent,
                             editor_bg, success_color, error_color, warning_color,
                             question, context_summary, context_mode, context_selector_open,
                             sent_context, sent_panel_expanded, explanation, formula.clone(),
-                            formula_valid, formula_error, warnings, error.clone(),
+                            formula_valid, formula_error, response_text.clone(),
+                            warnings, error.clone(),
                             last_insertion, is_loading, has_response, has_error,
                             has_raw_response, cx,
                         ),
@@ -88,10 +91,11 @@ pub fn render_ask_ai_dialog(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>
                     .size(DialogSize::Lg)
                     .width(px(580.0))
                     .max_height(px(650.0))
-                    .header(render_header(text_primary, text_muted, panel_border, cx))
+                    .header(render_header(verb, text_primary, text_muted, panel_border, cx))
                     .footer(render_footer(
-                        panel_border, text_primary, text_muted, accent, success_color,
-                        is_loading, can_insert, can_retry, has_error, formula, cx,
+                        verb, panel_border, text_primary, text_muted, accent, success_color,
+                        is_loading, can_insert, can_retry, has_error, has_response,
+                        formula, response_text.clone(), cx,
                     ))
                 )
         )
@@ -139,44 +143,74 @@ fn handle_key_event(this: &mut Spreadsheet, event: &KeyDownEvent, cx: &mut Conte
     }
 }
 
-/// Render the header with close button
+/// Render the header with title, contract badge, and close button
 fn render_header(
+    verb: AiVerb,
     text_primary: Hsla,
     text_muted: Hsla,
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
+    let (title, badge_text) = match verb {
+        AiVerb::InsertFormula => (
+            "Insert Formula",
+            "Single-cell write  Formula will be inserted into active cell.",
+        ),
+        AiVerb::Analyze => (
+            "Analyze",
+            "Read-only  No cells will be modified.",
+        ),
+    };
+
     div()
         .flex()
-        .items_center()
-        .justify_between()
+        .flex_col()
+        .gap_1()
         .child(
             div()
-                .text_size(px(14.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(text_primary)
-                .child("Ask AI")
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(text_primary)
+                        .child(title)
+                )
+                .child(
+                    div()
+                        .id("ask-ai-close")
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_size(px(14.0))
+                        .text_color(text_muted)
+                        .hover(|s| s.bg(panel_border))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.hide_ask_ai(cx);
+                        }))
+                        .child("×")
+                )
         )
+        // Execution contract badge
         .child(
             div()
-                .id("ask-ai-close")
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .cursor_pointer()
-                .text_size(px(14.0))
+                .bg(panel_border.opacity(0.3))
+                .text_size(px(10.0))
                 .text_color(text_muted)
-                .hover(|s| s.bg(panel_border))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.hide_ask_ai(cx);
-                }))
-                .child("×")
+                .child(badge_text)
         )
 }
 
 /// Render the dialog body content
 #[allow(clippy::too_many_arguments)]
 fn render_body(
+    verb: AiVerb,
     panel_bg: Hsla,
     panel_border: Hsla,
     text_primary: Hsla,
@@ -196,6 +230,7 @@ fn render_body(
     formula: Option<String>,
     formula_valid: bool,
     formula_error: Option<String>,
+    response_text: Option<String>,
     warnings: Vec<String>,
     error: Option<String>,
     last_insertion: Option<String>,
@@ -235,6 +270,27 @@ fn render_body(
     }
 
     // Question input with blinking cursor
+    let placeholder = match verb {
+        AiVerb::InsertFormula => "What formula do you need?",
+        AiVerb::Analyze => "What would you like to know about this data?",
+    };
+    let tip_text = match verb {
+        AiVerb::InsertFormula => {
+            if cfg!(target_os = "macos") {
+                "Tip: Ask for a single spreadsheet formula when possible. Press \u{2318}+Enter to submit."
+            } else {
+                "Tip: Ask for a single spreadsheet formula when possible. Press Ctrl+Enter to submit."
+            }
+        }
+        AiVerb::Analyze => {
+            if cfg!(target_os = "macos") {
+                "Ask about patterns, anomalies, summaries, or comparisons. Press \u{2318}+Enter to submit."
+            } else {
+                "Ask about patterns, anomalies, summaries, or comparisons. Press Ctrl+Enter to submit."
+            }
+        }
+    };
+
     content = content.child(
         div()
             .flex()
@@ -259,9 +315,9 @@ fn render_body(
                             .text_size(px(13.0))
                             .text_color(if question.is_empty() { text_muted } else { text_primary })
                             .child(if question.is_empty() {
-                                "What would you like to know about this data?".to_string()
+                                placeholder.to_string()
                             } else {
-                                question
+                                question.clone()
                             })
                     )
                     // Blinking cursor
@@ -283,107 +339,159 @@ fn render_body(
                             )
                     )
             )
+            // Prompt suggestion chips (Analyze only, hidden once user types)
+            .when(verb == AiVerb::Analyze && question.is_empty() && !is_loading && !has_response, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(prompt_chip("Summarize", "Summarize this data", accent, panel_border, text_primary, cx))
+                        .child(prompt_chip("Find anomalies", "Are there any anomalies or outliers?", accent, panel_border, text_primary, cx))
+                        .child(prompt_chip("Compare categories", "Compare the top categories", accent, panel_border, text_primary, cx))
+                )
+            })
             .child(
                 div()
                     .text_size(px(10.0))
                     .text_color(text_muted)
-                    .child(if cfg!(target_os = "macos") {
-                        "Tip: Ask for a single spreadsheet formula when possible. Press ⌘+Enter to submit."
-                    } else {
-                        "Tip: Ask for a single spreadsheet formula when possible. Press Ctrl+Enter to submit."
-                    })
+                    .child(tip_text)
             )
     );
 
-    // Response section
+    // Response section (branches on verb)
     if has_response {
-        // Explanation
-        if let Some(expl) = explanation {
-            content = content.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(section_label("EXPLANATION", text_muted))
-                    .child(
-                        div()
-                            .w_full()
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(editor_bg.opacity(0.5))
-                            .text_size(px(12.0))
-                            .text_color(text_primary)
-                            .child(expl)
-                    )
-            );
-        }
-
-        // Formula
-        if let Some(f) = formula {
-            let validation_label = if formula_valid {
-                div()
-                    .text_size(px(10.0))
-                    .text_color(success_color)
-                    .child("✓ Valid")
-            } else if let Some(err) = formula_error {
-                div()
-                    .text_size(px(10.0))
-                    .text_color(error_color)
-                    .child(format!("✗ {}", err))
-            } else {
-                div()
-            };
-
-            content = content.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
+        match verb {
+            AiVerb::InsertFormula => {
+                // Explanation
+                if let Some(expl) = explanation {
+                    content = content.child(
                         div()
                             .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(section_label("FORMULA", text_muted))
-                            .child(validation_label)
-                    )
-                    .child(
+                            .flex_col()
+                            .gap_1()
+                            .child(section_label("EXPLANATION", text_muted))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(editor_bg.opacity(0.5))
+                                    .text_size(px(12.0))
+                                    .text_color(text_primary)
+                                    .child(expl)
+                            )
+                    );
+                }
+
+                // Formula
+                if let Some(f) = formula {
+                    let validation_label = if formula_valid {
                         div()
-                            .id("ask-ai-formula")
-                            .w_full()
+                            .text_size(px(10.0))
+                            .text_color(success_color)
+                            .child("\u{2713} Valid")
+                    } else if let Some(err) = formula_error {
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(error_color)
+                            .child(format!("\u{2717} {}", err))
+                    } else {
+                        div()
+                    };
+
+                    content = content.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(section_label("FORMULA", text_muted))
+                                    .child(validation_label)
+                            )
+                            .child(
+                                div()
+                                    .id("ask-ai-formula")
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(if formula_valid { success_color.opacity(0.5) } else { error_color.opacity(0.5) })
+                                    .bg(editor_bg)
+                                    .text_size(px(13.0))
+                                    .font_family("monospace")
+                                    .text_color(text_primary)
+                                    .child(f)
+                            )
+                    );
+                }
+
+                // Insertion confirmation
+                if let Some(insertion_msg) = last_insertion {
+                    content = content.child(
+                        div()
                             .px_3()
                             .py_2()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(if formula_valid { success_color.opacity(0.5) } else { error_color.opacity(0.5) })
-                            .bg(editor_bg)
-                            .text_size(px(13.0))
-                            .font_family("monospace")
-                            .text_color(text_primary)
-                            .child(f)
-                    )
-            );
+                            .rounded_sm()
+                            .bg(success_color.opacity(0.15))
+                            .text_size(px(11.0))
+                            .text_color(success_color)
+                            .child(format!("\u{2713} {}", insertion_msg))
+                    );
+                }
+            }
+            AiVerb::Analyze => {
+                // Analysis text
+                if let Some(analysis) = &response_text {
+                    content = content.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(section_label("ANALYSIS", text_muted))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(editor_bg.opacity(0.5))
+                                    .text_size(px(12.0))
+                                    .text_color(text_primary)
+                                    .child(analysis.clone())
+                            )
+                    );
+
+                    // Formula blurring warning
+                    if analysis.contains("=SUM(") || analysis.contains("=AVERAGE(") || analysis.contains("=IF(") || analysis.contains("=VLOOKUP(") {
+                        content = content.child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .text_size(px(10.0))
+                                .text_color(text_muted)
+                                .child(if cfg!(target_os = "macos") {
+                                    "Formula suggestions are not available in Analyze mode. Use Insert Formula (\u{2318}+Shift+A) instead."
+                                } else {
+                                    "Formula suggestions are not available in Analyze mode. Use Insert Formula (Ctrl+Shift+A) instead."
+                                })
+                        );
+                    }
+                }
+                // No formula, no insertion — read-only contract
+            }
         }
 
-        // Insertion confirmation
-        if let Some(insertion_msg) = last_insertion {
-            content = content.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .rounded_sm()
-                    .bg(success_color.opacity(0.15))
-                    .text_size(px(11.0))
-                    .text_color(success_color)
-                    .child(format!("✓ {}", insertion_msg))
-            );
-        }
-
-        // Sent to AI panel
+        // Sent to AI panel (shared by both verbs)
         if let Some(sent) = sent_context {
             content = content.child(render_sent_panel(
-                panel_border, text_primary, text_muted, sent, sent_panel_expanded, cx,
+                verb, panel_border, text_primary, text_muted, sent, sent_panel_expanded, cx,
             ));
         }
     }
@@ -415,9 +523,10 @@ fn render_body(
     content
 }
 
-/// Render the footer with action buttons
+/// Render the footer with action buttons (branches on verb)
 #[allow(clippy::too_many_arguments)]
 fn render_footer(
+    verb: AiVerb,
     panel_border: Hsla,
     text_primary: Hsla,
     text_muted: Hsla,
@@ -427,31 +536,33 @@ fn render_footer(
     can_insert: bool,
     can_retry: bool,
     has_error: bool,
+    has_response: bool,
     formula: Option<String>,
+    response_text: Option<String>,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let mut left_buttons = div().flex().items_center().gap_2();
     let mut right_buttons = div().flex().items_center().gap_2();
 
-    // Ask AI button (primary) with keyboard shortcut hint
-    let shortcut = if cfg!(target_os = "macos") { "⌘↵" } else { "Ctrl+↵" };
-    let btn_label = if is_loading {
-        "Asking...".to_string()
-    } else {
-        format!("Ask AI  {}", shortcut)
+    // Primary submit button with keyboard shortcut hint
+    let shortcut = if cfg!(target_os = "macos") { "\u{2318}\u{21b5}" } else { "Ctrl+\u{21b5}" };
+    let (btn_label, btn_loading_label) = match verb {
+        AiVerb::InsertFormula => (format!("Ask AI  {}", shortcut), "Asking...".to_string()),
+        AiVerb::Analyze => (format!("Analyze  {}", shortcut), "Analyzing...".to_string()),
     };
-    let ask_btn = Button::new("ask-ai-submit", btn_label)
+    let btn_text = if is_loading { btn_loading_label } else { btn_label };
+    let submit_btn = Button::new("ask-ai-submit", btn_text)
         .disabled(is_loading)
         .primary(accent, text_primary);
 
-    let ask_btn = if is_loading {
-        ask_btn
+    let submit_btn = if is_loading {
+        submit_btn
     } else {
-        ask_btn.on_click(cx.listener(|this, _, _, cx| {
+        submit_btn.on_click(cx.listener(|this, _, _, cx| {
             this.ask_ai_submit(cx);
         }))
     };
-    left_buttons = left_buttons.child(ask_btn);
+    left_buttons = left_buttons.child(submit_btn);
 
     // Retry button
     if can_retry {
@@ -467,7 +578,7 @@ fn render_footer(
     // Refine button
     if can_retry && !has_error {
         left_buttons = left_buttons.child(
-            Button::new("ask-ai-refine", "Refine…")
+            Button::new("ask-ai-refine", "Refine\u{2026}")
                 .secondary(panel_border, text_muted)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.ask_ai_refine(cx);
@@ -475,26 +586,46 @@ fn render_footer(
         );
     }
 
-    // Insert Formula button
-    if can_insert {
-        right_buttons = right_buttons.child(
-            Button::new("ask-ai-insert", "Insert Formula")
-                .primary(success_color, text_primary)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.ask_ai_insert_formula(cx);
-                }))
-        );
-    }
+    // Right side buttons (verb-specific)
+    match verb {
+        AiVerb::InsertFormula => {
+            // Insert Formula button
+            if can_insert {
+                right_buttons = right_buttons.child(
+                    Button::new("ask-ai-insert", "Insert Formula")
+                        .primary(success_color, text_primary)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.ask_ai_insert_formula(cx);
+                        }))
+                );
+            }
 
-    // Copy formula button
-    if let Some(f) = formula {
-        right_buttons = right_buttons.child(
-            Button::new("ask-ai-copy", "Copy")
-                .secondary(panel_border, text_primary)
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(f.clone()));
-                }))
-        );
+            // Copy formula button
+            if let Some(f) = formula {
+                right_buttons = right_buttons.child(
+                    Button::new("ask-ai-copy", "Copy")
+                        .secondary(panel_border, text_primary)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(f.clone()));
+                        }))
+                );
+            }
+        }
+        AiVerb::Analyze => {
+            // Copy analysis text button
+            if has_response {
+                if let Some(text) = response_text {
+                    right_buttons = right_buttons.child(
+                        Button::new("ask-ai-copy", "Copy")
+                            .secondary(panel_border, text_primary)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                            }))
+                    );
+                }
+            }
+            // No Insert button — read-only contract
+        }
     }
 
     // Close button
@@ -566,7 +697,7 @@ pub fn render_ask_ai_context_menu(
     cx: &mut Context<Spreadsheet>,
 ) -> Option<impl IntoElement> {
     // Only show if Ask AI dialog is open and context selector is open
-    if !matches!(app.mode, crate::mode::Mode::AskAI) || !app.ask_ai.context_selector_open {
+    if !matches!(app.mode, crate::mode::Mode::AiDialog) || !app.ask_ai.context_selector_open {
         return None;
     }
 
@@ -671,6 +802,7 @@ fn context_menu_option(
 }
 
 fn render_sent_panel(
+    verb: AiVerb,
     panel_border: Hsla,
     text_primary: Hsla,
     text_muted: Hsla,
@@ -678,6 +810,11 @@ fn render_sent_panel(
     expanded: bool,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
+    let (contract_label, write_scope) = match verb {
+        AiVerb::InsertFormula => ("Single-cell write v1", "Active cell"),
+        AiVerb::Analyze => ("Read-only v1", "None"),
+    };
+
     div()
         .flex()
         .flex_col()
@@ -701,7 +838,7 @@ fn render_sent_panel(
                     div()
                         .text_size(px(10.0))
                         .text_color(text_muted)
-                        .child(if expanded { "▼" } else { "▶" })
+                        .child(if expanded { "\u{25bc}" } else { "\u{25b6}" })
                 )
                 .child(
                     div()
@@ -725,10 +862,12 @@ fn render_sent_panel(
                     .child(sent_row("Provider", &sent.provider, text_muted, text_primary))
                     .child(sent_row("Model", &sent.model, text_muted, text_primary))
                     .child(sent_row("Range", &sent.range_display, text_muted, text_primary))
-                    .child(sent_row("Cells", &format!("{} ({} × {})", sent.total_cells, sent.rows_sent, sent.cols_sent), text_muted, text_primary))
+                    .child(sent_row("Cells", &format!("{} ({} \u{00d7} {})", sent.total_cells, sent.rows_sent, sent.cols_sent), text_muted, text_primary))
                     .child(sent_row("Headers", if sent.headers_included { "Yes" } else { "No" }, text_muted, text_primary))
                     .child(sent_row("Truncation", sent.truncation.label(), text_muted, text_primary))
                     .child(sent_row("Privacy mode", if sent.privacy_mode { "On (values only)" } else { "Off" }, text_muted, text_primary))
+                    .child(sent_row("Contract", contract_label, text_muted, text_primary))
+                    .child(sent_row("Write scope", write_scope, text_muted, text_primary))
             )
         })
 }
@@ -799,4 +938,31 @@ fn section_label(text: &'static str, color: Hsla) -> impl IntoElement {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(color)
         .child(text)
+}
+
+/// Prompt suggestion chip for Analyze mode
+fn prompt_chip(
+    label: &'static str,
+    fills_with: &'static str,
+    accent: Hsla,
+    panel_border: Hsla,
+    text_primary: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("analyze-chip-{}", label.to_lowercase().replace(' ', "-"))))
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(accent.opacity(0.3))
+        .cursor_pointer()
+        .text_size(px(11.0))
+        .text_color(text_primary)
+        .hover(|s| s.bg(panel_border).border_color(accent.opacity(0.6)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.ask_ai.question = fills_with.to_string();
+            cx.notify();
+        }))
+        .child(label)
 }

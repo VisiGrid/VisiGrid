@@ -4171,10 +4171,10 @@ pub fn render_explain_diff_dialog(
     let ai_summary_loading = app.diff_ai_summary_loading;
     let ai_summary_error = app.diff_ai_summary_error.clone();
 
-    // Check if AI summary is available (provider configured with ask capability)
+    // Check if AI summary is available (provider configured with insert_formula capability)
     let ai_config = visigrid_config::ai::ResolvedAIConfig::load();
-    let ai_summary_available = ai_config.provider.capabilities().ask;
-    let ai_explain_available = ai_config.provider.capabilities().ask;
+    let ai_summary_available = ai_config.provider.capabilities().insert_formula;
+    let ai_explain_available = ai_config.provider.capabilities().insert_formula;
 
     // Entry explanation state
     let entry_explanations = app.diff_entry_explanations.clone();

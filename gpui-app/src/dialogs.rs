@@ -1366,11 +1366,76 @@ impl Spreadsheet {
             }
         }
 
-        // Reset dialog state
+        // Reset dialog state and set verb
+        self.ask_ai.verb = crate::app::AiVerb::InsertFormula;
         self.ask_ai.reset();
 
         // Set mode first, then update context
-        self.mode = Mode::AskAI;
+        self.mode = Mode::AiDialog;
+
+        // Build context from current selection
+        self.ask_ai_update_context(cx);
+    }
+
+    pub fn show_analyze(&mut self, cx: &mut Context<Self>) {
+        use visigrid_config::ai::{ResolvedAIConfig, AIConfigStatus};
+
+        // Close validation dropdown when opening modal
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::ModalOpened,
+            cx,
+        );
+        self.lua_console.visible = false;
+
+        // Check AI is configured
+        let config = ResolvedAIConfig::load();
+        match config.status {
+            AIConfigStatus::Disabled => {
+                self.status_message = Some("AI is disabled. Enable in Preferences → AI.".to_string());
+                cx.notify();
+                return;
+            }
+            AIConfigStatus::MissingKey => {
+                if !self.ai_key_validated_this_session {
+                    self.status_message = Some("API key not configured. Set in Preferences → AI.".to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+            AIConfigStatus::NotImplemented => {
+                self.status_message = Some(format!(
+                    "{} provider not yet implemented.",
+                    config.provider.name()
+                ));
+                cx.notify();
+                return;
+            }
+            AIConfigStatus::Error => {
+                self.status_message = Some(config.blocking_reason.unwrap_or_else(|| "AI configuration error".to_string()));
+                cx.notify();
+                return;
+            }
+            AIConfigStatus::Ready => {
+                // Continue to show dialog
+            }
+        }
+
+        // Check analyze capability
+        if !config.provider.capabilities().analyze {
+            self.status_message = Some(format!(
+                "{} provider does not support Analyze.",
+                config.provider.name()
+            ));
+            cx.notify();
+            return;
+        }
+
+        // Reset dialog state and set verb
+        self.ask_ai.verb = crate::app::AiVerb::Analyze;
+        self.ask_ai.reset();
+
+        // Set mode first, then update context
+        self.mode = Mode::AiDialog;
 
         // Build context from current selection
         self.ask_ai_update_context(cx);
@@ -1454,10 +1519,10 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Execute the Ask AI query
+    /// Execute the AI query (branches on verb: InsertFormula or Analyze)
     pub fn ask_ai_submit(&mut self, cx: &mut Context<Self>) {
-        use crate::ai::{ask_ai, build_ai_context};
-        use crate::app::{AskAIStatus, AskAISentContext, AskAITruncation};
+        use crate::ai::{ask_ai, analyze, build_ai_context};
+        use crate::app::{AiVerb, AskAIStatus, AskAISentContext, AskAITruncation};
 
         // Prevent duplicate requests
         if self.ask_ai.is_loading() {
@@ -1539,47 +1604,72 @@ impl Spreadsheet {
 
         // Clone for thread
         let question = self.ask_ai.question.clone();
+        let verb = self.ask_ai.verb;
 
-        // Spawn blocking task
-        let result = std::thread::spawn(move || {
-            ask_ai(&config, &question, &context)
-        }).join();
+        // Branch on verb: InsertFormula vs Analyze
+        match verb {
+            AiVerb::InsertFormula => {
+                let result = std::thread::spawn(move || {
+                    ask_ai(&config, &question, &context)
+                }).join();
 
-        match result {
-            Ok(Ok(response)) => {
-                // Store raw response for debugging
-                self.ask_ai.raw_response = response.raw_response.clone();
+                match result {
+                    Ok(Ok(response)) => {
+                        self.ask_ai.raw_response = response.raw_response.clone();
+                        self.ask_ai.explanation = Some(response.explanation);
+                        self.ask_ai.formula = response.formula.as_ref().map(|f| f.trim().to_string());
+                        self.ask_ai.warnings.extend(response.warnings);
 
-                self.ask_ai.explanation = Some(response.explanation);
-                // Store canonical (trimmed) formula
-                self.ask_ai.formula = response.formula.as_ref().map(|f| f.trim().to_string());
-                self.ask_ai.warnings.extend(response.warnings);
-
-                // Validate formula if present
-                if let Some(ref formula) = self.ask_ai.formula {
-                    match self.validate_ai_formula(formula, cx) {
-                        Ok(()) => {
-                            self.ask_ai.formula_valid = true;
-                            self.ask_ai.formula_error = None;
+                        // Validate formula if present
+                        if let Some(ref formula) = self.ask_ai.formula {
+                            match self.validate_ai_formula(formula, cx) {
+                                Ok(()) => {
+                                    self.ask_ai.formula_valid = true;
+                                    self.ask_ai.formula_error = None;
+                                }
+                                Err(e) => {
+                                    self.ask_ai.formula_valid = false;
+                                    self.ask_ai.formula_error = Some(e);
+                                }
+                            }
                         }
-                        Err(e) => {
-                            self.ask_ai.formula_valid = false;
-                            self.ask_ai.formula_error = Some(e);
-                        }
+
+                        self.ask_ai.status = AskAIStatus::Success;
+                    }
+                    Ok(Err(e)) => {
+                        let error_msg = self.format_ai_error(&e);
+                        self.ask_ai.status = AskAIStatus::Error(error_msg.clone());
+                        self.ask_ai.error = Some(error_msg);
+                    }
+                    Err(_) => {
+                        self.ask_ai.status = AskAIStatus::Error("Request failed".to_string());
+                        self.ask_ai.error = Some("AI request failed unexpectedly. Please retry.".to_string());
                     }
                 }
+            }
+            AiVerb::Analyze => {
+                let result = std::thread::spawn(move || {
+                    analyze(&config, &question, &context)
+                }).join();
 
-                self.ask_ai.status = AskAIStatus::Success;
-            }
-            Ok(Err(e)) => {
-                // Parse error type for better messages
-                let error_msg = self.format_ai_error(&e);
-                self.ask_ai.status = AskAIStatus::Error(error_msg.clone());
-                self.ask_ai.error = Some(error_msg);
-            }
-            Err(_) => {
-                self.ask_ai.status = AskAIStatus::Error("Request failed".to_string());
-                self.ask_ai.error = Some("AI request failed unexpectedly. Please retry.".to_string());
+                match result {
+                    Ok(Ok(response)) => {
+                        self.ask_ai.raw_response = response.raw_response.clone();
+                        self.ask_ai.response_text = Some(response.analysis);
+                        self.ask_ai.warnings.extend(response.warnings);
+                        // No formula, no validation — read-only contract
+                        self.ask_ai.status = AskAIStatus::Success;
+                    }
+                    Ok(Err(e)) => {
+                        let error_msg = self.format_ai_error(&e);
+                        self.ask_ai.status = AskAIStatus::Error(error_msg.clone());
+                        self.ask_ai.error = Some(error_msg);
+                    }
+                    Err(_) => {
+                        self.ask_ai.status = AskAIStatus::Error("Request failed".to_string());
+                        self.ask_ai.error = Some("AI request failed unexpectedly. Please retry.".to_string());
+                    }
+                }
             }
         }
 
@@ -1715,7 +1805,11 @@ impl Spreadsheet {
     pub fn ask_ai_copy_details(&mut self, cx: &mut Context<Self>) {
         let mut details = String::new();
 
-        details.push_str("=== Ask AI Diagnostic Details ===\n\n");
+        let verb_label = match self.ask_ai.verb {
+            crate::app::AiVerb::InsertFormula => "Insert Formula",
+            crate::app::AiVerb::Analyze => "Analyze",
+        };
+        details.push_str(&format!("=== {} AI Diagnostic Details ===\n\n", verb_label));
 
         if let Some(sent) = &self.ask_ai.sent_context {
             details.push_str(&format!("Provider: {}\n", sent.provider));
@@ -1936,8 +2030,8 @@ impl Spreadsheet {
         // Load AI config
         let config = ResolvedAIConfig::load();
 
-        // Check if Ask capability is available
-        if !config.provider.capabilities().ask {
+        // Check if Insert Formula capability is available (reuses same provider)
+        if !config.provider.capabilities().insert_formula {
             self.diff_ai_summary_error = Some("AI provider does not support summaries".to_string());
             cx.notify();
             return;
@@ -2017,8 +2111,8 @@ impl Spreadsheet {
         // Load AI config
         let config = ResolvedAIConfig::load();
 
-        // Check if Ask capability is available
-        if !config.provider.capabilities().ask {
+        // Check if Insert Formula capability is available (reuses same provider)
+        if !config.provider.capabilities().insert_formula {
             return;
         }
 

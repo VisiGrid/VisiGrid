@@ -275,6 +275,9 @@ fn render_data_menu(text_primary: Hsla, text_muted: Hsla, text_disabled: Hsla, s
         .child(menu_separator(border))
         .child(menu_item_disabled("Sort...", text_disabled))
         .child(menu_item_disabled("Filter", text_disabled))
+        .child(menu_separator(border))
+        .child(menu_item("Insert Formula with AI", Some("Ctrl+Shift+A"), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_ask_ai(cx); }))
+        .child(menu_item("Analyze with AI", Some("Ctrl+Shift+E"), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_analyze(cx); }))
 }
 
 fn render_help_menu(text_primary: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {

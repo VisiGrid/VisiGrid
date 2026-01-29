@@ -43,7 +43,7 @@ pub enum Mode {
     HubPublishConfirm, // VisiHub: Confirm publish when diverged
     ValidationDialog,  // Data validation dialog (Data > Validation)
     AISettings,        // AI configuration dialog (Help > AI Settings)
-    AskAI,             // Ask AI dialog (Data > AI > Ask AI)
+    AiDialog,          // AI dialog - Insert Formula or Analyze (Tools > AI)
     ExplainDiff,       // Explain Differences dialog (History right-click)
     PasteSpecial,      // Paste Special dialog (Ctrl+Alt+V)
     ColorPicker,       // Color picker modal (Fill Color)
@@ -115,7 +115,7 @@ impl Mode {
                 | Mode::HubPasteToken  // Hub token input
                 | Mode::HubLink        // Hub link input
                 | Mode::AISettings     // API key input
-                | Mode::AskAI          // AI prompt input
+                | Mode::AiDialog       // AI prompt input
                 | Mode::ColorPicker    // Hex color input
         )
     }

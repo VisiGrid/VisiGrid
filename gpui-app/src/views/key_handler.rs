@@ -16,7 +16,7 @@ pub(crate) fn handle_key_down(
     }
 
     // Let AI dialogs handle their own keys
-    if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+    if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
         return;
     }
 

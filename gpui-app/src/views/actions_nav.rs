@@ -11,7 +11,7 @@ pub(crate) fn bind(
         // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
             // Let AI dialogs handle their own keys
-            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+            if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
             }
             // Validation dropdown navigation takes priority
@@ -60,7 +60,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
             // Let AI dialogs handle their own keys
-            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+            if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
             }
             // Validation dropdown navigation takes priority
@@ -109,7 +109,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &MoveLeft, window, cx| {
             // Let AI dialogs handle their own keys
-            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+            if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
             }
             // Lua console: cursor left
@@ -155,7 +155,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &MoveRight, window, cx| {
             // Let AI dialogs handle their own keys
-            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+            if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
             }
             // Lua console: cursor right

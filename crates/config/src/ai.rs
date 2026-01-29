@@ -478,7 +478,8 @@ impl std::fmt::Display for AIDiagnostics {
 
         // Show capabilities
         writeln!(f, "Capabilities:")?;
-        writeln!(f, "  Ask AI:          {}", if self.capabilities.ask { "yes" } else { "no" })?;
+        writeln!(f, "  Insert Formula:  {}", if self.capabilities.insert_formula { "yes" } else { "no" })?;
+        writeln!(f, "  Analyze:         {}", if self.capabilities.analyze { "yes" } else { "no" })?;
         writeln!(f, "  Explain diffs:   {}", if self.capabilities.explain_diffs { "yes" } else { "no" })?;
         writeln!(f, "  Propose changes: {}", if self.capabilities.propose { "yes" } else { "no" })?;
 

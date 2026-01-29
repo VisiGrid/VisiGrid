@@ -1144,6 +1144,16 @@ impl AISettingsDialogState {
 // Ask AI Dialog State
 // ============================================================================
 
+/// Which AI verb is active in the dialog
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AiVerb {
+    /// Insert Formula with AI (Ctrl+Shift+A) — single-cell write contract
+    #[default]
+    InsertFormula,
+    /// Analyze with AI (Ctrl+Shift+E) — read-only contract
+    Analyze,
+}
+
 /// Status of an Ask AI request
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum AskAIStatus {
@@ -1220,9 +1230,12 @@ impl AskAITruncation {
     }
 }
 
-/// State for the Ask AI dialog
+/// State for the AI dialog (shared by InsertFormula and Analyze verbs)
 #[derive(Debug, Clone, Default)]
 pub struct AskAIDialogState {
+    /// Which verb is active
+    pub verb: AiVerb,
+
     /// User's question
     pub question: String,
 
@@ -1268,6 +1281,9 @@ pub struct AskAIDialogState {
     /// Raw model response (for debugging)
     pub raw_response: Option<String>,
 
+    /// Analysis text from Analyze verb (read-only response)
+    pub response_text: Option<String>,
+
     /// Last insertion confirmation (e.g., "Inserted into A1")
     pub last_insertion: Option<String>,
 
@@ -1282,8 +1298,9 @@ pub struct AskAIDialogState {
 }
 
 impl AskAIDialogState {
-    /// Reset to initial state
+    /// Reset to initial state (verb is set by the caller before reset)
     pub fn reset(&mut self) {
+        // Note: verb is NOT reset here — it's set by show_ask_ai/show_analyze before reset
         self.question.clear();
         self.context_mode = AskAIContextMode::CurrentSelection;
         self.context_summary.clear();
@@ -1296,6 +1313,7 @@ impl AskAIDialogState {
         self.formula = None;
         self.formula_valid = false;
         self.formula_error = None;
+        self.response_text = None;
         self.warnings.clear();
         self.error = None;
         self.raw_response = None;
@@ -1305,7 +1323,7 @@ impl AskAIDialogState {
         self.context_selector_open = false;
     }
 
-    /// Clear response state (keep question and context)
+    /// Clear response state (keep question, context, and verb)
     pub fn clear_response(&mut self) {
         self.sent_context = None;
         self.status = AskAIStatus::Idle;
@@ -1314,6 +1332,7 @@ impl AskAIDialogState {
         self.formula = None;
         self.formula_valid = false;
         self.formula_error = None;
+        self.response_text = None;
         self.error = None;
         self.raw_response = None;
         self.last_insertion = None;
@@ -3102,8 +3121,11 @@ impl Spreadsheet {
             CommandId::ShowAISettings => {
                 self.show_ai_settings(cx);
             }
-            CommandId::AskAI => {
+            CommandId::InsertFormulaAI => {
                 self.show_ask_ai(cx);
+            }
+            CommandId::AnalyzeAI => {
+                self.show_analyze(cx);
             }
             CommandId::ExtractNamedRange => {
                 self.show_extract_named_range(cx);

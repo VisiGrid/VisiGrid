@@ -81,7 +81,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_hub_publish_confirm = app.mode == Mode::HubPublishConfirm;
     let show_validation_dialog = app.mode == Mode::ValidationDialog;
     let show_ai_settings = app.mode == Mode::AISettings;
-    let show_ask_ai = app.mode == Mode::AskAI;
+    let show_ask_ai = app.mode == Mode::AiDialog;
     let show_explain_diff = app.mode == Mode::ExplainDiff;
     let show_paste_special = app.mode == Mode::PasteSpecial;
     let show_color_picker = app.mode == Mode::ColorPicker;

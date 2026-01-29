@@ -10,4 +10,4 @@ pub use context::{
     build_ai_context, cell_ref, range_ref,
     find_current_region, find_used_range,
 };
-pub use client::{ask_ai, AskError};
+pub use client::{ask_ai, analyze, AskError, AnalyzeResponse, ANALYZE_CONTRACT, INSERT_FORMULA_CONTRACT};

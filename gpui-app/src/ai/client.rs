@@ -1,4 +1,4 @@
-// AI client for Ask AI feature
+// AI client for Insert Formula and Analyze features
 //
 // Sends questions to AI providers and parses structured responses.
 // Currently supports OpenAI only.
@@ -9,7 +9,12 @@ use visigrid_config::settings::AIProvider;
 
 use super::context::AIContext;
 
-/// Response from Ask AI
+/// Execution contract identifiers.
+/// Visible in debug output, Copy Details, and Sent to AI panel.
+pub const ANALYZE_CONTRACT: &str = "read_only_v1";
+pub const INSERT_FORMULA_CONTRACT: &str = "single_cell_write_v1";
+
+/// Response from Ask AI (Insert Formula)
 #[derive(Debug, Clone)]
 pub struct AskResponse {
     /// Natural language explanation
@@ -126,11 +131,31 @@ struct OpenAIErrorDetail {
     r#type: Option<String>,
 }
 
-/// Expected JSON structure from AI
+/// Expected JSON structure from AI (Insert Formula)
 #[derive(Deserialize)]
 struct AIJsonResponse {
     explanation: String,
     formula: Option<String>,
+}
+
+/// Expected JSON structure from AI (Analyze) — strict: deny_unknown_fields
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnalyzeJsonResponse {
+    analysis: String,
+}
+
+/// Response from Analyze with AI
+#[derive(Debug, Clone)]
+pub struct AnalyzeResponse {
+    /// Analysis text
+    pub analysis: String,
+
+    /// Warnings about the response
+    pub warnings: Vec<String>,
+
+    /// Raw response text (for debugging)
+    pub raw_response: Option<String>,
 }
 
 // ============================================================================
@@ -340,6 +365,201 @@ fn parse_ai_response(content: &str) -> Result<AskResponse, AskError> {
     })
 }
 
+// ============================================================================
+// Analyze API (read-only)
+// ============================================================================
+
+/// Analyze data with AI (read-only — no cell writes)
+///
+/// Returns a structured analysis response. Contract: read_only_v1.
+/// This is a blocking call - use in a background task.
+pub fn analyze(
+    config: &ResolvedAIConfig,
+    question: &str,
+    context: &AIContext,
+) -> Result<AnalyzeResponse, AskError> {
+    // Check provider is configured and implemented
+    match config.provider {
+        AIProvider::None => {
+            return Err(AskError::NotConfigured("AI is disabled".to_string()));
+        }
+        AIProvider::OpenAI => {
+            // Continue with OpenAI implementation
+        }
+        AIProvider::Local | AIProvider::Anthropic | AIProvider::Gemini | AIProvider::Grok => {
+            return Err(AskError::NotImplemented(format!(
+                "{} provider not yet implemented",
+                config.provider.name()
+            )));
+        }
+    }
+
+    // Check API key
+    let api_key = config.api_key.as_ref().ok_or(AskError::MissingKey)?;
+
+    // Build prompt
+    let system_prompt = build_analyze_system_prompt();
+    let user_prompt = build_analyze_user_prompt(question, context);
+
+    // Call OpenAI API and parse as analyze response
+    call_openai_analyze(api_key, &config.model, &system_prompt, &user_prompt)
+}
+
+fn build_analyze_system_prompt() -> String {
+    r#"You are a spreadsheet analyst. Your role is to help users understand their data.
+
+CRITICAL INSTRUCTIONS:
+1. Return ONLY valid JSON with exactly this key: "analysis"
+2. "analysis" must be a string containing your complete answer
+3. Do NOT include any text before or after the JSON
+4. Do NOT use markdown code blocks
+5. Do NOT propose formulas, cell modifications, or suggest formulas even as examples
+
+ANALYSIS GUIDELINES:
+- Answer the user's question directly and concisely
+- Reference specific cells, rows, or columns when relevant
+- Use concrete numbers from the data
+- Note anomalies, patterns, or potential issues if asked
+- Keep the response under 500 words
+
+RESPONSE FORMAT:
+{"analysis": "your analysis here"}"#.to_string()
+}
+
+fn build_analyze_user_prompt(question: &str, context: &AIContext) -> String {
+    let mut prompt = String::new();
+
+    prompt.push_str("CONTEXT:\n");
+    prompt.push_str(&context.to_prompt_text());
+    prompt.push('\n');
+
+    prompt.push_str("QUESTION:\n");
+    prompt.push_str(question);
+    prompt.push('\n');
+
+    prompt.push_str("\nRemember: Return ONLY valid JSON with an \"analysis\" key. Do NOT include formulas.");
+
+    prompt
+}
+
+fn call_openai_analyze(
+    api_key: &str,
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<AnalyzeResponse, AskError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| AskError::NetworkError(e.to_string()))?;
+
+    let request = OpenAIRequest {
+        model: model.to_string(),
+        messages: vec![
+            OpenAIMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            OpenAIMessage {
+                role: "user".to_string(),
+                content: user_prompt.to_string(),
+            },
+        ],
+        temperature: 0.3,
+        max_tokens: 1024,
+        response_format: Some(OpenAIResponseFormat {
+            format_type: "json_object".to_string(),
+        }),
+    };
+
+    let response = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .map_err(|e| AskError::NetworkError(e.to_string()))?;
+
+    let status = response.status();
+
+    if !status.is_success() {
+        let error_text = response.text().unwrap_or_default();
+        if let Ok(error) = serde_json::from_str::<OpenAIError>(&error_text) {
+            return Err(AskError::ApiError {
+                status: status.as_u16(),
+                message: error.error.message,
+            });
+        }
+        return Err(AskError::ApiError {
+            status: status.as_u16(),
+            message: error_text,
+        });
+    }
+
+    let response_body: OpenAIResponse = response
+        .json()
+        .map_err(|e| AskError::ParseError(e.to_string()))?;
+
+    let content = response_body
+        .choices
+        .first()
+        .map(|c| c.message.content.clone())
+        .ok_or_else(|| AskError::InvalidResponse("No choices in response".to_string()))?;
+
+    parse_analyze_response(&content)
+}
+
+fn parse_analyze_response(content: &str) -> Result<AnalyzeResponse, AskError> {
+    let mut warnings = Vec::new();
+
+    // Try to parse as strict JSON (deny_unknown_fields)
+    let parsed: AnalyzeJsonResponse = match serde_json::from_str(content) {
+        Ok(p) => p,
+        Err(e) => {
+            // Try to extract JSON from the response if it's wrapped in markdown
+            if let Some(json_start) = content.find('{') {
+                if let Some(json_end) = content.rfind('}') {
+                    let json_str = &content[json_start..=json_end];
+                    match serde_json::from_str(json_str) {
+                        Ok(p) => {
+                            warnings.push("Response contained extra text around JSON".to_string());
+                            p
+                        }
+                        Err(_) => {
+                            return Err(AskError::ParseError(format!(
+                                "Failed to parse JSON: {}. Raw: {}",
+                                e, content
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(AskError::ParseError(format!(
+                        "Failed to parse JSON: {}. Raw: {}",
+                        e, content
+                    )));
+                }
+            } else {
+                return Err(AskError::ParseError(format!(
+                    "Response is not JSON: {}. Raw: {}",
+                    e, content
+                )));
+            }
+        }
+    };
+
+    // Check if analysis contains formula-like content
+    let analysis = parsed.analysis.trim().to_string();
+    if analysis.contains("=SUM(") || analysis.contains("=AVERAGE(") || analysis.contains("=IF(") {
+        warnings.push("Analysis contains formula references. Use Insert Formula (Ctrl+Shift+A) for formulas.".to_string());
+    }
+
+    Ok(AnalyzeResponse {
+        analysis,
+        warnings,
+        raw_response: Some(content.to_string()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +587,50 @@ mod tests {
         let response = parse_ai_response(json).unwrap();
         assert_eq!(response.explanation, "Test");
         assert!(!response.warnings.is_empty()); // Should warn about extra text
+    }
+
+    // ================================================================
+    // Analyze response tests
+    // ================================================================
+
+    #[test]
+    fn test_parse_analyze_valid() {
+        let json = r#"{"analysis": "Sales increased 15% quarter over quarter."}"#;
+        let response = parse_analyze_response(json).unwrap();
+        assert_eq!(response.analysis, "Sales increased 15% quarter over quarter.");
+        assert!(response.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_analyze_with_markdown() {
+        let json = "```json\n{\"analysis\": \"Data looks normal.\"}\n```";
+        let response = parse_analyze_response(json).unwrap();
+        assert_eq!(response.analysis, "Data looks normal.");
+        assert!(!response.warnings.is_empty()); // Extra text warning
+    }
+
+    #[test]
+    fn test_parse_analyze_invalid_json() {
+        let json = "This is not JSON";
+        assert!(parse_analyze_response(json).is_err());
+    }
+
+    #[test]
+    fn test_parse_analyze_extra_fields_rejected() {
+        // deny_unknown_fields: extra "formula" key must cause parse failure
+        let json = r#"{"analysis": "Test", "formula": "=SUM(A1:A10)"}"#;
+        assert!(parse_analyze_response(json).is_err());
+    }
+
+    #[test]
+    fn test_analyze_system_prompt_forbids_formulas() {
+        let prompt = build_analyze_system_prompt();
+        assert!(prompt.contains("Do NOT propose formulas"));
+    }
+
+    #[test]
+    fn test_contract_constants() {
+        assert_eq!(ANALYZE_CONTRACT, "read_only_v1");
+        assert_eq!(INSERT_FORMULA_CONTRACT, "single_cell_write_v1");
     }
 }

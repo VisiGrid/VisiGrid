@@ -64,7 +64,7 @@ impl AIProvider {
             AIProvider::None => ProviderCapabilities::none(),
             // TODO: Enable as providers are implemented
             AIProvider::Local => ProviderCapabilities::none(),      // Phase 1: implement Ollama client
-            AIProvider::OpenAI => ProviderCapabilities::ask_only(), // Implemented: Ask AI
+            AIProvider::OpenAI => ProviderCapabilities::insert_and_analyze(), // Implemented: Insert Formula + Analyze
             AIProvider::Anthropic => ProviderCapabilities::none(),  // Phase 1: implement Anthropic client
             AIProvider::Gemini => ProviderCapabilities::none(),     // Future: OpenAI-compatible?
             AIProvider::Grok => ProviderCapabilities::none(),       // Future: OpenAI-compatible?
@@ -84,8 +84,10 @@ impl AIProvider {
 /// This gates what features are actually available, not just configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ProviderCapabilities {
-    /// Can use "Ask AI" to answer questions about data
-    pub ask: bool,
+    /// Can use "Insert Formula with AI" to generate formulas
+    pub insert_formula: bool,
+    /// Can use "Analyze with AI" for read-only data analysis
+    pub analyze: bool,
     /// Can explain differences between snapshots
     pub explain_diffs: bool,
     /// Can propose cell changes (gated additionally by user setting)
@@ -96,17 +98,19 @@ impl ProviderCapabilities {
     /// No capabilities - provider not yet implemented
     pub const fn none() -> Self {
         Self {
-            ask: false,
+            insert_formula: false,
+            analyze: false,
             explain_diffs: false,
             propose: false,
         }
     }
 
-    /// Basic capabilities - Ask AI only
+    /// Basic capabilities - Insert Formula + Analyze
     #[allow(dead_code)]
-    pub const fn ask_only() -> Self {
+    pub const fn insert_and_analyze() -> Self {
         Self {
-            ask: true,
+            insert_formula: true,
+            analyze: true,
             explain_diffs: false,
             propose: false,
         }
@@ -116,7 +120,8 @@ impl ProviderCapabilities {
     #[allow(dead_code)]
     pub const fn full_v1() -> Self {
         Self {
-            ask: true,
+            insert_formula: true,
+            analyze: true,
             explain_diffs: true,
             propose: true,
         }
@@ -124,7 +129,7 @@ impl ProviderCapabilities {
 
     /// Returns true if any capability is implemented
     pub fn any_implemented(&self) -> bool {
-        self.ask || self.explain_diffs || self.propose
+        self.insert_formula || self.analyze || self.explain_diffs || self.propose
     }
 }
 

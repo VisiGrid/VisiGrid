@@ -240,7 +240,8 @@ actions!(data, [
 
 // AI actions
 actions!(ai, [
-    AskAI,              // Ctrl+Shift+A - Ask AI about selected data
+    InsertFormula,       // Ctrl+Shift+A - Insert Formula with AI
+    Analyze,             // Ctrl+Shift+E - Analyze with AI (read-only)
 ]);
 
 // Command palette actions

@@ -22,7 +22,7 @@ pub(crate) fn bind(
                 this.ai_settings_paste(cx);
                 return;
             }
-            if this.mode == Mode::AskAI {
+            if this.mode == Mode::AiDialog {
                 this.ask_ai_paste(cx);
                 return;
             }
@@ -127,7 +127,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
             // Let AI dialogs handle their own keys
-            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+            if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
             }
             // Sheet rename: Enter confirms
@@ -284,7 +284,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &TabNext, window, cx| {
             // Let AI dialogs handle their own keys
-            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+            if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
             }
             // Dialog modes handle Tab themselves
@@ -311,7 +311,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &TabPrev, window, cx| {
             // Let AI dialogs handle their own keys
-            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+            if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
             }
             if this.mode.is_editing() {
@@ -331,7 +331,7 @@ pub(crate) fn bind(
                 this.ai_settings_backspace(cx);
                 return;
             }
-            if this.mode == Mode::AskAI {
+            if this.mode == Mode::AiDialog {
                 this.ask_ai_backspace(cx);
                 return;
             }
@@ -385,7 +385,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &DeleteChar, window, cx| {
             // Let AI dialogs handle their own keys
-            if matches!(this.mode, Mode::AISettings | Mode::AskAI) {
+            if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
             }
             // Sheet rename: handle delete
@@ -490,7 +490,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ConfirmEditInPlace, _, cx| {
             // Ask AI dialog: Cmd/Ctrl+Enter submits
-            if this.mode == Mode::AskAI {
+            if this.mode == Mode::AiDialog {
                 this.ask_ai_submit(cx);
                 return;
             }

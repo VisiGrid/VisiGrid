@@ -91,9 +91,13 @@ pub(crate) fn bind(
             this.status_message = Some("Data validation dialog not yet implemented".to_string());
             cx.notify();
         }))
-        // Ask AI
-        .on_action(cx.listener(|this, _: &AskAI, _, cx| {
+        // Insert Formula with AI (Ctrl+Shift+A)
+        .on_action(cx.listener(|this, _: &InsertFormula, _, cx| {
             this.show_ask_ai(cx);
+        }))
+        // Analyze with AI (Ctrl+Shift+E)
+        .on_action(cx.listener(|this, _: &Analyze, _, cx| {
+            this.show_analyze(cx);
         }))
         .on_action(cx.listener(|this, _: &OpenValidationDropdown, _, cx| {
             this.open_validation_dropdown(cx);
