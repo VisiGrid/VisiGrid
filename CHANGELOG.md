@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.8
+
+### Merged Cells Phase 2 — Rendering
+
+Merged regions now render as unified overlays: hidden/origin cells become transparent spacers in the flex grid; overlays paint background, gridlines, text, user borders, selection tint, and selection borders with correct z-order.
+
+- **Merge overlay layer** — absolutely-positioned overlays render merged cells above the cell grid, between cell rows and the text spill layer. Follows the same pattern as `render_text_spill_overlay()`.
+- **Interactive overlays** — merge overlays have `.id()` and mouse handlers (click, drag, fill) that route to the merge origin. Double-click enters edit mode on the origin cell.
+- **Spacer cells** — hidden cells and non-editing origin cells return minimal transparent divs with only drag-through handlers, eliminating double-rendered backgrounds and text.
+- **Spill exclusion** — merged cells are excluded from the spill scan to prevent double-rendered text. Guard is documented with references to engine tests.
+- **Refactored into helpers** — `collect_visible_merges()` (pure geometry), `render_merge_div()` (single overlay element), `render_merge_overlays()` (orchestrator), `is_merge_in_selection()`, `render_merge_text()`.
+- **Pure geometry APIs** — `MergedRegion::overlaps_viewport()` and `MergedRegion::pixel_rect()` in the engine crate, testable without gpui.
+- **17 ship-gate tests** — viewport overlap (10 tests), pixel rect math (4 tests), spill predicate coverage (2 tests), span width/height (1 test). 476 engine tests total.
+
+#### Known limitation
+
+- **Freeze panes + merges:** merges fully inside the frozen region may not render correctly when scrolling (same limitation as text spill overlay). Both overlays use the scrollable viewport's coordinate system; frozen-region-only merges fall outside the viewport check. Planned for a future "Rendering Overlays v2" pass that adds quadrant-aware overlay rendering for both merges and spill.
+
+#### Manual verification
+
+- Open an XLSX fixture with merged headers + freeze panes
+- Scroll vertically and horizontally; confirm merged overlays render in the scrollable area
+- Edit a merge origin (double-click); confirm caret appears, merge background stays visible
+- Confirm no double-rendered text (spill layer excluded for merged cells)
+
 ## 0.3.7
 
 ### views/mod.rs Split

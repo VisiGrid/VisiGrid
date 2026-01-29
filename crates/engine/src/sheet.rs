@@ -191,6 +191,46 @@ impl MergedRegion {
     pub fn cell_count(&self) -> usize {
         self.rows() * self.cols()
     }
+
+    /// Whether this merge overlaps a viewport defined by scroll position + visible extent.
+    /// Used by the render layer to filter which merges need overlay elements.
+    pub fn overlaps_viewport(
+        &self,
+        scroll_row: usize,
+        scroll_col: usize,
+        visible_rows: usize,
+        visible_cols: usize,
+    ) -> bool {
+        let max_row = scroll_row + visible_rows;
+        let max_col = scroll_col + visible_cols;
+        // Overlap iff neither axis is entirely outside
+        self.end.0 >= scroll_row && self.start.0 < max_row
+            && self.end.1 >= scroll_col && self.start.1 < max_col
+    }
+
+    /// Compute the pixel rect of a merge overlay relative to the scroll position.
+    ///
+    /// Pure geometry — takes closures for col/row dimensions so it's testable
+    /// without any UI framework dependency.
+    ///
+    /// Returns (x, y, width, height) where:
+    /// - x = sum of col widths from scroll_col to merge.start_col
+    /// - y = sum of row heights from scroll_row to merge.start_row
+    /// - width = sum of col widths across the merge span
+    /// - height = sum of row heights across the merge span
+    pub fn pixel_rect(
+        &self,
+        scroll_row: usize,
+        scroll_col: usize,
+        col_width: impl Fn(usize) -> f32,
+        row_height: impl Fn(usize) -> f32,
+    ) -> (f32, f32, f32, f32) {
+        let x: f32 = (scroll_col..self.start.1).map(|c| col_width(c)).sum();
+        let y: f32 = (scroll_row..self.start.0).map(|r| row_height(r)).sum();
+        let w: f32 = (self.start.1..=self.end.1).map(|c| col_width(c)).sum();
+        let h: f32 = (self.start.0..=self.end.0).map(|r| row_height(r)).sum();
+        (x, y, w, h)
+    }
 }
 
 // =============================================================================
@@ -3877,5 +3917,210 @@ mod tests {
         // B1 format still bold — clear_cell only removes the value at origin,
         // it does NOT touch sibling cell formats
         assert!(sheet.get_format(0, 1).bold);
+    }
+
+    // =========================================================================
+    // Merge rendering ship-gate tests
+    // =========================================================================
+
+    #[test]
+    fn test_merge_overlaps_viewport_fully_inside() {
+        // Merge (2,2)→(4,5), viewport scroll=(0,0) visible=(10,10)
+        let m = MergedRegion::new(2, 2, 4, 5);
+        assert!(m.overlaps_viewport(0, 0, 10, 10));
+    }
+
+    #[test]
+    fn test_merge_overlaps_viewport_partially_visible_top_left() {
+        // Merge starts above and left of viewport, extends into it
+        let m = MergedRegion::new(0, 0, 3, 3);
+        assert!(m.overlaps_viewport(2, 2, 10, 10)); // bottom-right quadrant visible
+    }
+
+    #[test]
+    fn test_merge_overlaps_viewport_partially_visible_bottom_right() {
+        // Merge extends past viewport bottom-right
+        let m = MergedRegion::new(8, 8, 15, 15);
+        assert!(m.overlaps_viewport(5, 5, 10, 10)); // top-left quadrant visible
+    }
+
+    #[test]
+    fn test_merge_overlaps_viewport_entirely_above() {
+        let m = MergedRegion::new(0, 0, 2, 5);
+        assert!(!m.overlaps_viewport(5, 0, 10, 10));
+    }
+
+    #[test]
+    fn test_merge_overlaps_viewport_entirely_below() {
+        let m = MergedRegion::new(20, 0, 22, 5);
+        assert!(!m.overlaps_viewport(5, 0, 10, 10));
+    }
+
+    #[test]
+    fn test_merge_overlaps_viewport_entirely_left() {
+        let m = MergedRegion::new(0, 0, 5, 2);
+        assert!(!m.overlaps_viewport(0, 5, 10, 10));
+    }
+
+    #[test]
+    fn test_merge_overlaps_viewport_entirely_right() {
+        let m = MergedRegion::new(0, 20, 5, 25);
+        assert!(!m.overlaps_viewport(0, 5, 10, 10));
+    }
+
+    #[test]
+    fn test_merge_overlaps_viewport_edge_touching_bottom() {
+        // Merge end row == scroll_row (just barely visible)
+        let m = MergedRegion::new(3, 0, 5, 3);
+        assert!(m.overlaps_viewport(5, 0, 10, 10)); // row 5 is first visible
+    }
+
+    #[test]
+    fn test_merge_overlaps_viewport_edge_just_outside() {
+        // Merge end row == scroll_row - 1 (just outside)
+        let m = MergedRegion::new(0, 0, 4, 3);
+        assert!(!m.overlaps_viewport(5, 0, 10, 10));
+    }
+
+    #[test]
+    fn test_merge_overlaps_viewport_single_cell_merge() {
+        // 1x1 merges are degenerate and ignored, but test the geometry anyway
+        let m = MergedRegion::new(5, 5, 5, 5);
+        assert!(m.overlaps_viewport(5, 5, 1, 1));
+        assert!(!m.overlaps_viewport(6, 5, 1, 1));
+    }
+
+    #[test]
+    fn test_merge_get_merge_covers_all_cells() {
+        // Ship-gate: the spill overlay guard is:
+        //   if sheet.get_merge(row, col).is_some() { continue; }
+        // This test verifies get_merge() returns Some for EVERY cell inside a
+        // merge (origin + all hidden), and None for cells outside.
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(2, 3, 4, 6)).unwrap();
+
+        // Every cell inside the merge must return Some
+        for r in 2..=4 {
+            for c in 3..=6 {
+                assert!(
+                    sheet.get_merge(r, c).is_some(),
+                    "get_merge({}, {}) should be Some (inside merge)",
+                    r, c
+                );
+            }
+        }
+        // Cells adjacent to the merge must return None
+        assert!(sheet.get_merge(1, 3).is_none(), "above merge");
+        assert!(sheet.get_merge(2, 7).is_none(), "right of merge");
+        assert!(sheet.get_merge(5, 3).is_none(), "below merge");
+        assert!(sheet.get_merge(2, 2).is_none(), "left of merge");
+    }
+
+    #[test]
+    fn test_merge_with_text_still_detected_by_get_merge() {
+        // Ship-gate: even after setting a value on a merged cell,
+        // get_merge() must still return Some. This is the actual predicate
+        // the spill overlay uses to skip merged cells.
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.add_merge(MergedRegion::new(1, 1, 3, 4)).unwrap();
+
+        // Set a long text value on the origin cell
+        sheet.set_value(1, 1, "This is a very long text that would normally spill");
+
+        // Origin still detected as merged
+        assert!(sheet.get_merge(1, 1).is_some());
+        assert!(sheet.is_merge_origin(1, 1));
+
+        // Hidden cells still detected as merged
+        assert!(sheet.get_merge(2, 3).is_some());
+        assert!(sheet.is_merge_hidden(2, 3));
+
+        // Value redirects to origin — hidden cells have no independent value
+        assert_eq!(sheet.get_display(1, 1), "This is a very long text that would normally spill");
+    }
+
+    #[test]
+    fn test_merge_pixel_rect_uniform_widths() {
+        // Ship-gate: verify x/y offsets with uniform column/row sizes.
+        // Merge (2,3)→(4,5), scroll at (0,0), all cols=80px, all rows=25px
+        let m = MergedRegion::new(2, 3, 4, 5);
+        let (x, y, w, h) = m.pixel_rect(0, 0, |_| 80.0, |_| 25.0);
+
+        // x = cols 0,1,2 before merge start = 3 * 80 = 240
+        assert_eq!(x, 240.0);
+        // y = rows 0,1 before merge start = 2 * 25 = 50
+        assert_eq!(y, 50.0);
+        // width = cols 3,4,5 = 3 * 80 = 240
+        assert_eq!(w, 240.0);
+        // height = rows 2,3,4 = 3 * 25 = 75
+        assert_eq!(h, 75.0);
+    }
+
+    #[test]
+    fn test_merge_pixel_rect_with_scroll_offset() {
+        // Ship-gate: when scrolled, x/y should only sum widths/heights
+        // from scroll position to merge start — not from col 0.
+        let m = MergedRegion::new(5, 8, 7, 10);
+        // Scroll at row 3, col 5. All cols=100px, all rows=20px.
+        let (x, y, w, h) = m.pixel_rect(3, 5, |_| 100.0, |_| 20.0);
+
+        // x = cols 5,6,7 before merge start at col 8 = 3 * 100 = 300
+        assert_eq!(x, 300.0);
+        // y = rows 3,4 before merge start at row 5 = 2 * 20 = 40
+        assert_eq!(y, 40.0);
+        // width = cols 8,9,10 = 3 * 100 = 300
+        assert_eq!(w, 300.0);
+        // height = rows 5,6,7 = 3 * 20 = 60
+        assert_eq!(h, 60.0);
+    }
+
+    #[test]
+    fn test_merge_pixel_rect_variable_widths() {
+        // Ship-gate: non-uniform col widths (resized columns).
+        // Merge (1,2)→(3,4), scroll at (0,0).
+        let m = MergedRegion::new(1, 2, 3, 4);
+        let col_widths = [60.0, 80.0, 120.0, 50.0, 90.0]; // cols 0-4
+        let row_heights = [20.0, 30.0, 25.0, 35.0]; // rows 0-3
+        let (x, y, w, h) = m.pixel_rect(
+            0, 0,
+            |c| col_widths.get(c).copied().unwrap_or(80.0),
+            |r| row_heights.get(r).copied().unwrap_or(25.0),
+        );
+
+        // x = col 0 (60) + col 1 (80) = 140
+        assert_eq!(x, 140.0);
+        // y = row 0 (20) = 20
+        assert_eq!(y, 20.0);
+        // width = col 2 (120) + col 3 (50) + col 4 (90) = 260
+        assert_eq!(w, 260.0);
+        // height = row 1 (30) + row 2 (25) + row 3 (35) = 90
+        assert_eq!(h, 90.0);
+    }
+
+    #[test]
+    fn test_merge_pixel_rect_scroll_past_merge_start() {
+        // Edge case: scroll position is past the merge start.
+        // x/y should be 0 (or negative in real rendering, but sum of empty range = 0).
+        // The overlay clips via overflow_hidden so this is still correct.
+        let m = MergedRegion::new(2, 3, 5, 6);
+        let (x, y, _w, _h) = m.pixel_rect(4, 5, |_| 80.0, |_| 25.0);
+
+        // scroll_row=4 > merge.start.0=2, so range 4..2 is empty → y = 0
+        assert_eq!(y, 0.0);
+        // scroll_col=5 > merge.start.1=3, so range 5..3 is empty → x = 0
+        assert_eq!(x, 0.0);
+    }
+
+    #[test]
+    fn test_merge_rect_width_height_span() {
+        // Lock-in: the range iteration for width/height covers exactly the right cells.
+        let m = MergedRegion::new(2, 3, 5, 7);
+        assert_eq!(m.rows(), 4); // rows 2,3,4,5
+        assert_eq!(m.cols(), 5); // cols 3,4,5,6,7
+
+        let cols: Vec<usize> = (m.start.1..=m.end.1).collect();
+        assert_eq!(cols, vec![3, 4, 5, 6, 7]);
+        let rows: Vec<usize> = (m.start.0..=m.end.0).collect();
+        assert_eq!(rows, vec![2, 3, 4, 5]);
     }
 }
