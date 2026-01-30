@@ -2,103 +2,44 @@
 
 ## Unreleased
 
-### Merged Cells Phase 4 — Copy/Paste with Merge Recreation
-
-Copy, cut, and paste operations now carry merge metadata through the clipboard and recreate merged regions at the paste destination.
-
-- **Copy captures merge metadata** — `InternalClipboard` stores merged regions as relative coordinates. The selection is automatically expanded to include any intersecting merges (e.g., copying a single cell inside a merge captures the full merge).
-- **Paste recreates merges** — Normal paste (Ctrl+V) removes existing merges fully within the paste rectangle, then recreates clipboard merges at the destination offsets. Non-origin cells are cleared (same semantics as manual merge).
-- **Cut removes source merges** — Cut (Ctrl+X) removes merges within the cut selection (move semantics). Both value clearing and merge removal are bundled into a single `Group` undo action.
-- **Overlap guard** — The existing `paste_would_split_merge` check blocks paste when the paste rectangle would partially overlap an existing merge.
-- **Group undo** — Paste and cut operations that involve merges use `UndoAction::Group` to bundle value changes and merge topology changes into a single Ctrl+Z.
-- **Filtered view** — Merge metadata is not captured when copying from a filtered view. Cut in filtered view shows a status message ("merged regions not moved in filtered view") when merges exist in the cut range.
-- **Paste Values / Paste Formulas / Paste Formats** — These paste data only, not structure. Clipboard merge metadata is ignored.
-
-### Merged Cells Phase 5 — UI
-
-Users can now merge and unmerge cells through the UI with full undo/redo support.
-
-- **Merge Cells** (Ctrl+Shift+M) — merges the selected range into a single cell, keeping the upper-left value. Shows a data-loss confirmation dialog when non-origin cells contain data, listing affected cells (or count if >10).
-- **Unmerge Cells** (Ctrl+Shift+U) — unmerges all merged regions overlapping the current selection.
-- **Format menu entries** — "Merge Cells" and "Unmerge Cells" in the Format menu with shortcut hints.
-- **Undo/redo** — `UndoAction::SetMerges` captures merge topology (before/after) and cleared cell values. Undo restores both merges and discarded data; redo re-applies.
-- **Overlap guard** — merging a range that partially overlaps an existing merge shows a status error ("Unmerge first").
-- **Contained merge replacement** — merging a range that fully contains existing merges removes them first, with their origin values captured in the undo payload.
-- **ToggleProblems rebind** — moved from Ctrl+Shift+M to F10 to free the shortcut for Merge Cells.
-
-### Merged Cells Phase 3 — Navigation
-
-Merged cells now behave as single cells for all keyboard navigation. Arrow keys, Ctrl+Arrow data jumps, selection extension, Go To, and edit Tab/Enter flows correctly treat merges as atomic data units, snap to merge origins on landing, and expand selections to cover full merged regions.
-
-- **`find_data_boundary()` merge-aware** — cells inside a merge are treated as occupied (non-empty) for Ctrl+Arrow boundary detection, fixing data-edge scanning through hidden merge cells. Closure renamed `get_cell_value` → `is_cell_empty` to prevent boolean inversion bugs.
-- **`jump_selection()` merge-aware** — starts from the effective merge edge in the movement direction and snaps to merge origin on landing.
-- **`extend_jump_selection()` merge-aware** — same edge-start logic plus expands selection to include the full merge region on landing. Handles anchor-inside-merge edge case by normalizing anchor to `merge.start` before comparison.
-- **`confirm_goto()` merge-aware** — Go To a hidden merge cell redirects to merge origin, selects the full merge region, and clears additional selections.
-- **Tab-chain Enter merge-aware** — `confirm_edit_enter()` and `confirm_edit_up_enter()` snap to merge origin when the tab-chain return position lands on a merged cell.
-- **Engine invariant test** — `test_get_merge_returns_canonical_origin` locks the invariant that `get_merge(r, c).start` always equals the merge origin for every cell inside a merge.
-
-## 0.3.8
-
-### Merged Cells Phase 2 — Rendering
-
-Merged regions now render as unified overlays: hidden/origin cells become transparent spacers in the flex grid; overlays paint background, gridlines, text, user borders, selection tint, and selection borders with correct z-order.
-
-- **Merge overlay layer** — absolutely-positioned overlays render merged cells above the cell grid, between cell rows and the text spill layer. Follows the same pattern as `render_text_spill_overlay()`.
-- **Interactive overlays** — merge overlays have `.id()` and mouse handlers (click, drag, fill) that route to the merge origin. Double-click enters edit mode on the origin cell.
-- **Spacer cells** — hidden cells and non-editing origin cells return minimal transparent divs with only drag-through handlers, eliminating double-rendered backgrounds and text.
-- **Spill exclusion** — merged cells are excluded from the spill scan to prevent double-rendered text. Guard is documented with references to engine tests.
-- **Refactored into helpers** — `collect_visible_merges()` (pure geometry), `render_merge_div()` (single overlay element), `render_merge_overlays()` (orchestrator), `is_merge_in_selection()`, `render_merge_text()`.
-- **Pure geometry APIs** — `MergedRegion::overlaps_viewport()` and `MergedRegion::pixel_rect()` in the engine crate, testable without gpui.
-- **17 ship-gate tests** — viewport overlap (10 tests), pixel rect math (4 tests), spill predicate coverage (2 tests), span width/height (1 test). 476 engine tests total.
-
-#### Known limitation
-
-- **Freeze panes + merges:** merges fully inside the frozen region may not render correctly when scrolling (same limitation as text spill overlay). Both overlays use the scrollable viewport's coordinate system; frozen-region-only merges fall outside the viewport check. Planned for a future "Rendering Overlays v2" pass that adds quadrant-aware overlay rendering for both merges and spill.
-
-#### Manual verification
-
-- Open an XLSX fixture with merged headers + freeze panes
-- Scroll vertically and horizontally; confirm merged overlays render in the scrollable area
-- Edit a merge origin (double-click); confirm caret appears, merge background stays visible
-- Confirm no double-rendered text (spill layer excluded for merged cells)
-
 ## 0.3.7
 
-### views/mod.rs Split
+Trust, Correctness, and Real Excel Compatibility.
 
-`views/mod.rs` (4,422 lines) split into 7 focused modules. The render function stays as a slim orchestrator (~690 lines) that delegates to extracted modules.
+### AI with Explicit Rules
 
-- **`actions_nav.rs`** — 34 navigation/selection/search action handlers
-- **`actions_edit.rs`** — 30 editing/clipboard/cursor action handlers
-- **`actions_ui.rs`** — 108 file/format/view/menu action handlers
-- **`key_handler.rs`** — `on_key_down` dispatch (mode routing, character input)
-- **`f1_help.rs`** — F1 hold-to-peek context help overlay
-- **`named_range_dialogs.rs`** — rename, edit description, create, extract named range dialogs
-- **`rewind_dialogs.rs`** — rewind confirm dialog and success banner
+Execution Contracts make AI constraints visible and verifiable at every touchpoint.
 
-### XLSX Import Overhaul
+- **Execution Contracts** — every AI feature displays a named contract badge (`read_only_v1`, `single_cell_write_v1`) showing exactly what the AI can and cannot do. Tooltips explain the contract system; Copy Details includes contract identifier, human label, and write scope in the diagnostic dump.
+- **Multi-provider support** — OpenAI, Google Gemini, and xAI Grok all work via OpenAI-compatible chat completions endpoints. Provider selection configures credentials and defaults; feature availability is gated by implemented capabilities.
+- **Analyze with AI** — read-only data analysis for the current selection. AI describes patterns and structure but cannot modify cells. Contract: `read_only_v1`.
+- **Keyring persistence fix** — API keys now persist across sessions on all platforms. The `keyring` crate v3 requires explicit platform backend features (`apple-native`, `windows-native`, `linux-native-sync-persistent`); without them, keys were stored in memory only.
+- **Capability gate fix** — Diff Summary and Explain This Change correctly gate on the `analyze` capability (read-only), not `insert_formula` (write).
+- **Dialog stability** — Generate Summary no longer closes the diff dialog on click (fixed event propagation). Long AI responses scroll instead of being clipped.
 
-Importing Excel files with shared formulas, formula-only cells, and missing value cells now works correctly. Financial models that previously showed mass #CIRC! and #ERR errors now import cleanly.
+### Excel Import & Financial Model Fidelity
+
+Financial models that previously showed mass #CIRC! and #ERR errors now import cleanly.
+
+#### XLSX Import Overhaul
 
 - **calamine 0.26 → 0.32** — fixes shared formula expansion for `t="shared"` cells with ranges, absolute references, and column/row ranges
 - **Topological recompute on import** — all formulas are re-evaluated in dependency order after the full graph is built, fixing stale cached values from per-cell evaluation during import
 - **XML formula backfill** — cells with `<f>` elements but no cached `<v>` value (skipped by calamine) are now extracted directly from worksheet XML and backfilled
 - **Shared formula follower expansion** — 2-pass XML parsing reconstructs follower formulas from master definitions with reference shifting (respects `$` absolute anchors)
 - **XML value backfill** — cells stored as shared strings, inline strings, or numeric values that calamine drops are recovered from worksheet XML via shared string table resolution
-- **Post-recalc error counting** — circular refs (`is_cycle_error()`) and formula errors (`Value::Error`) are counted after topo recalc, with up to 5 concrete examples in the import report
+- **Post-recalc error counting** — circular refs and formula errors counted after topo recalc, with up to 5 concrete examples in the import report
 - **Import report diagnostics** — shows formula backfill count, value backfill count, shared formula groups, recalc errors with cell addresses and formulas
 - **Status bar error count** — "Opened in Xms — 0 errors" or "Opened in Xms — N errors (Import Report)" with clickable access
 
-### XLSX Formatting Import
-
-Cell formatting from Excel files is now preserved on import.
+#### XLSX Formatting Import
 
 - **styles.xml parsing** — number formats, font styles, fills, borders, alignment, column widths, and row heights extracted from XLSX style tables
 - **Style deduplication** — `StyleTable` with `style_id` per cell, interning identical formats to minimize memory
 - **Theme color approximation** — Excel theme colors with tint modifiers approximated to RGB with import report warnings
 - **Column widths and row heights** — imported from XLSX and applied to sheet layout
 
-### Number Format Rendering (ssfmt)
+#### Number Format Rendering (ssfmt)
 
 Custom Excel number format codes now render correctly via the `ssfmt` crate (ECMA-376 compliant, 99.99% SheetJS SSF compatibility).
 
@@ -107,7 +48,7 @@ Custom Excel number format codes now render correctly via the `ssfmt` crate (ECM
 - **Full format code support** — thousands separators, decimals, percent, currency, date/time tokens, conditional sections
 - **Graceful fallback** — if ssfmt can't parse a code, falls back to VisiGrid's built-in formatter
 
-### Formula Engine Additions
+#### Formula Engine Additions
 
 - **Unary plus** — `=+A1` parses correctly (common in financial models from Excel)
 - **Power operator** — `A1^2` with right-associative precedence and fractional exponents
@@ -123,17 +64,31 @@ Custom Excel number format codes now render correctly via the `ssfmt` crate (ECM
 - **AVERAGEIF / AVERAGEIFS** — Conditional averaging
 - **SPARKLINE** — Bar/line/winloss sparkline rendering in cells
 
-### Recalc Engine
+### Engine, UI, and Infrastructure
+
+#### Merged Cells
+
+Full merged cell support across the engine, rendering, navigation, clipboard, and UI.
+
+- **Rendering** — merged regions render as unified overlays with correct z-order (above cell grid, below text spill). Spacer cells for hidden/origin cells. Spill exclusion prevents double-rendered text. Interactive overlays route click, drag, and fill to merge origin.
+- **Navigation** — arrow keys, Ctrl+Arrow, selection extension, Go To, and edit Tab/Enter flows treat merges as atomic data units. `find_data_boundary()`, `jump_selection()`, `extend_jump_selection()`, `confirm_goto()`, and tab-chain Enter are all merge-aware.
+- **Copy/Paste** — `InternalClipboard` stores merged regions as relative coordinates. Paste recreates merges at destination. Cut removes source merges. Overlap guard blocks partial overlap. Paste Values/Formulas/Formats ignore merge metadata. Group undo bundles value and topology changes.
+- **UI** — Merge Cells (Ctrl+Shift+M) and Unmerge Cells (Ctrl+Shift+U) with data-loss confirmation dialog, overlap guard, contained merge replacement, and full undo/redo via `UndoAction::SetMerges`.
+- **17 ship-gate tests** — viewport overlap, pixel rect, spill predicates, span dimensions. 476+ engine tests total.
+
+**Known limitation:** merges fully inside a frozen region may not render correctly when scrolling (planned for Rendering Overlays v2).
+
+#### Recalc Engine
 
 - **Value-typed computed cache** — `HashMap<(usize, usize), Value>` replaces String cache, eliminating lossy numeric conversions
 - **No evaluate-on-cache-miss** — all getter paths return defaults on cache miss; only topo recalc and `set_value()` populate the cache
 - **Correct recalc ordering** — workbook-level topological evaluation ensures upstream cells are computed before dependents
 
-### Internal
+#### Internal
 
-- **Formula engine modularization** — split `eval.rs` (5,431 → 595 lines of non-test code) into 11 category modules (`eval_math`, `eval_logical`, `eval_text`, `eval_conditional`, `eval_lookup`, `eval_financial`, `eval_datetime`, `eval_trig`, `eval_statistical`, `eval_array`, `eval_helpers`). Dispatch via `Option::or_else` chain. No public API changes; all 444 engine tests pass.
+- **`views/mod.rs` split** — 4,422-line file split into 7 focused modules (`actions_nav`, `actions_edit`, `actions_ui`, `key_handler`, `f1_help`, `named_range_dialogs`, `rewind_dialogs`)
+- **Formula engine modularization** — `eval.rs` (5,431 → 595 lines) split into 11 category modules
 - **Dependency upgrades** — calamine 0.32, quick-xml 0.38, zip 4, ssfmt 0.1, regex 1
-- **quick-xml 0.38 migration** — `unescape()` → `decode()` in validation parser
 
 ## 0.3.6
 
