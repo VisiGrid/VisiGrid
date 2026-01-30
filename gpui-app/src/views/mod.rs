@@ -88,6 +88,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_keytips = app.keytips_active;
     let show_rewind_confirm = app.rewind_confirm.visible;
     let show_rewind_success = app.rewind_success.visible;
+    let show_merge_confirm = app.merge_confirm.visible;
     let show_import_overlay = app.import_overlay_visible;
     let show_name_tooltip = app.should_show_name_tooltip(cx) && app.mode == Mode::Navigation;
     let show_f2_tip = app.should_show_f2_tip(cx);  // Show immediately on trigger, not gated on mode
@@ -560,6 +561,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(show_rewind_confirm, |div| {
             div.child(rewind_dialogs::render_rewind_confirm_dialog(app, cx))
         })
+        .when(show_merge_confirm, |div| {
+            div.child(render_merge_confirm_dialog(app, cx))
+        })
         .when(show_rewind_success, |div| {
             div.child(rewind_dialogs::render_rewind_success_banner(app, cx))
         })
@@ -641,6 +645,132 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when_some(
             app.f1_help_visible.then(|| f1_help::render_f1_help_overlay(app, cx)),
             |div, overlay| div.child(overlay)
+        )
+}
+
+/// Render the merge cells data-loss confirmation dialog.
+fn render_merge_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
+    let warning_color = app.token(TokenKey::Error);
+
+    let affected = &app.merge_confirm.affected_cells;
+    let data_msg = if affected.len() > 10 {
+        format!("Data in {} cells will be lost.", affected.len())
+    } else {
+        format!("Data in {} will be lost.", affected.join(", "))
+    };
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(hsla(0.0, 0.0, 0.0, 0.6))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .id("merge-confirm-dialog")
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .rounded_md()
+                .shadow_lg()
+                .w(px(380.0))
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.merge_confirm.visible = false;
+                        cx.notify();
+                    }
+                }))
+                // Header
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(20.0))
+                                .text_color(warning_color)
+                                .child("\u{26A0}")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(text_primary)
+                                .child("Merge Cells")
+                        )
+                )
+                // Body
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(text_primary)
+                                .child("Merging cells only keeps the upper-left value and discards other values.")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
+                                .child(SharedString::from(data_msg))
+                        )
+                )
+                // Footer buttons
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("merge-cancel-btn")
+                                .px_3()
+                                .py_1()
+                                .border_1()
+                                .border_color(panel_border)
+                                .rounded_sm()
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(text_primary))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.merge_confirm.visible = false;
+                                    cx.notify();
+                                }))
+                                .child("Cancel")
+                        )
+                        .child(
+                            div()
+                                .id("merge-confirm-btn")
+                                .px_3()
+                                .py_1()
+                                .bg(accent)
+                                .rounded_sm()
+                                .text_size(px(12.0))
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(accent.opacity(0.85)))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.merge_confirm.visible = false;
+                                    this.merge_cells_confirmed(cx);
+                                }))
+                                .child("Merge Anyway")
+                        )
+                )
         )
 }
 

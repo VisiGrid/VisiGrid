@@ -22,20 +22,23 @@ Merged cells exist for **visual layout** — creating headers, labels, and struc
 ### Merging Cells
 
 **Entry points:**
-- Format menu → Merge Cells → Merge & Center
-- Command palette: "Merge Cells"
-- Context menu: Merge Cells
-- Keyboard: Ctrl+Shift+M (see Keyboard Shortcuts for rationale)
+- Format menu → Merge Cells / Unmerge Cells
+- Keyboard: Ctrl+Shift+M (merge), Ctrl+Shift+U (unmerge)
 
-**Merge options:**
-| Option | Result |
+**Current actions:**
+| Action | Result |
 |--------|--------|
-| Merge & Center | Merge all cells into one region, center content horizontally |
-| Merge Across | Merge each row separately (see below) |
-| Merge Cells | Merge all cells into one region, keep original alignment |
-| Unmerge Cells | Split merged cell back to individual cells |
+| Merge Cells | Merge all cells in selection into one region, keep original alignment |
+| Unmerge Cells | Split all merged regions overlapping the selection back to individual cells |
 
-**Merge Across** creates N separate `MergedRegion`s, one per row in the selection:
+**Future actions (not yet implemented):**
+| Action | Result |
+|--------|--------|
+| Merge & Center | Merge + center content horizontally (orthogonal to merge — center alignment can be applied separately) |
+| Merge Across | Merge each row in selection separately (see below) |
+| Context menu entries | Merge/unmerge from right-click menu |
+
+**Merge Across** (future) would create N separate `MergedRegion`s, one per row in the selection:
 
 ```
 Selection: A1:C3 → Merge Across produces:
@@ -44,7 +47,7 @@ Selection: A1:C3 → Merge Across produces:
   MergedRegion { start: (2,0), end: (2,2) }  // A3:C3
 ```
 
-Data loss warning for Merge Across lists affected cells per row: "Data in B1, C1 (row 1), B2, C2 (row 2), ..." — or an aggregate count if the list is long.
+Data loss warning for Merge Across would list affected cells per row: "Data in B1, C1 (row 1), B2, C2 (row 2), ..." — or an aggregate count if the list is long.
 
 ### Data Handling
 
@@ -56,22 +59,27 @@ Data loss warning for Merge Across lists affected cells per row: "Data in B1, C1
 **Warning dialog (if data would be lost):**
 ```
 ┌─────────────────────────────────────────────┐
-│ Merge Cells                              ✕  │
+│ ⚠ Merge Cells                              │
 ├─────────────────────────────────────────────┤
-│ ⚠ Merging cells only keeps the upper-left  │
-│   value and discards other values.          │
+│ Merging cells only keeps the upper-left     │
+│ value and discards other values.            │
 │                                             │
-│   Data in B2, B3, C2, C3 will be lost.      │
+│ Data in B2, B3, C2, C3 will be lost.        │
 │                                             │
 │              [Cancel]  [Merge Anyway]       │
 └─────────────────────────────────────────────┘
 ```
 
+If more than 10 cells have data, the dialog shows a count instead of listing cells: "Data in 47 cells will be lost."
+
+**Undo behavior:** Merge operations are fully undoable. `UndoAction::SetMerges` captures the merge topology before/after and any cell values cleared during the merge. Undo restores the topology first (via `set_merges(before)`), then restores cleared values. Redo clears values first, then re-applies the topology (`set_merges(after)`). This ordering ensures values are never "restored but still hidden" by an active merge.
+
 ### Unmerging Cells
 
-- Split merged cell back into original cells
-- Value stays in top-left cell only
-- Other cells become empty
+- Ctrl+Shift+U or Format menu → Unmerge Cells
+- Unmerges **all** merged regions overlapping the current selection (supports multi-merge unmerge)
+- Value stays in top-left cell only; other cells remain empty
+- Fully undoable — Ctrl+Z re-creates the merge
 - All unmerged cells **inherit the origin cell's format** (bold, borders, background, etc.)
 - This matches Excel behavior and avoids jarring format loss
 
@@ -571,11 +579,12 @@ Behavior in clipped state:
 
 ## Validation Rules
 
-### Cannot Merge
+### Cannot Merge (implemented guards)
 
-- Selection includes part of existing merge (but not all)
-- Selection is non-contiguous (additional selections)
-- Selection spans hidden rows/columns (filtered)
+- **Single cell selected** — "Select a range of cells to merge"
+- **Additional selections active** (Ctrl+Click multi-selection) — "Merge requires a single contiguous selection"
+- **Selection partially overlaps existing merge** — "Selection overlaps existing merged cells. Unmerge first."
+- Selection spans hidden rows/columns (filtered) — not yet guarded
 
 ### Merge Conflicts
 
@@ -583,9 +592,10 @@ Behavior in clipped state:
 Existing merge: A1:B2
 New selection: B1:C2
 
-Result: Error - "Selection overlaps existing merged cells"
-Options: Unmerge first, or extend selection
+Result: Error - "Selection overlaps existing merged cells. Unmerge first."
 ```
+
+**Contained merges** are handled: if the selection fully contains an existing merge, the contained merge is removed and replaced by the new merge. The contained merge's origin value is captured in the undo payload.
 
 ---
 
@@ -628,29 +638,36 @@ CREATE TABLE merged_regions (
 
 | Action | Windows/Linux | macOS |
 |--------|---------------|-------|
-| Merge & Center | Ctrl+Shift+M | Cmd+Shift+M |
-| Unmerge | Ctrl+Shift+U | Cmd+Shift+U |
+| Merge Cells | Ctrl+Shift+M | Cmd+Shift+M |
+| Unmerge Cells | Ctrl+Shift+U | Cmd+Shift+U |
 
 **Why not Ctrl/Cmd+M?** On macOS, Cmd+M is the system shortcut for "Minimize window." Overriding it would break platform conventions. Using Ctrl+Shift+M on both platforms keeps shortcuts consistent cross-platform. Excel uses Alt+H,M,C (ribbon path) — there is no universal standard shortcut for merge.
+
+**ToggleProblems rebind:** Ctrl+Shift+M was previously bound to ToggleProblems. Moved to F10 to free the shortcut for Merge Cells.
 
 ---
 
 ## Menu Integration
 
-### Format Menu
+### Format Menu (implemented)
 
 ```
 Format
 ├── ...
-├── Merge Cells                        ▸
-│   ├── Merge & Center     Ctrl+Shift+M
-│   ├── Merge Across
-│   ├── Merge Cells
-│   └── Unmerge Cells      Ctrl+Shift+U
-├── ...
+├── Borders
+│   ├── All Borders
+│   ├── Outline
+│   └── Clear Borders
+├── ─────────────
+├── Merge                           ← section label
+├── Merge Cells         Ctrl+Shift+M
+├── Unmerge Cells       Ctrl+Shift+U
+├── ─────────────
+├── Row Height...
+├── Column Width...
 ```
 
-### Context Menu
+### Context Menu (future)
 
 ```
 ...
@@ -738,9 +755,16 @@ When merged cell selected:
 38. =COUNTA(A1:C1) with merge A1:C1 → 1 (hidden cells are empty, not zero)
 39. =SUM(A1:C3) with merge A1:C3 containing 10 → 10 (not 10*9)
 
-### Merge Across
+### Merge Across (future)
 40. Merge Across A1:C3 → creates 3 separate row merges
 41. Merge Across with data in non-origin cells → warning lists per-row losses
+
+### Undo/Redo (Phase 5)
+42a. Merge with data loss → undo restores cleared values + removes merge
+42b. Merge without data loss → undo removes merge, redo re-adds merge
+42c. Unmerge → undo re-creates merge
+42d. Merge replacing contained merges → undo restores inner merges + their values
+42e. Redo after undo → clears values first, then re-applies merge topology
 
 ### File Formats
 42. Save/load .vgrid with merges → preserved (merge_index rebuilt on load)
@@ -837,12 +861,13 @@ Merged cells can hide data:
 - [x] Formula CellRef redirect (single-cell refs → origin; ranges → no redirect)
 - [x] Cross-sheet formula CellRef redirect (`get_merge_start_sheet`)
 
-**Phase 5: UI** — NOT STARTED
-- [ ] Format menu entries (Merge & Center, Merge Across, Merge Cells, Unmerge)
-- [ ] Context menu entries
-- [ ] Keyboard shortcuts (Ctrl+Shift+M, Ctrl+Shift+U)
-- [ ] Merge warning dialog (data loss confirmation)
-- [ ] Merge Across (per-row merge creation)
+**Phase 5: UI** — COMPLETE
+- [x] Format menu entries (Merge Cells, Unmerge Cells)
+- [ ] Context menu entries (future)
+- [x] Keyboard shortcuts (Ctrl+Shift+M merge, Ctrl+Shift+U unmerge)
+- [x] Merge warning dialog (data loss confirmation with affected cell list)
+- [x] Undo/redo support (UndoAction::SetMerges with topology + cleared values)
+- [ ] Merge Across (future — separate UX decision)
 
 **Phase 6: File Formats** — PARTIALLY COMPLETE
 - [x] .vgrid persistence (MergedRegion serialized via serde, merge_index rebuilt on load)
@@ -872,22 +897,26 @@ Merged cells can hide data:
 
 **Phase 7 (Edge Cases): COMPLETE.** Sort/filter blocked, overlap detection, formula redirect semantics all implemented and tested.
 
-**Phase 5: NOT STARTED.** UI (menus/shortcuts/dialogs) is the remaining work to expose merges to users.
+**Phase 5 (UI): COMPLETE.** Merge Cells (Ctrl+Shift+M) and Unmerge Cells (Ctrl+Shift+U) with Format menu entries, data-loss warning dialog, full undo/redo via `UndoAction::SetMerges`. Overlap guard rejects partial overlaps; contained merges are replaced with their values captured in the undo payload. 3 undo trust-anchor tests. 37 merge-specific tests total, 480 engine tests.
 
-### What's Left Before Merge UI Can Ship
+### What's Left
 
-1. **UI** (Phase 5) — Menu entries, keyboard shortcuts, merge warning dialog, Merge Across
-2. **Copy/paste merge recreation** (Phase 4 remainder) — Clipboard carries merge metadata, paste recreates merge at destination
-3. **XLSX export** (Phase 6 remainder) — Write `<mergeCells>` element with per-cell border decomposition
-4. **CSV export** (Phase 6 remainder) — Value in top-left only
+1. **Copy/paste merge recreation** (Phase 4 remainder) — Clipboard carries merge metadata, paste recreates merge at destination
+2. **XLSX export** (Phase 6 remainder) — Write `<mergeCells>` element with per-cell border decomposition
+3. **CSV export** (Phase 6 remainder) — Value in top-left only
 
 ### Test Coverage
 
-34 merge-specific tests across the engine:
+37 merge-specific tests across the engine:
 
-**`sheet.rs` (27 tests):** `test_merged_region_basic`, `test_merge_index_lookup`, `test_add_merge_overlap_rejected`, `test_add_merge_degenerate_ignored`, `test_remove_merge`, `test_merge_insert_row_shift`, `test_merge_insert_row_expand`, `test_merge_insert_row_below`, `test_merge_delete_row_shrink`, `test_merge_delete_row_degenerate`, `test_merge_delete_row_above`, `test_merge_insert_col_shift`, `test_merge_insert_col_expand`, `test_merge_delete_col_shrink`, `test_merge_delete_band_clips_top`, `test_merge_delete_band_clips_bottom`, `test_merge_delete_band_degenerates_wide`, `test_merge_delete_col_band_degenerates`, `test_merge_serde_roundtrip`, `test_resolve_merge_borders_no_borders`, `test_resolve_merge_borders_uniform_thin`, `test_resolve_merge_borders_mixed_precedence`, `test_resolve_merge_borders_single_styled_cell`, `test_adjacent_merges_shared_border`, `test_merge_at_viewport_boundary`, `test_merge_origin_coord`, `test_get_merge_returns_canonical_origin`
+**`sheet.rs` data model (27 tests):** `test_merged_region_basic`, `test_merge_index_lookup`, `test_add_merge_overlap_rejected`, `test_add_merge_degenerate_ignored`, `test_remove_merge`, `test_merge_insert_row_shift`, `test_merge_insert_row_expand`, `test_merge_insert_row_below`, `test_merge_delete_row_shrink`, `test_merge_delete_row_degenerate`, `test_merge_delete_row_above`, `test_merge_insert_col_shift`, `test_merge_insert_col_expand`, `test_merge_delete_col_shrink`, `test_merge_delete_band_clips_top`, `test_merge_delete_band_clips_bottom`, `test_merge_delete_band_degenerates_wide`, `test_merge_delete_col_band_degenerates`, `test_merge_serde_roundtrip`, `test_resolve_merge_borders_no_borders`, `test_resolve_merge_borders_uniform_thin`, `test_resolve_merge_borders_mixed_precedence`, `test_resolve_merge_borders_single_styled_cell`, `test_adjacent_merges_shared_border`, `test_merge_at_viewport_boundary`, `test_merge_origin_coord`, `test_get_merge_returns_canonical_origin`
 
 **`sheet.rs` semantic correctness (8 tests):** `test_set_value_redirects_to_origin`, `test_clear_cell_redirects_to_origin`, `test_set_value_preserves_hidden_style`, `test_set_format_no_redirect`, `test_clear_cell_preserves_hidden_style`, `test_set_cycle_error_preserves_hidden_style`, `test_range_clear_preserves_hidden_styles`
+
+**`sheet.rs` undo/redo trust anchors (3 tests — Phase 5):**
+- `test_set_merges_undo_restores_values_and_topology` — merge with data loss → undo restores B1="lose" + empty merge list
+- `test_set_merges_redo_clears_values_and_reapplies_topology` — redo clears values first, then applies merge topology
+- `test_set_merges_contained_merge_undo_restores_inner` — merge replacing contained merge → undo restores inner merge + its value
 
 **`workbook.rs` formula tests (4 tests):** `test_formula_single_ref_redirect`, `test_formula_range_hidden_empty`, `test_formula_explicit_refs_redirect`, `test_formula_cross_sheet_ref_redirect`
 
@@ -916,6 +945,7 @@ All bulk operations that could corrupt merge state are guarded via `block_if_mer
 
 | Version | Changes |
 |---------|---------|
+| v7 | Phase 5 complete (UI). Merge Cells (Ctrl+Shift+M) and Unmerge Cells (Ctrl+Shift+U) with Format menu entries, data-loss warning dialog (lists affected cells or count if >10), full undo/redo via `UndoAction::SetMerges` (before/after topology + cleared values), overlap guard (partial overlap → error, contained merges → replaced), ToggleProblems rebound to F10. 3 undo trust-anchor tests (`test_set_merges_undo_restores_values_and_topology`, `test_set_merges_redo_clears_values_and_reapplies_topology`, `test_set_merges_contained_merge_undo_restores_inner`). 37 merge-specific tests total, 480 engine tests. |
 | v6 | Phase 2 complete (overlay rendering, spacers, spill exclusion, 17 tests). Phase 3 complete (merge-aware navigation: `find_data_boundary()` treats merges as data units, `jump_selection()`/`extend_jump_selection()` start from merge edges and snap/expand on landing, `confirm_goto()` redirects to origin, tab-chain Enter snaps to origin). 34 merge-specific tests. |
 | v5 | Implementation: Phase 1 complete (data model, O(1) lookup, add/remove/normalize, insert/delete adjustment, serde). Phase 4 semantic correctness (value write redirect via `merge_origin_coord()`, formula CellRef redirect via `CellLookup` trait, 12 bulk op guards via `block_if_merged()`/`paste_would_split_merge()`). Phase 7 complete (sort/filter block, overlap detection, formula semantics). Phase 6 partial (.vgrid + XLSX import). 33 merge-specific tests. |
 | v4 | Final review: debug_assert_no_merge_overlap invariant, dynamic range function note (OFFSET/INDIRECT follow same empty-cell rule), ResolvedMergeBorders cache for wide merges, single-cell paste clarified to work from any cell inside merge, freeze boundary flagged as Excel-divergent |

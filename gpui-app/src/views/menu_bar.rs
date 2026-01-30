@@ -255,6 +255,10 @@ fn render_format_menu(text_primary: Hsla, text_muted: Hsla, text_disabled: Hsla,
         .child(menu_item("Outline", None, text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.apply_borders(BorderApplyMode::Outline, cx); }))
         .child(menu_item("Clear Borders", None, text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.apply_borders(BorderApplyMode::Clear, cx); }))
         .child(menu_separator(border))
+        .child(menu_label("Merge", text_muted))
+        .child(menu_item("Merge Cells", Some("Ctrl+Shift+M"), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.merge_cells(cx); }))
+        .child(menu_item("Unmerge Cells", Some("Ctrl+Shift+U"), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.unmerge_cells(cx); }))
+        .child(menu_separator(border))
         .child(menu_item_disabled("Row Height...", text_disabled))
         .child(menu_item_disabled("Column Width...", text_disabled))
 }

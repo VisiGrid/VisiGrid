@@ -1023,6 +1023,13 @@ impl Sheet {
     // Merged Regions
     // =========================================================================
 
+    /// Replace all merged regions and rebuild the lookup index.
+    /// Used by undo/redo to restore merge state.
+    pub fn set_merges(&mut self, regions: Vec<MergedRegion>) {
+        self.merged_regions = regions;
+        self.rebuild_merge_index();
+    }
+
     /// Rebuild the merge_index from merged_regions (O(total cells in merges)).
     /// Must be called after any mutation of merged_regions.
     pub fn rebuild_merge_index(&mut self) {
@@ -3437,6 +3444,127 @@ mod tests {
         assert!(loaded.get_merge(0, 0).is_some());
         assert!(loaded.get_merge(6, 6).is_some());
         assert!(loaded.get_merge(3, 3).is_none());
+    }
+
+    // =========================================================================
+    // set_merges() + undo/value restoration tests
+    // =========================================================================
+
+    /// Trust anchor: merge with data loss → undo restores values and topology.
+    /// Simulates the app-level undo sequence using only engine APIs:
+    ///   1. Put values in A1 ("keep") and B1 ("lose")
+    ///   2. Snapshot before merges, clear B1, add merge A1:C1
+    ///   3. Undo: set_merges(before), restore B1 value
+    ///   4. Assert: B1 == "lose", no merge exists
+    #[test]
+    fn test_set_merges_undo_restores_values_and_topology() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Step 1: populate cells
+        sheet.set_value(0, 0, "keep");
+        sheet.set_value(0, 1, "lose");
+        assert_eq!(sheet.get_raw(0, 0), "keep");
+        assert_eq!(sheet.get_raw(0, 1), "lose");
+
+        // Step 2: merge A1:C1 (simulating merge_cells_confirmed)
+        let before = sheet.merged_regions.clone();
+        assert!(before.is_empty());
+
+        // Record cleared values (B1 has data)
+        let cleared_values: Vec<(usize, usize, String)> = vec![(0, 1, "lose".to_string())];
+
+        // Clear non-origin values
+        sheet.set_value(0, 1, "");
+
+        // Add merge
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+        let after = sheet.merged_regions.clone();
+        assert_eq!(after.len(), 1);
+
+        // Verify merged state
+        assert_eq!(sheet.get_raw(0, 0), "keep");
+        assert_eq!(sheet.get_raw(0, 1), "");
+        assert!(sheet.get_merge(0, 1).is_some());
+
+        // Step 3: undo — restore topology first, then values
+        sheet.set_merges(before);
+        for (row, col, value) in &cleared_values {
+            sheet.set_value(*row, *col, value);
+        }
+
+        // Step 4: assert fully restored
+        assert!(sheet.merged_regions.is_empty());
+        assert!(sheet.get_merge(0, 1).is_none());
+        assert_eq!(sheet.get_raw(0, 0), "keep");
+        assert_eq!(sheet.get_raw(0, 1), "lose");
+    }
+
+    /// Redo after undo: clear values first, then set merges.
+    #[test]
+    fn test_set_merges_redo_clears_values_and_reapplies_topology() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.set_value(0, 0, "keep");
+        sheet.set_value(0, 1, "lose");
+
+        // Merge
+        let before = sheet.merged_regions.clone();
+        sheet.set_value(0, 1, "");
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+        let after = sheet.merged_regions.clone();
+        let cleared_values: Vec<(usize, usize, String)> = vec![(0, 1, "lose".to_string())];
+
+        // Undo
+        sheet.set_merges(before);
+        sheet.set_value(0, 1, "lose");
+        assert_eq!(sheet.get_raw(0, 1), "lose");
+        assert!(sheet.merged_regions.is_empty());
+
+        // Redo: clear values first, then apply merge topology
+        for (row, col, _) in &cleared_values {
+            sheet.set_value(*row, *col, "");
+        }
+        sheet.set_merges(after);
+
+        // Assert redo state
+        assert_eq!(sheet.merged_regions.len(), 1);
+        assert_eq!(sheet.get_raw(0, 0), "keep");
+        assert_eq!(sheet.get_raw(0, 1), "");
+        assert!(sheet.get_merge(0, 1).is_some());
+    }
+
+    /// set_merges replaces contained merges correctly during undo.
+    #[test]
+    fn test_set_merges_contained_merge_undo_restores_inner() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Create inner merge B2:C3 with value "inner"
+        sheet.set_value(1, 1, "inner");
+        sheet.add_merge(MergedRegion::new(1, 1, 2, 2)).unwrap();
+        let before = sheet.merged_regions.clone();
+        assert_eq!(before.len(), 1);
+
+        // Merge A1:D4 (contains B2:C3)
+        // Cleared values: B2 has "inner"
+        let cleared_values: Vec<(usize, usize, String)> = vec![(1, 1, "inner".to_string())];
+
+        // Remove contained merge, clear values, add new merge
+        sheet.remove_merge((1, 1));
+        sheet.set_value(1, 1, "");
+        sheet.add_merge(MergedRegion::new(0, 0, 3, 3)).unwrap();
+        let after = sheet.merged_regions.clone();
+        assert_eq!(after.len(), 1);
+
+        // Undo: restore before topology + values
+        sheet.set_merges(before);
+        for (row, col, value) in &cleared_values {
+            sheet.set_value(*row, *col, value);
+        }
+
+        // Assert: inner merge restored with value
+        assert_eq!(sheet.merged_regions.len(), 1);
+        assert_eq!(sheet.merged_regions[0], MergedRegion::new(1, 1, 2, 2));
+        assert_eq!(sheet.get_raw(1, 1), "inner");
+        assert!(sheet.get_merge(0, 0).is_none()); // A1:D4 merge gone
     }
 
     // =========================================================================

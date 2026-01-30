@@ -3,7 +3,7 @@
 use visigrid_engine::cell::CellFormat;
 use visigrid_engine::named_range::NamedRange;
 use visigrid_engine::provenance::Provenance;
-use visigrid_engine::sheet::SheetId;
+use visigrid_engine::sheet::{MergedRegion, SheetId};
 use visigrid_engine::workbook::Workbook;
 use std::time::Instant;
 
@@ -270,6 +270,19 @@ pub enum UndoAction {
         /// Time spent building the preview snapshot (milliseconds)
         preview_build_ms: u64,
     },
+    /// Merge regions changed (merge or unmerge operation).
+    /// Captures both topology (merge list) and any cell values cleared during merge.
+    SetMerges {
+        sheet_index: usize,
+        /// Merge regions before the operation
+        before: Vec<MergedRegion>,
+        /// Merge regions after the operation
+        after: Vec<MergedRegion>,
+        /// Cell values cleared during merge (row, col, old_value).
+        /// Empty for unmerge operations.
+        cleared_values: Vec<(usize, usize, String)>,
+        description: String,
+    },
 }
 
 impl UndoAction {
@@ -379,6 +392,9 @@ impl UndoAction {
             }
             UndoAction::Rewind { discarded_count, .. } => {
                 format!("Rewind (discarded {} change{})", discarded_count, if *discarded_count == 1 { "" } else { "s" })
+            }
+            UndoAction::SetMerges { description, .. } => {
+                description.clone()
             }
         }
     }
@@ -1031,6 +1047,22 @@ impl History {
                 let range = Self::bounding_box(&all_cells);
                 (sheet, all_cells, range)
             }
+            UndoAction::SetMerges { sheet_index, after, before, .. } => {
+                // Use the larger set (before or after) to compute affected range
+                let regions = if after.len() >= before.len() { after } else { before };
+                if let Some(first) = regions.first() {
+                    let mut bbox = (first.start.0, first.start.1, first.end.0, first.end.1);
+                    for m in regions.iter().skip(1) {
+                        bbox.0 = bbox.0.min(m.start.0);
+                        bbox.1 = bbox.1.min(m.start.1);
+                        bbox.2 = bbox.2.max(m.end.0);
+                        bbox.3 = bbox.3.max(m.end.1);
+                    }
+                    (Some(*sheet_index), vec![], Some(bbox))
+                } else {
+                    (Some(*sheet_index), vec![], None)
+                }
+            }
             _ => (None, vec![], None),
         }
     }
@@ -1436,6 +1468,18 @@ impl History {
                     "Rewind action found in replay path - this should be impossible".to_string()
                 ));
             }
+            UndoAction::SetMerges { sheet_index, after, cleared_values, .. } => {
+                let sheet = workbook.sheet_mut(*sheet_index)
+                    .ok_or_else(|| PreviewBuildError::InvariantViolation(
+                        format!("SetMerges action references invalid sheet {}", sheet_index)
+                    ))?;
+                // Clear values that the merge hides
+                for (row, col, _) in cleared_values {
+                    sheet.set_value(*row, *col, "");
+                }
+                // Apply merge topology
+                sheet.set_merges(after.clone());
+            }
         }
         Ok(())
     }
@@ -1466,6 +1510,7 @@ pub enum UndoActionKind {
     /// Rewind is an audit-only action - it should never appear in replay paths
     /// because rewind truncates history (no actions after it to replay)
     Rewind,
+    SetMerges,
 }
 
 impl UndoActionKind {
@@ -1494,6 +1539,9 @@ impl UndoActionKind {
             // Supported via PreviewViewState (Phase 8B)
             UndoActionKind::SortApplied => true,
             UndoActionKind::SortCleared => true,
+
+            // Merge topology changes are replay-supported
+            UndoActionKind::SetMerges => true,
 
             // Rewind is audit-only - should never appear in replay paths
             // (Rewind truncates history, so nothing follows it to replay)
@@ -1524,6 +1572,7 @@ impl UndoActionKind {
             UndoActionKind::ValidationExcluded => "Exclude validation",
             UndoActionKind::ValidationExclusionCleared => "Clear exclusion",
             UndoActionKind::Rewind => "Rewind",
+            UndoActionKind::SetMerges => "Merge cells",
         }
     }
 
@@ -1552,6 +1601,7 @@ impl UndoActionKind {
             UndoActionKind::ValidationExcluded => 0x0F,
             UndoActionKind::ValidationExclusionCleared => 0x10,
             UndoActionKind::Rewind => 0xFF, // Sentinel value for audit action
+            UndoActionKind::SetMerges => 0x14,
         }
     }
 }
@@ -1580,6 +1630,7 @@ impl UndoAction {
             UndoAction::ValidationExcluded { .. } => UndoActionKind::ValidationExcluded,
             UndoAction::ValidationExclusionCleared { .. } => UndoActionKind::ValidationExclusionCleared,
             UndoAction::Rewind { .. } => UndoActionKind::Rewind,
+            UndoAction::SetMerges { .. } => UndoActionKind::SetMerges,
         }
     }
 

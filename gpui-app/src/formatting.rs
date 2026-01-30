@@ -1,12 +1,14 @@
 //! Cell formatting methods for Spreadsheet
 //!
 //! This module contains all format setters (bold, italic, alignment, etc.)
+//! and merge/unmerge cell operations.
 
 use gpui::*;
 use visigrid_engine::cell::{Alignment, CellBorder, CellFormat, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::sheet::MergedRegion;
 
 use crate::app::{Spreadsheet, TriState, SelectionFormatState};
-use crate::history::{CellFormatPatch, FormatActionKind};
+use crate::history::{CellFormatPatch, FormatActionKind, UndoAction};
 
 /// Border application mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -706,6 +708,244 @@ impl Spreadsheet {
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
+        cx.notify();
+    }
+
+    // ── Merge / Unmerge ──────────────────────────────────────────────
+
+    /// Merge selected cells into one. Shows data-loss dialog if non-origin cells have data.
+    pub fn merge_cells(&mut self, cx: &mut Context<Self>) {
+        // Guard: multi-selection not supported
+        if !self.view_state.additional_selections.is_empty() {
+            self.status_message = Some("Merge requires a single contiguous selection".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Canonicalize selection range
+        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+
+        // Guard: must select more than one cell
+        if min_row == max_row && min_col == max_col {
+            self.status_message = Some("Select a range of cells to merge".to_string());
+            cx.notify();
+            return;
+        }
+
+        let sheet = self.sheet(cx);
+
+        // Overlap check: verify no partially-overlapping merges
+        for merge in &sheet.merged_regions {
+            let overlap_row = merge.start.0 <= max_row && merge.end.0 >= min_row;
+            let overlap_col = merge.start.1 <= max_col && merge.end.1 >= min_col;
+            if overlap_row && overlap_col {
+                // Merge overlaps our selection - check if fully contained
+                let fully_contained = merge.start.0 >= min_row
+                    && merge.end.0 <= max_row
+                    && merge.start.1 >= min_col
+                    && merge.end.1 <= max_col;
+                if !fully_contained {
+                    self.status_message =
+                        Some("Selection overlaps existing merged cells. Unmerge first.".to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
+        // Data-loss scan: check all cells except new origin
+        let mut affected: Vec<String> = Vec::new();
+        for r in min_row..=max_row {
+            for c in min_col..=max_col {
+                if (r, c) == (min_row, min_col) {
+                    continue; // origin is kept
+                }
+                let raw = sheet.get_raw(r, c);
+                if !raw.is_empty() {
+                    affected.push(format!("{}{}", Self::col_letter(c), r + 1));
+                }
+            }
+        }
+
+        // Store range for both paths
+        self.merge_confirm.merge_range = Some(((min_row, min_col), (max_row, max_col)));
+
+        if affected.is_empty() {
+            // No data loss — merge directly
+            self.merge_cells_confirmed(cx);
+        } else {
+            // Show data-loss warning dialog
+            self.merge_confirm.affected_cells = affected;
+            self.merge_confirm.visible = true;
+            cx.notify();
+        }
+    }
+
+    /// Execute the merge after confirmation (or directly when no data loss).
+    pub fn merge_cells_confirmed(&mut self, cx: &mut Context<Self>) {
+        let ((min_row, min_col), (max_row, max_col)) = match self.merge_confirm.merge_range.take()
+        {
+            Some(range) => range,
+            None => return,
+        };
+
+        let sheet_index = self.sheet_index(cx);
+
+        // Snapshot before state
+        let before = self.sheet(cx).merged_regions.clone();
+
+        // Collect values to clear
+        let mut cleared_values: Vec<(usize, usize, String)> = Vec::new();
+        {
+            let sheet = self.sheet(cx);
+            for r in min_row..=max_row {
+                for c in min_col..=max_col {
+                    if (r, c) == (min_row, min_col) {
+                        continue;
+                    }
+                    let raw = sheet.get_raw(r, c);
+                    if !raw.is_empty() {
+                        cleared_values.push((r, c, raw));
+                    }
+                }
+            }
+        }
+
+        // Remove any existing merges fully inside the selection
+        let contained_origins: Vec<(usize, usize)> = {
+            let sheet = self.sheet(cx);
+            sheet
+                .merged_regions
+                .iter()
+                .filter(|m| {
+                    m.start.0 >= min_row
+                        && m.end.0 <= max_row
+                        && m.start.1 >= min_col
+                        && m.end.1 <= max_col
+                })
+                .map(|m| m.start)
+                .collect()
+        };
+        for origin in contained_origins {
+            self.active_sheet_mut(cx, |sheet| {
+                sheet.remove_merge(origin);
+            });
+        }
+
+        // Clear non-origin cell values
+        for (row, col, _) in &cleared_values {
+            self.active_sheet_mut(cx, |sheet| {
+                sheet.set_value(*row, *col, "");
+            });
+        }
+
+        // Add new merge
+        self.active_sheet_mut(cx, |sheet| {
+            let _ = sheet.add_merge(MergedRegion::new(min_row, min_col, max_row, max_col));
+        });
+
+        // Snapshot after state
+        let after = self.sheet(cx).merged_regions.clone();
+
+        // Build range ref for status message
+        let range_ref = format!(
+            "{}{}:{}{}",
+            Self::col_letter(min_col),
+            min_row + 1,
+            Self::col_letter(max_col),
+            max_row + 1,
+        );
+
+        // Record undo
+        self.history.record_action_with_provenance(
+            UndoAction::SetMerges {
+                sheet_index,
+                before,
+                after,
+                cleared_values,
+                description: format!("Merge {}", range_ref),
+            },
+            None,
+        );
+
+        self.is_modified = true;
+        self.status_message = Some(format!("Merged {}", range_ref));
+
+        // Snap selection to merged range
+        self.view_state.selected = (min_row, min_col);
+        self.view_state.selection_end = Some((max_row, max_col));
+
+        // Reset dialog state
+        self.merge_confirm = Default::default();
+        cx.notify();
+    }
+
+    /// Unmerge all merged regions that overlap the current selection.
+    pub fn unmerge_cells(&mut self, cx: &mut Context<Self>) {
+        let sheet_index = self.sheet_index(cx);
+
+        // Collect all merges that overlap any selection range
+        let selection_ranges = self.all_selection_ranges();
+        let mut origins_to_remove: Vec<(usize, usize)> = Vec::new();
+
+        {
+            let sheet = self.sheet(cx);
+            for merge in &sheet.merged_regions {
+                for &((min_row, min_col), (max_row, max_col)) in &selection_ranges {
+                    let overlap_row = merge.start.0 <= max_row && merge.end.0 >= min_row;
+                    let overlap_col = merge.start.1 <= max_col && merge.end.1 >= min_col;
+                    if overlap_row && overlap_col {
+                        if !origins_to_remove.contains(&merge.start) {
+                            origins_to_remove.push(merge.start);
+                        }
+                    }
+                }
+            }
+        }
+
+        if origins_to_remove.is_empty() {
+            self.status_message = Some("No merged cells in selection".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Snapshot before state
+        let before = self.sheet(cx).merged_regions.clone();
+
+        // Remove all collected merges
+        for origin in &origins_to_remove {
+            self.active_sheet_mut(cx, |sheet| {
+                sheet.remove_merge(*origin);
+            });
+        }
+
+        // Snapshot after state
+        let after = self.sheet(cx).merged_regions.clone();
+
+        let count = origins_to_remove.len();
+
+        // Record undo
+        self.history.record_action_with_provenance(
+            UndoAction::SetMerges {
+                sheet_index,
+                before,
+                after,
+                cleared_values: vec![], // unmerge doesn't clear values
+                description: format!(
+                    "Unmerge {} region{}",
+                    count,
+                    if count == 1 { "" } else { "s" }
+                ),
+            },
+            None,
+        );
+
+        self.is_modified = true;
+        self.status_message = Some(format!(
+            "Unmerged {} region{}",
+            count,
+            if count == 1 { "" } else { "s" }
+        ));
         cx.notify();
     }
 }

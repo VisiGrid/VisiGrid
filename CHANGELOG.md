@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Merged Cells Phase 5 — UI
+
+Users can now merge and unmerge cells through the UI with full undo/redo support.
+
+- **Merge Cells** (Ctrl+Shift+M) — merges the selected range into a single cell, keeping the upper-left value. Shows a data-loss confirmation dialog when non-origin cells contain data, listing affected cells (or count if >10).
+- **Unmerge Cells** (Ctrl+Shift+U) — unmerges all merged regions overlapping the current selection.
+- **Format menu entries** — "Merge Cells" and "Unmerge Cells" in the Format menu with shortcut hints.
+- **Undo/redo** — `UndoAction::SetMerges` captures merge topology (before/after) and cleared cell values. Undo restores both merges and discarded data; redo re-applies.
+- **Overlap guard** — merging a range that partially overlaps an existing merge shows a status error ("Unmerge first").
+- **Contained merge replacement** — merging a range that fully contains existing merges removes them first, with their origin values captured in the undo payload.
+- **ToggleProblems rebind** — moved from Ctrl+Shift+M to F10 to free the shortcut for Merge Cells.
+
 ### Merged Cells Phase 3 — Navigation
 
 Merged cells now behave as single cells for all keyboard navigation. Arrow keys, Ctrl+Arrow data jumps, selection extension, Go To, and edit Tab/Enter flows correctly treat merges as atomic data units, snap to merge origins on landing, and expand selections to cover full merged regions.

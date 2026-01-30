@@ -318,6 +318,14 @@ pub(crate) fn bind(
             this.apply_borders(BorderApplyMode::Clear, cx);
             this.update_title_if_needed(window, cx);
         }))
+        .on_action(cx.listener(|this, _: &MergeCells, window, cx| {
+            this.merge_cells(cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &UnmergeCells, window, cx| {
+            this.unmerge_cells(cx);
+            this.update_title_if_needed(window, cx);
+        }))
         // Command palette
         .on_action(cx.listener(|this, _: &ToggleCommandPalette, _, cx| {
             this.toggle_palette(cx);
