@@ -41,19 +41,137 @@ pub enum DateStyle {
     Iso,        // 2026-01-18
 }
 
+/// Negative number display style
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub enum NegativeStyle {
+    #[default]
+    Minus,       // -1,234.56
+    Parens,      // (1,234.56)
+    RedMinus,    // -1,234.56 in red
+    RedParens,   // (1,234.56) in red
+}
+
+impl NegativeStyle {
+    /// True if this style should render the value in red
+    pub fn is_red(&self) -> bool {
+        matches!(self, NegativeStyle::RedMinus | NegativeStyle::RedParens)
+    }
+
+    /// True if this style uses parentheses instead of minus sign
+    pub fn uses_parens(&self) -> bool {
+        matches!(self, NegativeStyle::Parens | NegativeStyle::RedParens)
+    }
+
+    /// Convert to integer for storage (0-3)
+    pub fn to_int(&self) -> i32 {
+        match self {
+            NegativeStyle::Minus => 0,
+            NegativeStyle::Parens => 1,
+            NegativeStyle::RedMinus => 2,
+            NegativeStyle::RedParens => 3,
+        }
+    }
+
+    /// Convert from integer (0-3), defaults to Minus for unknown values
+    pub fn from_int(i: i32) -> Self {
+        match i {
+            1 => NegativeStyle::Parens,
+            2 => NegativeStyle::RedMinus,
+            3 => NegativeStyle::RedParens,
+            _ => NegativeStyle::Minus,
+        }
+    }
+}
+
 /// Number format type
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub enum NumberFormat {
     #[default]
     General,
-    Number { decimals: u8 },
-    Currency { decimals: u8 },
+    Number {
+        decimals: u8,
+        #[serde(default)]
+        thousands: bool,
+        #[serde(default)]
+        negative: NegativeStyle,
+    },
+    Currency {
+        decimals: u8,
+        #[serde(default)]
+        thousands: bool,
+        #[serde(default)]
+        negative: NegativeStyle,
+        #[serde(default)]
+        symbol: Option<String>,
+    },
     Percent { decimals: u8 },
     Date { style: DateStyle },
     Time,      // HH:MM:SS (fractional day → time of day)
     DateTime,  // Date + Time combined
     /// Raw Excel format code (e.g. "#,##0.00", "$#,##0")
     Custom(String),
+}
+
+impl NumberFormat {
+    /// UI default Number format: thousands separator on, negative minus
+    pub fn number(decimals: u8) -> Self {
+        NumberFormat::Number {
+            decimals: decimals.min(10),
+            thousands: true,
+            negative: NegativeStyle::Minus,
+        }
+    }
+
+    /// UI default Currency format: thousands separator on, negative parens, default $ symbol
+    pub fn currency(decimals: u8) -> Self {
+        NumberFormat::Currency {
+            decimals: decimals.min(10),
+            thousands: true,
+            negative: NegativeStyle::Parens,
+            symbol: None,
+        }
+    }
+
+    /// Backward-compatible Number format (decoder default): no thousands, negative minus
+    pub fn number_compat(decimals: u8) -> Self {
+        NumberFormat::Number {
+            decimals: decimals.min(10),
+            thousands: false,
+            negative: NegativeStyle::Minus,
+        }
+    }
+
+    /// Backward-compatible Currency format (decoder default): no thousands, negative minus
+    pub fn currency_compat(decimals: u8) -> Self {
+        NumberFormat::Currency {
+            decimals: decimals.min(10),
+            thousands: false,
+            negative: NegativeStyle::Minus,
+            symbol: None,
+        }
+    }
+
+    /// Returns decimals for Number/Currency/Percent, None for others
+    pub fn decimals(&self) -> Option<u8> {
+        match self {
+            NumberFormat::Number { decimals, .. } => Some(*decimals),
+            NumberFormat::Currency { decimals, .. } => Some(*decimals),
+            NumberFormat::Percent { decimals } => Some(*decimals),
+            _ => None,
+        }
+    }
+
+    /// True when value < 0 and the negative style includes red coloring
+    pub fn should_render_red(&self, value: f64) -> bool {
+        if value >= 0.0 {
+            return false;
+        }
+        match self {
+            NumberFormat::Number { negative, .. } => negative.is_red(),
+            NumberFormat::Currency { negative, .. } => negative.is_red(),
+            _ => false,
+        }
+    }
 }
 
 /// Border style (line thickness)
@@ -589,6 +707,41 @@ fn split_format_parts(section: &str) -> (&str, &str, &str) {
     }
 }
 
+/// Format an absolute value with optional thousands grouping.
+/// Works from the numeric value directly (no string parsing).
+/// Decimals clamped to 0..=10 as a safety net against overflow.
+fn format_grouped(abs: f64, decimals: u8, thousands: bool) -> String {
+    let decimals = decimals.min(10) as u32;
+    let scale = 10_i64.pow(decimals);
+    let scaled = (abs * scale as f64).round();
+    if !scaled.is_finite() {
+        return abs.to_string();
+    }
+    let scaled = scaled as i64;
+    let int_part = scaled / scale;
+    let frac_part = (scaled % scale).abs();
+
+    let int_str = if thousands {
+        let raw = int_part.to_string();
+        let mut result = String::with_capacity(raw.len() + raw.len() / 3);
+        for (i, ch) in raw.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 {
+                result.push(',');
+            }
+            result.push(ch);
+        }
+        result.chars().rev().collect()
+    } else {
+        int_part.to_string()
+    };
+
+    if decimals == 0 {
+        int_str
+    } else {
+        format!("{}.{:0>width$}", int_str, frac_part, width = decimals as usize)
+    }
+}
+
 /// Format a number with thousands separators
 fn format_with_thousands(n: f64, decimals: usize) -> String {
     let abs = n.abs();
@@ -697,14 +850,30 @@ impl CellValue {
                     format!("{:.2}", n)
                 }
             }
-            NumberFormat::Number { decimals } => {
-                format!("{:.*}", *decimals as usize, n)
-            }
-            NumberFormat::Currency { decimals } => {
+            NumberFormat::Number { decimals, thousands, negative } => {
+                let formatted = format_grouped(n.abs(), *decimals, *thousands);
                 if n < 0.0 {
-                    format!("-${:.*}", *decimals as usize, n.abs())
+                    if negative.uses_parens() {
+                        format!("({})", formatted)
+                    } else {
+                        format!("-{}", formatted)
+                    }
                 } else {
-                    format!("${:.*}", *decimals as usize, n)
+                    formatted
+                }
+            }
+            NumberFormat::Currency { decimals, thousands, negative, symbol } => {
+                let sym = symbol.as_deref().unwrap_or("$");
+                let formatted = format_grouped(n.abs(), *decimals, *thousands);
+                let prefixed = format!("{}{}", sym, formatted);
+                if n < 0.0 {
+                    if negative.uses_parens() {
+                        format!("({})", prefixed)
+                    } else {
+                        format!("-{}", prefixed)
+                    }
+                } else {
+                    prefixed
                 }
             }
             NumberFormat::Percent { decimals } => {
@@ -1179,7 +1348,7 @@ mod tests {
             italic: true,
             font_size: Some(16.0),
             font_color: Some([128, 0, 255, 255]),
-            number_format: NumberFormat::Currency { decimals: 2 },
+            number_format: NumberFormat::currency(2),
             ..Default::default()
         };
         let ovr = CellFormatOverride::from_format(&format);
@@ -1382,5 +1551,109 @@ mod tests {
         assert_eq!(p, "-");
         assert_eq!(pat, "");
         assert_eq!(s, "");
+    }
+
+    // ======== NumberFormat thousands/negative/symbol tests ========
+
+    #[test]
+    fn test_number_format_thousands_separator() {
+        let fmt = NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::Minus };
+        assert_eq!(CellValue::format_number(1234567.89, &fmt), "1,234,567.89");
+    }
+
+    #[test]
+    fn test_number_format_negative_styles() {
+        let base = |neg: NegativeStyle| NumberFormat::Number { decimals: 2, thousands: true, negative: neg };
+        assert_eq!(CellValue::format_number(-1234.56, &base(NegativeStyle::Minus)), "-1,234.56");
+        assert_eq!(CellValue::format_number(-1234.56, &base(NegativeStyle::Parens)), "(1,234.56)");
+        assert_eq!(CellValue::format_number(-1234.56, &base(NegativeStyle::RedMinus)), "-1,234.56");
+        assert_eq!(CellValue::format_number(-1234.56, &base(NegativeStyle::RedParens)), "(1,234.56)");
+    }
+
+    #[test]
+    fn test_currency_format_custom_symbol() {
+        let fmt = NumberFormat::Currency {
+            decimals: 2, thousands: true, negative: NegativeStyle::Minus,
+            symbol: Some("EUR ".to_string()),
+        };
+        assert_eq!(CellValue::format_number(1234.50, &fmt), "EUR 1,234.50");
+    }
+
+    #[test]
+    fn test_currency_default_symbol() {
+        let fmt = NumberFormat::Currency {
+            decimals: 2, thousands: true, negative: NegativeStyle::Minus,
+            symbol: None,
+        };
+        assert_eq!(CellValue::format_number(1234.50, &fmt), "$1,234.50");
+    }
+
+    #[test]
+    fn test_number_no_thousands() {
+        let fmt = NumberFormat::Number { decimals: 2, thousands: false, negative: NegativeStyle::Minus };
+        assert_eq!(CellValue::format_number(1234567.89, &fmt), "1234567.89");
+    }
+
+    #[test]
+    fn test_should_render_red() {
+        let fmt_red_minus = NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::RedMinus };
+        let fmt_red_parens = NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::RedParens };
+        let fmt_minus = NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::Minus };
+
+        assert!(fmt_red_minus.should_render_red(-1.0));
+        assert!(fmt_red_parens.should_render_red(-1.0));
+        assert!(!fmt_minus.should_render_red(-1.0));
+        assert!(!fmt_red_minus.should_render_red(1.0)); // positive
+        assert!(!fmt_red_minus.should_render_red(0.0)); // zero
+    }
+
+    #[test]
+    fn test_backward_compat_number_defaults() {
+        // Old behavior: Number { decimals: 2 } with defaults = no thousands, minus
+        let fmt = NumberFormat::number_compat(2);
+        assert_eq!(CellValue::format_number(1234.56, &fmt), "1234.56");
+        assert_eq!(CellValue::format_number(-1234.56, &fmt), "-1234.56");
+    }
+
+    #[test]
+    fn test_backward_compat_currency_defaults() {
+        let fmt = NumberFormat::currency_compat(2);
+        assert_eq!(CellValue::format_number(1234.56, &fmt), "$1234.56");
+        assert_eq!(CellValue::format_number(-1234.56, &fmt), "-$1234.56");
+    }
+
+    #[test]
+    fn test_format_grouped_edge_cases() {
+        assert_eq!(format_grouped(0.0, 2, true), "0.00");
+        assert_eq!(format_grouped(999.0, 0, true), "999");
+        assert_eq!(format_grouped(1000.0, 0, true), "1,000");
+        assert_eq!(format_grouped(1000.01, 2, true), "1,000.01");
+    }
+
+    #[test]
+    fn test_negative_style_int_roundtrip() {
+        for i in 0..4 {
+            assert_eq!(NegativeStyle::from_int(i).to_int(), i);
+        }
+        // Unknown values default to Minus (0)
+        assert_eq!(NegativeStyle::from_int(99).to_int(), 0);
+    }
+
+    #[test]
+    fn test_number_format_decimals_helper() {
+        assert_eq!(NumberFormat::number(2).decimals(), Some(2));
+        assert_eq!(NumberFormat::currency(0).decimals(), Some(0));
+        assert_eq!((NumberFormat::Percent { decimals: 3 }).decimals(), Some(3));
+        assert_eq!(NumberFormat::General.decimals(), None);
+    }
+
+    #[test]
+    fn test_currency_negative_parens() {
+        let fmt = NumberFormat::Currency {
+            decimals: 2, thousands: true, negative: NegativeStyle::Parens,
+            symbol: None,
+        };
+        assert_eq!(CellValue::format_number(-1234.56, &fmt), "($1,234.56)");
+        assert_eq!(CellValue::format_number(1234.56, &fmt), "$1,234.56");
     }
 }

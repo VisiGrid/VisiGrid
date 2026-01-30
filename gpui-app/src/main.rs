@@ -31,6 +31,7 @@ mod text_editing;
 mod links;
 #[cfg(target_os = "macos")]
 mod menus;
+mod menu_model;
 mod user_keybindings;
 mod mode;
 mod navigation;

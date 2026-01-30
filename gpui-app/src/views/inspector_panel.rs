@@ -4,8 +4,9 @@ use crate::app::{Spreadsheet, SelectionFormatState, TriState};
 use crate::formatting::BorderApplyMode;
 use crate::mode::InspectorTab;
 use crate::theme::TokenKey;
+use crate::ui::popup;
 use visigrid_engine::formula::parser::{parse, extract_cell_refs};
-use visigrid_engine::cell::{Alignment, VerticalAlignment, TextOverflow, NumberFormat, DateStyle};
+use visigrid_engine::cell::{Alignment, VerticalAlignment, TextOverflow, NumberFormat, DateStyle, NegativeStyle, CellValue};
 use visigrid_engine::cell_id::CellId;
 
 pub const PANEL_WIDTH: f32 = 280.0;
@@ -2516,18 +2517,20 @@ fn render_number_format_section(
 ) -> impl IntoElement {
     let current_format = &state.number_format;
 
-    // Extract current decimals, date style, and format type
-    let (current_type, current_decimals, current_date_style) = match current_format {
-        TriState::Uniform(NumberFormat::General) => ("General", None, None),
-        TriState::Uniform(NumberFormat::Number { decimals }) => ("Number", Some(*decimals), None),
-        TriState::Uniform(NumberFormat::Currency { decimals }) => ("Currency", Some(*decimals), None),
-        TriState::Uniform(NumberFormat::Percent { decimals }) => ("Percent", Some(*decimals), None),
-        TriState::Uniform(NumberFormat::Date { style }) => ("Date", None, Some(*style)),
-        TriState::Uniform(NumberFormat::Time) => ("Time", None, None),
-        TriState::Uniform(NumberFormat::DateTime) => ("DateTime", None, None),
-        TriState::Uniform(NumberFormat::Custom(_)) => ("Custom", None, None),
-        TriState::Mixed => ("Mixed", None, None),
-        TriState::Empty => ("General", None, None),
+    // Extract current decimals, date style, format type, and extended settings
+    let (current_type, current_decimals, current_date_style, current_thousands, current_negative, current_symbol) = match current_format {
+        TriState::Uniform(NumberFormat::General) => ("General", None, None, None, None, None),
+        TriState::Uniform(NumberFormat::Number { decimals, thousands, negative }) =>
+            ("Number", Some(*decimals), None, Some(*thousands), Some(*negative), None),
+        TriState::Uniform(NumberFormat::Currency { decimals, thousands, negative, symbol }) =>
+            ("Currency", Some(*decimals), None, Some(*thousands), Some(*negative), symbol.clone()),
+        TriState::Uniform(NumberFormat::Percent { decimals }) => ("Percent", Some(*decimals), None, None, None, None),
+        TriState::Uniform(NumberFormat::Date { style }) => ("Date", None, Some(*style), None, None, None),
+        TriState::Uniform(NumberFormat::Time) => ("Time", None, None, None, None, None),
+        TriState::Uniform(NumberFormat::DateTime) => ("DateTime", None, None, None, None, None),
+        TriState::Uniform(NumberFormat::Custom(_)) => ("Custom", None, None, None, None, None),
+        TriState::Mixed => ("Mixed", None, None, None, None, None),
+        TriState::Empty => ("General", None, None, None, None, None),
     };
 
     // Show decimal control only for numeric formats
@@ -2536,6 +2539,47 @@ fn render_number_format_section(
 
     // Show date style control only for date format
     let show_date_style = current_date_style.is_some();
+
+    // Show extended info for Number/Currency
+    let show_extended = current_thousands.is_some();
+
+    // Build summary text for Number/Currency formats
+    let summary_text = if let (Some(thousands), Some(negative)) = (current_thousands, current_negative) {
+        let mut parts = Vec::new();
+        if let Some(ref sym) = current_symbol {
+            parts.push(sym.clone());
+        } else if current_type == "Currency" {
+            parts.push("$".to_string());
+        }
+        if let Some(d) = current_decimals {
+            parts.push(format!("{} decimals", d));
+        }
+        if thousands {
+            parts.push("thousands".to_string());
+        }
+        parts.push(match negative {
+            NegativeStyle::Minus => "minus".to_string(),
+            NegativeStyle::Parens => "parens".to_string(),
+            NegativeStyle::RedMinus => "red minus".to_string(),
+            NegativeStyle::RedParens => "red parens".to_string(),
+        });
+        parts.join(", ")
+    } else {
+        String::new()
+    };
+
+    // Build preview for Number/Currency formats (use active cell value when available)
+    let sample = state.preview_value.unwrap_or(1234.5678);
+    let preview_text = if let TriState::Uniform(fmt) = current_format {
+        match fmt {
+            NumberFormat::Number { .. } | NumberFormat::Currency { .. } => {
+                Some(CellValue::format_number(sample, fmt))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     section("Number Format", panel_border, text_primary)
         // Format type buttons
@@ -2555,14 +2599,14 @@ fn render_number_format_section(
                 .child(
                     format_type_btn("Number", current_type == "Number", current_format.is_mixed(), text_primary, text_muted, accent, panel_border)
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.set_number_format_selection(NumberFormat::Number { decimals: 2 }, cx);
+                            this.set_number_format_selection(NumberFormat::number(2), cx);
                         }))
                 )
                 // Currency
                 .child(
                     format_type_btn("Currency", current_type == "Currency", current_format.is_mixed(), text_primary, text_muted, accent, panel_border)
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.set_number_format_selection(NumberFormat::Currency { decimals: 2 }, cx);
+                            this.set_number_format_selection(NumberFormat::currency(2), cx);
                         }))
                 )
                 // Percent
@@ -2668,6 +2712,54 @@ fn render_number_format_section(
                                     }))
                             )
                     )
+            )
+        })
+        // Summary line for Number/Currency (e.g. "2 decimals, thousands, minus")
+        .when(show_extended && !summary_text.is_empty(), |el| {
+            el.child(
+                div()
+                    .mt_1()
+                    .text_size(px(9.0))
+                    .text_color(text_muted)
+                    .child(SharedString::from(summary_text.clone()))
+            )
+        })
+        // Preview for Number/Currency
+        .when_some(preview_text, |el, preview| {
+            el.child(
+                div()
+                    .mt_1()
+                    .px_2()
+                    .py(px(3.0))
+                    .rounded(px(3.0))
+                    .border_1()
+                    .border_color(panel_border)
+                    .bg(gpui::transparent_black())
+                    .text_size(px(10.0))
+                    .text_color(text_primary)
+                    .child(SharedString::from(preview))
+            )
+        })
+        // "Edit..." button to open the full number format editor
+        // Visible for Number, Currency, Mixed, and Percent (seeds from active cell)
+        .when(show_extended || current_format.is_mixed() || current_type == "Percent", |el| {
+            el.child(
+                div()
+                    .id("nf-edit-btn")
+                    .mt_1()
+                    .px_2()
+                    .py(px(3.0))
+                    .rounded(px(3.0))
+                    .border_1()
+                    .border_color(panel_border)
+                    .text_size(px(10.0))
+                    .text_color(text_muted)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(panel_border.opacity(0.5)).text_color(text_primary))
+                    .child("Edit...")
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        this.open_number_format_editor(cx);
+                    }))
             )
         })
 }
@@ -2844,7 +2936,7 @@ fn render_alignment_section(
                 // Top
                 .child(
                     align_btn("T", matches!(v_align, TriState::Uniform(VerticalAlignment::Top)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
-                        .child("T")
+                        .child(super::format_bar::render_valign_icon(VerticalAlignment::Top, if matches!(v_align, TriState::Uniform(VerticalAlignment::Top)) && !v_align.is_mixed() { text_primary } else { text_muted }))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.set_vertical_alignment_selection(VerticalAlignment::Top, cx);
                         }))
@@ -2852,7 +2944,7 @@ fn render_alignment_section(
                 // Middle
                 .child(
                     align_btn("M", matches!(v_align, TriState::Uniform(VerticalAlignment::Middle)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
-                        .child("M")
+                        .child(super::format_bar::render_valign_icon(VerticalAlignment::Middle, if matches!(v_align, TriState::Uniform(VerticalAlignment::Middle)) && !v_align.is_mixed() { text_primary } else { text_muted }))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.set_vertical_alignment_selection(VerticalAlignment::Middle, cx);
                         }))
@@ -2860,7 +2952,7 @@ fn render_alignment_section(
                 // Bottom
                 .child(
                     align_btn("B", matches!(v_align, TriState::Uniform(VerticalAlignment::Bottom)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
-                        .child("B")
+                        .child(super::format_bar::render_valign_icon(VerticalAlignment::Bottom, if matches!(v_align, TriState::Uniform(VerticalAlignment::Bottom)) && !v_align.is_mixed() { text_primary } else { text_muted }))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.set_vertical_alignment_selection(VerticalAlignment::Bottom, cx);
                         }))
@@ -4085,24 +4177,10 @@ pub fn render_history_context_menu(
     // Menu items depend on whether entry is in undo stack (can diff) or redo stack
     let can_explain_diff = is_in_undo_stack && entry_index < app.history.undo_count().saturating_sub(1);
 
-    Some(div()
-        .id("history-context-menu")
-        .absolute()
+    Some(popup("history-context-menu", panel_bg, panel_border, |this, cx| this.hide_history_context_menu(cx), cx)
         .right(px(10.0))
         .top(px(100.0))
         .w(px(200.0))
-        .bg(panel_bg)
-        .border_1()
-        .border_color(panel_border)
-        .rounded_md()
-        .shadow_lg()
-        .flex()
-        .flex_col()
-        .py_1()
-        // Click outside to close
-        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-            this.hide_history_context_menu(cx);
-        }))
         // Explain changes since this
         .when(can_explain_diff, |el| {
             el.child(

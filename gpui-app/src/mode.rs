@@ -48,6 +48,7 @@ pub enum Mode {
     PasteSpecial,      // Paste Special dialog (Ctrl+Alt+V)
     ColorPicker,       // Color picker modal (Fill Color)
     FormatPainter,     // Format Painter: next click applies captured format
+    NumberFormatEditor, // Number format editor (Ctrl+1 when Format tab is open)
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -60,6 +61,34 @@ pub enum Menu {
     Format,
     Data,
     Help,
+}
+
+impl Menu {
+    /// Next menu in order (wrapping)
+    pub fn next(self) -> Menu {
+        match self {
+            Menu::File => Menu::Edit,
+            Menu::Edit => Menu::View,
+            Menu::View => Menu::Insert,
+            Menu::Insert => Menu::Format,
+            Menu::Format => Menu::Data,
+            Menu::Data => Menu::Help,
+            Menu::Help => Menu::File,
+        }
+    }
+
+    /// Previous menu in order (wrapping)
+    pub fn prev(self) -> Menu {
+        match self {
+            Menu::File => Menu::Help,
+            Menu::Edit => Menu::File,
+            Menu::View => Menu::Edit,
+            Menu::Insert => Menu::View,
+            Menu::Format => Menu::Insert,
+            Menu::Data => Menu::Format,
+            Menu::Help => Menu::Data,
+        }
+    }
 }
 
 /// Inspector panel tab selection
@@ -93,7 +122,7 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker)
+        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker | Mode::NumberFormatEditor)
     }
 
     /// True if this mode has text input active (typing should work normally).
@@ -117,6 +146,7 @@ impl Mode {
                 | Mode::AISettings     // API key input
                 | Mode::AiDialog       // AI prompt input
                 | Mode::ColorPicker    // Hex color input
+                | Mode::NumberFormatEditor  // Currency symbol input
         )
     }
 }

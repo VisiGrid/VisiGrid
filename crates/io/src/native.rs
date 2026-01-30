@@ -4,7 +4,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
-use visigrid_engine::cell::{Alignment, CellBorder, CellFormat, DateStyle, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, CellBorder, CellFormat, DateStyle, NegativeStyle, NumberFormat, TextOverflow, VerticalAlignment};
 use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
@@ -23,6 +23,9 @@ CREATE TABLE IF NOT EXISTS cells (
     fmt_number_type INTEGER DEFAULT 0,   -- 0=general, 1=number, 2=currency, 3=percent
     fmt_decimals INTEGER DEFAULT 2,      -- decimal places
     fmt_font_family TEXT,                -- NULL = inherit from settings
+    fmt_thousands INTEGER DEFAULT 0,     -- 1 = use thousands separator
+    fmt_negative INTEGER DEFAULT 0,      -- 0=minus, 1=parens, 2=red minus, 3=red parens
+    fmt_currency_symbol TEXT,            -- NULL = default ($)
     PRIMARY KEY (row, col)
 );
 
@@ -69,6 +72,28 @@ const TYPE_NUMBER: i32 = 1;
 const TYPE_TEXT: i32 = 2;
 const TYPE_FORMULA: i32 = 3;
 
+/// Current schema version. Increment for each migration.
+const SCHEMA_VERSION: i32 = 1;
+
+/// Run schema migrations for existing databases.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+
+    if version < 1 {
+        // Add thousands separator, negative style, and currency symbol columns
+        conn.execute_batch("
+            ALTER TABLE cells ADD COLUMN fmt_thousands INTEGER DEFAULT 0;
+            ALTER TABLE cells ADD COLUMN fmt_negative INTEGER DEFAULT 0;
+            ALTER TABLE cells ADD COLUMN fmt_currency_symbol TEXT;
+            PRAGMA user_version = 1;
+        ")?;
+    }
+
+    // Future migrations: if version < 2 { ... PRAGMA user_version = 2; }
+
+    Ok(())
+}
+
 pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
     // Delete existing file if present (SQLite will create fresh)
     if path.exists() {
@@ -79,6 +104,7 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
 
     // Create schema
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
 
     // Save metadata
     conn.execute(
@@ -101,7 +127,7 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
 
     {
         let mut stmt = conn.prepare(
-            "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+            "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
         ).map_err(|e| e.to_string())?;
 
         for row in 0..sheet.rows {
@@ -142,20 +168,7 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
                 // Convert number format to integer + decimals
                 // Date uses decimals field to store style (0=Short, 1=Long, 2=Iso)
                 // Time = 5, DateTime = 6
-                let (number_type, decimals) = match &format.number_format {
-                    NumberFormat::General => (0, 2),
-                    NumberFormat::Number { decimals } => (1, *decimals as i32),
-                    NumberFormat::Currency { decimals } => (2, *decimals as i32),
-                    NumberFormat::Percent { decimals } => (3, *decimals as i32),
-                    NumberFormat::Date { style } => (4, match style {
-                        DateStyle::Short => 0,
-                        DateStyle::Long => 1,
-                        DateStyle::Iso => 2,
-                    }),
-                    NumberFormat::Time => (5, 0),
-                    NumberFormat::DateTime => (6, 0),
-                    NumberFormat::Custom(_) => (0, 2), // Custom stored as General in native format
-                };
+                let (number_type, decimals, thousands, negative, currency_symbol) = extract_number_format_fields(&format.number_format);
 
                 stmt.execute(params![
                     row as i64,
@@ -169,7 +182,10 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
                     alignment_int,
                     number_type,
                     decimals,
-                    format.font_family.as_deref()
+                    format.font_family.as_deref(),
+                    thousands,
+                    negative,
+                    currency_symbol
                 ]).map_err(|e| e.to_string())?;
             }
         }
@@ -180,8 +196,33 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Extract number format fields for persistence
+fn extract_number_format_fields(nf: &NumberFormat) -> (i32, i32, i32, i32, Option<&str>) {
+    match nf {
+        NumberFormat::General => (0, 2, 0, 0, None),
+        NumberFormat::Number { decimals, thousands, negative } => {
+            (1, *decimals as i32, *thousands as i32, negative.to_int(), None)
+        }
+        NumberFormat::Currency { decimals, thousands, negative, symbol } => {
+            (2, *decimals as i32, *thousands as i32, negative.to_int(), symbol.as_deref())
+        }
+        NumberFormat::Percent { decimals } => (3, *decimals as i32, 0, 0, None),
+        NumberFormat::Date { style } => (4, match style {
+            DateStyle::Short => 0,
+            DateStyle::Long => 1,
+            DateStyle::Iso => 2,
+        }, 0, 0, None),
+        NumberFormat::Time => (5, 0, 0, 0, None),
+        NumberFormat::DateTime => (6, 0, 0, 0, None),
+        NumberFormat::Custom(_) => (0, 2, 0, 0, None),
+    }
+}
+
 pub fn load(path: &Path) -> Result<Sheet, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Run migrations (adds new columns if missing)
+    let _ = migrate(&conn); // Ignore errors (read-only DBs)
 
     // Load metadata
     let sheet_name: String = conn
@@ -212,8 +253,13 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
     let has_font_family = conn
         .prepare("SELECT fmt_font_family FROM cells LIMIT 1")
         .is_ok();
+    let has_thousands = conn
+        .prepare("SELECT fmt_thousands FROM cells LIMIT 1")
+        .is_ok();
 
-    let query = if has_font_family {
+    let query = if has_thousands {
+        "SELECT row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol FROM cells"
+    } else if has_font_family {
         "SELECT row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family FROM cells"
     } else if has_alignment_columns {
         "SELECT row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals FROM cells"
@@ -237,12 +283,15 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             let fmt_number_type: i32 = row.get(9).unwrap_or(0);
             let fmt_decimals: i32 = row.get(10).unwrap_or(2);
             let fmt_font_family: Option<String> = row.get(11).ok();
-            Ok((r as usize, c as usize, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family))
+            let fmt_thousands: i32 = row.get(12).unwrap_or(0);
+            let fmt_negative: i32 = row.get(13).unwrap_or(0);
+            let fmt_currency_symbol: Option<String> = row.get(14).ok().and_then(|v: Option<String>| v);
+            Ok((r as usize, c as usize, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol))
         })
         .map_err(|e| e.to_string())?;
 
     for cell_result in cell_iter {
-        let (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family) =
+        let (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) =
             cell_result.map_err(|e| e.to_string())?;
 
         let value = match value_type {
@@ -271,9 +320,16 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             2 => Alignment::Right,
             _ => Alignment::Left,
         };
+        let thousands = fmt_thousands != 0;
+        let negative = NegativeStyle::from_int(fmt_negative);
         let number_format = match fmt_number_type {
-            1 => NumberFormat::Number { decimals: fmt_decimals as u8 },
-            2 => NumberFormat::Currency { decimals: fmt_decimals as u8 },
+            1 => NumberFormat::Number { decimals: fmt_decimals as u8, thousands, negative },
+            2 => NumberFormat::Currency {
+                decimals: fmt_decimals as u8,
+                thousands,
+                negative,
+                symbol: fmt_currency_symbol,
+            },
             3 => NumberFormat::Percent { decimals: fmt_decimals as u8 },
             4 => NumberFormat::Date { style: match fmt_decimals {
                 1 => DateStyle::Long,
@@ -325,6 +381,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
 
     // Create schema (includes named_ranges table)
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
 
     // Save the active sheet (for now, single-sheet support)
     let sheet = workbook.active_sheet();
@@ -350,7 +407,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
 
     {
         let mut stmt = conn.prepare(
-            "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+            "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
         ).map_err(|e| e.to_string())?;
 
         for row in 0..sheet.rows {
@@ -388,22 +445,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     Alignment::CenterAcrossSelection => 1, // Stored as Center in native format
                 };
 
-                // Convert number format to integer + decimals
-                // Time = 5, DateTime = 6
-                let (number_type, decimals) = match &format.number_format {
-                    NumberFormat::General => (0, 2),
-                    NumberFormat::Number { decimals } => (1, *decimals as i32),
-                    NumberFormat::Currency { decimals } => (2, *decimals as i32),
-                    NumberFormat::Percent { decimals } => (3, *decimals as i32),
-                    NumberFormat::Date { style } => (4, match style {
-                        DateStyle::Short => 0,
-                        DateStyle::Long => 1,
-                        DateStyle::Iso => 2,
-                    }),
-                    NumberFormat::Time => (5, 0),
-                    NumberFormat::DateTime => (6, 0),
-                    NumberFormat::Custom(_) => (0, 2), // Custom stored as General in native format
-                };
+                let (number_type, decimals, thousands, negative, currency_symbol) = extract_number_format_fields(&format.number_format);
 
                 stmt.execute(params![
                     row as i64,
@@ -417,7 +459,10 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     alignment_int,
                     number_type,
                     decimals,
-                    format.font_family.as_deref()
+                    format.font_family.as_deref(),
+                    thousands,
+                    negative,
+                    currency_symbol
                 ]).map_err(|e| e.to_string())?;
             }
         }
@@ -961,5 +1006,164 @@ mod tests {
         let loaded = load_workbook(path).expect("Should load old file format");
         assert!(loaded.list_named_ranges().is_empty());
         assert_eq!(loaded.active_sheet().get_raw(0, 0), "Hello");
+    }
+
+    #[test]
+    fn test_old_schema_load_defaults() {
+        // Create an old-schema DB (no thousands/negative/symbol columns)
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(r#"
+                CREATE TABLE cells (
+                    row INTEGER NOT NULL,
+                    col INTEGER NOT NULL,
+                    value_type INTEGER NOT NULL,
+                    value_num REAL,
+                    value_text TEXT,
+                    fmt_bold INTEGER DEFAULT 0,
+                    fmt_italic INTEGER DEFAULT 0,
+                    fmt_underline INTEGER DEFAULT 0,
+                    fmt_alignment INTEGER DEFAULT 0,
+                    fmt_number_type INTEGER DEFAULT 0,
+                    fmt_decimals INTEGER DEFAULT 2,
+                    fmt_font_family TEXT,
+                    PRIMARY KEY (row, col)
+                );
+                CREATE TABLE meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO meta (key, value) VALUES ('sheet_name', 'Sheet1');
+                INSERT INTO meta (key, value) VALUES ('rows', '1000');
+                INSERT INTO meta (key, value) VALUES ('cols', '26');
+                INSERT INTO cells (row, col, value_type, value_num, fmt_number_type, fmt_decimals) VALUES (0, 0, 1, 1234.56, 1, 2);
+                INSERT INTO cells (row, col, value_type, value_num, fmt_number_type, fmt_decimals) VALUES (0, 1, 1, 99.99, 2, 2);
+            "#).unwrap();
+        }
+
+        let sheet = load(path).expect("Should load old format");
+        // Number format should default to thousands=false, negative=Minus
+        let fmt0 = sheet.get_format(0, 0);
+        match &fmt0.number_format {
+            NumberFormat::Number { decimals, thousands, negative } => {
+                assert_eq!(*decimals, 2);
+                assert!(!*thousands);
+                assert_eq!(*negative, NegativeStyle::Minus);
+            }
+            other => panic!("Expected Number format, got {:?}", other),
+        }
+        // Currency should default to thousands=false, negative=Minus, symbol=None
+        let fmt1 = sheet.get_format(0, 1);
+        match &fmt1.number_format {
+            NumberFormat::Currency { decimals, thousands, negative, symbol } => {
+                assert_eq!(*decimals, 2);
+                assert!(!*thousands);
+                assert_eq!(*negative, NegativeStyle::Minus);
+                assert!(symbol.is_none());
+            }
+            other => panic!("Expected Currency format, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_migration_roundtrip() {
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        // Create old-schema DB
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(r#"
+                CREATE TABLE cells (
+                    row INTEGER NOT NULL,
+                    col INTEGER NOT NULL,
+                    value_type INTEGER NOT NULL,
+                    value_num REAL,
+                    value_text TEXT,
+                    fmt_bold INTEGER DEFAULT 0,
+                    fmt_italic INTEGER DEFAULT 0,
+                    fmt_underline INTEGER DEFAULT 0,
+                    fmt_alignment INTEGER DEFAULT 0,
+                    fmt_number_type INTEGER DEFAULT 0,
+                    fmt_decimals INTEGER DEFAULT 2,
+                    fmt_font_family TEXT,
+                    PRIMARY KEY (row, col)
+                );
+                CREATE TABLE meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO meta (key, value) VALUES ('sheet_name', 'Sheet1');
+                INSERT INTO meta (key, value) VALUES ('rows', '1000');
+                INSERT INTO meta (key, value) VALUES ('cols', '26');
+                INSERT INTO cells (row, col, value_type, value_num, fmt_number_type, fmt_decimals) VALUES (0, 0, 1, 42.0, 1, 2);
+            "#).unwrap();
+        }
+
+        // Load triggers migration
+        let sheet = load(path).expect("Should load and migrate");
+        assert_eq!(sheet.get_raw(0, 0), "42");
+
+        // Verify migration added columns
+        {
+            let conn = Connection::open(path).unwrap();
+            let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+            assert_eq!(version, 1);
+
+            let columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(cells)").unwrap()
+                .query_map([], |row| row.get::<_, String>(1)).unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            assert!(columns.contains(&"fmt_thousands".to_string()));
+            assert!(columns.contains(&"fmt_negative".to_string()));
+            assert!(columns.contains(&"fmt_currency_symbol".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_new_format_fields_roundtrip() {
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        // Create and save a sheet with the new format fields
+        let mut sheet = Sheet::new(SheetId(1), 1000, 26);
+        sheet.set_value(0, 0, "1234.56");
+        sheet.set_number_format(0, 0, NumberFormat::Number {
+            decimals: 2,
+            thousands: true,
+            negative: NegativeStyle::RedParens,
+        });
+        sheet.set_value(0, 1, "99.99");
+        sheet.set_number_format(0, 1, NumberFormat::Currency {
+            decimals: 3,
+            thousands: true,
+            negative: NegativeStyle::Parens,
+            symbol: Some("EUR ".to_string()),
+        });
+
+        save(&sheet, path).expect("Save should succeed");
+
+        // Reload and verify
+        let loaded = load(path).expect("Load should succeed");
+        match &loaded.get_format(0, 0).number_format {
+            NumberFormat::Number { decimals, thousands, negative } => {
+                assert_eq!(*decimals, 2);
+                assert!(*thousands);
+                assert_eq!(*negative, NegativeStyle::RedParens);
+            }
+            other => panic!("Expected Number, got {:?}", other),
+        }
+        match &loaded.get_format(0, 1).number_format {
+            NumberFormat::Currency { decimals, thousands, negative, symbol } => {
+                assert_eq!(*decimals, 3);
+                assert!(*thousands);
+                assert_eq!(*negative, NegativeStyle::Parens);
+                assert_eq!(symbol.as_deref(), Some("EUR "));
+            }
+            other => panic!("Expected Currency, got {:?}", other),
+        }
     }
 }

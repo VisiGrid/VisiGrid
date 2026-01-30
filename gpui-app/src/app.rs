@@ -437,7 +437,7 @@ pub enum FillDrag {
     },
 }
 
-use visigrid_engine::cell::{Alignment, CellBorder, VerticalAlignment, TextOverflow, NumberFormat, max_border};
+use visigrid_engine::cell::{Alignment, CellBorder, NegativeStyle, VerticalAlignment, TextOverflow, NumberFormat, max_border};
 
 /// Which context menu variant to display on right-click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,6 +488,8 @@ pub struct SelectionFormatState {
     pub background_color: TriState<Option<[u8; 4]>>,
     pub font_size: TriState<Option<f32>>,
     pub font_color: TriState<Option<[u8; 4]>>,
+    /// Active cell numeric value for preview (None if non-numeric or multi-cell)
+    pub preview_value: Option<f64>,
 }
 
 impl Default for SelectionFormatState {
@@ -508,6 +510,7 @@ impl Default for SelectionFormatState {
             background_color: TriState::Empty,
             font_size: TriState::Empty,
             font_color: TriState::Empty,
+            preview_value: None,
         }
     }
 }
@@ -641,6 +644,230 @@ impl PasteType {
 pub struct PasteSpecialDialogState {
     /// Currently selected paste type
     pub selected: PasteType,
+}
+
+/// Format type selection in the number format editor
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NumberFormatEditorType {
+    #[default]
+    General,
+    Number,
+    Currency,
+    Percent,
+    Date,
+}
+
+/// Per-type settings cache for the number format editor
+#[derive(Clone)]
+pub struct TypeSettings {
+    pub decimals: u8,
+    pub thousands: bool,
+    pub negative: NegativeStyle,
+    pub currency_symbol: String,
+}
+
+impl Default for TypeSettings {
+    fn default() -> Self {
+        Self {
+            decimals: 2,
+            thousands: true,
+            negative: NegativeStyle::Minus,
+            currency_symbol: String::new(),
+        }
+    }
+}
+
+/// State for the Number Format Editor dialog (Ctrl+1 escalation)
+pub struct NumberFormatEditorState {
+    pub format_type: NumberFormatEditorType,
+    pub preview_value: f64,
+    // Active settings (mirrors the cache entry for current type)
+    pub decimals: u8,
+    pub thousands: bool,
+    pub negative: NegativeStyle,
+    pub currency_symbol: String,
+    // Per-type caches
+    number_cache: TypeSettings,
+    currency_cache: TypeSettings,
+    percent_cache: TypeSettings,
+}
+
+impl Default for NumberFormatEditorState {
+    fn default() -> Self {
+        Self {
+            format_type: NumberFormatEditorType::Number,
+            preview_value: 1234.5678,
+            decimals: 2,
+            thousands: true,
+            negative: NegativeStyle::Minus,
+            currency_symbol: String::new(),
+            number_cache: TypeSettings {
+                decimals: 2,
+                thousands: true,
+                negative: NegativeStyle::Minus,
+                currency_symbol: String::new(),
+            },
+            currency_cache: TypeSettings {
+                decimals: 2,
+                thousands: true,
+                negative: NegativeStyle::Parens,
+                currency_symbol: String::new(),
+            },
+            percent_cache: TypeSettings {
+                decimals: 2,
+                thousands: false,
+                negative: NegativeStyle::Minus,
+                currency_symbol: String::new(),
+            },
+        }
+    }
+}
+
+impl NumberFormatEditorState {
+    /// Initialize from an existing NumberFormat and a sample value
+    pub fn from_number_format(fmt: &NumberFormat, sample: f64) -> Self {
+        let mut state = Self::default();
+        state.preview_value = sample;
+        match fmt {
+            NumberFormat::Number { decimals, thousands, negative } => {
+                state.format_type = NumberFormatEditorType::Number;
+                state.decimals = *decimals;
+                state.thousands = *thousands;
+                state.negative = *negative;
+                state.number_cache = TypeSettings {
+                    decimals: *decimals,
+                    thousands: *thousands,
+                    negative: *negative,
+                    currency_symbol: String::new(),
+                };
+            }
+            NumberFormat::Currency { decimals, thousands, negative, symbol } => {
+                state.format_type = NumberFormatEditorType::Currency;
+                state.decimals = *decimals;
+                state.thousands = *thousands;
+                state.negative = *negative;
+                state.currency_symbol = symbol.as_deref().unwrap_or("").to_string();
+                state.currency_cache = TypeSettings {
+                    decimals: *decimals,
+                    thousands: *thousands,
+                    negative: *negative,
+                    currency_symbol: symbol.as_deref().unwrap_or("").to_string(),
+                };
+            }
+            NumberFormat::Percent { decimals } => {
+                state.format_type = NumberFormatEditorType::Percent;
+                state.decimals = *decimals;
+                state.thousands = false;
+                state.negative = NegativeStyle::Minus;
+                state.percent_cache = TypeSettings {
+                    decimals: *decimals,
+                    thousands: false,
+                    negative: NegativeStyle::Minus,
+                    currency_symbol: String::new(),
+                };
+            }
+            NumberFormat::Date { .. } => {
+                state.format_type = NumberFormatEditorType::Date;
+            }
+            _ => {
+                state.format_type = NumberFormatEditorType::General;
+            }
+        }
+        state
+    }
+
+    /// Convert current state to a NumberFormat
+    pub fn to_number_format(&self) -> NumberFormat {
+        match self.format_type {
+            NumberFormatEditorType::General => NumberFormat::General,
+            NumberFormatEditorType::Number => NumberFormat::Number {
+                decimals: self.decimals.min(10),
+                thousands: self.thousands,
+                negative: self.negative,
+            },
+            NumberFormatEditorType::Currency => NumberFormat::Currency {
+                decimals: self.decimals.min(10),
+                thousands: self.thousands,
+                negative: self.negative,
+                symbol: if self.currency_symbol.is_empty() { None } else { Some(self.currency_symbol.clone()) },
+            },
+            NumberFormatEditorType::Percent => NumberFormat::Percent {
+                decimals: self.decimals.min(10),
+            },
+            NumberFormatEditorType::Date => NumberFormat::Date {
+                style: visigrid_engine::cell::DateStyle::Short,
+            },
+        }
+    }
+
+    /// Format a value using current settings for preview
+    pub fn preview(&self) -> String {
+        use visigrid_engine::cell::CellValue;
+        CellValue::format_number(self.preview_value, &self.to_number_format())
+    }
+
+    /// Format the negative version for preview
+    pub fn preview_negative(&self) -> String {
+        use visigrid_engine::cell::CellValue;
+        CellValue::format_number(-self.preview_value.abs(), &self.to_number_format())
+    }
+
+    /// Format zero for preview
+    pub fn preview_zero(&self) -> String {
+        use visigrid_engine::cell::CellValue;
+        CellValue::format_number(0.0, &self.to_number_format())
+    }
+
+    /// Switch to a different format type, preserving per-type caches
+    pub fn switch_type(&mut self, new_type: NumberFormatEditorType) {
+        if self.format_type == new_type {
+            return;
+        }
+        // Save current settings to outgoing cache
+        let current = TypeSettings {
+            decimals: self.decimals,
+            thousands: self.thousands,
+            negative: self.negative,
+            currency_symbol: self.currency_symbol.clone(),
+        };
+        match self.format_type {
+            NumberFormatEditorType::Number => self.number_cache = current,
+            NumberFormatEditorType::Currency => self.currency_cache = current,
+            NumberFormatEditorType::Percent => self.percent_cache = current,
+            _ => {}
+        }
+        // Restore from incoming cache
+        self.format_type = new_type;
+        match new_type {
+            NumberFormatEditorType::Number => {
+                let c = &self.number_cache;
+                self.decimals = c.decimals;
+                self.thousands = c.thousands;
+                self.negative = c.negative;
+                self.currency_symbol = c.currency_symbol.clone();
+            }
+            NumberFormatEditorType::Currency => {
+                let c = &self.currency_cache;
+                self.decimals = c.decimals;
+                self.thousands = c.thousands;
+                self.negative = c.negative;
+                self.currency_symbol = c.currency_symbol.clone();
+            }
+            NumberFormatEditorType::Percent => {
+                let c = &self.percent_cache;
+                self.decimals = c.decimals;
+                self.thousands = c.thousands;
+                self.negative = c.negative;
+                self.currency_symbol = c.currency_symbol.clone();
+            }
+            _ => {
+                self.decimals = 2;
+                self.thousands = false;
+                self.negative = NegativeStyle::Minus;
+                self.currency_symbol = String::new();
+            }
+        }
+    }
 }
 
 /// Which field in the validation dialog has focus
@@ -1664,6 +1891,7 @@ pub struct Spreadsheet {
 
     // Menu bar state (Excel 2003 style dropdown menus)
     pub open_menu: Option<crate::mode::Menu>,
+    pub menu_highlight: Option<usize>,
 
     // Sheet tab state
     pub renaming_sheet: Option<usize>,     // Index of sheet being renamed
@@ -1948,6 +2176,9 @@ pub struct Spreadsheet {
 
     // Paste Special dialog state (Ctrl+Alt+V)
     pub paste_special_dialog: PasteSpecialDialogState,
+
+    // Number Format Editor dialog state (Ctrl+1 escalation)
+    pub number_format_editor: NumberFormatEditorState,
     /// Last selected paste type for session memory (remembered within session)
     pub last_paste_special_mode: PasteType,
 
@@ -2114,6 +2345,7 @@ impl Spreadsheet {
             resize_start_size: 0.0,
             resize_start_original: None,
             open_menu: None,
+            menu_highlight: None,
             renaming_sheet: None,
             sheet_rename_input: String::new(),
             sheet_rename_cursor: 0,
@@ -2297,6 +2529,7 @@ impl Spreadsheet {
             validation_dialog: ValidationDialogState::default(),
 
             paste_special_dialog: PasteSpecialDialogState::default(),
+            number_format_editor: NumberFormatEditorState::default(),
             last_paste_special_mode: PasteType::All,
 
             validation_failures: Vec::new(),
@@ -3184,8 +3417,7 @@ impl Spreadsheet {
                 self.open_keybindings(cx);
             }
             CommandId::ShowAbout => {
-                self.status_message = Some("VisiGrid - A spreadsheet for power users".into());
-                cx.notify();
+                self.show_about(cx);
             }
             CommandId::TourNamedRanges => {
                 self.show_tour(cx);
@@ -3252,14 +3484,84 @@ impl Spreadsheet {
         } else {
             self.open_menu = Some(menu);
         }
+        self.menu_highlight = None;
         cx.notify();
     }
 
     pub fn close_menu(&mut self, cx: &mut Context<Self>) {
         if self.open_menu.is_some() {
             self.open_menu = None;
+            self.menu_highlight = None;
             cx.notify();
         }
+    }
+
+    // Menu keyboard navigation methods
+
+    pub fn menu_highlight_next(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.open_menu {
+            let count = crate::menu_model::menu_item_count(menu);
+            if count == 0 { return; }
+            self.menu_highlight = Some(match self.menu_highlight {
+                None => 0,
+                Some(i) => if i + 1 >= count { 0 } else { i + 1 },
+            });
+            cx.notify();
+        }
+    }
+
+    pub fn menu_highlight_prev(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.open_menu {
+            let count = crate::menu_model::menu_item_count(menu);
+            if count == 0 { return; }
+            self.menu_highlight = Some(match self.menu_highlight {
+                None => count - 1,
+                Some(0) => count - 1,
+                Some(i) => i - 1,
+            });
+            cx.notify();
+        }
+    }
+
+    pub fn menu_switch_next(&mut self, cx: &mut Context<Self>) {
+        if let Some(current) = self.open_menu {
+            self.open_menu = Some(Self::next_active_menu(current));
+            self.menu_highlight = None;
+            cx.notify();
+        }
+    }
+
+    pub fn menu_switch_prev(&mut self, cx: &mut Context<Self>) {
+        if let Some(current) = self.open_menu {
+            self.open_menu = Some(Self::prev_active_menu(current));
+            self.menu_highlight = None;
+            cx.notify();
+        }
+    }
+
+    pub fn menu_execute_highlighted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let (Some(menu), Some(index)) = (self.open_menu, self.menu_highlight) {
+            self.close_menu(cx);
+            crate::menu_model::execute_menu_action(self, menu, index, window, cx);
+        }
+    }
+
+    fn next_active_menu(start: crate::mode::Menu) -> crate::mode::Menu {
+        let mut m = start.next();
+        for _ in 0..7 {
+            if crate::menu_model::menu_item_count(m) > 0 { return m; }
+            m = m.next();
+        }
+        start
+    }
+
+    fn prev_active_menu(start: crate::mode::Menu) -> crate::mode::Menu {
+        let mut m = start.prev();
+        for _ in 0..7 {
+            if crate::menu_model::menu_item_count(m) > 0 { return m; }
+            m = m.prev();
+        }
+        start
     }
 
     /// Get width for a column (custom or default) for the current sheet
@@ -4073,7 +4375,7 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, NumberFormat::Currency { decimals: 2 }));
+                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, NumberFormat::currency(2)));
                 }
             }
         }

@@ -73,15 +73,16 @@ fn unescape_xml(s: &str) -> String {
 // =============================================================================
 
 fn builtin_number_format(id: u16) -> NumberFormat {
+    use visigrid_engine::cell::NegativeStyle;
     match id {
         0 => NumberFormat::General,
-        1 => NumberFormat::Number { decimals: 0 },
-        2 => NumberFormat::Number { decimals: 2 },
-        3 => NumberFormat::Number { decimals: 0 }, // #,##0
-        4 => NumberFormat::Number { decimals: 2 }, // #,##0.00
+        1 => NumberFormat::number_compat(0),
+        2 => NumberFormat::number_compat(2),
+        3 => NumberFormat::Number { decimals: 0, thousands: true, negative: NegativeStyle::Minus }, // #,##0
+        4 => NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::Minus }, // #,##0.00
         9 => NumberFormat::Percent { decimals: 0 },
         10 => NumberFormat::Percent { decimals: 2 },
-        11 => NumberFormat::Number { decimals: 2 }, // 0.00E+00 (scientific)
+        11 => NumberFormat::number_compat(2), // 0.00E+00 (scientific)
         14 => NumberFormat::Date {
             style: visigrid_engine::cell::DateStyle::Short,
         },
@@ -99,15 +100,15 @@ fn builtin_number_format(id: u16) -> NumberFormat {
         20 => NumberFormat::Time,
         21 => NumberFormat::Time,
         22 => NumberFormat::DateTime,
-        37 => NumberFormat::Number { decimals: 0 }, // #,##0;(#,##0)
-        38 => NumberFormat::Number { decimals: 0 }, // #,##0;[Red](#,##0)
-        39 => NumberFormat::Number { decimals: 2 }, // #,##0.00;(#,##0.00)
-        40 => NumberFormat::Number { decimals: 2 }, // #,##0.00;[Red](#,##0.00)
-        44 => NumberFormat::Currency { decimals: 2 },
+        37 => NumberFormat::Number { decimals: 0, thousands: true, negative: NegativeStyle::Parens }, // #,##0;(#,##0)
+        38 => NumberFormat::Number { decimals: 0, thousands: true, negative: NegativeStyle::RedParens }, // #,##0;[Red](#,##0)
+        39 => NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::Parens }, // #,##0.00;(#,##0.00)
+        40 => NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::RedParens }, // #,##0.00;[Red](#,##0.00)
+        44 => NumberFormat::currency_compat(2),
         45 => NumberFormat::Time,
         46 => NumberFormat::Time,
         47 => NumberFormat::Time,
-        48 => NumberFormat::Number { decimals: 2 }, // ##0.0E+0
+        48 => NumberFormat::number_compat(2), // ##0.0E+0
         49 => NumberFormat::General,                // @ (text)
         _ => NumberFormat::General,
     }
@@ -1401,7 +1402,7 @@ mod tests {
         assert_eq!(builtin_number_format(0), NumberFormat::General);
         assert_eq!(
             builtin_number_format(2),
-            NumberFormat::Number { decimals: 2 }
+            NumberFormat::number_compat(2)
         );
         assert_eq!(
             builtin_number_format(9),
@@ -1415,7 +1416,7 @@ mod tests {
         );
         assert_eq!(
             builtin_number_format(44),
-            NumberFormat::Currency { decimals: 2 }
+            NumberFormat::currency_compat(2)
         );
     }
 

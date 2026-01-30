@@ -2,6 +2,7 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{ContextMenuKind, Spreadsheet};
 use crate::theme::TokenKey;
+use crate::ui::{popup, clamp_to_viewport};
 
 /// Render the right-click context menu overlay, if one is open.
 ///
@@ -37,32 +38,19 @@ pub fn render_context_menu(
 
     // Clamp position to keep menu within window bounds
     let viewport = window.viewport_size();
-    let window_w: f32 = viewport.width.into();
-    let window_h: f32 = viewport.height.into();
     let menu_w: f32 = 200.0;
     let x: f32 = state.position.x.into();
     let y: f32 = state.position.y.into();
-    let x = x.min(window_w - menu_w).max(0.0);
-    let y = y.min(window_h - menu_h).max(0.0);
+    let (x, y) = clamp_to_viewport(
+        x, y, menu_w, menu_h,
+        viewport.width.into(), viewport.height.into(),
+    );
 
     Some(
-        div()
-            .id("context-menu")
-            .absolute()
+        popup("context-menu", panel_bg, panel_border, |this, cx| this.hide_context_menu(cx), cx)
             .left(px(x))
             .top(px(y))
             .w(px(menu_w))
-            .bg(panel_bg)
-            .border_1()
-            .border_color(panel_border)
-            .rounded_md()
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .py_1()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.hide_context_menu(cx);
-            }))
             .children(items)
     )
 }

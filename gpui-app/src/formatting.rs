@@ -9,6 +9,7 @@ use visigrid_engine::sheet::MergedRegion;
 
 use crate::app::{Spreadsheet, TriState, SelectionFormatState};
 use crate::history::{CellFormatPatch, FormatActionKind, UndoAction};
+use crate::mode::Mode;
 
 /// Border application mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,9 +83,17 @@ impl Spreadsheet {
             }
         }
 
-        // For single cell, show display value
+        // For single cell, show display value and extract numeric preview
         if matches!(state.raw_value, TriState::Uniform(_)) {
             state.display_value = last_display;
+        }
+
+        // Extract active cell numeric value for format preview
+        if state.cell_count == 1 {
+            let (row, col) = self.view_state.active_cell();
+            if let visigrid_engine::cell::CellValue::Number(n) = self.sheet(cx).get_cell(row, col).value {
+                state.preview_value = Some(n);
+            }
         }
 
         state
@@ -344,6 +353,37 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Open the number format editor dialog, populated from the active cell
+    pub fn open_number_format_editor(&mut self, cx: &mut Context<Self>) {
+        use crate::app::NumberFormatEditorState;
+        use visigrid_engine::cell::CellValue;
+
+        let (row, col) = self.view_state.active_cell();
+        let format = self.sheet(cx).get_format(row, col);
+        let cell = self.sheet(cx).get_cell(row, col);
+        let sample = match cell.value {
+            CellValue::Number(n) => n.abs(),
+            _ => 1234.5678,
+        };
+        self.number_format_editor = NumberFormatEditorState::from_number_format(&format.number_format, sample);
+        self.mode = Mode::NumberFormatEditor;
+        cx.notify();
+    }
+
+    /// Close the number format editor without applying
+    pub fn close_number_format_editor(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
+    /// Apply the number format editor settings and close
+    pub fn apply_number_format_editor(&mut self, cx: &mut Context<Self>) {
+        let fmt = self.number_format_editor.to_number_format();
+        self.set_number_format_selection(fmt, cx);
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
     /// Adjust decimal places on selected cells - uses DecimalPlaces kind for coalescing
     pub fn adjust_decimals_selection(&mut self, delta: i8, cx: &mut Context<Self>) {
         let mut patches = Vec::new();
@@ -352,13 +392,13 @@ impl Spreadsheet {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
                     let new_format = match &before.number_format {
-                        NumberFormat::Number { decimals } => {
+                        NumberFormat::Number { decimals, thousands, negative } => {
                             let new_dec = (*decimals as i8 + delta).clamp(0, 10) as u8;
-                            Some(NumberFormat::Number { decimals: new_dec })
+                            Some(NumberFormat::Number { decimals: new_dec, thousands: *thousands, negative: *negative })
                         }
-                        NumberFormat::Currency { decimals } => {
+                        NumberFormat::Currency { decimals, thousands, negative, symbol } => {
                             let new_dec = (*decimals as i8 + delta).clamp(0, 10) as u8;
-                            Some(NumberFormat::Currency { decimals: new_dec })
+                            Some(NumberFormat::Currency { decimals: new_dec, thousands: *thousands, negative: *negative, symbol: symbol.clone() })
                         }
                         NumberFormat::Percent { decimals } => {
                             let new_dec = (*decimals as i8 + delta).clamp(0, 10) as u8;

@@ -2,7 +2,7 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, TriState, CELL_HEIGHT};
 use crate::theme::TokenKey;
-use visigrid_engine::cell::Alignment;
+use visigrid_engine::cell::{Alignment, VerticalAlignment};
 
 pub const FORMAT_BAR_HEIGHT: f32 = 28.0;
 
@@ -722,6 +722,34 @@ pub(super) fn render_align_icon(alignment: Alignment, color: Hsla) -> impl IntoE
     .child(div().w(w1).h(line_h).bg(color).rounded_sm())
     .child(div().w(w2).h(line_h).bg(color).rounded_sm())
     .child(div().w(w3).h(line_h).bg(color).rounded_sm())
+}
+
+/// Render a 3-line vertical alignment icon (14px wide, 14px tall).
+///
+/// Three equal-width lines positioned at top, middle, or bottom of a fixed-height box.
+pub(super) fn render_valign_icon(alignment: VerticalAlignment, color: Hsla) -> impl IntoElement {
+    let line_w = px(12.0);
+    let line_h = px(1.5);
+    let gap = px(1.5);
+
+    let justify_fn = match alignment {
+        VerticalAlignment::Top => |d: Div| d.justify_start(),
+        VerticalAlignment::Middle => |d: Div| d.justify_center(),
+        VerticalAlignment::Bottom => |d: Div| d.justify_end(),
+    };
+
+    justify_fn(
+        div()
+            .w(px(14.0))
+            .h(px(14.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(gap)
+    )
+    .child(div().w(line_w).h(line_h).bg(color).rounded_sm())
+    .child(div().w(line_w).h(line_h).bg(color).rounded_sm())
+    .child(div().w(line_w).h(line_h).bg(color).rounded_sm())
 }
 
 // ============================================================================

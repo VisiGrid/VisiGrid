@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.9
+
+Number format editor, thousands separators, negative styles, and currency symbols.
+
+### Number Formatting
+
+- **Thousands separators** — Number and Currency formats now support a thousands separator toggle. UI-applied formats default to thousands on.
+- **Negative number styles** — four styles: minus (`-1,234.56`), parentheses (`(1,234.56)`), red minus, and red parentheses. Red styles render negative values in red in the grid.
+- **Currency symbol selection** — preset buttons ($, €, £, ¥) in the editor. Custom symbols persist and export correctly to XLSX (quoted when needed).
+- **Number Format Editor** — new modal dialog (Ctrl+1, or "Edit..." in inspector). Type pills (General / Number / Currency / Percent / Date), decimals ±, thousands toggle, negative style radio, and live preview. Keyboard-drivable: Tab cycles types, arrows cycle negative styles, +/- adjust decimals, Space toggles thousands.
+- **Inspector summary** — Number/Currency formats show a summary line (e.g. "2 decimals, thousands, parens"), live preview using the active cell's value, and an "Edit..." shortcut button.
+- **XLSX export** — emits full 4-section format codes (`positive;negative;zero;text`) for Number and Currency, including `[Red]` markers and parentheses for Excel compatibility.
+- **Native persistence** — new `.vgrid` schema columns (`fmt_thousands`, `fmt_negative`, `fmt_currency_symbol`) with `PRAGMA user_version` migration. Old files open and render identically; saving migrates them forward.
+
+### Inspector Panel
+
+- **Vertical alignment icons** — Top / Middle / Bottom buttons now use three-line icons (lines positioned at top, center, or bottom of a box) instead of plain "T" / "M" / "B" text labels. Matches the horizontal alignment icon style.
+
+### Menu Dropdowns (Windows/Linux)
+
+- **Click-outside dismiss** — clicking anywhere outside an open menu dropdown now closes it. Uses a transparent backdrop below the menu bar so hover-to-switch between menu headers still works.
+- **Keyboard navigation** — Up/Down moves highlight, Left/Right switches menus, Enter executes highlighted item, Escape closes. Insert menu (empty) is skipped during keyboard cycling.
+- **Mouse-hover highlight sync** — hovering a menu item sets the keyboard highlight, so you can hover then press Enter to execute.
+- **Click isolation** — clicks inside the menu dropdown no longer leak through to the grid.
+- **`menu_model.rs`** — new module: typed `MenuAction` enum and `MenuEntry` descriptors as single source of truth for menu structure, item counts, and action dispatch. Decouples `app.rs` (navigation) from `views/menu_bar.rs` (rendering).
+
+### Internal
+
+- **`ui/popup.rs`** — new design system primitive for floating popup containers (context menus, positioned panels). Provides standard styling (bg, border, rounded, shadow), click-outside dismiss via `on_mouse_down_out`, and a `clamp_to_viewport` helper. Migrated 3 call sites: `context_menu.rs`, `status_bar.rs` (also fixed missing click-outside dismiss), and `inspector_panel.rs` history context menu.
+
 ## 0.3.8
 
 Format bar, context menus, grid polish, and merge export correctness.

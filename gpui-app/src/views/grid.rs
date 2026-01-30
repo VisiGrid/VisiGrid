@@ -1006,6 +1006,14 @@ fn render_cell(
                         });
                     }
                 }
+                // Red negative: override text color for negative values with Red* styles
+                if !is_editing && !is_selected && !is_multi_edit_preview && format.font_color.is_none() {
+                    if let visigrid_engine::cell::CellValue::Number(n) = app.sheet(cx).get_cell(data_row, col).value {
+                        if format.number_format.should_render_red(n) {
+                            text_style.color = gpui::Hsla::from(gpui::rgb(0xCC0000));
+                        }
+                    }
+                }
 
                 let styled = StyledText::new(text_content).with_default_highlights(&text_style, []);
                 // Font size: TextRun doesn't carry font_size, so we must set it

@@ -10,6 +10,10 @@ pub(crate) fn bind(
     el
         // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
+            if this.open_menu.is_some() {
+                this.menu_highlight_prev(cx);
+                return;
+            }
             // Format bar editing consumes navigation actions before grid movement.
             // See ConfirmEdit in actions_edit.rs for the full rationale.
             if this.ui.format_bar.size_editing {
@@ -70,6 +74,10 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
+            if this.open_menu.is_some() {
+                this.menu_highlight_next(cx);
+                return;
+            }
             // Format bar editing consumes navigation actions before grid movement.
             if this.ui.format_bar.size_editing {
                 if let Ok(n) = this.ui.format_bar.size_input.parse::<u32>() {
@@ -129,6 +137,10 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &MoveLeft, window, cx| {
+            if this.open_menu.is_some() {
+                this.menu_switch_prev(cx);
+                return;
+            }
             // Format bar editing consumes navigation actions before grid movement.
             if this.ui.format_bar.size_editing { return; }
             // Let AI dialogs handle their own keys
@@ -177,6 +189,10 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &MoveRight, window, cx| {
+            if this.open_menu.is_some() {
+                this.menu_switch_next(cx);
+                return;
+            }
             // Format bar editing consumes navigation actions before grid movement.
             if this.ui.format_bar.size_editing { return; }
             // Let AI dialogs handle their own keys

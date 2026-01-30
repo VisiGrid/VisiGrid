@@ -420,8 +420,8 @@ fn format_number_format(fmt: &visigrid_engine::cell::NumberFormat) -> String {
     use visigrid_engine::cell::NumberFormat;
     match fmt {
         NumberFormat::General => "number_format=\"general\"".to_string(),
-        NumberFormat::Number { decimals } => format!("number_format=\"number\", decimals={}", decimals),
-        NumberFormat::Currency { decimals } => format!("number_format=\"currency\", decimals={}", decimals),
+        NumberFormat::Number { decimals, .. } => format!("number_format=\"number\", decimals={}", decimals),
+        NumberFormat::Currency { decimals, .. } => format!("number_format=\"currency\", decimals={}", decimals),
         NumberFormat::Percent { decimals } => format!("number_format=\"percent\", decimals={}", decimals),
         NumberFormat::Date { .. } => "number_format=\"date\"".to_string(),
         NumberFormat::Time => "number_format=\"time\"".to_string(),

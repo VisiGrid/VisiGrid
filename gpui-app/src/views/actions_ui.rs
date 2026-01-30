@@ -214,9 +214,17 @@ pub(crate) fn bind(
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &ShowFormatPanel, _, cx| {
-            this.inspector_visible = true;
-            this.inspector_tab = InspectorTab::Format;
-            cx.notify();
+            if this.inspector_visible && this.inspector_tab == InspectorTab::Format {
+                // Already on Format tab — escalate to number format editor
+                this.open_number_format_editor(cx);
+            } else {
+                this.inspector_visible = true;
+                this.inspector_tab = InspectorTab::Format;
+                cx.notify();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &OpenNumberFormatEditor, _, cx| {
+            this.open_number_format_editor(cx);
         }))
         .on_action(cx.listener(|this, _: &ShowHistoryPanel, _, cx| {
             this.inspector_visible = true;

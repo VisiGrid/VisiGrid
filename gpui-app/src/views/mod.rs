@@ -33,6 +33,7 @@ mod menu_bar;
 mod status_bar;
 mod theme_picker;
 mod tour;
+mod number_format_dialog;
 mod validation_dialog;
 mod validation_dropdown_view;
 
@@ -87,6 +88,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_explain_diff = app.mode == Mode::ExplainDiff;
     let show_paste_special = app.mode == Mode::PasteSpecial;
     let show_color_picker = app.mode == Mode::ColorPicker;
+    let show_number_format_editor = app.mode == Mode::NumberFormatEditor;
     let show_keytips = app.keytips_active;
     let show_rewind_confirm = app.rewind_confirm.visible;
     let show_rewind_success = app.rewind_success.visible;
@@ -546,6 +548,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_paste_special, |div| {
             div.child(paste_special_dialog::render_paste_special_dialog(app, cx))
+        })
+        .when(show_number_format_editor, |div| {
+            div.child(number_format_dialog::render_number_format_dialog(app, cx))
         })
         // KeyTips overlay (macOS Option double-tap accelerators)
         .when(show_keytips, |div| {

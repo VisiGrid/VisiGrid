@@ -1874,7 +1874,7 @@ mod tests {
         sheet.toggle_italic(0, 0);
         sheet.set_vertical_alignment(0, 0, VerticalAlignment::Top);
         sheet.set_text_overflow(0, 0, TextOverflow::Wrap);
-        sheet.set_number_format(0, 0, NumberFormat::Currency { decimals: 2 });
+        sheet.set_number_format(0, 0, NumberFormat::currency_compat(2));
 
         // Get the source format
         let source_format = sheet.get_format(0, 0);
@@ -1894,7 +1894,7 @@ mod tests {
                 assert!(fmt.italic, "Cell ({}, {}) should be italic", row, col);
                 assert_eq!(fmt.vertical_alignment, VerticalAlignment::Top);
                 assert_eq!(fmt.text_overflow, TextOverflow::Wrap);
-                assert!(matches!(fmt.number_format, NumberFormat::Currency { decimals: 2 }));
+                assert!(matches!(fmt.number_format, NumberFormat::Currency { decimals: 2, .. }));
             }
         }
 

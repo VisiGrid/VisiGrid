@@ -20,8 +20,50 @@ pub(crate) fn handle_key_down(
         }
     }
 
+    // Menu dropdown keyboard navigation
+    if this.open_menu.is_some() {
+        let key = event.keystroke.key.as_str();
+        match key {
+            "escape" => {
+                this.close_menu(cx);
+                return;
+            }
+            "up" => {
+                this.menu_highlight_prev(cx);
+                return;
+            }
+            "down" => {
+                this.menu_highlight_next(cx);
+                return;
+            }
+            "left" => {
+                this.menu_switch_prev(cx);
+                return;
+            }
+            "right" => {
+                this.menu_switch_next(cx);
+                return;
+            }
+            "enter" => {
+                this.menu_execute_highlighted(window, cx);
+                return;
+            }
+            _ => {
+                // Non-modifier keys close the menu and fall through to normal handling
+                if key != "shift" && key != "control" && key != "alt" && key != "cmd" {
+                    this.close_menu(cx);
+                }
+            }
+        }
+    }
+
     // Let AI dialogs handle their own keys
     if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
+        return;
+    }
+
+    // Let Number Format Editor dialog handle its own keys
+    if this.mode == Mode::NumberFormatEditor {
         return;
     }
 

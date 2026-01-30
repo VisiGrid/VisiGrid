@@ -4,6 +4,7 @@ use crate::app::Spreadsheet;
 use crate::links::LinkTarget;
 use crate::mode::Mode;
 use crate::theme::TokenKey;
+use crate::ui::popup;
 
 /// Render the bottom status bar (Zed-inspired minimal design)
 pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -331,17 +332,10 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
     let text_primary = app.token(TokenKey::TextPrimary);
     let selection_bg = app.token(TokenKey::SelectionBg);
 
-    div()
-        .absolute()
+    popup("sheet-context-menu", panel_bg, panel_border, |this, cx| this.hide_sheet_context_menu(cx), cx)
         .bottom(px(24.0))
         .left(px(4.0 + (sheet_index as f32 * 70.0))) // Approximate position
         .w(px(120.0))
-        .bg(panel_bg)
-        .border_1()
-        .border_color(panel_border)
-        .rounded_sm()
-        .shadow_lg()
-        .py_1()
         .child(
             // Insert option
             div()

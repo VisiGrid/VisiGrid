@@ -2131,24 +2131,53 @@ fn border_style_to_xlsx(style: BorderStyle) -> FormatBorder {
     }
 }
 
+/// Escape a currency symbol for use in Excel format codes.
+/// Simple symbols ($, €, £, ¥) pass through; others get quoted.
+fn excel_literal_prefix(sym: &str) -> String {
+    if sym.chars().all(|c| c.is_ascii_alphanumeric() || "$€£¥".contains(c)) {
+        sym.to_string()
+    } else {
+        format!("\"{}\"", sym.replace('"', "\"\""))
+    }
+}
+
+/// Build the numeric pattern portion of a format code.
+/// e.g. `#,##0.00` (thousands=true, decimals=2) or `0.00` (thousands=false, decimals=2)
+fn build_number_pattern(decimals: u8, thousands: bool) -> String {
+    let int_part = if thousands { "#,##0" } else { "0" };
+    if decimals == 0 {
+        int_part.to_string()
+    } else {
+        format!("{}.{}", int_part, "0".repeat(decimals as usize))
+    }
+}
+
 /// Apply number format to an Excel Format
 fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
     match number_format {
         NumberFormat::General => format,
-        NumberFormat::Number { decimals } => {
-            let pattern = if *decimals == 0 {
-                "0".to_string()
-            } else {
-                format!("0.{}", "0".repeat(*decimals as usize))
+        NumberFormat::Number { decimals, thousands, negative } => {
+            let pos = build_number_pattern(*decimals, *thousands);
+            let neg = match negative {
+                visigrid_engine::cell::NegativeStyle::Minus => format!("-{}", pos),
+                visigrid_engine::cell::NegativeStyle::Parens => format!("({})", pos),
+                visigrid_engine::cell::NegativeStyle::RedMinus => format!("[Red]-{}", pos),
+                visigrid_engine::cell::NegativeStyle::RedParens => format!("[Red]({})", pos),
             };
+            let pattern = format!("{};{};{};@", pos, neg, pos);
             format.set_num_format(&pattern)
         }
-        NumberFormat::Currency { decimals } => {
-            let pattern = if *decimals == 0 {
-                "$#,##0".to_string()
-            } else {
-                format!("$#,##0.{}", "0".repeat(*decimals as usize))
+        NumberFormat::Currency { decimals, thousands, negative, symbol } => {
+            let sym = excel_literal_prefix(symbol.as_deref().unwrap_or("$"));
+            let num_pat = build_number_pattern(*decimals, *thousands);
+            let pos = format!("{}{}", sym, num_pat);
+            let neg = match negative {
+                visigrid_engine::cell::NegativeStyle::Minus => format!("-{}", pos),
+                visigrid_engine::cell::NegativeStyle::Parens => format!("({})", pos),
+                visigrid_engine::cell::NegativeStyle::RedMinus => format!("[Red]-{}", pos),
+                visigrid_engine::cell::NegativeStyle::RedParens => format!("[Red]({})", pos),
             };
+            let pattern = format!("{};{};{};@", pos, neg, pos);
             format.set_num_format(&pattern)
         }
         NumberFormat::Percent { decimals } => {
@@ -2349,7 +2378,7 @@ mod tests {
         // Set a cell with currency format
         sheet.set_value(0, 0, "1234.56");
         let mut format = CellFormat::default();
-        format.number_format = NumberFormat::Currency { decimals: 2 };
+        format.number_format = NumberFormat::currency_compat(2);
         format.bold = true;
         sheet.set_format(0, 0, format);
 
@@ -2910,25 +2939,25 @@ mod tests {
         // Currency with 0 decimals
         sheet.set_value(0, 0, "1234");
         let mut format = CellFormat::default();
-        format.number_format = NumberFormat::Currency { decimals: 0 };
+        format.number_format = NumberFormat::currency_compat(0);
         sheet.set_format(0, 0, format);
 
         // Currency with 2 decimals
         sheet.set_value(1, 0, "1234.56");
         let mut format = CellFormat::default();
-        format.number_format = NumberFormat::Currency { decimals: 2 };
+        format.number_format = NumberFormat::currency_compat(2);
         sheet.set_format(1, 0, format);
 
         // Negative currency
         sheet.set_value(2, 0, "-1234.56");
         let mut format = CellFormat::default();
-        format.number_format = NumberFormat::Currency { decimals: 2 };
+        format.number_format = NumberFormat::currency_compat(2);
         sheet.set_format(2, 0, format);
 
         // Zero currency
         sheet.set_value(3, 0, "0");
         let mut format = CellFormat::default();
-        format.number_format = NumberFormat::Currency { decimals: 2 };
+        format.number_format = NumberFormat::currency_compat(2);
         sheet.set_format(3, 0, format);
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3045,13 +3074,13 @@ mod tests {
         // Very small positive
         sheet.set_value(1, 0, "0.0000001");
         let mut format = CellFormat::default();
-        format.number_format = NumberFormat::Number { decimals: 7 };
+        format.number_format = NumberFormat::number_compat(7);
         sheet.set_format(1, 0, format);
 
         // Negative with many decimals
         sheet.set_value(2, 0, "-123.456789");
         let mut format = CellFormat::default();
-        format.number_format = NumberFormat::Number { decimals: 6 };
+        format.number_format = NumberFormat::number_compat(6);
         sheet.set_format(2, 0, format);
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3134,7 +3163,7 @@ mod tests {
 
             // Format price column as currency
             let mut price_fmt = CellFormat::default();
-            price_fmt.number_format = NumberFormat::Currency { decimals: 2 };
+            price_fmt.number_format = NumberFormat::currency_compat(2);
             sheet.set_format(row, 3, price_fmt.clone());
             sheet.set_format(row, 4, price_fmt);
 
@@ -3153,7 +3182,7 @@ mod tests {
         sheet.set_value(9, 4, "=SUM(E5:E9)");
         let mut total_fmt = CellFormat::default();
         total_fmt.bold = true;
-        total_fmt.number_format = NumberFormat::Currency { decimals: 2 };
+        total_fmt.number_format = NumberFormat::currency_compat(2);
         sheet.set_format(9, 4, total_fmt);
 
         // Export with layout
@@ -3234,7 +3263,7 @@ mod tests {
 
         // Currency format for revenue/expenses
         let mut curr_fmt = CellFormat::default();
-        curr_fmt.number_format = NumberFormat::Currency { decimals: 2 };
+        curr_fmt.number_format = NumberFormat::currency_compat(2);
         summary.set_format(3, 1, curr_fmt.clone());
         summary.set_format(4, 1, curr_fmt);
 

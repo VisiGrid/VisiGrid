@@ -181,6 +181,7 @@ actions!(format, [
     FormatPercent,
     ClearFormatting,  // Reset all format properties to default
     FormatPainter,    // Activate Format Painter mode
+    OpenNumberFormatEditor, // Open number format editor (Ctrl+1 escalation)
     // Background colors
     ClearBackground,
     BackgroundYellow,

@@ -128,6 +128,10 @@ pub(crate) fn bind(
             this.maybe_show_f2_tip(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
+            if this.open_menu.is_some() {
+                this.menu_execute_highlighted(window, cx);
+                return;
+            }
             // Format bar editing consumes actions before Spreadsheet editing.
             // gpui dispatches keybinding actions before on_key_down, so the
             // format bar's own key handler never sees Enter/Esc/Backspace.
