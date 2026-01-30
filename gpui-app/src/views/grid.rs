@@ -171,6 +171,8 @@ pub fn render_grid(
                         })
                     )
             )
+            // Merge overlays - unified merged cells drawn above cell grid
+            .child(render_merge_overlays(app, window, cx, pane_side))
             // Text spill overlay - draws overflowing text above cell backgrounds
             .child(render_text_spill_overlay(app, window, cx, pane_side))
             // Dashed borders overlay for formula references (above cells, below popups)
@@ -316,6 +318,8 @@ pub fn render_grid(
                         )
                 )
         )
+        // Merge overlays - unified merged cells drawn above cell grid
+        .child(render_merge_overlays(app, window, cx, pane_side))
         // Text spill overlay - draws overflowing text above cell backgrounds
         .child(render_text_spill_overlay(app, window, cx, pane_side))
         // Dashed borders overlay for formula references (above cells, below popups)
@@ -375,7 +379,7 @@ fn render_cell(
     app: &Spreadsheet,
     window: &Window,
     cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
+) -> AnyElement {
     // Selection uses view_row (what user sees/clicks)
     // Use pane-specific view state for selection checks
     let is_selected = is_selected_in_pane(view_state, view_row, col);
@@ -424,6 +428,35 @@ fn render_cell(
 
     // Merged cell: hidden cells suppress text and block editing
     let is_merge_hidden = app.sheet(cx).is_merge_hidden(data_row, col);
+    let is_merge_origin = app.sheet(cx).is_merge_origin(data_row, col);
+
+    // Merge spacer: overlay handles all rendering for merged cells.
+    // Hidden cells always become spacers. Origin cells become spacers unless editing.
+    let cell_row = view_row;
+    let cell_col = col;
+    if is_merge_hidden || (is_merge_origin && !(editing && is_active)) {
+        return div()
+            .id(ElementId::Name(format!("cell-{}-{}", view_row, col).into()))
+            .relative()
+            .flex_shrink_0()
+            .w(px(col_width))
+            .h_full()
+            // Keep mouse_move for edge-case drag-through (overlay handles clicks on top)
+            .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
+                if this.is_fill_dragging() {
+                    this.continue_fill_drag(cell_row, cell_col, cx);
+                    return;
+                }
+                if this.dragging_selection {
+                    if this.mode.is_formula() {
+                        this.formula_continue_drag(cell_row, cell_col, cx);
+                    } else {
+                        this.continue_drag_selection(cell_row, cell_col, cx);
+                    }
+                }
+            }))
+            .into_any_element();
+    }
 
     // Spill state detection - uses data_row (storage)
     let is_spill_parent = app.sheet(cx).is_spill_parent(data_row, col);
@@ -456,8 +489,6 @@ fn render_cell(
     };
 
     let format = app.sheet(cx).get_format(data_row, col);
-    let cell_row = view_row;  // For UI interactions (click, selection)
-    let cell_col = col;
 
     // NOTE: Text spillover is rendered in a separate overlay pass (render_text_spill_overlay)
     // to avoid z-order issues where adjacent cells' backgrounds cover the spilled text.
@@ -1273,7 +1304,7 @@ fn render_cell(
         );
     }
 
-    wrapper
+    wrapper.into_any_element()
 }
 
 /// Resolve alignment for rendering, applying Excel-style General rules.
@@ -1707,6 +1738,430 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
     .into_any_element()
 }
 
+/// Pre-computed geometry for a visible merge overlay.
+struct VisibleMerge {
+    origin_row: usize,
+    origin_col: usize,
+    end_row: usize,
+    end_col: usize,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+/// Collect merges that overlap the current viewport.
+///
+/// Pure geometry — no gpui types. Takes scroll position + viewport size,
+/// returns merge regions with their pixel rects.
+fn collect_visible_merges(
+    app: &Spreadsheet,
+    cx: &App,
+    scroll_row: usize,
+    scroll_col: usize,
+    visible_rows: usize,
+    visible_cols: usize,
+) -> Vec<VisibleMerge> {
+    let sheet = app.sheet(cx);
+    if sheet.merged_regions.is_empty() {
+        return Vec::new();
+    }
+
+    let metrics = &app.metrics;
+
+    let mut out = Vec::new();
+    for merge in &sheet.merged_regions {
+        if !merge.overlaps_viewport(scroll_row, scroll_col, visible_rows, visible_cols) {
+            continue;
+        }
+
+        // Use pixel_rect for rect computation — same math as col_x_offset/row_y_offset
+        // but via the engine's pure geometry method (testable without gpui).
+        // Note: col_x_offset applies pixel snapping; we do the same via metrics helpers.
+        let (x, y, width, height) = merge.pixel_rect(
+            scroll_row,
+            scroll_col,
+            |c| metrics.col_width(app.col_width(c)),
+            |r| metrics.row_height(app.row_height(r)),
+        );
+
+        out.push(VisibleMerge {
+            origin_row: merge.start.0,
+            origin_col: merge.start.1,
+            end_row: merge.end.0,
+            end_col: merge.end.1,
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+    out
+}
+
+/// Build the gpui element for a single merge overlay.
+///
+/// Layers (bottom → top): background → selection tint → text → user borders → selection border.
+/// Has `.id()` and mouse handlers — this IS the interactive surface for the merge.
+fn render_merge_div(
+    m: &VisibleMerge,
+    app: &Spreadsheet,
+    window: &Window,
+    cx: &mut Context<Spreadsheet>,
+    view_state: &WorkbookViewState,
+    pane_side: Option<SplitSide>,
+    editing: bool,
+    show_gridlines: bool,
+    gridline_color: Hsla,
+    sel_border_color: Hsla,
+    user_border_color: Hsla,
+) -> Stateful<Div> {
+    let sheet = app.sheet(cx);
+    let format = sheet.get_format(m.origin_row, m.origin_col);
+    let bg = cell_base_background(app, false, format.background_color);
+    let is_editing_this = editing && view_state.selected == (m.origin_row, m.origin_col);
+
+    // 1. Background + position
+    let mut merge_div = div()
+        .id(ElementId::Name(
+            format!("merge-{}-{}", m.origin_row, m.origin_col).into()
+        ))
+        .absolute()
+        .left(px(m.x))
+        .top(px(m.y))
+        .w(px(m.width))
+        .h(px(m.height))
+        .overflow_hidden()
+        .bg(bg)
+        .flex();
+
+    // Gridlines: all four perimeter sides (overlay covers underlying cells)
+    if show_gridlines {
+        merge_div = merge_div.border_color(gridline_color);
+        if m.origin_row > 0 { merge_div = merge_div.border_t_1(); }
+        if m.origin_col > 0 { merge_div = merge_div.border_l_1(); }
+        merge_div = merge_div.border_b_1().border_r_1();
+    }
+
+    // 2. Selection tint
+    let is_active = view_state.selected == (m.origin_row, m.origin_col)
+        || (view_state.selected.0 >= m.origin_row && view_state.selected.0 <= m.end_row
+            && view_state.selected.1 >= m.origin_col && view_state.selected.1 <= m.end_col);
+    let is_selected = is_merge_in_selection(view_state, m.origin_row, m.origin_col, m.end_row, m.end_col);
+
+    if !is_editing_this {
+        if let Some(overlay_color) = selection_overlay_color(app, is_active, is_selected, None) {
+            merge_div = merge_div.child(
+                div().absolute().inset_0().bg(overlay_color)
+            );
+        }
+    }
+
+    // 3. Text (skip if editing origin — caret renders in inline cell)
+    if !is_editing_this {
+        let is_number = matches!(
+            sheet.get_computed_value(m.origin_row, m.origin_col),
+            Value::Number(_)
+        );
+
+        merge_div = match format.alignment {
+            Alignment::General => {
+                if is_number { merge_div.justify_end() } else { merge_div.justify_start() }
+            }
+            Alignment::Left => merge_div.justify_start(),
+            Alignment::Center | Alignment::CenterAcrossSelection => merge_div.justify_center(),
+            Alignment::Right => merge_div.justify_end(),
+        };
+
+        merge_div = match format.vertical_alignment {
+            VerticalAlignment::Top => merge_div.items_start(),
+            VerticalAlignment::Middle => merge_div.items_center(),
+            VerticalAlignment::Bottom => merge_div.items_end(),
+        };
+
+        let value = if app.show_formulas() {
+            sheet.get_raw(m.origin_row, m.origin_col)
+        } else {
+            let display = sheet.get_formatted_display(m.origin_row, m.origin_col);
+            if !app.show_zeros() && display == "0" {
+                String::new()
+            } else {
+                display
+            }
+        };
+
+        if !value.is_empty() {
+            merge_div = merge_div.px_1().child(
+                render_merge_text(&value, &format, app, window)
+            );
+        }
+    }
+
+    // 4. User borders (non-interactive overlay — no .id())
+    let (b_top, b_right, b_bottom, b_left) =
+        sheet.resolve_merge_borders(
+            sheet.get_merge(m.origin_row, m.origin_col).unwrap()
+        );
+    if b_top.is_set() || b_right.is_set() || b_bottom.is_set() || b_left.is_set() {
+        merge_div = merge_div.child(
+            non_interactive_overlay()
+                .border_color(user_border_color)
+                .when(b_top.is_set(), |d| d.border_t_1())
+                .when(b_right.is_set(), |d| d.border_r_1())
+                .when(b_bottom.is_set(), |d| d.border_b_1())
+                .when(b_left.is_set(), |d| d.border_l_1())
+        );
+    }
+
+    // 5. Selection border (on top of everything — wins over user borders visually)
+    if is_selected || is_active {
+        merge_div = merge_div.child(
+            non_interactive_overlay()
+                .border_color(sel_border_color)
+                .border_1()
+        );
+    }
+
+    // Mouse handlers: the overlay IS the interactive surface for merges.
+    let origin_row = m.origin_row;
+    let origin_col = m.origin_col;
+    let end_row = m.end_row;
+    let end_col = m.end_col;
+
+    merge_div
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            if this.renaming_sheet.is_some() {
+                this.confirm_sheet_rename(cx);
+            }
+            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+                return;
+            }
+            if this.resizing_col.is_some() || this.resizing_row.is_some() {
+                return;
+            }
+            if this.is_fill_dragging() {
+                return;
+            }
+
+            this.activate_pane(pane_side, cx);
+
+            let target_row = origin_row;
+            let target_col = origin_col;
+            let merge_end = Some((end_row, end_col));
+
+            if this.mode.is_formula() {
+                if event.modifiers.shift {
+                    this.formula_shift_click_ref(target_row, target_col, cx);
+                } else {
+                    this.formula_start_drag(target_row, target_col, cx);
+                }
+                return;
+            }
+
+            if this.mode == crate::mode::Mode::FormatPainter {
+                this.select_cell(target_row, target_col, false, cx);
+                this.apply_format_painter(cx);
+                return;
+            }
+
+            if event.click_count == 2 {
+                this.select_cell(target_row, target_col, false, cx);
+                this.start_edit(cx);
+                this.maybe_show_f2_tip(cx);
+            } else if event.modifiers.shift {
+                this.select_cell(target_row, target_col, true, cx);
+            } else if event.modifiers.control || event.modifiers.platform {
+                this.start_ctrl_drag_selection(target_row, target_col, cx);
+            } else {
+                this.start_drag_selection(target_row, target_col, cx);
+            }
+
+            // Expand selection to cover full merge region
+            if let Some(merge_br) = merge_end {
+                if merge_br != (target_row, target_col) {
+                    let (anchor_row, anchor_col) = this.active_view_state().selected;
+                    let far_row = if anchor_row <= target_row { merge_br.0 } else { target_row };
+                    let far_col = if anchor_col <= target_col { merge_br.1 } else { target_col };
+                    this.active_view_state_mut().selection_end = Some((far_row, far_col));
+                    cx.notify();
+                }
+            }
+        }))
+        .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
+            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+                return;
+            }
+            if this.is_fill_dragging() {
+                this.continue_fill_drag(origin_row, origin_col, cx);
+                return;
+            }
+            if this.dragging_selection {
+                if this.mode.is_formula() {
+                    this.formula_continue_drag(origin_row, origin_col, cx);
+                } else {
+                    this.continue_drag_selection(origin_row, origin_col, cx);
+                }
+            }
+        }))
+        .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+                return;
+            }
+            if this.is_fill_dragging() {
+                let ctrl_held = event.modifiers.control || event.modifiers.platform;
+                this.end_fill_drag(ctrl_held, cx);
+                return;
+            }
+            this.end_drag_selection(cx);
+        }))
+}
+
+/// Render merged cell overlays as absolutely-positioned elements.
+///
+/// The grid uses flex layout (rows of cells), which cannot support multi-row spans.
+/// This overlay renders merged cells on top of the flex grid, covering the full
+/// merged region. Origin and hidden cells in the flex grid become transparent
+/// spacers (handled by render_cell), and this overlay paints the unified merged cell.
+///
+/// Z-order: cell grid → merge overlays → text spill → formula refs → popups
+///
+/// Each merge overlay has .id() and mouse handlers — it IS the interactive surface
+/// for merged cells. Without these, clicks and drag selection through merges would break.
+fn render_merge_overlays(
+    app: &Spreadsheet,
+    window: &Window,
+    cx: &mut Context<Spreadsheet>,
+    pane_side: Option<SplitSide>,
+) -> AnyElement {
+    let view_state = get_pane_view_state(app, pane_side);
+    let editing = app.mode.is_editing();
+
+    let show_gridlines = match &user_settings(cx).appearance.show_gridlines {
+        Setting::Value(v) => *v,
+        Setting::Inherit => true,
+    };
+
+    let visible_merges = collect_visible_merges(
+        app, cx,
+        view_state.scroll_row, view_state.scroll_col,
+        app.visible_rows(), app.visible_cols(),
+    );
+
+    if visible_merges.is_empty() {
+        return div().into_any_element();
+    }
+
+    let header_width = crate::app::HEADER_WIDTH * app.metrics.zoom;
+    let gridline_color = app.token(TokenKey::GridLines);
+    let sel_border_color = app.token(TokenKey::SelectionBorder);
+    let user_border_color = app.token(TokenKey::UserBorder);
+
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(header_width))
+        .right_0()
+        .overflow_hidden()
+        .children(visible_merges.iter().map(|m| {
+            render_merge_div(
+                m, app, window, cx, view_state, pane_side, editing,
+                show_gridlines, gridline_color, sel_border_color, user_border_color,
+            )
+        }))
+        .into_any_element()
+}
+
+/// Check if a merge region overlaps the current selection.
+fn is_merge_in_selection(
+    view_state: &WorkbookViewState,
+    merge_start_row: usize,
+    merge_start_col: usize,
+    merge_end_row: usize,
+    merge_end_col: usize,
+) -> bool {
+    let (ar, ac) = view_state.selected;
+    // Active cell is inside merge
+    if ar >= merge_start_row && ar <= merge_end_row && ac >= merge_start_col && ac <= merge_end_col {
+        return true;
+    }
+    // Selection range overlaps merge
+    if let Some(sel_end) = view_state.selection_end {
+        let (min_r, max_r) = (ar.min(sel_end.0), ar.max(sel_end.0));
+        let (min_c, max_c) = (ac.min(sel_end.1), ac.max(sel_end.1));
+        merge_end_row >= min_r && merge_start_row <= max_r
+            && merge_end_col >= min_c && merge_start_col <= max_c
+    } else {
+        false
+    }
+}
+
+/// Render formatted text for a merge overlay.
+fn render_merge_text(
+    value: &str,
+    format: &visigrid_engine::cell::CellFormat,
+    app: &Spreadsheet,
+    window: &Window,
+) -> AnyElement {
+    let text_content: SharedString = value.to_string().into();
+    let has_formatting = format.bold
+        || format.italic
+        || format.underline
+        || format.strikethrough
+        || format.font_family.is_some()
+        || format.font_size.is_some()
+        || format.font_color.is_some();
+
+    let text_color = app.token(TokenKey::CellText);
+
+    if has_formatting {
+        let mut text_style = window.text_style();
+        text_style.color = text_color;
+        text_style.font_size = px(app.metrics.font_size).into();
+
+        if format.bold {
+            text_style.font_weight = FontWeight::BOLD;
+        }
+        if format.italic {
+            text_style.font_style = FontStyle::Italic;
+        }
+        if format.underline {
+            text_style.underline = Some(UnderlineStyle {
+                thickness: px(1.),
+                ..Default::default()
+            });
+        }
+        if format.strikethrough {
+            text_style.strikethrough = Some(StrikethroughStyle {
+                thickness: px(1.),
+                ..Default::default()
+            });
+        }
+        if let Some(ref family) = format.font_family {
+            text_style.font_family = family.clone().into();
+        }
+        if let Some(size) = format.font_size {
+            text_style.font_size = px(size * app.metrics.zoom).into();
+        }
+        if let Some(rgba) = format.font_color {
+            text_style.color = gpui::Hsla::from(gpui::Rgba {
+                r: rgba[0] as f32 / 255.0,
+                g: rgba[1] as f32 / 255.0,
+                b: rgba[2] as f32 / 255.0,
+                a: rgba[3] as f32 / 255.0,
+            });
+        }
+
+        StyledText::new(text_content).with_default_highlights(&text_style, []).into_any_element()
+    } else {
+        div()
+            .text_color(text_color)
+            .text_size(px(app.metrics.font_size))
+            .child(text_content)
+            .into_any_element()
+    }
+}
+
 /// Render text that spills into adjacent empty cells (Excel-style overflow).
 /// This is a separate overlay pass that draws AFTER all cell backgrounds,
 /// ensuring spilled text isn't covered by neighboring cells.
@@ -1785,6 +2240,18 @@ fn render_text_spill_overlay(
 
             // Skip selected/active cells (they don't spill to avoid z-order complexity)
             if view_row == selected_row && col == selected_col {
+                continue;
+            }
+
+            // GUARD: Merged cells must not enter the spill scan.
+            // Merge text is rendered by the merge overlay (render_merge_overlays).
+            // If this guard is removed, merge-origin text will be drawn TWICE:
+            // once by the overlay and once by the spill layer, causing visual
+            // artifacts (double text, wrong z-order, misaligned spill runs).
+            // The predicate get_merge() is tested in engine tests:
+            //   test_merge_get_merge_covers_all_cells
+            //   test_merge_with_text_still_detected_by_get_merge
+            if app.sheet(cx).get_merge(data_row, col).is_some() {
                 continue;
             }
 

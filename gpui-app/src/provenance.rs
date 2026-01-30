@@ -212,6 +212,13 @@ impl UndoAction {
                 // Rewind is audit-only - no executable Lua
                 None
             }
+            UndoAction::SetMerges { sheet_index, description, .. } => {
+                Some(format!(
+                    "grid.{}{{ sheet={} }}",
+                    if description.starts_with("Unmerge") { "unmerge" } else { "merge" },
+                    sheet_index + 1
+                ))
+            }
         }
     }
 
@@ -644,6 +651,7 @@ fn action_affects_sheet(action: &UndoAction, sheet_index: usize) -> bool {
         }
         // Rewind is audit-only, always include
         UndoAction::Rewind { .. } => true,
+        UndoAction::SetMerges { sheet_index: s, .. } => *s == sheet_index,
     }
 }
 

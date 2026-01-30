@@ -53,8 +53,25 @@ impl Spreadsheet {
 
         if let Some((row, col)) = Self::parse_cell_ref(&self.goto_input) {
             if row < NUM_ROWS && col < NUM_COLS {
-                self.view_state.selected = (row, col);
-                self.view_state.selection_end = None;
+                // If target is inside a merge, redirect to origin and select full merge
+                let (target_row, target_col, merge_end) =
+                    if let Some(merge) = self.sheet(cx).get_merge(row, col) {
+                        (merge.start.0, merge.start.1, Some(merge.end))
+                    } else {
+                        (row, col, None)
+                    };
+
+                self.view_state.selected = (target_row, target_col);
+                if let Some(end) = merge_end {
+                    if end != (target_row, target_col) {
+                        self.view_state.selection_end = Some(end);
+                    } else {
+                        self.view_state.selection_end = None;
+                    }
+                } else {
+                    self.view_state.selection_end = None;
+                }
+                self.view_state.additional_selections.clear();
                 self.ensure_visible(cx);
                 self.status_message = Some(format!("Jumped to {}", self.cell_ref()));
             } else {

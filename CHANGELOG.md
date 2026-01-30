@@ -1,5 +1,67 @@
 # Changelog
 
+## Unreleased
+
+### Merged Cells Phase 4 — Copy/Paste with Merge Recreation
+
+Copy, cut, and paste operations now carry merge metadata through the clipboard and recreate merged regions at the paste destination.
+
+- **Copy captures merge metadata** — `InternalClipboard` stores merged regions as relative coordinates. The selection is automatically expanded to include any intersecting merges (e.g., copying a single cell inside a merge captures the full merge).
+- **Paste recreates merges** — Normal paste (Ctrl+V) removes existing merges fully within the paste rectangle, then recreates clipboard merges at the destination offsets. Non-origin cells are cleared (same semantics as manual merge).
+- **Cut removes source merges** — Cut (Ctrl+X) removes merges within the cut selection (move semantics). Both value clearing and merge removal are bundled into a single `Group` undo action.
+- **Overlap guard** — The existing `paste_would_split_merge` check blocks paste when the paste rectangle would partially overlap an existing merge.
+- **Group undo** — Paste and cut operations that involve merges use `UndoAction::Group` to bundle value changes and merge topology changes into a single Ctrl+Z.
+- **Filtered view** — Merge metadata is not captured when copying from a filtered view. Cut in filtered view shows a status message ("merged regions not moved in filtered view") when merges exist in the cut range.
+- **Paste Values / Paste Formulas / Paste Formats** — These paste data only, not structure. Clipboard merge metadata is ignored.
+
+### Merged Cells Phase 5 — UI
+
+Users can now merge and unmerge cells through the UI with full undo/redo support.
+
+- **Merge Cells** (Ctrl+Shift+M) — merges the selected range into a single cell, keeping the upper-left value. Shows a data-loss confirmation dialog when non-origin cells contain data, listing affected cells (or count if >10).
+- **Unmerge Cells** (Ctrl+Shift+U) — unmerges all merged regions overlapping the current selection.
+- **Format menu entries** — "Merge Cells" and "Unmerge Cells" in the Format menu with shortcut hints.
+- **Undo/redo** — `UndoAction::SetMerges` captures merge topology (before/after) and cleared cell values. Undo restores both merges and discarded data; redo re-applies.
+- **Overlap guard** — merging a range that partially overlaps an existing merge shows a status error ("Unmerge first").
+- **Contained merge replacement** — merging a range that fully contains existing merges removes them first, with their origin values captured in the undo payload.
+- **ToggleProblems rebind** — moved from Ctrl+Shift+M to F10 to free the shortcut for Merge Cells.
+
+### Merged Cells Phase 3 — Navigation
+
+Merged cells now behave as single cells for all keyboard navigation. Arrow keys, Ctrl+Arrow data jumps, selection extension, Go To, and edit Tab/Enter flows correctly treat merges as atomic data units, snap to merge origins on landing, and expand selections to cover full merged regions.
+
+- **`find_data_boundary()` merge-aware** — cells inside a merge are treated as occupied (non-empty) for Ctrl+Arrow boundary detection, fixing data-edge scanning through hidden merge cells. Closure renamed `get_cell_value` → `is_cell_empty` to prevent boolean inversion bugs.
+- **`jump_selection()` merge-aware** — starts from the effective merge edge in the movement direction and snaps to merge origin on landing.
+- **`extend_jump_selection()` merge-aware** — same edge-start logic plus expands selection to include the full merge region on landing. Handles anchor-inside-merge edge case by normalizing anchor to `merge.start` before comparison.
+- **`confirm_goto()` merge-aware** — Go To a hidden merge cell redirects to merge origin, selects the full merge region, and clears additional selections.
+- **Tab-chain Enter merge-aware** — `confirm_edit_enter()` and `confirm_edit_up_enter()` snap to merge origin when the tab-chain return position lands on a merged cell.
+- **Engine invariant test** — `test_get_merge_returns_canonical_origin` locks the invariant that `get_merge(r, c).start` always equals the merge origin for every cell inside a merge.
+
+## 0.3.8
+
+### Merged Cells Phase 2 — Rendering
+
+Merged regions now render as unified overlays: hidden/origin cells become transparent spacers in the flex grid; overlays paint background, gridlines, text, user borders, selection tint, and selection borders with correct z-order.
+
+- **Merge overlay layer** — absolutely-positioned overlays render merged cells above the cell grid, between cell rows and the text spill layer. Follows the same pattern as `render_text_spill_overlay()`.
+- **Interactive overlays** — merge overlays have `.id()` and mouse handlers (click, drag, fill) that route to the merge origin. Double-click enters edit mode on the origin cell.
+- **Spacer cells** — hidden cells and non-editing origin cells return minimal transparent divs with only drag-through handlers, eliminating double-rendered backgrounds and text.
+- **Spill exclusion** — merged cells are excluded from the spill scan to prevent double-rendered text. Guard is documented with references to engine tests.
+- **Refactored into helpers** — `collect_visible_merges()` (pure geometry), `render_merge_div()` (single overlay element), `render_merge_overlays()` (orchestrator), `is_merge_in_selection()`, `render_merge_text()`.
+- **Pure geometry APIs** — `MergedRegion::overlaps_viewport()` and `MergedRegion::pixel_rect()` in the engine crate, testable without gpui.
+- **17 ship-gate tests** — viewport overlap (10 tests), pixel rect math (4 tests), spill predicate coverage (2 tests), span width/height (1 test). 476 engine tests total.
+
+#### Known limitation
+
+- **Freeze panes + merges:** merges fully inside the frozen region may not render correctly when scrolling (same limitation as text spill overlay). Both overlays use the scrollable viewport's coordinate system; frozen-region-only merges fall outside the viewport check. Planned for a future "Rendering Overlays v2" pass that adds quadrant-aware overlay rendering for both merges and spill.
+
+#### Manual verification
+
+- Open an XLSX fixture with merged headers + freeze panes
+- Scroll vertically and horizontally; confirm merged overlays render in the scrollable area
+- Edit a merge origin (double-click); confirm caret appears, merge background stays visible
+- Confirm no double-rendered text (spill layer excluded for merged cells)
+
 ## 0.3.7
 
 ### views/mod.rs Split

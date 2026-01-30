@@ -823,6 +823,18 @@ impl RewindConfirmState {
     }
 }
 
+/// State for the merge cells confirmation dialog.
+/// Shown when merging would discard non-empty cell values.
+#[derive(Clone, Debug, Default)]
+pub struct MergeConfirmState {
+    /// Whether the dialog is visible
+    pub visible: bool,
+    /// Cell addresses whose values will be lost (display strings for the dialog)
+    pub affected_cells: Vec<String>,
+    /// The selection range to merge: ((min_row, min_col), (max_row, max_col))
+    pub merge_range: Option<((usize, usize), (usize, usize))>,
+}
+
 /// Banner shown briefly after a successful rewind.
 /// Displays count and provides "Copy audit" for audit trail.
 #[derive(Clone, Debug, Default)]
@@ -1914,6 +1926,9 @@ pub struct Spreadsheet {
     // Rewind success banner (Phase 8C: post-rewind feedback)
     pub rewind_success: RewindSuccessBanner,
 
+    // Merge cells confirmation dialog
+    pub merge_confirm: MergeConfirmState,
+
     // AI Settings dialog state
     pub ai_settings: AISettingsDialogState,
     pub ask_ai: AskAIDialogState,
@@ -2246,6 +2261,8 @@ impl Spreadsheet {
 
             rewind_confirm: RewindConfirmState::default(),
             rewind_success: RewindSuccessBanner::default(),
+
+            merge_confirm: MergeConfirmState::default(),
 
             ai_settings: AISettingsDialogState::default(),
             ask_ai: AskAIDialogState::default(),

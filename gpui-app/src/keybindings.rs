@@ -136,7 +136,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb_shift(m, "i"), ToggleInspector, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "y"), ShowHistoryPanel, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "1"), ShowFormatPanel, Some("Spreadsheet")),
-        KeyBinding::new(&kb_shift(m, "m"), ToggleProblems, Some("Spreadsheet")),
+        KeyBinding::new("f10", ToggleProblems, Some("Spreadsheet")),
         KeyBinding::new("f11", ToggleZenMode, Some("Spreadsheet")),
         KeyBinding::new("f9", Recalculate, Some("Spreadsheet")),  // Excel: force recalculate
         KeyBinding::new(&kb_shift(m, "l"), ToggleLuaConsole, Some("Spreadsheet")),
@@ -145,6 +145,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Borders (Excel: Ctrl+Shift+& = outline, Ctrl+Shift+_ = clear)
         KeyBinding::new(&kb_shift(m, "7"), BordersOutline, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "-"), BordersClear, Some("Spreadsheet")),
+
+        // Merge cells
+        KeyBinding::new(&kb_shift(m, "m"), MergeCells, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "u"), UnmergeCells, Some("Spreadsheet")),
 
         // Split view
         KeyBinding::new(&kb(m, "\\"), SplitRight, Some("Spreadsheet")),

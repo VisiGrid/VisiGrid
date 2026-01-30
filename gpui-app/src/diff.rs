@@ -482,6 +482,9 @@ fn process_action(
 
         // Skip rewind entries (audit-only)
         UndoAction::Rewind { .. } => {}
+
+        // Merge topology changes are structural-like, skip cell tracking
+        UndoAction::SetMerges { .. } => {}
     }
 }
 

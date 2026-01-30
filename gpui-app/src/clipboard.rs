@@ -10,9 +10,10 @@ use gpui::*;
 use visigrid_engine::cell::CellFormat;
 use visigrid_engine::formula::eval::Value;
 use visigrid_engine::provenance::{MutationOp, PasteMode, ClearMode};
+use visigrid_engine::sheet::MergedRegion;
 
 use crate::app::Spreadsheet;
-use crate::history::{CellChange, CellFormatPatch, FormatActionKind};
+use crate::history::{CellChange, CellFormatPatch, FormatActionKind, UndoAction};
 
 /// Maximum rows in the spreadsheet
 const NUM_ROWS: usize = 1_000_000;
@@ -36,6 +37,10 @@ pub struct InternalClipboard {
     /// On paste, we check if clipboard metadata contains this ID to distinguish
     /// internal copies from external clipboard content (even if text matches).
     pub id: u128,
+    /// Merged regions from the copied area, stored with coordinates
+    /// relative to the clipboard's top-left (0,0).
+    /// Empty when copied from a filtered view.
+    pub merges: Vec<MergedRegion>,
 }
 
 impl Spreadsheet {
@@ -61,6 +66,29 @@ impl Spreadsheet {
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
         let is_filtered = self.row_view.is_filtered();
+
+        // Normalize selection to include full merge regions (only when not filtered)
+        let (min_row, min_col, max_row, max_col) = if !is_filtered {
+            let sheet = self.sheet(cx);
+            let mut nr = min_row;
+            let mut nc = min_col;
+            let mut xr = max_row;
+            let mut xc = max_col;
+            // Expand to include any intersecting merges (one pass suffices since merges don't overlap)
+            for merge in &sheet.merged_regions {
+                let intersects = merge.end.0 >= nr && merge.start.0 <= xr
+                              && merge.end.1 >= nc && merge.start.1 <= xc;
+                if intersects {
+                    nr = nr.min(merge.start.0);
+                    nc = nc.min(merge.start.1);
+                    xr = xr.max(merge.end.0);
+                    xc = xc.max(merge.end.1);
+                }
+            }
+            (nr, nc, xr, xc)
+        } else {
+            (min_row, min_col, max_row, max_col)
+        };
 
         // Build tab-separated raw values (formulas) for system clipboard and normal paste
         // When filtered, only include visible rows
@@ -101,6 +129,28 @@ impl Spreadsheet {
             formats.push(row_formats);
         }
 
+        // Capture merge metadata (only when not filtered)
+        let merges = if !is_filtered {
+            let sheet = self.sheet(cx);
+            let mut relative_merges = Vec::new();
+            for merge in &sheet.merged_regions {
+                // After normalization, all intersecting merges are fully contained
+                let contained = merge.start.0 >= min_row && merge.end.0 <= max_row
+                              && merge.start.1 >= min_col && merge.end.1 <= max_col;
+                if contained {
+                    relative_merges.push(MergedRegion::new(
+                        merge.start.0 - min_row,
+                        merge.start.1 - min_col,
+                        merge.end.0 - min_row,
+                        merge.end.1 - min_col,
+                    ));
+                }
+            }
+            relative_merges
+        } else {
+            Vec::new()
+        };
+
         // Generate unique nonce for clipboard matching
         let id: u128 = rand::random();
 
@@ -110,6 +160,7 @@ impl Spreadsheet {
             formats,
             source: (source_row, min_col),
             id,
+            merges,
         });
         // Write clipboard with metadata ID for reliable internal detection
         let id_json = format!("\"{}\"", id);
@@ -132,6 +183,29 @@ impl Spreadsheet {
         // Clear the selected cells and record history (visible rows only when filtered)
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
         let is_filtered = self.row_view.is_filtered();
+
+        // Normalize selection to include full merge regions (same expansion as copy)
+        let (min_row, min_col, max_row, max_col) = if !is_filtered {
+            let sheet = self.sheet(cx);
+            let mut nr = min_row;
+            let mut nc = min_col;
+            let mut xr = max_row;
+            let mut xc = max_col;
+            for merge in &sheet.merged_regions {
+                let intersects = merge.end.0 >= nr && merge.start.0 <= xr
+                              && merge.end.1 >= nc && merge.start.1 <= xc;
+                if intersects {
+                    nr = nr.min(merge.start.0);
+                    nc = nc.min(merge.start.1);
+                    xr = xr.max(merge.end.0);
+                    xc = xc.max(merge.end.1);
+                }
+            }
+            (nr, nc, xr, xc)
+        } else {
+            (min_row, min_col, max_row, max_col)
+        };
+
         let mut changes = Vec::new();
 
         for view_row in min_row..=max_row {
@@ -154,12 +228,68 @@ impl Spreadsheet {
             }
         }
 
-        self.history.record_batch(self.sheet_index(cx), changes);
+        // Remove merges fully within the cut selection (move semantics, not filtered)
+        let mut removed_any = false;
+        let mut merges_before = Vec::new();
+        let mut merges_after = Vec::new();
+
+        if !is_filtered {
+            merges_before = self.sheet(cx).merged_regions.clone();
+            let origins_to_remove: Vec<(usize, usize)> = {
+                let sheet = self.sheet(cx);
+                sheet.merged_regions.iter()
+                    .filter(|merge| {
+                        merge.start.0 >= min_row && merge.end.0 <= max_row
+                        && merge.start.1 >= min_col && merge.end.1 <= max_col
+                    })
+                    .map(|merge| merge.start)
+                    .collect()
+            };
+            removed_any = !origins_to_remove.is_empty();
+            for origin in origins_to_remove {
+                self.active_sheet_mut(cx, |s| { let _ = s.remove_merge(origin); });
+            }
+            merges_after = self.sheet(cx).merged_regions.clone();
+        }
+
+        // Record history: Group if merges were removed, otherwise simple batch
+        if removed_any {
+            let sheet_index = self.sheet_index(cx);
+            let merge_action = UndoAction::SetMerges {
+                sheet_index,
+                before: merges_before,
+                after: merges_after,
+                cleared_values: vec![],
+                description: "Cut: remove source merges".to_string(),
+            };
+            let values_action = UndoAction::Values { sheet_index, changes };
+            // Order matters: redo applies forward, undo applies reverse;
+            // values must precede merges on redo.
+            self.history.record_action_with_provenance(
+                UndoAction::Group {
+                    actions: vec![values_action, merge_action],
+                    description: "Cut".to_string(),
+                },
+                None,
+            );
+        } else {
+            self.history.record_batch(self.sheet_index(cx), changes);
+        }
+
         self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
 
         if is_filtered {
-            self.status_message = Some("Cut visible rows to clipboard".to_string());
+            // Check if there were merges in the cut range that we didn't remove
+            let has_merges_in_range = self.sheet(cx).merged_regions.iter().any(|m| {
+                m.end.0 >= min_row && m.start.0 <= max_row
+                && m.end.1 >= min_col && m.start.1 <= max_col
+            });
+            if has_merges_in_range {
+                self.status_message = Some("Cut visible rows (merged regions not moved in filtered view)".to_string());
+            } else {
+                self.status_message = Some("Cut visible rows to clipboard".to_string());
+            }
         } else {
             self.status_message = Some("Cut to clipboard".to_string());
         }
@@ -302,20 +432,20 @@ impl Spreadsheet {
             // When filtered, paste to consecutive visible rows
             let data_start_row = self.row_view.view_to_data(start_row);
 
+            // Compute paste rectangle for split-merge guard and merge recreation
+            let paste_rows = lines.len();
+            let paste_cols = lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1);
+            let paste_max_row = (data_start_row + paste_rows).saturating_sub(1);
+            let paste_max_col = (start_col + paste_cols).saturating_sub(1);
+
             // Block if paste would split a merged region
-            {
-                let paste_rows = lines.len();
-                let paste_cols = lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1);
-                let dest_max_row = (data_start_row + paste_rows).saturating_sub(1);
-                let dest_max_col = (start_col + paste_cols).saturating_sub(1);
-                if let Some((mr, mc)) = self.paste_would_split_merge(data_start_row, start_col, dest_max_row, dest_max_col, cx) {
-                    self.status_message = Some(format!(
-                        "Cannot paste: would split merged cells at {}{}. Unmerge first.",
-                        Self::col_to_letter(mc), mr + 1,
-                    ));
-                    cx.notify();
-                    return;
-                }
+            if let Some((mr, mc)) = self.paste_would_split_merge(data_start_row, start_col, paste_max_row, paste_max_col, cx) {
+                self.status_message = Some(format!(
+                    "Cannot paste: would split merged cells at {}{}. Unmerge first.",
+                    Self::col_to_letter(mc), mr + 1,
+                ));
+                cx.notify();
+                return;
             }
 
             // Calculate delta from source if this is an internal paste
@@ -401,18 +531,96 @@ impl Spreadsheet {
                 }
             }
 
-            // Record with provenance (only if changes were made)
-            if !changes.is_empty() {
+            // Recreate clipboard merges at destination (only for internal paste, not filtered)
+            let clipboard_merges = if is_internal {
+                self.internal_clipboard.as_ref()
+                    .map(|ic| ic.merges.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            let mut merge_action = None;
+            if !clipboard_merges.is_empty() && !is_filtered {
+                let merges_before = self.sheet(cx).merged_regions.clone();
+
+                // Remove existing merges fully within the paste rectangle
+                let origins_to_remove: Vec<(usize, usize)> = {
+                    let sheet = self.sheet(cx);
+                    sheet.merged_regions.iter()
+                        .filter(|existing| {
+                            existing.start.0 >= data_start_row
+                            && existing.end.0 <= paste_max_row
+                            && existing.start.1 >= start_col
+                            && existing.end.1 <= paste_max_col
+                        })
+                        .map(|existing| existing.start)
+                        .collect()
+                };
+                for origin in origins_to_remove {
+                    self.active_sheet_mut(cx, |s| { let _ = s.remove_merge(origin); });
+                }
+
+                // Add clipboard merges at destination offsets
+                let mut cleared_values: Vec<(usize, usize, String)> = Vec::new();
+                for rel_merge in &clipboard_merges {
+                    let dest = MergedRegion::new(
+                        data_start_row + rel_merge.start.0,
+                        start_col + rel_merge.start.1,
+                        data_start_row + rel_merge.end.0,
+                        start_col + rel_merge.end.1,
+                    );
+                    // Clear non-origin cells (same semantics as merge_cells)
+                    for r in dest.start.0..=dest.end.0 {
+                        for c in dest.start.1..=dest.end.1 {
+                            if (r, c) == dest.start { continue; }
+                            let raw = self.sheet(cx).get_raw(r, c);
+                            if !raw.is_empty() {
+                                cleared_values.push((r, c, raw));
+                                self.active_sheet_mut(cx, |s| s.set_value(r, c, ""));
+                            }
+                        }
+                    }
+                    self.active_sheet_mut(cx, |s| { let _ = s.add_merge(dest); });
+                }
+
+                let merges_after = self.sheet(cx).merged_regions.clone();
+
+                merge_action = Some(UndoAction::SetMerges {
+                    sheet_index: self.sheet_index(cx),
+                    before: merges_before,
+                    after: merges_after,
+                    cleared_values,
+                    description: "Paste: recreate merges".to_string(),
+                });
+            }
+
+            // Record with provenance (only if changes or merge changes were made)
+            if !changes.is_empty() || merge_action.is_some() {
                 let provenance = MutationOp::Paste {
                     sheet: self.sheet(cx).id,
                     dst_row: data_start_row,
                     dst_col: start_col,
                     values: values_grid,
-                    mode: PasteMode::Both,  // Regular paste includes formulas
+                    mode: PasteMode::Both,
                 }.to_provenance(&self.sheet(cx).name);
 
-                self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
-                self.bump_cells_rev();  // Invalidate cell search cache
+                if let Some(merge_act) = merge_action {
+                    // Order matters: redo applies forward, undo applies reverse;
+                    // values must precede merges on redo.
+                    let sheet_index = self.sheet_index(cx);
+                    let values_action = UndoAction::Values { sheet_index, changes };
+                    self.history.record_action_with_provenance(
+                        UndoAction::Group {
+                            actions: vec![values_action, merge_act],
+                            description: "Paste".to_string(),
+                        },
+                        Some(provenance),
+                    );
+                } else if !changes.is_empty() {
+                    self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+                }
+                self.bump_cells_rev();
                 self.is_modified = true;
             }
 

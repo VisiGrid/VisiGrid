@@ -200,13 +200,17 @@ impl Spreadsheet {
         let mut row = start_row;
         let mut col = start_col;
 
-        // Get cell value, converting view row to data row
-        let get_cell_value = |view_row: usize, c: usize| -> bool {
+        // Check if a cell is empty for boundary detection.
+        // Merged cells are a data unit — never "empty" for Ctrl+Arrow.
+        let is_cell_empty = |view_row: usize, c: usize| -> bool {
             let data_row = self.row_view.view_to_data(view_row);
+            if self.sheet(cx).get_merge(data_row, c).is_some() {
+                return false; // occupied
+            }
             self.sheet(cx).get_cell(data_row, c).value.raw_display().is_empty()
         };
 
-        let current_empty = get_cell_value(row, col);
+        let current_empty = is_cell_empty(row, col);
 
         // For vertical movement with filtering, use visible rows
         if dr != 0 && self.row_view.is_filtered() {
@@ -228,7 +232,7 @@ impl Spreadsheet {
             let next_empty = if peek_row == row {
                 true // At edge
             } else {
-                get_cell_value(peek_row, col)
+                is_cell_empty(peek_row, col)
             };
 
             let looking_for_nonempty = current_empty || next_empty;
@@ -248,7 +252,7 @@ impl Spreadsheet {
                 }
 
                 let next_row = visible[next_idx];
-                let cell_empty = get_cell_value(next_row, col);
+                let cell_empty = is_cell_empty(next_row, col);
 
                 if looking_for_nonempty {
                     row = next_row;
@@ -274,7 +278,7 @@ impl Spreadsheet {
         let next_empty = if peek_row == row && peek_col == col {
             true // At edge
         } else {
-            get_cell_value(peek_row, peek_col)
+            is_cell_empty(peek_row, peek_col)
         };
 
         // Determine search mode: looking for non-empty or looking for empty
@@ -295,7 +299,7 @@ impl Spreadsheet {
                 continue;
             }
 
-            let cell_empty = get_cell_value(next_row, next_col);
+            let cell_empty = is_cell_empty(next_row, next_col);
 
             if looking_for_nonempty {
                 // Scanning through empty space: stop at first non-empty or edge
@@ -323,9 +327,26 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
 
         let (row, col) = self.view_state.selected;
-        let (new_row, new_col) = self.find_data_boundary(row, col, dr, dc, cx);
 
-        self.view_state.selected = (new_row, new_col);
+        // Start from effective merge edge (merge = single cell for navigation)
+        let (start_row, start_col) = if let Some(merge) = self.sheet(cx).get_merge(row, col) {
+            let sr = if dr > 0 { merge.end.0 } else if dr < 0 { merge.start.0 } else { row };
+            let sc = if dc > 0 { merge.end.1 } else if dc < 0 { merge.start.1 } else { col };
+            (sr, sc)
+        } else {
+            (row, col)
+        };
+
+        let (new_row, new_col) = self.find_data_boundary(start_row, start_col, dr, dc, cx);
+
+        // Snap to merge origin if landing on a merge
+        let (final_row, final_col) = if let Some(merge) = self.sheet(cx).get_merge(new_row, new_col) {
+            merge.start
+        } else {
+            (new_row, new_col)
+        };
+
+        self.view_state.selected = (final_row, final_col);
         self.view_state.selection_end = None;
         self.ensure_visible(cx);
     }
@@ -335,12 +356,36 @@ impl Spreadsheet {
     pub fn extend_jump_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
-        // Start from current selection end (or selected if no selection)
         let (row, col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
-        let (new_row, new_col) = self.find_data_boundary(row, col, dr, dc, cx);
+        let (anchor_row, anchor_col) = self.view_state.selected;
 
-        // Extend selection to this point (don't move selected, just selection_end)
-        self.view_state.selection_end = Some((new_row, new_col));
+        // Start from effective merge edge
+        let (start_row, start_col) = if let Some(merge) = self.sheet(cx).get_merge(row, col) {
+            let sr = if dr > 0 { merge.end.0 } else if dr < 0 { merge.start.0 } else { row };
+            let sc = if dc > 0 { merge.end.1 } else if dc < 0 { merge.start.1 } else { col };
+            (sr, sc)
+        } else {
+            (row, col)
+        };
+
+        let (new_row, new_col) = self.find_data_boundary(start_row, start_col, dr, dc, cx);
+
+        // Expand to include merge if landing on one.
+        // If anchor is inside the same merge, normalize to merge.start for stable comparison.
+        let (final_row, final_col) = if let Some(merge) = self.sheet(cx).get_merge(new_row, new_col) {
+            let (eff_anchor_row, eff_anchor_col) = if merge.contains(anchor_row, anchor_col) {
+                merge.start
+            } else {
+                (anchor_row, anchor_col)
+            };
+            let eff_row = if eff_anchor_row <= merge.start.0 { merge.end.0 } else { merge.start.0 };
+            let eff_col = if eff_anchor_col <= merge.start.1 { merge.end.1 } else { merge.start.1 };
+            (eff_row, eff_col)
+        } else {
+            (new_row, new_col)
+        };
+
+        self.view_state.selection_end = Some((final_row, final_col));
         self.ensure_visible(cx);
     }
 

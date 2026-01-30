@@ -322,6 +322,25 @@ impl Spreadsheet {
                     self.status_message = Some("Cannot undo rewind".to_string());
                     return;  // Don't modify state
                 }
+                UndoAction::SetMerges { sheet_index, before, cleared_values, description, .. } => {
+                    let before = before;
+                    let cleared = cleared_values;
+                    // Restore merge topology first
+                    self.workbook.update(cx, |wb, _| {
+                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                            sheet.set_merges(before);
+                        }
+                    });
+                    // Restore cleared cell values
+                    for (row, col, value) in cleared {
+                        self.workbook.update(cx, |wb, _| {
+                            if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                                sheet.set_value(row, col, &value);
+                            }
+                        });
+                    }
+                    self.status_message = Some(format!("Undo: {}", description));
+                }
             }
             self.is_modified = true;
             self.request_title_refresh(cx);
@@ -575,6 +594,22 @@ impl Spreadsheet {
                 // Rewind is audit-only - cannot be undone
                 // This should never be reached (Rewind is always last in stack)
             }
+            UndoAction::SetMerges { sheet_index, before, cleared_values, .. } => {
+                // Restore merge topology
+                self.workbook.update(cx, |wb, _| {
+                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                        sheet.set_merges(before);
+                    }
+                });
+                // Restore cleared cell values
+                for (row, col, value) in cleared_values {
+                    self.workbook.update(cx, |wb, _| {
+                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                            sheet.set_value(row, col, &value);
+                        }
+                    });
+                }
+            }
         }
     }
 
@@ -781,6 +816,22 @@ impl Spreadsheet {
             UndoAction::Rewind { .. } => {
                 // Rewind is audit-only - cannot be redone
                 // This should never be reached
+            }
+            UndoAction::SetMerges { sheet_index, after, cleared_values, .. } => {
+                // Clear values that the merge will hide
+                for (row, col, _) in &cleared_values {
+                    self.workbook.update(cx, |wb, _| {
+                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                            sheet.set_value(*row, *col, "");
+                        }
+                    });
+                }
+                // Apply merge topology
+                self.workbook.update(cx, |wb, _| {
+                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                        sheet.set_merges(after);
+                    }
+                });
             }
         }
     }
@@ -1037,6 +1088,25 @@ impl Spreadsheet {
                     // Rewind is audit-only - cannot be redone
                     self.status_message = Some("Cannot redo rewind".to_string());
                     return;  // Don't modify state
+                }
+                UndoAction::SetMerges { sheet_index, after, cleared_values, description, .. } => {
+                    let after = after;
+                    let cleared = cleared_values;
+                    // Clear values that the merge will hide
+                    for (row, col, _) in &cleared {
+                        self.workbook.update(cx, |wb, _| {
+                            if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                                sheet.set_value(*row, *col, "");
+                            }
+                        });
+                    }
+                    // Apply merge topology
+                    self.workbook.update(cx, |wb, _| {
+                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                            sheet.set_merges(after);
+                        }
+                    });
+                    self.status_message = Some(format!("Redo: {}", description));
                 }
             }
             self.is_modified = true;

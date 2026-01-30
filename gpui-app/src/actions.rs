@@ -199,6 +199,9 @@ actions!(format, [
     BordersLeft,     // Apply border to left edge of selection
     BordersRight,    // Apply border to right edge of selection
     BordersClear,    // Clear all borders from selected cells
+    // Merge cells
+    MergeCells,      // Merge selected cells into one
+    UnmergeCells,    // Unmerge selected merged cells
 ]);
 
 // Undo/Redo
