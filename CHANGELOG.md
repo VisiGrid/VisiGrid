@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Merged Cells Phase 4 — Copy/Paste with Merge Recreation
+
+Copy, cut, and paste operations now carry merge metadata through the clipboard and recreate merged regions at the paste destination.
+
+- **Copy captures merge metadata** — `InternalClipboard` stores merged regions as relative coordinates. The selection is automatically expanded to include any intersecting merges (e.g., copying a single cell inside a merge captures the full merge).
+- **Paste recreates merges** — Normal paste (Ctrl+V) removes existing merges fully within the paste rectangle, then recreates clipboard merges at the destination offsets. Non-origin cells are cleared (same semantics as manual merge).
+- **Cut removes source merges** — Cut (Ctrl+X) removes merges within the cut selection (move semantics). Both value clearing and merge removal are bundled into a single `Group` undo action.
+- **Overlap guard** — The existing `paste_would_split_merge` check blocks paste when the paste rectangle would partially overlap an existing merge.
+- **Group undo** — Paste and cut operations that involve merges use `UndoAction::Group` to bundle value changes and merge topology changes into a single Ctrl+Z.
+- **Filtered view** — Merge metadata is not captured when copying from a filtered view. Cut in filtered view shows a status message ("merged regions not moved in filtered view") when merges exist in the cut range.
+- **Paste Values / Paste Formulas / Paste Formats** — These paste data only, not structure. Clipboard merge metadata is ignored.
+
 ### Merged Cells Phase 5 — UI
 
 Users can now merge and unmerge cells through the UI with full undo/redo support.

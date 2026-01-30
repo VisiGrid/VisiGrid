@@ -843,8 +843,8 @@ Merged cells can hide data:
 - [x] Tab-chain Enter/Shift+Enter snap to merge origin (`confirm_edit_enter()`, `confirm_edit_up_enter()`)
 - [x] Selection extension over merges (`extend_selection()`)
 
-**Phase 4: Operations** — PARTIALLY COMPLETE
-- [ ] Copy/paste with merge recreation (clipboard merge metadata)
+**Phase 4: Operations** — COMPLETE
+- [x] Copy/paste with merge recreation (clipboard merge metadata)
 - [x] Insert/delete rows with merge adjustment (shift/expand/shrink/degenerate)
 - [x] Insert/delete columns with merge adjustment
 - [x] Clear content in merged cells (redirects to origin via `clear_cell()`)
@@ -901,9 +901,8 @@ Merged cells can hide data:
 
 ### What's Left
 
-1. **Copy/paste merge recreation** (Phase 4 remainder) — Clipboard carries merge metadata, paste recreates merge at destination
-2. **XLSX export** (Phase 6 remainder) — Write `<mergeCells>` element with per-cell border decomposition
-3. **CSV export** (Phase 6 remainder) — Value in top-left only
+1. **XLSX export** (Phase 6 remainder) — Write `<mergeCells>` element with per-cell border decomposition
+2. **CSV export** (Phase 6 remainder) — Value in top-left only
 
 ### Test Coverage
 
