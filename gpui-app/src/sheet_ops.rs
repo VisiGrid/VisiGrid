@@ -652,6 +652,31 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Show right-click context menu for cells or headers
+    pub fn show_context_menu(
+        &mut self,
+        kind: crate::app::ContextMenuKind,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        // Commit edit if in edit mode (save value, stay in place — don't move cursor)
+        if self.mode.is_editing() {
+            self.commit_pending_edit(cx);
+        }
+        // Cancel format painter if active
+        if self.mode == crate::mode::Mode::FormatPainter {
+            self.cancel_format_painter(cx);
+        }
+        self.context_menu = Some(crate::app::ContextMenuState { kind, position });
+        cx.notify();
+    }
+
+    /// Hide right-click context menu
+    pub fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        cx.notify();
+    }
+
     /// Delete a sheet
     pub fn delete_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.wb_mut(cx, |wb| wb.delete_sheet(index)) {

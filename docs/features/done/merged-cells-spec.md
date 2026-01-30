@@ -863,17 +863,15 @@ Merged cells can hide data:
 
 **Phase 5: UI** — COMPLETE
 - [x] Format menu entries (Merge Cells, Unmerge Cells)
-- [ ] Context menu entries (future)
 - [x] Keyboard shortcuts (Ctrl+Shift+M merge, Ctrl+Shift+U unmerge)
 - [x] Merge warning dialog (data loss confirmation with affected cell list)
 - [x] Undo/redo support (UndoAction::SetMerges with topology + cleared values)
-- [ ] Merge Across (future — separate UX decision)
 
-**Phase 6: File Formats** — PARTIALLY COMPLETE
+**Phase 6: File Formats** — COMPLETE
 - [x] .vgrid persistence (MergedRegion serialized via serde, merge_index rebuilt on load)
 - [x] XLSX import (reads `<mergeCells>`, creates MergedRegion per `<mergeCell>`)
-- [ ] XLSX export (write `<mergeCells>` element)
-- [ ] CSV export (value in top-left only, empty in others)
+- [x] XLSX export (write `<mergeCells>` element)
+- [x] CSV export (value in top-left only, empty in others)
 
 **Phase 7: Edge Cases** — COMPLETE
 - [x] Sort/filter blocked with clear error message
@@ -891,9 +889,9 @@ Merged cells can hide data:
 
 **Phase 3 (Navigation): COMPLETE.** All navigation functions are merge-aware: `move_selection()` and `extend_selection()` move from effective merge edges and snap/expand on landing. `jump_selection()` and `extend_jump_selection()` start from merge edges, snap to origin on landing, and expand selection for merges. `find_data_boundary()` treats merged cells as occupied data units for Ctrl+Arrow. `confirm_goto()` redirects to merge origin and selects the full merge. Tab-chain Enter/Shift+Enter snap to merge origin.
 
-**Phase 4 (Operations — Semantic Correctness): MOSTLY COMPLETE.** All value write entry points redirect to merge origin. Formula CellRef evaluation redirects single-cell refs to origin while range iteration treats hidden cells as empty. 12 bulk operations are guarded with `block_if_merged()` or `paste_would_split_merge()`. Remaining: copy/paste with merge recreation.
+**Phase 4 (Operations — Semantic Correctness): COMPLETE.** All value write entry points redirect to merge origin. Formula CellRef evaluation redirects single-cell refs to origin while range iteration treats hidden cells as empty. 12 bulk operations are guarded with `block_if_merged()` or `paste_would_split_merge()`. Copy/paste recreates merge structure at destination with group undo.
 
-**Phase 6 (File Formats): PARTIALLY COMPLETE.** .vgrid and XLSX import work. XLSX export and CSV export remain.
+**Phase 6 (File Formats): COMPLETE.** .vgrid persistence, XLSX import/export, and CSV export are all merge-aware. XLSX export writes `<mergeCells>` and skips hidden cell values; CSV export forces hidden cells to empty. Roundtrip tests verify origin values survive and hidden data never leaks.
 
 **Phase 7 (Edge Cases): COMPLETE.** Sort/filter blocked, overlap detection, formula redirect semantics all implemented and tested.
 
@@ -901,12 +899,11 @@ Merged cells can hide data:
 
 ### What's Left
 
-1. **XLSX export** (Phase 6 remainder) — Write `<mergeCells>` element with per-cell border decomposition
-2. **CSV export** (Phase 6 remainder) — Value in top-left only
+All phases are complete. Future items (Merge Across, context menu entries, copy/paste with merge recreation) are tracked in `docs/roadmap.md`.
 
 ### Test Coverage
 
-37 merge-specific tests across the engine:
+39 merge-specific tests across engine and IO:
 
 **`sheet.rs` data model (27 tests):** `test_merged_region_basic`, `test_merge_index_lookup`, `test_add_merge_overlap_rejected`, `test_add_merge_degenerate_ignored`, `test_remove_merge`, `test_merge_insert_row_shift`, `test_merge_insert_row_expand`, `test_merge_insert_row_below`, `test_merge_delete_row_shrink`, `test_merge_delete_row_degenerate`, `test_merge_delete_row_above`, `test_merge_insert_col_shift`, `test_merge_insert_col_expand`, `test_merge_delete_col_shrink`, `test_merge_delete_band_clips_top`, `test_merge_delete_band_clips_bottom`, `test_merge_delete_band_degenerates_wide`, `test_merge_delete_col_band_degenerates`, `test_merge_serde_roundtrip`, `test_resolve_merge_borders_no_borders`, `test_resolve_merge_borders_uniform_thin`, `test_resolve_merge_borders_mixed_precedence`, `test_resolve_merge_borders_single_styled_cell`, `test_adjacent_merges_shared_border`, `test_merge_at_viewport_boundary`, `test_merge_origin_coord`, `test_get_merge_returns_canonical_origin`
 
@@ -920,6 +917,10 @@ Merged cells can hide data:
 **`workbook.rs` formula tests (4 tests):** `test_formula_single_ref_redirect`, `test_formula_range_hidden_empty`, `test_formula_explicit_refs_redirect`, `test_formula_cross_sheet_ref_redirect`
 
 **`cell.rs` merge override tests (3 tests):** `test_merge_override_empty`, `test_merge_override_replaces_fields`, `test_merge_override_clears_option_fields`
+
+**IO export tests (2 tests — Phase 6):**
+- `test_csv_export_merged_cells_no_leak` — residual data in merge-hidden cells does not leak into CSV output
+- `test_xlsx_export_merged_cells_no_leak` — XLSX roundtrip preserves origin values, suppresses hidden data, and retains merge structure
 
 ### Guarded Operations (12 total)
 

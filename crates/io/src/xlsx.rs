@@ -1008,7 +1008,26 @@ pub fn export(
         // Get layout for this sheet if provided
         let layout = layouts.and_then(|l| l.get(sheet_idx));
 
-        // Export cells
+        // Export merged cell regions first — merge_range() writes blanks to all
+        // cells in the range, then export_sheet_cells() overwrites the origin
+        // cell with the correct typed value (number, formula, etc.).
+        let merge_format = Format::new();
+        for merge in &sheet.merged_regions {
+            worksheet
+                .merge_range(
+                    merge.start.0 as u32,
+                    merge.start.1 as u16,
+                    merge.end.0 as u32,
+                    merge.end.1 as u16,
+                    "",
+                    &merge_format,
+                )
+                .map_err(|e| format!("Failed to write merge: {}", e))?;
+            result.merges_exported += 1;
+        }
+
+        // Export cells (skips merge-hidden cells; origin cells overwrite the
+        // blank written by merge_range above)
         let (cells, formulas, as_values, converted, precision) = export_sheet_cells(sheet, worksheet)?;
         result.cells_exported += cells;
         result.formulas_exported += formulas;
@@ -1025,22 +1044,6 @@ pub fn export(
         let (exported, skipped) = export_validation_rules(worksheet, sheet)?;
         result.validations_exported += exported;
         result.validations_skipped += skipped;
-
-        // Export merged cell regions
-        let merge_format = Format::new();
-        for merge in &sheet.merged_regions {
-            worksheet
-                .merge_range(
-                    merge.start.0 as u32,
-                    merge.start.1 as u16,
-                    merge.end.0 as u32,
-                    merge.end.1 as u16,
-                    "",
-                    &merge_format,
-                )
-                .map_err(|e| format!("Failed to write merge: {}", e))?;
-            result.merges_exported += 1;
-        }
 
         result.sheets_exported += 1;
     }
@@ -1094,6 +1097,11 @@ fn export_sheet_cells(
     for ((row, col), cell) in sheet.cells_iter() {
         // Skip spill receiver cells - they'll be filled by Excel when recalculating
         if cell.is_spill_receiver() {
+            continue;
+        }
+
+        // Skip merge-hidden cells - only the origin cell exports its value
+        if sheet.is_merge_hidden(*row, *col) {
             continue;
         }
 
@@ -2559,6 +2567,58 @@ mod tests {
         // 3 supported (List, WholeNumber, Decimal), 2 skipped (Date, Custom)
         assert_eq!(result.validations_exported, 3);
         assert_eq!(result.validations_skipped, 2);
+    }
+
+    // ========================================================================
+    // Merge export tests
+    // ========================================================================
+
+    #[test]
+    fn test_xlsx_export_merged_cells_no_leak() {
+        use visigrid_engine::sheet::MergedRegion;
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+
+        // Set values that will become merge-hidden
+        sheet.set_value(0, 0, "Header");
+        sheet.set_value(0, 1, "LEAK1");
+        sheet.set_value(0, 2, "LEAK2");
+        sheet.set_value(1, 0, "10");
+        sheet.set_value(1, 1, "20");
+        sheet.set_value(1, 2, "30");
+
+        // Merge A1:C1 — B1/C1 become hidden but hold residual data
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("test_merge_leak.xlsx");
+
+        let result = export(&workbook, &export_path, None).unwrap();
+        assert_eq!(result.merges_exported, 1);
+
+        // Re-import and verify origin value survives, hidden values don't leak
+        let (imported_wb, import_result) = import(&export_path).expect("Import should succeed");
+        let imported = &imported_wb.sheets()[0];
+
+        // Origin cell must retain its value
+        assert_eq!(imported.get_display(0, 0), "Header", "merge origin should survive roundtrip");
+
+        // Hidden cells must not contain residual data
+        let b1 = imported.get_display(0, 1);
+        let c1 = imported.get_display(0, 2);
+        assert!(b1.is_empty(), "hidden merge cell B1 leaked: {b1}");
+        assert!(c1.is_empty(), "hidden merge cell C1 leaked: {c1}");
+
+        // Non-merged cells are unaffected
+        assert_eq!(imported.get_display(1, 0), "10");
+        assert_eq!(imported.get_display(1, 1), "20");
+        assert_eq!(imported.get_display(1, 2), "30");
+
+        // Merge structure survived roundtrip
+        assert_eq!(import_result.merges_imported, 1);
+        assert!(imported.is_merge_hidden(0, 1), "B1 should be merge-hidden after import");
+        assert!(imported.is_merge_hidden(0, 2), "C1 should be merge-hidden after import");
     }
 
     // ========================================================================

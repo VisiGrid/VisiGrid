@@ -128,6 +128,7 @@ actions!(view, [
     ToggleProblems,
     ToggleZenMode,
     ToggleLuaConsole, // Ctrl+Shift+L - Lua scripting REPL
+    ToggleFormatBar,
     ToggleFormulaView,
     ToggleShowZeros,
     ToggleVerifiedMode, // Toggle verified/deterministic recalc mode

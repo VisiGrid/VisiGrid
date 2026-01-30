@@ -8,6 +8,11 @@ pub(crate) fn handle_key_down(
     window: &mut Window,
     cx: &mut Context<Spreadsheet>,
 ) {
+    // Format bar owns focus: don't route keys to the grid
+    if this.ui.format_bar.is_active(window) {
+        return;
+    }
+
     // KeyTips: if active, route key to handler (takes precedence)
     if this.keytips_active {
         if this.keytips_handle_key(&event.keystroke.key, cx) {
@@ -31,6 +36,17 @@ pub(crate) fn handle_key_down(
         this.hide_sheet_context_menu(cx);
         if event.keystroke.key == "escape" {
             return;
+        }
+    }
+
+    // Handle cell/header context menu (close on non-modifier keys)
+    if this.context_menu.is_some() {
+        let key = &event.keystroke.key;
+        if key != "shift" && key != "control" && key != "alt" && key != "cmd" {
+            this.hide_context_menu(cx);
+            if key == "escape" {
+                return;
+            }
         }
     }
 

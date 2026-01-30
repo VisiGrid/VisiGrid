@@ -74,6 +74,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Show Formulas", ToggleFormulaView),
                 MenuItem::action("Show Zeros", ToggleShowZeros),
+                MenuItem::action("Format Bar", ToggleFormatBar),
             ],
         },
         // Format menu

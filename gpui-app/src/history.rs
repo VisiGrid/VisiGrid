@@ -94,6 +94,8 @@ pub enum FormatActionKind {
     NumberFormat,
     DecimalPlaces,  // Special: coalesces rapidly
     BackgroundColor,
+    FontSize,
+    FontColor,
     Border,
     PasteFormats,  // Paste Special > Formats
     ClearFormatting,

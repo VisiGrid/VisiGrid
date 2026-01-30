@@ -9,20 +9,23 @@ use gpui::{FocusHandle, Hsla};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorTarget {
     Fill,
-    // Future: Text, Border
+    Text,
 }
 
 impl ColorTarget {
     pub fn title(self) -> &'static str {
         match self {
             Self::Fill => "Fill Color",
+            Self::Text => "Text Color",
         }
     }
 
-    /// Whether the "No Fill" / clear option is available for this target.
+    /// Whether the "No Fill" / "Automatic" clear option is available for this target.
+    /// For Text, None means Automatic (use theme default text color).
     pub fn allow_none(self) -> bool {
         match self {
             Self::Fill => true,
+            Self::Text => true,
         }
     }
 }

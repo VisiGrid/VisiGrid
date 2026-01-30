@@ -118,6 +118,9 @@ pub(crate) fn bind(
             this.inspector_visible = !this.inspector_visible;
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &ToggleFormatBar, _, cx| {
+            this.toggle_format_bar(cx);
+        }))
         .on_action(cx.listener(|this, _: &ToggleZenMode, _, cx| {
             this.zen_mode = !this.zen_mode;
             cx.notify();

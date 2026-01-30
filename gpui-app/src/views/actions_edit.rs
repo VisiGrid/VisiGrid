@@ -85,6 +85,8 @@ pub(crate) fn bind(
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &DeleteCell, window, cx| {
+            // Format bar editing consumes actions before Spreadsheet editing.
+            if this.ui.format_bar.size_editing { return; }
             if !this.mode.is_editing() {
                 this.delete_selection(cx);
                 this.update_title_if_needed(window, cx);
@@ -126,6 +128,14 @@ pub(crate) fn bind(
             this.maybe_show_f2_tip(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
+            // Format bar editing consumes actions before Spreadsheet editing.
+            // gpui dispatches keybinding actions before on_key_down, so the
+            // format bar's own key handler never sees Enter/Esc/Backspace.
+            // These guards are the ONLY way format bar input works.
+            if this.ui.format_bar.size_editing {
+                crate::views::format_bar::commit_font_size(this, cx);
+                return;
+            }
             // Let AI dialogs handle their own keys
             if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
@@ -195,6 +205,15 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &CancelEdit, window, cx| {
+            // Format bar editing consumes actions before Spreadsheet editing.
+            // See ConfirmEdit guard above for rationale.
+            if this.ui.format_bar.size_editing {
+                this.ui.format_bar.size_editing = false;
+                this.ui.format_bar.size_dropdown = false;
+                this.ui.format_bar.size_replace_next = false;
+                cx.notify();
+                return;
+            }
             // Sheet rename: Escape cancels
             if this.renaming_sheet.is_some() {
                 this.cancel_sheet_rename(cx);
@@ -283,6 +302,13 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &TabNext, window, cx| {
+            // Format bar editing consumes actions before Spreadsheet editing.
+            // See ConfirmEdit guard above for rationale.
+            if this.ui.format_bar.size_editing {
+                crate::views::format_bar::commit_font_size(this, cx);
+                window.focus(&this.focus_handle, cx);
+                return;
+            }
             // Let AI dialogs handle their own keys
             if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
@@ -326,6 +352,14 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &BackspaceChar, window, cx| {
+            // Format bar editing consumes actions before Spreadsheet editing.
+            // See ConfirmEdit guard above for rationale.
+            if this.ui.format_bar.size_editing {
+                this.ui.format_bar.size_replace_next = false;
+                this.ui.format_bar.size_input.pop();
+                cx.notify();
+                return;
+            }
             // AI dialogs handle their own backspace
             if this.mode == Mode::AISettings {
                 this.ai_settings_backspace(cx);
@@ -384,6 +418,8 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &DeleteChar, window, cx| {
+            // Format bar editing consumes actions before Spreadsheet editing.
+            if this.ui.format_bar.size_editing { return; }
             // Let AI dialogs handle their own keys
             if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;

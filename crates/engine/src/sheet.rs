@@ -964,6 +964,16 @@ impl Sheet {
             .and_then(|c| c.format.background_color)
     }
 
+    pub fn set_font_size(&mut self, row: usize, col: usize, size: Option<f32>) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.font_size = size;
+    }
+
+    pub fn set_font_color(&mut self, row: usize, col: usize, color: Option<[u8; 4]>) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.font_color = color;
+    }
+
     /// Set all 4 borders on a cell at once
     pub fn set_borders(
         &mut self,
@@ -4281,5 +4291,31 @@ mod tests {
         assert!(sheet.get_merge(0, 0).is_none());
         assert!(sheet.get_merge(4, 0).is_none());
         assert!(sheet.get_merge(6, 0).is_none());
+    }
+
+    /// Regression: set_font_size must persist and be visible to get_format,
+    /// and the before/after PartialEq comparison must detect the change.
+    /// This is the engine contract that set_font_size_selection relies on.
+    #[test]
+    fn test_set_font_size_roundtrip_and_partial_eq() {
+        let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+        // Before: default format has no font_size
+        let before = sheet.get_format(0, 0);
+        assert_eq!(before.font_size, None);
+
+        // Set font_size = 24
+        sheet.set_font_size(0, 0, Some(24.0));
+        let after = sheet.get_format(0, 0);
+        assert_eq!(after.font_size, Some(24.0));
+
+        // PartialEq must detect the change (critical for undo patch generation)
+        assert_ne!(before, after, "CellFormat PartialEq must detect font_size change");
+
+        // Clear font_size back to None
+        sheet.set_font_size(0, 0, None);
+        let cleared = sheet.get_format(0, 0);
+        assert_eq!(cleared.font_size, None);
+        assert_eq!(before, cleared, "Clearing font_size should restore default equality");
     }
 }

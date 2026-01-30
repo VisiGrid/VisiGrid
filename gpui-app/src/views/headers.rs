@@ -197,6 +197,11 @@ fn render_column_header(
                 return;
             }
 
+            // If editing, commit before selecting column
+            if this.mode.is_editing() {
+                this.commit_pending_edit(cx);
+            }
+
             if event.modifiers.shift {
                 // Shift+click: extend selection
                 this.select_col(col, true, cx);
@@ -207,6 +212,18 @@ fn render_column_header(
                 // Regular click: start drag selection
                 this.start_col_header_drag(col, cx);
             }
+        }))
+        // Right-click: open column context menu
+        .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            // If column not in current selection, select it first
+            if !this.is_col_header_selected(col) {
+                this.select_col(col, false, cx);
+            }
+            this.show_context_menu(
+                crate::app::ContextMenuKind::ColHeader,
+                event.position,
+                cx,
+            );
         }))
         // Resize handle on the right edge
         .child(
@@ -287,6 +304,11 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
                 return;
             }
 
+            // If editing, commit before selecting row
+            if this.mode.is_editing() {
+                this.commit_pending_edit(cx);
+            }
+
             if event.modifiers.shift {
                 // Shift+click: extend selection
                 this.select_row(row, true, cx);
@@ -297,6 +319,18 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
                 // Regular click: start drag selection
                 this.start_row_header_drag(row, cx);
             }
+        }))
+        // Right-click: open row context menu
+        .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            // If row not in current selection, select it first
+            if !this.is_row_header_selected(row) {
+                this.select_row(row, false, cx);
+            }
+            this.show_context_menu(
+                crate::app::ContextMenuKind::RowHeader,
+                event.position,
+                cx,
+            );
         }))
         // Resize handle on the bottom edge
         .child(

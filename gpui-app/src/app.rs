@@ -439,6 +439,21 @@ pub enum FillDrag {
 
 use visigrid_engine::cell::{Alignment, CellBorder, VerticalAlignment, TextOverflow, NumberFormat, max_border};
 
+/// Which context menu variant to display on right-click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMenuKind {
+    Cell,
+    RowHeader,
+    ColHeader,
+}
+
+/// State for the right-click context menu on cells/headers.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextMenuState {
+    pub kind: ContextMenuKind,
+    pub position: Point<Pixels>,
+}
+
 /// State of the "set as default app" prompt in the title bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DefaultAppPromptState {
@@ -1506,6 +1521,27 @@ impl CellRect {
 /// incrementally (opportunistic, not a scheduled refactor).
 pub struct UiState {
     pub color_picker: crate::color_palette::ColorPickerState,
+    pub format_bar: FormatBarState,
+}
+
+/// Transient UI state for the format bar (font size input, dropdown).
+/// Never serialized, no undo semantics.
+pub struct FormatBarState {
+    pub size_input: String,
+    pub size_editing: bool,
+    pub size_dropdown: bool,
+    pub size_focus: FocusHandle,
+    /// True on the first keypress after entering edit mode — clears the buffer
+    /// so the user can type a replacement value without manually selecting all.
+    pub size_replace_next: bool,
+}
+
+impl FormatBarState {
+    /// Returns true when the format bar owns focus (editing or dropdown open).
+    /// Used to gate grid keyboard and mouse handling.
+    pub fn is_active(&self, window: &Window) -> bool {
+        self.size_editing || self.size_dropdown || self.size_focus.is_focused(window)
+    }
 }
 
 pub struct Spreadsheet {
@@ -1635,6 +1671,7 @@ pub struct Spreadsheet {
     pub sheet_rename_cursor: usize,        // Cursor position (byte index)
     pub sheet_rename_select_all: bool,     // Text is fully selected (typing replaces all)
     pub sheet_context_menu: Option<usize>, // Index of sheet with open context menu
+    pub context_menu: Option<ContextMenuState>, // Right-click context menu on cells/headers
 
     // Font picker state
     pub available_fonts: Vec<String>,      // System fonts
@@ -1981,6 +2018,13 @@ impl Spreadsheet {
         let font_picker_focus = cx.focus_handle();
         let ui = UiState {
             color_picker: crate::color_palette::ColorPickerState::new(cx.focus_handle()),
+            format_bar: FormatBarState {
+                size_input: String::new(),
+                size_editing: false,
+                size_dropdown: false,
+                size_focus: cx.focus_handle(),
+                size_replace_next: false,
+            },
         };
         window.focus(&focus_handle, cx);
         let window_size = window.viewport_size();
@@ -2075,6 +2119,7 @@ impl Spreadsheet {
             sheet_rename_cursor: 0,
             sheet_rename_select_all: false,
             sheet_context_menu: None,
+            context_menu: None,
             available_fonts: Self::enumerate_fonts(),
             font_picker_query: String::new(),
             font_picker_selected: 0,
@@ -2701,6 +2746,19 @@ impl Spreadsheet {
         let current = self.show_zeros();
         self.doc_settings.display.show_zeros = Setting::Value(!current);
         self.save_doc_settings_if_needed();
+        cx.notify();
+    }
+
+    /// Toggle the format bar visibility (user setting, persisted)
+    pub fn toggle_format_bar(&mut self, cx: &mut Context<Self>) {
+        use crate::settings::Setting;
+        let current = match &user_settings(cx).appearance.show_format_bar {
+            Setting::Value(v) => *v,
+            Setting::Inherit => true,
+        };
+        update_user_settings(cx, |s| {
+            s.appearance.show_format_bar = Setting::Value(!current);
+        });
         cx.notify();
     }
 

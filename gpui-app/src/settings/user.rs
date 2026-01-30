@@ -44,9 +44,17 @@ pub struct AppearanceSettings {
     /// Show gridlines by default
     #[serde(default = "default_show_gridlines", skip_serializing_if = "Setting::is_inherit")]
     pub show_gridlines: Setting<bool>,
+
+    /// Show format bar between formula bar and grid
+    #[serde(default = "default_show_format_bar", skip_serializing_if = "Setting::is_inherit")]
+    pub show_format_bar: Setting<bool>,
 }
 
 fn default_show_gridlines() -> Setting<bool> {
+    Setting::Value(true)
+}
+
+fn default_show_format_bar() -> Setting<bool> {
     Setting::Value(true)
 }
 
@@ -55,6 +63,7 @@ impl Default for AppearanceSettings {
         Self {
             theme_id: Setting::Inherit, // Use app default theme
             show_gridlines: Setting::Value(true),
+            show_format_bar: Setting::Value(true),
         }
     }
 }

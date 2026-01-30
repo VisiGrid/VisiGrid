@@ -262,8 +262,8 @@ fn looks_like_header_row(row: &[String]) -> bool {
         .filter(|s| s.parse::<f64>().is_err())
         .count();
 
-    // At least 70% should be text
-    text_count * 10 >= non_empty.len() * 7
+    // At least 60% should be text (allows mixed headers like "ID", "123", "Product")
+    text_count * 10 >= non_empty.len() * 6
 }
 
 /// Build AI context from a selected range

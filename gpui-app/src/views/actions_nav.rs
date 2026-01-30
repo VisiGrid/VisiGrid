@@ -10,6 +10,17 @@ pub(crate) fn bind(
     el
         // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
+            // Format bar editing consumes navigation actions before grid movement.
+            // See ConfirmEdit in actions_edit.rs for the full rationale.
+            if this.ui.format_bar.size_editing {
+                if let Ok(n) = this.ui.format_bar.size_input.parse::<u32>() {
+                    let new_size = (n + 1).min(400);
+                    this.ui.format_bar.size_input = format!("{}", new_size);
+                    this.ui.format_bar.size_replace_next = false;
+                    cx.notify();
+                }
+                return;
+            }
             // Let AI dialogs handle their own keys
             if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
@@ -59,6 +70,16 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
+            // Format bar editing consumes navigation actions before grid movement.
+            if this.ui.format_bar.size_editing {
+                if let Ok(n) = this.ui.format_bar.size_input.parse::<u32>() {
+                    let new_size = n.saturating_sub(1).max(1);
+                    this.ui.format_bar.size_input = format!("{}", new_size);
+                    this.ui.format_bar.size_replace_next = false;
+                    cx.notify();
+                }
+                return;
+            }
             // Let AI dialogs handle their own keys
             if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
@@ -108,6 +129,8 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &MoveLeft, window, cx| {
+            // Format bar editing consumes navigation actions before grid movement.
+            if this.ui.format_bar.size_editing { return; }
             // Let AI dialogs handle their own keys
             if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
@@ -154,6 +177,8 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &MoveRight, window, cx| {
+            // Format bar editing consumes navigation actions before grid movement.
+            if this.ui.format_bar.size_editing { return; }
             // Let AI dialogs handle their own keys
             if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;

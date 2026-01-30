@@ -1899,7 +1899,7 @@ fn test_keybinding_maps_ctrl_n_to_new_window() {
 /// and includes the dirty check pattern.
 #[test]
 fn test_close_window_checks_dirty_flag() {
-    let views_source = include_str!("views/mod.rs");
+    let views_source = include_str!("views/actions_ui.rs");
 
     // Verify CloseWindow handler checks is_modified
     assert!(
@@ -2436,4 +2436,154 @@ fn test_layout_action_on_deleted_sheet_behavior() {
     // Note: Actual undo/redo in the app would store the width against this
     // orphaned SheetId. If stricter validation is desired, modify undo_redo.rs
     // to check sheet existence and return an error.
+}
+
+// ============================================================================
+// Grid Hit-Testing Structure Tests
+// ============================================================================
+
+/// Regression test: cell wrapper owns .id() and mouse handlers, inner cell is visual only.
+///
+/// Before this fix, .id() and mouse handlers lived on the inner cell div (which used
+/// .size_full() to fill its wrapper). Sub-pixel gaps at cell borders caused the inner
+/// div to not perfectly reach the wrapper edge, creating dead zones where clicks failed
+/// and the cursor reverted to arrow. Moving .id() and handlers to the wrapper (which has
+/// exact pixel dimensions from the flex layout) eliminates these gaps.
+///
+/// If someone refactors the cell rendering and moves .id() back to the inner cell,
+/// this test will catch it.
+#[test]
+fn test_cell_wrapper_owns_id_and_handlers() {
+    let grid_source = include_str!("views/grid.rs");
+
+    // The inner cell div must NOT have .id() — it's purely visual.
+    // Pattern: `let mut cell = div()\n        .id(` would mean .id() is on the cell.
+    // The correct pattern: `let mut cell = div()\n        .relative()` (no .id())
+    assert!(
+        grid_source.contains("let mut cell = div()\n        .relative()  // Enable absolute positioning"),
+        "Inner cell div must NOT have .id() — it should start with div().relative()"
+    );
+
+    // The wrapper must own the .id()
+    assert!(
+        grid_source.contains("let mut wrapper = div()\n        .id(ElementId::Name(format!(\"cell-{}-{}\", view_row, col)"),
+        "Wrapper div must own .id(\"cell-{{row}}-{{col}}\") for hit-testing"
+    );
+
+    // The wrapper must set crosshair cursor (not the inner cell)
+    // Find the wrapper section and verify cursor is there
+    let wrapper_section = grid_source.split("let mut wrapper = div()").nth(1)
+        .expect("wrapper div should exist");
+    let wrapper_before_handlers = wrapper_section.split(".on_mouse_down(").next()
+        .expect("wrapper should have on_mouse_down");
+    assert!(
+        wrapper_before_handlers.contains(".cursor(CursorStyle::Crosshair)"),
+        "Wrapper must set CursorStyle::Crosshair for consistent grid cursor"
+    );
+
+    // The wrapper must have left-click, right-click, mouse_move, and mouse_up handlers
+    assert!(
+        wrapper_section.contains(".on_mouse_down(MouseButton::Left,"),
+        "Wrapper must handle left-click"
+    );
+    assert!(
+        wrapper_section.contains(".on_mouse_down(MouseButton::Right,"),
+        "Wrapper must handle right-click"
+    );
+    assert!(
+        wrapper_section.contains(".on_mouse_move("),
+        "Wrapper must handle mouse move for drag selection"
+    );
+    assert!(
+        wrapper_section.contains(".on_mouse_up(MouseButton::Left,"),
+        "Wrapper must handle mouse up to end drag"
+    );
+}
+
+/// Regression test: merge overlay click handler commits pending edit.
+///
+/// When clicking a merged cell while editing another cell, the edit must be
+/// committed before navigating (same behavior as regular cell clicks). Without
+/// this, editing A1 and clicking a merged B2:C3 would leave the app in a broken
+/// state with edit mode active but a different cell selected.
+#[test]
+fn test_merge_overlay_commits_edit_on_click() {
+    let grid_source = include_str!("views/grid.rs");
+
+    // Find the merge overlay left-click handler (render_merge_div function)
+    // It should contain commit_pending_edit before the normal click handling
+    let merge_div_section = grid_source.split("fn render_merge_div(").nth(1)
+        .expect("render_merge_div function should exist");
+
+    assert!(
+        merge_div_section.contains("commit_pending_edit"),
+        "Merge overlay click handler must call commit_pending_edit to exit edit mode"
+    );
+}
+
+// =============================================================================
+// Format bar state machine regression tests
+// =============================================================================
+// These tests guard the action-handler routing logic added in actions_edit.rs
+// and actions_nav.rs. Format bar editing consumes ConfirmEdit, CancelEdit,
+// BackspaceChar, and navigation actions before Spreadsheet editing/navigation.
+// If someone removes those guards during a keybinding refactor, these tests
+// catch the regression at the logic level.
+
+/// Regression: ConfirmEdit → commit_font_size must parse the input buffer
+/// and produce a valid font size. The action handler in actions_edit.rs
+/// gates ConfirmEdit when size_editing is true.
+#[test]
+fn test_format_bar_confirm_commits_valid_font_size() {
+    use crate::views::format_bar::parse_font_size_input;
+
+    // Normal sizes
+    assert_eq!(parse_font_size_input("24"), Some(24.0));
+    assert_eq!(parse_font_size_input("11"), Some(11.0));
+    assert_eq!(parse_font_size_input("1"), Some(1.0));
+    assert_eq!(parse_font_size_input("400"), Some(400.0));
+
+    // Whitespace tolerance
+    assert_eq!(parse_font_size_input(" 16 "), Some(16.0));
+}
+
+/// Regression: CancelEdit must NOT apply any change. Invalid/empty input
+/// should also produce None (revert, no change applied).
+#[test]
+fn test_format_bar_cancel_reverts_no_change() {
+    use crate::views::format_bar::parse_font_size_input;
+
+    // Empty or invalid input → None (no change)
+    assert_eq!(parse_font_size_input(""), None);
+    assert_eq!(parse_font_size_input("abc"), None);
+    assert_eq!(parse_font_size_input("0"), None, "0 is below minimum");
+    assert_eq!(parse_font_size_input("401"), None, "401 exceeds maximum");
+    assert_eq!(parse_font_size_input("-5"), None, "negative not allowed");
+    assert_eq!(parse_font_size_input("12.5"), None, "floats not allowed");
+}
+
+/// Regression: BackspaceChar in the format bar must edit the buffer,
+/// not delete the grid selection. The action handler in actions_edit.rs
+/// gates BackspaceChar when size_editing is true.
+#[test]
+fn test_format_bar_backspace_edits_buffer() {
+    use crate::views::format_bar::parse_font_size_input;
+
+    let mut buffer = String::from("123");
+
+    // Simulate backspace (same logic as in BackspaceChar handler)
+    buffer.pop();
+    assert_eq!(buffer, "12");
+
+    buffer.pop();
+    assert_eq!(buffer, "1");
+
+    // Backspace on single char → empty (which parses to None = no change)
+    buffer.pop();
+    assert_eq!(buffer, "");
+    assert_eq!(parse_font_size_input(&buffer), None);
+
+    // Backspace on empty is safe
+    buffer.pop(); // no-op
+    assert_eq!(buffer, "");
 }

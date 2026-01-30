@@ -334,6 +334,20 @@ fn format_to_lua(
                 "bg=nil".to_string()
             }
         }
+        FormatActionKind::FontSize => {
+            if let Some(size) = first.after.font_size {
+                format!("font_size={}", size as u32)
+            } else {
+                "font_size=nil".to_string()
+            }
+        }
+        FormatActionKind::FontColor => {
+            if let Some(color) = first.after.font_color {
+                format!("font_color=\"#{}\"", format_color(color))
+            } else {
+                "font_color=nil".to_string()
+            }
+        }
         FormatActionKind::Border => {
             "border=true".to_string() // Simplified; full border state is complex
         }

@@ -411,6 +411,60 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Set font size on all selected cells
+    pub fn set_font_size_selection(&mut self, size: Option<f32>, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_font_size(row, col, size));
+                    let after = self.sheet(cx).get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let desc = if let Some(s) = size {
+                format!("Font size {}", s as u32)
+            } else {
+                "Clear font size".to_string()
+            };
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::FontSize, desc.clone());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Set font color on all selected cells
+    pub fn set_font_color_selection(&mut self, color: Option<[u8; 4]>, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_font_color(row, col, color));
+                    let after = self.sheet(cx).get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let desc = if color.is_some() { "Text color" } else { "Clear text color" };
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::FontColor, desc.to_string());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
     /// Start Format Painter: capture the active cell's format.
     pub fn start_format_painter(&mut self, cx: &mut Context<Self>) {
         let (row, col) = self.view_state.selected;

@@ -2798,6 +2798,7 @@ fn render_alignment_section(
                 // Left
                 .child(
                     align_btn("L", matches!(h_align, TriState::Uniform(Alignment::Left)), h_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .child(super::format_bar::render_align_icon(Alignment::Left, if matches!(h_align, TriState::Uniform(Alignment::Left)) && !h_align.is_mixed() { text_primary } else { text_muted }))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.set_alignment_selection(Alignment::Left, cx);
                         }))
@@ -2805,6 +2806,7 @@ fn render_alignment_section(
                 // Center
                 .child(
                     align_btn("C", matches!(h_align, TriState::Uniform(Alignment::Center)), h_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .child(super::format_bar::render_align_icon(Alignment::Center, if matches!(h_align, TriState::Uniform(Alignment::Center)) && !h_align.is_mixed() { text_primary } else { text_muted }))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.set_alignment_selection(Alignment::Center, cx);
                         }))
@@ -2812,6 +2814,7 @@ fn render_alignment_section(
                 // Right
                 .child(
                     align_btn("R", matches!(h_align, TriState::Uniform(Alignment::Right)), h_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .child(super::format_bar::render_align_icon(Alignment::Right, if matches!(h_align, TriState::Uniform(Alignment::Right)) && !h_align.is_mixed() { text_primary } else { text_muted }))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.set_alignment_selection(Alignment::Right, cx);
                         }))
@@ -2841,6 +2844,7 @@ fn render_alignment_section(
                 // Top
                 .child(
                     align_btn("T", matches!(v_align, TriState::Uniform(VerticalAlignment::Top)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .child("T")
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.set_vertical_alignment_selection(VerticalAlignment::Top, cx);
                         }))
@@ -2848,6 +2852,7 @@ fn render_alignment_section(
                 // Middle
                 .child(
                     align_btn("M", matches!(v_align, TriState::Uniform(VerticalAlignment::Middle)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .child("M")
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.set_vertical_alignment_selection(VerticalAlignment::Middle, cx);
                         }))
@@ -2855,6 +2860,7 @@ fn render_alignment_section(
                 // Bottom
                 .child(
                     align_btn("B", matches!(v_align, TriState::Uniform(VerticalAlignment::Bottom)), v_align.is_mixed(), text_primary, text_muted, accent, panel_border)
+                        .child("B")
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.set_vertical_alignment_selection(VerticalAlignment::Bottom, cx);
                         }))
@@ -2863,7 +2869,7 @@ fn render_alignment_section(
 }
 
 fn align_btn(
-    label: &'static str,
+    id: &'static str,
     is_active: bool,
     is_mixed: bool,
     text_primary: Hsla,
@@ -2896,8 +2902,7 @@ fn align_btn(
 
     btn = btn.hover(|s| s.bg(panel_border.opacity(0.5)));
 
-    btn.child(label)
-        .id(SharedString::from(format!("align-{}", label)))
+    btn.id(SharedString::from(format!("align-{}", id)))
 }
 
 fn wrap_toggle_btn(

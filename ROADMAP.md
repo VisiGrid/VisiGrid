@@ -76,6 +76,10 @@ What's built, what's next, and what's not planned.
 - Format Cells dialog (Ctrl+1)
 - Cell alignment
 - Column/row resize (drag or double-click to auto-fit)
+- Format Painter (v0.3.6+) — capture cell format, click to apply, Esc to cancel
+- Color Picker (v0.3.6+) — theme grid, standard colors, hex input, recent colors, `ColorTarget` architecture
+- Clear Formatting (v0.3.6+) — resets all format properties to default
+- Format Bar (v0.3.8+) — toggleable toolbar between formula bar and column headers (View → Format Bar). Font family, font size input, B/I/U toggles, fill color, text color, alignment. Tri-state controls for mixed selections. Engine setters for font size and text color with undo/redo.
 
 ### Developer Features
 - Lua scripting console (Ctrl+Shift+L)
@@ -226,6 +230,14 @@ What's built, what's next, and what's not planned.
 - **Trust model**: AI describes but never modifies from audit context
 - See: [docs/features/future/ai-reconciliation-spec.md](docs/features/future/ai-reconciliation-spec.md)
 
+### Merged Cells (v0.3.7+)
+- Full merged cell support across engine, rendering, navigation, clipboard, and UI
+- Merge Cells (Ctrl+Shift+M) and Unmerge Cells (Ctrl+Shift+U)
+- Data-loss confirmation dialog, overlap guard, contained merge replacement
+- Navigation treats merges as atomic data units (arrow, Ctrl+Arrow, Tab, Enter, Go To)
+- Copy/paste recreates merges at destination; Cut removes source merges
+- See: [docs/features/done/merged-cells-spec.md](docs/features/done/merged-cells-spec.md)
+
 ---
 
 ## Planned
@@ -239,7 +251,6 @@ What's built, what's next, and what's not planned.
 
 ### Medium-term
 - Cell context menu (right-click)
-- Merged cells
 - Problems panel (Ctrl+Shift+M) - all formula errors
 
 ### Explainability Initiative

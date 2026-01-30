@@ -71,8 +71,11 @@ pub fn export_tsv(sheet: &Sheet, path: &Path) -> Result<(), String> {
 }
 
 fn export_with_delimiter(sheet: &Sheet, path: &Path, delimiter: u8) -> Result<(), String> {
+    // Rows may be variable width because merge-hidden cells are forced empty
+    // and trailing empties are omitted, so different rows can have different field counts.
     let mut writer = csv::WriterBuilder::new()
         .delimiter(delimiter)
+        .flexible(true)
         .from_path(path)
         .map_err(|e| e.to_string())?;
 
@@ -81,7 +84,11 @@ fn export_with_delimiter(sheet: &Sheet, path: &Path, delimiter: u8) -> Result<()
         let mut last_non_empty = 0;
 
         for col in 0..sheet.cols {
-            let value = sheet.get_display(row, col);
+            let value = if sheet.is_merge_hidden(row, col) {
+                String::new()
+            } else {
+                sheet.get_display(row, col)
+            };
             if !value.is_empty() {
                 last_non_empty = col + 1;
             }
@@ -104,6 +111,53 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    use visigrid_engine::sheet::MergedRegion;
+
+    #[test]
+    fn test_csv_export_merged_cells_no_leak() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("merged.csv");
+
+        // Small sheet to avoid dimension noise
+        let mut sheet = Sheet::new(SheetId(1), 3, 4);
+        sheet.set_value(0, 0, "Header");
+        sheet.set_value(0, 1, "LEAK1"); // will become hidden
+        sheet.set_value(0, 2, "LEAK2"); // will become hidden
+        sheet.set_value(1, 0, "A");
+        sheet.set_value(1, 1, "B");
+        sheet.set_value(1, 2, "C");
+
+        // Merge A1:C1 — B1/C1 become hidden but still hold residual data
+        sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
+
+        export(&sheet, &path).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+
+        // Residual data must not appear anywhere in the output
+        assert!(!content.contains("LEAK1"), "hidden merge cell B1 leaked into CSV");
+        assert!(!content.contains("LEAK2"), "hidden merge cell C1 leaked into CSV");
+
+        // Parse back with csv reader to verify structure
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .from_reader(content.as_bytes());
+        let records: Vec<csv::StringRecord> = reader.records().map(|r| r.unwrap()).collect();
+
+        // Row 0: origin value present, hidden cells empty
+        assert_eq!(records[0].get(0), Some("Header"));
+        let b1 = records[0].get(1).unwrap_or("");
+        let c1 = records[0].get(2).unwrap_or("");
+        assert!(b1.is_empty(), "B1 should be empty, got: {b1}");
+        assert!(c1.is_empty(), "C1 should be empty, got: {c1}");
+
+        // Row 1: normal cells unaffected
+        assert_eq!(records[1].get(0), Some("A"));
+        assert_eq!(records[1].get(1), Some("B"));
+        assert_eq!(records[1].get(2), Some("C"));
+    }
 
     #[test]
     fn test_tsv_roundtrip() {

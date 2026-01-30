@@ -1,6 +1,62 @@
 # Changelog
 
-## Unreleased
+## 0.3.8
+
+Format bar, context menus, grid polish, and merge export correctness.
+
+### Format Bar
+
+Toggleable formatting toolbar between the formula bar and column headers. View → Format Bar (default: on), persisted in user settings, hidden in zen mode.
+
+- **Font family** — clickable label shows current font name, click opens font picker. Mixed selections show "—" in italic.
+- **Font size** — editable input with dropdown of common sizes (8–72), integer-only. Click-to-edit with select-all replace, Enter/Esc/Tab semantics, and Up/Down to adjust size by 1. Invalid input reverts silently.
+- **Bold / Italic / Underline** — toggle buttons with tri-state: active (accent), inactive (transparent), and mixed (em dash, muted background) for heterogeneous selections.
+- **Fill color** — colored swatch chip, click opens color picker (`ColorTarget::Fill`). Mixed selections show checkerboard. None shows theme default.
+- **Text color** — "A" with colored underbar, click opens color picker with new `ColorTarget::Text` variant. None = Automatic (theme default text color, not transparent).
+- **Alignment** — Left / Center / Right toggle buttons with alignment icons, active state reflects current selection. Shared icons also used in inspector panel.
+- **Tooltips** — platform-aware keyboard shortcuts on all controls (e.g. "Bold (⌘B)" on macOS, "Bold (Ctrl+B)" elsewhere).
+- **Engine** — `set_font_size()` and `set_font_color()` setters on Sheet, with selection wrappers (`set_font_size_selection`, `set_font_color_selection`) and undo/redo via `FormatActionKind::FontSize` / `FontColor`. Provenance export as Lua (`font_size=24`, `font_color="#FF0000"`).
+- **Font size rendering** — custom font sizes render correctly in the grid. gpui's `TextRun` doesn't carry font_size, so sized text is wrapped in a div with `.text_size()` to cascade via the element tree.
+- **Action dispatch routing** — font size input correctly captures Enter, Escape, Backspace, Tab, Delete, and arrow keys. gpui dispatches keybinding actions before `on_key_down` handlers, so action handlers in `actions_edit.rs` and `actions_nav.rs` gate on `format_bar.size_editing` to route keys to the format bar instead of the grid.
+- **UI state** — `FormatBarState` on `UiState` (input buffer, focus handle, dropdown visibility) — transient UI chrome, never serialized, no undo semantics.
+
+### Context Menus
+
+Right-click on cells, row headers, or column headers for common actions.
+
+- **Cell menu** — Cut, Copy, Paste, Paste Values, Format Painter, Clear Contents, Clear Formats, Inspect.
+- **Row header menu** — Insert Row, Delete Row, Clear Contents, Clear Formats.
+- **Column header menu** — Insert Column, Delete Column, Clear Contents, Clear Formats, Sort A→Z, Sort Z→A.
+- **Smart selection** — right-click inside a multi-cell, multi-row, or multi-column selection preserves it; right-click outside moves to the target.
+- **Mode-aware** — right-click commits edits in place (no cursor jump) and cancels Format Painter cleanly.
+- **Paste gating** — Paste and Paste Values are disabled when the clipboard is empty. Sort is disabled when the selection is not a full column.
+- **Dismissal** — click outside, Escape, or any non-modifier key closes the menu. Modifier-only keys (Shift, Ctrl) keep it open.
+- **Edge clamping** — menu repositions to stay within window bounds near edges.
+
+### Grid Click Reliability
+
+- **No more dead clicks on gridlines** — mouse handlers moved from inner cell div to the outer wrapper div, which has exact pixel dimensions from the flex layout. Sub-pixel gaps at cell borders no longer create hit-testing dead zones. Cursor stays crosshair everywhere in the grid, including on gridline boundaries.
+- **Edit commit on click** — clicking another cell while editing commits the current edit in place and exits edit mode (Excel behavior). Works for cells, row headers, column headers, and merged cell overlays. Same-cell clicks preserve edit mode.
+- **Selection gridlines** — selected cells now draw interior gridlines as a child overlay (GridLines color) while keeping the selection border (accent) on outer edges. Previously, selected cells suppressed all gridlines.
+
+### Grid Cursor
+
+- **Crosshair over cells** — grid interior uses crosshair cursor (Excel convention), signaling spatial selection rather than UI interaction. Merged cell overlays match. Headers, toolbars, and dialogs remain arrow/pointer.
+
+### Merge Export Correctness
+
+Merge-hidden cells no longer leak residual data into exported files.
+
+- **CSV export** — cells hidden by a merge are forced to empty strings. The origin cell retains its value. `.flexible(true)` handles variable-width rows from trailing empty suppression.
+- **XLSX export** — `merge_range()` is now called before cell export (ordering fix), and merge-hidden cells are skipped entirely. Origin cell values overwrite the blank placeholder written by `merge_range()`.
+- **Roundtrip tests** — `test_csv_export_merged_cells_no_leak` and `test_xlsx_export_merged_cells_no_leak` verify origin values survive and hidden data never appears in output.
+- **Spec completion** — merged cells spec moved from `docs/features/future/` to `docs/features/done/`. All 6 phases complete.
+
+### Internal
+
+- **AI context** — header row detection threshold relaxed from 70% to 60% text, allowing mixed headers like "ID", "123", "Product".
+- **Inspector alignment** — horizontal alignment buttons use shared `render_align_icon()` from the format bar module, replacing plain text labels with consistent icons.
+- **Grid selection borders** — simplified gridline suppression: user borders and merge interiors suppress gridlines, but neighboring-cell selection state no longer factors in (handled by the new interior overlay approach).
 
 ## 0.3.7
 

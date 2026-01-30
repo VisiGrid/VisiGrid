@@ -211,6 +211,7 @@ fn render_view_menu(text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, bo
         .child(menu_separator(border))
         .child(menu_item("Show Formulas", Some("Ctrl+`"), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_show_formulas(cx); }))
         .child(menu_item("Show Zeros", None, text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_show_zeros(cx); }))
+        .child(menu_item("Format Bar", None, text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_format_bar(cx); }))
         .child(menu_separator(border))
         .child(menu_item("Freeze Top Row", None, text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_top_row(cx); }))
         .child(menu_item("Freeze First Column", None, text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_first_column(cx); }))

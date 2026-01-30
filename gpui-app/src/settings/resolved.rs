@@ -29,6 +29,8 @@ pub struct ResolvedAppearance {
     pub theme_id: Option<String>,
     /// Show gridlines
     pub show_gridlines: bool,
+    /// Show format bar
+    pub show_format_bar: bool,
 }
 
 /// Resolved editing settings
@@ -78,6 +80,7 @@ pub struct AppDefaults;
 impl AppDefaults {
     pub const THEME_ID: Option<&'static str> = None; // Use built-in default
     pub const SHOW_GRIDLINES: bool = true;
+    pub const SHOW_FORMAT_BAR: bool = true;
     pub const ENTER_BEHAVIOR: EnterBehavior = EnterBehavior::MoveDown;
     pub const ALLOW_DIRECT_EDIT: bool = true;
     pub const TAB_MOVES_RIGHT: bool = true;
@@ -108,6 +111,10 @@ impl ResolvedSettings {
                     &doc.display.show_gridlines,
                     &user.appearance.show_gridlines,
                     AppDefaults::SHOW_GRIDLINES,
+                ),
+                show_format_bar: resolve_value(
+                    &user.appearance.show_format_bar,
+                    AppDefaults::SHOW_FORMAT_BAR,
                 ),
             },
             editing: ResolvedEditing {
@@ -283,6 +290,7 @@ mod tests {
             appearance: crate::settings::user::AppearanceSettings {
                 theme_id: Setting::Inherit,
                 show_gridlines: Setting::Inherit,
+                show_format_bar: Setting::Inherit,
             },
             editing: crate::settings::user::EditingSettings {
                 enter_behavior: Setting::Inherit,
@@ -313,6 +321,7 @@ mod tests {
 
         // Should use AppDefaults
         assert_eq!(resolved.appearance.show_gridlines, AppDefaults::SHOW_GRIDLINES);
+        assert_eq!(resolved.appearance.show_format_bar, AppDefaults::SHOW_FORMAT_BAR);
         assert_eq!(resolved.editing.enter_behavior, AppDefaults::ENTER_BEHAVIOR);
         assert_eq!(resolved.editing.allow_direct_edit, AppDefaults::ALLOW_DIRECT_EDIT);
         assert_eq!(resolved.navigation.tab_moves_right, AppDefaults::TAB_MOVES_RIGHT);

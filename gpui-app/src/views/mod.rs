@@ -3,11 +3,13 @@ mod ai_settings_dialog;
 mod ask_ai_dialog;
 mod color_picker;
 pub mod command_palette;
+mod context_menu;
 mod hub_dialogs;
 mod export_report_dialog;
 mod filter_dropdown;
 mod find_dialog;
 mod font_picker;
+pub(crate) mod format_bar;
 mod formula_bar;
 mod goto_dialog;
 mod grid;
@@ -461,6 +463,15 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(!zen_mode, |div| {
             div.child(formula_bar::render_formula_bar(app, window, cx))
         })
+        .when(!zen_mode && {
+            use crate::settings::{Setting, user_settings};
+            match &user_settings(cx).appearance.show_format_bar {
+                Setting::Value(v) => *v,
+                Setting::Inherit => true,
+            }
+        }, |div| {
+            div.child(format_bar::render_format_bar(app, window, cx))
+        })
         .child(headers::render_column_headers(app, cx))
         // Split view: render two grids side-by-side, or single grid
         .child(if app.is_split() {
@@ -472,6 +483,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .child(lua_console::render_lua_console(app, cx))
         .when(!zen_mode, |div| {
             div.child(status_bar::render_status_bar(app, editing, cx))
+        })
+        // Font size dropdown overlay — rendered at root level so it paints above
+        // column headers and grid cells. Only visible when dropdown is open.
+        .when(app.ui.format_bar.size_dropdown, |d| {
+            d.child(format_bar::render_font_size_dropdown(app, cx))
         })
         // Inspector panel (right-side drawer) with click-outside-to-close backdrop.
         // Rendered BEFORE modal overlays so modals sit on top in z-order.
@@ -556,6 +572,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         // History entry context menu (right-click menu)
         .when_some(inspector_panel::render_history_context_menu(app, cx), |div, menu| {
+            div.child(menu)
+        })
+        // Cell/header right-click context menu
+        .when_some(context_menu::render_context_menu(app, window, cx), |div, menu| {
             div.child(menu)
         })
         .when(show_rewind_confirm, |div| {

@@ -510,7 +510,6 @@ fn render_cell(
     };
 
     let mut cell = div()
-        .id(ElementId::Name(format!("cell-{}-{}", view_row, col).into()))
         .relative()  // Enable absolute positioning for selection overlay
         .size_full()
         .flex()
@@ -687,7 +686,7 @@ fn render_cell(
         // Editing cell gets full border
         cell.border_1()
     } else if is_selected {
-        // Selected cells: only draw outer edges to avoid double borders
+        // Selected cells: selection border on outer edges (accent blue)
         // Use pane-specific view state for selection border calculation
         let (top, right, bottom, left) = selection_borders_for_pane(view_state, view_row, col);
         let mut c = cell;
@@ -695,6 +694,28 @@ fn render_cell(
         if right { c = c.border_r_1(); }
         if bottom { c = c.border_b_1(); }
         if left { c = c.border_l_1(); }
+
+        // Interior gridlines (GridLines color via overlay child, since cell border_color
+        // is already SelectionBorder for outer edges)
+        if show_gridlines {
+            let (top_in_merge, left_in_merge, _, _) = if let Some(merge) = app.sheet(cx).get_merge(data_row, col) {
+                (data_row > merge.start.0, col > merge.start.1, data_row < merge.end.0, col < merge.end.1)
+            } else {
+                (false, false, false, false)
+            };
+            // Canonical top+left ownership (same rule as normal cells).
+            // Skip edges where selection border is already drawn (!top / !left).
+            let need_top = !top && data_row > 0 && !top_in_merge;
+            let need_left = !left && col > 0 && !left_in_merge;
+            if need_top || need_left {
+                c = c.child(
+                    non_interactive_overlay()
+                        .border_color(app.token(TokenKey::GridLines))
+                        .when(need_top, |d| d.border_t_1())
+                        .when(need_left, |d| d.border_l_1())
+                );
+            }
+        }
         c
     } else if is_active_ref_target {
         // Active ref target: bright 2px border so user knows exactly where arrow keys are pointing
@@ -741,17 +762,15 @@ fn render_cell(
             };
 
             // Gridlines: draw on edges WITHOUT resolved user borders.
-            // Border suppression order per edge: user border → selection → merge interior → boundary.
+            // Border suppression order per edge: user border → merge interior → boundary.
             let mut c = cell;
             #[cfg(debug_assertions)]
             if show_gridlines {
                 app.debug_gridline_cells.set(app.debug_gridline_cells.get() + 1);
             }
             if show_gridlines {
-                let cell_above_selected = view_row > 0 && is_selected_in_pane(view_state, view_row - 1, col);
-                let cell_left_selected = col > 0 && is_selected_in_pane(view_state, view_row, col - 1);
-                if !user_top && data_row > 0 && !cell_above_selected && !top_in_merge { c = c.border_t_1(); }
-                if !user_left && col > 0 && !cell_left_selected && !left_in_merge { c = c.border_l_1(); }
+                if !user_top && data_row > 0 && !top_in_merge { c = c.border_t_1(); }
+                if !user_left && col > 0 && !left_in_merge { c = c.border_l_1(); }
                 if !user_bottom && is_last_visible_row && !bottom_in_merge { c = c.border_b_1(); }
                 if !user_right && is_last_visible_col && !right_in_merge { c = c.border_r_1(); }
             }
@@ -779,124 +798,7 @@ fn render_cell(
 
     cell = cell
         .text_color(cell_text_color(app, is_editing, is_selected, is_multi_edit_preview))
-        .text_size(px(app.metrics.font_size))  // Scaled font size for zoom
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-            // Clicking on grid while renaming sheet: confirm and continue
-            if this.renaming_sheet.is_some() {
-                this.confirm_sheet_rename(cx);
-            }
-            // Don't handle clicks if modal/overlay is visible
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
-                return;
-            }
-            // Don't handle clicks if we're resizing
-            if this.resizing_col.is_some() || this.resizing_row.is_some() {
-                return;
-            }
-            // Don't handle clicks if fill handle drag was just started (child handler fired first)
-            if this.is_fill_dragging() {
-                return;
-            }
-
-            // Activate this pane if we're in split view
-            this.activate_pane(pane_side, cx);
-
-            // If clicking a spill receiver, redirect to the spill parent
-            let (target_row, target_col) = if let Some((parent_row, parent_col)) = this.sheet(cx).get_spill_parent(cell_row, cell_col) {
-                (parent_row, parent_col)
-            } else {
-                (cell_row, cell_col)
-            };
-
-            // If clicking a merged cell, redirect to merge origin and note merge extent
-            let (target_row, target_col, merge_end) = if let Some(merge) = this.sheet(cx).get_merge(target_row, target_col) {
-                (merge.start.0, merge.start.1, Some(merge.end))
-            } else {
-                (target_row, target_col, None)
-            };
-
-            // Formula mode: clicks insert cell references, drag for range
-            if this.mode.is_formula() {
-                if event.modifiers.shift {
-                    this.formula_shift_click_ref(target_row, target_col, cx);
-                } else {
-                    // Start drag for range selection in formula mode
-                    this.formula_start_drag(target_row, target_col, cx);
-                }
-                return;
-            }
-
-            // Format Painter mode: apply captured format to clicked cell
-            if this.mode == crate::mode::Mode::FormatPainter {
-                this.select_cell(target_row, target_col, false, cx);
-                this.apply_format_painter(cx);
-                return;
-            }
-
-            // Normal mode handling
-            if event.click_count == 2 {
-                // Double-click to edit
-                this.select_cell(target_row, target_col, false, cx);
-                this.start_edit(cx);
-                // On macOS, show tip about enabling F2 (since they're using fallback)
-                this.maybe_show_f2_tip(cx);
-            } else if event.modifiers.shift {
-                // Shift+click extends selection
-                this.select_cell(target_row, target_col, true, cx);
-            } else if event.modifiers.control || event.modifiers.platform {
-                // Ctrl+click (or Cmd on Mac) for discontiguous selection
-                this.start_ctrl_drag_selection(target_row, target_col, cx);
-            } else {
-                // Start drag selection
-                this.start_drag_selection(target_row, target_col, cx);
-            }
-
-            // If the click target is a multi-cell merge, expand selection to cover full region
-            if let Some(merge_br) = merge_end {
-                if merge_br != (target_row, target_col) {
-                    let (anchor_row, anchor_col) = this.active_view_state().selected;
-                    // Pick the merge corner that, combined with anchor, covers the full region
-                    let far_row = if anchor_row <= target_row { merge_br.0 } else { target_row };
-                    let far_col = if anchor_col <= target_col { merge_br.1 } else { target_col };
-                    this.active_view_state_mut().selection_end = Some((far_row, far_col));
-                    cx.notify();
-                }
-            }
-        }))
-        .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
-            // Don't handle if modal/overlay is visible
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
-                return;
-            }
-            // Continue fill handle drag if active (priority over selection drag)
-            if this.is_fill_dragging() {
-                this.continue_fill_drag(cell_row, cell_col, cx);
-                return;
-            }
-            // Continue drag selection if active
-            if this.dragging_selection {
-                if this.mode.is_formula() {
-                    this.formula_continue_drag(cell_row, cell_col, cx);
-                } else {
-                    this.continue_drag_selection(cell_row, cell_col, cx);
-                }
-            }
-        }))
-        .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, cx| {
-            // Don't handle if modal/overlay is visible
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
-                return;
-            }
-            // End fill handle drag if active (commits the fill)
-            // Ctrl modifier toggles copy/series behavior
-            if this.is_fill_dragging() {
-                let ctrl_held = event.modifiers.control || event.modifiers.platform;
-                this.end_fill_drag(ctrl_held, cx);
-                return;
-            }
-            // End drag selection (works for both normal and formula mode)
-            this.end_drag_selection(cx);
-        }));
+        .text_size(px(app.metrics.font_size));  // Scaled font size for zoom
 
     // Build the text content with selection highlight (caret drawn as overlay)
     if is_editing {
@@ -1093,10 +995,6 @@ fn render_cell(
                 if let Some(ref family) = format.font_family {
                     text_style.font_family = family.clone().into();
                 }
-                // Font size: scale by zoom factor, override default
-                if let Some(size) = format.font_size {
-                    text_style.font_size = px(size * app.metrics.zoom).into();
-                }
                 // Font color: only apply for non-editing/non-selected cells
                 if let Some(rgba) = format.font_color {
                     if !is_editing && !is_selected && !is_multi_edit_preview {
@@ -1109,7 +1007,17 @@ fn render_cell(
                     }
                 }
 
-                StyledText::new(text_content).with_default_highlights(&text_style, []).into_any_element()
+                let styled = StyledText::new(text_content).with_default_highlights(&text_style, []);
+                // Font size: TextRun doesn't carry font_size, so we must set it
+                // on a parent div to cascade via the element tree's text style.
+                if let Some(size) = format.font_size {
+                    div()
+                        .text_size(px(size * app.metrics.zoom))
+                        .child(styled)
+                        .into_any_element()
+                } else {
+                    styled.into_any_element()
+                }
             } else {
                 text_content.into_any_element()
             };
@@ -1232,13 +1140,167 @@ fn render_cell(
         && app.mode != Mode::Hint
         && view_state.additional_selections.is_empty();
 
-    // Wrap in relative container for absolute positioning (hint badges, fill handle)
+    // Cell wrapper owns .id() and all mouse handlers. This ensures clicks on sub-pixel
+    // border gaps between cells still register — no dead zones. The wrapper has exact
+    // pixel dimensions (col_width × row_height) so adjacent wrappers in the flex row
+    // are packed with no gaps, eliminating gridline click failures.
     let mut wrapper = div()
+        .id(ElementId::Name(format!("cell-{}-{}", view_row, col).into()))
         .relative()
         .flex_shrink_0()
         .w(px(col_width))
         .h_full()
-        .child(cell);
+        // TODO: Replace with custom thick-plus cursor if gpui adds custom cursor image support
+        .cursor(CursorStyle::Crosshair) // Grid interior = crosshair (Excel convention)
+        .child(cell)
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            // Don't handle grid clicks when format bar owns focus
+            if this.ui.format_bar.is_active(window) {
+                // Commit any pending font size edit, then close
+                crate::views::format_bar::commit_font_size(this, cx);
+                this.ui.format_bar.size_dropdown = false;
+                cx.notify();
+                return;
+            }
+            // Clicking on grid while renaming sheet: confirm and continue
+            if this.renaming_sheet.is_some() {
+                this.confirm_sheet_rename(cx);
+            }
+            // Don't handle clicks if modal/overlay is visible
+            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+                return;
+            }
+            // Don't handle clicks if we're resizing
+            if this.resizing_col.is_some() || this.resizing_row.is_some() {
+                return;
+            }
+            // Don't handle clicks if fill handle drag was just started (child handler fired first)
+            if this.is_fill_dragging() {
+                return;
+            }
+
+            // Activate this pane if we're in split view
+            this.activate_pane(pane_side, cx);
+
+            // If clicking a spill receiver, redirect to the spill parent
+            let (target_row, target_col) = if let Some((parent_row, parent_col)) = this.sheet(cx).get_spill_parent(cell_row, cell_col) {
+                (parent_row, parent_col)
+            } else {
+                (cell_row, cell_col)
+            };
+
+            // If clicking a merged cell, redirect to merge origin and note merge extent
+            let (target_row, target_col, merge_end) = if let Some(merge) = this.sheet(cx).get_merge(target_row, target_col) {
+                (merge.start.0, merge.start.1, Some(merge.end))
+            } else {
+                (target_row, target_col, None)
+            };
+
+            // Formula mode: clicks insert cell references, drag for range
+            if this.mode.is_formula() {
+                if event.modifiers.shift {
+                    this.formula_shift_click_ref(target_row, target_col, cx);
+                } else {
+                    // Start drag for range selection in formula mode
+                    this.formula_start_drag(target_row, target_col, cx);
+                }
+                return;
+            }
+
+            // Format Painter mode: apply captured format to clicked cell
+            if this.mode == crate::mode::Mode::FormatPainter {
+                this.select_cell(target_row, target_col, false, cx);
+                this.apply_format_painter(cx);
+                return;
+            }
+
+            // If editing, commit the current edit before navigating to another cell
+            if this.mode.is_editing() {
+                let active = this.active_view_state().selected;
+                if (target_row, target_col) != active {
+                    this.commit_pending_edit(cx);
+                }
+            }
+
+            // Normal mode handling
+            if event.click_count == 2 {
+                // Double-click to edit
+                this.select_cell(target_row, target_col, false, cx);
+                this.start_edit(cx);
+                // On macOS, show tip about enabling F2 (since they're using fallback)
+                this.maybe_show_f2_tip(cx);
+            } else if event.modifiers.shift {
+                // Shift+click extends selection
+                this.select_cell(target_row, target_col, true, cx);
+            } else if event.modifiers.control || event.modifiers.platform {
+                // Ctrl+click (or Cmd on Mac) for discontiguous selection
+                this.start_ctrl_drag_selection(target_row, target_col, cx);
+            } else {
+                // Start drag selection
+                this.start_drag_selection(target_row, target_col, cx);
+            }
+
+            // If the click target is a multi-cell merge, expand selection to cover full region
+            if let Some(merge_br) = merge_end {
+                if merge_br != (target_row, target_col) {
+                    let (anchor_row, anchor_col) = this.active_view_state().selected;
+                    // Pick the merge corner that, combined with anchor, covers the full region
+                    let far_row = if anchor_row <= target_row { merge_br.0 } else { target_row };
+                    let far_col = if anchor_col <= target_col { merge_br.1 } else { target_col };
+                    this.active_view_state_mut().selection_end = Some((far_row, far_col));
+                    cx.notify();
+                }
+            }
+        }))
+        .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            // Don't handle right-clicks if modal/overlay is visible
+            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+                return;
+            }
+            // If right-clicking outside current selection, move active cell there
+            if !this.is_selected(cell_row, cell_col) {
+                this.select_cell(cell_row, cell_col, false, cx);
+            }
+            this.show_context_menu(
+                crate::app::ContextMenuKind::Cell,
+                event.position,
+                cx,
+            );
+        }))
+        .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
+            // Don't handle if modal/overlay is visible
+            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+                return;
+            }
+            // Continue fill handle drag if active (priority over selection drag)
+            if this.is_fill_dragging() {
+                this.continue_fill_drag(cell_row, cell_col, cx);
+                return;
+            }
+            // Continue drag selection if active
+            if this.dragging_selection {
+                if this.mode.is_formula() {
+                    this.formula_continue_drag(cell_row, cell_col, cx);
+                } else {
+                    this.continue_drag_selection(cell_row, cell_col, cx);
+                }
+            }
+        }))
+        .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+            // Don't handle if modal/overlay is visible
+            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+                return;
+            }
+            // End fill handle drag if active (commits the fill)
+            // Ctrl modifier toggles copy/series behavior
+            if this.is_fill_dragging() {
+                let ctrl_held = event.modifiers.control || event.modifiers.platform;
+                this.end_fill_drag(ctrl_held, cx);
+                return;
+            }
+            // End drag selection (works for both normal and formula mode)
+            this.end_drag_selection(cx);
+        }));
 
     // Add fill handle at bottom-right corner of active cell
     // Excel-style: solid dark square that overlaps selection border (corner cap feel)
@@ -1929,6 +1991,7 @@ fn render_merge_div(
     let end_col = m.end_col;
 
     merge_div
+        .cursor(CursorStyle::Crosshair) // Grid interior = crosshair
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             if this.renaming_sheet.is_some() {
                 this.confirm_sheet_rename(cx);
@@ -1962,6 +2025,14 @@ fn render_merge_div(
                 this.select_cell(target_row, target_col, false, cx);
                 this.apply_format_painter(cx);
                 return;
+            }
+
+            // If editing, commit the current edit before navigating to this merge
+            if this.mode.is_editing() {
+                let active = this.active_view_state().selected;
+                if (target_row, target_col) != active {
+                    this.commit_pending_edit(cx);
+                }
             }
 
             if event.click_count == 2 {
@@ -2063,6 +2134,7 @@ fn render_merge_overlays(
         .left(px(header_width))
         .right_0()
         .overflow_hidden()
+        .cursor(CursorStyle::Crosshair) // Match child merge overlays to prevent flicker on transition
         .children(visible_merges.iter().map(|m| {
             render_merge_div(
                 m, app, window, cx, view_state, pane_side, editing,
@@ -2140,9 +2212,6 @@ fn render_merge_text(
         if let Some(ref family) = format.font_family {
             text_style.font_family = family.clone().into();
         }
-        if let Some(size) = format.font_size {
-            text_style.font_size = px(size * app.metrics.zoom).into();
-        }
         if let Some(rgba) = format.font_color {
             text_style.color = gpui::Hsla::from(gpui::Rgba {
                 r: rgba[0] as f32 / 255.0,
@@ -2152,7 +2221,16 @@ fn render_merge_text(
             });
         }
 
-        StyledText::new(text_content).with_default_highlights(&text_style, []).into_any_element()
+        let styled = StyledText::new(text_content).with_default_highlights(&text_style, []);
+        // Font size: TextRun doesn't carry font_size, so cascade via parent div.
+        if let Some(size) = format.font_size {
+            div()
+                .text_size(px(size * app.metrics.zoom))
+                .child(styled)
+                .into_any_element()
+        } else {
+            styled.into_any_element()
+        }
     } else {
         div()
             .text_color(text_color)
