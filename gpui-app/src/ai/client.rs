@@ -13,6 +13,7 @@ use super::context::AIContext;
 /// Visible in debug output, Copy Details, and Sent to AI panel.
 pub const ANALYZE_CONTRACT: &str = "read_only_v1";
 pub const INSERT_FORMULA_CONTRACT: &str = "single_cell_write_v1";
+pub const DIFF_EXPLAIN_CONTRACT: &str = "read_only_v1";
 
 /// Response from Ask AI (Insert Formula)
 #[derive(Debug, Clone)]
@@ -172,20 +173,18 @@ pub fn ask_ai(
     context: &AIContext,
 ) -> Result<AskResponse, AskError> {
     // Check provider is configured and implemented
-    match config.provider {
-        AIProvider::None => {
+    let api_url = match config.provider.chat_completions_url() {
+        Some(url) => url,
+        None if config.provider == AIProvider::None => {
             return Err(AskError::NotConfigured("AI is disabled".to_string()));
         }
-        AIProvider::OpenAI => {
-            // Continue with OpenAI implementation
-        }
-        AIProvider::Local | AIProvider::Anthropic | AIProvider::Gemini | AIProvider::Grok => {
+        None => {
             return Err(AskError::NotImplemented(format!(
                 "{} provider not yet implemented",
                 config.provider.name()
             )));
         }
-    }
+    };
 
     // Check API key
     let api_key = config.api_key.as_ref().ok_or(AskError::MissingKey)?;
@@ -194,8 +193,8 @@ pub fn ask_ai(
     let system_prompt = build_system_prompt();
     let user_prompt = build_user_prompt(question, context);
 
-    // Call OpenAI API
-    call_openai(api_key, &config.model, &system_prompt, &user_prompt)
+    // Call OpenAI-compatible API
+    call_openai(api_key, &config.model, &system_prompt, &user_prompt, api_url)
 }
 
 fn build_system_prompt() -> String {
@@ -245,6 +244,7 @@ fn call_openai(
     model: &str,
     system_prompt: &str,
     user_prompt: &str,
+    api_url: &str,
 ) -> Result<AskResponse, AskError> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -271,7 +271,7 @@ fn call_openai(
     };
 
     let response = client
-        .post("https://api.openai.com/v1/chat/completions")
+        .post(api_url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&request)
@@ -379,20 +379,18 @@ pub fn analyze(
     context: &AIContext,
 ) -> Result<AnalyzeResponse, AskError> {
     // Check provider is configured and implemented
-    match config.provider {
-        AIProvider::None => {
+    let api_url = match config.provider.chat_completions_url() {
+        Some(url) => url,
+        None if config.provider == AIProvider::None => {
             return Err(AskError::NotConfigured("AI is disabled".to_string()));
         }
-        AIProvider::OpenAI => {
-            // Continue with OpenAI implementation
-        }
-        AIProvider::Local | AIProvider::Anthropic | AIProvider::Gemini | AIProvider::Grok => {
+        None => {
             return Err(AskError::NotImplemented(format!(
                 "{} provider not yet implemented",
                 config.provider.name()
             )));
         }
-    }
+    };
 
     // Check API key
     let api_key = config.api_key.as_ref().ok_or(AskError::MissingKey)?;
@@ -401,8 +399,8 @@ pub fn analyze(
     let system_prompt = build_analyze_system_prompt();
     let user_prompt = build_analyze_user_prompt(question, context);
 
-    // Call OpenAI API and parse as analyze response
-    call_openai_analyze(api_key, &config.model, &system_prompt, &user_prompt)
+    // Call OpenAI-compatible API and parse as analyze response
+    call_openai_analyze(api_key, &config.model, &system_prompt, &user_prompt, api_url)
 }
 
 fn build_analyze_system_prompt() -> String {
@@ -447,6 +445,7 @@ fn call_openai_analyze(
     model: &str,
     system_prompt: &str,
     user_prompt: &str,
+    api_url: &str,
 ) -> Result<AnalyzeResponse, AskError> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -473,7 +472,7 @@ fn call_openai_analyze(
     };
 
     let response = client
-        .post("https://api.openai.com/v1/chat/completions")
+        .post(api_url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&request)
@@ -632,5 +631,10 @@ mod tests {
     fn test_contract_constants() {
         assert_eq!(ANALYZE_CONTRACT, "read_only_v1");
         assert_eq!(INSERT_FORMULA_CONTRACT, "single_cell_write_v1");
+        assert_eq!(DIFF_EXPLAIN_CONTRACT, "read_only_v1");
+        // All contract constants must be non-empty
+        assert!(!ANALYZE_CONTRACT.is_empty());
+        assert!(!INSERT_FORMULA_CONTRACT.is_empty());
+        assert!(!DIFF_EXPLAIN_CONTRACT.is_empty());
     }
 }

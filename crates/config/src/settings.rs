@@ -66,8 +66,19 @@ impl AIProvider {
             AIProvider::Local => ProviderCapabilities::none(),      // Phase 1: implement Ollama client
             AIProvider::OpenAI => ProviderCapabilities::insert_and_analyze(), // Implemented: Insert Formula + Analyze
             AIProvider::Anthropic => ProviderCapabilities::none(),  // Phase 1: implement Anthropic client
-            AIProvider::Gemini => ProviderCapabilities::none(),     // Future: OpenAI-compatible?
-            AIProvider::Grok => ProviderCapabilities::none(),       // Future: OpenAI-compatible?
+            AIProvider::Gemini => ProviderCapabilities::insert_and_analyze(), // OpenAI-compatible
+            AIProvider::Grok => ProviderCapabilities::insert_and_analyze(), // OpenAI-compatible
+        }
+    }
+
+    /// Returns the OpenAI-compatible chat completions endpoint for this provider.
+    /// Returns None for providers that don't use this API format.
+    pub fn chat_completions_url(&self) -> Option<&'static str> {
+        match self {
+            AIProvider::OpenAI => Some("https://api.openai.com/v1/chat/completions"),
+            AIProvider::Gemini => Some("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"),
+            AIProvider::Grok => Some("https://api.x.ai/v1/chat/completions"),
+            _ => None,
         }
     }
 

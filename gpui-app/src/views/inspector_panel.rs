@@ -4171,10 +4171,10 @@ pub fn render_explain_diff_dialog(
     let ai_summary_loading = app.diff_ai_summary_loading;
     let ai_summary_error = app.diff_ai_summary_error.clone();
 
-    // Check if AI summary is available (provider configured with insert_formula capability)
+    // Check if AI is available for read-only operations (summary + explain)
     let ai_config = visigrid_config::ai::ResolvedAIConfig::load();
-    let ai_summary_available = ai_config.provider.capabilities().insert_formula;
-    let ai_explain_available = ai_config.provider.capabilities().insert_formula;
+    let ai_summary_available = ai_config.provider.capabilities().analyze;
+    let ai_explain_available = ai_config.provider.capabilities().analyze;
 
     // Entry explanation state
     let entry_explanations = app.diff_entry_explanations.clone();
@@ -4194,6 +4194,9 @@ pub fn render_explain_diff_dialog(
         .child(
             div()
                 .id("explain-diff-content")
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
                 .w(px(600.0))
                 .max_h(px(500.0))
                 .bg(panel_bg)
@@ -4203,7 +4206,8 @@ pub fn render_explain_diff_dialog(
                 .shadow_lg()
                 .flex()
                 .flex_col()
-                .overflow_hidden()
+                .overflow_y_scroll()
+                .overflow_x_hidden()
                 // Header
                 .child(
                     div()
@@ -4386,6 +4390,34 @@ pub fn render_explain_diff_dialog(
                                                 }))
                                         )
                                     })
+                            )
+                            // Contract badge
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(9.0))
+                                            .text_color(ai_badge_color.opacity(0.7))
+                                            .child("Read-only")
+                                    )
+                                    .child(
+                                        div()
+                                            .id("diff-summary-contract-info")
+                                            .text_size(px(9.0))
+                                            .text_color(text_muted)
+                                            .cursor_pointer()
+                                            .child("\u{24d8}")  // ⓘ
+                                            .tooltip(|_window, cx| cx.new(|_| ContractTooltip).into())
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(9.0))
+                                            .text_color(text_muted)
+                                            .child("Summary only — no cells modified.")
+                                    )
                             )
                             // Error display
                             .when(ai_summary_error.is_some(), |el| {
@@ -4678,32 +4710,60 @@ fn render_diff_section(
                                     .border_l_2()
                                     .border_color(ai_badge_color.opacity(0.3))
                                     .flex()
-                                    .items_start()
-                                    .gap_2()
-                                    // Explanation text
+                                    .flex_col()
+                                    .gap_1()
+                                    // Contract indicator
                                     .child(
                                         div()
-                                            .flex_1()
-                                            .text_size(px(10.0))
-                                            .text_color(text_muted)
-                                            .child(SharedString::from(explanation_text))
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_size(px(8.0))
+                                                    .text_color(ai_badge_color.opacity(0.6))
+                                                    .child("Read-only")
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("explain-contract-info-{}-{}-{}", sheet_idx, row, col)))
+                                                    .text_size(px(8.0))
+                                                    .text_color(text_muted)
+                                                    .cursor_pointer()
+                                                    .child("\u{24d8}")  // ⓘ
+                                                    .tooltip(|_window, cx| cx.new(|_| ContractTooltip).into())
+                                            )
                                     )
-                                    // Copy button
+                                    // Explanation text + copy button
                                     .child(
                                         div()
-                                            .id(SharedString::from(format!("copy-explain-{}-{}-{}", sheet_idx, row, col)))
-                                            .px_1()
-                                            .py_px()
-                                            .rounded_sm()
-                                            .text_size(px(9.0))
-                                            .text_color(text_muted)
-                                            .cursor_pointer()
-                                            .bg(panel_border.opacity(0.2))
-                                            .hover(|s| s.bg(panel_border.opacity(0.4)).text_color(text_primary))
-                                            .child("Copy")
-                                            .on_mouse_down(MouseButton::Left, cx.listener(move |_this, _: &MouseDownEvent, _, cx| {
-                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(explanation_for_copy.clone()));
-                                            }))
+                                            .flex()
+                                            .items_start()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .text_size(px(10.0))
+                                                    .text_color(text_muted)
+                                                    .child(SharedString::from(explanation_text))
+                                            )
+                                            // Copy button
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("copy-explain-{}-{}-{}", sheet_idx, row, col)))
+                                                    .px_1()
+                                                    .py_px()
+                                                    .rounded_sm()
+                                                    .text_size(px(9.0))
+                                                    .text_color(text_muted)
+                                                    .cursor_pointer()
+                                                    .bg(panel_border.opacity(0.2))
+                                                    .hover(|s| s.bg(panel_border.opacity(0.4)).text_color(text_primary))
+                                                    .child("Copy")
+                                                    .on_mouse_down(MouseButton::Left, cx.listener(move |_this, _: &MouseDownEvent, _, cx| {
+                                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(explanation_for_copy.clone()));
+                                                    }))
+                                            )
                                     )
                             )
                         })
@@ -4817,4 +4877,22 @@ fn render_validation_section(
                         .child(SharedString::from(change.description()))
                 }))
         )
+}
+
+/// Minimal tooltip view for contract info badges.
+struct ContractTooltip;
+
+impl Render for ContractTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0x2d2d2d))
+            .border_1()
+            .border_color(rgb(0x3d3d3d))
+            .text_size(px(11.0))
+            .text_color(rgb(0xcccccc))
+            .child("Execution Contracts define what AI is allowed to read and write.")
+    }
 }

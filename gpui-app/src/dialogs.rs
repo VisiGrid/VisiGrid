@@ -1811,6 +1811,17 @@ impl Spreadsheet {
         };
         details.push_str(&format!("=== {} AI Diagnostic Details ===\n\n", verb_label));
 
+        let (contract_id, contract_label, write_scope) = match self.ask_ai.verb {
+            crate::app::AiVerb::InsertFormula => (
+                crate::ai::INSERT_FORMULA_CONTRACT, "Single-cell write", "Active cell",
+            ),
+            crate::app::AiVerb::Analyze => (
+                crate::ai::ANALYZE_CONTRACT, "Read-only", "None",
+            ),
+        };
+        details.push_str(&format!("Contract: {} ({})\n", contract_id, contract_label));
+        details.push_str(&format!("Write scope: {}\n", write_scope));
+
         if let Some(sent) = &self.ask_ai.sent_context {
             details.push_str(&format!("Provider: {}\n", sent.provider));
             details.push_str(&format!("Model: {}\n", sent.model));
@@ -2030,8 +2041,8 @@ impl Spreadsheet {
         // Load AI config
         let config = ResolvedAIConfig::load();
 
-        // Check if Insert Formula capability is available (reuses same provider)
-        if !config.provider.capabilities().insert_formula {
+        // Check if analyze capability is available (diff explain is read-only)
+        if !config.provider.capabilities().analyze {
             self.diff_ai_summary_error = Some("AI provider does not support summaries".to_string());
             cx.notify();
             return;
@@ -2111,8 +2122,8 @@ impl Spreadsheet {
         // Load AI config
         let config = ResolvedAIConfig::load();
 
-        // Check if Insert Formula capability is available (reuses same provider)
-        if !config.provider.capabilities().insert_formula {
+        // Check if analyze capability is available (diff explain is read-only)
+        if !config.provider.capabilities().analyze {
             return;
         }
 
@@ -2267,11 +2278,8 @@ fn truncate_value(val: &str, max_len: usize) -> String {
 fn call_diff_summary_ai(config: &visigrid_config::ai::ResolvedAIConfig, prompt: &str) -> Result<String, String> {
     use visigrid_config::settings::AIProvider;
 
-    // Only OpenAI is implemented currently
-    match config.provider {
-        AIProvider::OpenAI => {}
-        _ => return Err(format!("{} not implemented for summaries", config.provider.name())),
-    }
+    let api_url = config.provider.chat_completions_url()
+        .ok_or_else(|| format!("{} not implemented for summaries", config.provider.name()))?;
 
     let api_key = config.api_key.as_ref().ok_or("API key not configured")?;
 
@@ -2298,7 +2306,7 @@ fn call_diff_summary_ai(config: &visigrid_config::ai::ResolvedAIConfig, prompt: 
         .map_err(|e| e.to_string())?;
 
     let response = client
-        .post("https://api.openai.com/v1/chat/completions")
+        .post(api_url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&request)
@@ -2385,11 +2393,8 @@ fn call_entry_explanation_ai(
 ) -> Result<String, String> {
     use visigrid_config::settings::AIProvider;
 
-    // Only OpenAI is implemented currently
-    match config.provider {
-        AIProvider::OpenAI => {}
-        _ => return Err(format!("{} not implemented for explanations", config.provider.name())),
-    }
+    let api_url = config.provider.chat_completions_url()
+        .ok_or_else(|| format!("{} not implemented for explanations", config.provider.name()))?;
 
     let api_key = config.api_key.as_ref().ok_or("API key not configured")?;
 
@@ -2415,7 +2420,7 @@ fn call_entry_explanation_ai(
         .map_err(|e| e.to_string())?;
 
     let response = client
-        .post("https://api.openai.com/v1/chat/completions")
+        .post(api_url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&request)
