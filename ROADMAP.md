@@ -2,6 +2,8 @@
 
 What's built, what's next, and what's not planned.
 
+> The CLI and deterministic engine are the source of truth. GUI features evolve on top of a stable computation core.
+
 > Current status: Early access (pre-v1.0). Expect breaking changes to `.sheet` format.
 
 ---

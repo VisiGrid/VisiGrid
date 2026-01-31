@@ -1,12 +1,10 @@
 # VisiGrid
 
-**A spreadsheet that behaves like code.**
+**A deterministic spreadsheet engine for reconciliation, audit, and reproducible computation.**
 
-VisiGrid is a native desktop spreadsheet designed for correctness under change.
+VisiGrid is a native spreadsheet engine designed for correctness under change. Recomputation is deterministic, structural edits are traceable, and circular dependencies are caught at edit-time.
 
-It makes causality explicit: where values come from, why they changed, and whether the workbook is fully up to date. Structural edits are traceable, recomputation is deterministic, and circular dependencies are caught at edit-time.
-
-Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)). Designed as a deterministic computation engine with a GPU-accelerated UI, not a scriptable notebook or macro layer.
+Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)).
 
 ## Why VisiGrid
 
@@ -21,35 +19,25 @@ VisiGrid is built to make these failures visible before they matter.
 - **Changes are safe**: structural edits generate provenance you can review and replay.
 - **State is verifiable**: you always know whether values are current or stale.
 
-## What Makes VisiGrid Explainable
+## Determinism
 
-- **Verified Mode (F9)** — guarantees all values are current.
-- **Cell Inspector** — view formulas, values, precedents, dependents, and recompute timestamps.
-- **Path Tracing** — follow data flow across sheets and ranges.
-- **Provenance History** — structural edits emit replayable Lua.
-- **Cycle Detection** — circular dependencies caught at edit-time.
+Everything in VisiGrid is deterministic: same inputs, same outputs, always. No volatile surprises, no hidden state, no ambient context that changes results between runs.
 
-## Editing and Navigation
-
-- Command palette for every action
-- Keyboard-first navigation and editing
-- Multi-select editing across non-adjacent cells
-- 100+ formula functions with autocomplete
-- Instant startup and smooth scrolling
+The CLI is the primary interface for automation, verification, and audit trails. The GUI is an inspector and editor built on the same engine.
 
 ## Headless Spreadsheet Workflows
 
 VisiGrid ships a CLI that runs without a GUI. Same engine, no window.
 
 ```bash
-# Convert between formats
-visigrid-cli convert data.xlsx --to csv
-
 # Evaluate a formula against piped data
 cat sales.csv | visigrid-cli calc "=SUM(B:B)" --from csv
 
 # Reconcile two datasets by key
 visigrid-cli diff vendor.xlsx ours.csv --key Invoice --compare Total --tolerance 0.01
+
+# Convert between formats
+visigrid-cli convert data.xlsx --to csv
 ```
 
 The CLI reads spreadsheet files (CSV, XLSX, JSON, TSV), runs the same formula engine and comparison logic as the GUI, and writes structured output to stdout. Exit codes are stable for scripting. Output is JSON or CSV.
@@ -59,7 +47,36 @@ The CLI reads spreadsheet files (CSV, XLSX, JSON, TSV), runs the same formula en
 - Numeric tolerance for financial data (`$1,234.56`, `(500.00)` handled natively)
 - Duplicate keys and ambiguous matches fail loudly instead of guessing
 
-The GUI and CLI serve different jobs. The GUI is for inspection, editing, and debugging. The CLI is for automation, verification, and audit trails. They share the engine but not the interface.
+Example output:
+
+```json
+{
+  "matched": 14238,
+  "only_left": 12,
+  "only_right": 9,
+  "changed": [
+    { "cell": "D412", "before": 120.00, "after": 118.75 }
+  ]
+}
+```
+
+## Explainability
+
+The desktop app is the debugger for your data.
+
+- **Cell Inspector** — view formulas, values, precedents, dependents, and recompute timestamps.
+- **Path Tracing** — follow data flow across sheets and ranges.
+- **Provenance History** — structural edits emit replayable scripts.
+- **Cycle Detection** — circular dependencies caught at edit-time.
+- **Deterministic recomputation** — explicit verification of stale vs current values.
+
+## Editing and Navigation
+
+- Command palette for every action
+- Keyboard-first navigation and editing
+- Multi-select editing across non-adjacent cells
+- 100+ formula functions with autocomplete
+- Instant startup and smooth scrolling
 
 ## Design Principles
 
@@ -120,7 +137,7 @@ Or via package manager:
 
 ```bash
 # macOS
-brew install visigrid/visigrid/visigrid
+brew install --cask visigrid/tap/visigrid
 
 # Arch Linux
 yay -S visigrid-bin
@@ -150,22 +167,13 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 - Import/export: CSV, TSV, JSON, XLSX, XLS, ODS
 - Cross-platform: macOS, Windows, Linux
 
-## Commercial Editions
+## Commercial Use
 
-VisiGrid is fully usable for real work in its open-source edition.
+VisiGrid is fully usable under its open-source license.
 
-A commercial license is available for users and organizations that need advanced inspection, provenance, automation, and large-file support.
+Some organizations require additional guarantees around scale, support, or long-term use. Commercial licenses are available for large-file performance, team controls, and operational assurances.
 
-Commercial features include:
-
-- Deep dependency inspection and full path tracing
-- Complete provenance history with replayable operations
-- Advanced data transforms and scripting
-- Performance optimizations for large workbooks
-
-Licenses are per-user, perpetual options are available, and no account or telemetry is required.
-
-See [visigrid.app](https://visigrid.app) for details.
+See [visigrid.app/commercial](https://visigrid.app/commercial) for details.
 
 ## VisiHub Integration
 
@@ -177,7 +185,7 @@ VisiHub is optional and not required to use VisiGrid.
 
 VisiGrid is open source under [AGPLv3](LICENSE.md) with a plugin exception.
 
-This ensures improvements remain open while allowing commercial plugins and extensions. Plugins using the public API may be licensed independently. Commercial licenses are available for embedding or hosting.
+This ensures improvements remain open while allowing commercial plugins and extensions. Plugins using the public API may be licensed independently. Commercial licenses are available for organizations that require alternative terms.
 
 See [LICENSE.md](LICENSE.md) for details.
 
