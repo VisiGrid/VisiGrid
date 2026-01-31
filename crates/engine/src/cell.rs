@@ -284,6 +284,15 @@ pub struct CellFormat {
 }
 
 impl CellFormat {
+    /// Returns true when every field matches `CellFormat::default()`.
+    ///
+    /// Used by the native save path to skip persisting cells whose formatting
+    /// is identical to the default. If new fields are added to CellFormat,
+    /// the derived PartialEq ensures they are automatically included here.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
     /// Returns true if any border edge is set (non-None style).
     pub fn has_any_border(&self) -> bool {
         self.border_top.is_set() || self.border_right.is_set()
@@ -996,6 +1005,14 @@ impl Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cellformat_is_default() {
+        assert!(CellFormat::default().is_default());
+        assert!(!CellFormat { bold: true, ..Default::default() }.is_default());
+        assert!(!CellFormat { alignment: Alignment::Left, ..Default::default() }.is_default());
+        assert!(!CellFormat { font_family: Some("Arial".into()), ..Default::default() }.is_default());
+    }
 
     #[test]
     fn test_text_overflow_default_is_clip() {

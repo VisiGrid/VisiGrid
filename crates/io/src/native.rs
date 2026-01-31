@@ -72,6 +72,29 @@ const TYPE_NUMBER: i32 = 1;
 const TYPE_TEXT: i32 = 2;
 const TYPE_FORMULA: i32 = 3;
 
+/// Encode Alignment → DB integer. Every variant has an explicit arm.
+fn alignment_to_db(a: Alignment) -> i32 {
+    match a {
+        Alignment::Left => 0,
+        Alignment::Center => 1,
+        Alignment::Right => 2,
+        Alignment::General => 3,
+        Alignment::CenterAcrossSelection => 4,
+    }
+}
+
+/// Decode DB integer → Alignment. Unknown codes fall back to General (the default).
+fn alignment_from_db(i: i32) -> Alignment {
+    match i {
+        0 => Alignment::Left,
+        1 => Alignment::Center,
+        2 => Alignment::Right,
+        3 => Alignment::General,
+        4 => Alignment::CenterAcrossSelection,
+        _ => Alignment::General,
+    }
+}
+
 /// Current schema version. Increment for each migration.
 const SCHEMA_VERSION: i32 = 1;
 
@@ -130,17 +153,12 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
             "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
         ).map_err(|e| e.to_string())?;
 
-        for row in 0..sheet.rows {
-            for col in 0..sheet.cols {
-                let raw = sheet.get_raw(row, col);
-                let format = sheet.get_format(row, col);
+        for (&(row, col), cell) in sheet.cells_iter() {
+                let raw = cell.value.raw_display();
+                let format = &cell.format;
 
                 // Skip cells with no value and default formatting
-                let has_formatting = format.bold || format.italic || format.underline || format.strikethrough
-                    || format.alignment != Alignment::Left
-                    || !matches!(format.number_format, NumberFormat::General)
-                    || format.font_family.is_some();
-                if raw.is_empty() && !has_formatting {
+                if raw.is_empty() && format.is_default() {
                     continue;
                 }
 
@@ -156,14 +174,7 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
                         (TYPE_TEXT, None, Some(&raw))
                     };
 
-                // Convert alignment to integer
-                let alignment_int = match format.alignment {
-                    Alignment::General => 3,
-                    Alignment::Left => 0,
-                    Alignment::Center => 1,
-                    Alignment::Right => 2,
-                    Alignment::CenterAcrossSelection => 1, // Stored as Center in native format
-                };
+                let alignment_int = alignment_to_db(format.alignment);
 
                 // Convert number format to integer + decimals
                 // Date uses decimals field to store style (0=Short, 1=Long, 2=Iso)
@@ -187,7 +198,6 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
                     negative,
                     currency_symbol
                 ]).map_err(|e| e.to_string())?;
-            }
         }
     }
 
@@ -315,11 +325,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
         }
 
         // Apply formatting
-        let alignment = match fmt_alignment {
-            1 => Alignment::Center,
-            2 => Alignment::Right,
-            _ => Alignment::Left,
-        };
+        let alignment = alignment_from_db(fmt_alignment);
         let thousands = fmt_thousands != 0;
         let negative = NegativeStyle::from_int(fmt_negative);
         let number_format = match fmt_number_type {
@@ -358,11 +364,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             border_bottom: CellBorder::default(),
             border_left: CellBorder::default(),
         };
-        let has_formatting = format.bold || format.italic || format.underline || format.strikethrough
-            || format.alignment != Alignment::Left
-            || !matches!(format.number_format, NumberFormat::General)
-            || format.font_family.is_some();
-        if has_formatting {
+        if !format.is_default() {
             sheet.set_format(row, col, format);
         }
     }
@@ -410,17 +412,12 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
             "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
         ).map_err(|e| e.to_string())?;
 
-        for row in 0..sheet.rows {
-            for col in 0..sheet.cols {
-                let raw = sheet.get_raw(row, col);
-                let format = sheet.get_format(row, col);
+        for (&(row, col), cell) in sheet.cells_iter() {
+                let raw = cell.value.raw_display();
+                let format = &cell.format;
 
                 // Skip cells with no value and default formatting
-                let has_formatting = format.bold || format.italic || format.underline || format.strikethrough
-                    || format.alignment != Alignment::Left
-                    || !matches!(format.number_format, NumberFormat::General)
-                    || format.font_family.is_some();
-                if raw.is_empty() && !has_formatting {
+                if raw.is_empty() && format.is_default() {
                     continue;
                 }
 
@@ -436,14 +433,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                         (TYPE_TEXT, None, Some(&raw))
                     };
 
-                // Convert alignment to integer
-                let alignment_int = match format.alignment {
-                    Alignment::General => 3,
-                    Alignment::Left => 0,
-                    Alignment::Center => 1,
-                    Alignment::Right => 2,
-                    Alignment::CenterAcrossSelection => 1, // Stored as Center in native format
-                };
+                let alignment_int = alignment_to_db(format.alignment);
 
                 let (number_type, decimals, thousands, negative, currency_symbol) = extract_number_format_fields(&format.number_format);
 
@@ -464,7 +454,6 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     negative,
                     currency_symbol
                 ]).map_err(|e| e.to_string())?;
-            }
         }
     }
 
@@ -528,6 +517,75 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
 
     // Now load named ranges if the table exists
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // --- Bloat migration: rebuild cells table if legacy bug filled it ---
+    let total_cells: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM cells", [], |r| r.get(0),
+    ).unwrap_or(0);
+
+    if total_cells > 10_000 {
+        // Count non-junk rows. A row is "real" if it has a value, or any non-default formatting.
+        // Only General (fmt_alignment=3) is treated as default; Left (0) is real formatting.
+        let real_cells: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM cells WHERE value_type != 0 \
+             OR COALESCE(fmt_bold, 0) != 0 \
+             OR COALESCE(fmt_italic, 0) != 0 \
+             OR COALESCE(fmt_underline, 0) != 0 \
+             OR COALESCE(fmt_alignment, 3) != 3 \
+             OR COALESCE(fmt_number_type, 0) != 0 \
+             OR fmt_font_family IS NOT NULL",
+            [], |r| r.get(0),
+        ).unwrap_or(total_cells);
+
+        // If >50% of rows are empty default junk, rebuild
+        if real_cells < total_cells / 2 {
+            let _ = conn.execute_batch("BEGIN IMMEDIATE;");
+            // Recreate with explicit schema to preserve PK, constraints, column types
+            let rebuild_ok = (|| -> rusqlite::Result<()> {
+                conn.execute_batch(
+                    "CREATE TABLE cells_clean ( \
+                        row INTEGER NOT NULL, \
+                        col INTEGER NOT NULL, \
+                        value_type INTEGER NOT NULL, \
+                        value_num REAL, \
+                        value_text TEXT, \
+                        fmt_bold INTEGER DEFAULT 0, \
+                        fmt_italic INTEGER DEFAULT 0, \
+                        fmt_underline INTEGER DEFAULT 0, \
+                        fmt_alignment INTEGER DEFAULT 0, \
+                        fmt_number_type INTEGER DEFAULT 0, \
+                        fmt_decimals INTEGER DEFAULT 2, \
+                        fmt_font_family TEXT, \
+                        fmt_thousands INTEGER DEFAULT 0, \
+                        fmt_negative INTEGER DEFAULT 0, \
+                        fmt_currency_symbol TEXT, \
+                        PRIMARY KEY (row, col) \
+                    );"
+                )?;
+                conn.execute_batch(
+                    "INSERT INTO cells_clean \
+                        SELECT * FROM cells \
+                        WHERE value_type != 0 \
+                           OR COALESCE(fmt_bold, 0) != 0 \
+                           OR COALESCE(fmt_italic, 0) != 0 \
+                           OR COALESCE(fmt_underline, 0) != 0 \
+                           OR COALESCE(fmt_alignment, 3) != 3 \
+                           OR COALESCE(fmt_number_type, 0) != 0 \
+                           OR fmt_font_family IS NOT NULL;"
+                )?;
+                conn.execute_batch(
+                    "DROP TABLE cells; \
+                     ALTER TABLE cells_clean RENAME TO cells;"
+                )?;
+                Ok(())
+            })();
+            if rebuild_ok.is_ok() {
+                let _ = conn.execute_batch("COMMIT;");
+            } else {
+                let _ = conn.execute_batch("ROLLBACK;");
+            }
+        }
+    }
 
     // Check if named_ranges table exists (for backward compatibility)
     let has_named_ranges = conn
@@ -1121,6 +1179,106 @@ mod tests {
             assert!(columns.contains(&"fmt_negative".to_string()));
             assert!(columns.contains(&"fmt_currency_symbol".to_string()));
         }
+    }
+
+    #[test]
+    fn test_save_only_populated_cells() {
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        let mut workbook = Workbook::new();
+        workbook.active_sheet_mut().set_value(0, 0, "Hello");
+        workbook.active_sheet_mut().set_value(1, 1, "42");
+        workbook.active_sheet_mut().set_value(2, 2, "=1+1");
+        save_workbook(&workbook, path).expect("Save should succeed");
+
+        // Query the DB directly to verify only 3 rows were written
+        let conn = Connection::open(path).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM cells", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 3, "Should only save 3 populated cells, got {}", count);
+    }
+
+    #[test]
+    fn test_alignment_general_roundtrip() {
+        // Directly insert a DB row with fmt_alignment=3 (General) and a value,
+        // then load and assert alignment == Alignment::General.
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+            conn.execute_batch(r#"
+                INSERT INTO meta (key, value) VALUES ('sheet_name', 'Sheet1');
+                INSERT INTO meta (key, value) VALUES ('rows', '100');
+                INSERT INTO meta (key, value) VALUES ('cols', '26');
+                INSERT INTO cells (row, col, value_type, value_num, fmt_alignment) VALUES (0, 0, 1, 42.0, 3);
+            "#).unwrap();
+        }
+
+        let sheet = load(path).expect("Load should succeed");
+        assert_eq!(sheet.get_format(0, 0).alignment, Alignment::General,
+            "fmt_alignment=3 should decode to Alignment::General, not Left");
+    }
+
+    #[test]
+    fn test_alignment_left_persists() {
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        let mut sheet = Sheet::new(SheetId(1), 100, 26);
+        sheet.set_value(0, 0, "hello");
+        sheet.set_alignment(0, 0, Alignment::Left);
+        save(&sheet, path).expect("Save should succeed");
+
+        let loaded = load(path).expect("Load should succeed");
+        assert_eq!(loaded.get_format(0, 0).alignment, Alignment::Left,
+            "Explicit Left alignment should survive round-trip (distinct from General)");
+    }
+
+    #[test]
+    fn test_bloated_file_auto_cleaned() {
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+            conn.execute_batch(r#"
+                INSERT INTO meta (key, value) VALUES ('sheet_name', 'Sheet1');
+                INSERT INTO meta (key, value) VALUES ('rows', '1000');
+                INSERT INTO meta (key, value) VALUES ('cols', '26');
+            "#).unwrap();
+
+            // Insert 20k empty junk rows (value_type=0, fmt_alignment=3 = General default)
+            let mut stmt = conn.prepare(
+                "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_alignment) VALUES (?1, ?2, 0, NULL, NULL, 3)"
+            ).unwrap();
+            for i in 0..20_000 {
+                stmt.execute(params![i as i64, 0i64]).unwrap();
+            }
+
+            // Insert 1 real cell with a value
+            conn.execute(
+                "INSERT OR REPLACE INTO cells (row, col, value_type, value_num, fmt_alignment) VALUES (0, 0, 1, 99.0, 3)",
+                [],
+            ).unwrap();
+
+            // Insert 1 empty cell with fmt_alignment=0 (Left) — real formatting, should survive
+            conn.execute(
+                "INSERT OR REPLACE INTO cells (row, col, value_type, value_num, value_text, fmt_alignment) VALUES (0, 1, 0, NULL, NULL, 0)",
+                [],
+            ).unwrap();
+        }
+
+        // load_workbook triggers the bloat migration
+        let _loaded = load_workbook(path).expect("Load should succeed");
+
+        // Reopen DB and verify cleanup
+        let conn = Connection::open(path).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM cells", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2, "Should keep only the real cell and the Left-formatted cell, got {}", count);
     }
 
     #[test]

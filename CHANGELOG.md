@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1
+
+### Native .sheet Save/Load Hardening
+
+- **Alignment round-trip fix** — `Alignment::General` (auto: numbers right-align, text left-aligns) now survives save/load. Previously, General was incorrectly mapped to Left on load, losing smart alignment behavior.
+- **`CellFormat::is_default()` helper** — replaces fragile inline field checks in save/load skip conditions. New fields added to `CellFormat` are automatically covered via derived `PartialEq`.
+- **`alignment_to_db` / `alignment_from_db` helpers** — explicit encoding for all 5 alignment variants (including `CenterAcrossSelection`), replacing scattered `match` blocks and a lossy `_ =>` catch-all.
+- **Bloated file auto-migration** — legacy `.sheet` files containing millions of empty default rows (from a prior save bug) are automatically cleaned on load. Rebuild triggers when >50% of rows are junk (>10k total). Explicit Left alignment and other real formatting survives the migration.
+- **5 new regression tests** — `is_default`, save-only-populated-cells, General round-trip, Left persistence, bloated file cleanup.
+
 ## 0.3.9
 
 Number format editor, thousands separators, negative styles, and currency symbols.
