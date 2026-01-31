@@ -1,0 +1,13 @@
+diff
+{DIR}/left.csv
+{DIR}/right.csv
+--key
+Invoice
+--match
+contains
+--compare
+Total
+--out
+json
+--summary
+none

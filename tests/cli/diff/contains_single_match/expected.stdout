@@ -1,0 +1,59 @@
+{
+  "results": [
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "16",
+      "left": {
+        "Invoice": "16",
+        "Total": "685"
+      },
+      "match_explain": {
+        "left_key_norm": "16",
+        "left_key_raw": "16",
+        "mode": "contains",
+        "right_key_norm": "100154616",
+        "right_key_raw": "100154616"
+      },
+      "right": {
+        "Invoice": "100154616",
+        "Total": "685"
+      },
+      "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "42",
+      "left": {
+        "Invoice": "42",
+        "Total": "1200"
+      },
+      "match_explain": {
+        "left_key_norm": "42",
+        "left_key_raw": "42",
+        "mode": "contains",
+        "right_key_norm": "100154642",
+        "right_key_raw": "100154642"
+      },
+      "right": {
+        "Invoice": "100154642",
+        "Total": "1200"
+      },
+      "status": "matched"
+    }
+  ],
+  "summary": {
+    "ambiguous": 0,
+    "diff": 0,
+    "key": "Invoice",
+    "key_transform": "trim",
+    "left_rows": 2,
+    "match": "contains",
+    "matched": 2,
+    "only_left": 0,
+    "only_right": 0,
+    "right_rows": 2,
+    "tolerance": 0.0
+  }
+}

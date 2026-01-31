@@ -37,6 +37,30 @@ VisiGrid is built to make these failures visible before they matter.
 - 100+ formula functions with autocomplete
 - Instant startup and smooth scrolling
 
+## Headless Spreadsheet Workflows
+
+VisiGrid ships a CLI that runs without a GUI. Same engine, no window.
+
+```bash
+# Convert between formats
+visigrid-cli convert data.xlsx --to csv
+
+# Evaluate a formula against piped data
+cat sales.csv | visigrid-cli calc "=SUM(B:B)" --from csv
+
+# Reconcile two datasets by key
+visigrid-cli diff vendor.xlsx ours.csv --key Invoice --compare Total --tolerance 0.01
+```
+
+The CLI reads spreadsheet files (CSV, XLSX, JSON, TSV), runs the same formula engine and comparison logic as the GUI, and writes structured output to stdout. Exit codes are stable for scripting. Output is JSON or CSV.
+
+**Reconciliation** (`diff`) compares two datasets row-by-row:
+- Rows only in the left file, only in the right file, or in both with value differences
+- Numeric tolerance for financial data (`$1,234.56`, `(500.00)` handled natively)
+- Duplicate keys and ambiguous matches fail loudly instead of guessing
+
+The GUI and CLI serve different jobs. The GUI is for inspection, editing, and debugging. The CLI is for automation, verification, and audit trails. They share the engine but not the interface.
+
 ## Design Principles
 
 - **Local-first**: Your data lives on your machine. No accounts required.

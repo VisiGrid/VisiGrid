@@ -30,6 +30,9 @@ run_test() {
         [[ -n "$line" ]] && args+=("$line")
     done < "$test_dir/args.txt"
 
+    # Substitute {DIR} with test directory path
+    args=("${args[@]/\{DIR\}/$test_dir}")
+
     # Determine input file
     local input_file=""
     for f in "$test_dir"/input.*; do

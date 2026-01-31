@@ -1,0 +1,55 @@
+{
+  "results": [
+    {
+      "candidates": null,
+      "diffs": [
+        {
+          "column": "Total",
+          "delta": 0.009999999999990905,
+          "left": "685",
+          "right": "684.99",
+          "within_tolerance": true
+        }
+      ],
+      "key": "INV-001",
+      "left": {
+        "Invoice": "INV-001",
+        "Total": "685"
+      },
+      "match_explain": null,
+      "right": {
+        "Invoice": "INV-001",
+        "Total": "684.99"
+      },
+      "status": "diff"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-002",
+      "left": {
+        "Invoice": "INV-002",
+        "Total": "1200"
+      },
+      "match_explain": null,
+      "right": {
+        "Invoice": "INV-002",
+        "Total": "1200"
+      },
+      "status": "matched"
+    }
+  ],
+  "summary": {
+    "ambiguous": 0,
+    "diff": 1,
+    "key": "Invoice",
+    "key_transform": "trim",
+    "left_rows": 2,
+    "match": "exact",
+    "matched": 1,
+    "only_left": 0,
+    "only_right": 0,
+    "right_rows": 2,
+    "tolerance": 0.01
+  }
+}

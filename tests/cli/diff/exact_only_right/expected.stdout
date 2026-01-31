@@ -1,0 +1,56 @@
+{
+  "results": [
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-001",
+      "left": {
+        "Amount": "100",
+        "Invoice": "INV-001"
+      },
+      "match_explain": null,
+      "right": {
+        "Amount": "100",
+        "Invoice": "INV-001"
+      },
+      "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-002",
+      "left": null,
+      "match_explain": null,
+      "right": {
+        "Amount": "200",
+        "Invoice": "INV-002"
+      },
+      "status": "only_right"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-003",
+      "left": null,
+      "match_explain": null,
+      "right": {
+        "Amount": "300",
+        "Invoice": "INV-003"
+      },
+      "status": "only_right"
+    }
+  ],
+  "summary": {
+    "ambiguous": 0,
+    "diff": 0,
+    "key": "Invoice",
+    "key_transform": "trim",
+    "left_rows": 1,
+    "match": "exact",
+    "matched": 1,
+    "only_left": 0,
+    "only_right": 2,
+    "right_rows": 3,
+    "tolerance": 0.0
+  }
+}

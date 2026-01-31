@@ -1,8 +1,10 @@
 // VisiGrid CLI - headless spreadsheet operations
 // See docs/cli-v1.md for specification
 
+mod diff;
 mod replay;
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -130,6 +132,67 @@ enum Commands {
         #[command(subcommand)]
         command: AiCommands,
     },
+
+    /// Reconcile two datasets by key
+    Diff {
+        /// Left dataset file
+        left: PathBuf,
+
+        /// Right dataset file
+        right: PathBuf,
+
+        /// Key column (name, letter, or 1-indexed number)
+        #[arg(long)]
+        key: String,
+
+        /// Matching mode (exact: keys must match exactly; contains: left key must be substring of right key)
+        #[arg(long, default_value = "exact")]
+        r#match: DiffMatchMode,
+
+        /// Key transform
+        #[arg(long, default_value = "trim")]
+        key_transform: DiffKeyTransform,
+
+        /// Columns to compare (comma-separated; omit for all non-key)
+        #[arg(long)]
+        compare: Option<String>,
+
+        /// Numeric tolerance (absolute)
+        #[arg(long, default_value = "0")]
+        tolerance: f64,
+
+        /// Policy for duplicate keys
+        #[arg(long, default_value = "error")]
+        on_duplicate: DiffDuplicatePolicy,
+
+        /// Policy for ambiguous matches (contains mode)
+        #[arg(long, default_value = "error")]
+        on_ambiguous: DiffAmbiguousPolicy,
+
+        /// Output format
+        #[arg(long, default_value = "json")]
+        out: DiffOutputFormat,
+
+        /// Output file (default: stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Summary output destination
+        #[arg(long, default_value = "stderr")]
+        summary: DiffSummaryMode,
+
+        /// Treat first row as data (generate A, B, C headers)
+        #[arg(long)]
+        no_headers: bool,
+
+        /// Header row number (1-indexed)
+        #[arg(long)]
+        header_row: Option<usize>,
+
+        /// CSV delimiter
+        #[arg(long, default_value = ",")]
+        delimiter: char,
+    },
 }
 
 #[derive(Subcommand)]
@@ -159,6 +222,43 @@ enum Format {
 #[derive(Clone, Copy, ValueEnum)]
 enum SpillFormat {
     Csv,
+    Json,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DiffMatchMode {
+    Exact,
+    Contains,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DiffKeyTransform {
+    None,
+    Trim,
+    Digits,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DiffDuplicatePolicy {
+    Error,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DiffAmbiguousPolicy {
+    Error,
+    Report,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DiffOutputFormat {
+    Json,
+    Csv,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DiffSummaryMode {
+    None,
+    Stderr,
     Json,
 }
 
@@ -202,6 +302,26 @@ fn main() -> ExitCode {
         Some(Commands::Ai { command }) => match command {
             AiCommands::Doctor { json, test } => cmd_ai_doctor(json, test),
         },
+        Some(Commands::Diff {
+            left,
+            right,
+            key,
+            r#match,
+            key_transform,
+            compare,
+            tolerance,
+            on_duplicate: _,
+            on_ambiguous,
+            out,
+            output,
+            summary,
+            no_headers,
+            header_row,
+            delimiter,
+        }) => cmd_diff(
+            left, right, key, r#match, key_transform, compare, tolerance,
+            on_ambiguous, out, output, summary, no_headers, header_row, delimiter,
+        ),
     };
 
     match result {
@@ -997,6 +1117,438 @@ fn cmd_open(file: Option<PathBuf>) -> Result<(), CliError> {
 // ============================================================================
 // replay (Phase 9B)
 // ============================================================================
+
+// ============================================================================
+// diff
+// ============================================================================
+
+// Diff-specific exit codes (per cli-diff.md spec)
+const EXIT_DIFF_DUPLICATE: u8 = 3;
+const EXIT_DIFF_AMBIGUOUS: u8 = 4;
+const EXIT_DIFF_PARSE: u8 = 5;
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_diff(
+    left_path: PathBuf,
+    right_path: PathBuf,
+    key: String,
+    match_mode: DiffMatchMode,
+    key_transform: DiffKeyTransform,
+    compare: Option<String>,
+    tolerance: f64,
+    on_ambiguous: DiffAmbiguousPolicy,
+    out: DiffOutputFormat,
+    output: Option<PathBuf>,
+    summary_mode: DiffSummaryMode,
+    no_headers: bool,
+    header_row: Option<usize>,
+    _delimiter: char,
+) -> Result<(), CliError> {
+    // Load both files
+    let left_format = infer_format(&left_path)?;
+    let right_format = infer_format(&right_path)?;
+    let left_sheet = read_file(&left_path, left_format, ',')?;
+    let right_sheet = read_file(&right_path, right_format, ',')?;
+
+    let (left_bounds_rows, left_bounds_cols) = get_data_bounds(&left_sheet);
+    let (right_bounds_rows, right_bounds_cols) = get_data_bounds(&right_sheet);
+
+    if left_bounds_rows == 0 {
+        return Err(CliError { code: EXIT_DIFF_PARSE, message: format!("{}: no data", left_path.display()) });
+    }
+    if right_bounds_rows == 0 {
+        return Err(CliError { code: EXIT_DIFF_PARSE, message: format!("{}: no data", right_path.display()) });
+    }
+
+    // Determine header row (0-indexed internally)
+    let hdr_row = if no_headers {
+        None
+    } else {
+        Some(header_row.map(|h| h.saturating_sub(1)).unwrap_or(0))
+    };
+
+    // Extract headers
+    let max_cols = left_bounds_cols.max(right_bounds_cols);
+    let headers: Vec<String> = if let Some(hr) = hdr_row {
+        (0..max_cols)
+            .map(|c| {
+                let lh = left_sheet.get_display(hr, c);
+                if !lh.is_empty() {
+                    lh
+                } else {
+                    right_sheet.get_display(hr, c)
+                }
+            })
+            .collect()
+    } else {
+        // Generate A, B, C, ... headers
+        (0..max_cols).map(|c| col_letter(c)).collect()
+    };
+
+    // Resolve key column
+    let key_col = resolve_column(&key, &headers)?;
+
+    // Resolve compare columns
+    let compare_cols = match &compare {
+        Some(spec) => {
+            let mut cols = Vec::new();
+            for part in spec.split(',') {
+                let part = part.trim();
+                cols.push(resolve_column(part, &headers)?);
+            }
+            Some(cols)
+        }
+        None => None,
+    };
+
+    // Convert match mode
+    let mode = match match_mode {
+        DiffMatchMode::Exact => diff::MatchMode::Exact,
+        DiffMatchMode::Contains => diff::MatchMode::Contains,
+    };
+
+    let kt = match key_transform {
+        DiffKeyTransform::None => diff::KeyTransform::None,
+        DiffKeyTransform::Trim => diff::KeyTransform::Trim,
+        DiffKeyTransform::Digits => diff::KeyTransform::Digits,
+    };
+
+    let amb = match on_ambiguous {
+        DiffAmbiguousPolicy::Error => diff::AmbiguityPolicy::Error,
+        DiffAmbiguousPolicy::Report => diff::AmbiguityPolicy::Report,
+    };
+
+    let options = diff::DiffOptions {
+        key_col,
+        compare_cols,
+        match_mode: mode,
+        key_transform: kt,
+        on_ambiguous: amb,
+        tolerance,
+    };
+
+    // Extract data rows
+    let data_start = hdr_row.map(|h| h + 1).unwrap_or(0);
+    let left_rows = extract_data_rows(&left_sheet, data_start, left_bounds_rows, left_bounds_cols, &headers, &options);
+    let right_rows = extract_data_rows(&right_sheet, data_start, right_bounds_rows, right_bounds_cols, &headers, &options);
+
+    // Warn when using substring matching
+    if mode == diff::MatchMode::Contains {
+        eprintln!("warning: using substring matching (--match contains); ensure keys are normalized");
+    }
+
+    // Run reconciliation
+    let result = match diff::reconcile(&left_rows, &right_rows, &headers, &options) {
+        Ok(r) => r,
+        Err(diff::DiffError::DuplicateKeys(dups)) => {
+            let mut msg = String::from("duplicate keys found:\n");
+            for dup in &dups {
+                msg.push_str(&format!("  {} key {:?} appears {} times\n", dup.side.as_str(), dup.key, dup.count));
+            }
+            return Err(CliError { code: EXIT_DIFF_DUPLICATE, message: msg.trim_end().to_string() });
+        }
+    };
+
+    // Check ambiguous error condition
+    if !result.ambiguous_keys.is_empty() && amb == diff::AmbiguityPolicy::Error {
+        let mut msg = String::from("ambiguous matches found:\n");
+        for ak in &result.ambiguous_keys {
+            msg.push_str(&format!("  key {:?} matches {} right rows:", ak.key, ak.candidates.len()));
+            for c in &ak.candidates {
+                msg.push_str(&format!(" {:?}(row {})", c.right_key_raw, c.right_row_index));
+            }
+            msg.push('\n');
+        }
+        return Err(CliError { code: EXIT_DIFF_AMBIGUOUS, message: msg.trim_end().to_string() });
+    }
+
+    // Format output
+    let output_bytes = match out {
+        DiffOutputFormat::Json => format_diff_json(&result, &options, &headers, &summary_mode)?,
+        DiffOutputFormat::Csv => format_diff_csv(&result, &options)?,
+    };
+
+    // Write output
+    match output {
+        Some(path) => {
+            std::fs::write(&path, &output_bytes)
+                .map_err(|e| CliError::io(format!("{}: {}", path.display(), e)))?;
+        }
+        None => {
+            io::stdout()
+                .write_all(&output_bytes)
+                .map_err(|e| CliError::io(e.to_string()))?;
+        }
+    }
+
+    // Write summary to stderr if requested
+    if matches!(summary_mode, DiffSummaryMode::Stderr) {
+        let s = &result.summary;
+        eprintln!("left:  {} rows ({})", s.left_rows, left_path.display());
+        eprintln!("right: {} rows ({})", s.right_rows, right_path.display());
+        eprintln!("matched: {}", s.matched);
+        eprintln!("only_left: {}", s.only_left);
+        eprintln!("only_right: {}", s.only_right);
+        eprintln!("value_diff: {}", s.diff);
+        if s.ambiguous > 0 {
+            eprintln!("ambiguous: {}", s.ambiguous);
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_column(spec: &str, headers: &[String]) -> Result<usize, CliError> {
+    // Try by name first (case-insensitive)
+    let spec_lower = spec.to_lowercase();
+    for (i, h) in headers.iter().enumerate() {
+        if h.to_lowercase() == spec_lower {
+            return Ok(i);
+        }
+    }
+
+    // Try as column letter (A=0, B=1, ...)
+    if spec.chars().all(|c| c.is_ascii_alphabetic()) {
+        let upper = spec.to_uppercase();
+        let mut col: usize = 0;
+        for c in upper.chars() {
+            col = col * 26 + (c as usize - 'A' as usize + 1);
+        }
+        let idx = col - 1;
+        if idx < headers.len() {
+            return Ok(idx);
+        }
+    }
+
+    // Try as 1-indexed number
+    if let Ok(n) = spec.parse::<usize>() {
+        if n >= 1 && n <= headers.len() {
+            return Ok(n - 1);
+        }
+    }
+
+    Err(CliError::args(format!("unknown column: {:?}", spec)))
+}
+
+fn col_letter(col: usize) -> String {
+    let mut result = String::new();
+    let mut n = col;
+    loop {
+        result.insert(0, (b'A' + (n % 26) as u8) as char);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    result
+}
+
+fn extract_data_rows(
+    sheet: &visigrid_engine::sheet::Sheet,
+    data_start: usize,
+    bounds_rows: usize,
+    bounds_cols: usize,
+    headers: &[String],
+    options: &diff::DiffOptions,
+) -> Vec<diff::DataRow> {
+    let mut rows = Vec::new();
+    for r in data_start..bounds_rows {
+        // Skip blank rows
+        let mut all_blank = true;
+        for c in 0..bounds_cols {
+            if !sheet.get_display(r, c).is_empty() {
+                all_blank = false;
+                break;
+            }
+        }
+        if all_blank {
+            continue;
+        }
+
+        let key_raw = sheet.get_display(r, options.key_col);
+        let key_norm = diff::apply_key_transform(&key_raw, options.key_transform);
+
+        let mut values = HashMap::new();
+        for (c, header) in headers.iter().enumerate() {
+            if c < bounds_cols {
+                values.insert(header.clone(), sheet.get_display(r, c));
+            }
+        }
+
+        rows.push(diff::DataRow {
+            key_raw,
+            key_norm,
+            values,
+        });
+    }
+    rows
+}
+
+fn format_diff_json(
+    result: &diff::DiffResult,
+    options: &diff::DiffOptions,
+    headers: &[String],
+    summary_mode: &DiffSummaryMode,
+) -> Result<Vec<u8>, CliError> {
+    let key_name = headers.get(options.key_col).cloned().unwrap_or_default();
+    let match_str = match options.match_mode {
+        diff::MatchMode::Exact => "exact",
+        diff::MatchMode::Contains => "contains",
+    };
+    let kt_str = match options.key_transform {
+        diff::KeyTransform::None => "none",
+        diff::KeyTransform::Trim => "trim",
+        diff::KeyTransform::Digits => "digits",
+    };
+
+    // Build results array
+    let results_json: Vec<serde_json::Value> = result.results.iter().map(|row| {
+        let diffs_json = if row.diffs.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(row.diffs.iter().map(|d| {
+                let mut m = serde_json::Map::new();
+                m.insert("column".to_string(), serde_json::json!(d.column));
+                m.insert("left".to_string(), serde_json::json!(d.left));
+                m.insert("right".to_string(), serde_json::json!(d.right));
+                m.insert("delta".to_string(), match d.delta {
+                    Some(v) => serde_json::json!(v),
+                    None => serde_json::Value::Null,
+                });
+                m.insert("within_tolerance".to_string(), serde_json::json!(d.within_tolerance));
+                serde_json::Value::Object(m)
+            }).collect::<Vec<_>>())
+        };
+
+        let explain_json = match &row.match_explain {
+            Some(e) => serde_json::json!({
+                "mode": e.mode,
+                "left_key_raw": e.left_key_raw,
+                "right_key_raw": e.right_key_raw,
+                "left_key_norm": e.left_key_norm,
+                "right_key_norm": e.right_key_norm,
+            }),
+            None => serde_json::Value::Null,
+        };
+
+        let candidates_json = match &row.candidates {
+            Some(cands) => serde_json::json!(cands.iter().map(|c| {
+                serde_json::json!({
+                    "right_key_raw": c.right_key_raw,
+                    "right_row_index": c.right_row_index,
+                })
+            }).collect::<Vec<_>>()),
+            None => serde_json::Value::Null,
+        };
+
+        let left_json = match &row.left {
+            Some(vals) => serde_json::json!(vals),
+            None => serde_json::Value::Null,
+        };
+        let right_json = match &row.right {
+            Some(vals) => serde_json::json!(vals),
+            None => serde_json::Value::Null,
+        };
+
+        serde_json::json!({
+            "status": row.status.as_str(),
+            "key": row.key,
+            "left": left_json,
+            "right": right_json,
+            "diffs": diffs_json,
+            "match_explain": explain_json,
+            "candidates": candidates_json,
+        })
+    }).collect();
+
+    // Build top-level object
+    let summary_json = serde_json::json!({
+        "left_rows": result.summary.left_rows,
+        "right_rows": result.summary.right_rows,
+        "matched": result.summary.matched,
+        "only_left": result.summary.only_left,
+        "only_right": result.summary.only_right,
+        "diff": result.summary.diff,
+        "ambiguous": result.summary.ambiguous,
+        "tolerance": options.tolerance,
+        "key": key_name,
+        "match": match_str,
+        "key_transform": kt_str,
+    });
+
+    let top = match summary_mode {
+        DiffSummaryMode::Json => serde_json::json!({
+            "summary": summary_json,
+            "results": results_json,
+        }),
+        _ => serde_json::json!({
+            "summary": summary_json,
+            "results": results_json,
+        }),
+    };
+
+    serde_json::to_vec_pretty(&top).map_err(|e| CliError::io(e.to_string()))
+}
+
+fn format_diff_csv(
+    result: &diff::DiffResult,
+    options: &diff::DiffOptions,
+) -> Result<Vec<u8>, CliError> {
+    let match_str = match options.match_mode {
+        diff::MatchMode::Exact => "exact",
+        diff::MatchMode::Contains => "contains",
+    };
+
+    let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
+
+    // Header
+    writer.write_record(&[
+        "status", "key", "column", "left_value", "right_value",
+        "delta", "within_tolerance", "match_mode", "match_explain",
+    ]).map_err(|e| CliError::io(e.to_string()))?;
+
+    for row in &result.results {
+        if row.status == diff::RowStatus::Diff && !row.diffs.is_empty() {
+            // One CSV row per column diff
+            for d in &row.diffs {
+                let explain = match &row.match_explain {
+                    Some(e) => format!("{} left={:?} right={:?}", e.mode, e.left_key_raw, e.right_key_raw),
+                    None => String::new(),
+                };
+                writer.write_record(&[
+                    row.status.as_str(),
+                    &row.key,
+                    &d.column,
+                    &d.left,
+                    &d.right,
+                    &d.delta.map(|v| format!("{}", v)).unwrap_or_default(),
+                    &d.within_tolerance.to_string(),
+                    match_str,
+                    &explain,
+                ]).map_err(|e| CliError::io(e.to_string()))?;
+            }
+        } else {
+            // One row for the key
+            let explain = match &row.match_explain {
+                Some(e) => format!("{} left={:?} right={:?}", e.mode, e.left_key_raw, e.right_key_raw),
+                None => String::new(),
+            };
+            writer.write_record(&[
+                row.status.as_str(),
+                &row.key,
+                "",
+                "",
+                "",
+                "",
+                "",
+                match_str,
+                &explain,
+            ]).map_err(|e| CliError::io(e.to_string()))?;
+        }
+    }
+
+    writer.into_inner().map_err(|e| CliError::io(e.to_string()))
+}
 
 // ============================================================================
 // ai doctor

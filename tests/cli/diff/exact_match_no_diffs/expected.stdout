@@ -1,0 +1,68 @@
+{
+  "results": [
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-001",
+      "left": {
+        "Amount": "100",
+        "Invoice": "INV-001",
+        "Vendor": "Acme"
+      },
+      "match_explain": null,
+      "right": {
+        "Amount": "100",
+        "Invoice": "INV-001",
+        "Vendor": "Acme"
+      },
+      "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-002",
+      "left": {
+        "Amount": "200.50",
+        "Invoice": "INV-002",
+        "Vendor": "Beta"
+      },
+      "match_explain": null,
+      "right": {
+        "Amount": "200.50",
+        "Invoice": "INV-002",
+        "Vendor": "Beta"
+      },
+      "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-003",
+      "left": {
+        "Amount": "350.75",
+        "Invoice": "INV-003",
+        "Vendor": "Gamma"
+      },
+      "match_explain": null,
+      "right": {
+        "Amount": "350.75",
+        "Invoice": "INV-003",
+        "Vendor": "Gamma"
+      },
+      "status": "matched"
+    }
+  ],
+  "summary": {
+    "ambiguous": 0,
+    "diff": 0,
+    "key": "Invoice",
+    "key_transform": "trim",
+    "left_rows": 3,
+    "match": "exact",
+    "matched": 3,
+    "only_left": 0,
+    "only_right": 0,
+    "right_rows": 3,
+    "tolerance": 0.0
+  }
+}
