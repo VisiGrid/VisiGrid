@@ -319,6 +319,25 @@ jobs:
 
           echo -n "APPLVSGD" > "$APP_DIR/Contents/PkgInfo"
 
+      - name: Verify Info.plist document types
+        run: |
+          PLIST="dist/VisiGrid.app/Contents/Info.plist"
+          echo "Checking Info.plist for required document type declarations..."
+
+          # Verify xlsx UTType is declared (canary for all document types)
+          plutil -p "$PLIST" | grep -q "org.openxmlformats.spreadsheetml.sheet" \
+            || { echo "ERROR: Info.plist missing xlsx UTType (org.openxmlformats.spreadsheetml.sheet)"; exit 1; }
+
+          # Verify native .vgrid UTType
+          plutil -p "$PLIST" | grep -q "com.visigrid.vgrid" \
+            || { echo "ERROR: Info.plist missing vgrid UTType (com.visigrid.vgrid)"; exit 1; }
+
+          # Verify exported UTType declarations exist
+          plutil -p "$PLIST" | grep -q "UTExportedTypeDeclarations" \
+            || { echo "ERROR: Info.plist missing UTExportedTypeDeclarations"; exit 1; }
+
+          echo "Info.plist document types verified."
+
       - name: Sign app bundle
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -330,6 +349,7 @@ jobs:
           # Sign the entire app bundle with --deep to include all nested binaries
           echo "Signing app bundle (deep)..."
           codesign --force --deep --options runtime --sign "Developer ID Application: RegAtlas, LLC ($APPLE_TEAM_ID)" \
+            --entitlements gpui-app/macos/entitlements.plist \
             --timestamp "dist/VisiGrid.app"
 
           # Verify signature

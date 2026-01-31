@@ -51,9 +51,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
 Name: "startmenu"; Description: "Create Start Menu shortcuts"; GroupDescription: "Additional icons:"; Flags: checkedonce
 Name: "openwith"; Description: "Add VisiGrid to ""Open with"" menu"; GroupDescription: "Shell integration:"; Flags: checkedonce
-Name: "associatevgrid"; Description: "Set as default app for .vgrid files"; GroupDescription: "File associations:"; Flags: checkedonce
-Name: "associatecsv"; Description: "Set as default app for .csv files"; GroupDescription: "File associations:"; Flags: unchecked
-Name: "associatetsv"; Description: "Set as default app for .tsv files"; GroupDescription: "File associations:"; Flags: unchecked
+Name: "associatevgrid"; Description: "Associate VisiGrid with .vgrid files (recommended)"; GroupDescription: "File associations:"; Flags: checkedonce
+Name: "associatesheet"; Description: "Associate VisiGrid with .sheet files (recommended)"; GroupDescription: "File associations:"; Flags: checkedonce
+Name: "associatecsv"; Description: "Show VisiGrid in Open With for .csv"; GroupDescription: "File associations:"; Flags: unchecked
+Name: "associatetsv"; Description: "Show VisiGrid in Open With for .tsv"; GroupDescription: "File associations:"; Flags: unchecked
+Name: "associatexlsx"; Description: "Show VisiGrid in Open With for .xlsx (best-effort import)"; GroupDescription: "File associations:"; Flags: unchecked
+Name: "associatexls"; Description: "Show VisiGrid in Open With for .xls (best-effort import)"; GroupDescription: "File associations:"; Flags: unchecked
 Name: "installcli"; Description: "Install command-line tools (visigrid)"; GroupDescription: "Command-line:"; Flags: checkedonce
 Name: "addtopath"; Description: "Add to PATH (requires shell restart)"; GroupDescription: "Command-line:"; Flags: checkedonce
 
@@ -91,6 +94,11 @@ Root: HKCU; Subkey: "Software\Classes\VisiGrid.Sheet"; ValueType: string; ValueN
 Root: HKCU; Subkey: "Software\Classes\VisiGrid.Sheet\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"
 Root: HKCU; Subkey: "Software\Classes\VisiGrid.Sheet\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""
 
+; ProgID: VisiGrid.NativeSheet (for .sheet files)
+Root: HKCU; Subkey: "Software\Classes\VisiGrid.NativeSheet"; ValueType: string; ValueName: ""; ValueData: "VisiGrid Sheet"; Flags: uninsdeletekey; Tasks: associatesheet
+Root: HKCU; Subkey: "Software\Classes\VisiGrid.NativeSheet\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"; Tasks: associatesheet
+Root: HKCU; Subkey: "Software\Classes\VisiGrid.NativeSheet\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Tasks: associatesheet
+
 ; ProgID: VisiGrid.CSV (for .csv files)
 Root: HKCU; Subkey: "Software\Classes\VisiGrid.CSV"; ValueType: string; ValueName: ""; ValueData: "CSV File"; Flags: uninsdeletekey; Tasks: associatecsv
 Root: HKCU; Subkey: "Software\Classes\VisiGrid.CSV\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"; Tasks: associatecsv
@@ -101,17 +109,32 @@ Root: HKCU; Subkey: "Software\Classes\VisiGrid.TSV"; ValueType: string; ValueNam
 Root: HKCU; Subkey: "Software\Classes\VisiGrid.TSV\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"; Tasks: associatetsv
 Root: HKCU; Subkey: "Software\Classes\VisiGrid.TSV\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Tasks: associatetsv
 
+; ProgID: VisiGrid.XLSX (for .xlsx files)
+Root: HKCU; Subkey: "Software\Classes\VisiGrid.XLSX"; ValueType: string; ValueName: ""; ValueData: "Excel Workbook"; Flags: uninsdeletekey; Tasks: associatexlsx
+Root: HKCU; Subkey: "Software\Classes\VisiGrid.XLSX\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"; Tasks: associatexlsx
+Root: HKCU; Subkey: "Software\Classes\VisiGrid.XLSX\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Tasks: associatexlsx
+
+; ProgID: VisiGrid.XLS (for .xls files)
+Root: HKCU; Subkey: "Software\Classes\VisiGrid.XLS"; ValueType: string; ValueName: ""; ValueData: "Excel 97-2003 Workbook"; Flags: uninsdeletekey; Tasks: associatexls
+Root: HKCU; Subkey: "Software\Classes\VisiGrid.XLS\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"; Tasks: associatexls
+Root: HKCU; Subkey: "Software\Classes\VisiGrid.XLS\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Tasks: associatexls
+
 ; File associations
 Root: HKCU; Subkey: "Software\Classes\.vgrid"; ValueType: string; ValueName: ""; ValueData: "VisiGrid.Sheet"; Flags: uninsdeletekey; Tasks: associatevgrid
+Root: HKCU; Subkey: "Software\Classes\.sheet"; ValueType: string; ValueName: ""; ValueData: "VisiGrid.NativeSheet"; Flags: uninsdeletekey; Tasks: associatesheet
 Root: HKCU; Subkey: "Software\Classes\.csv"; ValueType: string; ValueName: ""; ValueData: "VisiGrid.CSV"; Tasks: associatecsv
 Root: HKCU; Subkey: "Software\Classes\.tsv"; ValueType: string; ValueName: ""; ValueData: "VisiGrid.TSV"; Tasks: associatetsv
+Root: HKCU; Subkey: "Software\Classes\.xlsx"; ValueType: string; ValueName: ""; ValueData: "VisiGrid.XLSX"; Tasks: associatexlsx
+Root: HKCU; Subkey: "Software\Classes\.xls"; ValueType: string; ValueName: ""; ValueData: "VisiGrid.XLS"; Tasks: associatexls
 
 ; "Open with" registration
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#AppName}"; Flags: uninsdeletekey; Tasks: openwith
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\SupportedTypes"; ValueType: string; ValueName: ".vgrid"; ValueData: ""; Tasks: openwith
+Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\SupportedTypes"; ValueType: string; ValueName: ".sheet"; ValueData: ""; Tasks: openwith
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\SupportedTypes"; ValueType: string; ValueName: ".csv"; ValueData: ""; Tasks: openwith
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\SupportedTypes"; ValueType: string; ValueName: ".tsv"; ValueData: ""; Tasks: openwith
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\SupportedTypes"; ValueType: string; ValueName: ".json"; ValueData: ""; Tasks: openwith
+Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\SupportedTypes"; ValueType: string; ValueName: ".xlsx"; ValueData: ""; Tasks: openwith
+Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\SupportedTypes"; ValueType: string; ValueName: ".xls"; ValueData: ""; Tasks: openwith
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Tasks: openwith
 
 ; Bookkeeping flags for clean uninstall
@@ -121,10 +144,16 @@ Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AddedToOp
 Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AddedToOpenWith"; ValueData: "0"; Tasks: not openwith
 Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedVgrid"; ValueData: "1"; Tasks: associatevgrid
 Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedVgrid"; ValueData: "0"; Tasks: not associatevgrid
+Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedSheet"; ValueData: "1"; Tasks: associatesheet
+Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedSheet"; ValueData: "0"; Tasks: not associatesheet
 Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedCsv"; ValueData: "1"; Tasks: associatecsv
 Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedCsv"; ValueData: "0"; Tasks: not associatecsv
 Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedTsv"; ValueData: "1"; Tasks: associatetsv
 Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedTsv"; ValueData: "0"; Tasks: not associatetsv
+Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedXlsx"; ValueData: "1"; Tasks: associatexlsx
+Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedXlsx"; ValueData: "0"; Tasks: not associatexlsx
+Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedXls"; ValueData: "1"; Tasks: associatexls
+Root: HKCU; Subkey: "Software\VisiGrid"; ValueType: dword; ValueName: "AssociatedXls"; ValueData: "0"; Tasks: not associatexls
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent

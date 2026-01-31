@@ -56,6 +56,9 @@ pub struct SessionMeta {
 /// State for a single window
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WindowSession {
+    /// Unique ID for runtime matching (assigned at creation, not stable across restarts)
+    #[serde(default)]
+    pub window_id: u64,
     /// Open file path (None = untitled)
     pub file: Option<PathBuf>,
     /// Workbook/sheet state
@@ -415,21 +418,51 @@ pub struct SessionManager {
     dirty_since: Option<Instant>,
     /// Debounce interval
     debounce: Duration,
+    /// Counter for assigning unique window IDs within a session
+    next_window_id: u64,
 }
 
 impl SessionManager {
     /// Create a new session manager
     pub fn new() -> Self {
-        let session = load_session().unwrap_or_else(|| Session {
+        let mut session = load_session().unwrap_or_else(|| Session {
             version: SESSION_VERSION,
             ..Default::default()
         });
+
+        // Respect existing window_ids from saved sessions.
+        // Assign fresh IDs only to windows that have the default (0) value
+        // or are duplicates of an earlier window's ID.
+        let mut max_id: u64 = 0;
+        let mut claimed = std::collections::HashSet::new();
+
+        // First pass: find max existing ID (to start counter above all)
+        for ws in &session.windows {
+            if ws.window_id != 0 {
+                max_id = max_id.max(ws.window_id);
+            }
+        }
+
+        // Second pass: claim first-seen non-zero IDs, reassign zeros and duplicates
+        let mut next_assign = max_id.saturating_add(1);
+        for ws in session.windows.iter_mut() {
+            if ws.window_id == 0 || !claimed.insert(ws.window_id) {
+                // Either unassigned (0) or duplicate — assign a fresh ID
+                ws.window_id = next_assign;
+                claimed.insert(next_assign);
+                next_assign += 1;
+            }
+        }
+
+        // Counter starts above all assigned IDs
+        let next_window_id = next_assign;
 
         Self {
             session,
             dirty: false,
             dirty_since: None,
             debounce: Duration::from_secs(5),
+            next_window_id,
         }
     }
 
@@ -438,6 +471,13 @@ impl SessionManager {
         let mut mgr = Self::new();
         mgr.debounce = debounce;
         mgr
+    }
+
+    /// Get the next unique window ID (sequential counter)
+    pub fn next_window_id(&mut self) -> u64 {
+        let id = self.next_window_id;
+        self.next_window_id += 1;
+        id
     }
 
     /// Create a fresh session manager for testing (does NOT load from disk)
@@ -451,6 +491,7 @@ impl SessionManager {
             dirty: false,
             dirty_since: None,
             debounce,
+            next_window_id: 0,
         }
     }
 
@@ -546,6 +587,10 @@ impl Spreadsheet {
 
     /// Internal: create snapshot with given window bounds
     fn snapshot_with_bounds(&self, window_bounds: Option<WindowBounds>, cx: &App) -> WindowSession {
+        debug_assert!(
+            self.session_window_id != crate::app::WINDOW_ID_UNSET,
+            "snapshot called before session_window_id was assigned"
+        );
         // Capture sheet states
         let sheets: Vec<SheetSession> = self.wb(cx).sheets()
             .iter()
@@ -586,6 +631,7 @@ impl Spreadsheet {
         };
 
         WindowSession {
+            window_id: self.session_window_id,
             file: self.current_file.clone(),
             sheets,
             active_sheet: self.wb(cx).active_sheet_index(),
@@ -686,6 +732,7 @@ mod tests {
             version: SESSION_VERSION,
             windows: vec![
                 WindowSession {
+                    window_id: 0,
                     file: Some(PathBuf::from("/tmp/test.sheet")),
                     sheets: vec![
                         SheetSession {
@@ -948,5 +995,146 @@ mod tests {
         assert_eq!(mgr.session().windows.len(), 0);
         assert_eq!(mgr.session().version, SESSION_VERSION);
         assert!(mgr.dirty); // Should be marked dirty
+    }
+
+    #[test]
+    fn test_window_id_counter() {
+        let mut mgr = SessionManager::new_empty_for_test(Duration::from_secs(5));
+
+        assert_eq!(mgr.next_window_id(), 0);
+        assert_eq!(mgr.next_window_id(), 1);
+        assert_eq!(mgr.next_window_id(), 2);
+    }
+
+    #[test]
+    fn test_remove_window_from_session() {
+        let mut mgr = SessionManager::new_empty_for_test(Duration::from_secs(5));
+
+        // Add 3 windows with distinct IDs
+        for i in 0..3 {
+            let mut ws = WindowSession::default();
+            ws.window_id = mgr.next_window_id();
+            ws.file = Some(PathBuf::from(format!("/tmp/file{}.sheet", i)));
+            mgr.session_mut().windows.push(ws);
+        }
+        assert_eq!(mgr.session().windows.len(), 3);
+
+        // Remove middle window (window_id=1)
+        let session = mgr.session_mut();
+        if let Some(idx) = session.windows.iter().position(|w| w.window_id == 1) {
+            session.windows.remove(idx);
+        }
+
+        assert_eq!(mgr.session().windows.len(), 2);
+        assert_eq!(mgr.session().windows[0].window_id, 0);
+        assert_eq!(mgr.session().windows[1].window_id, 2);
+    }
+
+    #[test]
+    fn test_window_id_deserialization_default() {
+        // Old session without window_id should deserialize with default 0
+        let json = r#"{
+            "version": 1,
+            "windows": [{
+                "file": null,
+                "sheets": [],
+                "active_sheet": 0,
+                "panels": {}
+            }],
+            "focused_window": null
+        }"#;
+
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.windows[0].window_id, 0);
+    }
+
+    #[test]
+    fn test_same_file_different_window_ids() {
+        // Two windows with the same file path but different window_ids
+        // must not stomp each other on update or remove.
+        let mut mgr = SessionManager::new_empty_for_test(Duration::from_secs(5));
+        let same_path = Some(PathBuf::from("/tmp/shared.sheet"));
+
+        let id_a = mgr.next_window_id();
+        let id_b = mgr.next_window_id();
+
+        let ws_a = WindowSession {
+            window_id: id_a,
+            file: same_path.clone(),
+            zoom_level: 1.0,
+            ..Default::default()
+        };
+        let ws_b = WindowSession {
+            window_id: id_b,
+            file: same_path.clone(),
+            zoom_level: 1.5,
+            ..Default::default()
+        };
+        mgr.session_mut().windows.push(ws_a);
+        mgr.session_mut().windows.push(ws_b);
+
+        assert_eq!(mgr.session().windows.len(), 2);
+
+        // Update window A's zoom — window B must be unaffected
+        let session = mgr.session_mut();
+        let idx_a = session.windows.iter().position(|w| w.window_id == id_a).unwrap();
+        session.windows[idx_a].zoom_level = 2.0;
+
+        assert_eq!(mgr.session().windows[0].zoom_level, 2.0); // A updated
+        assert_eq!(mgr.session().windows[1].zoom_level, 1.5); // B untouched
+        assert_eq!(mgr.session().windows[1].window_id, id_b);
+
+        // Remove window A — window B must remain
+        let session = mgr.session_mut();
+        if let Some(idx) = session.windows.iter().position(|w| w.window_id == id_a) {
+            session.windows.remove(idx);
+        }
+
+        assert_eq!(mgr.session().windows.len(), 1);
+        assert_eq!(mgr.session().windows[0].window_id, id_b);
+        assert_eq!(mgr.session().windows[0].zoom_level, 1.5);
+    }
+
+    #[test]
+    fn test_id_assignment_respects_existing_and_deduplicates() {
+        // Test the ID assignment logic directly (same algorithm as SessionManager::new)
+        let mut windows = vec![
+            WindowSession { window_id: 5, ..Default::default() },
+            WindowSession { window_id: 10, ..Default::default() },
+            WindowSession { window_id: 0, ..Default::default() },  // needs assignment
+            WindowSession { window_id: 5, ..Default::default() },  // duplicate of first
+        ];
+
+        // Run the same assignment algorithm as SessionManager::new()
+        let mut max_id: u64 = 0;
+        for ws in &windows {
+            if ws.window_id != 0 {
+                max_id = max_id.max(ws.window_id);
+            }
+        }
+
+        let mut claimed = std::collections::HashSet::new();
+        let mut next_assign = max_id.saturating_add(1);
+        for ws in windows.iter_mut() {
+            if ws.window_id == 0 || !claimed.insert(ws.window_id) {
+                ws.window_id = next_assign;
+                claimed.insert(next_assign);
+                next_assign += 1;
+            }
+        }
+
+        // First window (5): kept (first-seen)
+        assert_eq!(windows[0].window_id, 5);
+        // Second window (10): kept (first-seen)
+        assert_eq!(windows[1].window_id, 10);
+        // Third window (0): assigned 11 (max was 10, next is 11)
+        assert_eq!(windows[2].window_id, 11);
+        // Fourth window (duplicate 5): reassigned 12
+        assert_eq!(windows[3].window_id, 12);
+
+        // All IDs are unique
+        let ids: Vec<u64> = windows.iter().map(|w| w.window_id).collect();
+        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), unique.len());
     }
 }

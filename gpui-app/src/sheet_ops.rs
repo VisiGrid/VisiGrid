@@ -106,27 +106,38 @@ impl Spreadsheet {
 
     /// Update the global session with this window's current state.
     /// Called on significant state changes (file open/save, panel toggles).
-    pub fn update_session(&self, window: &Window, cx: &mut Context<Self>) {
+    pub fn update_session(&mut self, window: &Window, cx: &mut Context<Self>) {
         let snapshot = self.snapshot(window, cx);
         self.update_session_with_snapshot(snapshot, cx);
     }
 
     /// Update session using cached window bounds (for use without Window access).
     /// Useful from file_ops or other places where Window isn't available.
-    pub fn update_session_cached(&self, cx: &mut Context<Self>) {
+    pub fn update_session_cached(&mut self, cx: &mut Context<Self>) {
         let snapshot = self.snapshot_cached(cx);
         self.update_session_with_snapshot(snapshot, cx);
     }
 
-    /// Internal: update session with a snapshot
-    fn update_session_with_snapshot(&self, snapshot: crate::session::WindowSession, cx: &mut Context<Self>) {
+    /// Internal: update session with a snapshot.
+    /// Self-heals if session_window_id was never assigned: allocates one on the spot.
+    fn update_session_with_snapshot(&mut self, mut snapshot: crate::session::WindowSession, cx: &mut Context<Self>) {
+        debug_assert!(
+            self.session_window_id != crate::app::WINDOW_ID_UNSET,
+            "update_session called before session_window_id was assigned"
+        );
+
+        // Self-heal: allocate an ID if one was never assigned
+        if snapshot.window_id == crate::app::WINDOW_ID_UNSET {
+            let id = cx.update_global::<SessionManager, _>(|mgr, _| mgr.next_window_id());
+            self.session_window_id = id;
+            snapshot.window_id = id;
+        }
+
         cx.update_global::<SessionManager, _>(|mgr, _| {
-            // Find and update this window's entry, or add a new one
-            // For now, we use the file path as the key (simple single-window case)
             let session = mgr.session_mut();
 
-            // Find existing window by file path, or add new
-            let idx = session.windows.iter().position(|w| w.file == snapshot.file);
+            // Match by window_id (stable within a session)
+            let idx = session.windows.iter().position(|w| w.window_id == snapshot.window_id);
 
             if let Some(idx) = idx {
                 session.windows[idx] = snapshot;
@@ -138,7 +149,7 @@ impl Spreadsheet {
 
     /// Save session immediately (for quit/close).
     /// This saves the session to disk synchronously.
-    pub fn save_session_now(&self, window: &Window, cx: &mut Context<Self>) {
+    pub fn save_session_now(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.update_session(window, cx);
         cx.update_global::<SessionManager, _>(|mgr, _| {
             mgr.save_now();
@@ -146,7 +157,7 @@ impl Spreadsheet {
     }
 
     /// Save session using cached window bounds (for use without Window access).
-    pub fn save_session_cached(&self, cx: &mut Context<Self>) {
+    pub fn save_session_cached(&mut self, cx: &mut Context<Self>) {
         self.update_session_cached(cx);
         cx.update_global::<SessionManager, _>(|mgr, _| {
             mgr.save_now();
@@ -297,6 +308,40 @@ impl Spreadsheet {
                 self.is_dirty(),
                 self.current_file.clone(),
             ));
+        });
+    }
+
+    /// Remove this window from session state.
+    /// Matches by window_id (stable within a session).
+    /// Self-heals if ID was never assigned (assigns one, but nothing to remove).
+    pub fn remove_from_session(&mut self, cx: &mut Context<Self>) {
+        debug_assert!(
+            self.session_window_id != crate::app::WINDOW_ID_UNSET,
+            "remove_from_session called before session_window_id was assigned"
+        );
+
+        // Self-heal: if ID was never assigned, this window was never tracked in session
+        if self.session_window_id == crate::app::WINDOW_ID_UNSET {
+            self.session_window_id = cx.update_global::<SessionManager, _>(|mgr, _| mgr.next_window_id());
+            return; // Nothing in session to remove
+        }
+
+        let window_id = self.session_window_id;
+        cx.update_global::<SessionManager, _>(|mgr, _| {
+            let session = mgr.session_mut();
+            if let Some(idx) = session.windows.iter().position(|w| w.window_id == window_id) {
+                session.windows.remove(idx);
+            }
+        });
+    }
+
+    /// Prepare this window for closing: remove from session, unregister from registry, persist.
+    /// Call before `window.remove_window()`.
+    pub fn prepare_close(&mut self, cx: &mut Context<Self>) {
+        self.remove_from_session(cx);
+        self.unregister_from_window_registry(cx);
+        cx.update_global::<SessionManager, _>(|mgr, _| {
+            mgr.save_now();
         });
     }
 

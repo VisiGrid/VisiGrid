@@ -76,6 +76,10 @@ pub enum PaletteScope {
 // Document Identity (for title bar display)
 // ============================================================================
 
+/// Sentinel value for unassigned session window IDs.
+/// Any Spreadsheet with this value has not been registered with SessionManager.
+pub const WINDOW_ID_UNSET: u64 = u64::MAX;
+
 /// Native file extension for VisiGrid documents
 #[allow(dead_code)]
 pub const NATIVE_EXT: &str = "vgrid";
@@ -1854,6 +1858,10 @@ pub struct Spreadsheet {
     pub internal_clipboard: Option<InternalClipboard>,
 
     // File state
+    /// Unique ID for session matching (assigned at startup).
+    /// Initialized to WINDOW_ID_UNSET — must be assigned via SessionManager::next_window_id()
+    /// before the first snapshot/save.
+    pub session_window_id: u64,
     pub current_file: Option<PathBuf>,
     pub is_modified: bool,  // Legacy - use is_dirty() for title bar
     pub close_after_save: bool,  // Set by save_and_close() to close window after Save As completes
@@ -2320,6 +2328,7 @@ impl Spreadsheet {
             palette_pre_scroll: (0, 0),
             palette_previewing: false,
             internal_clipboard: None,
+            session_window_id: WINDOW_ID_UNSET,
             current_file: None,
             is_modified: false,
             close_after_save: false,

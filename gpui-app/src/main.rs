@@ -66,6 +66,7 @@ pub mod workbook_view;
 mod tests;
 
 use std::env;
+use std::sync::{Arc, Mutex};
 
 use gpui::*;
 use app::Spreadsheet;
@@ -258,8 +259,8 @@ fn build_window_options(bounds: WindowBounds) -> WindowOptions {
 struct CliArgs {
     /// Skip session restore this launch (session file preserved)
     no_restore: bool,
-    /// File to open (if specified)
-    file: Option<String>,
+    /// Files to open (if specified). Supports multiple: `visigrid a.xlsx b.csv`
+    files: Vec<String>,
 }
 
 fn print_help() {
@@ -275,14 +276,14 @@ fn print_help() {
     eprintln!("    -h, --help           Print this help message");
     eprintln!();
     eprintln!("ARGS:");
-    eprintln!("    <FILE>               File to open (.sheet, .csv, .xlsx)");
+    eprintln!("    <FILE>...            File(s) to open (.vgrid, .sheet, .xlsx, .xls, .csv, .tsv)");
 }
 
 fn parse_args() -> CliArgs {
     let args: Vec<String> = env::args().collect();
     let mut cli = CliArgs {
         no_restore: false,
-        file: None,
+        files: Vec::new(),
     };
 
     let mut i = 1;
@@ -307,7 +308,7 @@ fn parse_args() -> CliArgs {
                 cli.no_restore = true;
             }
             arg if !arg.starts_with('-') => {
-                cli.file = Some(arg.to_string());
+                cli.files.push(arg.to_string());
             }
             unknown => {
                 eprintln!("Unknown option: {}", unknown);
@@ -321,6 +322,107 @@ fn parse_args() -> CliArgs {
     cli
 }
 
+/// Parse a file:// URL to a PathBuf. Returns None for non-file URLs.
+pub(crate) fn url_to_path(url_str: &str) -> Option<std::path::PathBuf> {
+    // macOS sends file:///path/to/file.xlsx
+    if let Some(path_str) = url_str.strip_prefix("file://") {
+        // URL-decode percent-encoded characters (e.g., %20 → space)
+        let decoded = percent_decode(path_str);
+        Some(std::path::PathBuf::from(decoded))
+    } else if !url_str.contains("://") {
+        // Plain path (shouldn't happen from macOS, but handle anyway)
+        Some(std::path::PathBuf::from(url_str))
+    } else {
+        None
+    }
+}
+
+/// Decode percent-encoded URL characters (minimal, no external deps)
+pub(crate) fn percent_decode(input: &str) -> String {
+    let mut result = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                result.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(result).unwrap_or_else(|_| input.to_string())
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Normalize raw URLs into deduplicated canonical paths, preserving order.
+#[allow(unused)] // used by tests
+/// Handles file:// URLs, percent-encoding, symlinks, and duplicate entries
+/// (Finder can send the same file as both file:// and path variants).
+pub(crate) fn normalize_and_dedup_urls(urls: Vec<String>) -> Vec<std::path::PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut paths = Vec::new();
+
+    for url in urls {
+        let Some(path) = url_to_path(&url) else { continue };
+        // canonicalize resolves symlinks + normalizes /./foo, //foo, etc.
+        let canonical = path.canonicalize().unwrap_or(path);
+        if seen.insert(canonical.clone()) {
+            paths.push(canonical);
+        }
+    }
+
+    paths
+}
+
+/// Open file URLs in new windows (one window per file).
+/// Called from the startup drain and the polling task.
+fn open_file_urls(urls: Vec<String>, cx: &mut App) {
+    let paths = normalize_and_dedup_urls(urls);
+    if paths.is_empty() {
+        return;
+    }
+
+    let work_area = get_work_area(cx);
+
+    for path in paths {
+        if !path.exists() {
+            eprintln!("[open-urls] File not found: {}", path.display());
+            continue;
+        }
+
+        let bounds = compute_window_bounds(None, work_area);
+
+        cx.open_window(
+            build_window_options(WindowBounds::Windowed(bounds)),
+            move |window, cx| {
+                let window_id = cx.update_global::<SessionManager, _>(|mgr, _| mgr.next_window_id());
+                let entity = cx.new(|cx| {
+                    let mut app = Spreadsheet::new(window, cx);
+                    app.session_window_id = window_id;
+                    app.load_file(&path, cx);
+                    app
+                });
+                entity.update(cx, |spreadsheet, cx| {
+                    spreadsheet.register_with_window_registry(cx);
+                });
+                entity
+            },
+        )
+        .ok();
+    }
+}
+
 fn main() {
     let startup_instant = std::time::Instant::now();
 
@@ -328,9 +430,23 @@ fn main() {
 
     // Move cli values out for use in closure
     let no_restore = cli.no_restore;
-    let cli_file = cli.file;
+    let cli_files = cli.files;
 
-    Application::new().run(move |cx: &mut App| {
+    // Buffer for file URLs from macOS "Open With" / Finder double-click.
+    // on_open_urls callback pushes here; polling task inside run() consumes.
+    let pending_open_urls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let app = Application::new();
+
+    // Register handler for files opened from Finder / "Open With" menu
+    app.on_open_urls({
+        let pending = pending_open_urls.clone();
+        move |urls| {
+            pending.lock().unwrap().extend(urls);
+        }
+    });
+
+    app.run(move |cx: &mut App| {
         // Initialize app-level settings store (must be first)
         init_settings_store(cx);
 
@@ -403,7 +519,12 @@ fn main() {
             cx.open_window(
                 build_window_options(WindowBounds::Windowed(bounds)),
                 |window, cx| {
-                    let entity = cx.new(|cx| Spreadsheet::new(window, cx));
+                    let window_id = cx.update_global::<SessionManager, _>(|mgr, _| mgr.next_window_id());
+                    let entity = cx.new(|cx| {
+                        let mut app = Spreadsheet::new(window, cx);
+                        app.session_window_id = window_id;
+                        app
+                    });
                     entity.update(cx, |spreadsheet, cx| {
                         spreadsheet.register_with_window_registry(cx);
 
@@ -446,12 +567,14 @@ fn main() {
 
         // Restore session or open fresh window
         let session = SessionManager::global(cx).session().clone();
-        let should_restore = !no_restore && !session.windows.is_empty() && cli_file.is_none();
+        let should_restore = !no_restore && !session.windows.is_empty() && cli_files.is_empty();
 
         // Get work area for smart window placement
         let work_area = get_work_area(cx);
 
         if should_restore {
+            let restored_count = session.windows.len();
+
             // Restore each window from session with smart bounds clamping
             for window_session in &session.windows {
                 let window_session = window_session.clone();
@@ -475,9 +598,13 @@ fn main() {
                 let _ = cx.open_window(
                     build_window_options(window_bounds),
                     move |window, cx| {
+                        // Assign window ID from SessionManager counter
+                        let window_id = cx.update_global::<SessionManager, _>(|mgr, _| mgr.next_window_id());
+
                         let entity = cx.new(|cx| {
                             let mut app = Spreadsheet::new(window, cx);
                             app.startup_instant = Some(startup_instant);
+                            app.session_window_id = window_id;
 
                             // Load file if present and exists
                             if let Some(ref path) = window_session.file {
@@ -496,6 +623,11 @@ fn main() {
                             // This is safe even if file didn't load - clamping handles it
                             app.apply(&window_session, cx);
 
+                            // Set "Session restored" status (only if we actually restored windows)
+                            if restored_count > 0 && app.status_message.is_none() {
+                                app.status_message = Some("Session restored".to_string());
+                            }
+
                             app
                         });
                         // Register with window registry for window switcher
@@ -506,35 +638,40 @@ fn main() {
                     },
                 );
             }
-        } else if let Some(file_path) = cli_file {
-            // Open specific file from CLI with smart window placement
-            let path = std::path::PathBuf::from(&file_path);
-            let bounds = compute_window_bounds(None, work_area);
+        } else if !cli_files.is_empty() {
+            // Open file(s) from CLI with smart window placement.
+            // Supports multi-file: `visigrid a.xlsx b.csv` opens each in its own window.
+            for file_path in cli_files {
+                let path = std::path::PathBuf::from(&file_path);
+                let bounds = compute_window_bounds(None, work_area);
 
-            cx.open_window(
-                build_window_options(WindowBounds::Windowed(bounds)),
-                move |window, cx| {
-                    let entity = cx.new(|cx| {
-                        let mut app = Spreadsheet::new(window, cx);
-                        app.startup_instant = Some(startup_instant);
-                        if path.exists() {
-                            app.load_file(&path, cx);
-                        } else {
-                            app.status_message = Some(format!(
-                                "File not found: {}",
-                                path.display()
-                            ));
-                        }
-                        app
-                    });
-                    // Register with window registry for window switcher
-                    entity.update(cx, |spreadsheet, cx| {
-                        spreadsheet.register_with_window_registry(cx);
-                    });
-                    entity
-                },
-            )
-            .unwrap();
+                cx.open_window(
+                    build_window_options(WindowBounds::Windowed(bounds)),
+                    move |window, cx| {
+                        let window_id = cx.update_global::<SessionManager, _>(|mgr, _| mgr.next_window_id());
+                        let entity = cx.new(|cx| {
+                            let mut app = Spreadsheet::new(window, cx);
+                            app.startup_instant = Some(startup_instant);
+                            app.session_window_id = window_id;
+                            if path.exists() {
+                                app.load_file(&path, cx);
+                            } else {
+                                app.status_message = Some(format!(
+                                    "File not found: {}",
+                                    path.display()
+                                ));
+                            }
+                            app
+                        });
+                        // Register with window registry for window switcher
+                        entity.update(cx, |spreadsheet, cx| {
+                            spreadsheet.register_with_window_registry(cx);
+                        });
+                        entity
+                    },
+                )
+                .ok();
+            }
         } else {
             // Fresh start - large near-maximized window with margin
             let bounds = compute_window_bounds(None, work_area);
@@ -542,9 +679,11 @@ fn main() {
             cx.open_window(
                 build_window_options(WindowBounds::Windowed(bounds)),
                 |window, cx| {
+                    let window_id = cx.update_global::<SessionManager, _>(|mgr, _| mgr.next_window_id());
                     let entity = cx.new(|cx| {
                         let mut app = Spreadsheet::new(window, cx);
                         app.startup_instant = Some(startup_instant);
+                        app.session_window_id = window_id;
                         app
                     });
                     // Register with window registry for window switcher
@@ -555,6 +694,55 @@ fn main() {
                 },
             )
             .unwrap();
+        }
+
+        // Process any file URLs that arrived during startup
+        // (e.g., user double-clicked a file in Finder to launch VisiGrid)
+        {
+            let urls = std::mem::take(&mut *pending_open_urls.lock().unwrap());
+            if !urls.is_empty() {
+                open_file_urls(urls, cx);
+            }
+        }
+
+        // Spawn polling task to handle file URLs from macOS "Open With"
+        // when the app is already running. on_open_urls callback pushes
+        // URLs into the shared buffer; this task drains and opens them.
+        //
+        // Adaptive sleep: fast (100ms) right after processing URLs for
+        // responsiveness, then backs off to 1s when idle to avoid wasting
+        // cycles. Buffer is drained in one shot via swap (minimal lock hold).
+        {
+            let pending = pending_open_urls;
+            cx.spawn(async move |async_cx| {
+                let mut idle_count: u32 = 0;
+                loop {
+                    let sleep_ms = if idle_count > 10 {
+                        1000  // idle: check once per second
+                    } else if idle_count > 3 {
+                        500   // cooling down
+                    } else {
+                        100   // recently active: stay responsive
+                    };
+                    async_cx.background_executor()
+                        .timer(std::time::Duration::from_millis(sleep_ms))
+                        .await;
+
+                    let urls = {
+                        let mut buf = pending.lock().unwrap();
+                        if buf.is_empty() {
+                            idle_count = idle_count.saturating_add(1);
+                            continue;
+                        }
+                        std::mem::take(&mut *buf)
+                    };
+                    idle_count = 0;
+
+                    let _ = async_cx.update(|cx| {
+                        open_file_urls(urls, cx);
+                    });
+                }
+            }).detach();
         }
     });
 }

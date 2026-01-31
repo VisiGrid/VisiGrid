@@ -107,6 +107,7 @@ impl Spreadsheet {
                 self.import_source_dir = None;
                 // Load document settings from sidecar file
                 self.doc_settings = load_doc_settings(path);
+
                 self.view_state.selected = (0, 0);
                 self.view_state.selection_end = None;
                 self.view_state.scroll_row = 0;
@@ -139,7 +140,6 @@ impl Spreadsheet {
                     self.hub_link = None;
                     self.hub_status = crate::hub::HubStatus::Unlinked;
                 }
-
                 // Update session with new file path
                 self.update_session_cached(cx);
 
@@ -480,6 +480,7 @@ impl Spreadsheet {
                     let should_close = this.close_after_save && !this.is_modified;
                     this.close_after_save = false;  // Reset flag
                     if should_close {
+                        this.prepare_close(cx);
                         Some(this.window_handle)
                     } else {
                         None

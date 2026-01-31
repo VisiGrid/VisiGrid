@@ -2,6 +2,41 @@
 
 ## 0.4.1
 
+### Session Restore Fix
+
+Closed windows no longer reappear on restart. Previously, closing a window removed it from the live window registry but not from the persisted session file, so every closed window came back as a zombie on next launch.
+
+- **Stable window identity** — each window gets a unique `window_id: u64` assigned at creation, used for session matching. Replaces fragile file-path matching which broke for untitled windows and multiple windows on the same file.
+- **Single close funnel** — all close paths (clean close, save-then-close, discard-and-close, Save As close) now call `prepare_close()`, which removes the window from session state, unregisters from the window registry, and persists immediately. No close path can forget session removal.
+- **Self-healing IDs** — if a window reaches a session method without an assigned ID (bug), it allocates one on the spot and proceeds normally rather than silently skipping. `debug_assert!` fires in development builds to catch the root cause.
+- **Robust ID assignment on load** — respects existing `window_id` values from the session file, sets the counter to `max + 1`, and deduplicates corrupt sessions (first-seen wins, duplicates get reassigned).
+- **Quit snapshots state** — the focused window commits pending edits and snapshots its session state on Quit, so scroll position and selection survive restart.
+- **"Session restored" status** — restored windows show a status bar message on launch (only when windows were actually restored).
+- **8 new tests** — window ID counter, remove-from-session, deserialization default, same-file-different-IDs, ID assignment with existing/duplicate IDs.
+
+### macOS File Association ("Open With")
+
+VisiGrid now appears in Finder's "Open With" menu for spreadsheet files and handles file-open events from Finder, Spotlight, and drag-to-dock.
+
+- **Document type declarations** — Info.plist declares `.vgrid` and `.sheet` (Owner), `.xlsx`, `.xls`, `.csv`, `.tsv` (Alternate) with proper `LSItemContentTypes` for modern macOS. Exported UTType declarations for `com.visigrid.vgrid` and `com.visigrid.sheet`.
+- **`on_open_urls` handler** — registered before `Application::run()` to catch file URLs that arrive during launch (Finder double-click starts app). Uses a shared `Arc<Mutex<Vec<String>>>` buffer bridging the platform callback (no App context) to the gpui event loop.
+- **Startup drain** — URLs accumulated during initialization are processed synchronously after window creation, opening each file in a new window.
+- **Adaptive polling task** — for files opened while the app is already running. Polls the buffer with adaptive sleep: 100ms after recent activity (responsive), backing off to 1s when idle (no wasted cycles). Buffer drained in one shot via `std::mem::take` for minimal lock hold time.
+- **URL deduplication** — `normalize_and_dedup_urls()` parses file:// URLs, percent-decodes, canonicalizes paths (resolves symlinks), and deduplicates with a `HashSet` while preserving order. Prevents "why did it open twice?" when Finder sends duplicate or differently-encoded URLs.
+- **9 new tests** — URL-to-path conversion, percent decoding (mixed, incomplete sequences), dedup (exact dupes, encoding variants, order preservation, non-file URL filtering).
+
+### Windows & Linux File Associations
+
+- **Windows installer** — `.xlsx`, `.xls`, `.sheet` added to the Inno Setup installer. `.sheet` is checked by default (native format). `.xlsx` and `.xls` are optional, unchecked by default, labeled "best-effort import" (respects user choice — registers in "Open with" without hijacking defaults). All six types (`.vgrid`, `.sheet`, `.csv`, `.tsv`, `.xlsx`, `.xls`) now appear in SupportedTypes for the "Open with" menu.
+- **Linux desktop entry** — `visigrid.desktop` now declares MIME types for xlsx (`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`), xls (`application/vnd.ms-excel`), and `.sheet` (`application/x-visigrid-sheet`). Desktop environments (GNOME, KDE) will show VisiGrid in "Open With" for these file types.
+- **Multi-file open from CLI** — `visigrid a.xlsx b.csv c.tsv` now opens each file in its own window. Previously only the last file argument was opened. Required for Windows "Open with" (sends `VisiGrid.exe "%1"` per file) and Linux desktop integration (`%F` in .desktop passes multiple paths).
+
+### Release Pipeline Hardening
+
+- **Entitlements in CI signing** — `release.yml` now includes `--entitlements gpui-app/macos/entitlements.plist` when code signing. Previously signed with hardened runtime but without entitlements, which could block file access and network in the shipped build.
+- **Info.plist verification** — both `release.yml` and `bundle-macos.sh` now verify the built app's Info.plist contains the expected UTTypes (`org.openxmlformats.spreadsheetml.sheet`, `com.visigrid.vgrid`, `UTExportedTypeDeclarations`) before signing. Fails fast with a clear error if the plist is wrong.
+- **Homebrew cask URL fix** — `update-cask.yml` DMG download URL and regenerated cask URL now match the actual release artifact filename (`VisiGrid-macOS-universal.dmg`). Previously used a versioned filename that would 404.
+
 ### Native .sheet Save/Load Hardening
 
 - **Alignment round-trip fix** — `Alignment::General` (auto: numbers right-align, text left-aligns) now survives save/load. Previously, General was incorrectly mapped to Left on load, losing smart alignment behavior.

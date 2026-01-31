@@ -2587,3 +2587,97 @@ fn test_format_bar_backspace_edits_buffer() {
     buffer.pop(); // no-op
     assert_eq!(buffer, "");
 }
+
+// =============================================================================
+// URL parsing (macOS "Open With" handler)
+// =============================================================================
+
+#[test]
+fn test_url_to_path_file_url() {
+    use crate::url_to_path;
+    let path = url_to_path("file:///Users/bob/Documents/report.xlsx");
+    assert_eq!(path, Some(std::path::PathBuf::from("/Users/bob/Documents/report.xlsx")));
+}
+
+#[test]
+fn test_url_to_path_percent_encoded_spaces() {
+    use crate::url_to_path;
+    let path = url_to_path("file:///Users/bob/My%20Documents/Q1%20Report.xlsx");
+    assert_eq!(path, Some(std::path::PathBuf::from("/Users/bob/My Documents/Q1 Report.xlsx")));
+}
+
+#[test]
+fn test_url_to_path_plain_path() {
+    use crate::url_to_path;
+    let path = url_to_path("/Users/bob/file.csv");
+    assert_eq!(path, Some(std::path::PathBuf::from("/Users/bob/file.csv")));
+}
+
+#[test]
+fn test_url_to_path_non_file_url_returns_none() {
+    use crate::url_to_path;
+    assert_eq!(url_to_path("https://example.com/file.xlsx"), None);
+    assert_eq!(url_to_path("ftp://server/file.csv"), None);
+}
+
+#[test]
+fn test_percent_decode_mixed() {
+    use crate::percent_decode;
+    assert_eq!(percent_decode("hello%20world"), "hello world");
+    assert_eq!(percent_decode("100%25%20done"), "100% done");
+    assert_eq!(percent_decode("no-encoding"), "no-encoding");
+    assert_eq!(percent_decode("%2FUsers%2Fbob"), "/Users/bob");
+}
+
+#[test]
+fn test_percent_decode_incomplete_sequence() {
+    use crate::percent_decode;
+    // Incomplete percent sequence at end — passed through literally
+    assert_eq!(percent_decode("abc%2"), "abc%2");
+    assert_eq!(percent_decode("abc%"), "abc%");
+}
+
+#[test]
+fn test_normalize_and_dedup_urls() {
+    use crate::normalize_and_dedup_urls;
+    // Duplicate URLs (same path, different encoding) should be deduplicated
+    let urls = vec![
+        "file:///tmp/test-dedup.csv".to_string(),
+        "file:///tmp/test-dedup.csv".to_string(),       // exact dupe
+        "file:///tmp/test%2Ddedup.csv".to_string(),     // percent-encoded '-' = same file
+    ];
+    let paths = normalize_and_dedup_urls(urls);
+    // All three refer to the same path — should collapse to 1
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].ends_with("test-dedup.csv"));
+}
+
+#[test]
+fn test_normalize_and_dedup_preserves_order() {
+    use crate::normalize_and_dedup_urls;
+    // Distinct paths should be preserved in order
+    let urls = vec![
+        "/tmp/b.xlsx".to_string(),
+        "/tmp/a.xlsx".to_string(),
+        "/tmp/c.xlsx".to_string(),
+    ];
+    let paths = normalize_and_dedup_urls(urls);
+    assert_eq!(paths.len(), 3);
+    assert!(paths[0].ends_with("b.xlsx"));
+    assert!(paths[1].ends_with("a.xlsx"));
+    assert!(paths[2].ends_with("c.xlsx"));
+}
+
+#[test]
+fn test_normalize_and_dedup_skips_non_file_urls() {
+    use crate::normalize_and_dedup_urls;
+    let urls = vec![
+        "https://example.com/foo.xlsx".to_string(),
+        "ftp://server/bar.csv".to_string(),
+        "/tmp/real-file.csv".to_string(),
+    ];
+    let paths = normalize_and_dedup_urls(urls);
+    // Only the plain path should survive
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].ends_with("real-file.csv"));
+}

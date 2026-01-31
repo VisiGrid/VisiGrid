@@ -185,6 +185,24 @@ echo -n "APPLVSGD" > "$BUNDLE_DIR/Contents/PkgInfo"
 
 echo -e "${GREEN}App bundle created at: $BUNDLE_DIR${NC}"
 
+# Verify Info.plist contains required document type declarations
+echo ""
+echo -e "${YELLOW}Verifying Info.plist document types...${NC}"
+BUILT_PLIST="$BUNDLE_DIR/Contents/Info.plist"
+
+if ! plutil -p "$BUILT_PLIST" | grep -q "org.openxmlformats.spreadsheetml.sheet"; then
+    echo -e "${RED}ERROR: Built Info.plist missing xlsx UTType (org.openxmlformats.spreadsheetml.sheet)${NC}"
+    echo "Check gpui-app/macos/Info.plist for correct CFBundleDocumentTypes"
+    exit 1
+fi
+
+if ! plutil -p "$BUILT_PLIST" | grep -q "com.visigrid.vgrid"; then
+    echo -e "${RED}ERROR: Built Info.plist missing vgrid UTType (com.visigrid.vgrid)${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Document types verified (xlsx, vgrid present)${NC}"
+
 # Code signing
 if $SIGN; then
     echo ""

@@ -390,8 +390,7 @@ pub(crate) fn bind(
 
             // If workbook is clean, just close
             if !this.is_modified {
-                // Unregister from window registry before closing
-                this.unregister_from_window_registry(cx);
+                this.prepare_close(cx);
                 window.remove_window();
                 return;
             }
@@ -423,9 +422,8 @@ pub(crate) fn bind(
                             }).unwrap_or(false);
 
                             if save_succeeded {
-                                // Unregister from window registry before closing
                                 let _ = this.update(cx, |this, cx| {
-                                    this.unregister_from_window_registry(cx);
+                                    this.prepare_close(cx);
                                 });
                                 let _ = window_handle.update(cx, |_, window, _| {
                                     window.remove_window();
@@ -434,9 +432,8 @@ pub(crate) fn bind(
                         }
                         1 => {
                             // Don't Save - close without saving
-                            // Unregister from window registry before closing
                             let _ = this.update(cx, |this, cx| {
-                                this.unregister_from_window_registry(cx);
+                                this.prepare_close(cx);
                             });
                             let _ = window_handle.update(cx, |_, window, _| {
                                 window.remove_window();
@@ -449,9 +446,11 @@ pub(crate) fn bind(
                 }
             }).detach();
         }))
-        .on_action(cx.listener(|this, _: &Quit, _, cx| {
+        .on_action(cx.listener(|this, _: &Quit, window, cx| {
             // Commit any pending edit before quitting
             this.commit_pending_edit(cx);
+            // Snapshot this window's state into session before quit
+            this.update_session(window, cx);
             // Propagate to global quit handler (saves session and quits)
             cx.propagate();
         }))

@@ -30,14 +30,21 @@
     <string>public.app-category.productivity</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2025 RegAtlas, LLC. All rights reserved.</string>
+
+    <!-- ============================================================
+         Document Types
+         Declares which file types VisiGrid can open.
+         LSItemContentTypes is required for modern macOS (10.10+).
+         ============================================================ -->
     <key>CFBundleDocumentTypes</key>
     <array>
+        <!-- Native: .vgrid (VisiGrid workbook) -->
         <dict>
             <key>CFBundleTypeName</key>
-            <string>VisiGrid Document</string>
+            <string>VisiGrid Workbook</string>
             <key>CFBundleTypeExtensions</key>
             <array>
-                <string>vsg</string>
+                <string>vgrid</string>
             </array>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
@@ -45,9 +52,65 @@
             <string>Owner</string>
             <key>LSItemContentTypes</key>
             <array>
-                <string>com.visigrid.document</string>
+                <string>com.visigrid.vgrid</string>
             </array>
         </dict>
+
+        <!-- Native: .sheet (VisiGrid sheet format) -->
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>VisiGrid Sheet</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>sheet</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.visigrid.sheet</string>
+            </array>
+        </dict>
+
+        <!-- Excel: .xlsx (Office Open XML Spreadsheet) -->
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Excel Workbook</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>xlsx</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>org.openxmlformats.spreadsheetml.sheet</string>
+            </array>
+        </dict>
+
+        <!-- Excel: .xls (Legacy Excel Binary) -->
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Excel 97-2003 Workbook</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>xls</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.microsoft.excel.xls</string>
+            </array>
+        </dict>
+
+        <!-- CSV -->
         <dict>
             <key>CFBundleTypeName</key>
             <string>CSV Document</string>
@@ -59,7 +122,13 @@
             <string>Editor</string>
             <key>LSHandlerRank</key>
             <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.comma-separated-values-text</string>
+            </array>
         </dict>
+
+        <!-- TSV -->
         <dict>
             <key>CFBundleTypeName</key>
             <string>TSV Document</string>
@@ -71,27 +140,24 @@
             <string>Editor</string>
             <key>LSHandlerRank</key>
             <string>Alternate</string>
-        </dict>
-        <dict>
-            <key>CFBundleTypeName</key>
-            <string>JSON Document</string>
-            <key>CFBundleTypeExtensions</key>
+            <key>LSItemContentTypes</key>
             <array>
-                <string>json</string>
+                <string>public.tab-separated-values-text</string>
             </array>
-            <key>CFBundleTypeRole</key>
-            <string>Editor</string>
-            <key>LSHandlerRank</key>
-            <string>Alternate</string>
         </dict>
     </array>
+
+    <!-- ============================================================
+         Exported UTTypes (custom types owned by VisiGrid)
+         ============================================================ -->
     <key>UTExportedTypeDeclarations</key>
     <array>
+        <!-- .vgrid -->
         <dict>
             <key>UTTypeIdentifier</key>
-            <string>com.visigrid.document</string>
+            <string>com.visigrid.vgrid</string>
             <key>UTTypeDescription</key>
-            <string>VisiGrid Document</string>
+            <string>VisiGrid Workbook</string>
             <key>UTTypeConformsTo</key>
             <array>
                 <string>public.data</string>
@@ -100,7 +166,26 @@
             <dict>
                 <key>public.filename-extension</key>
                 <array>
-                    <string>vsg</string>
+                    <string>vgrid</string>
+                </array>
+            </dict>
+        </dict>
+
+        <!-- .sheet -->
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.visigrid.sheet</string>
+            <key>UTTypeDescription</key>
+            <string>VisiGrid Sheet</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>sheet</string>
                 </array>
             </dict>
         </dict>
