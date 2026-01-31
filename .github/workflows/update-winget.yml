@@ -11,8 +11,7 @@ on:
 
 jobs:
   update-winget:
-    # Disabled until Microsoft approves VisiGrid for winget-pkgs
-    if: false
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - name: Get version

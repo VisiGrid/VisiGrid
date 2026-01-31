@@ -139,6 +139,9 @@ Or via package manager:
 # macOS
 brew install --cask visigrid/tap/visigrid
 
+# Windows
+winget install VisiGrid.VisiGrid
+
 # Arch Linux
 yay -S visigrid-bin
 ```
