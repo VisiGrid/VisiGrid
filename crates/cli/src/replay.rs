@@ -194,12 +194,22 @@ pub fn execute_script(script_path: &Path) -> Result<ReplayResult, CliError> {
 
     // Register grid API
     register_grid_api(&lua, state.clone())
-        .map_err(|e| CliError { code: EXIT_EVAL_ERROR, message: format!("Lua setup error: {}", e) })?;
+        .map_err(|e| CliError { code: EXIT_EVAL_ERROR, message: format!("Lua setup error: {}", e), hint: None })?;
 
     // Execute the script
     lua.load(&script)
         .exec()
-        .map_err(|e| CliError { code: EXIT_EVAL_ERROR, message: format!("Lua execution error: {}", e) })?;
+        .map_err(|e| {
+            let msg = format!("Lua error: {}", e);
+            let hint = if msg.contains("attempt to call a nil value") {
+                Some("check that all grid.* function names are spelled correctly".to_string())
+            } else if msg.contains("expected") {
+                Some("check the script syntax; provenance scripts use grid.set{ sheet=N, cell=\"A1\", value=\"...\" }".to_string())
+            } else {
+                None
+            };
+            CliError { code: EXIT_EVAL_ERROR, message: msg, hint }
+        })?;
 
     // Extract results
     let state = state.borrow();

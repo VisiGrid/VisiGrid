@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.4.2
+
+CLI hardening and documentation truthfulness for public launch.
+
+### CLI Error Messages
+
+Every CLI error now prints an actionable hint below the error line. The goal: a user who hits an error can fix it without leaving the terminal.
+
+- **`error:` / `hint:` pattern** — `CliError` gains an optional `hint` field. When present, printed on a second line after the error message. All error constructors (`args`, `io`, `parse`, `format`, `eval`) default to `hint: None`; callers chain `.with_hint()` to add guidance.
+- **Empty stdin** — `no input received on stdin` now shows a working pipe example (`cat file.csv | visigrid-cli calc '=SUM(A:A)' --from csv`).
+- **Formula errors** — context-specific hints per error token: `#REF!` (out-of-range reference), `#NAME?` (suggests `list-functions`), `#DIV/0!`, `#VALUE!`, `#N/A`.
+- **Unknown column in diff** — lists available columns from the header row.
+- **Duplicate keys** — suggests dedup or choosing a different key column.
+- **Ambiguous matches** — suggests `--on_ambiguous report`.
+- **Convert stdin without `--from`** — shows a working example with `--from`.
+- **XLSX export attempt** — suggests `csv` or `json` as alternatives.
+- **Unknown file extension** — lists valid extensions.
+- **Lua errors in replay** — syntax hints for common mistakes (`attempt to call a nil value`, malformed `grid.set{}` calls).
+- **Nondeterministic functions** — lists which functions (`NOW`, `TODAY`, `RAND`, `RANDBETWEEN`) caused `--verify` to fail.
+- **Fingerprint mismatch** — explains that the source data or script was modified.
+
+### CLI Flags & Output
+
+- **`diff --quiet`** — new `-q` / `--quiet` flag suppresses the stderr summary and warnings. Designed for CI where only the exit code matters.
+- **`diff --format` alias** — `--format` is now accepted as an alias for `--out`, so both `--out json` and `--format json` work. Prevents a common papercut.
+- **`.xlsb` and `.ods` extension recognition** — `infer_format` now maps `.xlsb` and `.ods` to the XLSX reader (via calamine), matching the desktop app's import support.
+- **JSON trailing newline** — `write_json` and `format_diff_json` now append `\n` after the closing brace. Prevents `bash: warning: here-document delimited by end-of-file` and plays nicely with `jq`, `diff`, and other line-oriented tools.
+- **`--version` enhancement** — `visigrid-cli --version` now prints engine version and build type (debug/release) in addition to the CLI version.
+
+### Documentation & Site Truthfulness
+
+Every CLI example on the marketing site and docs site was audited against the actual binary. Eight discrepancies were found and fixed by correcting the documentation (not by adding features).
+
+- **`calc` examples** — changed from file-path syntax to stdin pipe syntax (`cat file.csv | visigrid-cli calc ...`). Removed multi-formula example that doesn't exist.
+- **`diff --format`** — site examples updated to `--out` (the real flag; `--format` alias also added to CLI as a safety net).
+- **`replay --stop-at`** — removed from site; flag does not exist.
+- **`convert -t xlsx`** — removed XLSX export examples; not yet implemented.
+- **`list-functions`** — removed "with descriptions" claim; output is names only.
+- **XLS/XLSB/ODS** — scoped to "desktop app reads these via calamine" in FAQ; CLI reads XLSX.
+- **Known Limitations section** — added to both README and docs CLI reference. Five items: no XLSX export, calc stdin-only, replay layout ops hashed but not applied, conservative nondeterminism detection, multi-sheet exports sheet 0 only.
+- **CI snippet** — added `diff --quiet` and `replay --verify --quiet` examples to README.
+
 ## 0.4.1
 
 ### Session Restore Fix

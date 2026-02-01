@@ -171,6 +171,27 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 - Export: CSV, TSV, JSON, .sheet (XLSX export planned)
 - Cross-platform: macOS, Windows, Linux
 
+## Known Limitations (v0.4)
+
+- **XLSX export** is not yet implemented — CLI writes CSV, TSV, JSON, .sheet
+- **Replay**: layout operations (sort, column widths, merge) are hashed for fingerprint but not applied to workbook data
+- **Nondeterminism detection** is conservative — `NOW()`, `TODAY()`, `RAND()`, `RANDBETWEEN()` fail `--verify` even in dead-code branches
+- **Multi-sheet export** writes sheet 0 only
+- **CLI `calc`** reads from stdin only; no file-path argument
+
+## CI / Scripting
+
+```bash
+# Reconcile two files in CI — non-zero exit on differences
+visigrid-cli diff expected.csv actual.csv --key SKU --tolerance 0.01 --quiet || {
+  echo "Reconciliation failed"
+  exit 1
+}
+
+# Verify a provenance trail hasn't been tampered with
+visigrid-cli replay audit-trail.lua --verify --quiet
+```
+
 ## Commercial Use
 
 VisiGrid is fully usable under its open-source license.

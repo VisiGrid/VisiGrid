@@ -27,6 +27,7 @@ pub const EXIT_AI_KEYCHAIN_ERR: u8 = 12;  // Keychain error
 #[derive(Parser)]
 #[command(name = "visigrid-cli")]
 #[command(about = "Fast, native spreadsheet (CLI mode, headless)")]
+#[command(long_version = long_version())]
 #[command(version)]
 #[command(subcommand_required = false)]
 struct Cli {
@@ -218,6 +219,10 @@ Examples:
         /// CSV delimiter
         #[arg(long, default_value = ",")]
         delimiter: char,
+
+        /// Quiet mode - suppress stderr summary and warnings
+        #[arg(long, short = 'q')]
+        quiet: bool,
     },
 }
 
@@ -288,6 +293,24 @@ enum DiffSummaryMode {
     Json,
 }
 
+fn long_version() -> &'static str {
+    if cfg!(debug_assertions) {
+        concat!(
+            env!("CARGO_PKG_VERSION"),
+            "\nengine: visigrid-engine ",
+            env!("CARGO_PKG_VERSION"),
+            "\nbuild:  debug",
+        )
+    } else {
+        concat!(
+            env!("CARGO_PKG_VERSION"),
+            "\nengine: visigrid-engine ",
+            env!("CARGO_PKG_VERSION"),
+            "\nbuild:  release",
+        )
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -344,17 +367,21 @@ fn main() -> ExitCode {
             no_headers,
             header_row,
             delimiter,
+            quiet,
         }) => cmd_diff(
             left, right, key, r#match, key_transform, compare, tolerance,
-            on_ambiguous, out, output, summary, no_headers, header_row, delimiter,
+            on_ambiguous, out, output, summary, no_headers, header_row, delimiter, quiet,
         ),
     };
 
     match result {
         Ok(()) => ExitCode::from(EXIT_SUCCESS),
-        Err(CliError { code, message }) => {
+        Err(CliError { code, message, hint }) => {
             if !message.is_empty() {
                 eprintln!("error: {}", message);
+            }
+            if let Some(hint) = hint {
+                eprintln!("hint:  {}", hint);
             }
             ExitCode::from(code)
         }
@@ -364,27 +391,34 @@ fn main() -> ExitCode {
 pub struct CliError {
     pub code: u8,
     pub message: String,
+    pub hint: Option<String>,
 }
 
 impl CliError {
     pub fn args(msg: impl Into<String>) -> Self {
-        Self { code: EXIT_ARGS_ERROR, message: msg.into() }
+        Self { code: EXIT_ARGS_ERROR, message: msg.into(), hint: None }
     }
 
     pub fn io(msg: impl Into<String>) -> Self {
-        Self { code: EXIT_IO_ERROR, message: msg.into() }
+        Self { code: EXIT_IO_ERROR, message: msg.into(), hint: None }
     }
 
     pub fn parse(msg: impl Into<String>) -> Self {
-        Self { code: EXIT_PARSE_ERROR, message: msg.into() }
+        Self { code: EXIT_PARSE_ERROR, message: msg.into(), hint: None }
     }
 
     pub fn format(msg: impl Into<String>) -> Self {
-        Self { code: EXIT_FORMAT_ERROR, message: msg.into() }
+        Self { code: EXIT_FORMAT_ERROR, message: msg.into(), hint: None }
     }
 
     pub fn eval(msg: impl Into<String>) -> Self {
-        Self { code: EXIT_EVAL_ERROR, message: msg.into() }
+        Self { code: EXIT_EVAL_ERROR, message: msg.into(), hint: None }
+    }
+
+    /// Add a hint to an existing error.
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
     }
 }
 
@@ -420,7 +454,8 @@ fn cmd_convert(
 
     // Determine input format
     let input_format = match (&input, from) {
-        (None, None) => return Err(CliError::args("stdin requires --from")),
+        (None, None) => return Err(CliError::args("stdin requires --from to specify the input format")
+            .with_hint("visigrid-cli convert --from csv -t json")),
         (None, Some(f)) => f,
         (Some(path), None) => infer_format(path)?,
         (Some(_), Some(f)) => f, // --from overrides extension
@@ -462,7 +497,10 @@ fn infer_format(path: &PathBuf) -> Result<Format, CliError> {
         Some("json") => Ok(Format::Json),
         Some("xlsx") | Some("xls") | Some("xlsb") | Some("ods") => Ok(Format::Xlsx),
         Some("sheet") => Ok(Format::Sheet),
-        _ => Err(CliError::args("cannot infer format, use --from")),
+        _ => Err(CliError::args(format!(
+            "cannot infer format from extension {:?}",
+            ext.as_deref().unwrap_or("(none)")
+        )).with_hint("use --from with one of: csv, tsv, json, xlsx, sheet")),
     }
 }
 
@@ -509,7 +547,8 @@ fn read_stdin(format: Format, delimiter: char, into_row: usize, into_col: usize)
         .map_err(|e| CliError::io(e.to_string()))?;
 
     if input.is_empty() {
-        return Err(CliError::parse("empty input"));
+        return Err(CliError::parse("no input received on stdin")
+            .with_hint("cat file.csv | visigrid-cli calc '=SUM(A:A)' --from csv"));
     }
 
     match format {
@@ -653,8 +692,10 @@ fn write_format(
         Format::Tsv => write_csv(sheet, b'\t'),
         Format::Json => write_json(sheet, headers),
         Format::Lines => write_lines(sheet),
-        Format::Xlsx => Err(CliError::format("xlsx export not yet implemented")),
-        Format::Sheet => Err(CliError::format("sheet export to stdout not supported, use --output")),
+        Format::Xlsx => Err(CliError::format("xlsx export not yet implemented")
+            .with_hint("use -t csv or -t json instead")),
+        Format::Sheet => Err(CliError::format("sheet format cannot be written to stdout")
+            .with_hint("use -o output.sheet to write to a file")),
     }
 }
 
@@ -707,7 +748,9 @@ fn write_json(sheet: &visigrid_engine::sheet::Sheet, headers: bool) -> Result<Ve
             objects.push(obj);
         }
 
-        serde_json::to_vec_pretty(&objects).map_err(|e| CliError::io(e.to_string()))
+        let mut bytes = serde_json::to_vec_pretty(&objects).map_err(|e| CliError::io(e.to_string()))?;
+        bytes.push(b'\n');
+        Ok(bytes)
     } else {
         // Array of arrays
         let mut rows_vec: Vec<Vec<serde_json::Value>> = Vec::new();
@@ -720,7 +763,9 @@ fn write_json(sheet: &visigrid_engine::sheet::Sheet, headers: bool) -> Result<Ve
             rows_vec.push(row_vec);
         }
 
-        serde_json::to_vec_pretty(&rows_vec).map_err(|e| CliError::io(e.to_string()))
+        let mut bytes = serde_json::to_vec_pretty(&rows_vec).map_err(|e| CliError::io(e.to_string()))?;
+        bytes.push(b'\n');
+        Ok(bytes)
     }
 }
 
@@ -822,7 +867,16 @@ fn cmd_calc(
     if result.starts_with('#') {
         // Formula error - print to stdout, diagnostic to stderr
         println!("{}", result);
-        return Err(CliError::eval(format!("formula evaluation failed: {}", result)));
+        let hint = match result.as_str() {
+            "#REF!" => "a cell reference is out of range; check your formula references",
+            "#NAME?" => "unrecognized function name; run visigrid-cli list-functions to see all available",
+            "#VALUE!" => "wrong argument type; check that referenced cells contain the expected data",
+            "#DIV/0!" => "division by zero in your formula",
+            "#N/A" => "lookup function did not find a match",
+            _ => "check your formula syntax and cell references",
+        };
+        return Err(CliError::eval(format!("formula returned {}", result))
+            .with_hint(hint));
     }
 
     // Check if result is a spill (array) by checking adjacent cells
@@ -1171,6 +1225,7 @@ fn cmd_diff(
     no_headers: bool,
     header_row: Option<usize>,
     _delimiter: char,
+    quiet: bool,
 ) -> Result<(), CliError> {
     // Load both files
     let left_format = infer_format(&left_path)?;
@@ -1182,10 +1237,10 @@ fn cmd_diff(
     let (right_bounds_rows, right_bounds_cols) = get_data_bounds(&right_sheet);
 
     if left_bounds_rows == 0 {
-        return Err(CliError { code: EXIT_DIFF_PARSE, message: format!("{}: no data", left_path.display()) });
+        return Err(CliError { code: EXIT_DIFF_PARSE, message: format!("{}: file is empty or has no data rows", left_path.display()), hint: None });
     }
     if right_bounds_rows == 0 {
-        return Err(CliError { code: EXIT_DIFF_PARSE, message: format!("{}: no data", right_path.display()) });
+        return Err(CliError { code: EXIT_DIFF_PARSE, message: format!("{}: file is empty or has no data rows", right_path.display()), hint: None });
     }
 
     // Determine header row (0-indexed internally)
@@ -1261,7 +1316,7 @@ fn cmd_diff(
     let right_rows = extract_data_rows(&right_sheet, data_start, right_bounds_rows, right_bounds_cols, &headers, &options);
 
     // Warn when using substring matching
-    if mode == diff::MatchMode::Contains {
+    if !quiet && mode == diff::MatchMode::Contains {
         eprintln!("warning: using substring matching (--match contains); ensure keys are normalized");
     }
 
@@ -1273,7 +1328,11 @@ fn cmd_diff(
             for dup in &dups {
                 msg.push_str(&format!("  {} key {:?} appears {} times\n", dup.side.as_str(), dup.key, dup.count));
             }
-            return Err(CliError { code: EXIT_DIFF_DUPLICATE, message: msg.trim_end().to_string() });
+            return Err(CliError {
+                code: EXIT_DIFF_DUPLICATE,
+                message: msg.trim_end().to_string(),
+                hint: Some("each key must be unique within its file; deduplicate or choose a different --key column".to_string()),
+            });
         }
     };
 
@@ -1287,7 +1346,11 @@ fn cmd_diff(
             }
             msg.push('\n');
         }
-        return Err(CliError { code: EXIT_DIFF_AMBIGUOUS, message: msg.trim_end().to_string() });
+        return Err(CliError {
+            code: EXIT_DIFF_AMBIGUOUS,
+            message: msg.trim_end().to_string(),
+            hint: Some("use --on_ambiguous report to include ambiguous matches in output instead of failing".to_string()),
+        });
     }
 
     // Format output
@@ -1309,8 +1372,8 @@ fn cmd_diff(
         }
     }
 
-    // Write summary to stderr if requested
-    if matches!(summary_mode, DiffSummaryMode::Stderr) {
+    // Write summary to stderr if requested (--quiet suppresses)
+    if !quiet && matches!(summary_mode, DiffSummaryMode::Stderr) {
         let s = &result.summary;
         eprintln!("left:  {} rows ({})", s.left_rows, left_path.display());
         eprintln!("right: {} rows ({})", s.right_rows, right_path.display());
@@ -1326,7 +1389,7 @@ fn cmd_diff(
     // Exit 1 when differences are found (like standard diff)
     let s = &result.summary;
     if s.only_left > 0 || s.only_right > 0 || s.diff > 0 {
-        return Err(CliError { code: EXIT_EVAL_ERROR, message: String::new() });
+        return Err(CliError { code: EXIT_EVAL_ERROR, message: String::new(), hint: None });
     }
 
     Ok(())
@@ -1361,7 +1424,9 @@ fn resolve_column(spec: &str, headers: &[String]) -> Result<usize, CliError> {
         }
     }
 
-    Err(CliError::args(format!("unknown column: {:?}", spec)))
+    let available: Vec<&str> = headers.iter().map(|h| h.as_str()).collect();
+    Err(CliError::args(format!("unknown column: {:?}", spec))
+        .with_hint(format!("available columns: {}", available.join(", "))))
 }
 
 fn col_letter(col: usize) -> String {
@@ -1521,7 +1586,9 @@ fn format_diff_json(
         }),
     };
 
-    serde_json::to_vec_pretty(&top).map_err(|e| CliError::io(e.to_string()))
+    let mut bytes = serde_json::to_vec_pretty(&top).map_err(|e| CliError::io(e.to_string()))?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 fn format_diff_csv(
@@ -1719,11 +1786,11 @@ fn cmd_ai_doctor(json: bool, test: bool) -> Result<(), CliError> {
     // Determine exit code based on status
     match diag.status {
         AIDoctorStatus::Disabled => {
-            Err(CliError { code: EXIT_AI_DISABLED, message: "AI is disabled".to_string() })
+            Err(CliError { code: EXIT_AI_DISABLED, message: "AI is disabled".to_string(), hint: None })
         }
         AIDoctorStatus::Misconfigured => {
             let reason = diag.blocking_reason.unwrap_or_else(|| "unknown".to_string());
-            Err(CliError { code: EXIT_AI_MISSING_KEY, message: format!("AI misconfigured: {}", reason) })
+            Err(CliError { code: EXIT_AI_MISSING_KEY, message: format!("AI misconfigured: {}", reason), hint: None })
         }
         AIDoctorStatus::Ready => Ok(()),
     }
@@ -1790,10 +1857,9 @@ fn cmd_replay(
     // Fail early if --verify is used with nondeterministic functions
     if verify && result.has_nondeterministic {
         return Err(CliError::eval(format!(
-            "Cannot verify: script contains nondeterministic functions ({}). \
-             These produce different results on each run.",
+            "cannot verify: script contains nondeterministic functions ({})",
             result.nondeterministic_found.join(", ")
-        )));
+        )).with_hint("remove NOW(), TODAY(), RAND(), RANDBETWEEN() from formulas, or run without --verify"));
     }
 
     // Print result summary (unless quiet)
@@ -1828,7 +1894,8 @@ fn cmd_replay(
 
     // Check verification failure
     if verify && !result.verified {
-        return Err(CliError::eval("Fingerprint verification failed"));
+        return Err(CliError::eval("fingerprint verification failed")
+            .with_hint("the script or its source data may have been modified since the fingerprint was recorded"));
     }
 
     // Export output if requested
