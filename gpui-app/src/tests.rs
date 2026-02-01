@@ -2681,3 +2681,129 @@ fn test_normalize_and_dedup_skips_non_file_urls() {
     assert_eq!(paths.len(), 1);
     assert!(paths[0].ends_with("real-file.csv"));
 }
+
+// =========================================================================
+// Navigation: scroll_target tests (viewport jump on full-row/column selection)
+// =========================================================================
+
+#[test]
+fn test_scroll_target_full_column_selection() {
+    use crate::app::{NUM_ROWS, NUM_COLS};
+    use crate::navigation::scroll_target;
+    // Column selection: anchor=(0,5), end=(65535,5)
+    // Vertical axis is fully spanned → keep current scroll_row
+    let (row, col) = scroll_target(
+        (0, 5),
+        Some((NUM_ROWS - 1, 5)),
+        (10, 3),
+    );
+    assert_eq!(row, 10, "should keep current scroll_row for full-col selection");
+    assert_eq!(col, 5, "should scroll to sel_col");
+}
+
+#[test]
+fn test_scroll_target_full_row_selection() {
+    use crate::app::{NUM_ROWS, NUM_COLS};
+    use crate::navigation::scroll_target;
+    // Row selection: anchor=(3,0), end=(3,255)
+    // Horizontal axis is fully spanned → keep current scroll_col
+    let (row, col) = scroll_target(
+        (3, 0),
+        Some((3, NUM_COLS - 1)),
+        (10, 7),
+    );
+    assert_eq!(row, 3, "should scroll to sel_row");
+    assert_eq!(col, 7, "should keep current scroll_col for full-row selection");
+}
+
+#[test]
+fn test_scroll_target_normal_range() {
+    use crate::navigation::scroll_target;
+    // Normal range: (2,3) → (5,7) — no full-row/column
+    let (row, col) = scroll_target(
+        (2, 3),
+        Some((5, 7)),
+        (0, 0),
+    );
+    assert_eq!(row, 5, "should use sel_row for normal range");
+    assert_eq!(col, 7, "should use sel_col for normal range");
+}
+
+#[test]
+fn test_scroll_target_select_all() {
+    use crate::app::{NUM_ROWS, NUM_COLS};
+    use crate::navigation::scroll_target;
+    // Select-all: anchor=(0,0), end=(65535,255)
+    // Both axes fully spanned → keep current scroll on both
+    let (row, col) = scroll_target(
+        (0, 0),
+        Some((NUM_ROWS - 1, NUM_COLS - 1)),
+        (20, 5),
+    );
+    assert_eq!(row, 20, "should keep current scroll_row for select-all");
+    assert_eq!(col, 5, "should keep current scroll_col for select-all");
+}
+
+#[test]
+fn test_scroll_target_no_selection_end() {
+    use crate::navigation::scroll_target;
+    // No selection_end → falls back to selected, which is a single cell
+    let (row, col) = scroll_target(
+        (10, 4),
+        None,
+        (0, 0),
+    );
+    assert_eq!(row, 10, "should use selected row when no selection_end");
+    assert_eq!(col, 4, "should use selected col when no selection_end");
+}
+
+#[test]
+fn test_extend_direction_guards_full_column() {
+    use crate::app::{NUM_ROWS, NUM_COLS};
+    // Full-column selection: anchor=(0,5), end=(65535,5)
+    // Vertical extend (dr!=0, dc==0) should be blocked
+    let anchor = (0usize, 5usize);
+    let end = (NUM_ROWS - 1, 5);
+    let (min_row, max_row) = (anchor.0.min(end.0), anchor.0.max(end.0));
+    let (min_col, max_col) = (anchor.1.min(end.1), anchor.1.max(end.1));
+    let is_full_col = min_row == 0 && max_row >= NUM_ROWS - 1;
+    let is_full_row = min_col == 0 && max_col >= NUM_COLS - 1;
+
+    assert!(is_full_col, "should detect full-column selection");
+    assert!(!is_full_row, "should not detect full-row");
+
+    // Vertical-only extend blocked
+    let dr = 1i32;
+    let dc = 0i32;
+    assert!(is_full_col && dr != 0 && dc == 0, "vertical extend on full-col should be blocked");
+
+    // Horizontal extend NOT blocked
+    let dr = 0i32;
+    let dc = 1i32;
+    assert!(!(is_full_col && dr != 0 && dc == 0), "horizontal extend on full-col should NOT be blocked");
+}
+
+#[test]
+fn test_extend_direction_guards_full_row() {
+    use crate::app::{NUM_ROWS, NUM_COLS};
+    // Full-row selection: anchor=(3,0), end=(3,255)
+    let anchor = (3usize, 0usize);
+    let end = (3, NUM_COLS - 1);
+    let (min_row, max_row) = (anchor.0.min(end.0), anchor.0.max(end.0));
+    let (min_col, max_col) = (anchor.1.min(end.1), anchor.1.max(end.1));
+    let is_full_col = min_row == 0 && max_row >= NUM_ROWS - 1;
+    let is_full_row = min_col == 0 && max_col >= NUM_COLS - 1;
+
+    assert!(!is_full_col, "should not detect full-column");
+    assert!(is_full_row, "should detect full-row selection");
+
+    // Horizontal-only extend blocked
+    let dr = 0i32;
+    let dc = 1i32;
+    assert!(is_full_row && dc != 0 && dr == 0, "horizontal extend on full-row should be blocked");
+
+    // Vertical extend NOT blocked
+    let dr = 1i32;
+    let dc = 0i32;
+    assert!(!(is_full_row && dc != 0 && dr == 0), "vertical extend on full-row should NOT be blocked");
+}

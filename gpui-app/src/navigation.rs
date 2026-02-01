@@ -136,6 +136,20 @@ impl Spreadsheet {
         let (row, col) = view_state.selection_end.unwrap_or(view_state.selected);
         let (anchor_row, anchor_col) = view_state.selected;
 
+        // NOTE: Full-row / full-column selections are represented via sentinel
+        // coordinates (row=NUM_ROWS-1, col=NUM_COLS-1). We must block wrong-
+        // direction extensions and preserve shape to avoid jumping to extreme
+        // edges (Excel behavior).
+        let (min_col, max_col) = (anchor_col.min(col), anchor_col.max(col));
+        let (min_row, max_row) = (anchor_row.min(row), anchor_row.max(row));
+        let is_full_row = min_col == 0 && max_col >= NUM_COLS - 1;
+        let is_full_col = min_row == 0 && max_row >= NUM_ROWS - 1;
+
+        // Full row selection + horizontal extend → no-op (rows already span all cols)
+        if is_full_row && dc != 0 && dr == 0 { return; }
+        // Full column selection + vertical extend → no-op (cols already span all rows)
+        if is_full_col && dr != 0 && dc == 0 { return; }
+
         // Merge-aware: if extending from a merge, use the effective edge
         let (eff_start_row, eff_start_col, eff_end_row, eff_end_col) =
             if let Some(merge) = self.sheet(cx).get_merge(row, col) {
@@ -163,13 +177,17 @@ impl Spreadsheet {
         };
 
         // If we landed on a merge, extend to include the full merge region
-        let (final_row, final_col) = if let Some(merge) = self.sheet(cx).get_merge(new_row, new_col) {
+        let (mut final_row, mut final_col) = if let Some(merge) = self.sheet(cx).get_merge(new_row, new_col) {
             let eff_row = if anchor_row <= merge.start.0 { merge.end.0 } else { merge.start.0 };
             let eff_col = if anchor_col <= merge.start.1 { merge.end.1 } else { merge.start.1 };
             (eff_row, eff_col)
         } else {
             (new_row, new_col)
         };
+
+        // Preserve full-row/column shape after extension
+        if is_full_row { final_col = NUM_COLS - 1; }
+        if is_full_col { final_row = NUM_ROWS - 1; }
 
         self.active_view_state_mut().selection_end = Some((final_row, final_col));
 
@@ -359,6 +377,20 @@ impl Spreadsheet {
         let (row, col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
         let (anchor_row, anchor_col) = self.view_state.selected;
 
+        // NOTE: Full-row / full-column selections are represented via sentinel
+        // coordinates (row=NUM_ROWS-1, col=NUM_COLS-1). We must block wrong-
+        // direction extensions and preserve shape to avoid jumping to extreme
+        // edges (Excel behavior).
+        let (min_col, max_col) = (anchor_col.min(col), anchor_col.max(col));
+        let (min_row, max_row) = (anchor_row.min(row), anchor_row.max(row));
+        let is_full_row = min_col == 0 && max_col >= NUM_COLS - 1;
+        let is_full_col = min_row == 0 && max_row >= NUM_ROWS - 1;
+
+        // Full row selection + horizontal jump → no-op
+        if is_full_row && dc != 0 && dr == 0 { return; }
+        // Full column selection + vertical jump → no-op
+        if is_full_col && dr != 0 && dc == 0 { return; }
+
         // Start from effective merge edge
         let (start_row, start_col) = if let Some(merge) = self.sheet(cx).get_merge(row, col) {
             let sr = if dr > 0 { merge.end.0 } else if dr < 0 { merge.start.0 } else { row };
@@ -372,7 +404,7 @@ impl Spreadsheet {
 
         // Expand to include merge if landing on one.
         // If anchor is inside the same merge, normalize to merge.start for stable comparison.
-        let (final_row, final_col) = if let Some(merge) = self.sheet(cx).get_merge(new_row, new_col) {
+        let (mut final_row, mut final_col) = if let Some(merge) = self.sheet(cx).get_merge(new_row, new_col) {
             let (eff_anchor_row, eff_anchor_col) = if merge.contains(anchor_row, anchor_col) {
                 merge.start
             } else {
@@ -384,6 +416,10 @@ impl Spreadsheet {
         } else {
             (new_row, new_col)
         };
+
+        // Preserve full-row/column shape after extension
+        if is_full_row { final_col = NUM_COLS - 1; }
+        if is_full_col { final_row = NUM_ROWS - 1; }
 
         self.view_state.selection_end = Some((final_row, final_col));
         self.ensure_visible(cx);
@@ -458,7 +494,15 @@ impl Spreadsheet {
         let visible_cols = self.visible_cols();
 
         let view_state = self.active_view_state_mut();
-        let (row, col) = view_state.selection_end.unwrap_or(view_state.selected);
+
+        // Detect full-row/column selections: for the fully-spanned axis,
+        // keep the current scroll position instead of scrolling to sentinel
+        // coordinates (e.g., row 65535 or col 255).
+        let (row, col) = scroll_target(
+            view_state.selected,
+            view_state.selection_end,
+            (view_state.scroll_row, view_state.scroll_col),
+        );
 
         // When freeze panes are active, calculate scrollable region
         let scrollable_visible_rows = visible_rows.saturating_sub(view_state.frozen_rows);
@@ -847,4 +891,30 @@ impl Spreadsheet {
         self.view_state.additional_selections.push((self.view_state.selected, self.view_state.selection_end));
         self.select_col(col, false, cx);
     }
+}
+
+/// Compute the effective scroll target, accounting for full-row/column selections.
+///
+/// NOTE: Full-row / full-column selections are represented via sentinel
+/// coordinates (row=NUM_ROWS-1, col=NUM_COLS-1). We must preserve scroll on
+/// the spanned axis to avoid jumping to extreme edges (Excel behavior).
+/// Scrolling to those sentinels causes a viewport jump to empty space.
+/// Instead, for the fully-spanned axis we keep the current scroll position.
+pub(crate) fn scroll_target(
+    selected: (usize, usize),
+    selection_end: Option<(usize, usize)>,
+    current_scroll: (usize, usize),
+) -> (usize, usize) {
+    let (sel_row, sel_col) = selection_end.unwrap_or(selected);
+    let (anchor_row, anchor_col) = selected;
+
+    let (min_col, max_col) = (anchor_col.min(sel_col), anchor_col.max(sel_col));
+    let (min_row, max_row) = (anchor_row.min(sel_row), anchor_row.max(sel_row));
+    let is_full_row = min_col == 0 && max_col >= NUM_COLS - 1;
+    let is_full_col = min_row == 0 && max_row >= NUM_ROWS - 1;
+
+    let row = if is_full_col { current_scroll.0 } else { sel_row };
+    let col = if is_full_row { current_scroll.1 } else { sel_col };
+
+    (row, col)
 }

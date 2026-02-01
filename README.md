@@ -167,7 +167,8 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 ## Formats
 
-- Import/export: CSV, TSV, JSON, XLSX, XLS, ODS
+- Import: CSV, TSV, JSON, XLSX, XLS, XLSB, ODS
+- Export: CSV, TSV, JSON, .sheet (XLSX export planned)
 - Cross-platform: macOS, Windows, Linux
 
 ## Commercial Use

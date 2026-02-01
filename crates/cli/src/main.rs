@@ -37,6 +37,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Evaluate a spreadsheet formula against data read from stdin
+    #[command(after_help = "\
+Examples:
+  cat sales.csv | visigrid calc '=SUM(B:B)' -f csv
+  cat data.csv | visigrid calc '=AVERAGE(A:A)' -f csv --headers
+  echo '1,2,3' | visigrid calc '=SUM(A1:C1)' -f csv
+  cat matrix.csv | visigrid calc '=MMULT(A:B,D:E)' -f csv --spill csv")]
     Calc {
         /// Formula to evaluate (must start with =)
         formula: String,
@@ -63,6 +69,12 @@ enum Commands {
     },
 
     /// Convert between file formats
+    #[command(after_help = "\
+Examples:
+  visigrid convert data.xlsx -t csv
+  visigrid convert data.xlsx -t json -o data.json
+  cat data.csv | visigrid convert -f csv -t json
+  visigrid convert report.xlsx -t csv -o - | head -5")]
     Convert {
         /// Input file (omit to read from stdin)
         input: Option<PathBuf>,
@@ -101,7 +113,14 @@ enum Commands {
         file: Option<PathBuf>,
     },
 
-    /// Replay a provenance script (Phase 9B)
+    /// Replay a provenance script
+    #[command(after_help = "\
+Examples:
+  visigrid replay script.lua
+  visigrid replay script.lua --verify
+  visigrid replay script.lua -o result.csv
+  visigrid replay script.lua -o - -f json | jq .
+  visigrid replay script.lua --fingerprint")]
     Replay {
         /// Path to the Lua provenance script
         script: PathBuf,
@@ -133,7 +152,14 @@ enum Commands {
         command: AiCommands,
     },
 
-    /// Reconcile two datasets by key
+    /// Reconcile two datasets by key (exit 0 = match, exit 1 = diffs found)
+    #[command(after_help = "\
+Examples:
+  visigrid diff old.csv new.csv --key id
+  visigrid diff old.csv new.csv --key name --tolerance 0.01
+  visigrid diff old.csv new.csv --key sku --out csv --output diffs.csv
+  visigrid diff old.csv new.csv --key id --compare price,quantity
+  visigrid diff old.csv new.csv --key name --match contains")]
     Diff {
         /// Left dataset file
         left: PathBuf,
@@ -170,7 +196,7 @@ enum Commands {
         on_ambiguous: DiffAmbiguousPolicy,
 
         /// Output format
-        #[arg(long, default_value = "json")]
+        #[arg(long, alias = "format", default_value = "json")]
         out: DiffOutputFormat,
 
         /// Output file (default: stdout)
@@ -327,7 +353,9 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::from(EXIT_SUCCESS),
         Err(CliError { code, message }) => {
-            eprintln!("error: {}", message);
+            if !message.is_empty() {
+                eprintln!("error: {}", message);
+            }
             ExitCode::from(code)
         }
     }
@@ -432,7 +460,7 @@ fn infer_format(path: &PathBuf) -> Result<Format, CliError> {
         Some("csv") => Ok(Format::Csv),
         Some("tsv") => Ok(Format::Tsv),
         Some("json") => Ok(Format::Json),
-        Some("xlsx") | Some("xls") => Ok(Format::Xlsx),
+        Some("xlsx") | Some("xls") | Some("xlsb") | Some("ods") => Ok(Format::Xlsx),
         Some("sheet") => Ok(Format::Sheet),
         _ => Err(CliError::args("cannot infer format, use --from")),
     }
@@ -1295,6 +1323,12 @@ fn cmd_diff(
         }
     }
 
+    // Exit 1 when differences are found (like standard diff)
+    let s = &result.summary;
+    if s.only_left > 0 || s.only_right > 0 || s.diff > 0 {
+        return Err(CliError { code: EXIT_EVAL_ERROR, message: String::new() });
+    }
+
     Ok(())
 }
 
@@ -1764,6 +1798,11 @@ fn cmd_replay(
 
     // Print result summary (unless quiet)
     if !quiet {
+        // Print notes for hashed-only operations
+        for note in &result.hashed_only_notes {
+            eprintln!("note: hashed (not applied): {}", note);
+        }
+
         eprintln!("Replayed {} operations", result.operations);
         eprintln!("Fingerprint: {}", result.fingerprint.to_string());
 
@@ -1794,19 +1833,31 @@ fn cmd_replay(
 
     // Export output if requested
     if let Some(output_path) = output {
-        // Infer format from extension if not specified
+        let is_stdout = output_path.as_os_str() == "-";
+
+        // Infer format from extension if not specified (default csv for stdout)
         let fmt = format.unwrap_or_else(|| {
-            output_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|s| s.to_lowercase())
-                .unwrap_or_else(|| "csv".to_string())
+            if is_stdout {
+                "csv".to_string()
+            } else {
+                output_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_lowercase())
+                    .unwrap_or_else(|| "csv".to_string())
+            }
         });
 
-        replay::export_workbook(&result.workbook, &output_path, &fmt)?;
-
-        if !quiet {
-            eprintln!("Wrote output to: {}", output_path.display());
+        if is_stdout {
+            let bytes = replay::export_to_bytes(&result.workbook, &fmt)?;
+            io::stdout()
+                .write_all(&bytes)
+                .map_err(|e| CliError::io(e.to_string()))?;
+        } else {
+            replay::export_workbook(&result.workbook, &output_path, &fmt)?;
+            if !quiet {
+                eprintln!("Wrote output to: {}", output_path.display());
+            }
         }
     }
 

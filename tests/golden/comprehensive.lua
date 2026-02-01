@@ -1,7 +1,7 @@
 -- api=v1
 -- VisiGrid Provenance Script
 -- Comprehensive test of all supported operations
--- Expected fingerprint: v1:10:ab2618d9432569ac55470c7e5c09d95f
+-- Expected fingerprint: v1:10:ca7f3a140d8fa81075f80801ce2a0352
 -- Generated: 2025-01-26T12:00:00Z
 -- Actions: 10
 
@@ -30,7 +30,7 @@ grid.set_batch{ sheet=1, cells={
   } }
 
 -- #4 Format headers as bold
-grid.format{ sheet=1, range="A1:D1", bold=true }
+grid.format{ sheet=1, range="A1:D1", kind="bold", bold=true }
 
 -- #5 Insert a new row
 grid.insert_rows{ sheet=1, at=4, count=1 }

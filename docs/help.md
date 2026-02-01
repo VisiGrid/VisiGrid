@@ -1050,12 +1050,12 @@ Outputs all 96+ supported functions, one per line.
 
 | Code | Meaning |
 |------|---------|
-| 0 | Success |
-| 1 | Evaluation error (formula returned error) |
+| 0 | Success (for `diff`: datasets match) |
+| 1 | Evaluation error or diffs found (`diff`: diffs/missing rows; `replay --verify`: mismatch) |
 | 2 | Invalid arguments |
-| 3 | I/O error |
-| 4 | Parse error (malformed input) |
-| 5 | Format error (unsupported format) |
+| 3 | I/O error (also: duplicate keys in diff) |
+| 4 | Parse error (malformed input; also: ambiguous matches in diff) |
+| 5 | Format error (unsupported format; also: diff parse error) |
 
 See [docs/cli-v1.md](cli-v1.md) for complete specification.
 

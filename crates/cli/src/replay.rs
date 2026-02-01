@@ -48,6 +48,8 @@ pub struct ReplayResult {
     pub has_nondeterministic: bool,
     /// List of nondeterministic functions found (for error reporting).
     pub nondeterministic_found: Vec<String>,
+    /// Notes for hashed-only operations (not applied to workbook).
+    pub hashed_only_notes: Vec<String>,
 }
 
 /// Fingerprint for replay verification.
@@ -111,6 +113,8 @@ struct ReplayState {
     operation_count: usize,
     /// Nondeterministic functions found in formulas.
     nondeterministic_found: Vec<String>,
+    /// Notes for hashed-only operations (not applied to workbook).
+    hashed_only_notes: Vec<String>,
 }
 
 impl ReplayState {
@@ -120,6 +124,7 @@ impl ReplayState {
             hasher: blake3::Hasher::new(),
             operation_count: 0,
             nondeterministic_found: Vec::new(),
+            hashed_only_notes: Vec::new(),
         }
     }
 
@@ -128,6 +133,12 @@ impl ReplayState {
         self.hasher.update(op.as_bytes());
         self.hasher.update(b"\n");
         self.operation_count += 1;
+    }
+
+    /// Hash a hashed-only operation (contributes to fingerprint but not applied to workbook).
+    fn hash_only_operation(&mut self, op: &str, lua_call: &str) {
+        self.hash_operation(op);
+        self.hashed_only_notes.push(lua_call.to_string());
     }
 
     /// Compute the final fingerprint.
@@ -207,6 +218,7 @@ pub fn execute_script(script_path: &Path) -> Result<ReplayResult, CliError> {
         verified,
         has_nondeterministic,
         nondeterministic_found: state.nondeterministic_found.clone(),
+        hashed_only_notes: state.hashed_only_notes.clone(),
     })
 }
 
@@ -289,7 +301,7 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
         grid.set("set_batch", set_batch_fn)?;
     }
 
-    // grid.format{ sheet=N, range="A1:B2", bold=true, ... }
+    // grid.format{ sheet=N, range="A1:B2", kind="bold", bold=true, ... }
     {
         let state = state.clone();
         let format_fn = lua.create_function(move |_, args: Table| {
@@ -318,8 +330,9 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
                 }
             }
 
-            // Hash the operation (simplified - just the range)
-            state.hash_operation(&format!("format:{}:{}", sheet, range));
+            // Hash with kind for fingerprint parity with GUI
+            let kind: String = args.get::<String>("kind").unwrap_or_default();
+            state.hash_operation(&format!("format:{}:{}:{}", sheet, range, kind));
             Ok(())
         })?;
         grid.set("format", format_fn)?;
@@ -410,7 +423,10 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
             state.ensure_sheet(sheet - 1);
             // Sort operations are recorded in fingerprint but not replayed directly.
             // The actual row order is captured in subsequent value operations.
-            state.hash_operation(&format!("sort:{}:{}:{}", sheet, col, ascending));
+            state.hash_only_operation(
+                &format!("sort:{}:{}:{}", sheet, col, ascending),
+                "grid.sort",
+            );
 
             Ok(())
         })?;
@@ -483,6 +499,134 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
             Ok(())
         })?;
         grid.set("clear_exclusion", clear_exclusion_fn)?;
+    }
+
+    // grid.set_col_width{ sheet_id=N, col="A", width=100 }
+    // Layout operations are hashed for fingerprint but not applied in replay.
+    {
+        let state = state.clone();
+        let set_col_width_fn = lua.create_function(move |_, args: Table| {
+            let sheet_id: usize = args.get("sheet_id")?;
+            let col: String = args.get("col")?;
+            let width: f64 = args.get("width")?;
+
+            let mut state = state.borrow_mut();
+            state.hash_only_operation(
+                &format!("set_col_width:{}:{}:{}", sheet_id, col, width as i64),
+                "grid.set_col_width",
+            );
+
+            Ok(())
+        })?;
+        grid.set("set_col_width", set_col_width_fn)?;
+    }
+
+    // grid.clear_col_width{ sheet_id=N, col="A" }
+    {
+        let state = state.clone();
+        let clear_col_width_fn = lua.create_function(move |_, args: Table| {
+            let sheet_id: usize = args.get("sheet_id")?;
+            let col: String = args.get("col")?;
+
+            let mut state = state.borrow_mut();
+            state.hash_only_operation(
+                &format!("clear_col_width:{}:{}", sheet_id, col),
+                "grid.clear_col_width",
+            );
+
+            Ok(())
+        })?;
+        grid.set("clear_col_width", clear_col_width_fn)?;
+    }
+
+    // grid.set_row_height{ sheet_id=N, row=1, height=30 }
+    {
+        let state = state.clone();
+        let set_row_height_fn = lua.create_function(move |_, args: Table| {
+            let sheet_id: usize = args.get("sheet_id")?;
+            let row: usize = args.get("row")?;
+            let height: f64 = args.get("height")?;
+
+            let mut state = state.borrow_mut();
+            state.hash_only_operation(
+                &format!("set_row_height:{}:{}:{}", sheet_id, row, height as i64),
+                "grid.set_row_height",
+            );
+
+            Ok(())
+        })?;
+        grid.set("set_row_height", set_row_height_fn)?;
+    }
+
+    // grid.clear_row_height{ sheet_id=N, row=1 }
+    {
+        let state = state.clone();
+        let clear_row_height_fn = lua.create_function(move |_, args: Table| {
+            let sheet_id: usize = args.get("sheet_id")?;
+            let row: usize = args.get("row")?;
+
+            let mut state = state.borrow_mut();
+            state.hash_only_operation(
+                &format!("clear_row_height:{}:{}", sheet_id, row),
+                "grid.clear_row_height",
+            );
+
+            Ok(())
+        })?;
+        grid.set("clear_row_height", clear_row_height_fn)?;
+    }
+
+    // grid.clear_sort{ sheet=N }
+    {
+        let state = state.clone();
+        let clear_sort_fn = lua.create_function(move |_, args: Table| {
+            let sheet: usize = args.get("sheet")?;
+
+            let mut state = state.borrow_mut();
+            state.hash_only_operation(
+                &format!("clear_sort:{}", sheet),
+                "grid.clear_sort",
+            );
+
+            Ok(())
+        })?;
+        grid.set("clear_sort", clear_sort_fn)?;
+    }
+
+    // grid.merge{ sheet=N }
+    // Merge operations are hashed for fingerprint but not applied in replay.
+    // The actual cell values are captured in subsequent set operations.
+    {
+        let state = state.clone();
+        let merge_fn = lua.create_function(move |_, args: Table| {
+            let sheet: usize = args.get("sheet")?;
+
+            let mut state = state.borrow_mut();
+            state.hash_only_operation(
+                &format!("merge:{}", sheet),
+                "grid.merge",
+            );
+
+            Ok(())
+        })?;
+        grid.set("merge", merge_fn)?;
+    }
+
+    // grid.unmerge{ sheet=N }
+    {
+        let state = state.clone();
+        let unmerge_fn = lua.create_function(move |_, args: Table| {
+            let sheet: usize = args.get("sheet")?;
+
+            let mut state = state.borrow_mut();
+            state.hash_only_operation(
+                &format!("unmerge:{}", sheet),
+                "grid.unmerge",
+            );
+
+            Ok(())
+        })?;
+        grid.set("unmerge", unmerge_fn)?;
     }
 
     // grid.define_name{ name="...", sheet=N, range="A1" }
@@ -620,34 +764,23 @@ fn parse_range_ref(s: &str) -> Option<(usize, usize, usize, usize)> {
     }
 }
 
+/// Export the workbook to bytes in the specified format.
+pub fn export_to_bytes(workbook: &Workbook, format: &str) -> Result<Vec<u8>, CliError> {
+    let sheet = workbook.sheet(0)
+        .ok_or_else(|| CliError::io("No sheets in workbook"))?;
+    match format.to_lowercase().as_str() {
+        "csv" => Ok(sheet_to_csv(sheet).into_bytes()),
+        "tsv" => Ok(sheet_to_tsv(sheet).into_bytes()),
+        "json" => Ok(sheet_to_json(sheet).into_bytes()),
+        _ => Err(CliError::args(format!("Unsupported output format: {}", format))),
+    }
+}
+
 /// Export the workbook to a file in the specified format.
 pub fn export_workbook(workbook: &Workbook, path: &Path, format: &str) -> Result<(), CliError> {
-    match format.to_lowercase().as_str() {
-        "csv" => {
-            let sheet = workbook.sheet(0)
-                .ok_or_else(|| CliError::io("No sheets in workbook"))?;
-            let csv = sheet_to_csv(sheet);
-            std::fs::write(path, csv)
-                .map_err(|e| CliError::io(format!("Failed to write {}: {}", path.display(), e)))?;
-        }
-        "tsv" => {
-            let sheet = workbook.sheet(0)
-                .ok_or_else(|| CliError::io("No sheets in workbook"))?;
-            let tsv = sheet_to_tsv(sheet);
-            std::fs::write(path, tsv)
-                .map_err(|e| CliError::io(format!("Failed to write {}: {}", path.display(), e)))?;
-        }
-        "json" => {
-            let sheet = workbook.sheet(0)
-                .ok_or_else(|| CliError::io("No sheets in workbook"))?;
-            let json = sheet_to_json(sheet);
-            std::fs::write(path, json)
-                .map_err(|e| CliError::io(format!("Failed to write {}: {}", path.display(), e)))?;
-        }
-        _ => {
-            return Err(CliError::args(format!("Unsupported output format: {}", format)));
-        }
-    }
+    let bytes = export_to_bytes(workbook, format)?;
+    std::fs::write(path, bytes)
+        .map_err(|e| CliError::io(format!("Failed to write {}: {}", path.display(), e)))?;
     Ok(())
 }
 
@@ -1016,5 +1149,62 @@ line2]] }
         assert!(csv.contains("\"hello, world\""), "Comma should be quoted: {}", csv);
         assert!(csv.contains("\"say \"\"hi\"\"\""), "Quotes should be escaped: {}", csv);
         assert!(csv.contains("\"line1\nline2\""), "Newlines should be quoted: {}", csv);
+    }
+
+    // =========================================================================
+    // GUI-Exported Operation Stubs
+    // =========================================================================
+
+    #[test]
+    fn test_layout_ops_replay_without_crash() {
+        // Verify that all GUI-exported layout operations execute without error.
+        // These are hash-only stubs — they don't modify the workbook, but they
+        // must not crash so that GUI-exported scripts replay cleanly.
+        let script = r#"
+grid.set{ sheet=1, cell="A1", value="data" }
+grid.set_col_width{ sheet_id=1, col="A", width=120 }
+grid.clear_col_width{ sheet_id=1, col="B" }
+grid.set_row_height{ sheet_id=1, row=1, height=30 }
+grid.clear_row_height{ sheet_id=1, row=2 }
+grid.clear_sort{ sheet=1 }
+grid.merge{ sheet=1 }
+grid.unmerge{ sheet=1 }
+"#;
+        let lua = Lua::new();
+        let state = Rc::new(RefCell::new(ReplayState::new()));
+        register_grid_api(&lua, state.clone()).unwrap();
+        lua.load(script).exec().unwrap();
+
+        let state = state.borrow();
+        // 8 operations total (1 set + 7 layout stubs)
+        assert_eq!(state.operation_count, 8);
+        // Cell value should still be set correctly
+        assert_eq!(state.workbook.sheet(0).unwrap().get_display(0, 0), "data");
+    }
+
+    #[test]
+    fn test_layout_ops_contribute_to_fingerprint() {
+        // Layout stubs must be hashed — same script with/without layout ops
+        // should produce different fingerprints.
+        let script_without = r#"
+grid.set{ sheet=1, cell="A1", value="data" }
+"#;
+        let script_with = r#"
+grid.set{ sheet=1, cell="A1", value="data" }
+grid.set_col_width{ sheet_id=1, col="A", width=120 }
+"#;
+        let lua1 = Lua::new();
+        let state1 = Rc::new(RefCell::new(ReplayState::new()));
+        register_grid_api(&lua1, state1.clone()).unwrap();
+        lua1.load(script_without).exec().unwrap();
+
+        let lua2 = Lua::new();
+        let state2 = Rc::new(RefCell::new(ReplayState::new()));
+        register_grid_api(&lua2, state2.clone()).unwrap();
+        lua2.load(script_with).exec().unwrap();
+
+        let fp1 = state1.borrow().fingerprint();
+        let fp2 = state2.borrow().fingerprint();
+        assert_ne!(fp1, fp2, "Layout ops must change the fingerprint");
     }
 }
