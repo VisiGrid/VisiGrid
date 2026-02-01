@@ -223,6 +223,10 @@ Examples:
         /// Quiet mode - suppress stderr summary and warnings
         #[arg(long, short = 'q')]
         quiet: bool,
+
+        /// Export ambiguous matches to CSV file (written before exit, even on --on-ambiguous error)
+        #[arg(long)]
+        save_ambiguous: Option<PathBuf>,
     },
 }
 
@@ -368,9 +372,11 @@ fn main() -> ExitCode {
             header_row,
             delimiter,
             quiet,
+            save_ambiguous,
         }) => cmd_diff(
             left, right, key, r#match, key_transform, compare, tolerance,
             on_ambiguous, out, output, summary, no_headers, header_row, delimiter, quiet,
+            save_ambiguous,
         ),
     };
 
@@ -1226,6 +1232,7 @@ fn cmd_diff(
     header_row: Option<usize>,
     _delimiter: char,
     quiet: bool,
+    save_ambiguous: Option<PathBuf>,
 ) -> Result<(), CliError> {
     // Load both files
     let left_format = infer_format(&left_path)?;
@@ -1335,6 +1342,16 @@ fn cmd_diff(
             });
         }
     };
+
+    // Save ambiguous matches to CSV (before error exit, so the file is always written)
+    if let Some(ref amb_path) = save_ambiguous {
+        if !result.ambiguous_keys.is_empty() {
+            write_ambiguous_csv(amb_path, &result.ambiguous_keys)?;
+            if !quiet {
+                eprintln!("ambiguous matches exported to: {}", amb_path.display());
+            }
+        }
+    }
 
     // Check ambiguous error condition
     if !result.ambiguous_keys.is_empty() && amb == diff::AmbiguityPolicy::Error {
@@ -1649,6 +1666,31 @@ fn format_diff_csv(
     }
 
     writer.into_inner().map_err(|e| CliError::io(e.to_string()))
+}
+
+fn write_ambiguous_csv(path: &PathBuf, ambiguous_keys: &[diff::AmbiguousKey]) -> Result<(), CliError> {
+    let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
+
+    writer.write_record(&[
+        "left_key", "candidate_count", "candidate_keys",
+    ]).map_err(|e| CliError::io(e.to_string()))?;
+
+    for ak in ambiguous_keys {
+        let candidate_keys: Vec<&str> = ak.candidates.iter()
+            .map(|c| c.right_key_raw.as_str())
+            .collect();
+        writer.write_record(&[
+            &ak.key,
+            &ak.candidates.len().to_string(),
+            &candidate_keys.join("|"),
+        ]).map_err(|e| CliError::io(e.to_string()))?;
+    }
+
+    let bytes = writer.into_inner().map_err(|e| CliError::io(e.to_string()))?;
+    std::fs::write(path, &bytes)
+        .map_err(|e| CliError::io(format!("{}: {}", path.display(), e)))?;
+
+    Ok(())
 }
 
 // ============================================================================

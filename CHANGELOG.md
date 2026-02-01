@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.3
+
+### CLI
+
+- **`diff --save-ambiguous <path>`** — exports ambiguous matches to CSV before exiting. Columns: `left_key`, `candidate_count`, `candidate_keys` (pipe-separated). Written even when `--on-ambiguous error` causes exit 4, so the file is always available for manual review. Designed for audit workflows where matching cannot be resolved automatically.
+
 ## 0.4.2
 
 CLI hardening and documentation truthfulness for public launch.
