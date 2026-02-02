@@ -1,0 +1,8 @@
+convert
+--from
+csv
+-t
+csv
+--headers
+--where
+Status=Pending

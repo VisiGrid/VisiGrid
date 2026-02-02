@@ -1,0 +1,10 @@
+convert
+--from
+csv
+-t
+csv
+--headers
+--where
+Status=Posted
+--where
+Amount<0

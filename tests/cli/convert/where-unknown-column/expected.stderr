@@ -1,0 +1,2 @@
+error: unknown column "bogus"
+hint:  available columns: Status, Entity Name, Amount, Vendor

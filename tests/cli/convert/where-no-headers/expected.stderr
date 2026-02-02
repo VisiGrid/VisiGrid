@@ -1,0 +1,2 @@
+error: --where requires --headers
+hint:  add --headers so column names can be resolved

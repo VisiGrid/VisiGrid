@@ -1,0 +1,5 @@
+Name,Amount,Status
+Alice,100,Active
+Bob,,Active
+Charlie,-50,Closed
+Diana,0,Active

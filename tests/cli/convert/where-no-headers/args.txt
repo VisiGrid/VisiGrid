@@ -1,0 +1,7 @@
+convert
+--from
+csv
+-t
+csv
+--where
+Status=Pending

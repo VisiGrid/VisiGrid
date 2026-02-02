@@ -75,7 +75,10 @@ Examples:
   visigrid convert data.xlsx -t csv
   visigrid convert data.xlsx -t json -o data.json
   cat data.csv | visigrid convert -f csv -t json
-  visigrid convert report.xlsx -t csv -o - | head -5")]
+  visigrid convert report.xlsx -t csv -o - | head -5
+  visigrid convert data.csv -t csv --headers --where 'Status=Pending'
+  visigrid convert data.csv -t csv --headers --where 'Amount<0'
+  visigrid convert data.csv -t csv --headers --where 'Vendor~cloud'")]
     Convert {
         /// Input file (omit to read from stdin)
         input: Option<PathBuf>,
@@ -103,6 +106,15 @@ Examples:
         /// First row is headers (affects JSON object keys)
         #[arg(long)]
         headers: bool,
+
+        /// Filter rows (requires --headers). Repeatable.
+        /// Examples: 'Status=Pending', 'Amount<0', 'Vendor~cloud'
+        #[arg(long, value_name = "EXPR")]
+        r#where: Vec<String>,
+
+        /// Suppress stderr notes (e.g. skipped-row counts)
+        #[arg(long, short = 'q')]
+        quiet: bool,
     },
 
     /// List all supported functions
@@ -297,6 +309,213 @@ enum DiffSummaryMode {
     Json,
 }
 
+// ============================================================================
+// --where filtering types and helpers
+// ============================================================================
+
+#[derive(Clone, Copy)]
+enum WhereOp {
+    Eq,
+    NotEq,
+    Lt,
+    Gt,
+    Contains,
+}
+
+struct WhereClause {
+    column: String, // lowercased
+    op: WhereOp,
+    value: String, // quote-stripped, trimmed
+}
+
+struct ResolvedWhere {
+    col: usize,
+    op: WhereOp,
+    value: String,
+    /// RHS parsed as f64 (after lenient strip). None if not numeric.
+    numeric_value: Option<f64>,
+}
+
+/// Strip `$`, `,`, whitespace, then parse as f64.
+fn lenient_parse_f64(s: &str) -> Option<f64> {
+    let stripped: String = s.chars().filter(|c| *c != '$' && *c != ',').collect();
+    stripped.trim().parse::<f64>().ok()
+}
+
+fn parse_where(expr: &str) -> Result<WhereClause, CliError> {
+    // Reject >= and <= with hint
+    if expr.contains(">=") {
+        return Err(CliError::args(format!("unsupported operator >= in {:?}", expr))
+            .with_hint("use two clauses: --where 'col>value' --where 'col=value'"));
+    }
+    if expr.contains("<=") {
+        return Err(CliError::args(format!("unsupported operator <= in {:?}", expr))
+            .with_hint("use two clauses: --where 'col<value' --where 'col=value'"));
+    }
+
+    // Try operators in order: != ~ = < >
+    let (col, op, raw_value) = if let Some(pos) = expr.find("!=") {
+        (&expr[..pos], WhereOp::NotEq, &expr[pos + 2..])
+    } else if let Some(pos) = expr.find('~') {
+        (&expr[..pos], WhereOp::Contains, &expr[pos + 1..])
+    } else if let Some(pos) = expr.find('=') {
+        (&expr[..pos], WhereOp::Eq, &expr[pos + 1..])
+    } else if let Some(pos) = expr.find('<') {
+        (&expr[..pos], WhereOp::Lt, &expr[pos + 1..])
+    } else if let Some(pos) = expr.find('>') {
+        (&expr[..pos], WhereOp::Gt, &expr[pos + 1..])
+    } else {
+        return Err(CliError::args(format!("no operator found in --where {:?}", expr))
+            .with_hint("syntax: 'Column=value', 'Column<number', 'Column~substring'"));
+    };
+
+    let col = col.trim();
+    if col.is_empty() {
+        return Err(CliError::args(format!("empty column name in --where {:?}", expr)));
+    }
+
+    // Strip one layer of surrounding quotes from value
+    let value = raw_value.trim();
+    let value = if (value.starts_with('"') && value.ends_with('"'))
+        || (value.starts_with('\'') && value.ends_with('\''))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+
+    Ok(WhereClause {
+        column: col.trim().to_lowercase(),
+        op,
+        value: value.to_string(),
+    })
+}
+
+fn resolve_where_columns(
+    clauses: &[WhereClause],
+    sheet: &visigrid_engine::sheet::Sheet,
+    cols: usize,
+) -> Result<Vec<ResolvedWhere>, CliError> {
+    // Read row 0 headers (trimmed + lowercased for matching)
+    let headers: Vec<String> = (0..cols)
+        .map(|c| sheet.get_display(0, c).trim().to_lowercase())
+        .collect();
+
+    let mut resolved = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        let col_idx = headers.iter().position(|h| h == &clause.column);
+        match col_idx {
+            Some(idx) => {
+                resolved.push(ResolvedWhere {
+                    col: idx,
+                    op: clause.op,
+                    value: clause.value.clone(),
+                    numeric_value: lenient_parse_f64(&clause.value),
+                });
+            }
+            None => {
+                let available: Vec<String> = (0..cols)
+                    .map(|c| sheet.get_display(0, c).trim().to_string())
+                    .filter(|h| !h.is_empty())
+                    .collect();
+                return Err(CliError::args(format!("unknown column {:?}", clause.column))
+                    .with_hint(format!("available columns: {}", available.join(", "))));
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn row_matches(
+    sheet: &visigrid_engine::sheet::Sheet,
+    row: usize,
+    conditions: &[ResolvedWhere],
+    skip_counts: &mut [usize],
+) -> bool {
+    for (i, cond) in conditions.iter().enumerate() {
+        let cell = sheet.get_display(row, cond.col);
+        let matches = match cond.op {
+            WhereOp::Contains => cell.to_lowercase().contains(&cond.value.to_lowercase()),
+            WhereOp::Lt => {
+                if let Some(rhs) = cond.numeric_value {
+                    match lenient_parse_f64(&cell) {
+                        Some(lhs) => lhs < rhs,
+                        None => {
+                            skip_counts[i] += 1;
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
+            WhereOp::Gt => {
+                if let Some(rhs) = cond.numeric_value {
+                    match lenient_parse_f64(&cell) {
+                        Some(lhs) => lhs > rhs,
+                        None => {
+                            skip_counts[i] += 1;
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
+            WhereOp::Eq => {
+                if let Some(rhs) = cond.numeric_value {
+                    // Numeric equality
+                    match lenient_parse_f64(&cell) {
+                        Some(lhs) => lhs == rhs,
+                        None => {
+                            skip_counts[i] += 1;
+                            false
+                        }
+                    }
+                } else {
+                    // String equality (case-insensitive)
+                    cell.eq_ignore_ascii_case(&cond.value)
+                }
+            }
+            WhereOp::NotEq => {
+                if let Some(rhs) = cond.numeric_value {
+                    // Numeric not-equals
+                    match lenient_parse_f64(&cell) {
+                        Some(lhs) => lhs != rhs,
+                        None => {
+                            skip_counts[i] += 1;
+                            false
+                        }
+                    }
+                } else {
+                    // String not-equals (case-insensitive)
+                    !cell.eq_ignore_ascii_case(&cond.value)
+                }
+            }
+        };
+        if !matches {
+            return false;
+        }
+    }
+    true
+}
+
+fn filter_row_indices(
+    sheet: &visigrid_engine::sheet::Sheet,
+    conditions: &[ResolvedWhere],
+) -> (Vec<usize>, Vec<usize>) {
+    let (rows, _) = get_data_bounds(sheet);
+    let mut matched = Vec::new();
+    let mut skip_counts = vec![0usize; conditions.len()];
+    for row in 1..rows {
+        // skip header (row 0)
+        if row_matches(sheet, row, conditions, &mut skip_counts) {
+            matched.push(row);
+        }
+    }
+    (matched, skip_counts)
+}
+
 fn long_version() -> &'static str {
     if cfg!(debug_assertions) {
         concat!(
@@ -334,7 +553,9 @@ fn main() -> ExitCode {
             sheet,
             delimiter,
             headers,
-        }) => cmd_convert(input, from, to, output, sheet, delimiter, headers),
+            r#where: where_clauses,
+            quiet,
+        }) => cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, quiet),
         Some(Commands::Calc {
             formula,
             from,
@@ -456,7 +677,15 @@ fn cmd_convert(
     _sheet: Option<String>,
     delimiter: char,
     headers: bool,
+    where_clauses: Vec<String>,
+    quiet: bool,
 ) -> Result<(), CliError> {
+
+    // Validate --where requires --headers
+    if !where_clauses.is_empty() && !headers {
+        return Err(CliError::args("--where requires --headers")
+            .with_hint("add --headers so column names can be resolved"));
+    }
 
     // Determine input format
     let input_format = match (&input, from) {
@@ -473,8 +702,32 @@ fn cmd_convert(
         None => read_stdin(input_format, delimiter, 0, 0)?,
     };
 
+    // Resolve and apply --where filters
+    let row_filter = if !where_clauses.is_empty() {
+        let parsed: Vec<WhereClause> = where_clauses
+            .iter()
+            .map(|e| parse_where(e))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (_, cols) = get_data_bounds(&sheet);
+        let resolved = resolve_where_columns(&parsed, &sheet, cols)?;
+        let (indices, skip_counts) = filter_row_indices(&sheet, &resolved);
+
+        // Report unparseable cells to stderr (suppressed by --quiet)
+        if !quiet {
+            for (i, &count) in skip_counts.iter().enumerate() {
+                if count > 0 {
+                    eprintln!("note: {} rows skipped ({} not numeric)", count, parsed[i].column);
+                }
+            }
+        }
+
+        Some(indices)
+    } else {
+        None
+    };
+
     // Write output
-    let output_bytes = write_format(&sheet, to, delimiter, headers)?;
+    let output_bytes = write_format(&sheet, to, delimiter, headers, row_filter.as_deref())?;
 
     match output {
         Some(path) => {
@@ -692,12 +945,13 @@ fn write_format(
     format: Format,
     delimiter: char,
     headers: bool,
+    row_filter: Option<&[usize]>,
 ) -> Result<Vec<u8>, CliError> {
     match format {
-        Format::Csv => write_csv(sheet, delimiter as u8),
-        Format::Tsv => write_csv(sheet, b'\t'),
-        Format::Json => write_json(sheet, headers),
-        Format::Lines => write_lines(sheet),
+        Format::Csv => write_csv(sheet, delimiter as u8, row_filter),
+        Format::Tsv => write_csv(sheet, b'\t', row_filter),
+        Format::Json => write_json(sheet, headers, row_filter),
+        Format::Lines => write_lines(sheet, row_filter),
         Format::Xlsx => Err(CliError::format("xlsx export not yet implemented")
             .with_hint("use -t csv or -t json instead")),
         Format::Sheet => Err(CliError::format("sheet format cannot be written to stdout")
@@ -705,25 +959,46 @@ fn write_format(
     }
 }
 
-fn write_csv(sheet: &visigrid_engine::sheet::Sheet, delimiter: u8) -> Result<Vec<u8>, CliError> {
+fn write_csv(sheet: &visigrid_engine::sheet::Sheet, delimiter: u8, row_filter: Option<&[usize]>) -> Result<Vec<u8>, CliError> {
     let mut writer = csv::WriterBuilder::new()
         .delimiter(delimiter)
         .from_writer(Vec::new());
 
     let (rows, cols) = get_data_bounds(sheet);
 
-    for row in 0..rows {
-        let mut record: Vec<String> = Vec::new();
-        for col in 0..cols {
-            record.push(sheet.get_display(row, col));
+    match row_filter {
+        Some(indices) => {
+            // Write header (row 0) + filtered rows
+            if rows > 0 {
+                let mut record: Vec<String> = Vec::new();
+                for col in 0..cols {
+                    record.push(sheet.get_display(0, col));
+                }
+                writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+            }
+            for &row in indices {
+                let mut record: Vec<String> = Vec::new();
+                for col in 0..cols {
+                    record.push(sheet.get_display(row, col));
+                }
+                writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+            }
         }
-        writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+        None => {
+            for row in 0..rows {
+                let mut record: Vec<String> = Vec::new();
+                for col in 0..cols {
+                    record.push(sheet.get_display(row, col));
+                }
+                writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+            }
+        }
     }
 
     writer.into_inner().map_err(|e| CliError::io(e.to_string()))
 }
 
-fn write_json(sheet: &visigrid_engine::sheet::Sheet, headers: bool) -> Result<Vec<u8>, CliError> {
+fn write_json(sheet: &visigrid_engine::sheet::Sheet, headers: bool, row_filter: Option<&[usize]>) -> Result<Vec<u8>, CliError> {
     let (rows, cols) = get_data_bounds(sheet);
 
     if headers && rows > 0 {
@@ -745,7 +1020,11 @@ fn write_json(sheet: &visigrid_engine::sheet::Sheet, headers: bool) -> Result<Ve
         }
 
         let mut objects: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
-        for row in 1..rows {
+        let data_rows: Vec<usize> = match row_filter {
+            Some(indices) => indices.to_vec(),
+            None => (1..rows).collect(),
+        };
+        for row in data_rows {
             let mut obj = serde_json::Map::new();
             for (col, key) in header_names.iter().enumerate() {
                 let value = sheet.get_display(row, col);
@@ -760,7 +1039,15 @@ fn write_json(sheet: &visigrid_engine::sheet::Sheet, headers: bool) -> Result<Ve
     } else {
         // Array of arrays
         let mut rows_vec: Vec<Vec<serde_json::Value>> = Vec::new();
-        for row in 0..rows {
+        let all_rows: Vec<usize> = match row_filter {
+            Some(indices) => {
+                let mut v = vec![0]; // always include header row 0 for array-of-arrays
+                v.extend_from_slice(indices);
+                v
+            }
+            None => (0..rows).collect(),
+        };
+        for row in all_rows {
             let mut row_vec: Vec<serde_json::Value> = Vec::new();
             for col in 0..cols {
                 let value = sheet.get_display(row, col);
@@ -799,11 +1086,20 @@ fn string_to_json_value(s: &str) -> serde_json::Value {
     }
 }
 
-fn write_lines(sheet: &visigrid_engine::sheet::Sheet) -> Result<Vec<u8>, CliError> {
+fn write_lines(sheet: &visigrid_engine::sheet::Sheet, row_filter: Option<&[usize]>) -> Result<Vec<u8>, CliError> {
     let mut output = Vec::new();
     let (rows, _) = get_data_bounds(sheet);
 
-    for row in 0..rows {
+    let all_rows: Vec<usize> = match row_filter {
+        Some(indices) => {
+            let mut v = vec![0]; // header
+            v.extend_from_slice(indices);
+            v
+        }
+        None => (0..rows).collect(),
+    };
+
+    for row in all_rows {
         let value = sheet.get_display(row, 0);
         output.extend_from_slice(value.as_bytes());
         output.push(b'\n');
