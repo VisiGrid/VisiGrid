@@ -1,0 +1,7 @@
+convert
+--from
+csv
+-t
+csv
+--select
+A

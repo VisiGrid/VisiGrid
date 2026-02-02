@@ -78,7 +78,8 @@ Examples:
   visigrid convert report.xlsx -t csv -o - | head -5
   visigrid convert data.csv -t csv --headers --where 'Status=Pending'
   visigrid convert data.csv -t csv --headers --where 'Amount<0'
-  visigrid convert data.csv -t csv --headers --where 'Vendor~cloud'")]
+  visigrid convert data.csv -t csv --headers --select 'Invoice,Total,Status'
+  visigrid convert data.csv -t csv --headers --select Invoice --select Total")]
     Convert {
         /// Input file (omit to read from stdin)
         input: Option<PathBuf>,
@@ -111,6 +112,11 @@ Examples:
         /// Examples: 'Status=Pending', 'Amount<0', 'Vendor~cloud'
         #[arg(long, value_name = "EXPR")]
         r#where: Vec<String>,
+
+        /// Select columns to output (requires --headers). Repeatable; comma-separated accepted.
+        /// Examples: 'Invoice,Total', or --select Invoice --select Total
+        #[arg(long, value_name = "COLS")]
+        select: Vec<String>,
 
         /// Suppress stderr notes (e.g. skipped-row counts)
         #[arg(long, short = 'q')]
@@ -406,12 +412,11 @@ fn parse_where(expr: &str) -> Result<WhereClause, CliError> {
 
 fn resolve_where_columns(
     clauses: &[WhereClause],
-    sheet: &visigrid_engine::sheet::Sheet,
-    cols: usize,
+    canonical_headers: &[String],
 ) -> Result<Vec<ResolvedWhere>, CliError> {
-    // Read row 0 headers (trimmed + lowercased for matching)
-    let headers: Vec<String> = (0..cols)
-        .map(|c| sheet.get_display(0, c).trim().to_lowercase())
+    let headers: Vec<String> = canonical_headers
+        .iter()
+        .map(|h| h.trim().to_lowercase())
         .collect();
 
     let mut resolved = Vec::with_capacity(clauses.len());
@@ -427,8 +432,9 @@ fn resolve_where_columns(
                 });
             }
             None => {
-                let available: Vec<String> = (0..cols)
-                    .map(|c| sheet.get_display(0, c).trim().to_string())
+                let available: Vec<String> = canonical_headers
+                    .iter()
+                    .map(|h| h.trim().to_string())
                     .filter(|h| !h.is_empty())
                     .collect();
                 return Err(CliError::args(format!("unknown column {:?}", clause.column))
@@ -516,17 +522,113 @@ fn row_matches(
 fn filter_row_indices(
     sheet: &visigrid_engine::sheet::Sheet,
     conditions: &[ResolvedWhere],
+    header_row: usize,
 ) -> (Vec<usize>, Vec<usize>) {
     let (rows, _) = get_data_bounds(sheet);
     let mut matched = Vec::new();
     let mut skip_counts = vec![0usize; conditions.len()];
-    for row in 1..rows {
-        // skip header (row 0)
+    for row in (header_row + 1)..rows {
         if row_matches(sheet, row, conditions, &mut skip_counts) {
             matched.push(row);
         }
     }
     (matched, skip_counts)
+}
+
+// ============================================================================
+// --select helpers
+// ============================================================================
+
+/// Find the first non-empty row in the sheet. Returns 0 if all rows are empty.
+fn find_header_row(sheet: &visigrid_engine::sheet::Sheet, rows: usize, cols: usize) -> usize {
+    for row in 0..rows {
+        for col in 0..cols {
+            if !sheet.get_display(row, col).trim().is_empty() {
+                return row;
+            }
+        }
+    }
+    0
+}
+
+fn check_ambiguous_headers(canonical_headers: &[String]) -> Result<(), CliError> {
+    let mut seen: HashMap<String, Vec<String>> = HashMap::new();
+    for h in canonical_headers {
+        let canon = h.trim();
+        if canon.is_empty() { continue; }
+        seen.entry(canon.to_lowercase())
+            .or_default()
+            .push(canon.to_string());
+    }
+
+    for (key, names) in &seen {
+        if names.len() > 1 {
+            return Err(CliError::args(format!(
+                "ambiguous column name \"{}\" (matches: {})",
+                key,
+                names.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_select_args(select_args: &[String]) -> Vec<String> {
+    select_args
+        .iter()
+        .flat_map(|arg| arg.split(','))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn resolve_select_columns(
+    select_names: &[String],
+    canonical_headers: &[String],
+) -> Result<Vec<(usize, String)>, CliError> {
+    // Build O(1) lookup: lowercased → (index, canonical name)
+    let mut map: HashMap<String, (usize, String)> = HashMap::new();
+    for (i, h) in canonical_headers.iter().enumerate() {
+        let key = h.trim().to_lowercase();
+        if key.is_empty() { continue; }
+        map.insert(key, (i, h.clone()));
+    }
+
+    let mut result = Vec::with_capacity(select_names.len());
+    let mut seen_indices = std::collections::HashSet::new();
+
+    for name in select_names {
+        let needle = name.trim().to_lowercase();
+        match map.get(&needle) {
+            Some((idx, canonical)) => {
+                if !seen_indices.insert(*idx) {
+                    return Err(CliError::args(
+                        format!("duplicate column in --select: \"{}\"", name)
+                    ));
+                }
+                result.push((*idx, canonical.clone()));
+            }
+            None => {
+                let non_empty_count = canonical_headers.iter().filter(|h| !h.trim().is_empty()).count();
+                let available: Vec<&str> = canonical_headers
+                    .iter()
+                    .map(|h| h.as_str())
+                    .filter(|h| !h.trim().is_empty())
+                    .take(25)
+                    .collect();
+                let suffix = if non_empty_count > 25 {
+                    format!(" (+{} more)", non_empty_count - 25)
+                } else {
+                    String::new()
+                };
+                return Err(CliError::args(
+                    format!("unknown column in --select: \"{}\"", name)
+                ).with_hint(format!("available columns: {}{}", available.join(", "), suffix)));
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 fn long_version() -> &'static str {
@@ -567,8 +669,9 @@ fn main() -> ExitCode {
             delimiter,
             headers,
             r#where: where_clauses,
+            select: select_args,
             quiet,
-        }) => cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, quiet),
+        }) => cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, quiet),
         Some(Commands::Calc {
             formula,
             from,
@@ -693,12 +796,19 @@ fn cmd_convert(
     delimiter: char,
     headers: bool,
     where_clauses: Vec<String>,
+    select_args: Vec<String>,
     quiet: bool,
 ) -> Result<(), CliError> {
 
     // Validate --where requires --headers
     if !where_clauses.is_empty() && !headers {
         return Err(CliError::args("--where requires --headers")
+            .with_hint("add --headers so column names can be resolved"));
+    }
+
+    // Validate --select requires --headers
+    if !select_args.is_empty() && !headers {
+        return Err(CliError::args("--select requires --headers")
             .with_hint("add --headers so column names can be resolved"));
     }
 
@@ -717,15 +827,35 @@ fn cmd_convert(
         None => read_stdin(input_format, delimiter, 0, 0)?,
     };
 
+    let (bounds_rows, bounds_cols) = get_data_bounds(&sheet);
+
+    // Find the actual header row (first non-empty row)
+    let header_row = if headers && bounds_rows > 0 && bounds_cols > 0 {
+        find_header_row(&sheet, bounds_rows, bounds_cols)
+    } else {
+        0
+    };
+
+    // Build canonical headers list once
+    let canonical_headers: Vec<String> = if headers && bounds_cols > 0 {
+        (0..bounds_cols).map(|c| sheet.get_display(header_row, c).trim().to_string()).collect()
+    } else {
+        vec![]
+    };
+
+    // Ambiguous header check (once, before --where or --select resolution)
+    if (!where_clauses.is_empty() || !select_args.is_empty()) && headers {
+        check_ambiguous_headers(&canonical_headers)?;
+    }
+
     // Resolve and apply --where filters
     let row_filter = if !where_clauses.is_empty() {
         let parsed: Vec<WhereClause> = where_clauses
             .iter()
             .map(|e| parse_where(e))
             .collect::<Result<Vec<_>, _>>()?;
-        let (_, cols) = get_data_bounds(&sheet);
-        let resolved = resolve_where_columns(&parsed, &sheet, cols)?;
-        let (indices, skip_counts) = filter_row_indices(&sheet, &resolved);
+        let resolved = resolve_where_columns(&parsed, &canonical_headers)?;
+        let (indices, skip_counts) = filter_row_indices(&sheet, &resolved, header_row);
 
         // Report unparseable cells to stderr (suppressed by --quiet)
         if !quiet {
@@ -741,8 +871,24 @@ fn cmd_convert(
         None
     };
 
+    // Resolve column selection (after --where, before write)
+    let col_filter = if !select_args.is_empty() {
+        let select_names = parse_select_args(&select_args);
+        if select_names.is_empty() {
+            return Err(CliError::args("empty --select list"));
+        }
+        let resolved = resolve_select_columns(&select_names, &canonical_headers)?;
+        Some(resolved)
+    } else {
+        None
+    };
+
     // Write output
-    let output_bytes = write_format(&sheet, to, delimiter, headers, row_filter.as_deref())?;
+    let output_bytes = write_format(
+        &sheet, to, delimiter, headers, header_row,
+        row_filter.as_deref(),
+        col_filter.as_deref(),
+    )?;
 
     match output {
         Some(path) => {
@@ -960,13 +1106,15 @@ fn write_format(
     format: Format,
     delimiter: char,
     headers: bool,
+    header_row: usize,
     row_filter: Option<&[usize]>,
+    col_filter: Option<&[(usize, String)]>,
 ) -> Result<Vec<u8>, CliError> {
     match format {
-        Format::Csv => write_csv(sheet, delimiter as u8, row_filter),
-        Format::Tsv => write_csv(sheet, b'\t', row_filter),
-        Format::Json => write_json(sheet, headers, row_filter),
-        Format::Lines => write_lines(sheet, row_filter),
+        Format::Csv => write_csv(sheet, delimiter as u8, headers, header_row, row_filter, col_filter),
+        Format::Tsv => write_csv(sheet, b'\t', headers, header_row, row_filter, col_filter),
+        Format::Json => write_json(sheet, headers, header_row, row_filter, col_filter),
+        Format::Lines => write_lines(sheet, header_row, row_filter, col_filter),
         Format::Xlsx => Err(CliError::format("xlsx export not yet implemented")
             .with_hint("use -t csv or -t json instead")),
         Format::Sheet => Err(CliError::format("sheet format cannot be written to stdout")
@@ -974,38 +1122,69 @@ fn write_format(
     }
 }
 
-fn write_csv(sheet: &visigrid_engine::sheet::Sheet, delimiter: u8, row_filter: Option<&[usize]>) -> Result<Vec<u8>, CliError> {
+fn write_csv(
+    sheet: &visigrid_engine::sheet::Sheet,
+    delimiter: u8,
+    headers: bool,
+    header_row: usize,
+    row_filter: Option<&[usize]>,
+    col_filter: Option<&[(usize, String)]>,
+) -> Result<Vec<u8>, CliError> {
     let mut writer = csv::WriterBuilder::new()
         .delimiter(delimiter)
         .from_writer(Vec::new());
 
     let (rows, cols) = get_data_bounds(sheet);
 
+    // Helper: push columns for a given row into the record
+    let push_row = |record: &mut Vec<String>, row: usize| {
+        match col_filter {
+            Some(selected) => {
+                for (idx, _) in selected {
+                    record.push(sheet.get_display(row, *idx));
+                }
+            }
+            None => {
+                for col in 0..cols {
+                    record.push(sheet.get_display(row, col));
+                }
+            }
+        }
+    };
+
     match row_filter {
         Some(indices) => {
-            // Write header (row 0) + filtered rows
+            // Write header row + filtered data rows
             if rows > 0 {
                 let mut record: Vec<String> = Vec::new();
-                for col in 0..cols {
-                    record.push(sheet.get_display(0, col));
-                }
+                push_row(&mut record, header_row);
                 writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
             }
             for &row in indices {
                 let mut record: Vec<String> = Vec::new();
-                for col in 0..cols {
-                    record.push(sheet.get_display(row, col));
-                }
+                push_row(&mut record, row);
                 writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
             }
         }
         None => {
-            for row in 0..rows {
-                let mut record: Vec<String> = Vec::new();
-                for col in 0..cols {
-                    record.push(sheet.get_display(row, col));
+            if headers {
+                // Write header row, then data rows starting after header
+                if rows > 0 {
+                    let mut record: Vec<String> = Vec::new();
+                    push_row(&mut record, header_row);
+                    writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
                 }
-                writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+                for row in (header_row + 1)..rows {
+                    let mut record: Vec<String> = Vec::new();
+                    push_row(&mut record, row);
+                    writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+                }
+            } else {
+                for row in 0..rows {
+                    let mut record: Vec<String> = Vec::new();
+                    push_row(&mut record, row);
+                    writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+                }
             }
         }
     }
@@ -1013,50 +1192,108 @@ fn write_csv(sheet: &visigrid_engine::sheet::Sheet, delimiter: u8, row_filter: O
     writer.into_inner().map_err(|e| CliError::io(e.to_string()))
 }
 
-fn write_json(sheet: &visigrid_engine::sheet::Sheet, headers: bool, row_filter: Option<&[usize]>) -> Result<Vec<u8>, CliError> {
+fn write_json(
+    sheet: &visigrid_engine::sheet::Sheet,
+    headers: bool,
+    header_row: usize,
+    row_filter: Option<&[usize]>,
+    col_filter: Option<&[(usize, String)]>,
+) -> Result<Vec<u8>, CliError> {
     let (rows, cols) = get_data_bounds(sheet);
 
     if headers && rows > 0 {
-        // Array of objects
-        let mut header_names: Vec<String> = Vec::new();
-        for col in 0..cols {
-            let name = sheet.get_display(0, col);
-            // Sanitize: lowercase, spaces to _, strip invalid chars
-            let sanitized: String = name
-                .to_lowercase()
-                .chars()
-                .map(|c| if c.is_alphanumeric() { c } else { '_' })
-                .collect();
-            header_names.push(if sanitized.is_empty() {
-                format!("col{}", col)
-            } else {
-                sanitized
-            });
-        }
-
-        let mut objects: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
         let data_rows: Vec<usize> = match row_filter {
             Some(indices) => indices.to_vec(),
-            None => (1..rows).collect(),
+            None => ((header_row + 1)..rows).collect(),
         };
-        for row in data_rows {
-            let mut obj = serde_json::Map::new();
-            for (col, key) in header_names.iter().enumerate() {
-                let value = sheet.get_display(row, col);
-                obj.insert(key.clone(), string_to_json_value(&value));
-            }
-            objects.push(obj);
-        }
 
-        let mut bytes = serde_json::to_vec_pretty(&objects).map_err(|e| CliError::io(e.to_string()))?;
-        bytes.push(b'\n');
-        Ok(bytes)
+        if let Some(selected) = col_filter {
+            // --select path: build JSON manually to preserve key order
+            let json_keys: Vec<(usize, String)> = selected.iter().map(|(idx, name)| {
+                let sanitized: String = name
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                    .collect();
+                let key = if sanitized.is_empty() {
+                    format!("col{}", idx)
+                } else {
+                    sanitized
+                };
+                (*idx, key)
+            }).collect();
+
+            let mut rows_json: Vec<Vec<(String, serde_json::Value)>> = Vec::new();
+            for row in data_rows {
+                let mut pairs = Vec::new();
+                for (col_idx, key) in &json_keys {
+                    let value = sheet.get_display(row, *col_idx);
+                    pairs.push((key.clone(), string_to_json_value(&value)));
+                }
+                rows_json.push(pairs);
+            }
+
+            // Format manually to preserve key order
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"[\n");
+            for (i, pairs) in rows_json.iter().enumerate() {
+                bytes.extend_from_slice(b"  {\n");
+                for (j, (key, value)) in pairs.iter().enumerate() {
+                    let val_str = serde_json::to_string(value).map_err(|e| CliError::io(e.to_string()))?;
+                    bytes.extend_from_slice(b"    ");
+                    bytes.extend_from_slice(serde_json::to_string(key).map_err(|e| CliError::io(e.to_string()))?.as_bytes());
+                    bytes.extend_from_slice(b": ");
+                    bytes.extend_from_slice(val_str.as_bytes());
+                    if j < pairs.len() - 1 {
+                        bytes.push(b',');
+                    }
+                    bytes.push(b'\n');
+                }
+                bytes.extend_from_slice(b"  }");
+                if i < rows_json.len() - 1 {
+                    bytes.push(b',');
+                }
+                bytes.push(b'\n');
+            }
+            bytes.extend_from_slice(b"]\n");
+            Ok(bytes)
+        } else {
+            // Standard path: array of objects with BTreeMap key ordering
+            let mut header_names: Vec<String> = Vec::new();
+            for col in 0..cols {
+                let name = sheet.get_display(header_row, col);
+                let sanitized: String = name
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                    .collect();
+                header_names.push(if sanitized.is_empty() {
+                    format!("col{}", col)
+                } else {
+                    sanitized
+                });
+            }
+
+            let mut objects: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+            for row in data_rows {
+                let mut obj = serde_json::Map::new();
+                for (col, key) in header_names.iter().enumerate() {
+                    let value = sheet.get_display(row, col);
+                    obj.insert(key.clone(), string_to_json_value(&value));
+                }
+                objects.push(obj);
+            }
+
+            let mut bytes = serde_json::to_vec_pretty(&objects).map_err(|e| CliError::io(e.to_string()))?;
+            bytes.push(b'\n');
+            Ok(bytes)
+        }
     } else {
-        // Array of arrays
+        // Array of arrays (no col_filter since --select requires --headers)
         let mut rows_vec: Vec<Vec<serde_json::Value>> = Vec::new();
         let all_rows: Vec<usize> = match row_filter {
             Some(indices) => {
-                let mut v = vec![0]; // always include header row 0 for array-of-arrays
+                let mut v = vec![header_row];
                 v.extend_from_slice(indices);
                 v
             }
@@ -1101,13 +1338,24 @@ fn string_to_json_value(s: &str) -> serde_json::Value {
     }
 }
 
-fn write_lines(sheet: &visigrid_engine::sheet::Sheet, row_filter: Option<&[usize]>) -> Result<Vec<u8>, CliError> {
+fn write_lines(
+    sheet: &visigrid_engine::sheet::Sheet,
+    header_row: usize,
+    row_filter: Option<&[usize]>,
+    col_filter: Option<&[(usize, String)]>,
+) -> Result<Vec<u8>, CliError> {
     let mut output = Vec::new();
     let (rows, _) = get_data_bounds(sheet);
 
+    // With --select: output the first selected column; without: column 0
+    let output_col = match col_filter {
+        Some(selected) => selected[0].0,
+        None => 0,
+    };
+
     let all_rows: Vec<usize> = match row_filter {
         Some(indices) => {
-            let mut v = vec![0]; // header
+            let mut v = vec![header_row];
             v.extend_from_slice(indices);
             v
         }
@@ -1115,7 +1363,7 @@ fn write_lines(sheet: &visigrid_engine::sheet::Sheet, row_filter: Option<&[usize
     };
 
     for row in all_rows {
-        let value = sheet.get_display(row, 0);
+        let value = sheet.get_display(row, output_col);
         output.extend_from_slice(value.as_bytes());
         output.push(b'\n');
     }

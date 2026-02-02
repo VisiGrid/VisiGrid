@@ -27,6 +27,22 @@
 
   When a numeric operator encounters a cell that doesn't parse as a number, the row is silently skipped. After output completes, a one-line stderr note reports the count (`note: 3 rows skipped (Amount not numeric)`). Suppressed by `--quiet`.
 
+- **`convert --select` column projection** — select and reorder output columns by name. Requires `--headers`. Comma-separated or repeatable. Order of operations: parse → `--where` filter → `--select` projection → write. `--where` can reference columns not in `--select` (filtering happens before projection). JSON objects contain only the selected keys, emitted in `--select` order.
+
+  ```bash
+  # Pick two columns, reorder them
+  visigrid-cli convert data.csv -t csv --headers --select 'Status,Amount'
+
+  # Filter by one column, output different columns
+  visigrid-cli convert data.csv -t csv --headers \
+    --where 'Status=Pending' --select 'Amount,Vendor'
+
+  # JSON with only selected fields
+  visigrid-cli convert data.csv -t json --headers --select 'Status,Amount'
+  ```
+
+  Error handling: unknown column → exit 2 with available headers; duplicate column → exit 2; ambiguous headers (case-insensitive collision) → exit 2 for both `--where` and `--select`.
+
 - **`convert --quiet`** — new `-q` / `--quiet` flag suppresses stderr notes (e.g. skipped-row counts from `--where`). Designed for pipelines where only stdout matters.
 
 - **`diff -` stdin support** — either side of `diff` can now be `-` to read from stdin. Format is inferred from the other file's extension, or set explicitly with `--stdin-format`. Enables piping live exports directly into reconciliation without temp files.
@@ -46,7 +62,7 @@
 
 - **`diff --save-ambiguous <path>`** — exports ambiguous matches to CSV before exiting. Columns: `left_key`, `candidate_count`, `candidate_keys` (pipe-separated). Written even when `--on-ambiguous error` causes exit 4, so the file is always available for manual review.
 
-- **Golden tests: 42/42** — regenerated all stale expected outputs and locked down exit-code semantics with contract test, tolerance, and strict-exit tests.
+- **Golden tests: 52/52** — regenerated all stale expected outputs and locked down exit-code semantics with contract test, tolerance, strict-exit, and `--select` projection tests.
 
 ### Desktop App
 

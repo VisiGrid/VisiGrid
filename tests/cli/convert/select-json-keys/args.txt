@@ -1,0 +1,8 @@
+convert
+--from
+csv
+-t
+json
+--headers
+--select
+Status,Name

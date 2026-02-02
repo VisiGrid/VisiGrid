@@ -25,6 +25,8 @@ Everything in VisiGrid is deterministic: same inputs, same outputs, always. No v
 
 The CLI is the primary interface for automation, verification, and audit trails. The GUI is an inspector and editor built on the same engine.
 
+VisiGrid replaces read-and-compare scripts — the ones that end in printing results — not domain code that writes to your database.
+
 ## Headless Spreadsheet Workflows
 
 VisiGrid ships a CLI that runs without a GUI. Same engine, no window.
@@ -38,6 +40,10 @@ visigrid-cli diff vendor.xlsx ours.csv --key Invoice --compare Total --tolerance
 
 # Convert between formats
 visigrid-cli convert data.xlsx --to csv
+
+# Project a vendor export down to reconciliation columns, then diff
+visigrid-cli convert vendor.xlsx -t csv --headers --select 'Invoice,Amount' | \
+  visigrid-cli diff - our_export.csv --key Invoice --compare Amount --tolerance 0.01
 ```
 
 The CLI reads spreadsheet files (CSV, XLSX, JSON, TSV), runs the same formula engine and comparison logic as the GUI, and writes structured output to stdout. Exit codes are stable for scripting. Output is JSON or CSV.
@@ -58,6 +64,16 @@ visigrid-cli convert rh_transactions.csv -t csv --headers \
 ```
 
 Five operators: `=` `!=` `<` `>` `~` (contains). Typed comparisons — numeric RHS triggers numeric compare, string RHS triggers case-insensitive string compare. Lenient parsing handles `$1,200.00`. Multiple `--where` = AND.
+
+**Column selection** (`convert --select`) — pick and reorder output columns:
+
+```bash
+visigrid-cli convert data.csv -t csv --headers --select 'Status,Amount'
+
+# Filter by one column, output different ones
+visigrid-cli convert data.csv -t csv --headers \
+  --where 'Status=Pending' --select 'Amount,Vendor'
+```
 
 **Reconciliation** (`diff`) compares two datasets row-by-row:
 - Rows only in the left file, only in the right file, or in both with value differences

@@ -1,0 +1,10 @@
+convert
+--from
+csv
+-t
+csv
+--headers
+--where
+C=x
+--select
+A,B

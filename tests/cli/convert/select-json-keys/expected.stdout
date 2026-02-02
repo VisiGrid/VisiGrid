@@ -1,0 +1,10 @@
+[
+  {
+    "status": "Active",
+    "name": "Alice"
+  },
+  {
+    "status": "Pending",
+    "name": "Bob"
+  }
+]
