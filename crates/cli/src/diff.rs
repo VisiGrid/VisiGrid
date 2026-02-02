@@ -151,6 +151,7 @@ pub struct DiffSummary {
     pub only_left: usize,
     pub only_right: usize,
     pub diff: usize,
+    pub diff_outside_tolerance: usize,
     pub ambiguous: usize,
 }
 
@@ -398,13 +399,18 @@ pub fn reconcile(
     }
 
     // 6. Build summary
+    let diff_rows: Vec<&DiffRow> = results.iter().filter(|r| r.status == RowStatus::Diff).collect();
+    let diff_outside_tolerance = diff_rows.iter()
+        .filter(|r| r.diffs.iter().any(|d| !d.within_tolerance))
+        .count();
     let summary = DiffSummary {
         left_rows: left_rows.len(),
         right_rows: right_rows.len(),
         matched: results.iter().filter(|r| r.status == RowStatus::Matched).count(),
         only_left: results.iter().filter(|r| r.status == RowStatus::OnlyLeft).count(),
         only_right: results.iter().filter(|r| r.status == RowStatus::OnlyRight).count(),
-        diff: results.iter().filter(|r| r.status == RowStatus::Diff).count(),
+        diff: diff_rows.len(),
+        diff_outside_tolerance,
         ambiguous: ambiguous_keys.len(),
     };
 

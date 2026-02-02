@@ -1,1 +1,2 @@
-error: formula evaluation failed: #ERR: #DIV/0!
+error: formula returned #DIV/0!
+hint:  division by zero in your formula

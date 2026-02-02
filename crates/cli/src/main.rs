@@ -165,20 +165,25 @@ Examples:
         command: AiCommands,
     },
 
-    /// Reconcile two datasets by key (exit 0 = match, exit 1 = diffs found)
+    /// Reconcile two datasets by key (exit 0 = reconciled, exit 1 = material diffs)
     #[command(after_help = "\
+Exit code 1 indicates material differences: missing rows or value diffs outside \
+tolerance. Within-tolerance diffs are reported but do not cause a non-zero exit.
+
 Examples:
   visigrid diff old.csv new.csv --key id
   visigrid diff old.csv new.csv --key name --tolerance 0.01
   visigrid diff old.csv new.csv --key sku --out csv --output diffs.csv
   visigrid diff old.csv new.csv --key id --compare price,quantity
-  visigrid diff old.csv new.csv --key name --match contains")]
+  visigrid diff old.csv new.csv --key name --match contains
+  cat export.csv | visigrid diff - baseline.csv --key id
+  docker exec db dump | visigrid diff expected.csv - --key sku")]
     Diff {
-        /// Left dataset file
-        left: PathBuf,
+        /// Left dataset (file path, or - for stdin)
+        left: String,
 
-        /// Right dataset file
-        right: PathBuf,
+        /// Right dataset (file path, or - for stdin)
+        right: String,
 
         /// Key column (name, letter, or 1-indexed number)
         #[arg(long)]
@@ -231,6 +236,14 @@ Examples:
         /// CSV delimiter
         #[arg(long, default_value = ",")]
         delimiter: char,
+
+        /// Format for stdin when using - (inferred from other file if omitted)
+        #[arg(long, value_name = "FORMAT")]
+        stdin_format: Option<Format>,
+
+        /// Exit 1 on any diff, even within tolerance (Unix-diff semantics)
+        #[arg(long)]
+        strict_exit: bool,
 
         /// Quiet mode - suppress stderr summary and warnings
         #[arg(long, short = 'q')]
@@ -592,12 +605,14 @@ fn main() -> ExitCode {
             no_headers,
             header_row,
             delimiter,
+            stdin_format,
+            strict_exit,
             quiet,
             save_ambiguous,
         }) => cmd_diff(
             left, right, key, r#match, key_transform, compare, tolerance,
-            on_ambiguous, out, output, summary, no_headers, header_row, delimiter, quiet,
-            save_ambiguous,
+            on_ambiguous, out, output, summary, no_headers, header_row, delimiter,
+            stdin_format, strict_exit, quiet, save_ambiguous,
         ),
     };
 
@@ -1513,8 +1528,8 @@ const EXIT_DIFF_PARSE: u8 = 5;
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_diff(
-    left_path: PathBuf,
-    right_path: PathBuf,
+    left_arg: String,
+    right_arg: String,
     key: String,
     match_mode: DiffMatchMode,
     key_transform: DiffKeyTransform,
@@ -1526,24 +1541,64 @@ fn cmd_diff(
     summary_mode: DiffSummaryMode,
     no_headers: bool,
     header_row: Option<usize>,
-    _delimiter: char,
+    delimiter: char,
+    stdin_format: Option<Format>,
+    strict_exit: bool,
     quiet: bool,
     save_ambiguous: Option<PathBuf>,
 ) -> Result<(), CliError> {
-    // Load both files
-    let left_format = infer_format(&left_path)?;
-    let right_format = infer_format(&right_path)?;
-    let left_sheet = read_file(&left_path, left_format, ',')?;
-    let right_sheet = read_file(&right_path, right_format, ',')?;
+    let left_is_stdin = left_arg == "-";
+    let right_is_stdin = right_arg == "-";
+
+    if left_is_stdin && right_is_stdin {
+        return Err(CliError::args("cannot read both sides from stdin")
+            .with_hint("provide at least one file path: visigrid diff - file.csv --key id"));
+    }
+
+    // Resolve formats
+    let left_path = if left_is_stdin { None } else { Some(PathBuf::from(&left_arg)) };
+    let right_path = if right_is_stdin { None } else { Some(PathBuf::from(&right_arg)) };
+
+    let resolve_stdin_format = |other_path: &Option<PathBuf>| -> Result<Format, CliError> {
+        if let Some(fmt) = stdin_format {
+            return Ok(fmt);
+        }
+        if let Some(ref p) = other_path {
+            return infer_format(p);
+        }
+        Err(CliError::args("cannot infer stdin format")
+            .with_hint("use --stdin-format to specify the format for stdin input"))
+    };
+
+    // Load both sides
+    let (left_sheet, left_label) = if left_is_stdin {
+        let fmt = resolve_stdin_format(&right_path)?;
+        (read_stdin(fmt, delimiter, 0, 0)?, "stdin".to_string())
+    } else {
+        let p = left_path.as_ref().unwrap();
+        let fmt = infer_format(p)?;
+        let label = p.display().to_string();
+        (read_file(p, fmt, delimiter)?, label)
+    };
+
+    let (right_sheet, right_label) = if right_is_stdin {
+        let fmt = resolve_stdin_format(&left_path)?;
+        (read_stdin(fmt, delimiter, 0, 0)?, "stdin".to_string())
+    } else {
+        let p = right_path.as_ref().unwrap();
+        let fmt = infer_format(p)?;
+        let label = p.display().to_string();
+        (read_file(p, fmt, delimiter)?, label)
+    };
 
     let (left_bounds_rows, left_bounds_cols) = get_data_bounds(&left_sheet);
     let (right_bounds_rows, right_bounds_cols) = get_data_bounds(&right_sheet);
 
     if left_bounds_rows == 0 {
-        return Err(CliError { code: EXIT_DIFF_PARSE, message: format!("{}: file is empty or has no data rows", left_path.display()), hint: None });
+        return Err(CliError { code: EXIT_DIFF_PARSE, message: format!("{}: empty or has no data rows", left_label), hint: None });
     }
     if right_bounds_rows == 0 {
-        return Err(CliError { code: EXIT_DIFF_PARSE, message: format!("{}: file is empty or has no data rows", right_path.display()), hint: None });
+        return Err(CliError { code: EXIT_DIFF_PARSE, message: format!("{}: empty or has no data rows", right_label), hint: None });
     }
 
     // Determine header row (0-indexed internally)
@@ -1688,20 +1743,26 @@ fn cmd_diff(
     // Write summary to stderr if requested (--quiet suppresses)
     if !quiet && matches!(summary_mode, DiffSummaryMode::Stderr) {
         let s = &result.summary;
-        eprintln!("left:  {} rows ({})", s.left_rows, left_path.display());
-        eprintln!("right: {} rows ({})", s.right_rows, right_path.display());
+        eprintln!("left:  {} rows ({})", s.left_rows, left_label);
+        eprintln!("right: {} rows ({})", s.right_rows, right_label);
         eprintln!("matched: {}", s.matched);
         eprintln!("only_left: {}", s.only_left);
         eprintln!("only_right: {}", s.only_right);
         eprintln!("value_diff: {}", s.diff);
+        if s.diff > 0 && s.diff != s.diff_outside_tolerance {
+            eprintln!("value_diff_outside_tolerance: {}", s.diff_outside_tolerance);
+        }
         if s.ambiguous > 0 {
             eprintln!("ambiguous: {}", s.ambiguous);
         }
     }
 
-    // Exit 1 when differences are found (like standard diff)
+    // Exit 1 for material differences: missing rows or diffs outside tolerance.
+    // Within-tolerance diffs are reported but do not cause a non-zero exit code.
+    // --strict-exit: any diff (even within tolerance) causes exit 1.
     let s = &result.summary;
-    if s.only_left > 0 || s.only_right > 0 || s.diff > 0 {
+    let diff_count = if strict_exit { s.diff } else { s.diff_outside_tolerance };
+    if s.only_left > 0 || s.only_right > 0 || diff_count > 0 {
         return Err(CliError { code: EXIT_EVAL_ERROR, message: String::new(), hint: None });
     }
 
@@ -1881,6 +1942,7 @@ fn format_diff_json(
         "only_left": result.summary.only_left,
         "only_right": result.summary.only_right,
         "diff": result.summary.diff,
+        "diff_outside_tolerance": result.summary.diff_outside_tolerance,
         "ambiguous": result.summary.ambiguous,
         "tolerance": options.tolerance,
         "key": key_name,

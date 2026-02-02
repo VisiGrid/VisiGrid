@@ -1,0 +1,11 @@
+diff
+{DIR}/left.csv
+{DIR}/right.csv
+--key
+id
+--tolerance
+0.5
+--out
+json
+--summary
+none

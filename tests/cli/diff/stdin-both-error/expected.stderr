@@ -1,0 +1,2 @@
+error: cannot read both sides from stdin
+hint:  provide at least one file path: visigrid diff - file.csv --key id

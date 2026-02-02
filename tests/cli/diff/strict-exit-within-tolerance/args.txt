@@ -1,0 +1,14 @@
+diff
+{DIR}/left.csv
+{DIR}/right.csv
+--key
+Invoice
+--compare
+Total
+--tolerance
+0.01
+--strict-exit
+--out
+json
+--summary
+none

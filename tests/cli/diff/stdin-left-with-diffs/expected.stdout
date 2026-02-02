@@ -19,7 +19,15 @@
     },
     {
       "candidates": null,
-      "diffs": null,
+      "diffs": [
+        {
+          "column": "Amount",
+          "delta": 49.5,
+          "left": "200.50",
+          "right": "250",
+          "within_tolerance": false
+        }
+      ],
       "key": "INV-002",
       "left": {
         "Amount": "200.50",
@@ -28,11 +36,11 @@
       },
       "match_explain": null,
       "right": {
-        "Amount": "200.50",
+        "Amount": "250",
         "Invoice": "INV-002",
         "Vendor": "Beta"
       },
-      "status": "matched"
+      "status": "diff"
     },
     {
       "candidates": null,
@@ -50,18 +58,31 @@
         "Vendor": "Gamma"
       },
       "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-004",
+      "left": {
+        "Amount": "500",
+        "Invoice": "INV-004",
+        "Vendor": "Delta"
+      },
+      "match_explain": null,
+      "right": null,
+      "status": "only_left"
     }
   ],
   "summary": {
     "ambiguous": 0,
-    "diff": 0,
-    "diff_outside_tolerance": 0,
+    "diff": 1,
+    "diff_outside_tolerance": 1,
     "key": "Invoice",
     "key_transform": "trim",
-    "left_rows": 3,
+    "left_rows": 4,
     "match": "exact",
-    "matched": 3,
-    "only_left": 0,
+    "matched": 2,
+    "only_left": 1,
     "only_right": 0,
     "right_rows": 3,
     "tolerance": 0.0

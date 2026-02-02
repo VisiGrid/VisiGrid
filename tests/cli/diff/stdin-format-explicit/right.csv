@@ -1,0 +1,4 @@
+Invoice,Amount,Vendor
+INV-001,100.00,Acme
+INV-002,200.50,Beta
+INV-003,350.75,Gamma

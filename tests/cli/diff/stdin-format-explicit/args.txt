@@ -1,0 +1,11 @@
+diff
+-
+{DIR}/right.csv
+--key
+Invoice
+--stdin-format
+tsv
+--out
+json
+--summary
+none

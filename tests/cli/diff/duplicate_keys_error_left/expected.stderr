@@ -1,2 +1,3 @@
 error: duplicate keys found:
   left key "INV-001" appears 2 times
+hint:  each key must be unique within its file; deduplicate or choose a different --key column

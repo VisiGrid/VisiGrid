@@ -1,0 +1,9 @@
+diff
+-
+{DIR}/right.csv
+--key
+Invoice
+--out
+json
+--summary
+none

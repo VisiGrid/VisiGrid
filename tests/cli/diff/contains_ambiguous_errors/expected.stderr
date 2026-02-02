@@ -1,3 +1,4 @@
 warning: using substring matching (--match contains); ensure keys are normalized
 error: ambiguous matches found:
   key "12" matches 2 right rows: "100154612"(row 0) "100154312"(row 1)
+hint:  use --on_ambiguous report to include ambiguous matches in output instead of failing

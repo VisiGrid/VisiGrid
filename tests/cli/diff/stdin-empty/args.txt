@@ -1,0 +1,5 @@
+diff
+-
+{DIR}/right.csv
+--key
+id

@@ -46,6 +46,7 @@
   "summary": {
     "ambiguous": 0,
     "diff": 0,
+    "diff_outside_tolerance": 0,
     "key": "Invoice",
     "key_transform": "trim",
     "left_rows": 2,

@@ -1,0 +1,111 @@
+{
+  "results": [
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "1",
+      "left": {
+        "amount": "100",
+        "id": "1",
+        "vendor": "Acme"
+      },
+      "match_explain": null,
+      "right": {
+        "amount": "100",
+        "id": "1",
+        "vendor": "Acme"
+      },
+      "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": [
+        {
+          "column": "amount",
+          "delta": 0.09999999999999432,
+          "left": "200",
+          "right": "200.10",
+          "within_tolerance": true
+        }
+      ],
+      "key": "2",
+      "left": {
+        "amount": "200",
+        "id": "2",
+        "vendor": "Beta"
+      },
+      "match_explain": null,
+      "right": {
+        "amount": "200.10",
+        "id": "2",
+        "vendor": "Beta"
+      },
+      "status": "diff"
+    },
+    {
+      "candidates": null,
+      "diffs": [
+        {
+          "column": "amount",
+          "delta": 50.0,
+          "left": "300",
+          "right": "350",
+          "within_tolerance": false
+        }
+      ],
+      "key": "3",
+      "left": {
+        "amount": "300",
+        "id": "3",
+        "vendor": "Gamma"
+      },
+      "match_explain": null,
+      "right": {
+        "amount": "350",
+        "id": "3",
+        "vendor": "Gamma"
+      },
+      "status": "diff"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "4",
+      "left": {
+        "amount": "400",
+        "id": "4",
+        "vendor": "Delta"
+      },
+      "match_explain": null,
+      "right": null,
+      "status": "only_left"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "5",
+      "left": null,
+      "match_explain": null,
+      "right": {
+        "amount": "500",
+        "id": "5",
+        "vendor": "Epsilon"
+      },
+      "status": "only_right"
+    }
+  ],
+  "summary": {
+    "ambiguous": 0,
+    "diff": 2,
+    "diff_outside_tolerance": 1,
+    "key": "id",
+    "key_transform": "trim",
+    "left_rows": 4,
+    "match": "exact",
+    "matched": 1,
+    "only_left": 1,
+    "only_right": 1,
+    "right_rows": 4,
+    "tolerance": 0.5
+  }
+}
