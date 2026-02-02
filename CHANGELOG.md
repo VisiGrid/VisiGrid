@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.4.4
+
+### CLI
+
+- **`convert --where` row filtering** — filter rows by column value before writing output. Supports five operators: `=` (typed equality), `!=`, `<`, `>`, `~` (case-insensitive contains). Multiple `--where` flags combine as AND. Typed comparisons: numeric RHS triggers numeric compare, string RHS triggers case-insensitive string compare — matching user intuition with zero extra syntax. Lenient numeric parsing strips `$` and `,` so bank/ledger exports work out of the box. Quoted values (`'Entity Name="Affinity House Inc"'`) handle columns and values with special characters. Header names are matched after trimming whitespace.
+
+  ```bash
+  # Filter to pending transactions
+  visigrid-cli convert data.csv -t csv --headers --where 'Status=Pending'
+
+  # Negative amounts only
+  visigrid-cli convert data.csv -t csv --headers --where 'Amount<0'
+
+  # AND: pending negative amounts
+  visigrid-cli convert data.csv -t csv --headers \
+    --where 'Status=Pending' --where 'Amount<0'
+
+  # Substring search
+  visigrid-cli convert data.csv -t csv --headers --where 'Vendor~cloud'
+
+  # Pipe into calc
+  visigrid-cli convert data.csv -t csv --headers --where 'Status=Pending' | \
+    visigrid-cli calc '=SUM(E:E)' -f csv --headers
+  ```
+
+  When a numeric operator encounters a cell that doesn't parse as a number, the row is silently skipped. After output completes, a one-line stderr note reports the count (`note: 3 rows skipped (Amount not numeric)`). Suppressed by `--quiet`.
+
+- **`convert --quiet`** — new `-q` / `--quiet` flag suppresses stderr notes (e.g. skipped-row counts from `--where`). Designed for pipelines where only stdout matters.
+
+### Desktop App
+
+- **Menu accelerator keys** — every menu item now has a keyboard accelerator. When a dropdown is open, press the underlined letter to execute that item immediately. Accelerators are explicitly assigned per item (not auto-derived) and validated at startup in debug builds to catch collisions. Works across all menus: File, Edit, View, Format, Data, Help.
+
+- **Copy/cut dashed border** — copying or cutting cells now draws a dashed border overlay around the source range, matching Excel's visual feedback. The border uses the selection accent color and is cleared on paste, escape, edit start, edit confirm, or delete. Non-interactive (clicks pass through).
+
+- **Ctrl+W close window** — Windows/Linux keybinding to close the current window, matching platform convention.
+
 ## 0.4.3
 
 ### CLI

@@ -42,6 +42,23 @@ visigrid-cli convert data.xlsx --to csv
 
 The CLI reads spreadsheet files (CSV, XLSX, JSON, TSV), runs the same formula engine and comparison logic as the GUI, and writes structured output to stdout. Exit codes are stable for scripting. Output is JSON or CSV.
 
+**Filtering rows** (`convert --where`) — no awk required:
+
+```bash
+# Pending transactions
+visigrid-cli convert rh_transactions.csv -t csv --headers --where 'Status=Pending'
+
+# Pending charges (negative amounts)
+visigrid-cli convert rh_transactions.csv -t csv --headers \
+  --where 'Status=Pending' --where 'Amount<0'
+
+# Vendor name contains
+visigrid-cli convert rh_transactions.csv -t csv --headers \
+  --where 'Description~"google workspace"'
+```
+
+Five operators: `=` `!=` `<` `>` `~` (contains). Typed comparisons — numeric RHS triggers numeric compare, string RHS triggers case-insensitive string compare. Lenient parsing handles `$1,200.00`. Multiple `--where` = AND.
+
 **Reconciliation** (`diff`) compares two datasets row-by-row:
 - Rows only in the left file, only in the right file, or in both with value differences
 - Numeric tolerance for financial data (`$1,234.56`, `(500.00)` handled natively)
