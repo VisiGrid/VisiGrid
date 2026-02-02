@@ -1,8 +1,9 @@
 // VisiGrid CLI - headless spreadsheet operations
 // See docs/cli-v1.md for specification
 
-mod diff;
 mod replay;
+
+use visigrid_cli::diff;
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -635,16 +636,20 @@ fn long_version() -> &'static str {
     if cfg!(debug_assertions) {
         concat!(
             env!("CARGO_PKG_VERSION"),
-            "\nengine: visigrid-engine ",
-            env!("CARGO_PKG_VERSION"),
-            "\nbuild:  debug",
+            " (", env!("GIT_COMMIT_HASH"), ")",
+            "\nengine:  visigrid-engine ", env!("CARGO_PKG_VERSION"),
+            "\nbuild:   debug",
+            "\ntarget:  ", env!("TARGET"),
+            "\ncontract_version(diff): 1",
         )
     } else {
         concat!(
             env!("CARGO_PKG_VERSION"),
-            "\nengine: visigrid-engine ",
-            env!("CARGO_PKG_VERSION"),
-            "\nbuild:  release",
+            " (", env!("GIT_COMMIT_HASH"), ")",
+            "\nengine:  visigrid-engine ", env!("CARGO_PKG_VERSION"),
+            "\nbuild:   release",
+            "\ntarget:  ", env!("TARGET"),
+            "\ncontract_version(diff): 1",
         )
     }
 }
@@ -2105,11 +2110,13 @@ fn extract_data_rows(
     rows
 }
 
+const DIFF_CONTRACT_VERSION: u32 = 1;
+
 fn format_diff_json(
     result: &diff::DiffResult,
     options: &diff::DiffOptions,
     headers: &[String],
-    summary_mode: &DiffSummaryMode,
+    _summary_mode: &DiffSummaryMode,
 ) -> Result<Vec<u8>, CliError> {
     let key_name = headers.get(options.key_col).cloned().unwrap_or_default();
     let match_str = match options.match_mode {
@@ -2198,16 +2205,11 @@ fn format_diff_json(
         "key_transform": kt_str,
     });
 
-    let top = match summary_mode {
-        DiffSummaryMode::Json => serde_json::json!({
-            "summary": summary_json,
-            "results": results_json,
-        }),
-        _ => serde_json::json!({
-            "summary": summary_json,
-            "results": results_json,
-        }),
-    };
+    let top = serde_json::json!({
+        "contract_version": DIFF_CONTRACT_VERSION,
+        "summary": summary_json,
+        "results": results_json,
+    });
 
     let mut bytes = serde_json::to_vec_pretty(&top).map_err(|e| CliError::io(e.to_string()))?;
     bytes.push(b'\n');

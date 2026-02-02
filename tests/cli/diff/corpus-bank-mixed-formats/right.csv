@@ -1,0 +1,6 @@
+Invoice,Amount,Description
+INV-001,1234.56,Widget order
+INV-002,-500,Refund
+INV-003,0,Zero balance
+INV-004,99.99,Padded amount
+INV-006,300.00,Right only item

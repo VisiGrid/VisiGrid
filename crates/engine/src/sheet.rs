@@ -420,6 +420,11 @@ impl Sheet {
         self.computed_cache.borrow_mut().clear();
     }
 
+    /// Clear a single entry from the computed cache (for incremental recalc).
+    pub fn clear_cached(&self, row: usize, col: usize) {
+        self.computed_cache.borrow_mut().remove(&(row, col));
+    }
+
     /// Update the sheet name (also updates name_key)
     pub fn set_name(&mut self, name: &str) {
         let trimmed = name.trim();

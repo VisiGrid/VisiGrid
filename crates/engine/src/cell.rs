@@ -822,6 +822,16 @@ impl CellValue {
             };
         }
 
+        // Percent suffix: "1%" → 0.01, " -1,000 % " → -10.0
+        if let Some(pct) = trimmed.strip_suffix('%') {
+            let pct_clean: String = pct.chars()
+                .filter(|c| !c.is_whitespace() && *c != ',')
+                .collect();
+            if let Ok(n) = pct_clean.parse::<f64>() {
+                return CellValue::Number(n / 100.0);
+            }
+        }
+
         if let Ok(num) = trimmed.parse::<f64>() {
             return CellValue::Number(num);
         }
@@ -1672,5 +1682,47 @@ mod tests {
         };
         assert_eq!(CellValue::format_number(-1234.56, &fmt), "($1,234.56)");
         assert_eq!(CellValue::format_number(1234.56, &fmt), "$1,234.56");
+    }
+
+    // ======== Percent input parsing tests ========
+
+    #[test]
+    fn test_percent_input_simple() {
+        match CellValue::from_input("1%") {
+            CellValue::Number(n) => assert!((n - 0.01).abs() < 1e-15),
+            other => panic!("expected Number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_percent_input_50() {
+        match CellValue::from_input("50%") {
+            CellValue::Number(n) => assert!((n - 0.5).abs() < 1e-15),
+            other => panic!("expected Number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_percent_input_negative() {
+        match CellValue::from_input("-1%") {
+            CellValue::Number(n) => assert!((n - (-0.01)).abs() < 1e-15),
+            other => panic!("expected Number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_percent_input_thousands() {
+        match CellValue::from_input(" -1,000 %") {
+            CellValue::Number(n) => assert!((n - (-10.0)).abs() < 1e-15),
+            other => panic!("expected Number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_percent_input_non_numeric_falls_through() {
+        match CellValue::from_input("abc%") {
+            CellValue::Text(s) => assert_eq!(s, "abc%"),
+            other => panic!("expected Text, got {:?}", other),
+        }
     }
 }

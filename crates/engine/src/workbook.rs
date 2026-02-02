@@ -73,6 +73,25 @@ pub struct Workbook {
     /// Rebuilt on load, updated incrementally on cell changes.
     #[serde(skip)]
     dep_graph: DepGraph,
+
+    /// Batch nesting counter. When > 0, recalc is deferred until end_batch().
+    #[serde(skip)]
+    batch_depth: u32,
+
+    /// Cells changed during the current batch. Drained at end_batch().
+    #[serde(skip)]
+    batch_changed: Vec<CellId>,
+
+    /// Maps to `CalculationMode` from document settings:
+    ///   `true`  = `CalculationMode::Automatic` — recalc on every edit (default)
+    ///   `false` = `CalculationMode::Manual`    — recalc only on F9
+    ///
+    /// Stored as bool to avoid duplicating the settings enum in the engine crate.
+    /// Do NOT repurpose this for "should I ever recalc" — it strictly mirrors
+    /// the Automatic/Manual toggle. Future modes (iterative calc, volatile
+    /// function policy) should be separate fields.
+    #[serde(skip)]
+    auto_recalc: bool,
 }
 
 fn default_next_sheet_id() -> u64 {
@@ -96,6 +115,9 @@ impl Workbook {
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
             dep_graph: DepGraph::new(),
+            batch_depth: 0,
+            batch_changed: Vec::new(),
+            auto_recalc: true,
         }
     }
 
@@ -341,6 +363,9 @@ impl Workbook {
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
             dep_graph: DepGraph::new(),
+            batch_depth: 0,
+            batch_changed: Vec::new(),
+            auto_recalc: true,
         }
     }
 
@@ -355,6 +380,9 @@ impl Workbook {
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
             dep_graph: DepGraph::new(),
+            batch_depth: 0,
+            batch_changed: Vec::new(),
+            auto_recalc: true,
         }
     }
 
@@ -1315,6 +1343,156 @@ impl Workbook {
         Ok(())
     }
 
+    // =========================================================================
+    // Tracked cell mutations (set_value + dep update + recalc notification)
+    // =========================================================================
+
+    /// Set a cell value on a specific sheet with dep tracking + recalc notification.
+    /// Use this inside workbook closures where `Spreadsheet::set_cell_value()` is unavailable.
+    pub fn set_cell_value_tracked(&mut self, sheet_index: usize, row: usize, col: usize, value: &str) {
+        let sheet_id = match self.sheets.get(sheet_index) {
+            Some(sheet) => sheet.id,
+            None => return,
+        };
+        self.sheets[sheet_index].set_value(row, col, value);
+        self.update_cell_deps(sheet_id, row, col);
+        let cell_id = CellId::new(sheet_id, row, col);
+        self.note_cell_changed(cell_id);
+    }
+
+    /// Clear a cell on a specific sheet with dep tracking + recalc notification.
+    /// Removes the cell entirely (including spill state), unlike set_value("").
+    pub fn clear_cell_tracked(&mut self, sheet_index: usize, row: usize, col: usize) {
+        let sheet_id = match self.sheets.get(sheet_index) {
+            Some(sheet) => sheet.id,
+            None => return,
+        };
+        self.sheets[sheet_index].clear_cell(row, col);
+        self.update_cell_deps(sheet_id, row, col);
+        let cell_id = CellId::new(sheet_id, row, col);
+        self.note_cell_changed(cell_id);
+    }
+
+    /// Create an RAII batch guard. Calls begin_batch() on creation, end_batch() on Drop.
+    /// Use this to ensure batches are always closed, even on early return or panic.
+    ///
+    /// Access workbook methods through the guard (it implements DerefMut<Target=Workbook>).
+    pub fn batch_guard(&mut self) -> BatchGuard<'_> {
+        self.begin_batch();
+        BatchGuard { wb: self }
+    }
+
+    // =========================================================================
+    // Incremental Recalc (via dep graph)
+    // =========================================================================
+
+    /// Begin a batch edit. Defers recalc until end_batch().
+    /// Nestable: only the outermost end_batch() triggers recalc.
+    pub fn begin_batch(&mut self) {
+        self.batch_depth += 1;
+    }
+
+    /// End a batch edit. If this is the outermost end, run a single
+    /// incremental recalc for the union of all changed cells.
+    pub fn end_batch(&mut self) {
+        assert!(self.batch_depth > 0, "end_batch without begin_batch");
+        self.batch_depth -= 1;
+        if self.batch_depth == 0 {
+            let changed = std::mem::take(&mut self.batch_changed);
+            self.recalc_dirty_set(&changed);
+        }
+    }
+
+    /// Record a cell change. If batching, defers recalc.
+    /// If not batching, recalcs immediately.
+    /// No-op when `auto_recalc` is false (manual calculation mode).
+    pub fn note_cell_changed(&mut self, cell_id: CellId) {
+        if !self.auto_recalc {
+            return;
+        }
+        if self.batch_depth > 0 {
+            self.batch_changed.push(cell_id);
+        } else {
+            self.recalc_dirty_set(&[cell_id]);
+        }
+    }
+
+    /// Set whether incremental recalc runs automatically after edits.
+    /// `true` = Automatic (default), `false` = Manual (F9 to recalc).
+    pub fn set_auto_recalc(&mut self, auto: bool) {
+        self.auto_recalc = auto;
+    }
+
+    /// Returns true if auto-recalc is enabled (Automatic calculation mode).
+    pub fn auto_recalc(&self) -> bool {
+        self.auto_recalc
+    }
+
+    /// Incremental recalc: re-evaluate only cells that transitively depend
+    /// on any cell in `changed`. BFS to collect dirty subgraph, then
+    /// evaluate in global topo order.
+    fn recalc_dirty_set(&self, changed: &[CellId]) {
+        use std::collections::VecDeque;
+
+        // 1. BFS forward from all changed cells to collect dirty set
+        let mut dirty_set = FxHashSet::default();
+        let mut queue = VecDeque::new();
+
+        for &cell_id in changed {
+            for dep in self.dep_graph.dependents(cell_id) {
+                if dirty_set.insert(dep) {
+                    queue.push_back(dep);
+                }
+            }
+        }
+        while let Some(cell) = queue.pop_front() {
+            for dep in self.dep_graph.dependents(cell) {
+                if dirty_set.insert(dep) {
+                    queue.push_back(dep);
+                }
+            }
+        }
+
+        if dirty_set.is_empty() {
+            return;
+        }
+
+        // 2. Clear cached values for dirty cells
+        for cell_id in &dirty_set {
+            if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
+                sheet.clear_cached(cell_id.row, cell_id.col);
+            }
+        }
+
+        // 3. Evaluate in global topo order, skipping non-dirty cells.
+        //
+        // TODO(perf): Cache the topo order to avoid recomputing on every recalc.
+        //
+        // Implementation sketch:
+        //   struct TopoCache {
+        //       order: Vec<CellId>,  // cached topo_order_all_formulas() result
+        //       valid: bool,         // false when deps have changed
+        //   }
+        //
+        // Invalidation points (set valid = false):
+        //   - update_cell_deps()    — workbook.rs, called when a cell's formula changes
+        //   - clear_cell_deps()     — workbook.rs, called when a formula is replaced/cleared
+        //   - rebuild_dep_graph()   — workbook.rs, called on file load and structural changes
+        //   - insert_rows/cols      — sheet.rs, structural changes shift deps
+        //   - delete_rows/cols      — sheet.rs, structural changes remove deps
+        //
+        // On recalc: if valid, use cached order. If not, recompute and cache.
+        // For small-to-medium models the current approach is fine. Profile before
+        // optimizing — the BFS dirty-set collection is likely the bigger cost.
+        if let Ok(order) = self.dep_graph.topo_order_all_formulas() {
+            for cell_id in order {
+                if dirty_set.contains(&cell_id) {
+                    let _ = self.evaluate_cell(cell_id);
+                }
+            }
+        }
+    }
+
     /// Check if setting a formula at the given cell would create a cycle.
     ///
     /// Returns `Err(CycleReport)` if the formula would introduce a circular reference.
@@ -1426,6 +1604,43 @@ impl Workbook {
             }
             CellValue::Formula { ast: None, .. } => String::new(),
         }
+    }
+}
+
+// =============================================================================
+// BatchGuard - RAII batch scope for Workbook
+// =============================================================================
+
+/// RAII guard that calls `begin_batch()` on creation and `end_batch()` on drop.
+/// Access workbook methods through the guard (implements `Deref`/`DerefMut`).
+///
+/// ```ignore
+/// let mut guard = wb.batch_guard();
+/// for change in changes {
+///     guard.set_cell_value_tracked(sheet_index, row, col, &value);
+/// }
+/// // guard drops here → end_batch() → single recalc
+/// ```
+pub struct BatchGuard<'a> {
+    wb: &'a mut Workbook,
+}
+
+impl<'a> std::ops::Deref for BatchGuard<'a> {
+    type Target = Workbook;
+    fn deref(&self) -> &Workbook {
+        self.wb
+    }
+}
+
+impl<'a> std::ops::DerefMut for BatchGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Workbook {
+        self.wb
+    }
+}
+
+impl Drop for BatchGuard<'_> {
+    fn drop(&mut self) {
+        self.wb.end_batch();
     }
 }
 
@@ -2670,5 +2885,301 @@ mod tests {
         wb.recompute_full_ordered();
 
         assert_eq!(wb.sheet(sheet2_idx).unwrap().get_display(0, 0), "Hi");
+    }
+
+    // =========================================================================
+    // Incremental Recalc Tests (note_cell_changed / recalc_dirty_set)
+    // =========================================================================
+
+    #[test]
+    fn test_incremental_recalc_simple_chain() {
+        // A1=10, B1=A1*2, C1=B1+1
+        // Change A1→20 via set_cell_value_tracked → B1=40, C1=41
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "10");     // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1*2");  // B1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=B1+1");  // C1
+
+        wb.update_cell_deps(sid, 0, 1);
+        wb.update_cell_deps(sid, 0, 2);
+        wb.recompute_full_ordered(); // initial cache fill
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "20");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 2), "21");
+
+        // Incremental: change A1 → 20
+        wb.set_cell_value_tracked(0, 0, 0, "20");
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "40");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 2), "41");
+    }
+
+    #[test]
+    fn test_incremental_recalc_cross_sheet() {
+        // Sheet1!A1 = 5, Sheet2!A1 = =Sheet1!A1+10
+        // Change Sheet1!A1 → 100 → Sheet2!A1 = 110
+        let mut wb = Workbook::new();
+        let _s1 = wb.sheet_id_at_idx(0).unwrap();
+        let s2_idx = wb.add_sheet();
+        let s2 = wb.sheet_id_at_idx(s2_idx).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "5");               // Sheet1!A1
+        wb.sheet_mut(s2_idx).unwrap().set_value(0, 0, "=Sheet1!A1+10"); // Sheet2!A1
+
+        wb.update_cell_deps(s2, 0, 0);
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(s2_idx).unwrap().get_display(0, 0), "15");
+
+        // Incremental: change Sheet1!A1 → 100
+        wb.set_cell_value_tracked(0, 0, 0, "100");
+
+        assert_eq!(wb.sheet(s2_idx).unwrap().get_display(0, 0), "110");
+    }
+
+    #[test]
+    fn test_batch_deduplicates_recalc() {
+        // A1=1, B1=A1+1, C1=B1+1
+        // Batch: change A1 three times → recalc should see final value
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1");      // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1+1");  // B1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=B1+1");  // C1
+
+        wb.update_cell_deps(sid, 0, 1);
+        wb.update_cell_deps(sid, 0, 2);
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 2), "3"); // 1+1+1
+
+        // Batch: set A1 three times, only final value matters
+        wb.begin_batch();
+        wb.set_cell_value_tracked(0, 0, 0, "10");
+        wb.set_cell_value_tracked(0, 0, 0, "20");
+        wb.set_cell_value_tracked(0, 0, 0, "100");
+        wb.end_batch(); // single recalc here
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "100");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "101");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 2), "102");
+    }
+
+    #[test]
+    fn test_batch_multi_cell_change() {
+        // A1=1, A2=2, B1=A1+A2 — change both A1 and A2 in one batch
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1");       // A1
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "2");       // A2
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1+A2");  // B1
+
+        wb.update_cell_deps(sid, 0, 1);
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "3");
+
+        // Batch: change both source cells
+        wb.begin_batch();
+        wb.set_cell_value_tracked(0, 0, 0, "10");  // A1 → 10
+        wb.set_cell_value_tracked(0, 1, 0, "20");  // A2 → 20
+        wb.end_batch();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "30");
+    }
+
+    #[test]
+    fn test_incremental_recalc_diamond() {
+        // A1=5, B1=A1*2, C1=A1*3, D1=B1+C1
+        // Change A1→10 → B1=20, C1=30, D1=50
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "5");         // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1*2");     // B1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=A1*3");     // C1
+        wb.sheet_mut(0).unwrap().set_value(0, 3, "=B1+C1");    // D1
+
+        wb.update_cell_deps(sid, 0, 1);
+        wb.update_cell_deps(sid, 0, 2);
+        wb.update_cell_deps(sid, 0, 3);
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 3), "25"); // 10+15
+
+        wb.set_cell_value_tracked(0, 0, 0, "10");
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "20");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 2), "30");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 3), "50");
+    }
+
+    #[test]
+    fn test_incremental_recalc_no_deps_no_crash() {
+        // Changing a cell with no dependents should be a no-op (no crash)
+        let mut wb = Workbook::new();
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "hello");
+        wb.set_cell_value_tracked(0, 0, 0, "world");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "world");
+    }
+
+    #[test]
+    fn test_batch_guard_drop_triggers_recalc() {
+        // Same as batch test but using BatchGuard RAII
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1");      // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1+1");  // B1
+
+        wb.update_cell_deps(sid, 0, 1);
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "2");
+
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "50");
+            // guard drops here → end_batch → recalc
+        }
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "51");
+    }
+
+    #[test]
+    fn test_cycle_error_propagation() {
+        // A1==B1, B1==A1 — creates a cycle. After recalc, both should show #CYCLE!
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=B1");  // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1");  // B1
+
+        wb.update_cell_deps(sid, 0, 0);
+        wb.update_cell_deps(sid, 0, 1);
+
+        wb.recompute_full_ordered();
+
+        // Both cells should display a cycle error
+        let a1_display = wb.sheet(0).unwrap().get_display(0, 0);
+        let b1_display = wb.sheet(0).unwrap().get_display(0, 1);
+        assert!(
+            a1_display.contains("CYCLE") || a1_display.contains("REF") || a1_display.contains("ERR"),
+            "Expected cycle error in A1, got: {}", a1_display
+        );
+        assert!(
+            b1_display.contains("CYCLE") || b1_display.contains("REF") || b1_display.contains("ERR"),
+            "Expected cycle error in B1, got: {}", b1_display
+        );
+    }
+
+    #[test]
+    fn test_incremental_recalc_unrelated_cell_untouched() {
+        // A1=1, B1=A1+1, C1=99 (no formula)
+        // Change A1 → B1 updates, C1 stays unchanged
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1");      // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1+1");  // B1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "99");      // C1 (plain value)
+
+        wb.update_cell_deps(sid, 0, 1);
+        wb.recompute_full_ordered();
+
+        wb.set_cell_value_tracked(0, 0, 0, "50");
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "51");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 2), "99"); // untouched
+    }
+
+    #[test]
+    fn test_paste_then_undo_recalc() {
+        // Simulates: A1=1, B1=A1+1
+        // "Paste" A1..A5 with new values in a batch → B1 updates
+        // "Undo" by restoring old values in a batch → B1 reverts
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1");      // A1
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "2");      // A2
+        wb.sheet_mut(0).unwrap().set_value(2, 0, "3");      // A3
+        wb.sheet_mut(0).unwrap().set_value(3, 0, "4");      // A4
+        wb.sheet_mut(0).unwrap().set_value(4, 0, "5");      // A5
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1+1");  // B1
+
+        wb.update_cell_deps(sid, 0, 1);
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "2"); // B1 = 1+1
+
+        // Simulate paste: overwrite A1..A5 in one batch
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "10");  // A1 → 10
+            guard.set_cell_value_tracked(0, 1, 0, "20");  // A2 → 20
+            guard.set_cell_value_tracked(0, 2, 0, "30");  // A3 → 30
+            guard.set_cell_value_tracked(0, 3, 0, "40");  // A4 → 40
+            guard.set_cell_value_tracked(0, 4, 0, "50");  // A5 → 50
+        }
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "10");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "11"); // B1 = 10+1
+
+        // Simulate undo: restore original A1..A5 in one batch
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "1");
+            guard.set_cell_value_tracked(0, 1, 0, "2");
+            guard.set_cell_value_tracked(0, 2, 0, "3");
+            guard.set_cell_value_tracked(0, 3, 0, "4");
+            guard.set_cell_value_tracked(0, 4, 0, "5");
+        }
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "1");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "2"); // B1 = 1+1 again
+
+        // Simulate redo: re-apply the paste
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "10");
+            guard.set_cell_value_tracked(0, 1, 0, "20");
+            guard.set_cell_value_tracked(0, 2, 0, "30");
+            guard.set_cell_value_tracked(0, 3, 0, "40");
+            guard.set_cell_value_tracked(0, 4, 0, "50");
+        }
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "11"); // B1 = 10+1
+    }
+
+    #[test]
+    fn test_auto_recalc_off_skips_incremental() {
+        // When auto_recalc is false, note_cell_changed is a no-op.
+        // Cache stays stale until explicit recompute_full_ordered().
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1");      // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1+1");  // B1
+
+        wb.update_cell_deps(sid, 0, 1);
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "2");
+
+        // Disable auto-recalc (manual mode)
+        wb.set_auto_recalc(false);
+        wb.set_cell_value_tracked(0, 0, 0, "100");
+
+        // B1 still shows stale value (cache not cleared)
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "2");
+
+        // Explicit F9-style recalc fixes it
+        wb.recompute_full_ordered();
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "101");
     }
 }

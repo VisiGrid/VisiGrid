@@ -323,6 +323,18 @@ impl Spreadsheet {
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
+                    // Safety net: convert text "X%" to number when applying Percent format
+                    if matches!(format, NumberFormat::Percent { .. }) {
+                        let raw = self.sheet(cx).get_raw(row, col);
+                        if let Some(pct) = raw.strip_suffix('%') {
+                            let clean: String = pct.chars()
+                                .filter(|c| !c.is_whitespace() && *c != ',')
+                                .collect();
+                            if let Ok(n) = clean.parse::<f64>() {
+                                self.set_cell_value(row, col, &(n / 100.0).to_string(), cx);
+                            }
+                        }
+                    }
                     let before = self.sheet(cx).get_format(row, col);
                     let fmt = format.clone();
                     self.active_sheet_mut(cx, |s| s.set_number_format(row, col, fmt));
@@ -927,11 +939,11 @@ impl Spreadsheet {
         }
 
         // Clear non-origin cell values
+        self.wb_mut(cx, |wb| wb.begin_batch());
         for (row, col, _) in &cleared_values {
-            self.active_sheet_mut(cx, |sheet| {
-                sheet.set_value(*row, *col, "");
-            });
+            self.set_cell_value(*row, *col, "", cx);
         }
+        self.wb_mut(cx, |wb| wb.end_batch());
 
         // Add new merge
         self.active_sheet_mut(cx, |sheet| {

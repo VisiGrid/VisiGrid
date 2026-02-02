@@ -493,8 +493,8 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
     let code = code_to_run.unwrap_or_else(|| input.clone());
 
     // Create snapshot of current sheet for Lua to read from
-    let snapshot = SheetSnapshot::from_sheet(app.sheet());
-    let sheet_index = app.sheet_index();
+    let snapshot = SheetSnapshot::from_sheet(app.sheet(cx));
+    let sheet_index = app.sheet_index(cx);
 
     // Compute selection bounds (normalize to start <= end)
     let (anchor_row, anchor_col) = app.view_state.selected;
@@ -529,7 +529,7 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
 
     // Apply operations if any (single undo entry for all)
     if result.has_mutations() {
-        let changes = apply_lua_ops(app, sheet_index, &result.ops);
+        let changes = apply_lua_ops(app, sheet_index, &result.ops, cx);
         if !changes.is_empty() {
             app.history.record_batch(sheet_index, changes);
             app.is_modified = true;
@@ -548,65 +548,66 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
     cx.notify();
 }
 
-/// Apply Lua operations to the sheet and return undo changes
+/// Apply Lua operations to the sheet and return undo changes.
+/// Uses batched, tracked mutations so dependents recalculate once at the end.
 fn apply_lua_ops(
     app: &mut Spreadsheet,
     sheet_index: usize,
     ops: &[LuaOp],
+    cx: &mut gpui::Context<Spreadsheet>,
 ) -> Vec<crate::history::CellChange> {
     use crate::history::CellChange;
 
-    let mut changes = Vec::new();
-
-    // Get mutable sheet reference
-    let sheet = match app.workbook.sheet_mut(sheet_index) {
-        Some(s) => s,
-        None => return changes,
-    };
-
-    for op in ops {
-        match op {
-            LuaOp::SetValue { row, col, value } => {
-                let row = *row as usize;
-                let col = *col as usize;
-
-                // Record old value for undo
-                let old_value = sheet.get_raw(row, col);
-
-                // Convert LuaCellValue to string for set_value
-                let new_value = lua_cell_value_to_string(value);
-
-                // Apply the change
-                sheet.set_value(row, col, &new_value);
-
-                changes.push(CellChange {
-                    row,
-                    col,
-                    old_value,
-                    new_value,
-                });
-            }
-            LuaOp::SetFormula { row, col, formula } => {
-                let row = *row as usize;
-                let col = *col as usize;
-
-                // Record old value for undo
-                let old_value = sheet.get_raw(row, col);
-
-                // Apply the formula
-                sheet.set_value(row, col, formula);
-
-                changes.push(CellChange {
-                    row,
-                    col,
-                    old_value,
-                    new_value: formula.clone(),
-                });
-            }
-        }
+    if ops.is_empty() {
+        return Vec::new();
     }
 
-    changes
+    app.workbook.update(cx, |wb, _| {
+        let mut guard = wb.batch_guard();
+        let mut changes = Vec::new();
+
+        for op in ops {
+            match op {
+                LuaOp::SetValue { row, col, value } => {
+                    let row = *row as usize;
+                    let col = *col as usize;
+
+                    let old_value = guard.sheet(sheet_index)
+                        .map(|s| s.get_raw(row, col))
+                        .unwrap_or_default();
+
+                    let new_value = lua_cell_value_to_string(value);
+                    guard.set_cell_value_tracked(sheet_index, row, col, &new_value);
+
+                    changes.push(CellChange {
+                        row,
+                        col,
+                        old_value,
+                        new_value,
+                    });
+                }
+                LuaOp::SetFormula { row, col, formula } => {
+                    let row = *row as usize;
+                    let col = *col as usize;
+
+                    let old_value = guard.sheet(sheet_index)
+                        .map(|s| s.get_raw(row, col))
+                        .unwrap_or_default();
+
+                    guard.set_cell_value_tracked(sheet_index, row, col, formula);
+
+                    changes.push(CellChange {
+                        row,
+                        col,
+                        old_value,
+                        new_value: formula.clone(),
+                    });
+                }
+            }
+        }
+
+        changes
+    })
 }
 
 /// Convert LuaCellValue to a string suitable for sheet.set_value()

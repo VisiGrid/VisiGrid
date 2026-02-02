@@ -16,6 +16,24 @@ impl Spreadsheet {
     // Edit Mode Management
     // =========================================================================
 
+    /// Enter formula mode with clean state. Called from every path that
+    /// transitions into Formula mode (initial char, start_edit, recompute).
+    fn enter_formula_mode(&mut self) {
+        self.mode = Mode::Formula;
+        self.formula_nav_mode = crate::mode::FormulaNavMode::Point;
+        self.formula_nav_manual_override = None;
+        self.formula_ref_cell = None;
+        self.formula_ref_end = None;
+    }
+
+    /// Reset formula/edit transient state. Called on every exit from edit mode.
+    fn reset_edit_state(&mut self) {
+        self.formula_nav_mode = crate::mode::FormulaNavMode::Point;
+        self.formula_nav_manual_override = None;
+        self.formula_ref_cell = None;
+        self.formula_ref_end = None;
+    }
+
     /// Recompute edit mode based on current edit buffer content.
     /// Call this after every edit buffer change to keep mode in sync.
     /// - If edit buffer starts with '=' or '+', mode is Formula (ref-pick enabled)
@@ -31,9 +49,7 @@ impl Spreadsheet {
 
         if should_be_formula && !currently_formula {
             // Transition Edit -> Formula
-            self.mode = Mode::Formula;
-            // User just typed '=' - start in Point mode (ready to pick refs)
-            self.formula_nav_mode = crate::mode::FormulaNavMode::Point;
+            self.enter_formula_mode();
         } else if !should_be_formula && currently_formula {
             // Transition Formula -> Edit (user deleted the '=')
             self.mode = Mode::Edit;
@@ -97,7 +113,11 @@ impl Spreadsheet {
 
         // Set mode based on content: Formula if starts with '=' or '+', else Edit
         let is_formula = self.edit_value.starts_with('=') || self.edit_value.starts_with('+');
-        self.mode = if is_formula { Mode::Formula } else { Mode::Edit };
+        if is_formula {
+            self.enter_formula_mode();
+        } else {
+            self.mode = Mode::Edit;
+        }
 
         // Parse and highlight formula references if editing a formula
         // Clear color map for fresh edit session
@@ -219,13 +239,12 @@ impl Spreadsheet {
         self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
         self.set_cell_value(row, col, &new_value, cx);  // Use helper that updates dep graph
         self.mode = Mode::Navigation;
+        self.reset_edit_state();
         self.edit_value.clear();
         self.edit_original.clear();
         self.bump_cells_rev();
         self.is_modified = true;
         // Clear formula state
-        self.formula_ref_cell = None;
-        self.formula_ref_end = None;
         self.formula_ref_start_cursor = 0;
         self.formula_highlighted_refs.clear();
         // Non-Enter commit breaks tab chain (Save/Export path)
@@ -552,11 +571,13 @@ impl Spreadsheet {
             }
         }
 
-        // Apply all changes
+        // Apply all changes (batched to defer recalc until all cells set)
         let sheet_index = self.sheet_index(cx);
+        self.workbook.update(cx, |wb, _| wb.begin_batch());
         for change in &changes {
             self.set_cell_value(change.row, change.col, &change.new_value, cx);
         }
+        self.workbook.update(cx, |wb, _| wb.end_batch());
 
         // Record batch for undo
         let had_changes = !changes.is_empty();
@@ -566,10 +587,9 @@ impl Spreadsheet {
 
         // Exit edit mode
         self.mode = Mode::Navigation;
+        self.reset_edit_state();
         self.edit_value.clear();
         self.edit_original.clear();
-        self.formula_ref_cell = None;
-        self.formula_ref_end = None;
         self.formula_highlighted_refs.clear();
         self.clear_formula_ref_colors();
         self.autocomplete_visible = false;
@@ -586,17 +606,10 @@ impl Spreadsheet {
     }
 
     pub fn cancel_edit(&mut self, cx: &mut Context<Self>) {
-        // Clear formula reference state if it was active
-        if self.mode.is_formula() && self.formula_ref_cell.is_some() {
-            self.formula_ref_cell = None;
-            self.formula_ref_end = None;
-        }
-
         self.mode = Mode::Navigation;
+        self.reset_edit_state();
         self.edit_value.clear();
         self.edit_original.clear();
-        self.formula_ref_cell = None;
-        self.formula_ref_end = None;
         self.formula_highlighted_refs.clear();
         self.clear_formula_ref_colors();
         self.autocomplete_visible = false;
@@ -859,9 +872,7 @@ impl Spreadsheet {
 
             // Enter Formula mode if starting with = or +
             if c == '=' || c == '+' {
-                self.mode = Mode::Formula;
-                self.formula_ref_cell = None;
-                self.formula_ref_end = None;
+                self.enter_formula_mode();
             } else {
                 self.mode = Mode::Edit;
             }
@@ -928,16 +939,28 @@ impl Spreadsheet {
             }
         }
 
+        // Capture raw edit value before clearing for percent auto-format check
+        let raw_edit = self.edit_value.clone();
+
         self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
         self.set_cell_value(row, col, &new_value, cx);
+
+        // Auto-apply Percent format when user typed "X%" and cell format is General
+        if raw_edit.trim().ends_with('%') {
+            let current_fmt = self.sheet(cx).get_format(row, col).number_format.clone();
+            if matches!(current_fmt, visigrid_engine::cell::NumberFormat::General) {
+                let fmt = visigrid_engine::cell::NumberFormat::Percent { decimals: 0 };
+                self.with_active_sheet_mut(cx, |s| s.set_number_format(row, col, fmt));
+            }
+        }
+
         self.mode = Mode::Navigation;
+        self.reset_edit_state();
         self.edit_value.clear();
         self.edit_original.clear();
         self.bump_cells_rev();
         self.is_modified = true;
         // Clear formula reference state
-        self.formula_ref_cell = None;
-        self.formula_ref_end = None;
         self.formula_ref_start_cursor = 0;
         // Clear formula highlighting state
         self.formula_highlighted_refs.clear();
@@ -951,6 +974,8 @@ impl Spreadsheet {
 
         // Smoke mode: trigger full ordered recompute for dogfooding
         self.maybe_smoke_recalc(cx);
+
+        cx.notify();
 
         true
     }
@@ -1020,6 +1045,7 @@ impl Spreadsheet {
         let mut filled_count = 0;
         let mut skipped_spill = 0;
 
+        self.wb_mut(cx, |wb| wb.begin_batch());
         for (row, col) in &target_cells {
             // Skip spill receivers
             if self.sheet(cx).get_spill_parent(*row, *col).is_some() {
@@ -1046,9 +1072,10 @@ impl Spreadsheet {
                     new_value: new_value.clone(),
                 });
             }
-            self.active_sheet_mut(cx, |s| s.set_value(*row, *col, &new_value));
+            self.set_cell_value(*row, *col, &new_value, cx);
             filled_count += 1;
         }
+        self.wb_mut(cx, |wb| wb.end_batch());
 
         let sheet_id = self.sheet(cx).id;
         let sheet_name = self.sheet(cx).name.clone();

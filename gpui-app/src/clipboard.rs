@@ -211,6 +211,7 @@ impl Spreadsheet {
 
         let mut changes = Vec::new();
 
+        self.wb_mut(cx, |wb| wb.begin_batch());
         for view_row in min_row..=max_row {
             // Skip hidden rows when filtered
             if is_filtered && !self.row_view.is_view_row_visible(view_row) {
@@ -227,9 +228,10 @@ impl Spreadsheet {
                         row: data_row, col, old_value, new_value: String::new(),
                     });
                 }
-                self.active_sheet_mut(cx, |s| s.set_value(data_row, col, ""));
+                self.set_cell_value(data_row, col, "", cx);
             }
         }
+        self.wb_mut(cx, |wb| wb.end_batch());
 
         // Remove merges fully within the cut selection (move semantics, not filtered)
         let mut removed_any = false;
@@ -384,6 +386,7 @@ impl Spreadsheet {
                 let is_formula = single_value.starts_with('=');
                 let mut values_grid: Vec<Vec<String>> = Vec::new();
 
+                self.wb_mut(cx, |wb| wb.begin_batch());
                 for (data_row, col) in &target_cells {
                     let old_value = self.sheet(cx).get_raw(*data_row, *col);
 
@@ -401,8 +404,9 @@ impl Spreadsheet {
                             row: *data_row, col: *col, old_value, new_value: new_value.clone(),
                         });
                     }
-                    self.active_sheet_mut(cx, |s| s.set_value(*data_row, *col, &new_value));
+                    self.set_cell_value(*data_row, *col, &new_value, cx);
                 }
+                self.wb_mut(cx, |wb| wb.end_batch());
 
                 // Build values grid for provenance
                 if !target_cells.is_empty() {
@@ -477,6 +481,7 @@ impl Spreadsheet {
             let mut end_data_row = data_start_row;
             let mut end_col = start_col;
 
+            self.wb_mut(cx, |wb| wb.begin_batch());
             for (row_offset, line) in text.lines().enumerate() {
                 // Determine target view row for this clipboard row
                 let (_target_view_row, target_data_row) = if is_filtered {
@@ -523,7 +528,7 @@ impl Spreadsheet {
                                 row: target_data_row, col, old_value, new_value: new_value.clone(),
                             });
                         }
-                        self.active_sheet_mut(cx, |s| s.set_value(target_data_row, col, &new_value));
+                        self.set_cell_value(target_data_row, col, &new_value, cx);
 
                         // Track paste bounds (in data coordinates)
                         end_data_row = end_data_row.max(target_data_row);
@@ -581,7 +586,7 @@ impl Spreadsheet {
                             let raw = self.sheet(cx).get_raw(r, c);
                             if !raw.is_empty() {
                                 cleared_values.push((r, c, raw));
-                                self.active_sheet_mut(cx, |s| s.set_value(r, c, ""));
+                                self.set_cell_value(r, c, "", cx);
                             }
                         }
                     }
@@ -598,6 +603,7 @@ impl Spreadsheet {
                     description: "Paste: recreate merges".to_string(),
                 });
             }
+            self.wb_mut(cx, |wb| wb.end_batch());
 
             // Record with provenance (only if changes or merge changes were made)
             if !changes.is_empty() || merge_action.is_some() {
@@ -780,6 +786,7 @@ impl Spreadsheet {
             }
         }
 
+        self.wb_mut(cx, |wb| wb.begin_batch());
         if use_internal_values {
             // Use typed values from internal clipboard (clone to avoid borrow issues)
             let values = self.internal_clipboard.as_ref().map(|ic| ic.values.clone());
@@ -805,7 +812,7 @@ impl Spreadsheet {
                                     row: target_data_row, col, old_value, new_value: new_value.clone(),
                                 });
                             }
-                            self.active_sheet_mut(cx, |s| s.set_value(target_data_row, col, &new_value));
+                            self.set_cell_value(target_data_row, col, &new_value, cx);
 
                             end_data_row = end_data_row.max(target_data_row);
                             end_col = end_col.max(col);
@@ -840,7 +847,7 @@ impl Spreadsheet {
                                 row: target_data_row, col, old_value, new_value: new_value.clone(),
                             });
                         }
-                        self.active_sheet_mut(cx, |s| s.set_value(target_data_row, col, &new_value));
+                        self.set_cell_value(target_data_row, col, &new_value, cx);
 
                         end_data_row = end_data_row.max(target_data_row);
                         end_col = end_col.max(col);
@@ -851,6 +858,7 @@ impl Spreadsheet {
                 }
             }
         }
+        self.wb_mut(cx, |wb| wb.end_batch());
 
         if !changes.is_empty() {
             let provenance = MutationOp::Paste {
@@ -1076,6 +1084,7 @@ impl Spreadsheet {
             None
         };
 
+        self.wb_mut(cx, |wb| wb.begin_batch());
         for (row_offset, line) in raw_tsv.lines().enumerate() {
             // Determine target view row for this clipboard row
             let target_data_row = if is_filtered {
@@ -1115,7 +1124,7 @@ impl Spreadsheet {
                             row: target_data_row, col, old_value, new_value: new_value.clone(),
                         });
                     }
-                    self.active_sheet_mut(cx, |s| s.set_value(target_data_row, col, &new_value));
+                    self.set_cell_value(target_data_row, col, &new_value, cx);
 
                     end_data_row = end_data_row.max(target_data_row);
                     end_col = end_col.max(col);
@@ -1125,6 +1134,7 @@ impl Spreadsheet {
                 values_grid.push(row_values);
             }
         }
+        self.wb_mut(cx, |wb| wb.end_batch());
 
         // Record with provenance (PasteMode::Formulas)
         if !changes.is_empty() {
@@ -1279,6 +1289,7 @@ impl Spreadsheet {
 
         // Delete from all selection ranges (including discontiguous Ctrl+Click selections)
         // When filtered, only delete from visible rows
+        self.wb_mut(cx, |wb| wb.begin_batch());
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for view_row in min_row..=max_row {
                 // Skip hidden rows when filtered
@@ -1302,10 +1313,11 @@ impl Spreadsheet {
                             row: data_row, col, old_value, new_value: String::new(),
                         });
                     }
-                    self.active_sheet_mut(cx, |s| s.clear_cell(data_row, col));
+                    self.clear_cell_value(data_row, col, cx);
                 }
             }
         }
+        self.wb_mut(cx, |wb| wb.end_batch());
 
         let had_changes = !changes.is_empty();
         if had_changes {

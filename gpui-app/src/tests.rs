@@ -2807,3 +2807,115 @@ fn test_extend_direction_guards_full_row() {
     let dc = 0i32;
     assert!(!(is_full_row && dc != 0 && dr == 0), "vertical extend on full-row should NOT be blocked");
 }
+
+// =============================================================================
+// Static invariant: no untracked cell mutations in gpui-app source
+// =============================================================================
+
+/// Scan gpui-app/src/ for direct cell mutation calls that bypass dep tracking.
+///
+/// **Tracked paths** (the ONLY approved ways to mutate cell values):
+/// - `Spreadsheet::set_cell_value()` / `clear_cell_value()` (gpui-app layer)
+/// - `Workbook::set_cell_value_tracked()` / `clear_cell_tracked()` (engine layer)
+///
+/// **Danger patterns** (bypass dep graph → stale formula caches):
+/// - `.set_value(`  — Sheet::set_value, the primary untracked mutation
+/// - `.clear_cell(` — Sheet::clear_cell, removes cell without dep notification
+///
+/// These ensure the dependency graph stays in sync and incremental recalc fires.
+/// Bypassing them means dependent formulas silently show stale values.
+#[test]
+fn no_untracked_cell_mutations() {
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    // ── Whitelist ──────────────────────────────────────────────────────────
+    // Each entry MUST have a reason. If you add one, you're accepting
+    // responsibility for manual dep-tracking correctness in that file.
+    // PR reviewers: any addition here deserves scrutiny.
+    let whitelist_files: &[(&str, &str)] = &[
+        ("tests.rs",         "Test code operates on raw Sheet (no live Entity<Workbook>)"),
+        ("sheet_ops.rs",     "Defines the tracked wrappers (set_cell_value, clear_cell_value)"),
+        ("history.rs",       "Preview replay on cloned (non-live) workbook — no recalc needed"),
+        ("workbook_view.rs", "SharedWorkbookView uses RefCell<Workbook> — separate architecture"),
+    ];
+    let whitelist_dirs: &[(&str, &str)] = &[
+        ("scripting", "Lua sink API records ops; apply_lua_ops batches them through tracked path"),
+    ];
+
+    // ── Count gate ─────────────────────────────────────────────────────────
+    // If these counts change, a conscious decision was made. Make it visible.
+    assert_eq!(whitelist_files.len(), 4,
+        "Whitelist file count changed! If you added an entry, document why.\n\
+         Current whitelist:\n{}",
+        whitelist_files.iter().map(|(f, r)| format!("  {} — {}", f, r)).collect::<Vec<_>>().join("\n")
+    );
+    assert_eq!(whitelist_dirs.len(), 1,
+        "Whitelist dir count changed! If you added an entry, document why.\n\
+         Current whitelist:\n{}",
+        whitelist_dirs.iter().map(|(d, r)| format!("  {} — {}", d, r)).collect::<Vec<_>>().join("\n")
+    );
+
+    // ── Danger patterns ────────────────────────────────────────────────────
+    // Any direct Sheet mutation that writes cell content without dep tracking.
+    let danger_patterns: &[(&str, &str)] = &[
+        (".set_value(",  "Sheet::set_value — changes cell content without dep notification"),
+        (".clear_cell(", "Sheet::clear_cell — removes cell without dep notification"),
+    ];
+
+    let wl_file_names: Vec<&str> = whitelist_files.iter().map(|(f, _)| *f).collect();
+    let wl_dir_names: Vec<&str> = whitelist_dirs.iter().map(|(d, _)| *d).collect();
+
+    let mut violations = Vec::new();
+
+    fn scan(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        wl_files: &[&str],
+        wl_dirs: &[&str],
+        patterns: &[(&str, &str)],
+        out: &mut Vec<String>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().unwrap().to_str().unwrap();
+                if !wl_dirs.contains(&name) {
+                    scan(&path, root, wl_files, wl_dirs, patterns, out);
+                }
+                continue;
+            }
+            let name = path.file_name().unwrap().to_str().unwrap();
+            if !name.ends_with(".rs") { continue; }
+            if wl_files.contains(&name) { continue; }
+
+            let content = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") { continue; }
+                for &(pattern, _reason) in patterns {
+                    if trimmed.contains(pattern) {
+                        let rel = path.strip_prefix(root).unwrap_or(&path);
+                        out.push(format!("  {}:{}: {}", rel.display(), i + 1, trimmed));
+                    }
+                }
+            }
+        }
+    }
+
+    scan(&src_dir, &src_dir, &wl_file_names, &wl_dir_names, danger_patterns, &mut violations);
+
+    assert!(
+        violations.is_empty(),
+        "\n\nUntracked cell mutation(s) found!\n\
+         All cell mutations must go through tracked paths to ensure\n\
+         dependency tracking and incremental recalc.\n\n\
+         Approved paths:\n\
+         - Spreadsheet::set_cell_value() / clear_cell_value()\n\
+         - Workbook::set_cell_value_tracked() / clear_cell_tracked()\n\n\
+         Violations:\n{}\n\n\
+         If intentional (e.g. operating on a cloned workbook), add the file\n\
+         to whitelist_files in no_untracked_cell_mutations() with a reason.\n",
+        violations.join("\n")
+    );
+}

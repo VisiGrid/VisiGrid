@@ -81,16 +81,19 @@ visigrid-cli convert data.csv -t csv --headers \
 - Either side can be `-` to read from stdin — pipe live exports directly into reconciliation
 - Duplicate keys and ambiguous matches fail loudly instead of guessing
 
-Example output:
+Example summary (from `--out json`):
 
 ```json
 {
-  "matched": 14238,
-  "only_left": 12,
-  "only_right": 9,
-  "changed": [
-    { "cell": "D412", "before": 120.00, "after": 118.75 }
-  ]
+  "contract_version": 1,
+  "summary": {
+    "matched": 14238,
+    "only_left": 12,
+    "only_right": 9,
+    "diff": 3,
+    "diff_outside_tolerance": 1
+  },
+  "results": [ ... ]
 }
 ```
 
@@ -215,14 +218,44 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 ## CI / Scripting
 
-Exit 0 means reconciled (within tolerance). Exit 1 means material differences — missing rows or diffs outside tolerance. No wrapper scripts needed.
+Exit 0 means reconciled (within tolerance). Exit 1 means material differences — missing rows or diffs outside tolerance. Exit ≥ 2 means error. No wrapper scripts needed.
+
+### Bank statement vs ledger
 
 ```bash
-# Reconcile two files in CI — exit 0 if all diffs are within tolerance
-visigrid-cli diff expected.csv actual.csv --key SKU --tolerance 0.01 --quiet || {
-  echo "Reconciliation failed"
+# Reconcile bank export against your ledger
+# --key-transform digits: match "INV-001" to "PO-001" by extracting "001"
+visigrid-cli diff bank_export.csv ledger.csv \
+  --key Reference --key-transform digits \
+  --compare Amount --tolerance 0.01 \
+  --out json
+```
+
+### Vendor export via stdin
+
+```bash
+# Pipe a live vendor export, project to reconciliation columns, then diff
+curl -s https://vendor.example.com/api/export.csv | \
+  visigrid-cli convert - -t csv --headers --select 'Invoice,Amount' | \
+  visigrid-cli diff - our_export.csv --key Invoice --compare Amount --tolerance 0.01
+```
+
+### CI gate with strict exit
+
+```bash
+# In CI: fail the build if ANY value differs, even within tolerance
+visigrid-cli diff expected.csv actual.csv \
+  --key SKU --tolerance 0.01 --strict-exit --quiet || {
+  echo "Reconciliation failed — diffs detected"
   exit 1
 }
+```
+
+### More examples
+
+```bash
+# Quiet mode: just the exit code, no output
+visigrid-cli diff expected.csv actual.csv --key id --quiet
 
 # Pipe a live export into diff
 rails runner 'Ledger.export_csv' | visigrid-cli diff - expected.csv --key id --quiet
@@ -256,5 +289,9 @@ See [LICENSE.md](LICENSE.md) for details.
 ## Contributing
 
 Issues and pull requests are welcome.
+
+**Diff bug reports**: if you file a bug against `visigrid diff`, include a minimal
+CSV fixture that reproduces the issue. Every confirmed diff bug becomes a corpus
+golden test in `tests/cli/diff/` — this is how the contract stays honest.
 
 See the [Roadmap](ROADMAP.md) for what's next.

@@ -239,11 +239,11 @@ impl Spreadsheet {
         }
 
         // Apply the formula changes
-        self.active_sheet_mut(cx, |sheet| {
-            for change in &changes {
-                sheet.set_value(change.row, change.col, &change.new_value);
-            }
-        });
+        self.wb_mut(cx, |wb| wb.begin_batch());
+        for change in &changes {
+            self.set_cell_value(change.row, change.col, &change.new_value, cx);
+        }
+        self.wb_mut(cx, |wb| wb.end_batch());
 
         // Rename the named range itself
         if let Err(e) = self.wb_mut(cx, |wb| wb.rename_named_range(old_name, new_name)) {

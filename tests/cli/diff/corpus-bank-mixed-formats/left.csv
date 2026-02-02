@@ -1,0 +1,6 @@
+Invoice,Amount,Description
+INV-001,"$1,234.56",Widget order
+INV-002,"($500.00)",Refund
+INV-003,"$0.00",Zero balance
+INV-004,"  $99.99  ",Padded amount
+INV-005,"$750.00",Left only item

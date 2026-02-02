@@ -1,0 +1,115 @@
+{
+  "contract_version": 1,
+  "results": [
+    {
+      "candidates": [
+        {
+          "right_key_raw": "ACME-INV-001",
+          "right_row_index": 0
+        },
+        {
+          "right_key_raw": "ACME-INV-002",
+          "right_row_index": 1
+        }
+      ],
+      "diffs": null,
+      "key": "INV",
+      "left": {
+        "Amount": "100",
+        "PartialKey": "INV"
+      },
+      "match_explain": null,
+      "right": null,
+      "status": "ambiguous"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "ORD",
+      "left": {
+        "Amount": "200",
+        "PartialKey": "ORD"
+      },
+      "match_explain": {
+        "left_key_norm": "ORD",
+        "left_key_raw": "ORD",
+        "mode": "contains",
+        "right_key_norm": "BETA-ORD-777",
+        "right_key_raw": "BETA-ORD-777"
+      },
+      "right": {
+        "Amount": "200",
+        "PartialKey": "BETA-ORD-777"
+      },
+      "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "UNIQUE-ZZZ",
+      "left": {
+        "Amount": "50",
+        "PartialKey": "UNIQUE-ZZZ"
+      },
+      "match_explain": {
+        "left_key_norm": "UNIQUE-ZZZ",
+        "left_key_raw": "UNIQUE-ZZZ",
+        "mode": "contains",
+        "right_key_norm": "",
+        "right_key_raw": ""
+      },
+      "right": null,
+      "status": "only_left"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "ACME-INV-001",
+      "left": null,
+      "match_explain": null,
+      "right": {
+        "Amount": "100",
+        "PartialKey": "ACME-INV-001"
+      },
+      "status": "only_right"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "ACME-INV-002",
+      "left": null,
+      "match_explain": null,
+      "right": {
+        "Amount": "100",
+        "PartialKey": "ACME-INV-002"
+      },
+      "status": "only_right"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "STANDALONE",
+      "left": null,
+      "match_explain": null,
+      "right": {
+        "Amount": "999",
+        "PartialKey": "STANDALONE"
+      },
+      "status": "only_right"
+    }
+  ],
+  "summary": {
+    "ambiguous": 1,
+    "diff": 0,
+    "diff_outside_tolerance": 0,
+    "key": "PartialKey",
+    "key_transform": "trim",
+    "left_rows": 3,
+    "match": "contains",
+    "matched": 1,
+    "only_left": 1,
+    "only_right": 3,
+    "right_rows": 4,
+    "tolerance": 0.0
+  }
+}

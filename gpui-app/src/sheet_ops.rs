@@ -188,6 +188,20 @@ impl Spreadsheet {
             let sheet_id = wb.active_sheet_id();
             wb.active_sheet_mut().set_value(row, col, value);
             wb.update_cell_deps(sheet_id, row, col);
+            let cell_id = visigrid_engine::cell_id::CellId::new(sheet_id, row, col);
+            wb.note_cell_changed(cell_id);
+        });
+    }
+
+    /// Clear a cell value on the active sheet and update the dependency graph + recalc.
+    /// This is the preferred way to clear cells - it ensures the dep graph stays in sync.
+    pub fn clear_cell_value(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        self.workbook.update(cx, |wb, _| {
+            let sheet_id = wb.active_sheet_id();
+            wb.active_sheet_mut().clear_cell(row, col);
+            wb.update_cell_deps(sheet_id, row, col);
+            let cell_id = visigrid_engine::cell_id::CellId::new(sheet_id, row, col);
+            wb.note_cell_changed(cell_id);
         });
     }
 

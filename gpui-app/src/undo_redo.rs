@@ -35,10 +35,9 @@ impl Spreadsheet {
             match entry.action {
                 UndoAction::Values { sheet_index, changes } => {
                     self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            for change in changes {
-                                sheet.set_value(change.row, change.col, &change.old_value);
-                            }
+                        let mut guard = wb.batch_guard();
+                        for change in changes {
+                            guard.set_cell_value_tracked(sheet_index, change.row, change.col, &change.old_value);
                         }
                     });
                     self.bump_cells_rev();  // Invalidate cell search cache
@@ -115,9 +114,11 @@ impl Spreadsheet {
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
                             sheet.insert_rows(at_row, count);
-                            // Restore the deleted cells
-                            for (row, col, value, format) in deleted_cells {
-                                sheet.set_value(row, col, &value);
+                        }
+                        let mut guard = wb.batch_guard();
+                        for (row, col, value, format) in deleted_cells {
+                            guard.set_cell_value_tracked(sheet_index, row, col, &value);
+                            if let Some(sheet) = guard.sheet_mut(sheet_index) {
                                 sheet.set_format(row, col, format);
                             }
                         }
@@ -172,9 +173,11 @@ impl Spreadsheet {
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
                             sheet.insert_cols(at_col, count);
-                            // Restore the deleted cells
-                            for (row, col, value, format) in deleted_cells {
-                                sheet.set_value(row, col, &value);
+                        }
+                        let mut guard = wb.batch_guard();
+                        for (row, col, value, format) in deleted_cells {
+                            guard.set_cell_value_tracked(sheet_index, row, col, &value);
+                            if let Some(sheet) = guard.sheet_mut(sheet_index) {
                                 sheet.set_format(row, col, format);
                             }
                         }
@@ -325,20 +328,16 @@ impl Spreadsheet {
                 UndoAction::SetMerges { sheet_index, before, cleared_values, description, .. } => {
                     let before = before;
                     let cleared = cleared_values;
-                    // Restore merge topology first
+                    // Restore merge topology first, then restore cleared values with tracking
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
                             sheet.set_merges(before);
                         }
+                        let mut guard = wb.batch_guard();
+                        for (row, col, value) in cleared {
+                            guard.set_cell_value_tracked(sheet_index, row, col, &value);
+                        }
                     });
-                    // Restore cleared cell values
-                    for (row, col, value) in cleared {
-                        self.workbook.update(cx, |wb, _| {
-                            if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                                sheet.set_value(row, col, &value);
-                            }
-                        });
-                    }
                     self.status_message = Some(format!("Undo: {}", description));
                 }
             }
@@ -352,12 +351,11 @@ impl Spreadsheet {
         match action {
             UndoAction::Values { sheet_index, changes } => {
                 self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        // CRITICAL: Apply in reverse order to handle same-cell sequences correctly.
-                        // If cell X was changed A→B→C in one batch, we must undo C→B first, then B→A.
-                        for change in changes.iter().rev() {
-                            sheet.set_value(change.row, change.col, &change.old_value);
-                        }
+                    // CRITICAL: Apply in reverse order to handle same-cell sequences correctly.
+                    // If cell X was changed A→B→C in one batch, we must undo C→B first, then B→A.
+                    let mut guard = wb.batch_guard();
+                    for change in changes.iter().rev() {
+                        guard.set_cell_value_tracked(sheet_index, change.row, change.col, &change.old_value);
                     }
                 });
                 self.bump_cells_rev();
@@ -418,8 +416,11 @@ impl Spreadsheet {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.insert_rows(at_row, count);
-                        for (row, col, value, format) in deleted_cells {
-                            sheet.set_value(row, col, &value);
+                    }
+                    let mut guard = wb.batch_guard();
+                    for (row, col, value, format) in deleted_cells {
+                        guard.set_cell_value_tracked(sheet_index, row, col, &value);
+                        if let Some(sheet) = guard.sheet_mut(sheet_index) {
                             sheet.set_format(row, col, format);
                         }
                     }
@@ -469,8 +470,11 @@ impl Spreadsheet {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.insert_cols(at_col, count);
-                        for (row, col, value, format) in deleted_cells {
-                            sheet.set_value(row, col, &value);
+                    }
+                    let mut guard = wb.batch_guard();
+                    for (row, col, value, format) in deleted_cells {
+                        guard.set_cell_value_tracked(sheet_index, row, col, &value);
+                        if let Some(sheet) = guard.sheet_mut(sheet_index) {
                             sheet.set_format(row, col, format);
                         }
                     }
@@ -595,20 +599,16 @@ impl Spreadsheet {
                 // This should never be reached (Rewind is always last in stack)
             }
             UndoAction::SetMerges { sheet_index, before, cleared_values, .. } => {
-                // Restore merge topology
+                // Restore merge topology, then restore cleared values with tracking
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.set_merges(before);
                     }
+                    let mut guard = wb.batch_guard();
+                    for (row, col, value) in cleared_values {
+                        guard.set_cell_value_tracked(sheet_index, row, col, &value);
+                    }
                 });
-                // Restore cleared cell values
-                for (row, col, value) in cleared_values {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.set_value(row, col, &value);
-                        }
-                    });
-                }
             }
         }
     }
@@ -617,9 +617,10 @@ impl Spreadsheet {
     fn apply_redo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) {
         match action {
             UndoAction::Values { sheet_index, changes } => {
-                self.sheet_mut(sheet_index, cx, |sheet| {
+                self.workbook.update(cx, |wb, _| {
+                    let mut guard = wb.batch_guard();
                     for change in changes {
-                        sheet.set_value(change.row, change.col, &change.new_value);
+                        guard.set_cell_value_tracked(sheet_index, change.row, change.col, &change.new_value);
                     }
                 });
                 self.bump_cells_rev();
@@ -818,16 +819,14 @@ impl Spreadsheet {
                 // This should never be reached
             }
             UndoAction::SetMerges { sheet_index, after, cleared_values, .. } => {
-                // Clear values that the merge will hide
-                for (row, col, _) in &cleared_values {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.set_value(*row, *col, "");
-                        }
-                    });
-                }
-                // Apply merge topology
+                // Clear values that the merge will hide, then apply merge topology
                 self.workbook.update(cx, |wb, _| {
+                    {
+                        let mut guard = wb.batch_guard();
+                        for (row, col, _) in &cleared_values {
+                            guard.set_cell_value_tracked(sheet_index, *row, *col, "");
+                        }
+                    }
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.set_merges(after);
                     }
@@ -841,10 +840,9 @@ impl Spreadsheet {
             match entry.action {
                 UndoAction::Values { sheet_index, changes } => {
                     self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            for change in changes {
-                                sheet.set_value(change.row, change.col, &change.new_value);
-                            }
+                        let mut guard = wb.batch_guard();
+                        for change in changes {
+                            guard.set_cell_value_tracked(sheet_index, change.row, change.col, &change.new_value);
                         }
                     });
                     self.bump_cells_rev();  // Invalidate cell search cache
@@ -1092,16 +1090,14 @@ impl Spreadsheet {
                 UndoAction::SetMerges { sheet_index, after, cleared_values, description, .. } => {
                     let after = after;
                     let cleared = cleared_values;
-                    // Clear values that the merge will hide
-                    for (row, col, _) in &cleared {
-                        self.workbook.update(cx, |wb, _| {
-                            if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                                sheet.set_value(*row, *col, "");
-                            }
-                        });
-                    }
-                    // Apply merge topology
+                    // Clear values that the merge will hide, then apply merge topology
                     self.workbook.update(cx, |wb, _| {
+                        {
+                            let mut guard = wb.batch_guard();
+                            for (row, col, _) in &cleared {
+                                guard.set_cell_value_tracked(sheet_index, *row, *col, "");
+                            }
+                        }
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
                             sheet.set_merges(after);
                         }

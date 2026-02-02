@@ -416,6 +416,7 @@ impl Spreadsheet {
 
         // 2. Replace range literal with name in all affected cells
         let mut cell_changes = Vec::new();
+        self.wb_mut(cx, |wb| wb.begin_batch());
         for (row, col) in &affected_cells {
             let cell = self.sheet(cx).get_cell(*row, *col);
             let old_value = cell.value.raw_display();
@@ -423,7 +424,7 @@ impl Spreadsheet {
                 let new_value = self.replace_range_in_formula(&old_value, &range_literal, &name);
                 if new_value != old_value {
                     // Apply the change
-                    self.active_sheet_mut(cx, |s| s.set_value(*row, *col, &new_value));
+                    self.set_cell_value(*row, *col, &new_value, cx);
                     cell_changes.push(crate::history::CellChange {
                         row: *row,
                         col: *col,
@@ -433,6 +434,7 @@ impl Spreadsheet {
                 }
             }
         }
+        self.wb_mut(cx, |wb| wb.end_batch());
 
         // 3. Record undo action (group)
         // Get the full named range we just created for the undo action

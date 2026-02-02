@@ -465,7 +465,15 @@ fn compare_values(
         match (left_num, right_num) {
             (Some(l), Some(r)) => {
                 let delta = (l - r).abs();
-                let within = delta <= tolerance;
+                // Epsilon-inclusive comparison: preserve human-decimal boundary
+                // semantics under IEEE-754 float representation.
+                let scale = 1.0_f64
+                    .max(l.abs())
+                    .max(r.abs())
+                    .max(delta)
+                    .max(tolerance);
+                let eps = f64::EPSILON * 16.0 * scale;
+                let within = delta <= tolerance + eps;
                 if !within || delta > 0.0 {
                     // Report diff if values aren't identical (even if within tolerance)
                     // but mark within_tolerance accordingly

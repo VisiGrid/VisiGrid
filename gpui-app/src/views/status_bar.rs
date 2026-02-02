@@ -170,6 +170,17 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                 .when(app.verified_mode, |d| {
                     d.child(render_verified_indicator(app, cx))
                 })
+                // Manual calc mode indicator
+                .when(!app.wb(cx).auto_recalc(), |d| {
+                    let warn_color = app.token(TokenKey::Warn);
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .text_color(warn_color)
+                            .child("MANUAL CALC")
+                    )
+                })
                 // Filter indicator (when filtering is active)
                 .when(app.row_view.is_filtered(), |d| {
                     let visible = app.row_view.visible_count();

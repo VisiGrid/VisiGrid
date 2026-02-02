@@ -1,0 +1,15 @@
+diff
+{DIR}/left.csv
+{DIR}/right.csv
+--key
+PartialKey
+--match
+contains
+--on-ambiguous
+report
+--compare
+Amount
+--out
+json
+--summary
+json

@@ -1,0 +1,113 @@
+{
+  "contract_version": 1,
+  "results": [
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-001",
+      "left": {
+        "Amount": "$1,234.56",
+        "Description": "Widget order",
+        "Invoice": "INV-001"
+      },
+      "match_explain": null,
+      "right": {
+        "Amount": "1234.56",
+        "Description": "Widget order",
+        "Invoice": "INV-001"
+      },
+      "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-002",
+      "left": {
+        "Amount": "($500.00)",
+        "Description": "Refund",
+        "Invoice": "INV-002"
+      },
+      "match_explain": null,
+      "right": {
+        "Amount": "-500",
+        "Description": "Refund",
+        "Invoice": "INV-002"
+      },
+      "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-003",
+      "left": {
+        "Amount": "$0.00",
+        "Description": "Zero balance",
+        "Invoice": "INV-003"
+      },
+      "match_explain": null,
+      "right": {
+        "Amount": "0",
+        "Description": "Zero balance",
+        "Invoice": "INV-003"
+      },
+      "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-004",
+      "left": {
+        "Amount": "$99.99",
+        "Description": "Padded amount",
+        "Invoice": "INV-004"
+      },
+      "match_explain": null,
+      "right": {
+        "Amount": "99.99",
+        "Description": "Padded amount",
+        "Invoice": "INV-004"
+      },
+      "status": "matched"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-005",
+      "left": {
+        "Amount": "$750.00",
+        "Description": "Left only item",
+        "Invoice": "INV-005"
+      },
+      "match_explain": null,
+      "right": null,
+      "status": "only_left"
+    },
+    {
+      "candidates": null,
+      "diffs": null,
+      "key": "INV-006",
+      "left": null,
+      "match_explain": null,
+      "right": {
+        "Amount": "300",
+        "Description": "Right only item",
+        "Invoice": "INV-006"
+      },
+      "status": "only_right"
+    }
+  ],
+  "summary": {
+    "ambiguous": 0,
+    "diff": 0,
+    "diff_outside_tolerance": 0,
+    "key": "Invoice",
+    "key_transform": "trim",
+    "left_rows": 5,
+    "match": "exact",
+    "matched": 4,
+    "only_left": 1,
+    "only_right": 1,
+    "right_rows": 5,
+    "tolerance": 0.0
+  }
+}

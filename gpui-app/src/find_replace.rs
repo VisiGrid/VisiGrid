@@ -364,7 +364,7 @@ impl Spreadsheet {
         // Record undo and apply
         let sheet_index = self.sheet_index(cx);
         self.history.record_change(sheet_index, hit.row, hit.col, raw_value, new_value.clone());
-        self.active_sheet_mut(cx, |s| s.set_value(hit.row, hit.col, &new_value));
+        self.set_cell_value(hit.row, hit.col, &new_value, cx);
         cx.notify();
 
         // Recompute find results (offsets have changed)
@@ -407,6 +407,7 @@ impl Spreadsheet {
         let mut changes: Vec<CellChange> = Vec::new();
         let mut replaced_count = 0;
 
+        self.wb_mut(cx, |wb| wb.begin_batch());
         for ((row, col), mut cell_hits) in cells_to_replace {
             // Sort hits by start position descending (replace from end to preserve offsets)
             cell_hits.sort_by(|a, b| b.start.cmp(&a.start));
@@ -446,8 +447,9 @@ impl Spreadsheet {
                 new_value: new_value.clone(),
             });
 
-            self.active_sheet_mut(cx, |s| s.set_value(row, col, &new_value));
+            self.set_cell_value(row, col, &new_value, cx);
         }
+        self.wb_mut(cx, |wb| wb.end_batch());
 
         // Record all changes as single batch undo
         let sheet_index = self.sheet_index(cx);

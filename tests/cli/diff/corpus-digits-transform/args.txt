@@ -1,0 +1,15 @@
+diff
+{DIR}/left.csv
+{DIR}/right.csv
+--key
+Reference
+--key-transform
+digits
+--compare
+Amount
+--tolerance
+1
+--out
+json
+--summary
+json

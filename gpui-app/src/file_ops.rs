@@ -108,6 +108,12 @@ impl Spreadsheet {
                 // Load document settings from sidecar file
                 self.doc_settings = load_doc_settings(path);
 
+                // Wire calculation mode to engine
+                let auto = self.doc_settings.calculation.mode
+                    .resolve(crate::settings::CalculationMode::Automatic)
+                    != crate::settings::CalculationMode::Manual;
+                self.wb_mut(cx, |wb| wb.set_auto_recalc(auto));
+
                 self.view_state.selected = (0, 0);
                 self.view_state.selection_end = None;
                 self.view_state.scroll_row = 0;

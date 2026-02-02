@@ -50,6 +50,9 @@ impl Spreadsheet {
 
         let mut changes = Vec::new();
 
+        // Batch recalc: defer incremental recalc until all cells are set
+        self.workbook.update(cx, |wb, _| wb.begin_batch());
+
         // For each column in selection
         for col in min_col..=max_col {
             // Get the source value/formula from the first row
@@ -76,6 +79,8 @@ impl Spreadsheet {
                 self.set_cell_value(row, col, &new_value, cx);
             }
         }
+
+        self.workbook.update(cx, |wb, _| wb.end_batch());
 
         if !changes.is_empty() {
             let provenance = MutationOp::Fill {
@@ -134,6 +139,9 @@ impl Spreadsheet {
 
         let mut changes = Vec::new();
 
+        // Batch recalc: defer incremental recalc until all cells are set
+        self.workbook.update(cx, |wb, _| wb.begin_batch());
+
         // For each row in selection
         for row in min_row..=max_row {
             // Get the source value/formula from the first column
@@ -160,6 +168,8 @@ impl Spreadsheet {
                 self.set_cell_value(row, col, &new_value, cx);
             }
         }
+
+        self.workbook.update(cx, |wb, _| wb.end_batch());
 
         if !changes.is_empty() {
             let provenance = MutationOp::Fill {
@@ -421,6 +431,8 @@ impl Spreadsheet {
         let mut changes = Vec::new();
         let mut trimmed_count = 0;
 
+        self.workbook.update(cx, |wb, _| wb.begin_batch());
+
         for row in min_row..=max_row {
             for col in min_col..=max_col {
                 let old_value = self.sheet(cx).get_raw(row, col);
@@ -444,6 +456,8 @@ impl Spreadsheet {
                 }
             }
         }
+
+        self.workbook.update(cx, |wb, _| wb.end_batch());
 
         if !changes.is_empty() {
             self.history.record_batch(self.sheet_index(cx), changes);
@@ -695,6 +709,9 @@ impl Spreadsheet {
             (end_row..src_min_row).rev().collect()
         };
 
+        // Batch recalc: defer incremental recalc until all cells are set
+        self.workbook.update(cx, |wb, _| wb.begin_batch());
+
         // Formulas use existing ref-adjustment path (cycle through source formulas)
         if has_formula {
             let source_len = source_raws.len();
@@ -777,6 +794,8 @@ impl Spreadsheet {
             }
         }
 
+        self.workbook.update(cx, |wb, _| wb.end_batch());
+
         let count = fill_range.len();
         if !changes.is_empty() {
             let direction = if end_row > src_max_row { FillDirection::Down } else { FillDirection::Up };
@@ -857,6 +876,9 @@ impl Spreadsheet {
             // Fill left
             (end_col..src_min_col).rev().collect()
         };
+
+        // Batch recalc: defer incremental recalc until all cells are set
+        self.workbook.update(cx, |wb, _| wb.begin_batch());
 
         // Formulas use existing ref-adjustment path (cycle through source formulas)
         if has_formula {
@@ -939,6 +961,8 @@ impl Spreadsheet {
                 }
             }
         }
+
+        self.workbook.update(cx, |wb, _| wb.end_batch());
 
         let count = fill_range.len();
         if !changes.is_empty() {

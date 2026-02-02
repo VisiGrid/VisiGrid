@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.5
+
+### Spreadsheet
+
+- **Automatic recalculation** — dependent formulas now update immediately after edits, without requiring F9 or re-entering the cell. VisiGrid uses incremental dependency-based recalc: only cells in the dirty subgraph are re-evaluated, in topological order. Multi-cell operations (paste, fill, undo/redo, Lua scripts) batch into a single recalc pass. Manual calculation mode is respected when set via document settings; status bar shows "MANUAL CALC" when active.
+
+- **Percent entry** — typing `1%` now stores the numeric value `0.01` and auto-applies Percent formatting (when the cell format is General). Handles whitespace, commas, and negatives: `" -1,000 % "` parses as `-10.0`. Applying Percent format to an existing text cell like `50%` converts it to the numeric `0.5`.
+
+- **Formula entry parity** — `+` now behaves identically to `=` for starting formula mode. Arrow keys immediately enter ref-picking regardless of previous F2 toggle state, and Escape cleanly exits. Fixes an intermittent bug where formula navigation state leaked between edit sessions.
+
 ## 0.4.4
 
 ### CLI
