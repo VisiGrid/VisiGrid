@@ -62,6 +62,7 @@ Five operators: `=` `!=` `<` `>` `~` (contains). Typed comparisons — numeric R
 **Reconciliation** (`diff`) compares two datasets row-by-row:
 - Rows only in the left file, only in the right file, or in both with value differences
 - Numeric tolerance for financial data (`$1,234.56`, `(500.00)` handled natively)
+- Either side can be `-` to read from stdin — pipe live exports directly into reconciliation
 - Duplicate keys and ambiguous matches fail loudly instead of guessing
 
 Example output:
@@ -198,12 +199,17 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 ## CI / Scripting
 
+Exit 0 means reconciled (within tolerance). Exit 1 means material differences — missing rows or diffs outside tolerance. No wrapper scripts needed.
+
 ```bash
-# Reconcile two files in CI — non-zero exit on differences
+# Reconcile two files in CI — exit 0 if all diffs are within tolerance
 visigrid-cli diff expected.csv actual.csv --key SKU --tolerance 0.01 --quiet || {
   echo "Reconciliation failed"
   exit 1
 }
+
+# Pipe a live export into diff
+rails runner 'Ledger.export_csv' | visigrid-cli diff - expected.csv --key id --quiet
 
 # Verify a provenance trail hasn't been tampered with
 visigrid-cli replay audit-trail.lua --verify --quiet

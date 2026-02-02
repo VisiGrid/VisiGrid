@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.4
+## 0.4.3
 
 ### CLI
 
@@ -29,6 +29,25 @@
 
 - **`convert --quiet`** — new `-q` / `--quiet` flag suppresses stderr notes (e.g. skipped-row counts from `--where`). Designed for pipelines where only stdout matters.
 
+- **`diff -` stdin support** — either side of `diff` can now be `-` to read from stdin. Format is inferred from the other file's extension, or set explicitly with `--stdin-format`. Enables piping live exports directly into reconciliation without temp files.
+
+  ```bash
+  # Pipe an export into diff
+  cat export.csv | visigrid-cli diff - baseline.csv --key id
+
+  # Right side from stdin
+  docker exec db dump.sh | visigrid-cli diff expected.csv - --key sku
+
+  # Explicit format when the other side has no extension
+  cat data.tsv | visigrid-cli diff - reference.csv --key id --stdin-format tsv
+  ```
+
+- **`diff` reconciliation exit-code semantics** — exit code 1 now indicates material differences only: missing rows or value diffs outside `--tolerance`. Within-tolerance diffs are reported in JSON (with `within_tolerance: true` and `diff_outside_tolerance` counter) but do not cause a non-zero exit code. This means `--tolerance 0.01` in CI passes when the only differences are rounding — no wrapper scripts needed. Use `--strict-exit` for Unix-diff semantics (any diff → exit 1).
+
+- **`diff --save-ambiguous <path>`** — exports ambiguous matches to CSV before exiting. Columns: `left_key`, `candidate_count`, `candidate_keys` (pipe-separated). Written even when `--on-ambiguous error` causes exit 4, so the file is always available for manual review.
+
+- **Golden tests: 42/42** — regenerated all stale expected outputs and locked down exit-code semantics with contract test, tolerance, and strict-exit tests.
+
 ### Desktop App
 
 - **Menu accelerator keys** — every menu item now has a keyboard accelerator. When a dropdown is open, press the underlined letter to execute that item immediately. Accelerators are explicitly assigned per item (not auto-derived) and validated at startup in debug builds to catch collisions. Works across all menus: File, Edit, View, Format, Data, Help.
@@ -36,12 +55,6 @@
 - **Copy/cut dashed border** — copying or cutting cells now draws a dashed border overlay around the source range, matching Excel's visual feedback. The border uses the selection accent color and is cleared on paste, escape, edit start, edit confirm, or delete. Non-interactive (clicks pass through).
 
 - **Ctrl+W close window** — Windows/Linux keybinding to close the current window, matching platform convention.
-
-## 0.4.3
-
-### CLI
-
-- **`diff --save-ambiguous <path>`** — exports ambiguous matches to CSV before exiting. Columns: `left_key`, `candidate_count`, `candidate_keys` (pipe-separated). Written even when `--on-ambiguous error` causes exit 4, so the file is always available for manual review. Designed for audit workflows where matching cannot be resolved automatically.
 
 ## 0.4.2
 
