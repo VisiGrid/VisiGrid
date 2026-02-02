@@ -49,8 +49,14 @@ pub(crate) fn handle_key_down(
                 return;
             }
             _ => {
-                // Non-modifier keys close the menu and fall through to normal handling
+                // Non-modifier keys: try letter accelerator first, then close menu
                 if key != "shift" && key != "control" && key != "alt" && key != "cmd" {
+                    if key.len() == 1 {
+                        let ch = key.chars().next().unwrap().to_ascii_lowercase();
+                        if this.menu_execute_by_letter(ch, window, cx) {
+                            return;
+                        }
+                    }
                     this.close_menu(cx);
                 }
             }

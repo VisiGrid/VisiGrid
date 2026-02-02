@@ -166,6 +166,9 @@ impl Spreadsheet {
         let id_json = format!("\"{}\"", id);
         cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(raw_tsv, id_json));
 
+        // Set visual range for dashed border overlay
+        self.clipboard_visual_range = Some((min_row, min_col, max_row, max_col));
+
         if is_filtered {
             self.status_message = Some("Copied visible rows to clipboard".to_string());
         } else {
@@ -422,6 +425,7 @@ impl Spreadsheet {
                     self.is_modified = true;
                 }
 
+                self.clipboard_visual_range = None;
                 self.status_message = Some(format!("Pasted to {} cells", target_cells.len()));
                 self.maybe_smoke_recalc(cx);
                 cx.notify();
@@ -638,6 +642,9 @@ impl Spreadsheet {
             } else {
                 self.status_message = Some("Pasted from clipboard".to_string());
             }
+
+            // Clear copy border overlay — clipboard consumed
+            self.clipboard_visual_range = None;
 
             // Smoke mode: trigger full ordered recompute for dogfooding
             self.maybe_smoke_recalc(cx);
@@ -876,6 +883,7 @@ impl Spreadsheet {
         } else {
             self.status_message = Some("Pasted values".to_string());
         }
+        self.clipboard_visual_range = None;
         cx.notify();
     }
 
@@ -1133,6 +1141,7 @@ impl Spreadsheet {
             self.is_modified = true;
         }
 
+        self.clipboard_visual_range = None;
         self.status_message = Some("Pasted formulas".to_string());
         self.maybe_smoke_recalc(cx);
         cx.notify();
@@ -1253,6 +1262,7 @@ impl Spreadsheet {
             self.is_modified = true;
         }
 
+        self.clipboard_visual_range = None;
         let rows = formats.len();
         let cols = formats.first().map(|r| r.len()).unwrap_or(0);
         self.status_message = Some(format!("Pasted formats to {}x{} range", rows, cols));
@@ -1319,6 +1329,10 @@ impl Spreadsheet {
             self.history.record_batch_with_provenance(self.sheet_index(cx), changes, provenance);
             self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
+        }
+
+        if had_changes {
+            self.clipboard_visual_range = None;
         }
 
         if skipped_spill_receivers && !had_changes {

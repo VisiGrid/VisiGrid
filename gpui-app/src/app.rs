@@ -1856,6 +1856,9 @@ pub struct Spreadsheet {
 
     // Clipboard
     pub internal_clipboard: Option<InternalClipboard>,
+    /// Visual range for copy/cut dashed border overlay (r1, c1, r2, c2).
+    /// Set on Copy/Cut, cleared on Paste/Escape/edit start/confirm/delete.
+    pub clipboard_visual_range: Option<(usize, usize, usize, usize)>,
 
     // File state
     /// Unique ID for session matching (assigned at startup).
@@ -2328,6 +2331,7 @@ impl Spreadsheet {
             palette_pre_scroll: (0, 0),
             palette_previewing: false,
             internal_clipboard: None,
+            clipboard_visual_range: None,
             session_window_id: WINDOW_ID_UNSET,
             current_file: None,
             is_modified: false,
@@ -3553,6 +3557,32 @@ impl Spreadsheet {
             self.close_menu(cx);
             crate::menu_model::execute_menu_action(self, menu, index, window, cx);
         }
+    }
+
+    /// Try to execute a menu item by its accelerator letter.
+    /// Returns true if a matching item was found and executed.
+    pub fn menu_execute_by_letter(&mut self, letter: char, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use crate::menu_model::{MenuEntry, menu_entries, execute_menu_action, resolve_accel};
+
+        if let Some(menu) = self.open_menu {
+            let entries = menu_entries(menu);
+            let mut selectable_idx = 0;
+            for entry in &entries {
+                match entry {
+                    MenuEntry::Item { label, accel, .. } | MenuEntry::Color { label, accel, .. } => {
+                        let item_letter = resolve_accel(label, *accel);
+                        if item_letter == letter {
+                            self.close_menu(cx);
+                            execute_menu_action(self, menu, selectable_idx, window, cx);
+                            return true;
+                        }
+                        selectable_idx += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        false
     }
 
     fn next_active_menu(start: crate::mode::Menu) -> crate::mode::Menu {

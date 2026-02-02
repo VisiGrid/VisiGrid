@@ -34,8 +34,8 @@ pub enum MenuAction {
 
 /// Menu entry descriptor — single source of truth for menu structure.
 pub enum MenuEntry {
-    Item { label: &'static str, shortcut: Option<&'static str>, action: MenuAction },
-    Color { label: &'static str, color: Option<[u8; 4]>, action: MenuAction },
+    Item { label: &'static str, shortcut: Option<&'static str>, action: MenuAction, accel: Option<char> },
+    Color { label: &'static str, color: Option<[u8; 4]>, action: MenuAction, accel: Option<char> },
     Separator,
     Label(&'static str),
     Disabled(&'static str),
@@ -43,53 +43,53 @@ pub enum MenuEntry {
 
 pub fn file_menu_entries() -> Vec<MenuEntry> {
     vec![
-        MenuEntry::Item { label: "New Workbook", shortcut: Some("Ctrl+N"), action: MenuAction::NewWorkbook },
-        MenuEntry::Item { label: "Open...", shortcut: Some("Ctrl+O"), action: MenuAction::Open },
-        MenuEntry::Item { label: "Save", shortcut: Some("Ctrl+S"), action: MenuAction::Save },
-        MenuEntry::Item { label: "Save As...", shortcut: Some("Ctrl+Shift+S"), action: MenuAction::SaveAs },
+        MenuEntry::Item { label: "New Workbook", shortcut: Some("Ctrl+N"), action: MenuAction::NewWorkbook, accel: None },
+        MenuEntry::Item { label: "Open...", shortcut: Some("Ctrl+O"), action: MenuAction::Open, accel: None },
+        MenuEntry::Item { label: "Save", shortcut: Some("Ctrl+S"), action: MenuAction::Save, accel: Some('s') },
+        MenuEntry::Item { label: "Save As...", shortcut: Some("Ctrl+Shift+S"), action: MenuAction::SaveAs, accel: Some('a') },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Export as CSV...", shortcut: None, action: MenuAction::ExportCsv },
-        MenuEntry::Item { label: "Export as TSV...", shortcut: None, action: MenuAction::ExportTsv },
-        MenuEntry::Item { label: "Export as JSON...", shortcut: None, action: MenuAction::ExportJson },
-        MenuEntry::Item { label: "Export to Excel (.xlsx)...", shortcut: None, action: MenuAction::ExportXlsx },
+        MenuEntry::Item { label: "Export as CSV...", shortcut: None, action: MenuAction::ExportCsv, accel: Some('c') },
+        MenuEntry::Item { label: "Export as TSV...", shortcut: None, action: MenuAction::ExportTsv, accel: Some('t') },
+        MenuEntry::Item { label: "Export as JSON...", shortcut: None, action: MenuAction::ExportJson, accel: Some('j') },
+        MenuEntry::Item { label: "Export to Excel (.xlsx)...", shortcut: None, action: MenuAction::ExportXlsx, accel: Some('x') },
     ]
 }
 
 pub fn edit_menu_entries() -> Vec<MenuEntry> {
     vec![
-        MenuEntry::Item { label: "Undo", shortcut: Some("Ctrl+Z"), action: MenuAction::Undo },
-        MenuEntry::Item { label: "Redo", shortcut: Some("Ctrl+Y"), action: MenuAction::Redo },
+        MenuEntry::Item { label: "Undo", shortcut: Some("Ctrl+Z"), action: MenuAction::Undo, accel: None },
+        MenuEntry::Item { label: "Redo", shortcut: Some("Ctrl+Y"), action: MenuAction::Redo, accel: None },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Cut", shortcut: Some("Ctrl+X"), action: MenuAction::Cut },
-        MenuEntry::Item { label: "Copy", shortcut: Some("Ctrl+C"), action: MenuAction::Copy },
-        MenuEntry::Item { label: "Paste", shortcut: Some("Ctrl+V"), action: MenuAction::Paste },
-        MenuEntry::Item { label: "Paste Values", shortcut: Some("Ctrl+Shift+V"), action: MenuAction::PasteValues },
+        MenuEntry::Item { label: "Cut", shortcut: Some("Ctrl+X"), action: MenuAction::Cut, accel: Some('t') },
+        MenuEntry::Item { label: "Copy", shortcut: Some("Ctrl+C"), action: MenuAction::Copy, accel: Some('c') },
+        MenuEntry::Item { label: "Paste", shortcut: Some("Ctrl+V"), action: MenuAction::Paste, accel: Some('p') },
+        MenuEntry::Item { label: "Paste Values", shortcut: Some("Ctrl+Shift+V"), action: MenuAction::PasteValues, accel: Some('v') },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Delete", shortcut: Some("Del"), action: MenuAction::Delete },
+        MenuEntry::Item { label: "Delete", shortcut: Some("Del"), action: MenuAction::Delete, accel: None },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Find...", shortcut: Some("Ctrl+F"), action: MenuAction::Find },
-        MenuEntry::Item { label: "Go To...", shortcut: Some("Ctrl+G"), action: MenuAction::GoTo },
+        MenuEntry::Item { label: "Find...", shortcut: Some("Ctrl+F"), action: MenuAction::Find, accel: None },
+        MenuEntry::Item { label: "Go To...", shortcut: Some("Ctrl+G"), action: MenuAction::GoTo, accel: None },
     ]
 }
 
 pub fn view_menu_entries() -> Vec<MenuEntry> {
     vec![
-        MenuEntry::Item { label: "Command Palette", shortcut: Some("Ctrl+Shift+P"), action: MenuAction::CommandPalette },
+        MenuEntry::Item { label: "Command Palette", shortcut: Some("Ctrl+Shift+P"), action: MenuAction::CommandPalette, accel: None },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Inspector", shortcut: Some("Ctrl+Shift+I"), action: MenuAction::Inspector },
+        MenuEntry::Item { label: "Inspector", shortcut: Some("Ctrl+Shift+I"), action: MenuAction::Inspector, accel: None },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Zoom In", shortcut: Some("Ctrl+Shift+="), action: MenuAction::ZoomIn },
-        MenuEntry::Item { label: "Zoom Out", shortcut: Some("Ctrl+Shift+-"), action: MenuAction::ZoomOut },
-        MenuEntry::Item { label: "Reset Zoom", shortcut: Some("Ctrl+0"), action: MenuAction::ZoomReset },
+        MenuEntry::Item { label: "Zoom In", shortcut: Some("Ctrl+Shift+="), action: MenuAction::ZoomIn, accel: Some('+') },
+        MenuEntry::Item { label: "Zoom Out", shortcut: Some("Ctrl+Shift+-"), action: MenuAction::ZoomOut, accel: Some('-') },
+        MenuEntry::Item { label: "Reset Zoom", shortcut: Some("Ctrl+0"), action: MenuAction::ZoomReset, accel: Some('0') },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Show Formulas", shortcut: Some("Ctrl+`"), action: MenuAction::ShowFormulas },
-        MenuEntry::Item { label: "Show Zeros", shortcut: None, action: MenuAction::ShowZeros },
-        MenuEntry::Item { label: "Format Bar", shortcut: None, action: MenuAction::FormatBar },
+        MenuEntry::Item { label: "Show Formulas", shortcut: Some("Ctrl+`"), action: MenuAction::ShowFormulas, accel: Some('f') },
+        MenuEntry::Item { label: "Show Zeros", shortcut: None, action: MenuAction::ShowZeros, accel: Some('z') },
+        MenuEntry::Item { label: "Format Bar", shortcut: None, action: MenuAction::FormatBar, accel: Some('b') },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Freeze Top Row", shortcut: None, action: MenuAction::FreezeTopRow },
-        MenuEntry::Item { label: "Freeze First Column", shortcut: None, action: MenuAction::FreezeFirstCol },
-        MenuEntry::Item { label: "Freeze Panes", shortcut: None, action: MenuAction::FreezePanes },
-        MenuEntry::Item { label: "Unfreeze Panes", shortcut: None, action: MenuAction::UnfreezePanes },
+        MenuEntry::Item { label: "Freeze Top Row", shortcut: None, action: MenuAction::FreezeTopRow, accel: Some('t') },
+        MenuEntry::Item { label: "Freeze First Column", shortcut: None, action: MenuAction::FreezeFirstCol, accel: Some('l') },
+        MenuEntry::Item { label: "Freeze Panes", shortcut: None, action: MenuAction::FreezePanes, accel: Some('p') },
+        MenuEntry::Item { label: "Unfreeze Panes", shortcut: None, action: MenuAction::UnfreezePanes, accel: None },
     ]
 }
 
@@ -104,32 +104,32 @@ pub fn insert_menu_entries() -> Vec<MenuEntry> {
 
 pub fn format_menu_entries() -> Vec<MenuEntry> {
     vec![
-        MenuEntry::Item { label: "Bold", shortcut: Some("Ctrl+B"), action: MenuAction::Bold },
-        MenuEntry::Item { label: "Italic", shortcut: Some("Ctrl+I"), action: MenuAction::Italic },
-        MenuEntry::Item { label: "Underline", shortcut: Some("Ctrl+U"), action: MenuAction::Underline },
+        MenuEntry::Item { label: "Bold", shortcut: Some("Ctrl+B"), action: MenuAction::Bold, accel: Some('b') },
+        MenuEntry::Item { label: "Italic", shortcut: Some("Ctrl+I"), action: MenuAction::Italic, accel: Some('i') },
+        MenuEntry::Item { label: "Underline", shortcut: Some("Ctrl+U"), action: MenuAction::Underline, accel: Some('u') },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Font...", shortcut: None, action: MenuAction::Font },
+        MenuEntry::Item { label: "Font...", shortcut: None, action: MenuAction::Font, accel: Some('f') },
         MenuEntry::Disabled("Cells..."),
         MenuEntry::Separator,
         MenuEntry::Label("Background Color"),
-        MenuEntry::Color { label: "None", color: None, action: MenuAction::BgColor(None) },
-        MenuEntry::Color { label: "Yellow", color: Some([255, 255, 0, 255]), action: MenuAction::BgColor(Some([255, 255, 0, 255])) },
-        MenuEntry::Color { label: "Green", color: Some([198, 239, 206, 255]), action: MenuAction::BgColor(Some([198, 239, 206, 255])) },
-        MenuEntry::Color { label: "Blue", color: Some([189, 215, 238, 255]), action: MenuAction::BgColor(Some([189, 215, 238, 255])) },
-        MenuEntry::Color { label: "Red", color: Some([255, 199, 206, 255]), action: MenuAction::BgColor(Some([255, 199, 206, 255])) },
-        MenuEntry::Color { label: "Orange", color: Some([255, 235, 156, 255]), action: MenuAction::BgColor(Some([255, 235, 156, 255])) },
-        MenuEntry::Color { label: "Purple", color: Some([204, 192, 218, 255]), action: MenuAction::BgColor(Some([204, 192, 218, 255])) },
-        MenuEntry::Color { label: "Gray", color: Some([217, 217, 217, 255]), action: MenuAction::BgColor(Some([217, 217, 217, 255])) },
-        MenuEntry::Color { label: "Cyan", color: Some([183, 222, 232, 255]), action: MenuAction::BgColor(Some([183, 222, 232, 255])) },
+        MenuEntry::Color { label: "None", color: None, action: MenuAction::BgColor(None), accel: Some('n') },
+        MenuEntry::Color { label: "Yellow", color: Some([255, 255, 0, 255]), action: MenuAction::BgColor(Some([255, 255, 0, 255])), accel: Some('y') },
+        MenuEntry::Color { label: "Green", color: Some([198, 239, 206, 255]), action: MenuAction::BgColor(Some([198, 239, 206, 255])), accel: Some('g') },
+        MenuEntry::Color { label: "Blue", color: Some([189, 215, 238, 255]), action: MenuAction::BgColor(Some([189, 215, 238, 255])), accel: Some('l') },
+        MenuEntry::Color { label: "Red", color: Some([255, 199, 206, 255]), action: MenuAction::BgColor(Some([255, 199, 206, 255])), accel: Some('r') },
+        MenuEntry::Color { label: "Orange", color: Some([255, 235, 156, 255]), action: MenuAction::BgColor(Some([255, 235, 156, 255])), accel: Some('o') },
+        MenuEntry::Color { label: "Purple", color: Some([204, 192, 218, 255]), action: MenuAction::BgColor(Some([204, 192, 218, 255])), accel: Some('p') },
+        MenuEntry::Color { label: "Gray", color: Some([217, 217, 217, 255]), action: MenuAction::BgColor(Some([217, 217, 217, 255])), accel: Some('a') },
+        MenuEntry::Color { label: "Cyan", color: Some([183, 222, 232, 255]), action: MenuAction::BgColor(Some([183, 222, 232, 255])), accel: Some('c') },
         MenuEntry::Separator,
         MenuEntry::Label("Borders"),
-        MenuEntry::Item { label: "All Borders", shortcut: None, action: MenuAction::BorderAll },
-        MenuEntry::Item { label: "Outline", shortcut: None, action: MenuAction::BorderOutline },
-        MenuEntry::Item { label: "Clear Borders", shortcut: None, action: MenuAction::BorderClear },
+        MenuEntry::Item { label: "All Borders", shortcut: None, action: MenuAction::BorderAll, accel: Some('d') },
+        MenuEntry::Item { label: "Outline", shortcut: None, action: MenuAction::BorderOutline, accel: Some('t') },
+        MenuEntry::Item { label: "Clear Borders", shortcut: None, action: MenuAction::BorderClear, accel: Some('e') },
         MenuEntry::Separator,
         MenuEntry::Label("Merge"),
-        MenuEntry::Item { label: "Merge Cells", shortcut: Some("Ctrl+Shift+M"), action: MenuAction::MergeCells },
-        MenuEntry::Item { label: "Unmerge Cells", shortcut: Some("Ctrl+Shift+U"), action: MenuAction::UnmergeCells },
+        MenuEntry::Item { label: "Merge Cells", shortcut: Some("Ctrl+Shift+M"), action: MenuAction::MergeCells, accel: Some('m') },
+        MenuEntry::Item { label: "Unmerge Cells", shortcut: Some("Ctrl+Shift+U"), action: MenuAction::UnmergeCells, accel: Some('x') },
         MenuEntry::Separator,
         MenuEntry::Disabled("Row Height..."),
         MenuEntry::Disabled("Column Width..."),
@@ -138,33 +138,34 @@ pub fn format_menu_entries() -> Vec<MenuEntry> {
 
 pub fn data_menu_entries() -> Vec<MenuEntry> {
     vec![
-        MenuEntry::Item { label: "Validation...", shortcut: None, action: MenuAction::Validation },
-        MenuEntry::Item { label: "Exclude from Validation", shortcut: None, action: MenuAction::ExcludeValidation },
-        MenuEntry::Item { label: "Clear Validation Exclusions", shortcut: None, action: MenuAction::ClearExclusions },
+        MenuEntry::Item { label: "Validation...", shortcut: None, action: MenuAction::Validation, accel: None },
+        MenuEntry::Item { label: "Exclude from Validation", shortcut: None, action: MenuAction::ExcludeValidation, accel: None },
+        MenuEntry::Item { label: "Clear Validation Exclusions", shortcut: None, action: MenuAction::ClearExclusions, accel: None },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Fill Down", shortcut: Some("Ctrl+D"), action: MenuAction::FillDown },
-        MenuEntry::Item { label: "Fill Right", shortcut: Some("Ctrl+R"), action: MenuAction::FillRight },
+        MenuEntry::Item { label: "Fill Down", shortcut: Some("Ctrl+D"), action: MenuAction::FillDown, accel: Some('d') },
+        MenuEntry::Item { label: "Fill Right", shortcut: Some("Ctrl+R"), action: MenuAction::FillRight, accel: Some('r') },
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Circle Invalid Data", shortcut: None, action: MenuAction::CircleInvalid },
-        MenuEntry::Item { label: "Clear Invalid Circles", shortcut: None, action: MenuAction::ClearCircles },
+        MenuEntry::Item { label: "Circle Invalid Data", shortcut: None, action: MenuAction::CircleInvalid, accel: Some('i') },
+        MenuEntry::Item { label: "Clear Invalid Circles", shortcut: None, action: MenuAction::ClearCircles, accel: Some('l') },
         MenuEntry::Separator,
         MenuEntry::Disabled("Sort..."),
         MenuEntry::Disabled("Filter"),
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Insert Formula with AI", shortcut: Some("Ctrl+Shift+A"), action: MenuAction::InsertFormulaAI },
-        MenuEntry::Item { label: "Analyze with AI", shortcut: Some("Ctrl+Shift+E"), action: MenuAction::AnalyzeAI },
+        MenuEntry::Item { label: "Insert Formula with AI", shortcut: Some("Ctrl+Shift+A"), action: MenuAction::InsertFormulaAI, accel: Some('f') },
+        MenuEntry::Item { label: "Analyze with AI", shortcut: Some("Ctrl+Shift+E"), action: MenuAction::AnalyzeAI, accel: Some('a') },
     ]
 }
 
 pub fn help_menu_entries() -> Vec<MenuEntry> {
     let mut entries = vec![
-        MenuEntry::Item { label: "About VisiGrid", shortcut: None, action: MenuAction::About },
+        MenuEntry::Item { label: "About VisiGrid", shortcut: None, action: MenuAction::About, accel: None },
         MenuEntry::Separator,
     ];
     entries.push(MenuEntry::Item {
         label: if visigrid_license::is_pro() { "Manage License..." } else { "Enter License..." },
         shortcut: None,
         action: MenuAction::License,
+        accel: None,
     });
     entries
 }
@@ -184,6 +185,12 @@ pub fn menu_entries(menu: Menu) -> Vec<MenuEntry> {
 /// Count selectable items (Item + Color) in a menu.
 pub fn menu_item_count(menu: Menu) -> usize {
     menu_entries(menu).iter().filter(|e| matches!(e, MenuEntry::Item { .. } | MenuEntry::Color { .. })).count()
+}
+
+/// Resolve the accelerator character for a menu entry.
+/// Uses explicit `accel` if set, otherwise falls back to first letter of label.
+pub fn resolve_accel(label: &str, accel: Option<char>) -> char {
+    accel.unwrap_or_else(|| label.chars().next().unwrap_or(' ')).to_ascii_lowercase()
 }
 
 /// Execute a menu action by selectable-item index.
@@ -256,5 +263,37 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::AnalyzeAI => app.show_analyze(cx),
         MenuAction::About => app.show_about(cx),
         MenuAction::License => app.show_license(cx),
+    }
+}
+
+/// Debug: verify no duplicate accelerator keys within a menu.
+/// Call during development to catch accel collisions.
+#[cfg(debug_assertions)]
+pub fn debug_assert_unique_accels(menu: Menu) {
+    let entries = menu_entries(menu);
+    let mut seen = std::collections::HashMap::new();
+    for entry in &entries {
+        match entry {
+            MenuEntry::Item { label, accel, .. } | MenuEntry::Color { label, accel, .. } => {
+                let ch = resolve_accel(label, *accel);
+                if let Some(prev_label) = seen.insert(ch, *label) {
+                    debug_assert!(
+                        false,
+                        "Duplicate accel '{}' in {:?} menu: \"{}\" and \"{}\"",
+                        ch, menu, prev_label, label
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Run accel uniqueness checks for all menus (call once at startup in debug builds).
+#[cfg(debug_assertions)]
+pub fn debug_assert_all_accels() {
+    use crate::mode::Menu;
+    for menu in [Menu::File, Menu::Edit, Menu::View, Menu::Format, Menu::Data, Menu::Help] {
+        debug_assert_unique_accels(menu);
     }
 }

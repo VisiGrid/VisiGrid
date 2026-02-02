@@ -495,6 +495,10 @@ fn main() {
         #[cfg(not(target_os = "macos"))]
         keybindings::register_menu_accelerators(cx);
 
+        // Verify no duplicate accelerator keys within menus (debug builds only)
+        #[cfg(debug_assertions)]
+        crate::menu_model::debug_assert_all_accels();
+
         // Set up quit handler (save session before quit)
         cx.on_action(|_: &actions::Quit, cx| {
             // Save session before quitting

@@ -251,6 +251,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Preferences shortcut
         bindings.push(KeyBinding::new(&kb(m, ","), ShowPreferences, Some("Spreadsheet")));
 
+        // Close window (Ctrl+W on Windows/Linux)
+        bindings.push(KeyBinding::new("ctrl-w", CloseWindow, Some("Spreadsheet")));
+
         // Quit shortcut (Ctrl+Q on Windows/Linux)
         bindings.push(KeyBinding::new("ctrl-q", Quit, Some("Spreadsheet")));
 

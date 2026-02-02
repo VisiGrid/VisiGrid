@@ -301,6 +301,10 @@ pub(crate) fn bind(
                 this.history_highlight_range = None;
                 this.selected_history_id = None;
                 cx.notify();
+            } else if this.clipboard_visual_range.is_some() && this.mode == Mode::Navigation {
+                // Esc clears copy/cut border overlay
+                this.clipboard_visual_range = None;
+                cx.notify();
             } else {
                 this.cancel_edit(cx);
             }

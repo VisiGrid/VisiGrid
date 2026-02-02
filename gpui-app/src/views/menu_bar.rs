@@ -360,6 +360,25 @@ fn menu_item(
     cx: &mut Context<Spreadsheet>,
     action: impl Fn(&mut Spreadsheet, &mut Window, &mut Context<Spreadsheet>) + 'static,
 ) -> impl IntoElement {
+    menu_item_with_accel(label, shortcut, None, selectable_index, is_highlighted, text_color, shortcut_color, hover_bg, cx, action)
+}
+
+fn menu_item_with_accel(
+    label: &'static str,
+    shortcut: Option<&'static str>,
+    accel: Option<char>,
+    selectable_index: usize,
+    is_highlighted: bool,
+    text_color: Hsla,
+    shortcut_color: Hsla,
+    hover_bg: Hsla,
+    cx: &mut Context<Spreadsheet>,
+    action: impl Fn(&mut Spreadsheet, &mut Window, &mut Context<Spreadsheet>) + 'static,
+) -> impl IntoElement {
+    // Resolve the accelerator character and find its position in the label
+    let accel_char = crate::menu_model::resolve_accel(label, accel);
+    let accel_pos = label.chars().position(|c| c.to_ascii_lowercase() == accel_char);
+
     div()
         .id(ElementId::Name(format!("menuitem-{}", label).into()))
         .flex()
@@ -383,12 +402,26 @@ fn menu_item(
                 cx.notify();
             }
         }))
-        .child(label)
+        .child(
+            // Render label with underlined accelerator character
+            div()
+                .flex()
+                .flex_1()
+                .children(
+                    label.char_indices().map(move |(i, c)| {
+                        let should_underline = accel_pos == Some(i);
+                        div()
+                            .when(should_underline, |d: Div| d.underline())
+                            .child(c.to_string())
+                    })
+                )
+        )
         .when(shortcut.is_some(), move |d: Stateful<Div>| {
             d.child(
                 div()
                     .text_color(shortcut_color)
                     .text_size(px(10.0))  // Smaller shortcuts
+                    .flex_shrink_0()
                     .child(shortcut.unwrap_or(""))
             )
         })
@@ -442,6 +475,10 @@ fn color_menu_item(
         })
     });
 
+    // Resolve accelerator for underline
+    let accel_char = crate::menu_model::resolve_accel(label, None);
+    let accel_pos = label.chars().position(|c| c.to_ascii_lowercase() == accel_char);
+
     div()
         .id(ElementId::Name(format!("color-{}", label).into()))
         .flex()
@@ -475,5 +512,16 @@ fn color_menu_item(
                 .when_some(swatch_color, |d, c| d.bg(c))
                 .when(swatch_color.is_none(), |d| d.bg(hsla(0.0, 0.0, 1.0, 1.0)))
         )
-        .child(label)
+        .child(
+            div()
+                .flex()
+                .children(
+                    label.char_indices().map(move |(i, c)| {
+                        let should_underline = accel_pos == Some(i);
+                        div()
+                            .when(should_underline, |d: Div| d.underline())
+                            .child(c.to_string())
+                    })
+                )
+        )
 }

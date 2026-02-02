@@ -177,6 +177,8 @@ pub fn render_grid(
             .child(render_text_spill_overlay(app, window, cx, pane_side))
             // Dashed borders overlay for formula references (above cells, below popups)
             .child(render_formula_ref_borders(app, pane_side))
+            // Dashed border overlay for copy/cut visual range
+            .child(render_clipboard_border(app, pane_side))
             // Popup overlay layer - positioned relative to grid, not window chrome
             .child(render_popup_overlay(app, cx))
             // Debug: draw 1px reference lines to verify pixel alignment (Cmd+Alt+Shift+G).
@@ -324,6 +326,8 @@ pub fn render_grid(
         .child(render_text_spill_overlay(app, window, cx, pane_side))
         // Dashed borders overlay for formula references (above cells, below popups)
         .child(render_formula_ref_borders(app, pane_side))
+        // Dashed border overlay for copy/cut visual range
+        .child(render_clipboard_border(app, pane_side))
         // Popup overlay layer - positioned relative to grid, not window chrome
         .child(render_popup_overlay(app, cx))
         .into_any_element()
@@ -1800,6 +1804,83 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
                 );
                 window.paint_quad(quad);
             }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+    .into_any_element()
+}
+
+/// Render a dashed border overlay around the copy/cut source range.
+/// Static dashed border (no animation), non-interactive (clicks pass through).
+/// Modeled on render_formula_ref_borders — same canvas pattern.
+fn render_clipboard_border(app: &Spreadsheet, pane_side: Option<SplitSide>) -> impl IntoElement {
+    let Some((r1, c1, r2, c2)) = app.clipboard_visual_range else {
+        return div().into_any_element();
+    };
+
+    // Only show in the active pane (same logic as formula ref borders)
+    let is_active_pane = match pane_side {
+        None => true,
+        Some(side) => side == app.split_active_side,
+    };
+    if !is_active_pane {
+        return div().into_any_element();
+    }
+
+    // Check if any part of the range is visible
+    let view_state = get_pane_view_state(app, pane_side);
+    let scroll_row = view_state.scroll_row;
+    let scroll_col = view_state.scroll_col;
+    let visible_rows = app.visible_rows();
+    let visible_cols = app.visible_cols();
+
+    if r2 < scroll_row || c2 < scroll_col {
+        return div().into_any_element();
+    }
+    if r1 >= scroll_row + visible_rows || c1 >= scroll_col + visible_cols {
+        return div().into_any_element();
+    }
+
+    // Compute bounds using cell_rect (same pattern as formula ref borders)
+    let top_left = app.cell_rect(r1, c1);
+    let bottom_right = app.cell_rect(r2, c2);
+    let header_w = app.metrics.header_w;
+
+    let x = top_left.x + header_w;
+    let y = top_left.y;
+    let width = (bottom_right.x + bottom_right.width) - top_left.x;
+    let height = (bottom_right.y + bottom_right.height) - top_left.y;
+
+    let bounds = Bounds {
+        origin: Point::new(px(x), px(y)),
+        size: Size { width: px(width), height: px(height) },
+    };
+
+    // Use SelectionBorder token color (accent blue)
+    let mut color: Hsla = app.token(TokenKey::SelectionBorder);
+    color.a = 1.0; // Ensure full opacity
+
+    canvas(
+        move |_bounds, _window, _cx| (bounds, color),
+        move |canvas_bounds, (cell_bounds, color), window, _cx| {
+            let adjusted_bounds = Bounds {
+                origin: Point::new(
+                    canvas_bounds.origin.x + cell_bounds.origin.x,
+                    canvas_bounds.origin.y + cell_bounds.origin.y,
+                ),
+                size: cell_bounds.size,
+            };
+            let quad = gpui::quad(
+                adjusted_bounds,
+                px(0.0),
+                gpui::transparent_black(),
+                px(2.0),
+                color,
+                BorderStyle::Dashed,
+            );
+            window.paint_quad(quad);
         },
     )
     .absolute()

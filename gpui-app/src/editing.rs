@@ -54,6 +54,9 @@ impl Spreadsheet {
         // Block editing during preview mode
         if self.block_if_previewing(cx) { return; }
 
+        // Clear copy/cut border overlay when entering edit mode
+        self.clipboard_visual_range = None;
+
         let (mut row, mut col) = self.view_state.selected;
 
         // If on a merge-hidden cell, redirect selection to the merge origin
@@ -116,6 +119,9 @@ impl Spreadsheet {
 
         // Block editing during preview mode
         if self.block_if_previewing(cx) { return; }
+
+        // Clear copy/cut border overlay when entering edit mode
+        self.clipboard_visual_range = None;
 
         let (mut row, mut col) = self.view_state.selected;
 
@@ -834,7 +840,9 @@ impl Spreadsheet {
             // Update autocomplete for formulas
             self.update_autocomplete(cx);
         } else {
-            // Start editing with this character
+            // Start editing with this character — clear copy/cut border overlay
+            self.clipboard_visual_range = None;
+
             let (row, col) = self.view_state.selected;
 
             // Block editing spill receivers
@@ -895,6 +903,9 @@ impl Spreadsheet {
         if !self.mode.is_editing() {
             return false;
         }
+
+        // Clear copy/cut border overlay on edit commit
+        self.clipboard_visual_range = None;
 
         let (row, col) = self.view_state.selected;
         let old_value = self.edit_original.clone();
