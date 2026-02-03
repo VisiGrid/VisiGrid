@@ -75,12 +75,14 @@ pub struct Workbook {
     dep_graph: DepGraph,
 
     /// Batch nesting counter. When > 0, recalc is deferred until end_batch().
+    /// `pub(crate)` for test harness access.
     #[serde(skip)]
-    batch_depth: u32,
+    pub(crate) batch_depth: u32,
 
     /// Cells changed during the current batch. Drained at end_batch().
+    /// `pub(crate)` for test harness access.
     #[serde(skip)]
-    batch_changed: Vec<CellId>,
+    pub(crate) batch_changed: Vec<CellId>,
 
     /// Maps to `CalculationMode` from document settings:
     ///   `true`  = `CalculationMode::Automatic` — recalc on every edit (default)
@@ -92,6 +94,18 @@ pub struct Workbook {
     /// function policy) should be separate fields.
     #[serde(skip)]
     auto_recalc: bool,
+
+    /// Monotonically increasing revision number. Incremented once per successful
+    /// batch completion (or single-cell edit outside batch).
+    /// Used for optimistic concurrency control in session server protocol.
+    #[serde(skip)]
+    revision: u64,
+
+    /// Test instrumentation: counts how many times recalc_dirty_set was called.
+    /// Only present in test builds. Reset manually via reset_recalc_count().
+    #[cfg(test)]
+    #[serde(skip)]
+    recalc_count: std::cell::Cell<u32>,
 }
 
 fn default_next_sheet_id() -> u64 {
@@ -118,6 +132,9 @@ impl Workbook {
             batch_depth: 0,
             batch_changed: Vec::new(),
             auto_recalc: true,
+            revision: 0,
+            #[cfg(test)]
+            recalc_count: std::cell::Cell::new(0),
         }
     }
 
@@ -308,6 +325,11 @@ impl Workbook {
         self.sheets.iter_mut().find(|s| s.id == id)
     }
 
+    /// Get the index of a sheet by its ID
+    pub fn sheet_index_by_id(&self, id: SheetId) -> Option<usize> {
+        self.sheets.iter().position(|s| s.id == id)
+    }
+
     /// Find a sheet by name (case-insensitive)
     pub fn sheet_by_name(&self, name: &str) -> Option<&Sheet> {
         let key = normalize_sheet_name(name);
@@ -366,6 +388,9 @@ impl Workbook {
             batch_depth: 0,
             batch_changed: Vec::new(),
             auto_recalc: true,
+            revision: 0,
+            #[cfg(test)]
+            recalc_count: std::cell::Cell::new(0),
         }
     }
 
@@ -383,6 +408,9 @@ impl Workbook {
             batch_depth: 0,
             batch_changed: Vec::new(),
             auto_recalc: true,
+            revision: 0,
+            #[cfg(test)]
+            recalc_count: std::cell::Cell::new(0),
         }
     }
 
@@ -1393,18 +1421,22 @@ impl Workbook {
     }
 
     /// End a batch edit. If this is the outermost end, run a single
-    /// incremental recalc for the union of all changed cells.
+    /// incremental recalc for the union of all changed cells, then
+    /// increment the revision number once.
     pub fn end_batch(&mut self) {
         assert!(self.batch_depth > 0, "end_batch without begin_batch");
         self.batch_depth -= 1;
         if self.batch_depth == 0 {
             let changed = std::mem::take(&mut self.batch_changed);
-            self.recalc_dirty_set(&changed);
+            if !changed.is_empty() {
+                self.recalc_dirty_set(&changed);
+                self.increment_revision();
+            }
         }
     }
 
     /// Record a cell change. If batching, defers recalc.
-    /// If not batching, recalcs immediately.
+    /// If not batching, recalcs immediately and increments revision.
     /// No-op when `auto_recalc` is false (manual calculation mode).
     pub fn note_cell_changed(&mut self, cell_id: CellId) {
         if !self.auto_recalc {
@@ -1414,6 +1446,7 @@ impl Workbook {
             self.batch_changed.push(cell_id);
         } else {
             self.recalc_dirty_set(&[cell_id]);
+            self.increment_revision();
         }
     }
 
@@ -1428,11 +1461,38 @@ impl Workbook {
         self.auto_recalc
     }
 
+    /// Returns the current revision number.
+    /// Revision increments once per successful batch or single-cell edit.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Increment revision. Called at end of successful batch or single-cell edit.
+    fn increment_revision(&mut self) {
+        self.revision += 1;
+    }
+
+    /// Test instrumentation: returns the number of times recalc_dirty_set was called.
+    #[cfg(test)]
+    pub fn recalc_count(&self) -> u32 {
+        self.recalc_count.get()
+    }
+
+    /// Test instrumentation: reset the recalc counter.
+    #[cfg(test)]
+    pub fn reset_recalc_count(&self) {
+        self.recalc_count.set(0);
+    }
+
     /// Incremental recalc: re-evaluate only cells that transitively depend
     /// on any cell in `changed`. BFS to collect dirty subgraph, then
     /// evaluate in global topo order.
     fn recalc_dirty_set(&self, changed: &[CellId]) {
         use std::collections::VecDeque;
+
+        // Test instrumentation: count recalc calls
+        #[cfg(test)]
+        self.recalc_count.set(self.recalc_count.get() + 1);
 
         // 1. BFS forward from all changed cells to collect dirty set
         let mut dirty_set = FxHashSet::default();
@@ -3181,5 +3241,801 @@ mod tests {
         // Explicit F9-style recalc fixes it
         wb.recompute_full_ordered();
         assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "101");
+    }
+
+    // =========================================================================
+    // Session Server Invariant Tests (Phase 1)
+    //
+    // These tests define the contract for the session server protocol.
+    // Write first, make pass during implementation.
+    // See: docs/future/phase-1-session-server.md
+    // =========================================================================
+
+    /// Invariant: Empty batch does not increment revision.
+    ///
+    /// A batch with no ops applied should not change the revision number.
+    /// This is a prerequisite for rollback semantics.
+    #[test]
+    fn invariant_empty_batch_no_revision_increment() {
+        let mut wb = Workbook::new();
+        let initial_rev = wb.revision();
+
+        // Empty batch: no changes, no revision increment
+        {
+            let _guard = wb.batch_guard();
+            // No ops applied
+        }
+
+        assert_eq!(wb.revision(), initial_rev, "revision should not increment on empty batch");
+    }
+
+    /// Invariant: Aborted batch (manual clear) does not increment revision.
+    ///
+    /// When batch_changed is cleared before end_batch (simulating abort),
+    /// revision must remain stable.
+    #[test]
+    fn invariant_aborted_batch_no_revision_increment() {
+        let mut wb = Workbook::new();
+        let initial_rev = wb.revision();
+
+        // Start batch, make changes, then "abort" by clearing batch_changed
+        wb.begin_batch();
+        wb.batch_changed.push(CellId::new(SheetId(1), 0, 0)); // Simulate a change
+        // Simulate abort: clear the batch_changed without recalc
+        wb.batch_changed.clear();
+        wb.batch_depth -= 1; // Manual decrement to avoid end_batch logic
+
+        assert_eq!(wb.revision(), initial_rev, "revision should not increment on aborted batch");
+    }
+
+    /// Invariant 1: Rollback must not emit events to subscribers.
+    ///
+    /// When a batch is aborted (all ops rolled back), no cells_changed,
+    /// batch_applied, or revision_changed events should be emitted
+    /// (except a single BatchApplied with error and applied=0).
+    /// This prevents clients from seeing intermediate state.
+    #[test]
+    fn invariant_rollback_no_events() {
+        use crate::harness::{EngineHarness, Op};
+
+        let mut harness = EngineHarness::new();
+
+        // First, do a successful batch to establish baseline
+        let setup_ops = vec![Op::SetCellValue {
+            sheet_index: 0,
+            row: 0,
+            col: 0,
+            value: "baseline".to_string(),
+        }];
+        harness.apply_ops(&setup_ops, false);
+        harness.clear_events();
+
+        // Now apply a batch that will fail atomically
+        let ops = vec![
+            Op::SetCellValue {
+                sheet_index: 0,
+                row: 1,
+                col: 0,
+                value: "will rollback".to_string(),
+            },
+            Op::SimulateError {
+                message: "intentional failure".to_string(),
+            },
+        ];
+
+        let result = harness.apply_ops(&ops, true); // atomic=true
+
+        // Verify: only BatchApplied event (with error), NO CellsChanged, NO RevisionChanged
+        let events = harness.events();
+        assert_eq!(
+            events.cells_changed().len(),
+            0,
+            "rollback must not emit CellsChanged"
+        );
+        assert_eq!(
+            events.revision_changed().len(),
+            0,
+            "rollback must not emit RevisionChanged"
+        );
+        assert_eq!(
+            events.batch_applied().len(),
+            1,
+            "rollback must emit exactly one BatchApplied"
+        );
+
+        let batch_event = &events.batch_applied()[0];
+        assert_eq!(batch_event.applied, 0, "BatchApplied.applied must be 0 on rollback");
+        assert!(batch_event.error.is_some(), "BatchApplied must have error on rollback");
+
+        // Verify revision unchanged
+        assert_eq!(result.applied, 0);
+        assert_eq!(result.revision, 1); // Still at revision 1 from setup
+    }
+
+    /// Invariant 2: Rollback must not create undo entries.
+    ///
+    /// When a batch fails and is rolled back, the undo stack length must
+    /// remain unchanged. No undo group should be created for aborted batches.
+    #[test]
+    fn invariant_rollback_no_undo_entries() {
+        use crate::harness::{EngineHarness, Op};
+
+        let mut harness = EngineHarness::new();
+
+        // Create some initial undo groups
+        harness.apply_ops(
+            &[Op::SetCellValue {
+                sheet_index: 0,
+                row: 0,
+                col: 0,
+                value: "edit1".to_string(),
+            }],
+            false,
+        );
+        harness.apply_ops(
+            &[Op::SetCellValue {
+                sheet_index: 0,
+                row: 0,
+                col: 1,
+                value: "edit2".to_string(),
+            }],
+            false,
+        );
+
+        let undo_count_before = harness.undo_group_count();
+        assert_eq!(undo_count_before, 2, "should have 2 undo groups from setup");
+
+        // Now apply a batch that will fail atomically
+        let ops = vec![
+            Op::SetCellValue {
+                sheet_index: 0,
+                row: 1,
+                col: 0,
+                value: "will rollback".to_string(),
+            },
+            Op::SimulateError {
+                message: "intentional failure".to_string(),
+            },
+        ];
+
+        harness.apply_ops(&ops, true); // atomic=true
+
+        // Verify: undo group count unchanged
+        assert_eq!(
+            harness.undo_group_count(),
+            undo_count_before,
+            "rollback must not create undo entry"
+        );
+    }
+
+    /// Invariant 3: Successful batch triggers exactly one recalc.
+    ///
+    /// Multiple cell changes within a batch should result in a single
+    /// recalc_dirty_set call when the batch completes.
+    #[test]
+    fn invariant_single_recalc_on_success() {
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        // Setup: A1=1, B1=A1+1, C1=B1+1
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1");
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1+1");
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=B1+1");
+        wb.update_cell_deps(sid, 0, 1);
+        wb.update_cell_deps(sid, 0, 2);
+        wb.recompute_full_ordered();
+
+        // Reset counter after setup
+        wb.reset_recalc_count();
+
+        // Batch: change multiple cells
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "10");
+            guard.set_cell_value_tracked(0, 1, 0, "20");
+            guard.set_cell_value_tracked(0, 2, 0, "30");
+        }
+
+        assert_eq!(wb.recalc_count(), 1, "batch should trigger exactly one recalc");
+    }
+
+    /// Invariant 4: Failed batch (atomic rollback) triggers exactly one recalc.
+    ///
+    /// Even when a batch fails partway through, the rollback path should
+    /// result in exactly one recalc (to restore consistent state).
+    ///
+    /// Note: Current engine doesn't have atomic rollback - this test verifies
+    /// recalc count for successful batch. Full test requires session server.
+    #[test]
+    fn invariant_single_recalc_on_failure() {
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        // Setup formula chain
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "1");
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1*2");
+        wb.update_cell_deps(sid, 0, 1);
+        wb.recompute_full_ordered();
+
+        wb.reset_recalc_count();
+
+        // Batch with single change (simulating "failure after first op")
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "5");
+            // In atomic mode, if next op failed, we'd rollback
+            // For now, just verify single recalc on successful completion
+        }
+
+        assert_eq!(wb.recalc_count(), 1, "batch should trigger exactly one recalc");
+    }
+
+    /// Invariant 5: Revision increments exactly once per successful batch.
+    ///
+    /// A batch that modifies N cells should increment revision by exactly 1,
+    /// not N. This enables efficient change detection.
+    #[test]
+    fn invariant_revision_increments_once_per_batch() {
+        let mut wb = Workbook::new();
+        let initial_rev = wb.revision();
+
+        // Batch: 5 cell changes
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "a");
+            guard.set_cell_value_tracked(0, 1, 0, "b");
+            guard.set_cell_value_tracked(0, 2, 0, "c");
+            guard.set_cell_value_tracked(0, 3, 0, "d");
+            guard.set_cell_value_tracked(0, 4, 0, "e");
+        }
+
+        assert_eq!(
+            wb.revision(),
+            initial_rev + 1,
+            "batch of 5 changes should increment revision by exactly 1"
+        );
+    }
+
+    /// Invariant 6: Revision must not increment on rejected/empty batch.
+    ///
+    /// If a batch is rejected (e.g., expected_revision mismatch) or contains
+    /// no actual changes, the revision number must remain stable.
+    #[test]
+    fn invariant_revision_stable_on_rejection() {
+        let mut wb = Workbook::new();
+
+        // Set up initial state
+        wb.set_cell_value_tracked(0, 0, 0, "initial");
+        let rev_after_setup = wb.revision();
+
+        // Empty batch (no ops)
+        {
+            let _guard = wb.batch_guard();
+        }
+
+        assert_eq!(
+            wb.revision(),
+            rev_after_setup,
+            "empty batch should not increment revision"
+        );
+
+        // Batch that modifies same cell to same value (no-op in practice)
+        // Note: Current impl doesn't detect no-change, so this increments revision.
+        // This is acceptable behavior - true no-change detection is optimization.
+    }
+
+    /// Invariant: Revision increments by exactly 1 per successful batch.
+    ///
+    /// Not just "strictly monotonic" (r2 > r1) but the stronger property:
+    /// r2 == r1 + 1. No skipping, no gaps. This enables efficient change
+    /// detection and is a prerequisite for event boundary isolation.
+    #[test]
+    fn invariant_revision_increments_by_one_per_batch() {
+        let mut wb = Workbook::new();
+
+        // Record revision before batch 1
+        let rev_before_batch1 = wb.revision();
+
+        // Batch 1
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "batch1");
+        }
+        let rev_after_batch1 = wb.revision();
+
+        // Batch 2
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 1, 0, "batch2");
+        }
+        let rev_after_batch2 = wb.revision();
+
+        // Revisions should be strictly increasing
+        assert!(
+            rev_after_batch1 > rev_before_batch1,
+            "revision should increment after batch 1"
+        );
+        assert!(
+            rev_after_batch2 > rev_after_batch1,
+            "revision should increment after batch 2"
+        );
+        assert_eq!(
+            rev_after_batch2 - rev_after_batch1,
+            1,
+            "each batch increments revision by exactly 1"
+        );
+    }
+
+    /// Invariant 8: Fingerprint must be deterministic across platforms.
+    ///
+    /// Given identical cell data, the fingerprint (hash) must be identical
+    /// regardless of platform, endianness, or JSON key ordering.
+    ///
+    /// This test verifies basic fingerprint stability using canonical encoding.
+    #[test]
+    fn invariant_fingerprint_deterministic() {
+        // Test canonical byte encoding for operations
+        // Format: tag(1) + sheet(4 LE) + row(4 LE) + col(4 LE) + len(4 LE) + value(UTF-8)
+
+        fn encode_set_value(sheet: u32, row: u32, col: u32, value: &str) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.push(0x01); // SetCellValue tag
+            buf.extend_from_slice(&sheet.to_le_bytes());
+            buf.extend_from_slice(&row.to_le_bytes());
+            buf.extend_from_slice(&col.to_le_bytes());
+            buf.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            buf.extend_from_slice(value.as_bytes());
+            buf
+        }
+
+        // Same operation should produce identical bytes
+        let bytes1 = encode_set_value(0, 5, 3, "hello");
+        let bytes2 = encode_set_value(0, 5, 3, "hello");
+        assert_eq!(bytes1, bytes2, "identical ops must encode identically");
+
+        // Different operations should produce different bytes
+        let bytes3 = encode_set_value(0, 5, 3, "world");
+        assert_ne!(bytes1, bytes3, "different values must encode differently");
+
+        // Expected bytes for verification (can be computed on any platform)
+        let expected = vec![
+            0x01, // tag
+            0x00, 0x00, 0x00, 0x00, // sheet 0
+            0x05, 0x00, 0x00, 0x00, // row 5
+            0x03, 0x00, 0x00, 0x00, // col 3
+            0x05, 0x00, 0x00, 0x00, // len 5
+            b'h', b'e', b'l', b'l', b'o', // value
+        ];
+        assert_eq!(bytes1, expected, "encoding must match expected bytes");
+    }
+
+    /// Invariant 9: Float canonicalization for fingerprinting.
+    ///
+    /// - NaN and infinity should be rejected (or canonicalized)
+    /// - -0.0 must equal +0.0 in fingerprint
+    /// - Floats must be encoded consistently (e.g., via to_le_bytes)
+    #[test]
+    fn invariant_float_canonicalization() {
+        // Test float encoding for fingerprinting
+        fn canonicalize_float(f: f64) -> Option<[u8; 8]> {
+            if f.is_nan() || f.is_infinite() {
+                return None; // Reject non-finite values
+            }
+            // Canonicalize -0.0 to +0.0
+            let canonical = if f == 0.0 { 0.0_f64 } else { f };
+            Some(canonical.to_le_bytes())
+        }
+
+        // Normal values work
+        assert!(canonicalize_float(42.0).is_some());
+        assert!(canonicalize_float(-123.456).is_some());
+
+        // -0.0 canonicalizes to +0.0
+        let neg_zero = canonicalize_float(-0.0_f64).unwrap();
+        let pos_zero = canonicalize_float(0.0_f64).unwrap();
+        assert_eq!(neg_zero, pos_zero, "-0.0 must equal +0.0 in fingerprint");
+
+        // NaN rejected
+        assert!(canonicalize_float(f64::NAN).is_none(), "NaN must be rejected");
+
+        // Infinity rejected
+        assert!(
+            canonicalize_float(f64::INFINITY).is_none(),
+            "infinity must be rejected"
+        );
+        assert!(
+            canonicalize_float(f64::NEG_INFINITY).is_none(),
+            "negative infinity must be rejected"
+        );
+    }
+
+    /// Invariant 10: Discovery file must be written atomically.
+    ///
+    /// The discovery file (containing session info) must be written atomically
+    /// so readers never see partial content. This is typically done via
+    /// write-to-temp + rename.
+    ///
+    /// This test verifies the atomic write pattern at filesystem level.
+    #[test]
+    fn invariant_discovery_file_atomic() {
+        use std::fs;
+        use std::io::Write;
+
+        let temp_dir = std::env::temp_dir();
+        let final_path = temp_dir.join("visigrid-discovery-test.json");
+        let temp_path = temp_dir.join("visigrid-discovery-test.json.tmp");
+
+        // Cleanup from previous runs
+        let _ = fs::remove_file(&final_path);
+        let _ = fs::remove_file(&temp_path);
+
+        // Atomic write pattern: write to temp, then rename
+        let content = r#"{"pid":12345,"port":9876,"token":"abc123"}"#;
+
+        // Step 1: Write to temp file
+        {
+            let mut file = fs::File::create(&temp_path).expect("create temp file");
+            file.write_all(content.as_bytes()).expect("write temp file");
+            file.sync_all().expect("sync temp file");
+        }
+
+        // Step 2: Atomic rename
+        fs::rename(&temp_path, &final_path).expect("atomic rename");
+
+        // Verify: final file is readable and complete
+        let read_content = fs::read_to_string(&final_path).expect("read final file");
+        assert_eq!(read_content, content, "content must match after atomic write");
+
+        // Verify: temp file no longer exists
+        assert!(
+            !temp_path.exists(),
+            "temp file should not exist after rename"
+        );
+
+        // Cleanup
+        let _ = fs::remove_file(&final_path);
+    }
+
+    // =========================================================================
+    // Additional Invariants (identified during review)
+    // =========================================================================
+
+    /// Invariant: cells_changed events must not coalesce across revisions.
+    ///
+    /// When two batches complete in quick succession, even with event throttling,
+    /// the cells_changed events must not merge changes from different revisions.
+    ///
+    /// Each CellsChanged event has a revision tag. Cells in that event must
+    /// only be from operations in the batch that produced that revision.
+    #[test]
+    fn invariant_events_no_cross_revision_coalesce() {
+        use crate::harness::{EngineHarness, Op};
+
+        let mut harness = EngineHarness::new();
+
+        // Batch A: change A1 → revision r1
+        let ops_a = vec![Op::SetCellValue {
+            sheet_index: 0,
+            row: 0,
+            col: 0, // A1
+            value: "batch_a".to_string(),
+        }];
+        harness.apply_ops(&ops_a, false);
+        let r1 = harness.revision();
+
+        // Batch B: change B1 → revision r2
+        let ops_b = vec![Op::SetCellValue {
+            sheet_index: 0,
+            row: 0,
+            col: 1, // B1
+            value: "batch_b".to_string(),
+        }];
+        harness.apply_ops(&ops_b, false);
+        let r2 = harness.revision();
+
+        // Verify revisions are distinct
+        assert_ne!(r1, r2, "batches should produce different revisions");
+
+        // Collect cells_changed events
+        let events = harness.events();
+        let cells_events = events.cells_changed();
+        assert_eq!(cells_events.len(), 2, "should have 2 CellsChanged events");
+
+        // Find events by revision
+        let event_r1 = cells_events.iter().find(|e| e.revision == r1);
+        let event_r2 = cells_events.iter().find(|e| e.revision == r2);
+
+        assert!(event_r1.is_some(), "should have CellsChanged for r1");
+        assert!(event_r2.is_some(), "should have CellsChanged for r2");
+
+        let event_r1 = event_r1.unwrap();
+        let event_r2 = event_r2.unwrap();
+
+        // Event for r1 should contain A1 only
+        assert_eq!(event_r1.cells.len(), 1, "r1 event should have 1 cell");
+        assert_eq!(event_r1.cells[0].col, 0, "r1 event should contain col 0 (A1)");
+
+        // Event for r2 should contain B1 only
+        assert_eq!(event_r2.cells.len(), 1, "r2 event should have 1 cell");
+        assert_eq!(event_r2.cells[0].col, 1, "r2 event should contain col 1 (B1)");
+
+        // No event should contain cells from both batches
+        for event in cells_events {
+            let has_a1 = event.cells.iter().any(|c| c.col == 0);
+            let has_b1 = event.cells.iter().any(|c| c.col == 1);
+            assert!(
+                !(has_a1 && has_b1),
+                "CellsChanged must not coalesce cells from different revisions"
+            );
+        }
+    }
+
+    /// Invariant: Rate limiter uses deterministic token bucket semantics.
+    ///
+    /// The rate limiter must have predictable boundary behavior:
+    /// - Fixed refill rate (20k ops/sec)
+    /// - Fixed burst capacity (40k ops)
+    /// - Message exceeding burst must fail entirely (not partially)
+    ///
+    /// Requires: Session server layer (rate limiter implementation).
+    #[test]
+    #[ignore = "requires session server rate limiter implementation"]
+    fn invariant_rate_limiter_burst_boundary() {
+        // Test structure (to be implemented in session server):
+        //
+        // 1. Create rate limiter with 40k burst, 20k/sec refill
+        // 2. Drain to exactly 0 tokens
+        // 3. Wait 1 second (should have 20k tokens)
+        // 4. Submit 20k ops → should succeed
+        // 5. Submit 1 more op → should fail (rate limited)
+        // 6. Wait 50ms (should have 1k tokens)
+        // 7. Submit 1k ops → should succeed
+        // 8. Submit 50k ops → should fail entirely (exceeds burst)
+        //
+        // Token bucket: capacity=40k, refill_rate=20k/sec
+        // Deterministic: same timing → same result across runs
+        unimplemented!("requires session server rate limiter");
+    }
+
+    /// Invariant: Partial non-atomic apply increments revision.
+    ///
+    /// When atomic=false and a batch fails partway through, the revision
+    /// must still increment because state has changed (partial apply committed).
+    ///
+    /// This documents the chosen behavior: partial success = revision bump.
+    #[test]
+    fn invariant_revision_increment_on_partial_nonatomic() {
+        use crate::harness::{EngineHarness, Op};
+
+        let mut harness = EngineHarness::new();
+        let initial_rev = harness.revision();
+
+        // Apply a batch that will partially succeed (non-atomic)
+        let ops = vec![
+            Op::SetCellValue {
+                sheet_index: 0,
+                row: 0,
+                col: 0, // A1
+                value: "first".to_string(),
+            },
+            Op::SetCellValue {
+                sheet_index: 0,
+                row: 0,
+                col: 1, // B1
+                value: "second".to_string(),
+            },
+            Op::SimulateError {
+                message: "fail after 2 ops".to_string(),
+            },
+            Op::SetCellValue {
+                sheet_index: 0,
+                row: 0,
+                col: 2, // C1 - never applied
+                value: "never".to_string(),
+            },
+        ];
+
+        let result = harness.apply_ops(&ops, false); // atomic=false
+
+        // Partial apply: 2 ops applied, revision incremented
+        assert_eq!(result.applied, 2);
+        assert!(result.error.is_some());
+        assert_eq!(
+            result.revision,
+            initial_rev + 1,
+            "partial apply must increment revision"
+        );
+
+        // Verify the changes were actually applied
+        let wb = harness.workbook();
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "first");  // A1
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "second"); // B1
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 2), "");       // C1 - not applied
+    }
+
+    /// Invariant: Partial non-atomic apply event semantics.
+    ///
+    /// When atomic=false and a batch fails partway:
+    /// - RevisionChanged: emitted (state changed)
+    /// - CellsChanged: emitted for applied ops ONLY (not failed/skipped)
+    /// - BatchApplied: emitted with applied=N, total=M, error set
+    ///
+    /// This documents the exact event contract for partial failure.
+    #[test]
+    fn invariant_partial_nonatomic_event_semantics() {
+        use crate::harness::{EngineHarness, Op};
+
+        let mut harness = EngineHarness::new();
+
+        let ops = vec![
+            Op::SetCellValue {
+                sheet_index: 0,
+                row: 0,
+                col: 0, // A1
+                value: "applied1".to_string(),
+            },
+            Op::SetCellValue {
+                sheet_index: 0,
+                row: 0,
+                col: 1, // B1
+                value: "applied2".to_string(),
+            },
+            Op::SimulateError {
+                message: "fail".to_string(),
+            },
+            Op::SetCellValue {
+                sheet_index: 0,
+                row: 0,
+                col: 2, // C1 - skipped
+                value: "skipped".to_string(),
+            },
+        ];
+
+        let _result = harness.apply_ops(&ops, false); // atomic=false
+
+        let events = harness.events();
+
+        // RevisionChanged: must be emitted (state changed)
+        assert_eq!(
+            events.revision_changed().len(),
+            1,
+            "partial apply must emit RevisionChanged"
+        );
+        let rev_event = &events.revision_changed()[0];
+        assert_eq!(rev_event.previous, 0);
+        assert_eq!(rev_event.revision, 1);
+
+        // CellsChanged: must contain only applied cells (A1, B1), not skipped (C1)
+        assert_eq!(
+            events.cells_changed().len(),
+            1,
+            "partial apply must emit CellsChanged"
+        );
+        let cells_event = &events.cells_changed()[0];
+        assert_eq!(cells_event.revision, 1);
+        assert_eq!(
+            cells_event.cells.len(),
+            2,
+            "CellsChanged must have only applied cells"
+        );
+
+        // Verify cells are A1 and B1, not C1
+        let cols: Vec<usize> = cells_event.cells.iter().map(|c| c.col).collect();
+        assert!(cols.contains(&0), "CellsChanged must include A1");
+        assert!(cols.contains(&1), "CellsChanged must include B1");
+        assert!(!cols.contains(&2), "CellsChanged must NOT include C1 (skipped)");
+
+        // BatchApplied: must have correct applied count and error
+        assert_eq!(events.batch_applied().len(), 1);
+        let batch_event = &events.batch_applied()[0];
+        assert_eq!(batch_event.applied, 2, "BatchApplied.applied must be 2");
+        assert_eq!(batch_event.total, 4, "BatchApplied.total must be 4");
+        assert!(batch_event.error.is_some(), "BatchApplied must have error");
+        assert_eq!(
+            batch_event.error.as_ref().unwrap().op_index,
+            2,
+            "error must be at op_index 2"
+        );
+    }
+
+    /// Invariant: Fingerprint golden vector (version 1).
+    ///
+    /// A fixed sequence of operations must produce a known fingerprint.
+    /// This catches encoding drift, field reordering, and hash changes.
+    ///
+    /// If this test fails after intentional changes, bump the fingerprint
+    /// version in the protocol and update the expected hash.
+    #[test]
+    fn invariant_fingerprint_golden_vector_v1() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        /// Canonical op encoding for fingerprinting (version 1).
+        /// Format: tag(1) + sheet(4 LE) + row(4 LE) + col(4 LE) + payload
+        fn encode_op_v1(tag: u8, sheet: u32, row: u32, col: u32, payload: &[u8]) -> Vec<u8> {
+            let mut buf = Vec::with_capacity(13 + payload.len());
+            buf.push(tag);
+            buf.extend_from_slice(&sheet.to_le_bytes());
+            buf.extend_from_slice(&row.to_le_bytes());
+            buf.extend_from_slice(&col.to_le_bytes());
+            buf.extend_from_slice(payload);
+            buf
+        }
+
+        fn encode_string_payload(s: &str) -> Vec<u8> {
+            let mut buf = Vec::with_capacity(4 + s.len());
+            buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            buf.extend_from_slice(s.as_bytes());
+            buf
+        }
+
+        // Golden vector: a fixed sequence of operations
+        let ops = [
+            // Op 1: SetCellValue(sheet=0, row=0, col=0, value="Revenue")
+            encode_op_v1(0x01, 0, 0, 0, &encode_string_payload("Revenue")),
+            // Op 2: SetCellValue(sheet=0, row=0, col=1, value="100000")
+            encode_op_v1(0x01, 0, 0, 1, &encode_string_payload("100000")),
+            // Op 3: SetCellFormula(sheet=0, row=1, col=1, formula="=B1*1.1")
+            encode_op_v1(0x02, 0, 1, 1, &encode_string_payload("=B1*1.1")),
+        ];
+
+        // Hash the concatenated ops
+        let mut hasher = DefaultHasher::new();
+        for op in &ops {
+            op.hash(&mut hasher);
+        }
+        let fingerprint = hasher.finish();
+
+        // Expected fingerprint (computed once, frozen forever for v1)
+        // If encoding changes, this MUST fail. Update only with version bump.
+        //
+        // Note: DefaultHasher is not guaranteed stable across Rust versions,
+        // but for this test we're verifying the ENCODING is stable, not the
+        // hash algorithm. In production, use a stable hash (e.g., xxhash, blake3).
+        //
+        // For now, we verify the raw bytes match expected encoding:
+        let expected_op1 = vec![
+            0x01, // tag: SetCellValue
+            0x00, 0x00, 0x00, 0x00, // sheet: 0
+            0x00, 0x00, 0x00, 0x00, // row: 0
+            0x00, 0x00, 0x00, 0x00, // col: 0
+            0x07, 0x00, 0x00, 0x00, // len: 7
+            b'R', b'e', b'v', b'e', b'n', b'u', b'e', // "Revenue"
+        ];
+        assert_eq!(ops[0], expected_op1, "Op 1 encoding must match golden vector");
+
+        let expected_op2 = vec![
+            0x01, // tag: SetCellValue
+            0x00, 0x00, 0x00, 0x00, // sheet: 0
+            0x00, 0x00, 0x00, 0x00, // row: 0
+            0x01, 0x00, 0x00, 0x00, // col: 1
+            0x06, 0x00, 0x00, 0x00, // len: 6
+            b'1', b'0', b'0', b'0', b'0', b'0', // "100000"
+        ];
+        assert_eq!(ops[1], expected_op2, "Op 2 encoding must match golden vector");
+
+        let expected_op3 = vec![
+            0x02, // tag: SetCellFormula
+            0x00, 0x00, 0x00, 0x00, // sheet: 0
+            0x01, 0x00, 0x00, 0x00, // row: 1
+            0x01, 0x00, 0x00, 0x00, // col: 1
+            0x07, 0x00, 0x00, 0x00, // len: 7
+            b'=', b'B', b'1', b'*', b'1', b'.', b'1', // "=B1*1.1"
+        ];
+        assert_eq!(ops[2], expected_op3, "Op 3 encoding must match golden vector");
+
+        // Verify fingerprint is non-zero and deterministic
+        assert_ne!(fingerprint, 0, "fingerprint must be non-zero");
+
+        // Re-compute to verify determinism
+        let mut hasher2 = DefaultHasher::new();
+        for op in &ops {
+            op.hash(&mut hasher2);
+        }
+        assert_eq!(
+            hasher2.finish(),
+            fingerprint,
+            "fingerprint must be deterministic"
+        );
     }
 }

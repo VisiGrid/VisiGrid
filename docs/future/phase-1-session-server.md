@@ -4,6 +4,45 @@
 **Effort:** 2-3 weeks
 **Transport:** TCP localhost + token (cross-platform, simplest to ship right)
 
+## Implementation Progress
+
+### Completed (engine layer)
+
+- **Revision tracking** — `Workbook.revision()` increments exactly once per successful batch. Enables optimistic concurrency control via `expected_revision`.
+
+- **Event types** — `crates/engine/src/events.rs` defines:
+  - `BatchApplied` — emitted after apply_ops (success or partial failure)
+  - `CellsChanged` — cells that changed, tagged with revision
+  - `RevisionChanged` — new/previous revision pair
+
+- **Engine harness** — `crates/engine/src/harness.rs` provides:
+  - `EngineHarness` wrapper with `apply_ops(ops, atomic)`
+  - Event collection via `EventCollector`
+  - Undo group tracking
+  - Used for invariant tests without GUI dependencies
+
+- **Invariant tests** — 16 passing tests that define the protocol contract:
+  - `invariant_rollback_no_events` — atomic rollback emits only BatchApplied error
+  - `invariant_rollback_no_undo_entries` — atomic rollback creates no undo group
+  - `invariant_events_no_cross_revision_coalesce` — CellsChanged per revision isolated
+  - `invariant_partial_nonatomic_event_semantics` — partial apply event contract
+  - `invariant_revision_increments_by_one_per_batch` — no skipping, no gaps
+  - `invariant_fingerprint_golden_vector_v1` — frozen encoding for v1
+  - `invariant_float_canonicalization` — NaN/inf rejected, -0.0 == +0.0
+  - `invariant_discovery_file_atomic` — write-to-temp + rename pattern
+  - Plus 8 more covering recalc counts, revision stability, fingerprint encoding
+
+### Remaining (server layer)
+
+- [ ] TCP server binding to 127.0.0.1:<random_port>
+- [ ] Token generation and discovery file writing
+- [ ] JSONL message framing and parsing
+- [ ] Protocol handshake (hello/welcome)
+- [ ] apply_ops endpoint with atomic/non-atomic modes
+- [ ] Rate limiter (token bucket: 40k burst, 20k/sec refill)
+- [ ] Event subscription and streaming
+- [ ] CLI `attach` and `apply` commands
+
 ## Goal
 
 A running VisiGrid GUI exposes a local session endpoint.

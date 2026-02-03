@@ -10,6 +10,14 @@
 
 - **Formula entry parity** — `+` now behaves identically to `=` for starting formula mode. Arrow keys immediately enter ref-picking regardless of previous F2 toggle state, and Escape cleanly exits. Fixes an intermittent bug where formula navigation state leaked between edit sessions.
 
+### Engine
+
+- **Session server foundation** — engine-layer infrastructure for the upcoming session server (Phase 1 of AI agent support):
+  - Revision tracking: `Workbook.revision()` increments exactly once per successful batch
+  - Event types: `BatchApplied`, `CellsChanged`, `RevisionChanged` with revision tagging
+  - Engine harness: `EngineHarness` for testing batch operations with event collection
+  - 16 invariant tests defining the protocol contract (atomic rollback, event boundaries, fingerprint encoding)
+
 ## 0.4.4
 
 ### CLI
