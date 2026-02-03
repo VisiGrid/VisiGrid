@@ -2626,12 +2626,17 @@ impl Spreadsheet {
     }
 
     /// Handle an apply_ops request from the session server.
+    ///
+    /// Uses proper batching: all ops are applied within a single batch_guard,
+    /// ensuring exactly one recalc and one revision increment for the entire batch.
     fn handle_session_apply_ops(
         &mut self,
         req: &crate::session_server::ApplyOpsRequest,
         cx: &mut Context<Self>,
     ) -> crate::session_server::ApplyOpsResponse {
         use crate::session_server::{ApplyOpsResponse, ApplyOpsError, Op};
+        use crate::history::CellChange;
+        use visigrid_engine::cell_id::CellId;
 
         // Check expected_revision if provided
         let current_rev = self.workbook.read(cx).revision();
@@ -2649,42 +2654,102 @@ impl Spreadsheet {
             }
         }
 
-        // Apply ops one by one (or atomically if requested)
-        // For now, apply all ops and count successes
-        let mut applied = 0;
-        let mut error = None;
+        if req.ops.is_empty() {
+            return ApplyOpsResponse {
+                applied: 0,
+                total: 0,
+                current_revision: current_rev,
+                error: None,
+            };
+        }
 
-        for (i, op) in req.ops.iter().enumerate() {
-            match op {
-                Op::SetCellValue { sheet, row, col, value } => {
-                    // TODO: Switch to correct sheet if needed
-                    self.set_cell_value(*row, *col, value, cx);
-                    applied += 1;
+        // Apply all ops within a single batch_guard, collecting changes for history
+        let (applied, error, changes_by_sheet) = self.workbook.update(cx, |wb, _| {
+            let mut guard = wb.batch_guard();
+            let mut applied = 0;
+            let mut error: Option<crate::session_server::ApplyOpsError> = None;
+            // Group changes by sheet for history recording
+            let mut changes_by_sheet: std::collections::HashMap<usize, Vec<CellChange>> =
+                std::collections::HashMap::new();
+
+            for (_i, op) in req.ops.iter().enumerate() {
+                let sheet_count = guard.sheets().len();
+
+                match op {
+                    Op::SetCellValue { sheet, row, col, value } => {
+                        let sheet_idx = if *sheet < sheet_count { *sheet } else { guard.active_sheet_index() };
+
+                        // Capture old value for history
+                        let old_value = guard.sheets()[sheet_idx].get_raw(*row, *col);
+                        changes_by_sheet.entry(sheet_idx).or_default().push(CellChange {
+                            row: *row,
+                            col: *col,
+                            old_value,
+                            new_value: value.clone(),
+                        });
+
+                        // Apply the mutation via tracked method
+                        guard.set_cell_value_tracked(sheet_idx, *row, *col, value);
+                        applied += 1;
+                    }
+                    Op::SetCellFormula { sheet, row, col, formula } => {
+                        let sheet_idx = if *sheet < sheet_count { *sheet } else { guard.active_sheet_index() };
+
+                        let old_value = guard.sheets()[sheet_idx].get_raw(*row, *col);
+                        changes_by_sheet.entry(sheet_idx).or_default().push(CellChange {
+                            row: *row,
+                            col: *col,
+                            old_value,
+                            new_value: formula.clone(),
+                        });
+
+                        guard.set_cell_value_tracked(sheet_idx, *row, *col, formula);
+                        applied += 1;
+                    }
+                    Op::ClearCell { sheet, row, col } => {
+                        let sheet_idx = if *sheet < sheet_count { *sheet } else { guard.active_sheet_index() };
+
+                        let old_value = guard.sheets()[sheet_idx].get_raw(*row, *col);
+                        changes_by_sheet.entry(sheet_idx).or_default().push(CellChange {
+                            row: *row,
+                            col: *col,
+                            old_value,
+                            new_value: String::new(),
+                        });
+
+                        guard.clear_cell_tracked(sheet_idx, *row, *col);
+                        applied += 1;
+                    }
+                    Op::SetNumberFormat { .. } => {
+                        // TODO: Parse format string and apply to range
+                        applied += 1;
+                    }
+                    Op::SetStyle { .. } => {
+                        // TODO: Apply style changes to range
+                        applied += 1;
+                    }
                 }
-                Op::SetCellFormula { sheet, row, col, formula } => {
-                    // Formulas are set via set_cell_value (auto-detected by leading =)
-                    self.set_cell_value(*row, *col, formula, cx);
-                    applied += 1;
-                }
-                Op::ClearCell { sheet, row, col } => {
-                    self.set_cell_value(*row, *col, "", cx);
-                    applied += 1;
-                }
-                Op::SetNumberFormat { sheet, start_row, start_col, end_row, end_col, format } => {
-                    // TODO: Parse format string and apply
-                    applied += 1;
-                }
-                Op::SetStyle { sheet, start_row, start_col, end_row, end_col, bold, italic, underline } => {
-                    // TODO: Apply style changes
-                    applied += 1;
+
+                // If atomic and there was an error, stop
+                if req.atomic && error.is_some() {
+                    break;
                 }
             }
 
-            // If atomic and there was an error, stop
-            if req.atomic && error.is_some() {
-                break;
+            (applied, error, changes_by_sheet)
+        });
+        // batch_guard dropped here → single recalc + revision increment
+
+        // Record history entries for undo (one per sheet that had changes)
+        for (sheet_idx, changes) in changes_by_sheet {
+            if !changes.is_empty() {
+                self.history.record_batch(sheet_idx, changes);
             }
         }
+
+        // Mark document as modified
+        self.is_modified = true;
+        self.cached_title = None;
 
         let new_rev = self.workbook.read(cx).revision();
         ApplyOpsResponse {
