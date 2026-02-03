@@ -61,24 +61,25 @@
 - **GUI integration** — `gpui-app/src/app.rs`:
   - `Spreadsheet` owns `Receiver<SessionRequest>` + `SessionServer`
   - `drain_session_requests()` called at render start
-  - `handle_session_apply_ops()` applies ops via canonical mutation path
-  - `handle_session_inspect()` queries workbook state
+  - `handle_session_apply_ops()` applies ops via canonical mutation path:
+    - Uses `batch_guard()` for single recalc + revision increment
+    - Uses `set_cell_value_tracked()`/`clear_cell_tracked()` methods
+    - Records history for undo (one entry per sheet with changes)
+    - Marks document as modified
+  - `handle_session_inspect()` queries workbook state:
+    - Supports Cell, Range, and Workbook targets
+    - Returns display value, raw value, and formula status
   - `start_session_server()` / `stop_session_server()` public API
 
-- **Tests** — 16 passing tests covering:
-  - Server lifecycle and bridge requirements
-  - Connection handshake and authentication
-  - Apply ops and inspect via bridge
-  - Discovery file serialization and token verification
-  - Protocol message serialization
+- **Tests** — 16 passing tests + 397 total gpui tests pass
 
 ### Remaining
 
-- [ ] Wire apply_ops to real workbook mutations (currently placeholder)
 - [ ] Rate limiter (token bucket: 40k burst, 20k/sec refill)
 - [ ] Event subscription and streaming
 - [ ] GUI controls (Live Control panel, status bar indicator)
 - [ ] CLI `attach` and `apply` commands
+- [ ] Smoke test: manual test client applies ops and verifies results
 
 ## Goal
 
