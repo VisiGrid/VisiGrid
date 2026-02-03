@@ -577,7 +577,7 @@ impl Spreadsheet {
         for change in &changes {
             self.set_cell_value(change.row, change.col, &change.new_value, cx);
         }
-        self.workbook.update(cx, |wb, _| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         // Record batch for undo
         let had_changes = !changes.is_empty();
@@ -1075,7 +1075,7 @@ impl Spreadsheet {
             self.set_cell_value(*row, *col, &new_value, cx);
             filled_count += 1;
         }
-        self.wb_mut(cx, |wb| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         let sheet_id = self.sheet(cx).id;
         let sheet_name = self.sheet(cx).name.clone();

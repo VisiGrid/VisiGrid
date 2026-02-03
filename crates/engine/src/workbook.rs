@@ -1423,7 +1423,10 @@ impl Workbook {
     /// End a batch edit. If this is the outermost end, run a single
     /// incremental recalc for the union of all changed cells, then
     /// increment the revision number once.
-    pub fn end_batch(&mut self) {
+    ///
+    /// Returns the list of changed cells (empty if nested batch or no changes).
+    /// Callers can use this to broadcast changes to subscribers.
+    pub fn end_batch(&mut self) -> Vec<CellId> {
         assert!(self.batch_depth > 0, "end_batch without begin_batch");
         self.batch_depth -= 1;
         if self.batch_depth == 0 {
@@ -1431,8 +1434,10 @@ impl Workbook {
             if !changed.is_empty() {
                 self.recalc_dirty_set(&changed);
                 self.increment_revision();
+                return changed;
             }
         }
+        Vec::new()
     }
 
     /// Record a cell change. If batching, defers recalc.

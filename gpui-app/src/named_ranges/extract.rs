@@ -434,7 +434,7 @@ impl Spreadsheet {
                 }
             }
         }
-        self.wb_mut(cx, |wb| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         // 3. Record undo action (group)
         // Get the full named range we just created for the undo action

@@ -2919,3 +2919,149 @@ fn no_untracked_cell_mutations() {
         violations.join("\n")
     );
 }
+
+// =========================================================================
+// Clipboard is_internal_paste: Wayland regression tests
+// =========================================================================
+
+use crate::clipboard::InternalClipboard;
+use visigrid_engine::cell::CellFormat;
+use visigrid_engine::formula::eval::Value;
+use crate::app::Spreadsheet;
+
+/// Create a minimal InternalClipboard for testing
+fn make_internal_clipboard(raw_tsv: &str, id: u128) -> InternalClipboard {
+    InternalClipboard {
+        raw_tsv: raw_tsv.to_string(),
+        values: vec![vec![Value::Text(raw_tsv.to_string())]],
+        formats: vec![vec![CellFormat::default()]],
+        source: (0, 0),
+        id,
+        merges: vec![],
+    }
+}
+
+#[test]
+fn test_is_internal_paste_metadata_matches() {
+    // Primary path: metadata ID matches
+    let ic = make_internal_clipboard("=A1+1", 12345);
+    let metadata = "\"12345\"";
+    assert!(
+        Spreadsheet::is_internal_paste(Some(&ic), Some("=A1+1"), Some(metadata)),
+        "Matching metadata should return internal"
+    );
+}
+
+#[test]
+fn test_is_internal_paste_metadata_mismatch() {
+    // Metadata present but doesn't match (different copy operation)
+    let ic = make_internal_clipboard("=A1+1", 12345);
+    let metadata = "\"99999\"";
+    assert!(
+        !Spreadsheet::is_internal_paste(Some(&ic), Some("=A1+1"), Some(metadata)),
+        "Mismatched metadata should return external even if text matches"
+    );
+}
+
+#[test]
+fn test_is_internal_paste_no_metadata_text_matches() {
+    // Fallback: no metadata (Linux/Wayland), text comparison succeeds
+    let ic = make_internal_clipboard("=A1+1", 12345);
+    assert!(
+        Spreadsheet::is_internal_paste(Some(&ic), Some("=A1+1"), None),
+        "No metadata + matching text should return internal"
+    );
+}
+
+#[test]
+fn test_is_internal_paste_no_metadata_text_mismatch() {
+    // External paste: user copied different content from outside
+    let ic = make_internal_clipboard("=A1+1", 12345);
+    assert!(
+        !Spreadsheet::is_internal_paste(Some(&ic), Some("external text"), None),
+        "No metadata + different text should return external"
+    );
+}
+
+#[test]
+fn test_is_internal_paste_wayland_clipboard_unavailable() {
+    // CRITICAL: Wayland failure mode - system clipboard returns None
+    // We have internal clipboard data and will use it, so treat as internal
+    let ic = make_internal_clipboard("=A1+1", 12345);
+    assert!(
+        Spreadsheet::is_internal_paste(Some(&ic), None, None),
+        "Wayland clipboard unavailable: should treat as internal when internal clipboard exists"
+    );
+}
+
+#[test]
+fn test_is_internal_paste_no_internal_clipboard() {
+    // No internal clipboard - always external
+    assert!(
+        !Spreadsheet::is_internal_paste(None, Some("anything"), None),
+        "No internal clipboard should always return external"
+    );
+    assert!(
+        !Spreadsheet::is_internal_paste(None, None, None),
+        "No internal clipboard + no system clipboard should return external"
+    );
+}
+
+#[test]
+fn test_is_internal_paste_text_normalization_whitespace() {
+    // Text comparison should handle whitespace differences
+    let ic = make_internal_clipboard("=A1+1", 12345);
+    // System clipboard might have trailing newline
+    assert!(
+        Spreadsheet::is_internal_paste(Some(&ic), Some("=A1+1\n"), None),
+        "Trailing newline should normalize and match"
+    );
+    assert!(
+        Spreadsheet::is_internal_paste(Some(&ic), Some("  =A1+1  "), None),
+        "Leading/trailing whitespace should normalize and match"
+    );
+}
+
+#[test]
+fn test_is_internal_paste_text_normalization_line_endings() {
+    // Text comparison should handle different line ending styles
+    let ic = make_internal_clipboard("A1\nB1", 12345);
+    assert!(
+        Spreadsheet::is_internal_paste(Some(&ic), Some("A1\r\nB1"), None),
+        "Windows line endings should normalize and match"
+    );
+    assert!(
+        Spreadsheet::is_internal_paste(Some(&ic), Some("A1\rB1"), None),
+        "Old Mac line endings should normalize and match"
+    );
+}
+
+#[test]
+fn test_normalize_clipboard_text_identity() {
+    assert_eq!(Spreadsheet::normalize_clipboard_text("hello"), "hello");
+    assert_eq!(Spreadsheet::normalize_clipboard_text("=A1+1"), "=A1+1");
+}
+
+#[test]
+fn test_normalize_clipboard_text_trims_both_ends() {
+    assert_eq!(Spreadsheet::normalize_clipboard_text("  hello  "), "hello");
+    assert_eq!(Spreadsheet::normalize_clipboard_text("\thello\t"), "hello");
+    assert_eq!(Spreadsheet::normalize_clipboard_text("\nhello\n"), "hello");
+}
+
+#[test]
+fn test_normalize_clipboard_text_line_endings() {
+    // Windows CRLF
+    assert_eq!(Spreadsheet::normalize_clipboard_text("a\r\nb"), "a\nb");
+    // Old Mac CR
+    assert_eq!(Spreadsheet::normalize_clipboard_text("a\rb"), "a\nb");
+    // Unix LF (unchanged)
+    assert_eq!(Spreadsheet::normalize_clipboard_text("a\nb"), "a\nb");
+}
+
+#[test]
+fn test_normalize_clipboard_text_preserves_internal_whitespace() {
+    // Only trim ends, preserve internal
+    assert_eq!(Spreadsheet::normalize_clipboard_text("a  b"), "a  b");
+    assert_eq!(Spreadsheet::normalize_clipboard_text("a\tb"), "a\tb");
+}

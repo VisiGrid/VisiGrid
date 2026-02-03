@@ -80,7 +80,7 @@ impl Spreadsheet {
             }
         }
 
-        self.workbook.update(cx, |wb, _| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         if !changes.is_empty() {
             let provenance = MutationOp::Fill {
@@ -169,7 +169,7 @@ impl Spreadsheet {
             }
         }
 
-        self.workbook.update(cx, |wb, _| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         if !changes.is_empty() {
             let provenance = MutationOp::Fill {
@@ -457,7 +457,7 @@ impl Spreadsheet {
             }
         }
 
-        self.workbook.update(cx, |wb, _| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         if !changes.is_empty() {
             self.history.record_batch(self.sheet_index(cx), changes);
@@ -794,7 +794,7 @@ impl Spreadsheet {
             }
         }
 
-        self.workbook.update(cx, |wb, _| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         let count = fill_range.len();
         if !changes.is_empty() {
@@ -962,7 +962,7 @@ impl Spreadsheet {
             }
         }
 
-        self.workbook.update(cx, |wb, _| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         let count = fill_range.len();
         if !changes.is_empty() {

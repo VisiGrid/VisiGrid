@@ -231,7 +231,7 @@ impl Spreadsheet {
                 self.set_cell_value(data_row, col, "", cx);
             }
         }
-        self.wb_mut(cx, |wb| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         // Remove merges fully within the cut selection (move semantics, not filtered)
         let mut removed_any = false;
@@ -316,19 +316,12 @@ impl Spreadsheet {
         let system_text = clipboard_item.as_ref().and_then(|item| item.text().map(|s| s.to_string()));
         let metadata = clipboard_item.as_ref().and_then(|item| item.metadata().cloned());
 
-        // Check if clipboard matches our internal clipboard via metadata ID (primary)
-        // Fall back to normalized string comparison only if metadata absent (legacy)
-        let is_internal = self.internal_clipboard.as_ref().map_or(false, |ic| {
-            let expected_id = format!("\"{}\"", ic.id);
-            if let Some(ref m) = metadata {
-                m == &expected_id
-            } else {
-                // Legacy fallback: normalized string compare when metadata missing
-                system_text.as_ref().map_or(false, |st| {
-                    Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv)
-                })
-            }
-        });
+        // Determine if this is an internal paste (with formula adjustment) or external
+        let is_internal = Self::is_internal_paste(
+            self.internal_clipboard.as_ref(),
+            system_text.as_deref(),
+            metadata.as_deref(),
+        );
 
         // Get the text to paste (prefer system clipboard for interop)
         let text = system_text.or_else(|| self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()));
@@ -406,7 +399,7 @@ impl Spreadsheet {
                     }
                     self.set_cell_value(*data_row, *col, &new_value, cx);
                 }
-                self.wb_mut(cx, |wb| wb.end_batch());
+                self.end_batch_and_broadcast(cx);
 
                 // Build values grid for provenance
                 if !target_cells.is_empty() {
@@ -603,7 +596,7 @@ impl Spreadsheet {
                     description: "Paste: recreate merges".to_string(),
                 });
             }
-            self.wb_mut(cx, |wb| wb.end_batch());
+            self.end_batch_and_broadcast(cx);
 
             // Record with provenance (only if changes or merge changes were made)
             if !changes.is_empty() || merge_action.is_some() {
@@ -661,7 +654,47 @@ impl Spreadsheet {
 
     /// Normalize clipboard text for comparison (handles line ending differences)
     pub(crate) fn normalize_clipboard_text(text: &str) -> String {
-        text.replace("\r\n", "\n").trim_end().to_string()
+        // Normalize line endings and trim whitespace from both ends
+        // Some clipboard managers add leading/trailing whitespace or transform line endings
+        text.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
+    }
+
+    /// Determine if a paste operation should use internal clipboard data with formula adjustment.
+    ///
+    /// Returns true (internal paste) when:
+    /// 1. Clipboard metadata matches internal clipboard ID (reliable cross-platform)
+    /// 2. System clipboard text matches internal clipboard text (fallback when metadata unavailable)
+    /// 3. System clipboard is unavailable but internal clipboard exists (Wayland failure mode)
+    ///
+    /// Returns false (external paste) when:
+    /// - No internal clipboard exists
+    /// - System clipboard has different content (user copied from external source)
+    ///
+    /// This function is public for testing the Wayland clipboard-unavailable scenario.
+    pub fn is_internal_paste(
+        internal_clipboard: Option<&InternalClipboard>,
+        system_text: Option<&str>,
+        metadata: Option<&str>,
+    ) -> bool {
+        let Some(ic) = internal_clipboard else {
+            return false;
+        };
+
+        let expected_id = format!("\"{}\"", ic.id);
+
+        // Primary: metadata ID match (reliable when available)
+        if let Some(m) = metadata {
+            return m == expected_id;
+        }
+
+        // Secondary: text comparison fallback (when metadata unavailable)
+        if let Some(st) = system_text {
+            return Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv);
+        }
+
+        // Tertiary: system clipboard unavailable (Wayland failure mode)
+        // We have internal clipboard data and will use it, so treat as internal
+        true
     }
 
     /// Paste clipboard text into the edit buffer (when in editing mode)
@@ -858,7 +891,7 @@ impl Spreadsheet {
                 }
             }
         }
-        self.wb_mut(cx, |wb| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         if !changes.is_empty() {
             let provenance = MutationOp::Paste {
@@ -1134,7 +1167,7 @@ impl Spreadsheet {
                 values_grid.push(row_values);
             }
         }
-        self.wb_mut(cx, |wb| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         // Record with provenance (PasteMode::Formulas)
         if !changes.is_empty() {
@@ -1317,7 +1350,7 @@ impl Spreadsheet {
                 }
             }
         }
-        self.wb_mut(cx, |wb| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         let had_changes = !changes.is_empty();
         if had_changes {

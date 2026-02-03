@@ -943,7 +943,7 @@ impl Spreadsheet {
         for (row, col, _) in &cleared_values {
             self.set_cell_value(*row, *col, "", cx);
         }
-        self.wb_mut(cx, |wb| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         // Add new merge
         self.active_sheet_mut(cx, |sheet| {

@@ -449,7 +449,7 @@ impl Spreadsheet {
 
             self.set_cell_value(row, col, &new_value, cx);
         }
-        self.wb_mut(cx, |wb| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         // Record all changes as single batch undo
         let sheet_index = self.sheet_index(cx);

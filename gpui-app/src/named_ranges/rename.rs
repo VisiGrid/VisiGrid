@@ -243,7 +243,7 @@ impl Spreadsheet {
         for change in &changes {
             self.set_cell_value(change.row, change.col, &change.new_value, cx);
         }
-        self.wb_mut(cx, |wb| wb.end_batch());
+        self.end_batch_and_broadcast(cx);
 
         // Rename the named range itself
         if let Err(e) = self.wb_mut(cx, |wb| wb.rename_named_range(old_name, new_name)) {
