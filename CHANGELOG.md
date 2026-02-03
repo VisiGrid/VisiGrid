@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.6
+
+### Spreadsheet
+
+- **Fixed formula reference shifting on paste (Linux/Wayland)** — copying a formula like `=A1+1` and pasting it one column over now correctly adjusts to `=B1+1`. This was a regression on Linux Wayland where clipboard metadata isn't preserved; the fallback detection incorrectly treated internal clipboard data as external, skipping reference adjustment. The fix adds a third fallback tier: when the system clipboard is unavailable but internal clipboard exists, treat as internal paste.
+
 ## 0.4.5
 
 ### Spreadsheet
