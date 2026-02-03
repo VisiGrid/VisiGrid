@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Discovery file contents - written atomically, read by clients.
+///
+/// SECURITY: This file is readable by any process on the system.
+/// It intentionally does NOT contain the authentication token.
+/// Tokens are distributed out-of-band (env var, secure channel, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryFile {
     /// Unique session ID (random UUID).
@@ -27,9 +31,6 @@ pub struct DiscoveryFile {
     pub port: u16,
     /// Process ID of the GUI.
     pub pid: u32,
-    /// Authentication token (base64-encoded 32 bytes).
-    /// Clients must include this in the hello message.
-    pub token: String,
     /// Path to the open workbook (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workbook_path: Option<PathBuf>,
@@ -42,68 +43,69 @@ pub struct DiscoveryFile {
 }
 
 impl DiscoveryFile {
-    /// Create a new discovery file with a fresh session ID and token.
+    /// Create a new discovery file with a fresh session ID.
     pub fn new(port: u16, workbook_path: Option<PathBuf>, workbook_title: String) -> Self {
         Self {
             session_id: Uuid::new_v4(),
             port,
             pid: std::process::id(),
-            token: generate_token(),
             workbook_path,
             workbook_title,
             created_at: Utc::now(),
             protocol_version: 1,
         }
     }
-
-    /// Get the raw token bytes (decode from base64).
-    pub fn token_bytes(&self) -> Option<Vec<u8>> {
-        base64::engine::general_purpose::STANDARD
-            .decode(&self.token)
-            .ok()
-    }
-
-    /// Verify a token string matches this session's token.
-    pub fn verify_token(&self, token: &str) -> bool {
-        // Constant-time comparison to prevent timing attacks
-        use subtle::ConstantTimeEq;
-        if let (Some(expected), Ok(provided)) = (
-            self.token_bytes(),
-            base64::engine::general_purpose::STANDARD.decode(token),
-        ) {
-            expected.ct_eq(&provided).into()
-        } else {
-            false
-        }
-    }
 }
 
-/// Generate a cryptographically random 32-byte token, base64-encoded.
-fn generate_token() -> String {
+/// Generate cryptographically random 32 bytes for authentication token.
+fn generate_token_bytes() -> [u8; 32] {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+    bytes
 }
 
-/// Manages discovery file lifecycle.
+/// Manages discovery file lifecycle and authentication token.
+///
+/// The token is stored in memory only - never written to disk.
+/// For CI/automation, pass the token via VISIGRID_SESSION_TOKEN env var.
 pub struct DiscoveryManager {
     /// Path to this session's discovery file.
     path: PathBuf,
-    /// The discovery file contents.
+    /// The discovery file contents (public info only).
     discovery: DiscoveryFile,
+    /// Authentication token (base64-encoded, kept in memory only).
+    token: String,
+    /// Raw token bytes for verification.
+    token_bytes: Vec<u8>,
 }
 
 impl DiscoveryManager {
     /// Create a new discovery manager and write the discovery file.
+    ///
+    /// If `token_override` is Some, uses that token (for test harness).
+    /// Otherwise generates a fresh cryptographic token.
     pub fn new(
         port: u16,
         workbook_path: Option<PathBuf>,
         workbook_title: String,
+        token_override: Option<String>,
     ) -> std::io::Result<Self> {
         let discovery = DiscoveryFile::new(port, workbook_path, workbook_title);
         let path = discovery_file_path(&discovery.session_id)?;
 
-        let manager = Self { path, discovery };
+        // Use provided token or generate a fresh one
+        let (token, token_bytes) = if let Some(t) = token_override {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&t)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            (t, bytes)
+        } else {
+            let bytes = generate_token_bytes();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            (encoded, bytes.to_vec())
+        };
+
+        let manager = Self { path, discovery, token, token_bytes };
         manager.write()?;
 
         Ok(manager)
@@ -114,19 +116,29 @@ impl DiscoveryManager {
         &self.discovery
     }
 
+    /// Get the path to the discovery file.
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
     /// Get the session ID.
     pub fn session_id(&self) -> Uuid {
         self.discovery.session_id
     }
 
-    /// Get the authentication token.
+    /// Get the authentication token (base64-encoded).
     pub fn token(&self) -> &str {
-        &self.discovery.token
+        &self.token
     }
 
-    /// Verify a token matches this session.
+    /// Verify a token matches this session (constant-time comparison).
     pub fn verify_token(&self, token: &str) -> bool {
-        self.discovery.verify_token(token)
+        use subtle::ConstantTimeEq;
+        if let Ok(provided) = base64::engine::general_purpose::STANDARD.decode(token) {
+            self.token_bytes.ct_eq(&provided).into()
+        } else {
+            false
+        }
     }
 
     /// Update the workbook info and rewrite the discovery file.
@@ -295,15 +307,12 @@ mod tests {
 
     #[test]
     fn test_token_generation() {
-        let token = generate_token();
-        // Base64 of 32 bytes = 44 characters (with padding)
-        assert_eq!(token.len(), 44);
-
-        // Should decode back to 32 bytes
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&token)
-            .unwrap();
+        let bytes = generate_token_bytes();
         assert_eq!(bytes.len(), 32);
+
+        // Base64 encoding should produce 44 characters
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(encoded.len(), 44);
     }
 
     #[test]
@@ -315,21 +324,18 @@ mod tests {
 
         assert_eq!(parsed.session_id, discovery.session_id);
         assert_eq!(parsed.port, 12345);
-        assert_eq!(parsed.token, discovery.token);
+
+        // Verify token is NOT in serialized output
+        assert!(!json.contains("token"));
     }
 
     #[test]
-    fn test_token_verification() {
+    fn test_discovery_file_no_token_field() {
+        // Verify the discovery file struct has no token field
         let discovery = DiscoveryFile::new(12345, None, "Test".to_string());
+        let json = serde_json::to_string_pretty(&discovery).unwrap();
 
-        // Correct token should verify
-        assert!(discovery.verify_token(&discovery.token));
-
-        // Wrong token should not verify
-        assert!(!discovery.verify_token("wrong_token"));
-
-        // Different valid token should not verify
-        let other_token = generate_token();
-        assert!(!discovery.verify_token(&other_token));
+        // Token should never appear in the JSON
+        assert!(!json.contains("token"), "Discovery file should not contain token: {}", json);
     }
 }

@@ -1,0 +1,4 @@
+{"type":"apply_ops","id":"req-1","ops":[{"op":"set_cell_value","sheet":0,"row":0,"col":0,"value":"First"}],"atomic":false}
+{"type":"apply_ops_result","id":"req-1","applied":1,"total":1,"current_revision":43}
+{"type":"apply_ops","id":"req-2","ops":[{"op":"set_cell_value","sheet":0,"row":0,"col":0,"value":"Second"}],"atomic":false}
+{"type":"error","id":"req-2","code":"writer_conflict","message":"Write lease held by another connection","retry_after_ms":5000}

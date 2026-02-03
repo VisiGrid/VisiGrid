@@ -1,0 +1,11 @@
+{"type":"error","id":"req-1","code":"auth_failed","message":"Invalid or missing authentication token"}
+{"type":"error","id":"req-2","code":"protocol_mismatch","message":"Unsupported protocol version"}
+{"type":"error","id":"req-3","code":"rate_limited","message":"Rate limit exceeded. Retry after 1000 ms","retry_after_ms":1000}
+{"type":"error","id":"req-4","code":"revision_mismatch","message":"Expected revision does not match current revision"}
+{"type":"error","id":"req-5","code":"formula_parse_error","message":"Formula syntax error"}
+{"type":"error","id":"req-6","code":"invalid_reference","message":"Invalid sheet, row, or column reference"}
+{"type":"error","id":"req-7","code":"message_too_large","message":"Message exceeds maximum size"}
+{"type":"error","id":"req-8","code":"malformed_message","message":"Malformed JSON message"}
+{"type":"error","id":"req-9","code":"read_only_mode","message":"Server is in read-only mode"}
+{"type":"error","id":"req-10","code":"writer_conflict","message":"Write lease held by another connection","retry_after_ms":5000}
+{"type":"error","id":"req-11","code":"internal_error","message":"Internal server error"}

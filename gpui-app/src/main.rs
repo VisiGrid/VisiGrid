@@ -262,6 +262,8 @@ struct CliArgs {
     no_restore: bool,
     /// Files to open (if specified). Supports multiple: `visigrid a.xlsx b.csv`
     files: Vec<String>,
+    /// Enable session server on startup (for CI/automation)
+    session_server: bool,
 }
 
 fn print_help() {
@@ -274,6 +276,7 @@ fn print_help() {
     eprintln!("    -n, --no-restore     Skip session restore (start fresh, session preserved)");
     eprintln!("    --reset-session      Delete session file and start fresh");
     eprintln!("    --dump-session       Print session JSON to stdout and exit");
+    eprintln!("    --session-server     Enable session server on startup (for CI/automation)");
     eprintln!("    -h, --help           Print this help message");
     eprintln!();
     eprintln!("ARGS:");
@@ -285,6 +288,7 @@ fn parse_args() -> CliArgs {
     let mut cli = CliArgs {
         no_restore: false,
         files: Vec::new(),
+        session_server: false,
     };
 
     let mut i = 1;
@@ -307,6 +311,10 @@ fn parse_args() -> CliArgs {
             "--no-restore" | "-n" => {
                 // Skip restore this launch, but preserve session file
                 cli.no_restore = true;
+            }
+            "--session-server" => {
+                // Enable session server on startup (for CI/automation)
+                cli.session_server = true;
             }
             arg if !arg.starts_with('-') => {
                 cli.files.push(arg.to_string());
@@ -432,6 +440,10 @@ fn main() {
     // Move cli values out for use in closure
     let no_restore = cli.no_restore;
     let cli_files = cli.files;
+    let start_session_server = cli.session_server;
+
+    // Track if session server has been started (only one per app instance)
+    let session_server_started: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
     // Buffer for file URLs from macOS "Open With" / Finder double-click.
     // on_open_urls callback pushes here; polling task inside run() consumes.
@@ -583,6 +595,7 @@ fn main() {
             // Restore each window from session with smart bounds clamping
             for window_session in &session.windows {
                 let window_session = window_session.clone();
+                let session_server_started = session_server_started.clone();
 
                 // Get restored bounds (if any)
                 let restored_bounds = window_session.bounds.as_ref().map(|b| b.to_gpui());
@@ -638,6 +651,26 @@ fn main() {
                         // Register with window registry for window switcher
                         entity.update(cx, |spreadsheet, cx| {
                             spreadsheet.register_with_window_registry(cx);
+
+                            // Start session server if requested via CLI (only once per app)
+                            if start_session_server {
+                                let mut started = session_server_started.lock().unwrap();
+                                if !*started {
+                                    *started = true;
+                                    // Token from env var (test harness passes this)
+                                    let token_override = env::var("VISIGRID_SESSION_TOKEN").ok();
+                                    if let Err(e) = spreadsheet.start_session_server(
+                                        session_server::ServerMode::Apply,
+                                        token_override,
+                                        cx,
+                                    ) {
+                                        eprintln!("Failed to start session server: {}", e);
+                                    } else if let Some((session_id, port, discovery)) = spreadsheet.session_server_ready_info() {
+                                        // Structured READY line for CI parsing
+                                        eprintln!("READY session_id={} port={} discovery={}", session_id, port, discovery.display());
+                                    }
+                                }
+                            }
                         });
                         entity
                     },
@@ -649,6 +682,7 @@ fn main() {
             for file_path in cli_files {
                 let path = std::path::PathBuf::from(&file_path);
                 let bounds = compute_window_bounds(None, work_area);
+                let session_server_started = session_server_started.clone();
 
                 cx.open_window(
                     build_window_options(WindowBounds::Windowed(bounds)),
@@ -671,6 +705,24 @@ fn main() {
                         // Register with window registry for window switcher
                         entity.update(cx, |spreadsheet, cx| {
                             spreadsheet.register_with_window_registry(cx);
+
+                            // Start session server if requested via CLI (only once per app)
+                            if start_session_server {
+                                let mut started = session_server_started.lock().unwrap();
+                                if !*started {
+                                    *started = true;
+                                    let token_override = env::var("VISIGRID_SESSION_TOKEN").ok();
+                                    if let Err(e) = spreadsheet.start_session_server(
+                                        session_server::ServerMode::Apply,
+                                        token_override,
+                                        cx,
+                                    ) {
+                                        eprintln!("Failed to start session server: {}", e);
+                                    } else if let Some((session_id, port, discovery)) = spreadsheet.session_server_ready_info() {
+                                        eprintln!("READY session_id={} port={} discovery={}", session_id, port, discovery.display());
+                                    }
+                                }
+                            }
                         });
                         entity
                     },
@@ -680,10 +732,11 @@ fn main() {
         } else {
             // Fresh start - large near-maximized window with margin
             let bounds = compute_window_bounds(None, work_area);
+            let session_server_started = session_server_started.clone();
 
             cx.open_window(
                 build_window_options(WindowBounds::Windowed(bounds)),
-                |window, cx| {
+                move |window, cx| {
                     let window_id = cx.update_global::<SessionManager, _>(|mgr, _| mgr.next_window_id());
                     let entity = cx.new(|cx| {
                         let mut app = Spreadsheet::new(window, cx);
@@ -694,6 +747,24 @@ fn main() {
                     // Register with window registry for window switcher
                     entity.update(cx, |spreadsheet, cx| {
                         spreadsheet.register_with_window_registry(cx);
+
+                        // Start session server if requested via CLI (only once per app)
+                        if start_session_server {
+                            let mut started = session_server_started.lock().unwrap();
+                            if !*started {
+                                *started = true;
+                                let token_override = env::var("VISIGRID_SESSION_TOKEN").ok();
+                                if let Err(e) = spreadsheet.start_session_server(
+                                    session_server::ServerMode::Apply,
+                                    token_override,
+                                    cx,
+                                ) {
+                                    eprintln!("Failed to start session server: {}", e);
+                                } else if let Some((session_id, port, discovery)) = spreadsheet.session_server_ready_info() {
+                                    eprintln!("READY session_id={} port={} discovery={}", session_id, port, discovery.display());
+                                }
+                            }
+                        }
                     });
                     entity
                 },

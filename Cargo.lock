@@ -6661,6 +6661,7 @@ dependencies = [
  "base64",
  "blake3",
  "chrono",
+ "clap",
  "core-text",
  "dirs 5.0.1",
  "gpui",

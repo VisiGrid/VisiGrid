@@ -9,6 +9,10 @@ description = "VisiGrid spreadsheet - gpui frontend"
 name = "visigrid"
 path = "src/main.rs"
 
+[[bin]]
+name = "vg-session-smoke"
+path = "src/bin/vg_session_smoke.rs"
+
 [package.metadata.bundle]
 name = "VisiGrid"
 identifier = "com.visigrid.app"
@@ -49,6 +53,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 subtle = "2"
+
+# CLI (for vg-session-smoke)
+clap = { version = "4", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

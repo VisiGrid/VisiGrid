@@ -1,0 +1,6 @@
+{"type":"inspect","id":"req-5","target":{"target":"cell","sheet":0,"row":0,"col":0}}
+{"type":"inspect_result","id":"req-5","revision":43,"result":{"result":"cell","raw":"Hello","display":"Hello","formula":null}}
+{"type":"inspect","id":"req-6","target":{"target":"cell","sheet":0,"row":1,"col":0}}
+{"type":"inspect_result","id":"req-6","revision":43,"result":{"result":"cell","raw":"=A1&\" World\"","display":"Hello World","formula":"=A1&\" World\""}}
+{"type":"inspect","id":"req-7","target":{"target":"workbook"}}
+{"type":"inspect_result","id":"req-7","revision":43,"result":{"result":"workbook","sheet_count":1,"active_sheet":0,"title":"Untitled"}}

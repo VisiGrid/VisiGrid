@@ -2740,6 +2740,22 @@ impl Spreadsheet {
         });
         // batch_guard dropped here → single recalc + revision increment
 
+        // Build changed cells list BEFORE history takes ownership of changes_by_sheet
+        let changed_cells: Vec<crate::session_server::CellRef> = if applied > 0 && error.is_none() {
+            changes_by_sheet
+                .iter()
+                .flat_map(|(sheet_idx, changes)| {
+                    changes.iter().map(move |c| crate::session_server::CellRef {
+                        sheet: *sheet_idx,
+                        row: c.row,
+                        col: c.col,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Record history entries for undo (one per sheet that had changes)
         for (sheet_idx, changes) in changes_by_sheet {
             if !changes.is_empty() {
@@ -2752,6 +2768,13 @@ impl Spreadsheet {
         self.cached_title = None;
 
         let new_rev = self.workbook.read(cx).revision();
+
+        // Broadcast cell changes to subscribed connections
+        // This happens in the same transaction boundary as revision increment
+        if !changed_cells.is_empty() {
+            self.session_server.broadcast_cells(new_rev, changed_cells);
+        }
+
         ApplyOpsResponse {
             applied,
             total: req.ops.len(),
@@ -2780,14 +2803,11 @@ impl Spreadsheet {
                 };
                 let display = sheet_data.get_display(*row, *col);
                 let raw = sheet_data.get_raw(*row, *col);
-                let is_formula = raw.starts_with('=');
+                let formula = if raw.starts_with('=') { Some(raw.clone()) } else { None };
                 InspectResult::Cell(CellInfo {
-                    sheet: *sheet,
-                    row: *row,
-                    col: *col,
-                    display,
                     raw,
-                    is_formula,
+                    display,
+                    formula,
                 })
             }
             InspectTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
@@ -2801,25 +2821,21 @@ impl Spreadsheet {
                     for c in *start_col..=*end_col {
                         let display = sheet_data.get_display(r, c);
                         let raw = sheet_data.get_raw(r, c);
-                        let is_formula = raw.starts_with('=');
+                        let formula = if raw.starts_with('=') { Some(raw.clone()) } else { None };
                         cells.push(CellInfo {
-                            sheet: *sheet,
-                            row: r,
-                            col: c,
-                            display,
                             raw,
-                            is_formula,
+                            display,
+                            formula,
                         });
                     }
                 }
                 InspectResult::Range { cells }
             }
             InspectTarget::Workbook => {
-                let sheets: Vec<String> = wb.sheets().iter().map(|s| s.name.clone()).collect();
                 InspectResult::Workbook(WorkbookInfo {
-                    sheet_count: sheets.len(),
-                    sheets,
-                    revision: current_rev,
+                    sheet_count: wb.sheets().len(),
+                    active_sheet: wb.active_sheet_index(),
+                    title: self.document_meta.display_name.clone(),
                 })
             }
         };
@@ -2831,9 +2847,14 @@ impl Spreadsheet {
     }
 
     /// Start the session server with the given mode.
+    ///
+    /// If `token_override` is provided (e.g. from VISIGRID_SESSION_TOKEN env var),
+    /// uses that token instead of generating a fresh one. This allows test harnesses
+    /// to know the token in advance.
     pub fn start_session_server(
         &mut self,
         mode: crate::session_server::ServerMode,
+        token_override: Option<String>,
         cx: &mut Context<Self>,
     ) -> std::io::Result<()> {
         let bridge = self.session_bridge_handle();
@@ -2845,12 +2866,46 @@ impl Spreadsheet {
             workbook_path,
             workbook_title,
             bridge: Some(bridge),
+            token_override,
+            ..Default::default()
         })
+    }
+
+    /// Get structured READY info for CI output.
+    pub fn session_server_ready_info(&self) -> Option<(String, u16, std::path::PathBuf)> {
+        self.session_server.ready_info()
     }
 
     /// Stop the session server.
     pub fn stop_session_server(&mut self) {
         self.session_server.stop();
+    }
+
+    /// End a workbook batch and broadcast changes to session server subscribers.
+    ///
+    /// This is the canonical way to end a batch when session server may be running.
+    /// It ensures all mutation paths (user edits, paste, import, session ops) broadcast
+    /// their changes to subscribers.
+    ///
+    /// Returns the number of changed cells (0 if no changes or nested batch).
+    pub fn end_batch_and_broadcast(&mut self, cx: &mut Context<Self>) -> usize {
+        let changed = self.workbook.update(cx, |wb, _| wb.end_batch());
+        let count = changed.len();
+
+        if !changed.is_empty() && self.session_server.is_running() {
+            let revision = self.workbook.read(cx).revision();
+            let cells: Vec<crate::session_server::CellRef> = changed
+                .into_iter()
+                .map(|c| crate::session_server::CellRef {
+                    sheet: c.sheet.0 as usize, // SheetId(u64) -> usize
+                    row: c.row,
+                    col: c.col,
+                })
+                .collect();
+            self.session_server.broadcast_cells(revision, cells);
+        }
+
+        count
     }
 
     /// Get the active theme (preview if set, otherwise current)

@@ -1,0 +1,2 @@
+{"type":"hello","id":"req-1","client":"future-agent","version":"2.0.0","token":"dGVzdC10b2tlbg==","protocol_version":999}
+{"type":"error","id":"req-1","code":"protocol_mismatch","message":"Unsupported protocol version"}

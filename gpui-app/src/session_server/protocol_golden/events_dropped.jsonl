@@ -1,0 +1,4 @@
+{"type":"subscribe","id":"req-1","topics":["cells"]}
+{"type":"subscribed","id":"req-1","topics":["cells"]}
+{"type":"event","topic":"cells","revision":100,"payload":{"event":"cells_changed","ranges":[{"sheet":0,"r1":0,"c1":0,"r2":0,"c2":0}]}}
+{"type":"event","topic":"cells","revision":150,"payload":{"event":"events_dropped","dropped_count":49,"current_revision":150}}

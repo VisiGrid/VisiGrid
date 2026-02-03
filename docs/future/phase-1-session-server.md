@@ -1,8 +1,21 @@
 # Phase 1: Session Server (IPC)
 
-**Status:** After HN launch (not touching CLI until then)
-**Effort:** 2-3 weeks
+**Status:** COMPLETE (server-side). GUI controls and CLI commands deferred.
+**Effort:** 2-3 weeks (actual)
 **Transport:** TCP localhost + token (cross-platform, simplest to ship right)
+
+---
+
+## ⚠️ Protocol v1 Frozen
+
+**Protocol v1 is frozen. Any changes require:**
+1. `protocol_version` bump to v2
+2. New golden vector files
+3. Backwards compatibility analysis
+
+Golden vectors lock the wire format: `gpui-app/src/session_server/protocol_golden/*.jsonl`
+
+---
 
 ## Implementation Progress
 
@@ -47,9 +60,9 @@
   - Stale session cleanup (PID check)
 
 - **JSONL protocol** — `gpui-app/src/session_server/protocol.rs`:
-  - Message types: Hello, Welcome, ApplyOps, Inspect, Subscribe, Ping/Pong
+  - Message types: Hello, Welcome, ApplyOps, Inspect, Subscribe, Unsubscribe, Ping/Pong, Stats
   - Op enum: SetCellValue, SetCellFormula, ClearCell, SetNumberFormat, SetStyle
-  - Error taxonomy with structured error messages
+  - Error taxonomy with 11 structured error codes
   - 10MB message size limit
 
 - **Bridge pattern** — `gpui-app/src/session_server/bridge.rs`:
@@ -71,15 +84,69 @@
     - Returns display value, raw value, and formula status
   - `start_session_server()` / `stop_session_server()` public API
 
-- **Tests** — 16 passing tests + 397 total gpui tests pass
+- **Rate limiter** — `gpui-app/src/session_server/rate_limiter.rs`:
+  - Token bucket algorithm (configurable burst/refill)
+  - Per-connection rate limiting
+  - Ops-based costing (apply_ops costs by op count)
+  - `rate_limited` error with `retry_after_ms`
 
-### Remaining
+- **Event subscription** — `gpui-app/src/session_server/events.rs`:
+  - Subscribe/unsubscribe to topics (currently: `cells`)
+  - Bounded event queue (256 depth) with backpressure
+  - Events dropped silently when queue full (best-effort delivery)
+  - Revision field in every event for gap detection
 
-- [ ] Rate limiter (token bucket: 40k burst, 20k/sec refill)
-- [ ] Event subscription and streaming
-- [ ] GUI controls (Live Control panel, status bar indicator)
-- [ ] CLI `attach` and `apply` commands
-- [ ] Smoke test: manual test client applies ops and verifies results
+- **Event coalescing** — `gpui-app/src/session_server/coalesce.rs`:
+  - Converts cell sets to minimal rectangular ranges
+  - O(n log n) algorithm: row bucketing → horizontal runs → vertical merge
+  - Bounding box fallback when ranges exceed 2000 per sheet
+  - Reduces event payload size and client redraw churn
+
+- **Writer lease** — `gpui-app/src/session_server/server.rs`:
+  - Only one connection can write at a time
+  - 10-second lease, renewed on each apply_ops
+  - `writer_conflict` error with `retry_after_ms` for competing clients
+  - Released on disconnect
+
+- **Stats endpoint** — Query server health without logs:
+  - `connections_closed_parse_failures`
+  - `connections_closed_oversize`
+  - `writer_conflict_count`
+  - `dropped_events_total`
+  - `active_connections`
+
+- **Protocol golden vectors** — `gpui-app/src/session_server/protocol_golden/`:
+  - 11 golden files locking wire format
+  - Round-trip test ensures serialization stability
+  - Error code coverage test ensures taxonomy completeness
+
+- **Smoke test** — `gpui-app/src/bin/vg_session_smoke.rs`:
+  - CI-ready spawn mode (`--spawn-mode`)
+  - Exercises: connect, auth, apply_ops, inspect, subscribe, events
+  - Verifies revision tracking, error handling, event delivery
+
+- **Tests** — 66 session server tests + 16 invariant tests + full gpui test suite
+
+### Deferred (not blocking)
+
+- [ ] GUI controls (Live Control panel, status bar indicator, token rotation)
+- [ ] CLI `sessions`, `attach`, `apply` commands (explicitly after HN)
+- [ ] Connection limit (max 5) — event registry exists but no hard cap
+- [ ] "Allow unauthenticated read-only" toggle
+
+## Guarantees (v1)
+
+These are the contracts clients can rely on:
+
+| Guarantee | Implementation |
+|-----------|----------------|
+| Token never on disk | Discovery file has `token_hint` only (first 4 chars) |
+| Deterministic ops | Fingerprint via blake3 over canonical binary encoding |
+| Revision-based concurrency | `expected_revision` for optimistic locking |
+| Single writer | Writer lease with 10s timeout, explicit conflicts |
+| Bounded memory | 256-event queue, 10MB message limit, 2000 range cap |
+| Best-effort events | Drops under backpressure; use revision gaps to detect |
+| Queryable health | Stats endpoint for instant diagnostics |
 
 ## Goal
 

@@ -1,0 +1,4 @@
+{"type":"subscribe","id":"req-1","topics":["cells"]}
+{"type":"subscribed","id":"req-1","topics":["cells"]}
+{"type":"event","topic":"cells","revision":50,"payload":{"event":"cells_changed","ranges":[{"sheet":0,"r1":0,"c1":0,"r2":99,"c2":9}]}}
+{"type":"event","topic":"cells","revision":51,"payload":{"event":"cells_changed","ranges":[{"sheet":0,"r1":0,"c1":0,"r2":0,"c2":5},{"sheet":0,"r1":5,"c1":0,"r2":5,"c2":5}]}}

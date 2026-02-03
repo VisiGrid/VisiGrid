@@ -1,0 +1,2 @@
+{"type":"stats","id":"req-1"}
+{"type":"stats_result","id":"req-1","connections_closed_parse_failures":3,"connections_closed_oversize":1,"writer_conflict_count":7,"dropped_events_total":142,"active_connections":2}

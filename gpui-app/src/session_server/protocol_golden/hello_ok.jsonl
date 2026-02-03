@@ -1,0 +1,2 @@
+{"type":"hello","id":"req-1","client":"test-agent","version":"1.0.0","token":"dGVzdC10b2tlbi1mb3ItZ29sZGVuLXZlY3RvcnM=","protocol_version":1}
+{"type":"welcome","id":"req-1","session_id":"550e8400-e29b-41d4-a716-446655440000","protocol_version":1,"revision":42,"capabilities":["apply","inspect","subscribe"]}

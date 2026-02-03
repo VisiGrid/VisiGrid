@@ -1,0 +1,2 @@
+{"type":"apply_ops","id":"req-2","ops":[{"op":"set_cell_value","sheet":0,"row":0,"col":0,"value":"Hello"},{"op":"set_cell_formula","sheet":0,"row":1,"col":0,"formula":"=A1&\" World\""},{"op":"clear_cell","sheet":0,"row":2,"col":0}],"atomic":true,"expected_revision":42}
+{"type":"apply_ops_result","id":"req-2","applied":3,"total":3,"current_revision":43}

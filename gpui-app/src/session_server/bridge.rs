@@ -293,8 +293,8 @@ mod tests {
             current_revision: 42,
             result: InspectResult::Workbook(super::super::protocol::WorkbookInfo {
                 sheet_count: 1,
-                sheets: vec!["Sheet1".to_string()],
-                revision: 42,
+                active_sheet: 0,
+                title: "Test".to_string(),
             }),
         };
         assert_eq!(response.current_revision, 42);

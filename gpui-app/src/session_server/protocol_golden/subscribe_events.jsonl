@@ -1,0 +1,6 @@
+{"type":"subscribe","id":"req-3","topics":["cells"]}
+{"type":"subscribed","id":"req-3","topics":["cells"]}
+{"type":"event","topic":"cells","revision":44,"payload":{"event":"cells_changed","ranges":[{"sheet":0,"r1":0,"c1":0,"r2":1,"c2":0}]}}
+{"type":"event","topic":"cells","revision":45,"payload":{"event":"cells_changed","ranges":[{"sheet":0,"r1":5,"c1":2,"r2":5,"c2":2}]}}
+{"type":"unsubscribe","id":"req-4","topics":["cells"]}
+{"type":"unsubscribed","id":"req-4","topics":["cells"]}
