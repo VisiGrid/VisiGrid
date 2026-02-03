@@ -2215,6 +2215,16 @@ pub struct Spreadsheet {
     pub ai_key_validated_this_session: bool,
     /// Cached API key from this session (workaround for keychain timing)
     pub ai_session_key: Option<String>,
+
+    // Session server state (TCP server for external control)
+    /// Session server instance (manages TCP listener and discovery file).
+    pub session_server: crate::session_server::SessionServer,
+    /// Receiver for session requests from TCP server (bridge).
+    /// Messages are drained in render() and processed via canonical mutation path.
+    session_request_rx: std::sync::mpsc::Receiver<crate::session_server::SessionRequest>,
+    /// Sender for session requests (cloned to give to server).
+    /// Kept here so we can create bridge handles on demand.
+    session_request_tx: std::sync::mpsc::Sender<crate::session_server::SessionRequest>,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -2283,6 +2293,10 @@ impl Spreadsheet {
             // Notify all windows to re-render when settings change
             cx.refresh_windows();
         });
+
+        // Session server channel: requests from TCP server → GUI thread
+        let (session_tx, session_rx) = std::sync::mpsc::channel();
+        let session_server = crate::session_server::SessionServer::new();
 
         Self {
             workbook,
@@ -2559,7 +2573,219 @@ impl Spreadsheet {
             ask_ai: AskAIDialogState::default(),
             ai_key_validated_this_session: false,
             ai_session_key: None,
+
+            // Session server: initialized below
+            session_server: session_server,
+            session_request_rx: session_rx,
+            session_request_tx: session_tx,
         }
+    }
+
+    // ========================================================================
+    // Session Server
+    // ========================================================================
+
+    /// Create a bridge handle for the session server.
+    /// The handle can be cloned and passed to the TCP server.
+    pub fn session_bridge_handle(&self) -> crate::session_server::SessionBridgeHandle {
+        crate::session_server::SessionBridgeHandle::new(self.session_request_tx.clone())
+    }
+
+    /// Drain pending session requests and process them.
+    /// Called at the start of each render cycle.
+    fn drain_session_requests(&mut self, cx: &mut Context<Self>) {
+        use crate::session_server::{SessionRequest, SubscribeResponse, UnsubscribeResponse};
+
+        // Non-blocking drain: process all pending requests
+        while let Ok(request) = self.session_request_rx.try_recv() {
+            match request {
+                SessionRequest::ApplyOps { req, reply } => {
+                    // Apply ops through the canonical mutation path
+                    let response = self.handle_session_apply_ops(&req, cx);
+                    let _ = reply.send(response);
+                }
+                SessionRequest::Inspect { req, reply } => {
+                    let response = self.handle_session_inspect(&req, cx);
+                    let _ = reply.send(response);
+                }
+                SessionRequest::Subscribe { req, reply } => {
+                    // TODO: Implement subscription tracking
+                    let _ = reply.send(SubscribeResponse {
+                        topics: req.topics,
+                        current_revision: self.workbook.read(cx).revision(),
+                    });
+                }
+                SessionRequest::Unsubscribe { req, reply } => {
+                    // TODO: Implement unsubscription
+                    let _ = reply.send(UnsubscribeResponse {
+                        topics: req.topics,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Handle an apply_ops request from the session server.
+    fn handle_session_apply_ops(
+        &mut self,
+        req: &crate::session_server::ApplyOpsRequest,
+        cx: &mut Context<Self>,
+    ) -> crate::session_server::ApplyOpsResponse {
+        use crate::session_server::{ApplyOpsResponse, ApplyOpsError, Op};
+
+        // Check expected_revision if provided
+        let current_rev = self.workbook.read(cx).revision();
+        if let Some(expected) = req.expected_revision {
+            if expected != current_rev {
+                return ApplyOpsResponse {
+                    applied: 0,
+                    total: req.ops.len(),
+                    current_revision: current_rev,
+                    error: Some(ApplyOpsError::RevisionMismatch {
+                        expected,
+                        actual: current_rev,
+                    }),
+                };
+            }
+        }
+
+        // Apply ops one by one (or atomically if requested)
+        // For now, apply all ops and count successes
+        let mut applied = 0;
+        let mut error = None;
+
+        for (i, op) in req.ops.iter().enumerate() {
+            match op {
+                Op::SetCellValue { sheet, row, col, value } => {
+                    // TODO: Switch to correct sheet if needed
+                    self.set_cell_value(*row, *col, value, cx);
+                    applied += 1;
+                }
+                Op::SetCellFormula { sheet, row, col, formula } => {
+                    // Formulas are set via set_cell_value (auto-detected by leading =)
+                    self.set_cell_value(*row, *col, formula, cx);
+                    applied += 1;
+                }
+                Op::ClearCell { sheet, row, col } => {
+                    self.set_cell_value(*row, *col, "", cx);
+                    applied += 1;
+                }
+                Op::SetNumberFormat { sheet, start_row, start_col, end_row, end_col, format } => {
+                    // TODO: Parse format string and apply
+                    applied += 1;
+                }
+                Op::SetStyle { sheet, start_row, start_col, end_row, end_col, bold, italic, underline } => {
+                    // TODO: Apply style changes
+                    applied += 1;
+                }
+            }
+
+            // If atomic and there was an error, stop
+            if req.atomic && error.is_some() {
+                break;
+            }
+        }
+
+        let new_rev = self.workbook.read(cx).revision();
+        ApplyOpsResponse {
+            applied,
+            total: req.ops.len(),
+            current_revision: new_rev,
+            error,
+        }
+    }
+
+    /// Handle an inspect request from the session server.
+    fn handle_session_inspect(
+        &self,
+        req: &crate::session_server::InspectRequest,
+        cx: &Context<Self>,
+    ) -> crate::session_server::InspectResponse {
+        use crate::session_server::{InspectResponse, InspectResult, InspectTarget, CellInfo, WorkbookInfo};
+
+        let wb = self.workbook.read(cx);
+        let current_rev = wb.revision();
+
+        let result = match &req.target {
+            InspectTarget::Cell { sheet, row, col } => {
+                let sheet_data = if *sheet < wb.sheets().len() {
+                    &wb.sheets()[*sheet]
+                } else {
+                    wb.active_sheet()
+                };
+                let display = sheet_data.get_display(*row, *col);
+                let raw = sheet_data.get_raw(*row, *col);
+                let is_formula = raw.starts_with('=');
+                InspectResult::Cell(CellInfo {
+                    sheet: *sheet,
+                    row: *row,
+                    col: *col,
+                    display,
+                    raw,
+                    is_formula,
+                })
+            }
+            InspectTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
+                let sheet_data = if *sheet < wb.sheets().len() {
+                    &wb.sheets()[*sheet]
+                } else {
+                    wb.active_sheet()
+                };
+                let mut cells = Vec::new();
+                for r in *start_row..=*end_row {
+                    for c in *start_col..=*end_col {
+                        let display = sheet_data.get_display(r, c);
+                        let raw = sheet_data.get_raw(r, c);
+                        let is_formula = raw.starts_with('=');
+                        cells.push(CellInfo {
+                            sheet: *sheet,
+                            row: r,
+                            col: c,
+                            display,
+                            raw,
+                            is_formula,
+                        });
+                    }
+                }
+                InspectResult::Range { cells }
+            }
+            InspectTarget::Workbook => {
+                let sheets: Vec<String> = wb.sheets().iter().map(|s| s.name.clone()).collect();
+                InspectResult::Workbook(WorkbookInfo {
+                    sheet_count: sheets.len(),
+                    sheets,
+                    revision: current_rev,
+                })
+            }
+        };
+
+        InspectResponse {
+            current_revision: current_rev,
+            result,
+        }
+    }
+
+    /// Start the session server with the given mode.
+    pub fn start_session_server(
+        &mut self,
+        mode: crate::session_server::ServerMode,
+        cx: &mut Context<Self>,
+    ) -> std::io::Result<()> {
+        let bridge = self.session_bridge_handle();
+        let workbook_path = self.current_file.clone();
+        let workbook_title = self.document_meta.display_name.clone();
+
+        self.session_server.start(crate::session_server::SessionServerConfig {
+            mode,
+            workbook_path,
+            workbook_title,
+            bridge: Some(bridge),
+        })
+    }
+
+    /// Stop the session server.
+    pub fn stop_session_server(&mut self) {
+        self.session_server.stop();
     }
 
     /// Get the active theme (preview if set, otherwise current)
@@ -5064,6 +5290,9 @@ impl Spreadsheet {
 
 impl Render for Spreadsheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Drain pending session server requests (TCP → GUI bridge)
+        self.drain_session_requests(cx);
+
         // Flush batched navigation moves (multiple arrow repeats → one batch per frame)
         self.flush_pending_nav_moves(cx);
         // Flush deferred scroll adjustment (coalesces multiple nav moves per frame)

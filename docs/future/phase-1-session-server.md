@@ -32,15 +32,52 @@
   - `invariant_discovery_file_atomic` — write-to-temp + rename pattern
   - Plus 8 more covering recalc counts, revision stability, fingerprint encoding
 
-### Remaining (server layer)
+### Completed (GUI/server layer)
 
-- [ ] TCP server binding to 127.0.0.1:<random_port>
-- [ ] Token generation and discovery file writing
-- [ ] JSONL message framing and parsing
-- [ ] Protocol handshake (hello/welcome)
-- [ ] apply_ops endpoint with atomic/non-atomic modes
+- **TCP server** — `gpui-app/src/session_server/server.rs`:
+  - Binds to 127.0.0.1:<random_port> (IPv4 only)
+  - Non-blocking listener with shutdown signal
+  - Per-connection thread spawning
+  - Mode: Off | ReadOnly | Apply
+
+- **Discovery files** — `gpui-app/src/session_server/discovery.rs`:
+  - Platform-specific paths (Linux/macOS/Windows)
+  - Atomic write (temp + rename)
+  - 32-byte cryptographic token with constant-time comparison
+  - Stale session cleanup (PID check)
+
+- **JSONL protocol** — `gpui-app/src/session_server/protocol.rs`:
+  - Message types: Hello, Welcome, ApplyOps, Inspect, Subscribe, Ping/Pong
+  - Op enum: SetCellValue, SetCellFormula, ClearCell, SetNumberFormat, SetStyle
+  - Error taxonomy with structured error messages
+  - 10MB message size limit
+
+- **Bridge pattern** — `gpui-app/src/session_server/bridge.rs`:
+  - `SessionBridgeHandle` with mpsc::Sender for cross-thread communication
+  - `SessionRequest` enum routed to GUI thread
+  - Oneshot response channels for request/response correlation
+  - All responses include `current_revision` per spec
+
+- **GUI integration** — `gpui-app/src/app.rs`:
+  - `Spreadsheet` owns `Receiver<SessionRequest>` + `SessionServer`
+  - `drain_session_requests()` called at render start
+  - `handle_session_apply_ops()` applies ops via canonical mutation path
+  - `handle_session_inspect()` queries workbook state
+  - `start_session_server()` / `stop_session_server()` public API
+
+- **Tests** — 16 passing tests covering:
+  - Server lifecycle and bridge requirements
+  - Connection handshake and authentication
+  - Apply ops and inspect via bridge
+  - Discovery file serialization and token verification
+  - Protocol message serialization
+
+### Remaining
+
+- [ ] Wire apply_ops to real workbook mutations (currently placeholder)
 - [ ] Rate limiter (token bucket: 40k burst, 20k/sec refill)
 - [ ] Event subscription and streaming
+- [ ] GUI controls (Live Control panel, status bar indicator)
 - [ ] CLI `attach` and `apply` commands
 
 ## Goal

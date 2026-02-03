@@ -48,6 +48,7 @@ mod ref_target;
 mod search;
 mod series_fill;
 mod session;
+mod session_server;
 mod settings;
 mod sheet_ops;
 mod sort_filter;
