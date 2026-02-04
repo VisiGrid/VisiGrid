@@ -616,8 +616,9 @@ fn main() {
                 let _ = cx.open_window(
                     build_window_options(window_bounds),
                     move |window, cx| {
-                        // Assign window ID from SessionManager counter
-                        let window_id = cx.update_global::<SessionManager, _>(|mgr, _| mgr.next_window_id());
+                        // CRITICAL: Use the SAME window_id from session, not a new one.
+                        // This ensures close removes the correct entry from session.
+                        let window_id = window_session.window_id;
 
                         let entity = cx.new(|cx| {
                             let mut app = Spreadsheet::new(window, cx);
