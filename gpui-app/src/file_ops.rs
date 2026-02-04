@@ -150,6 +150,11 @@ impl Spreadsheet {
                             self.cell_metadata = meta.into_iter()
                                 .map(|(k, v)| (k, v.into_iter().collect()))
                                 .collect();
+
+                            // Auto-fit columns for agent-built sheets with metadata
+                            if !self.cell_metadata.is_empty() {
+                                self.auto_fit_all_data_columns(cx);
+                            }
                         }
                         Err(_) => {
                             self.cell_metadata.clear();

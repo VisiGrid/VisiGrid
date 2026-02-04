@@ -111,6 +111,58 @@ pub(crate) fn days_in_month(year: i32, month: i32) -> i32 {
     }
 }
 
+/// Try to parse a date string and return Excel serial number.
+/// Supports formats:
+/// - ISO: "2023-11-07", "2023/11/07"
+/// - US: "11/07/2023", "11-07-2023"
+/// Returns None if the string doesn't look like a date.
+pub fn try_parse_date_string(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Try ISO format: YYYY-MM-DD or YYYY/MM/DD
+    if s.len() >= 8 && s.len() <= 10 {
+        // Check for ISO pattern (starts with 4-digit year)
+        if let Some(sep_pos) = s.find(|c| c == '-' || c == '/') {
+            if sep_pos == 4 {
+                let sep = s.chars().nth(sep_pos).unwrap();
+                let parts: Vec<&str> = s.split(sep).collect();
+                if parts.len() == 3 {
+                    if let (Ok(year), Ok(month), Ok(day)) = (
+                        parts[0].parse::<i32>(),
+                        parts[1].parse::<i32>(),
+                        parts[2].parse::<i32>(),
+                    ) {
+                        if month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 1900 && year <= 9999 {
+                            return Some(date_to_serial(year, month, day));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try US format: MM/DD/YYYY or MM-DD-YYYY
+        if let Some(sep) = s.chars().find(|&c| c == '/' || c == '-') {
+            let parts: Vec<&str> = s.split(sep).collect();
+            if parts.len() == 3 && parts[2].len() == 4 {
+                if let (Ok(month), Ok(day), Ok(year)) = (
+                    parts[0].parse::<i32>(),
+                    parts[1].parse::<i32>(),
+                    parts[2].parse::<i32>(),
+                ) {
+                    if month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 1900 && year <= 9999 {
+                        return Some(date_to_serial(year, month, day));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Check if a cell value matches criteria (for SUMIF, COUNTIF, etc.)
 pub(crate) fn matches_criteria(value: &EvalResult, criteria: &EvalResult) -> bool {
     let criteria_str = criteria.to_text();
@@ -338,4 +390,52 @@ fn collect_all_values_from_range<L: CellLookup>(
         start_row, start_col, end_row, end_col,
         lookup, values
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_try_parse_date_string_iso() {
+        // ISO format: YYYY-MM-DD
+        let serial = try_parse_date_string("2023-11-07").unwrap();
+        let (y, m, d) = serial_to_date(serial);
+        assert_eq!((y, m, d), (2023, 11, 7));
+
+        // ISO format with slashes
+        let serial = try_parse_date_string("2024/08/29").unwrap();
+        let (y, m, d) = serial_to_date(serial);
+        assert_eq!((y, m, d), (2024, 8, 29));
+    }
+
+    #[test]
+    fn test_try_parse_date_string_us() {
+        // US format: MM/DD/YYYY
+        let serial = try_parse_date_string("11/07/2023").unwrap();
+        let (y, m, d) = serial_to_date(serial);
+        assert_eq!((y, m, d), (2023, 11, 7));
+
+        // US format with dashes
+        let serial = try_parse_date_string("08-29-2024").unwrap();
+        let (y, m, d) = serial_to_date(serial);
+        assert_eq!((y, m, d), (2024, 8, 29));
+    }
+
+    #[test]
+    fn test_try_parse_date_string_invalid() {
+        assert!(try_parse_date_string("hello").is_none());
+        assert!(try_parse_date_string("123").is_none());
+        assert!(try_parse_date_string("").is_none());
+        assert!(try_parse_date_string("13/01/2023").is_none()); // Invalid month for US format when year is last
+    }
+
+    #[test]
+    fn test_date_subtraction() {
+        // Test that date subtraction gives correct day count
+        let date1 = try_parse_date_string("2023-11-07").unwrap();
+        let date2 = try_parse_date_string("2024-08-29").unwrap();
+        let days = date2 - date1;
+        assert_eq!(days as i32, 296); // 296 days between these dates
+    }
 }

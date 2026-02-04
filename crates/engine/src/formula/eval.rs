@@ -175,7 +175,17 @@ impl Value {
             Value::Number(n) => Ok(*n),
             Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
             Value::Text(s) if s.is_empty() => Ok(0.0),
-            Value::Text(s) => s.parse::<f64>().map_err(|_| format!("#VALUE! Cannot convert '{}' to number", s)),
+            Value::Text(s) => {
+                // Try numeric parse first
+                if let Ok(n) = s.parse::<f64>() {
+                    return Ok(n);
+                }
+                // Try date string parse (ISO: 2023-11-07, US: 11/07/2023)
+                if let Some(serial) = super::eval_helpers::try_parse_date_string(s) {
+                    return Ok(serial);
+                }
+                Err(format!("#VALUE! Cannot convert '{}' to number", s))
+            }
             Value::Empty => Ok(0.0),
             Value::Error(e) => Err(e.clone()),
         }
@@ -339,11 +349,22 @@ impl EvalResult {
 
     /// Convert result to a number (for arithmetic operations)
     /// Arrays coerce to their top-left value
+    /// Also parses ISO date strings (2023-11-07) to Excel serial numbers
     pub fn to_number(&self) -> Result<f64, String> {
         match self {
             EvalResult::Number(n) => Ok(*n),
             EvalResult::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
-            EvalResult::Text(s) => s.parse::<f64>().map_err(|_| format!("Cannot convert '{}' to number", s)),
+            EvalResult::Text(s) => {
+                // Try numeric parse first
+                if let Ok(n) = s.parse::<f64>() {
+                    return Ok(n);
+                }
+                // Try date string parse (ISO: 2023-11-07, US: 11/07/2023)
+                if let Some(serial) = super::eval_helpers::try_parse_date_string(s) {
+                    return Ok(serial);
+                }
+                Err(format!("Cannot convert '{}' to number", s))
+            }
             EvalResult::Error(e) => Err(e.clone()),
             EvalResult::Array(arr) => arr.top_left().to_number(),
         }

@@ -1,8 +1,8 @@
-// Date/time functions: TODAY, NOW, DATE, YEAR, MONTH, DAY, WEEKDAY, DATEDIF,
+// Date/time functions: TODAY, NOW, DATE, DATEVALUE, YEAR, MONTH, DAY, WEEKDAY, DATEDIF,
 // EDATE, EOMONTH, HOUR, MINUTE, SECOND
 
 use super::eval::{evaluate, CellLookup, EvalResult};
-use super::eval_helpers::{date_to_serial, serial_to_date, days_in_month};
+use super::eval_helpers::{date_to_serial, serial_to_date, days_in_month, try_parse_date_string};
 use super::parser::BoundExpr;
 
 pub(crate) fn try_evaluate<L: CellLookup>(
@@ -57,6 +57,18 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             // Simple date to Excel serial conversion
             let serial = date_to_serial(year, month, day);
             EvalResult::Number(serial)
+        }
+        "DATEVALUE" => {
+            // DATEVALUE(date_text) - converts a date string to Excel serial number
+            // Supports ISO (2023-11-07) and US (11/07/2023) formats
+            if args.len() != 1 {
+                return Some(EvalResult::Error("DATEVALUE requires exactly 1 argument".to_string()));
+            }
+            let text = evaluate(&args[0], lookup).to_text();
+            match try_parse_date_string(&text) {
+                Some(serial) => EvalResult::Number(serial),
+                None => EvalResult::Error(format!("#VALUE! Cannot parse '{}' as date", text)),
+            }
         }
         "YEAR" => {
             if args.len() != 1 {

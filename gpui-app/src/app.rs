@@ -4272,6 +4272,26 @@ impl Spreadsheet {
         self.set_col_width(col, max_width);
     }
 
+    /// Auto-fit all columns that have content (for agent-built sheets)
+    /// Scans all columns up to the rightmost cell with data.
+    pub fn auto_fit_all_data_columns(&mut self, cx: &App) {
+        // Find the rightmost column with data
+        let mut max_col = 0usize;
+        for row in 0..100 {  // Check first 100 rows for content
+            for col in 0..100 {  // Check first 100 columns
+                let text = self.sheet(cx).get_text(row, col);
+                if !text.is_empty() {
+                    max_col = max_col.max(col);
+                }
+            }
+        }
+
+        // Auto-fit each column with data
+        for col in 0..=max_col {
+            self.auto_fit_col_width_no_notify(col, cx);
+        }
+    }
+
     /// Auto-fit row height - if row is selected and multiple rows are selected,
     /// auto-fit all selected rows (Excel behavior)
     pub fn auto_fit_selected_row_heights(&mut self, clicked_row: usize, cx: &mut Context<Self>) {
