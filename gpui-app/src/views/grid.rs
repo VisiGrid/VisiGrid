@@ -473,6 +473,11 @@ fn render_cell(
 
     // Cell value: use data_row to access actual storage
     // Merge-hidden cells display nothing (text is shown only at the origin)
+    let format = app.sheet(cx).get_format(data_row, col);
+
+    // Role-based auto-styling (from agent metadata)
+    let role_style = app.get_cell_role_style(data_row, col);
+
     let value = if is_merge_hidden {
         String::new()
     } else if is_editing {
@@ -485,14 +490,24 @@ fn render_cell(
     } else {
         let display = app.sheet(cx).get_formatted_display(data_row, col);
         // Hide zero values if show_zeros is false
-        if !app.show_zeros() && display == "0" {
+        let display = if !app.show_zeros() && display == "0" {
             String::new()
+        } else {
+            display
+        };
+
+        // Apply role-based number formatting if present
+        if let Some(num_format) = role_style.and_then(|rs| rs.number_format) {
+            // Try to parse as number for formatting
+            if let Ok(n) = display.parse::<f64>() {
+                crate::role_styles::format_number_for_display(n, num_format)
+            } else {
+                display
+            }
         } else {
             display
         }
     };
-
-    let format = app.sheet(cx).get_format(data_row, col);
 
     // NOTE: Text spillover is rendered in a separate overlay pass (render_text_spill_overlay)
     // to avoid z-order issues where adjacent cells' backgrounds cover the spilled text.
@@ -519,7 +534,7 @@ fn render_cell(
         .flex()
         .px_1()
         .overflow_hidden()  // Always clip; spill is rendered in overlay layer
-        .bg(cell_base_background(app, is_editing, format.background_color))
+        .bg(cell_base_background_with_role(app, is_editing, format.background_color, role_style))
         .border_color(border_color);
 
     // Add selection/formula-ref overlay (semi-transparent, layered on top of cell background)
@@ -650,16 +665,25 @@ fn render_cell(
     // Apply horizontal alignment
     // When editing, always left-align so caret positioning works correctly
     // General alignment: numbers right-align, text/empty left-aligns (Excel behavior)
+    // Role-based alignment overrides General but not explicit Left/Center/Right
     cell = if is_editing {
         // Editing: always left-align for correct caret positioning
         cell.justify_start()
     } else {
         match format.alignment {
             Alignment::General => {
-                let computed = app.sheet(cx).get_computed_value(data_row, col);
-                match computed {
-                    Value::Number(_) => cell.justify_end(),
-                    _ => cell.justify_start(),
+                // Role-based alignment takes precedence for General alignment
+                if role_style.map_or(false, |rs| rs.align_right) {
+                    cell.justify_end()
+                } else if role_style.map_or(false, |rs| rs.align_center) {
+                    cell.justify_center()
+                } else {
+                    // Default General behavior: numbers right, text left
+                    let computed = app.sheet(cx).get_computed_value(data_row, col);
+                    match computed {
+                        Value::Number(_) => cell.justify_end(),
+                        _ => cell.justify_start(),
+                    }
                 }
             }
             Alignment::Left => cell.justify_start(),
@@ -963,13 +987,18 @@ fn render_cell(
             let text_content: SharedString = value.clone().into();
 
             // Check if any formatting is applied (font_family IS formatting)
+            // Include role-based styling in the check
+            let role_has_formatting = role_style.map_or(false, |rs| {
+                rs.bold.is_some() || rs.italic.is_some() || rs.text_color.is_some()
+            });
             let has_formatting = format.bold
                 || format.italic
                 || format.underline
                 || format.strikethrough
                 || format.font_family.is_some()
                 || format.font_size.is_some()
-                || format.font_color.is_some();
+                || format.font_color.is_some()
+                || role_has_formatting;
 
             // Build styled text element if needed
             let text_element: AnyElement = if has_formatting {
@@ -977,7 +1006,29 @@ fn render_cell(
                 let mut text_style = window.text_style();
                 text_style.color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
 
-                if format.bold {
+                // Apply role-based text color if present (overrides default, but format.font_color wins)
+                if let Some(role_color) = role_style.and_then(|rs| rs.text_color) {
+                    if !is_editing && !is_selected && !is_multi_edit_preview && format.font_color.is_none() {
+                        text_style.color = role_color;
+                    }
+                }
+
+                // Special case: check_result role colors PASS green, FAIL red
+                if let Some(role) = app.get_cell_role(data_row, col) {
+                    if role == crate::role_styles::Role::CheckResult {
+                        if !is_editing && !is_selected && !is_multi_edit_preview {
+                            let upper = value.to_uppercase();
+                            if upper == "PASS" || upper == "OK" || upper == "YES" || upper == "TRUE" {
+                                text_style.color = gpui::hsla(0.35, 0.7, 0.4, 1.0); // green
+                            } else if upper == "FAIL" || upper == "ERROR" || upper == "NO" || upper == "FALSE" {
+                                text_style.color = gpui::hsla(0.0, 0.7, 0.5, 1.0); // red
+                            }
+                        }
+                    }
+                }
+
+                // Role bold (format.bold overrides)
+                if format.bold || role_style.map_or(false, |rs| rs.bold.unwrap_or(false)) {
                     text_style.font_weight = FontWeight::BOLD;
                 }
                 if format.italic {
@@ -1626,6 +1677,32 @@ fn cell_base_background(
             b: b as f32 / 255.0,
             a: a as f32 / 255.0,
         })
+    } else {
+        app.token(TokenKey::CellBg)
+    }
+}
+
+/// Returns the base background color for a cell, with role-based styling.
+/// Priority: is_editing > custom_bg > role_style > default
+fn cell_base_background_with_role(
+    app: &Spreadsheet,
+    is_editing: bool,
+    custom_bg: Option<[u8; 4]>,
+    role_style: Option<&crate::role_styles::RoleStyle>,
+) -> Hsla {
+    if is_editing {
+        app.token(TokenKey::EditorBg)
+    } else if let Some([r, g, b, a]) = custom_bg {
+        // Custom background color from cell format (RGBA → Hsla)
+        Hsla::from(gpui::Rgba {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: a as f32 / 255.0,
+        })
+    } else if let Some(bg) = role_style.and_then(|rs| rs.background) {
+        // Role-based background color
+        bg
     } else {
         app.token(TokenKey::CellBg)
     }

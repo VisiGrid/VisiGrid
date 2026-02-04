@@ -126,7 +126,7 @@ impl Spreadsheet {
                 self.finalize_load(path);
                 self.request_title_refresh(cx);
 
-                // Load VisiHub link if present (for .sheet files)
+                // Load VisiHub link and cell metadata (for .sheet files)
                 if ext_lower == "sheet" {
                     match crate::hub::load_hub_link(path) {
                         Ok(Some(link)) => {
@@ -142,9 +142,23 @@ impl Spreadsheet {
                             self.hub_status = crate::hub::HubStatus::Unlinked;
                         }
                     }
+
+                    // Load cell metadata for role-based auto-styling
+                    match visigrid_io::native::load_cell_metadata(path) {
+                        Ok(meta) => {
+                            // Convert BTreeMap to HashMap for faster lookup
+                            self.cell_metadata = meta.into_iter()
+                                .map(|(k, v)| (k, v.into_iter().collect()))
+                                .collect();
+                        }
+                        Err(_) => {
+                            self.cell_metadata.clear();
+                        }
+                    }
                 } else {
                     self.hub_link = None;
                     self.hub_status = crate::hub::HubStatus::Unlinked;
+                    self.cell_metadata.clear();
                 }
                 // Update session with new file path
                 self.update_session_cached(cx);

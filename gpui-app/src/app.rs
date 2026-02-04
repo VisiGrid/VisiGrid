@@ -1786,6 +1786,12 @@ pub struct Spreadsheet {
     /// Soft-rewind preview state (Phase 8A)
     pub rewind_preview: RewindPreviewState,
 
+    // Role-based auto-styling (agent metadata)
+    /// Cell metadata loaded from .sheet file (target -> {key: value})
+    pub cell_metadata: crate::role_styles::CellMetadataMap,
+    /// Role -> style mapping (singleton, could become per-doc)
+    pub role_style_map: crate::role_styles::RoleStyleMap,
+
     // Row view layer (for sort/filter)
     // Maps view rows to data rows, handles visibility
     pub row_view: RowView,
@@ -2303,6 +2309,8 @@ impl Spreadsheet {
             history: History::new(),
             base_workbook,
             rewind_preview: RewindPreviewState::Off,
+            cell_metadata: crate::role_styles::CellMetadataMap::new(),
+            role_style_map: crate::role_styles::RoleStyleMap::new(),
             row_view: RowView::new(NUM_ROWS),  // Identity mapping, all visible
             filter_state: FilterState::default(),
             filter_dropdown_col: None,

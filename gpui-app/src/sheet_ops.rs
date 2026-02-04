@@ -181,6 +181,17 @@ impl Spreadsheet {
         self.wb(cx).active_sheet_index()
     }
 
+    /// Get the role for a cell from metadata (for role-based auto-styling)
+    pub fn get_cell_role(&self, row: usize, col: usize) -> Option<crate::role_styles::Role> {
+        crate::role_styles::get_cell_role(&self.cell_metadata, row, col)
+    }
+
+    /// Get the style for a cell's role
+    pub fn get_cell_role_style(&self, row: usize, col: usize) -> Option<&crate::role_styles::RoleStyle> {
+        self.get_cell_role(row, col)
+            .and_then(|role| self.role_style_map.get(role))
+    }
+
     /// Set a cell value and update the dependency graph.
     /// This is the preferred way to set cell values - it ensures the dep graph stays in sync.
     pub fn set_cell_value(&mut self, row: usize, col: usize, value: &str, cx: &mut Context<Self>) {
