@@ -280,12 +280,12 @@ fn is_process_alive(pid: u32) -> bool {
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle != 0 {
+            if !handle.is_null() {
                 CloseHandle(handle);
                 true
             } else {
