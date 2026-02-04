@@ -57,15 +57,15 @@ subtle = "2"
 # CLI (for vg-session-smoke)
 clap = { version = "4", features = ["derive"] }
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 # VisiHub sync
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
 blake3 = "1"
 
 # Lua scripting (Pro only)
 mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 default = []
