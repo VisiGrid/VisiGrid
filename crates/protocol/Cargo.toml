@@ -1,0 +1,10 @@
+[package]
+name = "visigrid-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Session server protocol types (v1 frozen wire format)"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = "1"

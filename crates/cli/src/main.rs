@@ -1,7 +1,10 @@
 // VisiGrid CLI - headless spreadsheet operations
 // See docs/cli-v1.md for specification
 
+mod exit_codes;
 mod replay;
+mod session;
+mod sheet_ops;
 
 use visigrid_cli::diff;
 
@@ -12,18 +15,20 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-// Exit codes per spec
-pub const EXIT_SUCCESS: u8 = 0;
-pub const EXIT_EVAL_ERROR: u8 = 1;
-pub const EXIT_ARGS_ERROR: u8 = 2;
-pub const EXIT_IO_ERROR: u8 = 3;
-pub const EXIT_PARSE_ERROR: u8 = 4;
-pub const EXIT_FORMAT_ERROR: u8 = 5;
+// Re-export exit codes from registry (single source of truth)
+use exit_codes::{
+    EXIT_SUCCESS, EXIT_ERROR, EXIT_USAGE,
+    EXIT_AI_DISABLED, EXIT_AI_MISSING_KEY,
+    EXIT_DIFF_DUPLICATE, EXIT_DIFF_AMBIGUOUS, EXIT_DIFF_PARSE,
+    session_exit_code,
+};
 
-// AI-specific exit codes
-pub const EXIT_AI_DISABLED: u8 = 10;      // AI disabled (provider=none) - not an error
-pub const EXIT_AI_MISSING_KEY: u8 = 11;   // Provider configured but key missing
-pub const EXIT_AI_KEYCHAIN_ERR: u8 = 12;  // Keychain error
+// Legacy aliases for backward compatibility (will be removed)
+pub const EXIT_EVAL_ERROR: u8 = EXIT_ERROR;
+pub const EXIT_ARGS_ERROR: u8 = EXIT_USAGE;
+pub const EXIT_IO_ERROR: u8 = 3;     // TODO: migrate to specific codes
+pub const EXIT_PARSE_ERROR: u8 = 4;  // TODO: migrate to specific codes
+pub const EXIT_FORMAT_ERROR: u8 = 5; // TODO: migrate to specific codes
 
 #[derive(Parser)]
 #[command(name = "visigrid-cli")]
@@ -259,6 +264,239 @@ Examples:
         /// Export ambiguous matches to CSV file (written before exit, even on --on-ambiguous error)
         #[arg(long)]
         save_ambiguous: Option<PathBuf>,
+    },
+
+    /// List running VisiGrid sessions
+    #[command(after_help = "\
+Examples:
+  visigrid sessions
+  visigrid sessions --json")]
+    Sessions {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Connect to a running session and show status
+    #[command(after_help = "\
+Examples:
+  visigrid attach
+  visigrid attach --session abc123
+  VISIGRID_SESSION_TOKEN=xxx visigrid attach --session abc123")]
+    Attach {
+        /// Session ID (prefix match supported; auto-selects if only one session)
+        #[arg(long)]
+        session: Option<String>,
+    },
+
+    /// Apply operations to a running session
+    #[command(after_help = "\
+Examples:
+  visigrid apply ops.jsonl
+  visigrid apply --session abc123 ops.jsonl
+  cat ops.jsonl | visigrid apply -
+  visigrid apply --atomic --expected-revision 42 ops.jsonl
+  visigrid apply --wait --wait-timeout 30 ops.jsonl")]
+    Apply {
+        /// Operations file (JSONL format, or - for stdin)
+        ops: String,
+
+        /// Session ID (prefix match supported; auto-selects if only one session)
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Apply all-or-nothing (rollback on error)
+        #[arg(long)]
+        atomic: bool,
+
+        /// Expected revision for optimistic concurrency
+        #[arg(long)]
+        expected_revision: Option<u64>,
+
+        /// Wait and retry on writer conflict (instead of failing immediately)
+        #[arg(long)]
+        wait: bool,
+
+        /// Maximum time to wait for writer lease (seconds, default 30)
+        #[arg(long, default_value = "30")]
+        wait_timeout: u64,
+    },
+
+    /// Query cell state from a running session
+    #[command(after_help = "\
+Examples:
+  visigrid inspect A1
+  visigrid inspect A1:B10 --json
+  visigrid inspect --session abc123 --sheet 1 A1:C5")]
+    Inspect {
+        /// Cell or range to inspect (e.g., A1, A1:B10, or 'workbook')
+        range: String,
+
+        /// Session ID (prefix match supported; auto-selects if only one session)
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Sheet index (0-based, default: 0)
+        #[arg(long, default_value = "0")]
+        sheet: usize,
+
+        /// Output as JSON (default: human-readable table)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show session server statistics (health check)
+    #[command(after_help = "\
+Examples:
+  visigrid stats
+  visigrid stats --session abc123
+  visigrid stats --json")]
+    Stats {
+        /// Session ID (prefix match supported; auto-selects if only one session)
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// View a live session (read-only grid snapshot)
+    #[command(after_help = "\
+Examples:
+  visigrid view
+  visigrid view --range A1:K20
+  visigrid view --session abc123 --sheet 1
+  visigrid view --follow")]
+    View {
+        /// Session ID (prefix match supported; auto-selects if only one session)
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Range to display (default: A1:J20)
+        #[arg(long, default_value = "A1:J20")]
+        range: String,
+
+        /// Sheet index (0-based, default: 0)
+        #[arg(long, default_value = "0")]
+        sheet: usize,
+
+        /// Follow mode: refresh on changes (poll every 500ms)
+        #[arg(long)]
+        follow: bool,
+
+        /// Column width for display (default: 12)
+        #[arg(long, default_value = "12")]
+        width: usize,
+    },
+
+    /// Sheet file operations (headless build/inspect/verify)
+    #[command(subcommand)]
+    Sheet(SheetCommands),
+}
+
+/// Sheet subcommands for agent-ready headless workflows.
+#[derive(Subcommand)]
+enum SheetCommands {
+    /// Build a .sheet file from a Lua script (replacement semantics)
+    #[command(after_help = "\
+Examples:
+  visigrid sheet apply model.sheet --lua build.lua
+  visigrid sheet apply model.sheet --lua build.lua --verify v1:42:abc123...
+  visigrid sheet apply model.sheet --lua build.lua --dry-run
+  visigrid sheet apply model.sheet --lua build.lua --json
+
+The Lua script builds the sheet from scratch using:
+  set(cell, value)     -- set cell value or formula
+  clear(cell)          -- clear cell
+  meta(target, table)  -- semantic metadata (affects fingerprint)
+  style(target, table) -- presentation style (excluded from fingerprint)
+
+Example Lua script:
+  set(\"A1\", \"Revenue Model\")
+  meta(\"A1\", { role = \"title\" })
+  style(\"A1\", { bold = true })
+  set(\"B2\", 10000)
+  set(\"B3\", \"=B2*1.05\")")]
+    Apply {
+        /// Output .sheet file path
+        output: PathBuf,
+
+        /// Path to Lua build script
+        #[arg(long)]
+        lua: PathBuf,
+
+        /// Verify fingerprint after build (exit 1 if mismatch)
+        #[arg(long)]
+        verify: Option<String>,
+
+        /// Compute fingerprint but don't write file
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect cells/ranges in a .sheet file
+    #[command(after_help = "\
+Examples:
+  visigrid sheet inspect model.sheet A1
+  visigrid sheet inspect model.sheet A1:D10
+  visigrid sheet inspect model.sheet --workbook
+  visigrid sheet inspect model.sheet A1 --json
+  visigrid sheet inspect model.sheet A1 --include-style")]
+    Inspect {
+        /// Path to .sheet file
+        file: PathBuf,
+
+        /// Target to inspect (cell like A1, range like A1:D10, or omit for workbook)
+        target: Option<String>,
+
+        /// Show workbook metadata (fingerprint, sheet count)
+        #[arg(long)]
+        workbook: bool,
+
+        /// Include style information
+        #[arg(long)]
+        include_style: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Verify a .sheet file's fingerprint
+    #[command(after_help = "\
+Examples:
+  visigrid sheet verify model.sheet --fingerprint v1:42:abc123...
+
+Exit codes:
+  0  Fingerprint matches
+  1  Fingerprint mismatch
+  2  Usage error")]
+    Verify {
+        /// Path to .sheet file
+        file: PathBuf,
+
+        /// Expected fingerprint
+        #[arg(long)]
+        fingerprint: String,
+    },
+
+    /// Compute and print a .sheet file's fingerprint
+    #[command(after_help = "\
+Examples:
+  visigrid sheet fingerprint model.sheet
+  visigrid sheet fingerprint model.sheet --json")]
+    Fingerprint {
+        /// Path to .sheet file
+        file: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -722,6 +960,30 @@ fn main() -> ExitCode {
             on_ambiguous, out, output, summary, no_headers, header_row, delimiter,
             stdin_format, strict_exit, quiet, save_ambiguous,
         ),
+        Some(Commands::Sessions { json }) => cmd_sessions(json),
+        Some(Commands::Attach { session }) => cmd_attach(session),
+        Some(Commands::Apply { ops, session, atomic, expected_revision, wait, wait_timeout }) => {
+            cmd_apply(ops, session, atomic, expected_revision, wait, wait_timeout)
+        }
+        Some(Commands::Inspect { range, session, sheet, json }) => cmd_inspect(range, session, sheet, json),
+        Some(Commands::Stats { session, json }) => cmd_stats(session, json),
+        Some(Commands::View { session, range, sheet, follow, width }) => {
+            cmd_view(session, range, sheet, follow, width)
+        }
+        Some(Commands::Sheet(sheet_cmd)) => match sheet_cmd {
+            SheetCommands::Apply { output, lua, verify, dry_run, json } => {
+                cmd_sheet_apply(output, lua, verify, dry_run, json)
+            }
+            SheetCommands::Inspect { file, target, workbook, include_style, json } => {
+                cmd_sheet_inspect(file, target, workbook, include_style, json)
+            }
+            SheetCommands::Verify { file, fingerprint } => {
+                cmd_sheet_verify(file, fingerprint)
+            }
+            SheetCommands::Fingerprint { file, json } => {
+                cmd_sheet_fingerprint(file, json)
+            }
+        }
     };
 
     match result {
@@ -738,6 +1000,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[derive(Debug)]
 pub struct CliError {
     pub code: u8,
     pub message: String,
@@ -763,6 +1026,31 @@ impl CliError {
 
     pub fn eval(msg: impl Into<String>) -> Self {
         Self { code: EXIT_EVAL_ERROR, message: msg.into(), hint: None }
+    }
+
+    /// Create error from session error with proper exit code.
+    pub fn session(err: session::SessionError) -> Self {
+        let code = session_exit_code(&err);
+        let hint = match &err {
+            session::SessionError::ConnectionFailed(_) => {
+                Some("is VisiGrid GUI running with session server enabled?".to_string())
+            }
+            session::SessionError::AuthFailed(_) => {
+                Some("check VISIGRID_SESSION_TOKEN environment variable".to_string())
+            }
+            session::SessionError::ServerError { code: err_code, .. }
+                if err_code == "writer_conflict" =>
+            {
+                Some("another client holds the write lease; retry later".to_string())
+            }
+            session::SessionError::ServerError { code: err_code, .. }
+                if err_code == "revision_mismatch" =>
+            {
+                Some("workbook was modified; re-fetch and retry".to_string())
+            }
+            _ => None,
+        };
+        Self { code, message: err.to_string(), hint }
     }
 
     /// Add a hint to an existing error.
@@ -1774,10 +2062,7 @@ fn cmd_open(file: Option<PathBuf>) -> Result<(), CliError> {
 // diff
 // ============================================================================
 
-// Diff-specific exit codes (per cli-diff.md spec)
-const EXIT_DIFF_DUPLICATE: u8 = 3;
-const EXIT_DIFF_AMBIGUOUS: u8 = 4;
-const EXIT_DIFF_PARSE: u8 = 5;
+// Diff exit codes imported from exit_codes.rs registry
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_diff(
@@ -2576,6 +2861,822 @@ fn cmd_replay(
                 eprintln!("Wrote output to: {}", output_path.display());
             }
         }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Session commands
+// ============================================================================
+
+fn cmd_sessions(json: bool) -> Result<(), CliError> {
+    let sessions = session::list_sessions()
+        .map_err(|e| CliError::io(format!("failed to list sessions: {}", e)))?;
+
+    if sessions.is_empty() {
+        if json {
+            println!("[]");
+        } else {
+            eprintln!("No running VisiGrid sessions found.");
+        }
+        return Ok(());
+    }
+
+    if json {
+        let output = serde_json::to_string_pretty(&sessions)
+            .map_err(|e| CliError::io(e.to_string()))?;
+        println!("{}", output);
+    } else {
+        // Table format
+        println!("{:<12} {:>6} {:>8} {:<24} {}",
+            "SESSION", "PORT", "PID", "CREATED", "WORKBOOK");
+        println!("{}", "-".repeat(80));
+
+        for s in &sessions {
+            let short_id = &s.session_id.to_string()[..8];
+            let created = s.created_at.format("%Y-%m-%d %H:%M:%S");
+            let workbook = s.workbook_path.as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or(&s.workbook_title);
+
+            println!("{:<12} {:>6} {:>8} {:<24} {}",
+                short_id,
+                s.port,
+                s.pid,
+                created,
+                workbook);
+        }
+
+        eprintln!();
+        eprintln!("{} session(s) found", sessions.len());
+    }
+
+    Ok(())
+}
+
+fn cmd_attach(session_id: Option<String>) -> Result<(), CliError> {
+    let discovery = resolve_session(session_id.as_deref())?;
+    let token = get_session_token()?;
+
+    let client = session::SessionClient::connect(&discovery, &token)
+        .map_err(CliError::session)?;
+
+    println!("Connected to session {}", discovery.session_id);
+    println!("  Revision:     {}", client.revision());
+    println!("  Capabilities: {}", client.capabilities().join(", "));
+    println!("  Workbook:     {}", discovery.workbook_title);
+    if let Some(ref path) = discovery.workbook_path {
+        println!("  Path:         {}", path.display());
+    }
+
+    Ok(())
+}
+
+fn cmd_apply(
+    ops_arg: String,
+    session_id: Option<String>,
+    atomic: bool,
+    expected_revision: Option<u64>,
+    wait: bool,
+    wait_timeout: u64,
+) -> Result<(), CliError> {
+    use std::time::{Duration, Instant};
+
+    // Safety guard: --wait without idempotency protection is a footgun
+    if wait && !atomic && expected_revision.is_none() {
+        return Err(CliError {
+            code: exit_codes::EXIT_USAGE,
+            message: "--wait requires --atomic or --expected-revision for safety".to_string(),
+            hint: Some("retrying non-atomic ops without revision check can cause double-apply".to_string()),
+        });
+    }
+
+    let discovery = resolve_session(session_id.as_deref())?;
+    let token = get_session_token()?;
+
+    // Read ops from file or stdin (before connecting, so we don't hold connection while reading)
+    let ops_json = if ops_arg == "-" {
+        let mut buf = String::new();
+        io::stdin().read_to_string(&mut buf)
+            .map_err(|e| CliError::io(format!("failed to read stdin: {}", e)))?;
+        buf
+    } else {
+        std::fs::read_to_string(&ops_arg)
+            .map_err(|e| CliError::io(format!("failed to read {}: {}", ops_arg, e)))?
+    };
+
+    // Parse ops - support both JSONL (one op per line) and JSON array
+    let ops: Vec<session::Op> = if ops_json.trim_start().starts_with('[') {
+        // JSON array format
+        serde_json::from_str(&ops_json)
+            .map_err(|e| CliError::parse(format!("failed to parse ops JSON: {}", e)))?
+    } else {
+        // JSONL format (one op per line)
+        ops_json
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .enumerate()
+            .map(|(i, line)| {
+                serde_json::from_str(line)
+                    .map_err(|e| CliError::parse(format!("line {}: {}", i + 1, e)))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    if ops.is_empty() {
+        eprintln!("No operations to apply");
+        return Ok(());
+    }
+
+    eprintln!("Applying {} operation(s)...", ops.len());
+
+    let deadline = if wait {
+        Some(Instant::now() + Duration::from_secs(wait_timeout))
+    } else {
+        None
+    };
+
+    // Connect once; reuse for retries (saves connection slots)
+    let mut client = session::SessionClient::connect(&discovery, &token)
+        .map_err(CliError::session)?;
+
+    // Retry loop for writer conflicts
+    loop {
+        let result = client.apply_ops(ops.clone(), atomic, expected_revision);
+
+        match result {
+            Ok(result) => {
+                if let Some(ref err) = result.error {
+                    eprintln!("Error at op {}: [{}] {}", err.op_index, err.code, err.message);
+                    if let Some(ref hint) = err.suggestion {
+                        eprintln!("  Suggestion: {}", hint);
+                    }
+                    eprintln!("Applied: {}/{}", result.applied, result.total);
+                    eprintln!("Revision: {}", result.revision);
+                    // Partial apply = exit 24 (EXIT_SESSION_PARTIAL)
+                    return Err(CliError {
+                        code: exit_codes::EXIT_SESSION_PARTIAL,
+                        message: "operation failed".to_string(),
+                        hint: None,
+                    });
+                }
+
+                println!("Applied: {}/{}", result.applied, result.total);
+                println!("Revision: {}", result.revision);
+                return Ok(());
+            }
+            Err(session::SessionError::ServerError { code, message, retry_after_ms }) if code == "writer_conflict" => {
+                if let Some(deadline) = deadline {
+                    if Instant::now() >= deadline {
+                        eprintln!("error: writer conflict (timeout after {}s)", wait_timeout);
+                        return Err(CliError {
+                            code: exit_codes::EXIT_SESSION_CONFLICT,
+                            message: format!("writer conflict: {}", message),
+                            hint: Some("another client holds the writer lease".to_string()),
+                        });
+                    }
+
+                    // Adaptive backoff: use server hint, clamp to [50ms, 2000ms], add jitter
+                    let base_ms = retry_after_ms.unwrap_or(1000).clamp(50, 2000);
+                    let jitter = (base_ms as f64 * 0.1 * rand_jitter()) as u64;
+                    let sleep_ms = base_ms + jitter;
+
+                    eprintln!("Writer conflict, retrying in {}ms...", sleep_ms);
+                    std::thread::sleep(Duration::from_millis(sleep_ms));
+                    continue;
+                } else {
+                    // No --wait, fail immediately
+                    return Err(CliError::session(session::SessionError::ServerError {
+                        code,
+                        message,
+                        retry_after_ms,
+                    }));
+                }
+            }
+            Err(session::SessionError::ConnectionClosed) if wait => {
+                // Connection dropped; reconnect and retry
+                eprintln!("Connection lost, reconnecting...");
+                client = session::SessionClient::connect(&discovery, &token)
+                    .map_err(CliError::session)?;
+                continue;
+            }
+            Err(e) => {
+                return Err(CliError::session(e));
+            }
+        }
+    }
+}
+
+/// Simple jitter factor in range [-1.0, 1.0] using timestamp entropy.
+/// Not cryptographic, just enough to spread out retries.
+fn rand_jitter() -> f64 {
+    use std::time::SystemTime;
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    // Map to [-1.0, 1.0]
+    ((nanos % 2001) as f64 / 1000.0) - 1.0
+}
+
+fn cmd_inspect(
+    range: String,
+    session_id: Option<String>,
+    sheet: usize,
+    json: bool,
+) -> Result<(), CliError> {
+    use visigrid_protocol::InspectResult;
+
+    let discovery = resolve_session(session_id.as_deref())?;
+    let token = get_session_token()?;
+
+    let mut client = session::SessionClient::connect(&discovery, &token)
+        .map_err(CliError::session)?;
+
+    // Parse the range string into an inspect target
+    let result = if range.eq_ignore_ascii_case("workbook") {
+        client.inspect_workbook()
+    } else if let Some((start, end)) = range.split_once(':') {
+        // Range like "A1:B2"
+        let (start_col, start_row) = parse_cell_ref(start)
+            .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", start)))?;
+        let (end_col, end_row) = parse_cell_ref(end)
+            .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", end)))?;
+        client.inspect_range(sheet, start_row, start_col, end_row, end_col)
+    } else {
+        // Single cell like "A1"
+        let (col, row) = parse_cell_ref(&range)
+            .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", range)))?;
+        client.inspect_cell(sheet, row, col)
+    }.map_err(CliError::session)?;
+
+    if json {
+        let output = serde_json::to_string_pretty(&result)
+            .map_err(|e| CliError::io(e.to_string()))?;
+        println!("{}", output);
+    } else {
+        // Human-readable table format
+        let short_id = &discovery.session_id.to_string()[..8];
+        println!("Session {}  Revision {}", short_id, result.revision);
+
+        match result.result {
+            InspectResult::Cell(info) => {
+                // Single cell format: "A1 = value (type)"
+                let cell_type = if info.formula.is_some() {
+                    "formula"
+                } else if info.display.parse::<f64>().is_ok() {
+                    "number"
+                } else if info.display.is_empty() {
+                    "empty"
+                } else {
+                    "text"
+                };
+
+                println!("{} = {}  ({})", range.to_uppercase(), info.display, cell_type);
+
+                if let Some(formula) = &info.formula {
+                    println!("Formula: {}", formula);
+                }
+            }
+            InspectResult::Range { cells } => {
+                println!("Range {}\n", range.to_uppercase());
+
+                if cells.is_empty() {
+                    println!("(empty range)");
+                } else {
+                    // Simple column display - one cell per line with truncation
+                    for (i, cell) in cells.iter().enumerate() {
+                        let display = if cell.display.len() > 40 {
+                            format!("{}…", &cell.display[..39])
+                        } else {
+                            cell.display.clone()
+                        };
+
+                        let formula_marker = if cell.formula.is_some() { " [f]" } else { "" };
+                        println!("  [{}] {}{}", i, display, formula_marker);
+                    }
+                }
+            }
+            InspectResult::Workbook(info) => {
+                println!("\nWorkbook: {}", info.title);
+                println!("  Sheets:       {}", info.sheet_count);
+                println!("  Active sheet: {}", info.active_sheet);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_stats(session_id: Option<String>, json: bool) -> Result<(), CliError> {
+    let discovery = resolve_session(session_id.as_deref())?;
+    let token = get_session_token()?;
+
+    let mut client = session::SessionClient::connect(&discovery, &token)
+        .map_err(CliError::session)?;
+
+    let stats = client.stats()
+        .map_err(CliError::session)?;
+
+    if json {
+        let output = serde_json::to_string_pretty(&stats)
+            .map_err(|e| CliError::io(e.to_string()))?;
+        println!("{}", output);
+    } else {
+        // Human-readable table format
+        println!("Session Statistics");
+        println!("------------------");
+        println!("Active connections:    {}", stats.active_connections);
+        println!("Writer conflicts:      {}", stats.writer_conflict_count);
+        println!("Dropped events:        {}", stats.dropped_events_total);
+        println!("Refused (limit):       {}", stats.connections_refused_limit);
+        println!("Parse failures:        {}", stats.connections_closed_parse_failures);
+        println!("Oversize messages:     {}", stats.connections_closed_oversize);
+    }
+
+    Ok(())
+}
+
+fn cmd_view(
+    session_id: Option<String>,
+    range: String,
+    sheet: usize,
+    follow: bool,
+    col_width: usize,
+) -> Result<(), CliError> {
+    use std::time::Duration;
+    use visigrid_protocol::InspectResult;
+
+    // Parse range (e.g., "A1:J20")
+    let (start, end) = range.split_once(':')
+        .ok_or_else(|| CliError::args(format!("invalid range '{}', expected format like A1:J20", range)))?;
+
+    let (start_col, start_row) = parse_cell_ref(start)
+        .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", start)))?;
+    let (end_col, end_row) = parse_cell_ref(end)
+        .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", end)))?;
+
+    let discovery = resolve_session(session_id.as_deref())?;
+    let token = get_session_token()?;
+
+    // Single connection, reused for follow mode
+    let mut client = session::SessionClient::connect(&discovery, &token)
+        .map_err(CliError::session)?;
+
+    let session_id_str = discovery.session_id.to_string();
+    let short_id = &session_id_str[..8.min(session_id_str.len())];
+    let mut last_revision: Option<u64> = None;
+
+    loop {
+        // Fetch range data
+        let result = client.inspect_range(sheet, start_row, start_col, end_row, end_col)
+            .map_err(CliError::session)?;
+
+        // Skip redraw if revision unchanged (in follow mode)
+        if follow {
+            if last_revision == Some(result.revision) {
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+            last_revision = Some(result.revision);
+
+            // Clear screen for follow mode
+            print!("\x1B[2J\x1B[H");
+        }
+
+        // Print header
+        println!(
+            "Session: {}  Sheet: {}  Range: {}  Revision: {}",
+            short_id, sheet, range, result.revision
+        );
+        println!("{}", "─".repeat(60));
+
+        // Print grid
+        match result.result {
+            InspectResult::Range { cells } => {
+                // Cells are returned in row-major order
+                print_grid_from_cells(&cells, start_row, start_col, end_row, end_col, col_width);
+            }
+            InspectResult::Cell(info) => {
+                // Single cell - just print it
+                println!("{}: {}", range.to_uppercase(), info.display);
+            }
+            InspectResult::Workbook(_) => {
+                return Err(CliError::args("view requires a cell range, not 'workbook'".to_string()));
+            }
+        }
+
+        if follow {
+            println!();
+            println!("(following - press Ctrl+C to stop)");
+            std::thread::sleep(Duration::from_millis(500));
+        } else {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Print a grid of cells in table format.
+/// Cells are assumed to be in row-major order.
+fn print_grid_from_cells(
+    cells: &[visigrid_protocol::CellInfo],
+    start_row: usize,
+    start_col: usize,
+    end_row: usize,
+    end_col: usize,
+    col_width: usize,
+) {
+    let num_cols = end_col - start_col + 1;
+
+    // Build a map of (row, col) -> display value from flat array
+    let mut grid: std::collections::HashMap<(usize, usize), &str> = std::collections::HashMap::new();
+    for (i, cell) in cells.iter().enumerate() {
+        let row = start_row + i / num_cols;
+        let col = start_col + i % num_cols;
+        grid.insert((row, col), &cell.display);
+    }
+
+    // Print column headers
+    print!("{:>5} ", ""); // Row number column
+    for col in start_col..=end_col {
+        let col_name = col_to_letter(col);
+        print!("{:^width$}", col_name, width = col_width);
+    }
+    println!();
+
+    // Print separator
+    print!("{:─>5}─", "");
+    for _ in start_col..=end_col {
+        print!("{:─>width$}", "", width = col_width);
+    }
+    println!();
+
+    // Print rows
+    for row in start_row..=end_row {
+        print!("{:>5} ", row + 1); // 1-indexed row numbers
+        for col in start_col..=end_col {
+            let value = grid.get(&(row, col)).map(|s| *s).unwrap_or("");
+            let display = truncate_display(value, col_width);
+            print!("{:>width$}", display, width = col_width);
+        }
+        println!();
+    }
+}
+
+/// Truncate a string to fit within width, adding ".." if truncated.
+/// Handles UTF-8 safely by finding char boundaries.
+fn truncate_display(s: &str, width: usize) -> String {
+    if width < 3 {
+        return s.chars().next().map(|c| c.to_string()).unwrap_or_default();
+    }
+
+    let char_count = s.chars().count();
+    if char_count <= width {
+        return s.to_string();
+    }
+
+    // Truncate to width - 2 chars, add ".."
+    let truncated: String = s.chars().take(width - 2).collect();
+    format!("{}..", truncated)
+}
+
+/// Convert column index to letter (0 -> A, 1 -> B, 26 -> AA, etc.)
+fn col_to_letter(col: usize) -> String {
+    let mut result = String::new();
+    let mut n = col;
+    loop {
+        result.insert(0, (b'A' + (n % 26) as u8) as char);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    result
+}
+
+/// Resolve session by ID (prefix match), or auto-select if only one session.
+fn resolve_session(session_id: Option<&str>) -> Result<session::DiscoveryFile, CliError> {
+    let sessions = session::list_sessions()
+        .map_err(|e| CliError::io(format!("failed to list sessions: {}", e)))?;
+
+    if sessions.is_empty() {
+        return Err(CliError::io("no running VisiGrid sessions found")
+            .with_hint("start VisiGrid GUI and enable session server"));
+    }
+
+    match session_id {
+        Some(id) => {
+            session::find_session(id)
+                .map_err(|e| CliError::args(e.to_string()))?
+                .ok_or_else(|| CliError::args(format!("session '{}' not found", id))
+                    .with_hint("use 'visigrid sessions' to list available sessions"))
+        }
+        None => {
+            if sessions.len() == 1 {
+                Ok(sessions.into_iter().next().unwrap())
+            } else {
+                Err(CliError::args(format!("{} sessions found; specify --session", sessions.len()))
+                    .with_hint("use 'visigrid sessions' to list available sessions"))
+            }
+        }
+    }
+}
+
+/// Get session token from environment variable.
+fn get_session_token() -> Result<String, CliError> {
+    std::env::var("VISIGRID_SESSION_TOKEN")
+        .map_err(|_| CliError::args("VISIGRID_SESSION_TOKEN environment variable not set")
+            .with_hint("copy the token from VisiGrid GUI session panel and set: export VISIGRID_SESSION_TOKEN=xxx"))
+}
+
+// =============================================================================
+// Sheet commands (Phase 2A: Agent-ready headless workflows)
+// =============================================================================
+
+/// Build a .sheet file from a Lua script.
+fn cmd_sheet_apply(
+    output: PathBuf,
+    lua_path: PathBuf,
+    verify: Option<String>,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    use visigrid_io::native::save_workbook;
+
+    // Execute the build script
+    let result = sheet_ops::execute_build_script(&lua_path, verify.as_deref())?;
+
+    // Check verification if requested
+    if let Some(verified) = result.verified {
+        if !verified {
+            let expected = verify.as_deref().unwrap_or("(unknown)");
+            let computed = result.fingerprint.to_string();
+
+            if json {
+                let output_json = serde_json::json!({
+                    "ok": false,
+                    "error": "fingerprint_mismatch",
+                    "expected": expected,
+                    "computed": computed,
+                    "semantic_ops": result.semantic_ops,
+                    "style_ops": result.style_ops,
+                    "cells_changed": result.cells_changed,
+                });
+                println!("{}", serde_json::to_string_pretty(&output_json).unwrap());
+            } else {
+                eprintln!("Fingerprint mismatch");
+                eprintln!("  Expected: {}", expected);
+                eprintln!("  Computed: {}", computed);
+            }
+            return Err(CliError { code: EXIT_ERROR, message: "fingerprint mismatch".to_string(), hint: None });
+        }
+    }
+
+    // Write output (unless dry-run)
+    if !dry_run {
+        // Atomic write: write to temp file first, then rename
+        let temp_path = output.with_extension("sheet.tmp");
+
+        save_workbook(&result.workbook, &temp_path)
+            .map_err(|e| CliError::io(format!("failed to write temp file: {}", e)))?;
+
+        std::fs::rename(&temp_path, &output)
+            .map_err(|e| CliError::io(format!("failed to rename to output: {}", e)))?;
+    }
+
+    // Output result
+    if json {
+        let output_json = serde_json::json!({
+            "ok": true,
+            "fingerprint": result.fingerprint.to_string(),
+            "semantic_ops": result.semantic_ops,
+            "style_ops": result.style_ops,
+            "cells_changed": result.cells_changed,
+            "dry_run": dry_run,
+            "output": if dry_run { None } else { Some(output.display().to_string()) },
+        });
+        println!("{}", serde_json::to_string_pretty(&output_json).unwrap());
+    } else {
+        if dry_run {
+            println!("(dry run - file not written)");
+        } else {
+            println!("Wrote {}", output.display());
+        }
+        println!("Fingerprint:  {}", result.fingerprint.to_string());
+        println!("Semantic ops: {}", result.semantic_ops);
+        println!("Style ops:    {}", result.style_ops);
+        println!("Cells:        {}", result.cells_changed);
+    }
+
+    Ok(())
+}
+
+/// Inspect cells/ranges in a .sheet file.
+fn cmd_sheet_inspect(
+    file: PathBuf,
+    target: Option<String>,
+    workbook_mode: bool,
+    include_style: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    use visigrid_io::native::load_workbook;
+
+    let workbook = load_workbook(&file)
+        .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
+
+    if workbook_mode || target.is_none() {
+        // Workbook metadata
+        let fingerprint = sheet_ops::compute_sheet_fingerprint(&workbook);
+        let sheet = workbook.sheet(0);
+        let cell_count = sheet.map(|s| {
+            s.cells_iter().filter(|(_, c)| !c.value.raw_display().is_empty()).count()
+        }).unwrap_or(0);
+
+        let result = sheet_ops::WorkbookInspectResult {
+            fingerprint: fingerprint.to_string(),
+            sheet_count: workbook.sheet_count(),
+            cell_count,
+        };
+
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        } else {
+            println!("File:        {}", file.display());
+            println!("Fingerprint: {}", result.fingerprint);
+            println!("Sheets:      {}", result.sheet_count);
+            println!("Cells:       {}", result.cell_count);
+        }
+    } else {
+        let target_str = target.unwrap();
+        let sheet = workbook.sheet(0)
+            .ok_or_else(|| CliError::io("no sheets in workbook"))?;
+
+        // Parse target
+        let parsed = sheet_ops::parse_cell_ref(&target_str)
+            .map(|(r, c)| (r, c, r, c))
+            .or_else(|| {
+                // Try range
+                if let Some((start, end)) = target_str.split_once(':') {
+                    let (sr, sc) = sheet_ops::parse_cell_ref(start)?;
+                    let (er, ec) = sheet_ops::parse_cell_ref(end)?;
+                    Some((sr, sc, er, ec))
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| CliError::args(format!("invalid target: {}", target_str)))?;
+
+        let (start_row, start_col, end_row, end_col) = parsed;
+
+        if start_row == end_row && start_col == end_col {
+            // Single cell
+            let raw = sheet.get_raw(start_row, start_col);
+            let display = sheet.get_display(start_row, start_col);
+            let format = sheet.get_format(start_row, start_col);
+
+            let value_type = if raw.starts_with('=') {
+                "formula"
+            } else if display.parse::<f64>().is_ok() {
+                "number"
+            } else if display.is_empty() {
+                "empty"
+            } else {
+                "text"
+            };
+
+            let formula = if raw.starts_with('=') { Some(raw.clone()) } else { None };
+
+            let format_info = if include_style {
+                let nf_str = match &format.number_format {
+                    visigrid_engine::cell::NumberFormat::General => None,
+                    nf => Some(format!("{:?}", nf)),
+                };
+                Some(sheet_ops::CellFormatInfo {
+                    bold: format.bold,
+                    italic: format.italic,
+                    underline: format.underline,
+                    number_format: nf_str,
+                })
+            } else {
+                None
+            };
+
+            let result = sheet_ops::CellInspectResult {
+                cell: target_str.to_uppercase(),
+                value: display,
+                formula,
+                value_type: value_type.to_string(),
+                format: format_info,
+            };
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            } else {
+                println!("{} = {}  ({})", result.cell, result.value, result.value_type);
+                if let Some(f) = &result.formula {
+                    println!("Formula: {}", f);
+                }
+                if include_style {
+                    if format.bold { println!("Style: bold"); }
+                    if format.italic { println!("Style: italic"); }
+                    if format.underline { println!("Style: underline"); }
+                }
+            }
+        } else {
+            // Range
+            let mut cells = Vec::new();
+            for row in start_row..=end_row {
+                for col in start_col..=end_col {
+                    let raw = sheet.get_raw(row, col);
+                    let display = sheet.get_display(row, col);
+
+                    let value_type = if raw.starts_with('=') {
+                        "formula"
+                    } else if display.parse::<f64>().is_ok() {
+                        "number"
+                    } else if display.is_empty() {
+                        "empty"
+                    } else {
+                        "text"
+                    };
+
+                    let formula = if raw.starts_with('=') { Some(raw.clone()) } else { None };
+
+                    cells.push(sheet_ops::CellInspectResult {
+                        cell: sheet_ops::format_cell_ref(row, col),
+                        value: display,
+                        formula,
+                        value_type: value_type.to_string(),
+                        format: None, // Style not included for ranges by default
+                    });
+                }
+            }
+
+            let result = sheet_ops::RangeInspectResult {
+                range: target_str.to_uppercase(),
+                cells,
+            };
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            } else {
+                println!("Range: {}", result.range);
+                for cell in &result.cells {
+                    let formula_marker = if cell.formula.is_some() { " [f]" } else { "" };
+                    println!("  {} = {}{}", cell.cell, cell.value, formula_marker);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify a .sheet file's fingerprint.
+fn cmd_sheet_verify(file: PathBuf, expected: String) -> Result<(), CliError> {
+    use visigrid_io::native::load_workbook;
+
+    let workbook = load_workbook(&file)
+        .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
+
+    let computed = sheet_ops::compute_sheet_fingerprint(&workbook);
+    let expected_fp = replay::ReplayFingerprint::parse(&expected)
+        .ok_or_else(|| CliError::args(format!("invalid fingerprint format: {}", expected)))?;
+
+    if computed == expected_fp {
+        println!("Verification: PASS");
+        println!("Fingerprint:  {}", computed.to_string());
+        Ok(())
+    } else {
+        eprintln!("Verification: FAIL");
+        eprintln!("  Expected: {}", expected);
+        eprintln!("  Computed: {}", computed.to_string());
+        Err(CliError { code: EXIT_ERROR, message: "fingerprint mismatch".to_string(), hint: None })
+    }
+}
+
+/// Compute and print a .sheet file's fingerprint.
+fn cmd_sheet_fingerprint(file: PathBuf, json: bool) -> Result<(), CliError> {
+    use visigrid_io::native::load_workbook;
+
+    let workbook = load_workbook(&file)
+        .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
+
+    let fingerprint = sheet_ops::compute_sheet_fingerprint(&workbook);
+
+    if json {
+        let output = serde_json::json!({
+            "file": file.display().to_string(),
+            "fingerprint": fingerprint.to_string(),
+            "ops": fingerprint.len,
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    } else {
+        println!("{}", fingerprint.to_string());
     }
 
     Ok(())

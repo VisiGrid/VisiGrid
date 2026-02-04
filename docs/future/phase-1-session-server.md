@@ -1,8 +1,12 @@
 # Phase 1: Session Server (IPC)
 
-**Status:** COMPLETE (server-side). GUI controls and CLI commands deferred.
+**Status:** ✅ FROZEN (2026-02-03)
 **Effort:** 2-3 weeks (actual)
 **Transport:** TCP localhost + token (cross-platform, simplest to ship right)
+
+> **Phase 1 is complete.** Server, CLI, protocol, and resource limits are implemented and tested.
+> GUI controls and "unauthenticated read-only" toggle are Phase 2 polish.
+> Only bugfixes allowed in this layer going forward.
 
 ---
 
@@ -13,7 +17,54 @@
 2. New golden vector files
 3. Backwards compatibility analysis
 
-Golden vectors lock the wire format: `gpui-app/src/session_server/protocol_golden/*.jsonl`
+Golden vectors lock the wire format:
+- Server: `gpui-app/src/session_server/protocol_golden/*.jsonl`
+- CLI: `crates/cli/tests/golden_vectors/*.jsonl`
+
+Shared types: `crates/protocol/src/lib.rs` (single source of truth)
+
+---
+
+## Phase 1 Freeze Policy
+
+**This layer is frozen as of 2026-02-03. The rules below govern what changes are allowed.**
+
+### Allowed (bugfixes only)
+
+| Category | Examples |
+|----------|----------|
+| Behavior behind existing fields | Fix race in writer lease renewal |
+| Metrics correctness | Fix dropped event counter underflow |
+| Enforcing existing limits | Tighten message size validation |
+| Security hardening | Add constant-time token comparison |
+| CLI behavior (no protocol change) | Add `--wait` retry loop for `apply` |
+| Documentation | Clarify error code semantics |
+
+### NOT Allowed (requires protocol v2)
+
+| Category | Examples |
+|----------|----------|
+| New message types | `trace_precedents`, `undo` |
+| New fields on existing messages | Adding `cell_type` to `InspectResult` |
+| New optional fields | Even "harmless" additions break byte-exact tests |
+| Changed semantics | Redefining what `revision` means |
+| New error codes | Must stay within existing taxonomy |
+
+### Enforcement
+
+1. **Golden vectors are the gate.** Any PR that touches protocol types must update both server and CLI golden tests.
+2. **Byte-exact tests catch drift.** If serialization changes, the test fails. Do not "fix" the golden vector — fix the code or bump protocol version.
+3. **Code review checkpoint.** Any change to `crates/protocol/` or `gpui-app/src/session_server/protocol.rs` requires explicit justification.
+
+### Phase 2 Design Constraints
+
+The `MAX_CONNECTIONS=5` cap creates pressure for Phase 2:
+
+- **Connection reuse**: `view --session` should hold one connection, not open/close repeatedly
+- **Stats awareness**: Document "don't poll faster than 1/sec" or add `--watch` with built-in throttle
+- **Multiplexing consideration**: If connection pressure grows, Phase 2 may need to multiplex operations over fewer connections
+
+These are Phase 2 concerns. Document them here so they're not forgotten.
 
 ---
 
@@ -108,10 +159,17 @@ Golden vectors lock the wire format: `gpui-app/src/session_server/protocol_golde
   - `writer_conflict` error with `retry_after_ms` for competing clients
   - Released on disconnect
 
+- **Connection limit** — `gpui-app/src/session_server/server.rs`:
+  - `MAX_CONNECTIONS = 5` enforced at accept loop
+  - Excess connections refused immediately (before handshake)
+  - `connections_refused_limit` counter for stats
+  - Slot freed immediately on disconnect
+
 - **Stats endpoint** — Query server health without logs:
   - `connections_closed_parse_failures`
   - `connections_closed_oversize`
   - `writer_conflict_count`
+  - `connections_refused_limit`
   - `dropped_events_total`
   - `active_connections`
 
@@ -125,13 +183,46 @@ Golden vectors lock the wire format: `gpui-app/src/session_server/protocol_golde
   - Exercises: connect, auth, apply_ops, inspect, subscribe, events
   - Verifies revision tracking, error handling, event delivery
 
-- **Tests** — 66 session server tests + 16 invariant tests + full gpui test suite
+- **Tests** — 66 session server tests + 16 invariant tests + 85 CLI tests + full gpui test suite
 
-### Deferred (not blocking)
+### Completed (CLI layer)
+
+- **Shared protocol crate** — `crates/protocol/src/lib.rs`:
+  - Canonical v1 types shared between CLI and GUI
+  - `ClientMessage`, `ServerMessage` enums
+  - All message types: Hello, Welcome, ApplyOps, Inspect, Stats, etc.
+  - `PROTOCOL_VERSION: u32 = 1` constant
+
+- **Session client** — `crates/cli/src/session.rs`:
+  - TCP connection with bounded JSONL reads (10MB cap)
+  - Request/response correlation via message ID
+  - Mid-frame connection close detection
+  - Unit tests for bounded read edge cases
+
+- **Exit code registry** — `crates/cli/src/exit_codes.rs`:
+  - Single source of truth for all CLI exit codes
+  - Range-based organization: 0-2 universal, 3-9 diff, 10-19 AI, 20-29 session, 30-39 replay
+  - `session_exit_code()` maps `SessionError` to exit codes
+  - `SessionErrorOutput` for structured error output (JSON + human)
+
+- **CLI commands** — `crates/cli/src/main.rs`:
+  - `visigrid sessions` — List active sessions (table + JSON)
+  - `visigrid attach` — Interactive session shell
+  - `visigrid apply` — Apply ops from file/stdin (atomic + expected_revision + --wait)
+  - `visigrid inspect` — Query cell/range state (table default + JSON)
+  - `visigrid stats` — Session server health metrics (table + JSON)
+  - `visigrid view` — Live grid snapshot (ASCII table + --follow)
+
+- **Golden vector tests** — `crates/cli/tests/protocol_golden.rs`:
+  - 17 tests including 5 byte-exact serialization tests
+  - Locks wire format for both directions (GUI→CLI and CLI→GUI)
+  - Uses same golden files as server-side tests
+
+- **Tests** — 85 total CLI tests (including session + golden vector tests)
+
+### Deferred (Phase 2 polish)
 
 - [ ] GUI controls (Live Control panel, status bar indicator, token rotation)
-- [ ] CLI `sessions`, `attach`, `apply` commands (explicitly after HN)
-- [ ] Connection limit (max 5) — event registry exists but no hard cap
 - [ ] "Allow unauthenticated read-only" toggle
 
 ## Guarantees (v1)
@@ -941,21 +1032,110 @@ Integration tests:
 - [ ] Error handling for malformed messages
 - [ ] "Allow unauthenticated read-only" toggle (default OFF)
 
-## CLI Commands (Later, After HN)
+## CLI Commands (COMPLETE)
+
+All session CLI commands are implemented. See `crates/cli/src/main.rs`.
 
 ```bash
-# List running sessions (with stale detection)
-visigrid-cli sessions
+# List running sessions (with stale PID detection)
+visigrid sessions                    # Table format
+visigrid sessions --json             # JSON format
 
 # Apply ops to running session
-visigrid-cli apply --session a1b2c3 ops.jsonl
-visigrid-cli apply --session a1b2c3 --expected-revision 42 ops.jsonl
+visigrid apply ops.jsonl                              # Auto-detect session
+visigrid apply --session a1b2c3 ops.jsonl             # Explicit session
+visigrid apply --expected-revision 42 ops.jsonl       # Optimistic concurrency
+visigrid apply --atomic=false ops.jsonl               # Partial apply mode
+cat ops.jsonl | visigrid apply -                      # Stdin
+visigrid apply --wait ops.jsonl                       # Retry on writer conflict
+visigrid apply --wait --wait-timeout 60 ops.jsonl     # Custom timeout (default 30s)
 
-# Watch file and re-apply on save
-visigrid-cli watch ops.jsonl --session a1b2c3
+# Query cell/range state
+visigrid inspect A1                  # Single cell (table)
+visigrid inspect A1:C10              # Range (table)
+visigrid inspect A1 --json           # JSON format
+
+# Session server health metrics
+visigrid stats                       # Table format
+visigrid stats --json                # JSON format
+
+# View live grid (read-only snapshot)
+visigrid view                        # Default: A1:J20
+visigrid view --range A1:K30         # Custom range
+visigrid view --follow               # Auto-refresh on changes
+visigrid view --width 15             # Custom column width
+
+# Interactive shell
+visigrid attach                      # REPL for exploration
 ```
 
-Do NOT build these until after HN diff focus.
+### Exit Codes
+
+Session commands use exit codes 20-29 for scripting:
+
+| Code | Constant | Description |
+|------|----------|-------------|
+| 20 | `EXIT_SESSION_CONNECT` | Cannot connect (no server, refused) |
+| 21 | `EXIT_SESSION_PROTOCOL` | Protocol error (bad framing, version) |
+| 22 | `EXIT_SESSION_AUTH` | Authentication failed (bad token) |
+| 23 | `EXIT_SESSION_CONFLICT` | Writer conflict or revision mismatch |
+| 24 | `EXIT_SESSION_PARTIAL` | Partial apply (some ops rejected) |
+| 25 | `EXIT_SESSION_INPUT` | Invalid input (bad op, bad reference) |
+| 26 | `EXIT_SESSION_TIMEOUT` | Operation timed out |
+
+### Writer Conflict Retry (`--wait`)
+
+When `apply` encounters a `writer_conflict` error:
+- Without `--wait`: fails immediately with exit 23
+- With `--wait`: retries with adaptive backoff until success or timeout
+- `--wait-timeout N`: custom timeout in seconds (default 30)
+- On timeout: exit 23 (`EXIT_SESSION_CONFLICT`)
+
+**Adaptive backoff:**
+- Uses `retry_after_ms` from server (clamped to 50-2000ms)
+- Adds ±10% jitter to prevent thundering herd
+- Reuses same connection (saves connection slots)
+- Reconnects automatically if connection drops
+
+**Safety guard:**
+```
+--wait requires --atomic or --expected-revision
+```
+Without idempotency protection, retrying can cause double-apply. Exit 2 (usage error) if neither is provided.
+
+This makes scripts reliable without manual retry loops or hidden correctness bugs.
+
+### Live Grid View (`view`)
+
+Read-only grid snapshot with optional auto-refresh:
+- Displays range as ASCII table with row/column headers
+- `--follow`: polls revision every 500ms, refreshes on change
+- Single connection held for duration (respects connection cap)
+- Truncates cells to `--width` characters (default 12)
+
+```
+Session: a1b2c3d4  Sheet: 0  Range: A1:J20  Revision: 43
+────────────────────────────────────────────────────────────
+            A           B           C           D
+─────────────────────────────────────────────────────────
+    1    Revenue     Q1 2024     Q2 2024     Q3 2024
+    2    Product A     10000       12000       15000
+    3    Product B      8000        9500       11000
+```
+
+### Bounded JSONL Reads
+
+CLI enforces 10MB message limit before buffering:
+- Prevents memory exhaustion from malicious/buggy servers
+- Detects mid-frame connection close (no newline)
+- Returns `EXIT_SESSION_PROTOCOL` (21) on violation
+
+### Deferred
+
+```bash
+# Watch file and re-apply on save (not implemented)
+visigrid watch ops.jsonl --session a1b2c3
+```
 
 ## The "Prove It" Demo
 

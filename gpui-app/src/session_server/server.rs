@@ -227,6 +227,10 @@ impl Default for WriterLease {
     }
 }
 
+/// Maximum concurrent connections per session server.
+/// Prevents resource exhaustion from runaway scripts/agents.
+pub const MAX_CONNECTIONS: usize = 5;
+
 /// Operational metrics for the session server.
 /// Used for debugging and monitoring.
 #[derive(Clone, Default)]
@@ -237,6 +241,8 @@ pub struct ServerMetrics {
     pub connections_closed_oversize: Arc<std::sync::atomic::AtomicU64>,
     /// Writer conflict errors returned.
     pub writer_conflict_count: Arc<std::sync::atomic::AtomicU64>,
+    /// Connections refused due to connection limit.
+    pub connections_refused_limit: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ServerMetrics {
@@ -467,6 +473,21 @@ fn run_listener(
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, addr)) => {
+                // Check connection limit before spawning handler
+                if event_registry.connection_count() >= MAX_CONNECTIONS {
+                    log::warn!(
+                        "Connection refused from {}: limit of {} reached",
+                        addr,
+                        MAX_CONNECTIONS
+                    );
+                    metrics
+                        .connections_refused_limit
+                        .fetch_add(1, Ordering::Relaxed);
+                    // Close immediately (stream drops)
+                    drop(stream);
+                    continue;
+                }
+
                 log::debug!("Accepted connection from {}", addr);
                 let token = token.clone();
                 let session_id = session_id.clone();
@@ -793,6 +814,7 @@ fn handle_message(
             connections_closed_parse_failures: metrics.connections_closed_parse_failures.load(Ordering::Relaxed),
             connections_closed_oversize: metrics.connections_closed_oversize.load(Ordering::Relaxed),
             writer_conflict_count: metrics.writer_conflict_count.load(Ordering::Relaxed),
+            connections_refused_limit: metrics.connections_refused_limit.load(Ordering::Relaxed),
             dropped_events_total: registry.dropped_events_count(),
             active_connections: registry.connection_count() as u64,
         }),
@@ -1939,12 +1961,162 @@ mod tests {
             assert_eq!(result.connections_closed_parse_failures, 0);
             assert_eq!(result.connections_closed_oversize, 0);
             assert_eq!(result.writer_conflict_count, 0);
+            assert_eq!(result.connections_refused_limit, 0);
             assert_eq!(result.dropped_events_total, 0);
             // At least one connection (ourselves)
             assert!(result.active_connections >= 1);
         } else {
             panic!("Expected StatsResult, got {:?}", msg);
         }
+
+        server.stop();
+    }
+
+    // ========================================================================
+    // Connection Limit Tests
+    // ========================================================================
+
+    #[test]
+    fn test_connection_limit_enforced() {
+        let (bridge, _handler) = create_test_bridge();
+        let mut server = SessionServer::new();
+        server
+            .start(SessionServerConfig {
+                mode: ServerMode::Apply,
+                workbook_path: None,
+                workbook_title: "Test".to_string(),
+                bridge: Some(bridge),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let addr = server.bound_addr().unwrap();
+        let token = server.token().unwrap().to_string();
+
+        // Initial counter should be zero
+        assert_eq!(server.metrics().connections_refused_limit.load(Ordering::Relaxed), 0);
+
+        // Open MAX_CONNECTIONS connections and authenticate them
+        let mut streams = Vec::new();
+        for i in 0..MAX_CONNECTIONS {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+
+            let hello = serde_json::json!({
+                "type": "hello",
+                "id": format!("{}", i),
+                "client": "test",
+                "version": "1.0.0",
+                "token": token,
+                "protocol_version": 1
+            });
+            writeln!(stream, "{}", hello).unwrap();
+
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut response = String::new();
+            reader.read_line(&mut response).unwrap();
+            assert!(response.contains("welcome"), "Connection {} should be accepted", i);
+
+            streams.push((stream, reader));
+        }
+
+        // Give the server time to register all connections
+        thread::sleep(std::time::Duration::from_millis(100));
+
+        // Attempt to open one more - should be refused
+        let result = TcpStream::connect(addr);
+        if let Ok(mut stream) = result {
+            stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+
+            // Try to read - connection should be immediately closed
+            let mut reader = BufReader::new(stream);
+            let mut response = String::new();
+            let read_result = reader.read_line(&mut response);
+
+            // Either connection refused, or empty read (server closed immediately)
+            assert!(
+                read_result.is_err() || response.is_empty(),
+                "6th connection should be refused, got: {:?}",
+                response
+            );
+        }
+
+        // Give server time to process the refusal
+        thread::sleep(std::time::Duration::from_millis(100));
+
+        // Counter should be incremented
+        assert_eq!(
+            server.metrics().connections_refused_limit.load(Ordering::Relaxed),
+            1,
+            "connections_refused_limit should be 1 after rejecting 6th connection"
+        );
+
+        server.stop();
+    }
+
+    #[test]
+    fn test_connection_slot_freed_on_disconnect() {
+        let (bridge, _handler) = create_test_bridge();
+        let mut server = SessionServer::new();
+        server
+            .start(SessionServerConfig {
+                mode: ServerMode::Apply,
+                workbook_path: None,
+                workbook_title: "Test".to_string(),
+                bridge: Some(bridge),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let addr = server.bound_addr().unwrap();
+        let token = server.token().unwrap().to_string();
+
+        // Open MAX_CONNECTIONS connections
+        let mut streams = Vec::new();
+        for i in 0..MAX_CONNECTIONS {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+
+            let hello = serde_json::json!({
+                "type": "hello",
+                "id": format!("{}", i),
+                "client": "test",
+                "version": "1.0.0",
+                "token": token,
+                "protocol_version": 1
+            });
+            writeln!(stream, "{}", hello).unwrap();
+
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut response = String::new();
+            reader.read_line(&mut response).unwrap();
+            streams.push(stream);
+        }
+
+        // Close one connection
+        drop(streams.pop());
+
+        // Give server time to detect the disconnect
+        thread::sleep(std::time::Duration::from_millis(200));
+
+        // Now a new connection should succeed
+        let mut new_stream = TcpStream::connect(addr).unwrap();
+        new_stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+
+        let hello = serde_json::json!({
+            "type": "hello",
+            "id": "new",
+            "client": "test",
+            "version": "1.0.0",
+            "token": token,
+            "protocol_version": 1
+        });
+        writeln!(new_stream, "{}", hello).unwrap();
+
+        let mut reader = BufReader::new(new_stream);
+        let mut response = String::new();
+        reader.read_line(&mut response).unwrap();
+        assert!(response.contains("welcome"), "New connection should be accepted after one disconnects");
 
         server.stop();
     }

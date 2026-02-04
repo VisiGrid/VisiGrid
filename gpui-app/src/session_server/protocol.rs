@@ -458,6 +458,8 @@ pub struct StatsResultMessage {
     pub connections_closed_oversize: u64,
     /// Writer conflict errors returned.
     pub writer_conflict_count: u64,
+    /// Connections refused due to connection limit (max 5).
+    pub connections_refused_limit: u64,
     /// Total events dropped due to backpressure.
     pub dropped_events_total: u64,
     /// Current number of connected clients.

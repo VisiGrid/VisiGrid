@@ -97,6 +97,48 @@ Example summary (from `--out json`):
 }
 ```
 
+## Session Control
+
+Control a running VisiGrid GUI from the terminal. Inspect cells, apply changes, and watch state evolve — all from scripts or the command line.
+
+```bash
+# List running sessions
+visigrid sessions
+
+# View live grid snapshot (auto-refresh on changes)
+visigrid view --follow
+
+# Inspect a cell
+visigrid inspect A1
+# → A1 = 1234.56  (number)
+
+# Apply operations with retry on contention
+cat ops.jsonl | visigrid apply --atomic --wait
+
+# Query server health
+visigrid stats
+```
+
+**Session protocol**: TCP localhost with token auth. Protocol v1 is frozen — wire format locked by golden vectors.
+
+**Scriptable control loop**:
+
+```bash
+# Get session
+SESSION=$(visigrid sessions --json | jq -r '.[0].session_id')
+
+# Inspect current state
+REV=$(visigrid inspect workbook --json | jq '.revision')
+
+# Apply changes with revision check (prevents stale overwrites)
+visigrid apply ops.jsonl --atomic --expected-revision $REV --wait
+
+# Verify new state
+visigrid view --range A1:D10
+```
+
+**Exit codes** are stable for scripting: 0 = success, 20-29 = session errors (conflict, auth, protocol).
+
 ## Explainability
 
 The desktop app is the debugger for your data.
@@ -159,6 +201,32 @@ When you open a workbook six months from now, you can answer:
 - Can I verify the formula it suggested?
 
 The answer to all three is yes. That's what "explainable" means.
+
+## Agents: Verifiable Spreadsheet Builds
+
+VisiGrid provides a headless build loop for LLM agents and CI pipelines. Write Lua, build a `.sheet`, inspect results, verify fingerprint.
+
+```bash
+# Build from Lua script (replacement semantics — Lua is source of truth)
+visigrid-cli sheet apply model.sheet --lua build.lua --json
+
+# Inspect cells to verify results
+visigrid-cli sheet inspect model.sheet B3 --json
+# → {"cell":"B3","value":"220000","formula":"=SUM(B1:B2)","value_type":"formula"}
+
+# Get fingerprint for audit trail
+visigrid-cli sheet fingerprint model.sheet --json
+# → {"fingerprint":"v1:42:abc123...","ops":42}
+
+# Verify in CI (exit 0 = match, exit 1 = mismatch)
+visigrid-cli sheet verify model.sheet --fingerprint v1:42:abc123...
+```
+
+**Fingerprint boundary**: `set()`, `clear()`, and `meta()` affect fingerprint. `style()` does not. Agents can format sheets without breaking verification.
+
+**Workflow rule**: Always `apply → inspect → verify`. Never assume results.
+
+See [Agent Tools](docs/agent-tools.json) for MCP definitions and [Claude MD Snippet](docs/claude-md-snippet.md) for copy-paste instructions.
 
 ## Download
 
