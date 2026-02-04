@@ -3441,7 +3441,7 @@ fn cmd_sheet_apply(
         // Atomic write: write to temp file first, then rename
         let temp_path = output.with_extension("sheet.tmp");
 
-        save_workbook(&result.workbook, &temp_path)
+        visigrid_io::native::save_workbook_with_metadata(&result.workbook, &result.metadata, &temp_path)
             .map_err(|e| CliError::io(format!("failed to write temp file: {}", e)))?;
 
         std::fs::rename(&temp_path, &output)
@@ -3643,12 +3643,15 @@ fn cmd_sheet_inspect(
 
 /// Verify a .sheet file's fingerprint.
 fn cmd_sheet_verify(file: PathBuf, expected: String) -> Result<(), CliError> {
-    use visigrid_io::native::load_workbook;
+    use visigrid_io::native::{load_workbook, load_cell_metadata};
 
     let workbook = load_workbook(&file)
         .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
 
-    let computed = sheet_ops::compute_sheet_fingerprint(&workbook);
+    let metadata = load_cell_metadata(&file)
+        .map_err(|e| CliError::io(format!("failed to load metadata: {}", e)))?;
+
+    let computed = sheet_ops::compute_sheet_fingerprint_with_meta(&workbook, &metadata);
     let expected_fp = replay::ReplayFingerprint::parse(&expected)
         .ok_or_else(|| CliError::args(format!("invalid fingerprint format: {}", expected)))?;
 
@@ -3666,12 +3669,15 @@ fn cmd_sheet_verify(file: PathBuf, expected: String) -> Result<(), CliError> {
 
 /// Compute and print a .sheet file's fingerprint.
 fn cmd_sheet_fingerprint(file: PathBuf, json: bool) -> Result<(), CliError> {
-    use visigrid_io::native::load_workbook;
+    use visigrid_io::native::{load_workbook, load_cell_metadata};
 
     let workbook = load_workbook(&file)
         .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
 
-    let fingerprint = sheet_ops::compute_sheet_fingerprint(&workbook);
+    let metadata = load_cell_metadata(&file)
+        .map_err(|e| CliError::io(format!("failed to load metadata: {}", e)))?;
+
+    let fingerprint = sheet_ops::compute_sheet_fingerprint_with_meta(&workbook, &metadata);
 
     if json {
         let output = serde_json::json!({

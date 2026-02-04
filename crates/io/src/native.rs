@@ -64,6 +64,15 @@ CREATE TABLE IF NOT EXISTS hub_link (
     linked_at TEXT NOT NULL,
     api_base TEXT DEFAULT 'https://api.visihub.app'
 );
+
+-- Semantic metadata for cells/ranges (affects fingerprint, unlike style)
+-- target: "A1" (cell), "A1:B10" (range), "COL:C" (column), "ROW:5" (row)
+CREATE TABLE IF NOT EXISTS cell_metadata (
+    target TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (target, key)
+);
 "#;
 
 // Value type constants
@@ -507,6 +516,158 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Type alias for cell metadata (target -> {key: value}).
+pub type CellMetadata = std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
+
+/// Save a workbook with semantic metadata.
+pub fn save_workbook_with_metadata(
+    workbook: &Workbook,
+    metadata: &CellMetadata,
+    path: &Path,
+) -> Result<(), String> {
+    // Delete existing file if present (SQLite will create fresh)
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Create schema (includes cell_metadata table)
+    conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
+
+    // Save the active sheet
+    let sheet = workbook.active_sheet();
+
+    // Save workbook-level metadata
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params!["sheet_name", &sheet.name],
+    ).map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params!["rows", sheet.rows.to_string()],
+    ).map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params!["cols", sheet.cols.to_string()],
+    ).map_err(|e| e.to_string())?;
+
+    // Save cells
+    conn.execute("BEGIN TRANSACTION", []).map_err(|e| e.to_string())?;
+
+    {
+        let mut stmt = conn.prepare(
+            "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+        ).map_err(|e| e.to_string())?;
+
+        for (&(row, col), cell) in sheet.cells_iter() {
+            let raw = cell.value.raw_display();
+            let format = &cell.format;
+
+            if raw.is_empty() && format.is_default() {
+                continue;
+            }
+
+            let (value_type, value_num, value_text): (i32, Option<f64>, Option<&str>) =
+                if raw.is_empty() {
+                    (TYPE_EMPTY, None, None)
+                } else if raw.starts_with('=') {
+                    (TYPE_FORMULA, None, Some(&raw))
+                } else if let Ok(num) = raw.parse::<f64>() {
+                    (TYPE_NUMBER, Some(num), None)
+                } else {
+                    (TYPE_TEXT, None, Some(&raw))
+                };
+
+            let alignment_int = alignment_to_db(format.alignment);
+            let (number_type, decimals, thousands, negative, currency_symbol) = extract_number_format_fields(&format.number_format);
+
+            stmt.execute(params![
+                row as i64,
+                col as i64,
+                value_type,
+                value_num,
+                value_text,
+                format.bold as i32,
+                format.italic as i32,
+                format.underline as i32,
+                alignment_int,
+                number_type,
+                decimals,
+                format.font_family.as_deref(),
+                thousands,
+                negative,
+                currency_symbol
+            ]).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Save semantic metadata (affects fingerprint)
+    {
+        let mut stmt = conn.prepare(
+            "INSERT INTO cell_metadata (target, key, value) VALUES (?1, ?2, ?3)"
+        ).map_err(|e| e.to_string())?;
+
+        for (target, props) in metadata.iter() {
+            for (key, value) in props.iter() {
+                stmt.execute(params![target, key, value]).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    // Save named ranges
+    {
+        let mut stmt = conn.prepare(
+            "INSERT INTO named_ranges (name, target_type, sheet, start_row, start_col, end_row, end_col, description) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        ).map_err(|e| e.to_string())?;
+
+        for nr in workbook.list_named_ranges() {
+            let (target_type, sheet_idx, start_row, start_col, end_row, end_col) = match &nr.target {
+                NamedRangeTarget::Cell { sheet, row, col } => {
+                    (0i32, *sheet as i64, *row as i64, *col as i64, None::<i64>, None::<i64>)
+                }
+                NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
+                    (1i32, *sheet as i64, *start_row as i64, *start_col as i64, Some(*end_row as i64), Some(*end_col as i64))
+                }
+            };
+
+            stmt.execute(params![
+                &nr.name,
+                target_type,
+                sheet_idx,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                nr.description.as_deref()
+            ]).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Save merged regions
+    {
+        let mut stmt = conn.prepare(
+            "INSERT INTO merged_regions (start_row, start_col, end_row, end_col) VALUES (?1, ?2, ?3, ?4)"
+        ).map_err(|e| e.to_string())?;
+
+        for merge in &sheet.merged_regions {
+            stmt.execute(params![
+                merge.start.0 as i64,
+                merge.start.1 as i64,
+                merge.end.0 as i64,
+                merge.end.1 as i64,
+            ]).map_err(|e| e.to_string())?;
+        }
+    }
+
+    conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 /// Load a complete workbook including named ranges
 pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
     // First load the sheet using existing logic
@@ -680,6 +841,42 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
     workbook.rebuild_dep_graph();
 
     Ok(workbook)
+}
+
+/// Load semantic metadata from a .sheet file.
+/// Returns an empty map if the cell_metadata table doesn't exist (backward compatibility).
+pub fn load_cell_metadata(path: &Path) -> Result<CellMetadata, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let mut metadata = CellMetadata::new();
+
+    // Check if cell_metadata table exists (backward compatibility)
+    let has_metadata = conn
+        .prepare("SELECT target FROM cell_metadata LIMIT 1")
+        .is_ok();
+
+    if !has_metadata {
+        return Ok(metadata);
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT target, key, value FROM cell_metadata ORDER BY target, key"
+    ).map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let target: String = row.get(0)?;
+            let key: String = row.get(1)?;
+            let value: String = row.get(2)?;
+            Ok((target, key, value))
+        })
+        .map_err(|e| e.to_string())?;
+
+    for row_result in rows {
+        let (target, key, value) = row_result.map_err(|e| e.to_string())?;
+        metadata.entry(target).or_default().insert(key, value);
+    }
+
+    Ok(metadata)
 }
 
 /// VisiHub link information stored in .sheet files

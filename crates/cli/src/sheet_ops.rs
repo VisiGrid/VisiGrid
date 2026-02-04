@@ -33,7 +33,13 @@ pub struct SheetApplyResult {
     pub verified: Option<bool>,
     /// Cells changed count.
     pub cells_changed: usize,
+    /// Semantic metadata (target -> {key: value}).
+    pub metadata: CellMetadata,
 }
+
+/// Semantic metadata for a target (cell, range, column, row).
+/// Key-value pairs that affect fingerprint but not display.
+pub type CellMetadata = std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
 
 /// State shared between Lua and Rust during sheet build.
 struct BuildState {
@@ -46,6 +52,9 @@ struct BuildState {
     style_ops: usize,
     /// Track which cells were touched.
     cells_touched: std::collections::HashSet<(usize, usize)>,
+    /// Semantic metadata (target -> {key: value}).
+    /// BTreeMap for deterministic iteration order.
+    metadata: CellMetadata,
 }
 
 impl BuildState {
@@ -56,6 +65,7 @@ impl BuildState {
             semantic_ops: 0,
             style_ops: 0,
             cells_touched: std::collections::HashSet::new(),
+            metadata: CellMetadata::new(),
         }
     }
 
@@ -126,9 +136,9 @@ pub fn execute_build_script(script_path: &Path, verify_fp: Option<&str>) -> Resu
     state.workbook.rebuild_dep_graph();
     let _recalc_report = state.workbook.recompute_full_ordered();
 
-    // Compute fingerprint from resulting workbook (same as file fingerprint)
+    // Compute fingerprint from resulting workbook + metadata
     // This ensures apply fingerprint == file fingerprint regardless of Lua op order
-    let fingerprint = compute_sheet_fingerprint(&state.workbook);
+    let fingerprint = compute_sheet_fingerprint_with_meta(&state.workbook, &state.metadata);
 
     // Verify if requested
     let verified = verify_fp.map(|expected| {
@@ -146,6 +156,7 @@ pub fn execute_build_script(script_path: &Path, verify_fp: Option<&str>) -> Resu
         fingerprint,
         verified,
         cells_changed: state.cells_touched.len(),
+        metadata: state.metadata.clone(),
     })
 }
 
@@ -192,24 +203,35 @@ fn register_agent_api(lua: &Lua, state: Rc<RefCell<BuildState>>) -> LuaResult<()
         globals.set("clear", clear_fn)?;
     }
 
-    // meta(target, table) — set semantic metadata
-    // NOTE: Currently meta() is NOT stored in the file, so it's excluded from fingerprint
-    // to maintain consistency between apply fingerprint and file fingerprint.
-    // When meta storage is implemented, this should be changed to affect fingerprint.
+    // meta(target, table) — set semantic metadata (affects fingerprint)
     // Examples: meta("A1", { role = "header" }), meta("A1:D1", { type = "input" })
     {
         let state = state.clone();
-        let meta_fn = lua.create_function(move |_, (target, _props): (String, Table)| {
+        let meta_fn = lua.create_function(move |_, (target, props): (String, Table)| {
             // Parse target (cell or range) for validation
             let _ = parse_target(&target)
                 .ok_or_else(|| mlua::Error::external(format!("Invalid target: {}", target)))?;
 
-            let mut state = state.borrow_mut();
-            // Meta operations currently do NOT affect fingerprint (not stored in file)
-            // This ensures apply fingerprint == file fingerprint
-            state.style_ops += 1;  // Count as style-like op for reporting
+            // Collect properties (sorted for deterministic order)
+            let mut prop_map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+            for pair in props.pairs::<String, LuaValue>() {
+                let (key, value) = pair?;
+                prop_map.insert(key, lua_value_to_string(&value));
+            }
 
-            // TODO: Actually store metadata in workbook and include in fingerprint
+            let mut state = state.borrow_mut();
+
+            // Store metadata
+            let entry = state.metadata.entry(target.clone()).or_default();
+            for (k, v) in &prop_map {
+                entry.insert(k.clone(), v.clone());
+            }
+
+            // Meta operations DO affect fingerprint (semantic truth)
+            // Hash in sorted order for determinism
+            for (k, v) in &prop_map {
+                state.hash_semantic(&format!("meta:{}:{}={}", target, k, v));
+            }
 
             Ok(())
         })?;
@@ -465,8 +487,20 @@ pub struct WorkbookInspectResult {
 /// Compute fingerprint of a .sheet file by rebuilding from cell data.
 ///
 /// This computes the fingerprint that would result from building the sheet
-/// via Lua `set()` calls in row-major order.
+/// via Lua `set()` calls in row-major order. Does NOT include metadata.
 pub fn compute_sheet_fingerprint(workbook: &Workbook) -> ReplayFingerprint {
+    compute_sheet_fingerprint_with_meta(workbook, &CellMetadata::new())
+}
+
+/// Compute fingerprint of a .sheet file including semantic metadata.
+///
+/// The fingerprint includes:
+/// - Cell values/formulas (set operations)
+/// - Semantic metadata (meta operations)
+/// - Does NOT include style (presentation only)
+///
+/// Order is deterministic: cells sorted by (row, col), then metadata sorted by target, then by key.
+pub fn compute_sheet_fingerprint_with_meta(workbook: &Workbook, metadata: &CellMetadata) -> ReplayFingerprint {
     let mut hasher = blake3::Hasher::new();
     let mut op_count = 0;
 
@@ -490,6 +524,16 @@ pub fn compute_sheet_fingerprint(workbook: &Workbook) -> ReplayFingerprint {
                 hasher.update(b"\n");
                 op_count += 1;
             }
+        }
+    }
+
+    // Include metadata in fingerprint (already sorted - BTreeMap)
+    for (target, props) in metadata.iter() {
+        for (key, value) in props.iter() {
+            let op = format!("meta:{}:{}={}", target, key, value);
+            hasher.update(op.as_bytes());
+            hasher.update(b"\n");
+            op_count += 1;
         }
     }
 
