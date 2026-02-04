@@ -131,6 +131,17 @@ jobs:
           cargo build --release -p visigrid-gpui
           cargo build --release -p visigrid-cli
 
+      - name: List build artifacts
+        shell: pwsh
+        run: |
+          Write-Host "Contents of target/release:"
+          Get-ChildItem target/release/*.exe -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.Name }
+          if (-not (Test-Path "target/release/visigrid.exe")) {
+            Write-Host "WARNING: visigrid.exe not found!"
+            Write-Host "All files in target/release:"
+            Get-ChildItem target/release/ | Select-Object Name, Length
+          }
+
       - name: Sign executable
         continue-on-error: true
         uses: azure/trusted-signing-action@v0.5.0
