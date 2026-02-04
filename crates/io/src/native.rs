@@ -837,8 +837,9 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
         }
     }
 
-    // Rebuild dependency graph after loading all data
+    // Rebuild dependency graph and compute all formulas after loading
     workbook.rebuild_dep_graph();
+    workbook.recompute_full_ordered();
 
     Ok(workbook)
 }
