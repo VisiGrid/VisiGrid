@@ -847,7 +847,9 @@ impl CellValue {
                 if n.fract() == 0.0 {
                     format!("{}", *n as i64)
                 } else {
-                    format!("{:.2}", n)
+                    // Use full precision to preserve exact values for storage
+                    // (display formatting is handled separately by format_number)
+                    n.to_string()
                 }
             }
             CellValue::Formula { source, .. } => source.clone(),

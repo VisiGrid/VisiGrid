@@ -3485,8 +3485,13 @@ fn cmd_sheet_inspect(
 ) -> Result<(), CliError> {
     use visigrid_io::native::load_workbook;
 
-    let workbook = load_workbook(&file)
+    let mut workbook = load_workbook(&file)
         .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
+
+    // Rebuild dependency graph and recalculate all formulas
+    // This ensures formula cells have computed values when inspected
+    workbook.rebuild_dep_graph();
+    workbook.recompute_full_ordered();
 
     if workbook_mode || target.is_none() {
         // Workbook metadata

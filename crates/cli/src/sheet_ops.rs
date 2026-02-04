@@ -118,9 +118,17 @@ pub fn execute_build_script(script_path: &Path, verify_fp: Option<&str>) -> Resu
             CliError { code: EXIT_EVAL_ERROR, message: msg, hint }
         })?;
 
-    // Extract results
-    let state = state.borrow();
-    let fingerprint = state.fingerprint();
+    // Extract results and run recalc
+    let mut state = state.borrow_mut();
+
+    // CRITICAL: Build dependency graph and recalculate all formulas
+    // This ensures formula cells have computed values, not just the formula text
+    state.workbook.rebuild_dep_graph();
+    let _recalc_report = state.workbook.recompute_full_ordered();
+
+    // Compute fingerprint from resulting workbook (same as file fingerprint)
+    // This ensures apply fingerprint == file fingerprint regardless of Lua op order
+    let fingerprint = compute_sheet_fingerprint(&state.workbook);
 
     // Verify if requested
     let verified = verify_fp.map(|expected| {
@@ -184,28 +192,24 @@ fn register_agent_api(lua: &Lua, state: Rc<RefCell<BuildState>>) -> LuaResult<()
         globals.set("clear", clear_fn)?;
     }
 
-    // meta(target, table) — set semantic metadata (affects fingerprint)
+    // meta(target, table) — set semantic metadata
+    // NOTE: Currently meta() is NOT stored in the file, so it's excluded from fingerprint
+    // to maintain consistency between apply fingerprint and file fingerprint.
+    // When meta storage is implemented, this should be changed to affect fingerprint.
     // Examples: meta("A1", { role = "header" }), meta("A1:D1", { type = "input" })
     {
         let state = state.clone();
-        let meta_fn = lua.create_function(move |_, (target, props): (String, Table)| {
-            // Parse target (cell or range)
+        let meta_fn = lua.create_function(move |_, (target, _props): (String, Table)| {
+            // Parse target (cell or range) for validation
             let _ = parse_target(&target)
                 .ok_or_else(|| mlua::Error::external(format!("Invalid target: {}", target)))?;
 
-            // Collect properties for hashing
-            let mut prop_parts: Vec<String> = Vec::new();
-            for pair in props.pairs::<String, LuaValue>() {
-                let (key, value) = pair?;
-                prop_parts.push(format!("{}={}", key, lua_value_to_string(&value)));
-            }
-            prop_parts.sort(); // Deterministic order
-
             let mut state = state.borrow_mut();
-            // Meta operations affect fingerprint
-            state.hash_semantic(&format!("meta:{}:{}", target, prop_parts.join(",")));
+            // Meta operations currently do NOT affect fingerprint (not stored in file)
+            // This ensures apply fingerprint == file fingerprint
+            state.style_ops += 1;  // Count as style-like op for reporting
 
-            // TODO: Actually store metadata in workbook (future enhancement)
+            // TODO: Actually store metadata in workbook and include in fingerprint
 
             Ok(())
         })?;
