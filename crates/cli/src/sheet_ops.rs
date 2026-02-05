@@ -286,21 +286,23 @@ fn register_grid_api_compat(lua: &Lua, state: Rc<RefCell<BuildState>>) -> LuaRes
     let grid = lua.create_table()?;
 
     // grid.set{ sheet=N, cell="A1", value="..." }
+    // value can be string, number, or boolean (converted via lua_value_to_string)
     {
         let state = state.clone();
         let set_fn = lua.create_function(move |_, args: Table| {
             let sheet: usize = args.get("sheet")?;
             let cell: String = args.get("cell")?;
-            let value: String = args.get("value")?;
+            let value: LuaValue = args.get("value")?;
+            let value_str = lua_value_to_string(&value);
 
             let (row, col) = parse_cell_ref(&cell)
                 .ok_or_else(|| mlua::Error::external(format!("Invalid cell reference: {}", cell)))?;
 
             let mut state = state.borrow_mut();
             state.ensure_sheet(sheet - 1);
-            state.sheet_mut(sheet - 1).set_value(row, col, &value);
+            state.sheet_mut(sheet - 1).set_value(row, col, &value_str);
             state.cells_touched.insert((row, col));
-            state.hash_semantic(&format!("set:{}:{}:{}:{}", sheet, row, col, value));
+            state.hash_semantic(&format!("set:{}:{}:{}:{}", sheet, row, col, value_str));
 
             Ok(())
         })?;
@@ -308,6 +310,7 @@ fn register_grid_api_compat(lua: &Lua, state: Rc<RefCell<BuildState>>) -> LuaRes
     }
 
     // grid.set_batch{ sheet=N, cells={{cell="A1", value="..."}, ...} }
+    // value can be string, number, or boolean (converted via lua_value_to_string)
     {
         let state = state.clone();
         let set_batch_fn = lua.create_function(move |_, args: Table| {
@@ -321,14 +324,15 @@ fn register_grid_api_compat(lua: &Lua, state: Rc<RefCell<BuildState>>) -> LuaRes
             for pair in cells.pairs::<i64, Table>() {
                 let (_, cell_entry) = pair?;
                 let cell: String = cell_entry.get("cell")?;
-                let value: String = cell_entry.get("value")?;
+                let value: LuaValue = cell_entry.get("value")?;
+                let value_str = lua_value_to_string(&value);
 
                 let (row, col) = parse_cell_ref(&cell)
                     .ok_or_else(|| mlua::Error::external(format!("Invalid cell reference: {}", cell)))?;
 
-                state.sheet_mut(sheet - 1).set_value(row, col, &value);
+                state.sheet_mut(sheet - 1).set_value(row, col, &value_str);
                 state.cells_touched.insert((row, col));
-                op_parts.push(format!("{}:{}:{}", row, col, value));
+                op_parts.push(format!("{}:{}:{}", row, col, value_str));
             }
 
             state.hash_semantic(&format!("set_batch:{}:{}", sheet, op_parts.join("|")));
