@@ -571,6 +571,45 @@ fn main() {
             .ok(); // Ignore error if window creation fails
         });
 
+        // Set up OpenFile handler at App level so it works even when no windows are open
+        // If there's an active window, dispatch to it. Otherwise create a new window first.
+        cx.on_action(move |_: &actions::OpenFile, cx| {
+            // Try to find an active spreadsheet window to delegate to
+            if let Some(window) = cx.active_window() {
+                // Dispatch OpenFile to the active window - it will handle the file picker
+                window.update(cx, |_, window, cx| {
+                    cx.dispatch_action(&actions::OpenFile);
+                    let _ = window; // silence unused warning
+                }).ok();
+            } else {
+                // No windows open - create a new window first, then trigger open
+                let work_area = get_work_area(cx);
+                let bounds = compute_window_bounds(None, work_area);
+
+                if let Ok(window_handle) = cx.open_window(
+                    build_window_options(WindowBounds::Windowed(bounds)),
+                    |window, cx| {
+                        let window_id = cx.update_global::<SessionManager, _>(|mgr, _| mgr.next_window_id());
+                        let entity = cx.new(|cx| {
+                            let mut app = Spreadsheet::new(window, cx);
+                            app.session_window_id = window_id;
+                            app
+                        });
+                        entity.update(cx, |spreadsheet, cx| {
+                            spreadsheet.register_with_window_registry(cx);
+                        });
+                        entity
+                    },
+                ) {
+                    // Now dispatch OpenFile to the newly created window
+                    window_handle.update(cx, |_, window, cx| {
+                        cx.dispatch_action(&actions::OpenFile);
+                        let _ = window; // silence unused warning
+                    }).ok();
+                }
+            }
+        });
+
         // Set up SwitchWindow handler (Cmd+` / Ctrl+` opens window switcher)
         cx.on_action(|_: &actions::SwitchWindow, cx| {
             // Get the currently focused window to pass to the switcher

@@ -122,11 +122,13 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&format!("{}-alt-v", primary_mod(m)), PasteSpecial, Some("Spreadsheet")),
 
         // File
-        // Note: NewWindow is handled at App level (main.rs) to open a new window
-        // We still bind it here so the keybinding shows in help, but the action
-        // propagates up to the App-level handler
+        // Note: NewWindow and OpenFile are handled at App level (main.rs) to work
+        // even when no windows are open. We bind in both Spreadsheet context (for
+        // help display) and globally (None) so they work without a focused window.
         KeyBinding::new(&kb(m, "n"), NewWindow, Some("Spreadsheet")),
+        KeyBinding::new(&kb(m, "n"), NewWindow, None),  // Global fallback
         KeyBinding::new(&kb(m, "o"), OpenFile, Some("Spreadsheet")),
+        KeyBinding::new(&kb(m, "o"), OpenFile, None),   // Global fallback
         KeyBinding::new(&kb(m, "s"), Save, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "s"), SaveAs, Some("Spreadsheet")),
 
