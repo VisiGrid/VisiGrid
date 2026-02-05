@@ -98,6 +98,12 @@ impl Spreadsheet {
         match result {
             Ok(workbook) => {
                 self.wb_mut(cx, |wb| *wb = workbook);
+                // Rebuild dependency graph and recompute all formulas
+                // This ensures formula cells have computed values, not just raw text
+                self.wb_mut(cx, |wb| {
+                    wb.rebuild_dep_graph();
+                    wb.recompute_full_ordered();
+                });
                 self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                 self.debug_assert_sheet_cache_sync(cx);
                 self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
