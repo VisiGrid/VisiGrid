@@ -1770,6 +1770,8 @@ impl CellRect {
 pub struct UiState {
     pub color_picker: crate::color_palette::ColorPickerState,
     pub format_bar: FormatBarState,
+    /// Format dropdown menu in header bar (Bold/Italic/Underline/Alignment)
+    pub format_menu_open: bool,
 }
 
 /// Transient UI state for the format bar (font size input, dropdown).
@@ -1995,6 +1997,18 @@ pub struct Spreadsheet {
     pub(crate) formula_bar_boundary_xs: Vec<f32>,        // X positions aligned to boundaries
     pub formula_bar_text_width: f32,
     pub formula_bar_drag_anchor: Option<usize>,  // None = not dragging, Some(byte) = drag start anchor
+    /// Formula bar expanded mode (shows 2-3 lines for long formulas)
+    pub formula_bar_expanded: bool,
+
+    // Name box (cell selector) editing state
+    /// Whether the name box is being edited
+    pub name_box_editing: bool,
+    /// Current input value in name box
+    pub name_box_input: String,
+    /// Focus handle for name box keyboard events
+    pub name_box_focus: FocusHandle,
+    /// Replace on next keypress (select-all mode)
+    pub name_box_replace_next: bool,
 
     // Formula autocomplete state
     pub autocomplete_visible: bool,
@@ -2312,6 +2326,7 @@ impl Spreadsheet {
                 size_focus: cx.focus_handle(),
                 size_replace_next: false,
             },
+            format_menu_open: false,
         };
         window.focus(&focus_handle, cx);
         let window_size = window.viewport_size();
@@ -2448,6 +2463,11 @@ impl Spreadsheet {
             formula_bar_boundary_xs: Vec::new(),
             formula_bar_text_width: 0.0,
             formula_bar_drag_anchor: None,
+            formula_bar_expanded: false,
+            name_box_editing: false,
+            name_box_input: String::new(),
+            name_box_focus: cx.focus_handle(),
+            name_box_replace_next: false,
             autocomplete_visible: false,
             autocomplete_suppressed: false,
             autocomplete_selected: 0,
@@ -3899,6 +3919,27 @@ impl Spreadsheet {
             self.menu_highlight = None;
             cx.notify();
         }
+    }
+
+    /// Close the Format dropdown menu in the header bar.
+    /// Called by: backdrop click, Escape key, mode switches (Find/GoTo), opening other popovers.
+    pub fn close_format_menu(&mut self, cx: &mut Context<Self>) {
+        if self.ui.format_menu_open {
+            self.ui.format_menu_open = false;
+            cx.notify();
+        }
+    }
+
+    /// Open the Format dropdown menu in the header bar.
+    pub fn open_format_menu(&mut self, cx: &mut Context<Self>) {
+        self.ui.format_menu_open = true;
+        cx.notify();
+    }
+
+    /// Toggle the Format dropdown menu in the header bar.
+    pub fn toggle_format_menu(&mut self, cx: &mut Context<Self>) {
+        self.ui.format_menu_open = !self.ui.format_menu_open;
+        cx.notify();
     }
 
     // Menu keyboard navigation methods

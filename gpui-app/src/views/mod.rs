@@ -245,9 +245,6 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             let title_primary = app.document_meta.title_primary(app.history.is_dirty());
             let title_secondary = app.document_meta.title_secondary();
 
-            // Chrome scrim: subtle gradient fade from titlebar into content
-            let scrim_top = titlebar_bg.opacity(0.12);
-            let scrim_bottom = titlebar_bg.opacity(0.0);
 
             // Check if we should show the default app prompt
             // Also check timer for success state auto-hide
@@ -446,18 +443,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                         }
                     })
             )
-            // Chrome scrim: subtle top fade for visual separation
-            .child(
-                div()
-                    .w_full()
-                    .h(px(8.0))  // Slightly smaller scrim
-                    .flex_shrink_0()
-                    .bg(linear_gradient(
-                        180.0,
-                        linear_color_stop(scrim_top, 0.0),
-                        linear_color_stop(scrim_bottom, 1.0),
-                    ))
-            )
+            // No scrim - let formula bar background do the work
         })
         // Hide in-app menu bar on macOS (uses native menu bar instead)
         // Also hide in zen mode
@@ -492,6 +478,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         // column headers and grid cells. Only visible when dropdown is open.
         .when(app.ui.format_bar.size_dropdown, |d| {
             d.child(format_bar::render_font_size_dropdown(app, cx))
+        })
+        // Format dropdown overlay (Bold/Italic/Underline/Alignment)
+        .when(app.ui.format_menu_open, |d| {
+            d.child(format_bar::render_format_dropdown(app, cx))
         })
         // Inspector panel (right-side drawer) with click-outside-to-close backdrop.
         // Rendered BEFORE modal overlays so modals sit on top in z-order.

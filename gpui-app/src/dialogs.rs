@@ -100,6 +100,80 @@ impl Spreadsheet {
     }
 
     // =========================================================================
+    // Name box (cell selector) editing
+    // =========================================================================
+
+    /// Start editing the name box - populate with current cell reference, select all
+    pub fn start_name_box_edit(&mut self, cx: &mut Context<Self>) {
+        self.name_box_input = self.cell_ref();
+        self.name_box_editing = true;
+        self.name_box_replace_next = true;  // Select all - first keypress replaces
+        cx.notify();
+    }
+
+    /// Cancel name box editing - revert and exit
+    pub fn cancel_name_box_edit(&mut self, cx: &mut Context<Self>) {
+        self.name_box_editing = false;
+        self.name_box_input.clear();
+        self.name_box_replace_next = false;
+        cx.notify();
+    }
+
+    /// Confirm name box input - navigate to cell and exit
+    pub fn confirm_name_box(&mut self, cx: &mut Context<Self>) {
+        if let Some((row, col)) = Self::parse_cell_ref(&self.name_box_input) {
+            if row < NUM_ROWS && col < NUM_COLS {
+                // If target is inside a merge, redirect to origin and select full merge
+                let (target_row, target_col, merge_end) =
+                    if let Some(merge) = self.sheet(cx).get_merge(row, col) {
+                        (merge.start.0, merge.start.1, Some(merge.end))
+                    } else {
+                        (row, col, None)
+                    };
+
+                self.view_state.selected = (target_row, target_col);
+                if let Some(end) = merge_end {
+                    if end != (target_row, target_col) {
+                        self.view_state.selection_end = Some(end);
+                    } else {
+                        self.view_state.selection_end = None;
+                    }
+                } else {
+                    self.view_state.selection_end = None;
+                }
+                self.view_state.additional_selections.clear();
+                self.ensure_visible(cx);
+            }
+        }
+        self.name_box_editing = false;
+        self.name_box_input.clear();
+        self.name_box_replace_next = false;
+        cx.notify();
+    }
+
+    /// Insert character into name box input
+    pub fn name_box_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        if self.name_box_editing {
+            // First keypress after entering edit: replace entire value
+            if self.name_box_replace_next {
+                self.name_box_input.clear();
+                self.name_box_replace_next = false;
+            }
+            self.name_box_input.push(c.to_ascii_uppercase());
+            cx.notify();
+        }
+    }
+
+    /// Backspace in name box input
+    pub fn name_box_backspace(&mut self, cx: &mut Context<Self>) {
+        if self.name_box_editing {
+            self.name_box_replace_next = false;
+            self.name_box_input.pop();
+            cx.notify();
+        }
+    }
+
+    // =========================================================================
     // Preferences panel
     // =========================================================================
 

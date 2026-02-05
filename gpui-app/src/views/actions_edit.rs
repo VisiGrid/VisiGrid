@@ -163,6 +163,11 @@ pub(crate) fn bind(
                 crate::views::format_bar::commit_font_size(this, cx);
                 return;
             }
+            // Name box (cell selector) editing
+            if this.name_box_editing {
+                this.confirm_name_box(cx);
+                return;
+            }
             // Let AI dialogs handle their own keys
             if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;
@@ -239,6 +244,11 @@ pub(crate) fn bind(
                 this.ui.format_bar.size_dropdown = false;
                 this.ui.format_bar.size_replace_next = false;
                 cx.notify();
+                return;
+            }
+            // Name box (cell selector) editing
+            if this.name_box_editing {
+                this.cancel_name_box_edit(cx);
                 return;
             }
             // Sheet rename: Escape cancels
@@ -389,6 +399,11 @@ pub(crate) fn bind(
                 this.ui.format_bar.size_replace_next = false;
                 this.ui.format_bar.size_input.pop();
                 cx.notify();
+                return;
+            }
+            // Name box (cell selector) editing
+            if this.name_box_editing {
+                this.name_box_backspace(cx);
                 return;
             }
             // AI dialogs handle their own backspace

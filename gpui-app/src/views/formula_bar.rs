@@ -41,45 +41,151 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
     let scroll_x = app.formula_bar_scroll_x;
     let formula_content = build_formula_content(app, window, &raw_value, editing, scroll_x, selection_bg);
 
+    // fx button is always visible as a credibility signal (Excel familiarity)
+    // Highlighted when editing a formula
+    let is_formula_editing = editing && app.edit_value.starts_with('=');
+
+    // Expanded mode: 2.5x height for long formulas
+    let bar_height = if app.formula_bar_expanded { CELL_HEIGHT * 2.5 } else { CELL_HEIGHT };
+
     div()
         .relative()
         .flex_shrink_0()
-        .h(px(CELL_HEIGHT))
+        .h(px(bar_height))
         .bg(panel_bg)
         .flex()
         .items_center()
         .border_b_1()
         .border_color(panel_border)
-        // Cell reference label
-        .child(
+        // Cell reference label (name box) - editable, Excel-style
+        .child({
+            let name_box_editing = app.name_box_editing;
+            let name_box_input = app.name_box_input.clone();
+            let name_box_focus = app.name_box_focus.clone();
+            let name_box_replace_next = app.name_box_replace_next;
+            let accent = app.token(TokenKey::Accent);
+            let editor_bg = app.token(TokenKey::EditorBg);
+            let selection_bg = app.token(TokenKey::SelectionBg);
+            let caret_visible = app.caret_visible;
+
+            // Display: when selected-all, show highlighted text; otherwise show text with caret
+            let display_text: SharedString = if name_box_editing {
+                if name_box_replace_next {
+                    // Selected all - show plain text (will be highlighted)
+                    name_box_input.clone().into()
+                } else if caret_visible {
+                    // Show blinking caret
+                    format!("{}|", name_box_input).into()
+                } else {
+                    name_box_input.clone().into()
+                }
+            } else {
+                cell_ref.into()
+            };
+
             div()
+                .id("name-box")
+                .track_focus(&name_box_focus)
                 .w(px(FORMULA_BAR_CELL_REF_WIDTH))
-                .h_full()
+                .h(px(20.0))
                 .flex()
                 .items_center()
                 .justify_center()
-                .border_r_1()
-                .border_color(panel_border)
-                .bg(app_bg)
+                .mx_1()
+                .border_1()
+                .border_color(if name_box_editing { accent } else { panel_border })
+                .rounded_sm()
+                .bg(if name_box_editing { editor_bg } else { panel_bg })
                 .text_color(text_primary)
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
-                .child(cell_ref)
-        )
-        // Function button (fx)
-        .child(
+                .cursor_text()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                    if !this.name_box_editing {
+                        this.start_name_box_edit(cx);
+                        window.focus(&this.name_box_focus, cx);
+                    }
+                    this.reset_caret_activity();  // Start caret blinking
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if !this.name_box_editing {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    this.reset_caret_activity();  // Reset caret on keypress
+                    match event.keystroke.key.as_str() {
+                        "enter" => {
+                            this.confirm_name_box(cx);
+                            window.focus(&this.focus_handle, cx);
+                        }
+                        "escape" => {
+                            this.cancel_name_box_edit(cx);
+                            window.focus(&this.focus_handle, cx);
+                        }
+                        "backspace" => {
+                            this.name_box_backspace(cx);
+                        }
+                        _ => {
+                            if let Some(ch) = &event.keystroke.key_char {
+                                // Allow letters and numbers for cell references
+                                for c in ch.chars() {
+                                    if c.is_ascii_alphanumeric() {
+                                        this.name_box_insert_char(c, cx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }))
+                // Select-all highlight when replace_next is true
+                .when(name_box_editing && name_box_replace_next, |d| {
+                    d.child(
+                        div()
+                            .bg(selection_bg)
+                            .rounded(px(2.0))
+                            .px(px(2.0))
+                            .child(display_text.clone())
+                    )
+                })
+                .when(!(name_box_editing && name_box_replace_next), |d| {
+                    d.child(display_text.clone())
+                })
+        })
+        // Function button (fx) - always visible as credibility signal
+        // Click: start formula editing with '=' inserted
+        .child({
+            let accent = app.token(TokenKey::Accent);
+            let fx_color = if is_formula_editing { accent } else { text_muted };
+
             div()
+                .id("fx-button")
                 .w(px(FORMULA_BAR_FX_WIDTH))
-                .h_full()
+                .h(px(20.0))
                 .flex()
                 .items_center()
                 .justify_center()
-                .border_r_1()
-                .border_color(panel_border)
-                .text_color(text_muted)
+                .rounded_sm()
+                .cursor_pointer()
+                .text_color(fx_color)
                 .text_sm()
+                .italic()
+                .hover(|s| s.text_color(text_primary))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    // Start editing with '=' if not already editing a formula
+                    if !this.mode.is_editing() {
+                        this.start_edit(cx);
+                    }
+                    if !this.edit_value.starts_with('=') {
+                        this.edit_value = "=".to_string();
+                        this.edit_cursor = 1;
+                    }
+                    cx.notify();
+                }))
+                .tooltip(|_window, cx| {
+                    cx.new(|_| FxTooltip).into()
+                })
                 .child("fx")
-        )
+        })
         // Formula/value input area - clickable to start editing
         .child(
             div()
@@ -221,8 +327,66 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 // Function docs are available via autocomplete and signature help while editing.
                 .child(formula_content)
         )
+        // Expand/collapse chevron (right side) - Excel-style affordance
+        .child(
+            div()
+                .id("formula-bar-expand")
+                .w(px(20.0))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_size(px(10.0))
+                .text_color(text_muted)
+                .hover(|s| s.text_color(text_primary))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.formula_bar_expanded = !this.formula_bar_expanded;
+                    cx.notify();
+                }))
+                .tooltip(|_window, cx| {
+                    cx.new(|_| ExpandTooltip).into()
+                })
+                .child(if app.formula_bar_expanded { "▲" } else { "▼" })
+        )
         // Note: Autocomplete, signature help, and error popups are rendered at the top level
         // in views/mod.rs to avoid being clipped by the formula bar's fixed height
+}
+
+/// Tooltip for formula bar expand button.
+struct ExpandTooltip;
+
+impl Render for ExpandTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0x2d2d2d))
+            .border_1()
+            .border_color(rgb(0x3d3d3d))
+            .text_size(px(11.0))
+            .text_color(rgb(0xcccccc))
+            .child("Expand/collapse formula bar")
+    }
+}
+
+/// Tooltip for fx button.
+struct FxTooltip;
+
+impl Render for FxTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0x2d2d2d))
+            .border_1()
+            .border_color(rgb(0x3d3d3d))
+            .text_size(px(11.0))
+            .text_color(rgb(0xcccccc))
+            .child("Insert function")
+    }
 }
 
 /// Extract the first function from a formula for hover documentation

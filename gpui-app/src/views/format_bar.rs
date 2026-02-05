@@ -56,13 +56,10 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
     let size_editing = app.ui.format_bar.size_editing;
     let size_dropdown = app.ui.format_bar.size_dropdown;
 
-    // Bold / Italic / Underline tri-state
+    // Bold / Italic / Underline tri-state (mixed state not used by Format dropdown)
     let bold_active = matches!(state.bold, TriState::Uniform(true));
-    let bold_mixed = state.bold.is_mixed();
     let italic_active = matches!(state.italic, TriState::Uniform(true));
-    let italic_mixed = state.italic.is_mixed();
     let underline_active = matches!(state.underline, TriState::Uniform(true));
-    let underline_mixed = state.underline.is_mixed();
 
     // Fill color chip
     let fill_chip_color = rgba_to_hsla(&state.background_color);
@@ -85,8 +82,7 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
         .h(px(FORMAT_BAR_HEIGHT))
         .w_full()
         .bg(toolbar_bg)
-        .border_b_1()
-        .border_color(panel_border)
+        // No bottom border - let spacing and background separation do the work
         .items_center()
         .px_2()
         .gap_1()
@@ -100,10 +96,14 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
         ))
         // Separator
         .child(toolbar_separator(panel_border))
-        // B / I / U toggle buttons
-        .child(render_style_btn("B", bold_active, bold_mixed, text_primary, text_muted, accent, panel_border, cx))
-        .child(render_style_btn("I", italic_active, italic_mixed, text_primary, text_muted, accent, panel_border, cx))
-        .child(render_style_btn("U", underline_active, underline_mixed, text_primary, text_muted, accent, panel_border, cx))
+        // Format dropdown (replaces B/I/U buttons)
+        .child(render_format_dropdown_btn(
+            bold_active, italic_active, underline_active,
+            align_left, align_center, align_right,
+            text_primary, text_muted, accent, panel_border,
+            app.ui.format_menu_open,
+            cx,
+        ))
         // Separator
         .child(toolbar_separator(panel_border))
         // Fill color button
@@ -438,6 +438,193 @@ pub fn commit_font_size(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
     }
     // If parse fails or out of range, just revert (no change)
     cx.notify();
+}
+
+/// Compact "Format ▾" dropdown button (replaces separate B/I/U buttons).
+fn render_format_dropdown_btn(
+    bold_active: bool,
+    italic_active: bool,
+    underline_active: bool,
+    _align_left: bool,
+    _align_center: bool,
+    _align_right: bool,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    is_open: bool,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    // Show indicator if any formatting is active
+    let has_active = bold_active || italic_active || underline_active;
+    let btn_bg = if is_open { accent.opacity(0.15) } else { gpui::transparent_black() };
+    let btn_border = if is_open { accent.opacity(0.5) } else { panel_border };
+    let btn_color = if is_open { accent } else if has_active { text_primary } else { text_muted };
+
+    div()
+        .id("fmt-format-dropdown")
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .px(px(6.0))
+        .h(px(22.0))
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(btn_border)
+        .bg(btn_bg)
+        .text_size(px(11.0))
+        .text_color(btn_color)
+        .hover(|s| s.bg(panel_border.opacity(0.3)))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.toggle_format_menu(cx);
+        }))
+        .child("Format")
+        .child(div().text_size(px(7.0)).child("▾"))
+}
+
+/// Format dropdown panel - rendered at root level so it floats above grid.
+pub fn render_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
+    let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
+
+    let state = app.selection_format_state(cx);
+    let bold_active = matches!(state.bold, TriState::Uniform(true));
+    let italic_active = matches!(state.italic, TriState::Uniform(true));
+    let underline_active = matches!(state.underline, TriState::Uniform(true));
+    let align_left = matches!(state.alignment, TriState::Uniform(Alignment::Left));
+    let align_center = matches!(state.alignment, TriState::Uniform(Alignment::Center));
+    let align_right = matches!(state.alignment, TriState::Uniform(Alignment::Right));
+
+    // Position below format bar, roughly under Format button
+    // macOS: titlebar(34) + formula_bar(24) + format_bar(28) = 86
+    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
+    let top_offset = chrome_above + CELL_HEIGHT + FORMAT_BAR_HEIGHT;
+    // Horizontal: after font family + size + separator
+    let left_offset: f32 = 8.0 + 84.0 + 54.0 + 4.0 + 4.0;
+
+    div()
+        .id("fmt-format-dropdown-panel")
+        .absolute()
+        .top(px(top_offset))
+        .left(px(left_offset))
+        .w(px(140.0))
+        .bg(panel_bg)
+        .border_1()
+        .border_color(panel_border)
+        .rounded_sm()
+        .shadow_lg()
+        .py_1()
+        .flex()
+        .flex_col()
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            this.close_format_menu(cx);
+        }))
+        // Bold
+        .child(
+            div()
+                .id("fmt-menu-bold")
+                .flex()
+                .items_center()
+                .px_2()
+                .py(px(4.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover_bg))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.toggle_bold(cx);
+                }))
+                .child(div().w(px(16.0)).text_size(px(10.0)).text_color(accent).child(if bold_active { "✓" } else { "" }))
+                .child(div().flex_1().text_size(px(12.0)).text_color(if bold_active { accent } else { text_primary }).child("Bold"))
+                .child(div().text_size(px(10.0)).text_color(text_muted).child("⌘B"))
+        )
+        // Italic
+        .child(
+            div()
+                .id("fmt-menu-italic")
+                .flex()
+                .items_center()
+                .px_2()
+                .py(px(4.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover_bg))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.toggle_italic(cx);
+                }))
+                .child(div().w(px(16.0)).text_size(px(10.0)).text_color(accent).child(if italic_active { "✓" } else { "" }))
+                .child(div().flex_1().text_size(px(12.0)).text_color(if italic_active { accent } else { text_primary }).child("Italic"))
+                .child(div().text_size(px(10.0)).text_color(text_muted).child("⌘I"))
+        )
+        // Underline
+        .child(
+            div()
+                .id("fmt-menu-underline")
+                .flex()
+                .items_center()
+                .px_2()
+                .py(px(4.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover_bg))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.toggle_underline(cx);
+                }))
+                .child(div().w(px(16.0)).text_size(px(10.0)).text_color(accent).child(if underline_active { "✓" } else { "" }))
+                .child(div().flex_1().text_size(px(12.0)).text_color(if underline_active { accent } else { text_primary }).child("Underline"))
+                .child(div().text_size(px(10.0)).text_color(text_muted).child("⌘U"))
+        )
+        // Separator
+        .child(div().h(px(1.0)).mx_2().my_1().bg(panel_border.opacity(0.5)))
+        // Align Left
+        .child(
+            div()
+                .id("fmt-menu-align-left")
+                .flex()
+                .items_center()
+                .px_2()
+                .py(px(4.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover_bg))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.set_alignment_selection(Alignment::Left, cx);
+                }))
+                .child(div().w(px(16.0)).text_size(px(10.0)).text_color(accent).child(if align_left { "✓" } else { "" }))
+                .child(div().flex_1().text_size(px(12.0)).text_color(if align_left { accent } else { text_primary }).child("Align Left"))
+        )
+        // Align Center
+        .child(
+            div()
+                .id("fmt-menu-align-center")
+                .flex()
+                .items_center()
+                .px_2()
+                .py(px(4.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover_bg))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.set_alignment_selection(Alignment::Center, cx);
+                }))
+                .child(div().w(px(16.0)).text_size(px(10.0)).text_color(accent).child(if align_center { "✓" } else { "" }))
+                .child(div().flex_1().text_size(px(12.0)).text_color(if align_center { accent } else { text_primary }).child("Align Center"))
+        )
+        // Align Right
+        .child(
+            div()
+                .id("fmt-menu-align-right")
+                .flex()
+                .items_center()
+                .px_2()
+                .py(px(4.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover_bg))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.set_alignment_selection(Alignment::Right, cx);
+                }))
+                .child(div().w(px(16.0)).text_size(px(10.0)).text_color(accent).child(if align_right { "✓" } else { "" }))
+                .child(div().flex_1().text_size(px(12.0)).text_color(if align_right { accent } else { text_primary }).child("Align Right"))
+        )
 }
 
 /// B / I / U toggle button for the format bar.
