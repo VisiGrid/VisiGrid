@@ -156,11 +156,11 @@ grid.set{ sheet=2, cell="A6", value="Revenue" }
 grid.set{ sheet=2, cell="B6", value=198270 }  -- FY2022 actual
 grid.set{ sheet=2, cell="C6", value=211915 }  -- FY2023 actual
 grid.set{ sheet=2, cell="D6", value=245122 }  -- FY2024 actual
-grid.set{ sheet=2, cell="E6", value="=D6*(1+Sheet1!B6)" }  -- FY2025 projected
-grid.set{ sheet=2, cell="F6", value="=E6*(1+Sheet1!C6)" }  -- FY2026 projected
-grid.set{ sheet=2, cell="G6", value="=F6*(1+Sheet1!D6)" }  -- FY2027 projected
-grid.set{ sheet=2, cell="H6", value="=G6*(1+Sheet1!E6)" }  -- FY2028 projected
-grid.set{ sheet=2, cell="I6", value="=H6*(1+Sheet1!F6)" }  -- FY2029 projected
+grid.set{ sheet=2, cell="E6", value="=D6*(1+Assumptions!B6)" }  -- FY2025 projected
+grid.set{ sheet=2, cell="F6", value="=E6*(1+Assumptions!C6)" }  -- FY2026 projected
+grid.set{ sheet=2, cell="G6", value="=F6*(1+Assumptions!D6)" }  -- FY2027 projected
+grid.set{ sheet=2, cell="H6", value="=G6*(1+Assumptions!E6)" }  -- FY2028 projected
+grid.set{ sheet=2, cell="I6", value="=H6*(1+Assumptions!F6)" }  -- FY2029 projected
 grid.format{ sheet=2, range="A6", bold=true }
 
 -- Cost of Revenue
@@ -168,11 +168,11 @@ grid.set{ sheet=2, cell="A7", value="Cost of Revenue" }
 grid.set{ sheet=2, cell="B7", value=-62650 }  -- FY2022
 grid.set{ sheet=2, cell="C7", value=-65863 }  -- FY2023
 grid.set{ sheet=2, cell="D7", value=-74114 }  -- FY2024
-grid.set{ sheet=2, cell="E7", value="=-E6*(1-Sheet1!B7)*(D7/-D6)" }
-grid.set{ sheet=2, cell="F7", value="=-F6*(1-Sheet1!C7)*(D7/-D6)" }
-grid.set{ sheet=2, cell="G7", value="=-G6*(1-Sheet1!D7)*(D7/-D6)" }
-grid.set{ sheet=2, cell="H7", value="=-H6*(1-Sheet1!E7)*(D7/-D6)" }
-grid.set{ sheet=2, cell="I7", value="=-I6*(1-Sheet1!F7)*(D7/-D6)" }
+grid.set{ sheet=2, cell="E7", value="=-E6*(1-Assumptions!B7)*(D7/-D6)" }
+grid.set{ sheet=2, cell="F7", value="=-F6*(1-Assumptions!C7)*(D7/-D6)" }
+grid.set{ sheet=2, cell="G7", value="=-G6*(1-Assumptions!D7)*(D7/-D6)" }
+grid.set{ sheet=2, cell="H7", value="=-H6*(1-Assumptions!E7)*(D7/-D6)" }
+grid.set{ sheet=2, cell="I7", value="=-I6*(1-Assumptions!F7)*(D7/-D6)" }
 
 -- Gross Profit
 grid.set{ sheet=2, cell="A8", value="Gross Profit" }
@@ -235,11 +235,11 @@ grid.set{ sheet=2, cell="B15", value="=B8+B13" }
 grid.set{ sheet=2, cell="C15", value="=C8+C13" }
 grid.set{ sheet=2, cell="D15", value="=D8+D13" }
 -- Projected: use operating margin assumption
-grid.set{ sheet=2, cell="E15", value="=E6*Sheet1!B7" }
-grid.set{ sheet=2, cell="F15", value="=F6*Sheet1!C7" }
-grid.set{ sheet=2, cell="G15", value="=G6*Sheet1!D7" }
-grid.set{ sheet=2, cell="H15", value="=H6*Sheet1!E7" }
-grid.set{ sheet=2, cell="I15", value="=I6*Sheet1!F7" }
+grid.set{ sheet=2, cell="E15", value="=E6*Assumptions!B7" }
+grid.set{ sheet=2, cell="F15", value="=F6*Assumptions!C7" }
+grid.set{ sheet=2, cell="G15", value="=G6*Assumptions!D7" }
+grid.set{ sheet=2, cell="H15", value="=H6*Assumptions!E7" }
+grid.set{ sheet=2, cell="I15", value="=I6*Assumptions!F7" }
 grid.format{ sheet=2, range="A15:I15", bold=true }
 
 -- Interest Expense (driven by prior year debt * rate)
@@ -247,11 +247,11 @@ grid.set{ sheet=2, cell="A17", value="Interest Expense" }
 grid.set{ sheet=2, cell="B17", value=-2063 }
 grid.set{ sheet=2, cell="C17", value=-1968 }
 grid.set{ sheet=2, cell="D17", value=-1602 }
-grid.set{ sheet=2, cell="E17", value="=-Sheet3!D20*Sheet1!B9" }
-grid.set{ sheet=2, cell="F17", value="=-Sheet3!E20*Sheet1!C9" }
-grid.set{ sheet=2, cell="G17", value="=-Sheet3!F20*Sheet1!D9" }
-grid.set{ sheet=2, cell="H17", value="=-Sheet3!G20*Sheet1!E9" }
-grid.set{ sheet=2, cell="I17", value="=-Sheet3!H20*Sheet1!F9" }
+grid.set{ sheet=2, cell="E17", value="=-'Balance Sheet'!D20*Assumptions!B9" }
+grid.set{ sheet=2, cell="F17", value="=-'Balance Sheet'!E20*Assumptions!C9" }
+grid.set{ sheet=2, cell="G17", value="=-'Balance Sheet'!F20*Assumptions!D9" }
+grid.set{ sheet=2, cell="H17", value="=-'Balance Sheet'!G20*Assumptions!E9" }
+grid.set{ sheet=2, cell="I17", value="=-'Balance Sheet'!H20*Assumptions!F9" }
 
 -- Other Income
 grid.set{ sheet=2, cell="A18", value="Other Income (Expense)" }
@@ -281,11 +281,11 @@ grid.set{ sheet=2, cell="A20", value="Income Tax Provision" }
 grid.set{ sheet=2, cell="B20", value=-10978 }
 grid.set{ sheet=2, cell="C20", value=-16950 }
 grid.set{ sheet=2, cell="D20", value=-19651 }
-grid.set{ sheet=2, cell="E20", value="=-E19*Sheet1!B8" }
-grid.set{ sheet=2, cell="F20", value="=-F19*Sheet1!C8" }
-grid.set{ sheet=2, cell="G20", value="=-G19*Sheet1!D8" }
-grid.set{ sheet=2, cell="H20", value="=-H19*Sheet1!E8" }
-grid.set{ sheet=2, cell="I20", value="=-I19*Sheet1!F8" }
+grid.set{ sheet=2, cell="E20", value="=-E19*Assumptions!B8" }
+grid.set{ sheet=2, cell="F20", value="=-F19*Assumptions!C8" }
+grid.set{ sheet=2, cell="G20", value="=-G19*Assumptions!D8" }
+grid.set{ sheet=2, cell="H20", value="=-H19*Assumptions!E8" }
+grid.set{ sheet=2, cell="I20", value="=-I19*Assumptions!F8" }
 
 -- Net Income
 grid.set{ sheet=2, cell="A22", value="Net Income" }
@@ -328,11 +328,11 @@ grid.set{ sheet=3, cell="A6", value="Cash & Equivalents" }
 grid.set{ sheet=3, cell="B6", value=13931 }
 grid.set{ sheet=3, cell="C6", value=34704 }
 grid.set{ sheet=3, cell="D6", value=18315 }
-grid.set{ sheet=3, cell="E6", value="=Sheet4!E28" }  -- Ending cash from CF
-grid.set{ sheet=3, cell="F6", value="=Sheet4!F28" }
-grid.set{ sheet=3, cell="G6", value="=Sheet4!G28" }
-grid.set{ sheet=3, cell="H6", value="=Sheet4!H28" }
-grid.set{ sheet=3, cell="I6", value="=Sheet4!I28" }
+grid.set{ sheet=3, cell="E6", value="='Cash Flow'!E28" }  -- Ending cash from CF
+grid.set{ sheet=3, cell="F6", value="='Cash Flow'!F28" }
+grid.set{ sheet=3, cell="G6", value="='Cash Flow'!G28" }
+grid.set{ sheet=3, cell="H6", value="='Cash Flow'!H28" }
+grid.set{ sheet=3, cell="I6", value="='Cash Flow'!I28" }
 
 -- Short-term Investments
 grid.set{ sheet=3, cell="A7", value="Short-term Investments" }
@@ -350,22 +350,22 @@ grid.set{ sheet=3, cell="A8", value="Accounts Receivable" }
 grid.set{ sheet=3, cell="B8", value=44261 }
 grid.set{ sheet=3, cell="C8", value=48688 }
 grid.set{ sheet=3, cell="D8", value=56924 }
-grid.set{ sheet=3, cell="E8", value="=Sheet2!E6*(D8/D6)" }
-grid.set{ sheet=3, cell="F8", value="=Sheet2!F6*(D8/D6)" }
-grid.set{ sheet=3, cell="G8", value="=Sheet2!G6*(D8/D6)" }
-grid.set{ sheet=3, cell="H8", value="=Sheet2!H6*(D8/D6)" }
-grid.set{ sheet=3, cell="I8", value="=Sheet2!I6*(D8/D6)" }
+grid.set{ sheet=3, cell="E8", value="='Income Statement'!E6*(D8/D6)" }
+grid.set{ sheet=3, cell="F8", value="='Income Statement'!F6*(D8/D6)" }
+grid.set{ sheet=3, cell="G8", value="='Income Statement'!G6*(D8/D6)" }
+grid.set{ sheet=3, cell="H8", value="='Income Statement'!H6*(D8/D6)" }
+grid.set{ sheet=3, cell="I8", value="='Income Statement'!I6*(D8/D6)" }
 
 -- Other Current Assets
 grid.set{ sheet=3, cell="A9", value="Other Current Assets" }
 grid.set{ sheet=3, cell="B9", value=16924 }
 grid.set{ sheet=3, cell="C9", value=21807 }
 grid.set{ sheet=3, cell="D9", value=29553 }
-grid.set{ sheet=3, cell="E9", value="=Sheet2!E6*(D9/D6)" }
-grid.set{ sheet=3, cell="F9", value="=Sheet2!F6*(D9/D6)" }
-grid.set{ sheet=3, cell="G9", value="=Sheet2!G6*(D9/D6)" }
-grid.set{ sheet=3, cell="H9", value="=Sheet2!H6*(D9/D6)" }
-grid.set{ sheet=3, cell="I9", value="=Sheet2!I6*(D9/D6)" }
+grid.set{ sheet=3, cell="E9", value="='Income Statement'!E6*(D9/D6)" }
+grid.set{ sheet=3, cell="F9", value="='Income Statement'!F6*(D9/D6)" }
+grid.set{ sheet=3, cell="G9", value="='Income Statement'!G6*(D9/D6)" }
+grid.set{ sheet=3, cell="H9", value="='Income Statement'!H6*(D9/D6)" }
+grid.set{ sheet=3, cell="I9", value="='Income Statement'!I6*(D9/D6)" }
 
 -- Total Current Assets
 grid.set{ sheet=3, cell="A10", value="Total Current Assets" }
@@ -385,11 +385,11 @@ grid.set{ sheet=3, cell="B12", value=74398 }
 grid.set{ sheet=3, cell="C12", value=95641 }
 grid.set{ sheet=3, cell="D12", value=135591 }
 -- PP&E = Prior PP&E + CapEx - D&A
-grid.set{ sheet=3, cell="E12", value="=D12+Sheet4!E12+Sheet4!E8" }
-grid.set{ sheet=3, cell="F12", value="=E12+Sheet4!F12+Sheet4!F8" }
-grid.set{ sheet=3, cell="G12", value="=F12+Sheet4!G12+Sheet4!G8" }
-grid.set{ sheet=3, cell="H12", value="=G12+Sheet4!H12+Sheet4!H8" }
-grid.set{ sheet=3, cell="I12", value="=H12+Sheet4!I12+Sheet4!I8" }
+grid.set{ sheet=3, cell="E12", value="=D12+'Cash Flow'!E12+'Cash Flow'!E8" }
+grid.set{ sheet=3, cell="F12", value="=E12+'Cash Flow'!F12+'Cash Flow'!F8" }
+grid.set{ sheet=3, cell="G12", value="=F12+'Cash Flow'!G12+'Cash Flow'!G8" }
+grid.set{ sheet=3, cell="H12", value="=G12+'Cash Flow'!H12+'Cash Flow'!H8" }
+grid.set{ sheet=3, cell="I12", value="=H12+'Cash Flow'!I12+'Cash Flow'!I8" }
 
 -- Goodwill & Intangibles
 grid.set{ sheet=3, cell="A13", value="Goodwill & Intangibles" }
@@ -434,22 +434,22 @@ grid.set{ sheet=3, cell="A18", value="Accounts Payable" }
 grid.set{ sheet=3, cell="B18", value=19000 }
 grid.set{ sheet=3, cell="C18", value=18095 }
 grid.set{ sheet=3, cell="D18", value=21996 }
-grid.set{ sheet=3, cell="E18", value="=Sheet2!E6*(D18/D6)" }
-grid.set{ sheet=3, cell="F18", value="=Sheet2!F6*(D18/D6)" }
-grid.set{ sheet=3, cell="G18", value="=Sheet2!G6*(D18/D6)" }
-grid.set{ sheet=3, cell="H18", value="=Sheet2!H6*(D18/D6)" }
-grid.set{ sheet=3, cell="I18", value="=Sheet2!I6*(D18/D6)" }
+grid.set{ sheet=3, cell="E18", value="='Income Statement'!E6*(D18/D6)" }
+grid.set{ sheet=3, cell="F18", value="='Income Statement'!F6*(D18/D6)" }
+grid.set{ sheet=3, cell="G18", value="='Income Statement'!G6*(D18/D6)" }
+grid.set{ sheet=3, cell="H18", value="='Income Statement'!H6*(D18/D6)" }
+grid.set{ sheet=3, cell="I18", value="='Income Statement'!I6*(D18/D6)" }
 
 -- Deferred Revenue & Other
 grid.set{ sheet=3, cell="A19", value="Deferred Revenue & Other CL" }
 grid.set{ sheet=3, cell="B19", value=76827 }
 grid.set{ sheet=3, cell="C19", value=86298 }
 grid.set{ sheet=3, cell="D19", value=103369 }
-grid.set{ sheet=3, cell="E19", value="=Sheet2!E6*(D19/D6)" }
-grid.set{ sheet=3, cell="F19", value="=Sheet2!F6*(D19/D6)" }
-grid.set{ sheet=3, cell="G19", value="=Sheet2!G6*(D19/D6)" }
-grid.set{ sheet=3, cell="H19", value="=Sheet2!H6*(D19/D6)" }
-grid.set{ sheet=3, cell="I19", value="=Sheet2!I6*(D19/D6)" }
+grid.set{ sheet=3, cell="E19", value="='Income Statement'!E6*(D19/D6)" }
+grid.set{ sheet=3, cell="F19", value="='Income Statement'!F6*(D19/D6)" }
+grid.set{ sheet=3, cell="G19", value="='Income Statement'!G6*(D19/D6)" }
+grid.set{ sheet=3, cell="H19", value="='Income Statement'!H6*(D19/D6)" }
+grid.set{ sheet=3, cell="I19", value="='Income Statement'!I6*(D19/D6)" }
 
 -- Long-term Debt
 grid.set{ sheet=3, cell="A20", value="Long-term Debt" }
@@ -494,11 +494,11 @@ grid.set{ sheet=3, cell="A25", value="Retained Earnings" }
 grid.set{ sheet=3, cell="B25", value=84281 }
 grid.set{ sheet=3, cell="C25", value=118848 }
 grid.set{ sheet=3, cell="D25", value=115440 }
-grid.set{ sheet=3, cell="E25", value="=D25+Sheet2!E22-Sheet1!B13-Sheet1!B14" }
-grid.set{ sheet=3, cell="F25", value="=E25+Sheet2!F22-Sheet1!C13-Sheet1!C14" }
-grid.set{ sheet=3, cell="G25", value="=F25+Sheet2!G22-Sheet1!D13-Sheet1!D14" }
-grid.set{ sheet=3, cell="H25", value="=G25+Sheet2!H22-Sheet1!E13-Sheet1!E14" }
-grid.set{ sheet=3, cell="I25", value="=H25+Sheet2!I22-Sheet1!F13-Sheet1!F14" }
+grid.set{ sheet=3, cell="E25", value="=D25+'Income Statement'!E22-Assumptions!B13-Assumptions!B14" }
+grid.set{ sheet=3, cell="F25", value="=E25+'Income Statement'!F22-Assumptions!C13-Assumptions!C14" }
+grid.set{ sheet=3, cell="G25", value="=F25+'Income Statement'!G22-Assumptions!D13-Assumptions!D14" }
+grid.set{ sheet=3, cell="H25", value="=G25+'Income Statement'!H22-Assumptions!E13-Assumptions!E14" }
+grid.set{ sheet=3, cell="I25", value="=H25+'Income Statement'!I22-Assumptions!F13-Assumptions!F14" }
 
 -- Other Equity (AOCI, etc.) - kept flat
 grid.set{ sheet=3, cell="A26", value="Other Equity Components" }
@@ -583,25 +583,25 @@ grid.format{ sheet=4, range="A5", bold=true }
 
 -- Net Income (from IS)
 grid.set{ sheet=4, cell="A6", value="Net Income" }
-grid.set{ sheet=4, cell="B6", value="=Sheet2!B22" }
-grid.set{ sheet=4, cell="C6", value="=Sheet2!C22" }
-grid.set{ sheet=4, cell="D6", value="=Sheet2!D22" }
-grid.set{ sheet=4, cell="E6", value="=Sheet2!E22" }
-grid.set{ sheet=4, cell="F6", value="=Sheet2!F22" }
-grid.set{ sheet=4, cell="G6", value="=Sheet2!G22" }
-grid.set{ sheet=4, cell="H6", value="=Sheet2!H22" }
-grid.set{ sheet=4, cell="I6", value="=Sheet2!I22" }
+grid.set{ sheet=4, cell="B6", value="='Income Statement'!B22" }
+grid.set{ sheet=4, cell="C6", value="='Income Statement'!C22" }
+grid.set{ sheet=4, cell="D6", value="='Income Statement'!D22" }
+grid.set{ sheet=4, cell="E6", value="='Income Statement'!E22" }
+grid.set{ sheet=4, cell="F6", value="='Income Statement'!F22" }
+grid.set{ sheet=4, cell="G6", value="='Income Statement'!G22" }
+grid.set{ sheet=4, cell="H6", value="='Income Statement'!H22" }
+grid.set{ sheet=4, cell="I6", value="='Income Statement'!I22" }
 
 -- D&A (add back)
 grid.set{ sheet=4, cell="A8", value="Depreciation & Amortization" }
 grid.set{ sheet=4, cell="B8", value=14460 }
 grid.set{ sheet=4, cell="C8", value=13861 }
 grid.set{ sheet=4, cell="D8", value=22287 }
-grid.set{ sheet=4, cell="E8", value="=Sheet2!E6*Sheet1!B10" }
-grid.set{ sheet=4, cell="F8", value="=Sheet2!F6*Sheet1!C10" }
-grid.set{ sheet=4, cell="G8", value="=Sheet2!G6*Sheet1!D10" }
-grid.set{ sheet=4, cell="H8", value="=Sheet2!H6*Sheet1!E10" }
-grid.set{ sheet=4, cell="I8", value="=Sheet2!I6*Sheet1!F10" }
+grid.set{ sheet=4, cell="E8", value="='Income Statement'!E6*Assumptions!B10" }
+grid.set{ sheet=4, cell="F8", value="='Income Statement'!F6*Assumptions!C10" }
+grid.set{ sheet=4, cell="G8", value="='Income Statement'!G6*Assumptions!D10" }
+grid.set{ sheet=4, cell="H8", value="='Income Statement'!H6*Assumptions!E10" }
+grid.set{ sheet=4, cell="I8", value="='Income Statement'!I6*Assumptions!F10" }
 
 -- Change in Working Capital
 grid.set{ sheet=4, cell="A9", value="Change in Working Capital" }
@@ -609,11 +609,11 @@ grid.set{ sheet=4, cell="B9", value=-929 }
 grid.set{ sheet=4, cell="C9", value=3280 }
 grid.set{ sheet=4, cell="D9", value=-5523 }
 -- NWC change = (Current NWC % - Prior NWC %) * Revenue
-grid.set{ sheet=4, cell="E9", value="=-(Sheet2!E6*Sheet1!B12-Sheet2!D6*(-0.15))" }
-grid.set{ sheet=4, cell="F9", value="=-(Sheet2!F6*Sheet1!C12-Sheet2!E6*Sheet1!B12)" }
-grid.set{ sheet=4, cell="G9", value="=-(Sheet2!G6*Sheet1!D12-Sheet2!F6*Sheet1!C12)" }
-grid.set{ sheet=4, cell="H9", value="=-(Sheet2!H6*Sheet1!E12-Sheet2!G6*Sheet1!D12)" }
-grid.set{ sheet=4, cell="I9", value="=-(Sheet2!I6*Sheet1!F12-Sheet2!H6*Sheet1!E12)" }
+grid.set{ sheet=4, cell="E9", value="=-('Income Statement'!E6*Assumptions!B12-'Income Statement'!D6*(-0.15))" }
+grid.set{ sheet=4, cell="F9", value="=-('Income Statement'!F6*Assumptions!C12-'Income Statement'!E6*Assumptions!B12)" }
+grid.set{ sheet=4, cell="G9", value="=-('Income Statement'!G6*Assumptions!D12-'Income Statement'!F6*Assumptions!C12)" }
+grid.set{ sheet=4, cell="H9", value="=-('Income Statement'!H6*Assumptions!E12-'Income Statement'!G6*Assumptions!D12)" }
+grid.set{ sheet=4, cell="I9", value="=-('Income Statement'!I6*Assumptions!F12-'Income Statement'!H6*Assumptions!E12)" }
 
 -- Other Operating
 grid.set{ sheet=4, cell="A10", value="Other Operating Adjustments" }
@@ -647,11 +647,11 @@ grid.set{ sheet=4, cell="A12", value="Capital Expenditures" }
 grid.set{ sheet=4, cell="B12", value=-23886 }
 grid.set{ sheet=4, cell="C12", value=-28107 }
 grid.set{ sheet=4, cell="D12", value=-44477 }
-grid.set{ sheet=4, cell="E12", value="=-Sheet2!E6*Sheet1!B11" }
-grid.set{ sheet=4, cell="F12", value="=-Sheet2!F6*Sheet1!C11" }
-grid.set{ sheet=4, cell="G12", value="=-Sheet2!G6*Sheet1!D11" }
-grid.set{ sheet=4, cell="H12", value="=-Sheet2!H6*Sheet1!E11" }
-grid.set{ sheet=4, cell="I12", value="=-Sheet2!I6*Sheet1!F11" }
+grid.set{ sheet=4, cell="E12", value="=-'Income Statement'!E6*Assumptions!B11" }
+grid.set{ sheet=4, cell="F12", value="=-'Income Statement'!F6*Assumptions!C11" }
+grid.set{ sheet=4, cell="G12", value="=-'Income Statement'!G6*Assumptions!D11" }
+grid.set{ sheet=4, cell="H12", value="=-'Income Statement'!H6*Assumptions!E11" }
+grid.set{ sheet=4, cell="I12", value="=-'Income Statement'!I6*Assumptions!F11" }
 
 -- Other Investing
 grid.set{ sheet=4, cell="A14", value="Acquisitions & Other" }
@@ -685,22 +685,22 @@ grid.set{ sheet=4, cell="A18", value="Dividends Paid" }
 grid.set{ sheet=4, cell="B18", value=-18135 }
 grid.set{ sheet=4, cell="C18", value=-19800 }
 grid.set{ sheet=4, cell="D18", value=-21771 }
-grid.set{ sheet=4, cell="E18", value="=-Sheet1!B13" }
-grid.set{ sheet=4, cell="F18", value="=-Sheet1!C13" }
-grid.set{ sheet=4, cell="G18", value="=-Sheet1!D13" }
-grid.set{ sheet=4, cell="H18", value="=-Sheet1!E13" }
-grid.set{ sheet=4, cell="I18", value="=-Sheet1!F13" }
+grid.set{ sheet=4, cell="E18", value="=-Assumptions!B13" }
+grid.set{ sheet=4, cell="F18", value="=-Assumptions!C13" }
+grid.set{ sheet=4, cell="G18", value="=-Assumptions!D13" }
+grid.set{ sheet=4, cell="H18", value="=-Assumptions!E13" }
+grid.set{ sheet=4, cell="I18", value="=-Assumptions!F13" }
 
 -- Share Repurchases
 grid.set{ sheet=4, cell="A19", value="Share Repurchases" }
 grid.set{ sheet=4, cell="B19", value=-32696 }
 grid.set{ sheet=4, cell="C19", value=-22245 }
 grid.set{ sheet=4, cell="D19", value=-17254 }
-grid.set{ sheet=4, cell="E19", value="=-Sheet1!B14" }
-grid.set{ sheet=4, cell="F19", value="=-Sheet1!C14" }
-grid.set{ sheet=4, cell="G19", value="=-Sheet1!D14" }
-grid.set{ sheet=4, cell="H19", value="=-Sheet1!E14" }
-grid.set{ sheet=4, cell="I19", value="=-Sheet1!F14" }
+grid.set{ sheet=4, cell="E19", value="=-Assumptions!B14" }
+grid.set{ sheet=4, cell="F19", value="=-Assumptions!C14" }
+grid.set{ sheet=4, cell="G19", value="=-Assumptions!D14" }
+grid.set{ sheet=4, cell="H19", value="=-Assumptions!E14" }
+grid.set{ sheet=4, cell="I19", value="=-Assumptions!F14" }
 
 -- Debt Changes
 grid.set{ sheet=4, cell="A20", value="Debt Issued / (Repaid)" }
@@ -784,14 +784,14 @@ grid.format{ sheet=4, range="A28:I28", bold=true }
 
 -- Cash Check
 grid.set{ sheet=4, cell="A30", value="CHECK: CF Ending Cash - BS Cash" }
-grid.set{ sheet=4, cell="B30", value="=B28-Sheet3!B6" }
-grid.set{ sheet=4, cell="C30", value="=C28-Sheet3!C6" }
-grid.set{ sheet=4, cell="D30", value="=D28-Sheet3!D6" }
-grid.set{ sheet=4, cell="E30", value="=E28-Sheet3!E6" }
-grid.set{ sheet=4, cell="F30", value="=F28-Sheet3!F6" }
-grid.set{ sheet=4, cell="G30", value="=G28-Sheet3!G6" }
-grid.set{ sheet=4, cell="H30", value="=H28-Sheet3!H6" }
-grid.set{ sheet=4, cell="I30", value="=I28-Sheet3!I6" }
+grid.set{ sheet=4, cell="B30", value="=B28-'Balance Sheet'!B6" }
+grid.set{ sheet=4, cell="C30", value="=C28-'Balance Sheet'!C6" }
+grid.set{ sheet=4, cell="D30", value="=D28-'Balance Sheet'!D6" }
+grid.set{ sheet=4, cell="E30", value="=E28-'Balance Sheet'!E6" }
+grid.set{ sheet=4, cell="F30", value="=F28-'Balance Sheet'!F6" }
+grid.set{ sheet=4, cell="G30", value="=G28-'Balance Sheet'!G6" }
+grid.set{ sheet=4, cell="H30", value="=H28-'Balance Sheet'!H6" }
+grid.set{ sheet=4, cell="I30", value="=I28-'Balance Sheet'!I6" }
 grid.format{ sheet=4, range="A30:I30", bold=true }
 
 grid.set{ sheet=4, cell="A31", value="Cash Check (must = 0)" }
