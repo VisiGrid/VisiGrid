@@ -170,6 +170,10 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                 .when(app.verified_mode, |d| {
                     d.child(render_verified_indicator(app, cx))
                 })
+                // Approval status indicator (semantic fingerprint)
+                .when(app.approved_fingerprint.is_some(), |d| {
+                    d.child(render_approval_indicator(app, cx))
+                })
                 // Manual calc mode indicator
                 .when(!app.wb(cx).auto_recalc(), |d| {
                     let warn_color = app.token(TokenKey::Warn);
@@ -658,6 +662,57 @@ fn render_verified_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                 .text_color(text_muted)
                 .text_xs()
                 .child(format!("({})", tooltip_content))
+        )
+}
+
+/// Render the semantic approval status indicator
+fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    use crate::app::ApprovalStatus;
+
+    let success_color = app.token(TokenKey::Ok);
+    let warning_color = app.token(TokenKey::Warn);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let panel_border = app.token(TokenKey::PanelBorder);
+
+    let status = app.approval_status();
+    let (status_text, status_color) = match status {
+        ApprovalStatus::NotApproved => ("", text_muted), // Shouldn't render
+        ApprovalStatus::Approved => ("Approved ✓", success_color),
+        ApprovalStatus::Drifted => ("Drifted ⚠", warning_color),
+    };
+
+    // Build tooltip content
+    let tooltip = match status {
+        ApprovalStatus::Approved => "Logic unchanged since approval",
+        ApprovalStatus::Drifted => "Logic has changed since approval",
+        ApprovalStatus::NotApproved => "",
+    };
+
+    div()
+        .id("approval-indicator")
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_px()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_color(status_color)
+        .hover(move |s| s.bg(panel_border))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            // Click to re-approve if drifted, or clear if approved
+            if this.is_approved() {
+                this.clear_approval(cx);
+            } else {
+                this.approve_model(None, cx);
+            }
+        }))
+        .child(status_text)
+        .child(
+            div()
+                .text_color(text_muted)
+                .text_xs()
+                .child(format!("({})", tooltip))
         )
 }
 

@@ -159,6 +159,8 @@ pub enum CommandId {
     ReturnToTraceSource,
     ToggleVerifiedMode,
     Recalculate,
+    ApproveModel,
+    ClearApproval,
     NavPerfReport,
 
     // Window
@@ -282,6 +284,8 @@ impl CommandId {
             Self::ReturnToTraceSource => "Return to Trace Source",
             Self::ToggleVerifiedMode => "Toggle Verified Mode",
             Self::Recalculate => "Recalculate All",
+            Self::ApproveModel => "Approve Model",
+            Self::ClearApproval => "Clear Approval",
             Self::NavPerfReport => "Navigation Latency Report",
             Self::SwitchWindow => "Switch Window...",
             Self::ExtractNamedRange => "Extract to Named Range...",
@@ -488,6 +492,8 @@ impl CommandId {
             Self::ReturnToTraceSource => "trace back return source origin home",
             Self::ToggleVerifiedMode => "verified deterministic recalc audit trust",
             Self::Recalculate => "recalc refresh calculate formulas f9",
+            Self::ApproveModel => "approve model fingerprint semantic logic verify lock sign-off audit",
+            Self::ClearApproval => "clear approval reset unapprove remove fingerprint",
             Self::NavPerfReport => "navigation latency perf performance timing",
         }
     }
@@ -566,6 +572,8 @@ impl CommandId {
             Self::ReturnToTraceSource,
             Self::ToggleVerifiedMode,
             Self::Recalculate,
+            Self::ApproveModel,
+            Self::ClearApproval,
             Self::SwitchWindow,
             Self::ExtractNamedRange,
             Self::ShowShortcuts,
@@ -663,6 +671,8 @@ impl CommandId {
             | Self::CycleTraceDependent
             | Self::ReturnToTraceSource
             | Self::ToggleVerifiedMode
+            | Self::ApproveModel
+            | Self::ClearApproval
             | Self::InsertFormulaAI
             | Self::AnalyzeAI
             | Self::NavPerfReport => Some(MenuCategory::Tools),

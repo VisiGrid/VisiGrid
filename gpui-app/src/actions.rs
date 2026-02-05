@@ -133,6 +133,8 @@ actions!(view, [
     ToggleShowZeros,
     ToggleVerifiedMode, // Toggle verified/deterministic recalc mode
     Recalculate,        // F9: Force full recalculation (Excel muscle memory)
+    ApproveModel,       // Approve current semantic state (capture fingerprint)
+    ClearApproval,      // Clear the approved state
     NavPerfReport,      // Show navigation latency report (VISIGRID_PERF=nav)
     ZoomIn,
     ZoomOut,

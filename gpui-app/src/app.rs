@@ -128,6 +128,17 @@ pub enum HistoryFilterMode {
     DataEditsOnly,
 }
 
+/// Semantic approval status for model verification
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalStatus {
+    /// No approved fingerprint has been set
+    NotApproved,
+    /// Current state matches the approved fingerprint
+    Approved,
+    /// Current state has drifted from the approved fingerprint
+    Drifted,
+}
+
 // ============================================================================
 // Soft-Rewind Preview (Phase 8A)
 // ============================================================================
@@ -2168,6 +2179,13 @@ pub struct Spreadsheet {
     pub verified_mode: bool,
     pub last_recalc_report: Option<visigrid_engine::recalc::RecalcReport>,
 
+    // Semantic approval state (fingerprint boundary)
+    // The approved fingerprint captures a "known-good" semantic state.
+    // Formatting changes don't affect it; only logic (formulas, values, metadata) do.
+    pub approved_fingerprint: Option<crate::history::HistoryFingerprint>,
+    pub approval_timestamp: Option<std::time::Instant>,
+    pub approval_note: Option<String>,
+
     // VisiHub sync state
     pub hub_link: Option<crate::hub::HubLink>,
     pub hub_status: crate::hub::HubStatus,
@@ -2543,6 +2561,10 @@ impl Spreadsheet {
 
             verified_mode: false,
             last_recalc_report: None,
+
+            approved_fingerprint: None,
+            approval_timestamp: None,
+            approval_note: None,
 
             hub_link: None,
             hub_status: crate::hub::HubStatus::Unlinked,
@@ -3758,6 +3780,8 @@ impl Spreadsheet {
             CommandId::ReturnToTraceSource => self.return_to_trace_source(cx),
             CommandId::ToggleVerifiedMode => self.toggle_verified_mode(cx),
             CommandId::Recalculate => self.recalculate(cx),
+            CommandId::ApproveModel => self.approve_model(None, cx),
+            CommandId::ClearApproval => self.clear_approval(cx),
             CommandId::NavPerfReport => {
                 let msg = self.nav_perf.report()
                     .unwrap_or_else(|| "Nav perf tracking disabled. Set VISIGRID_PERF=nav and restart.".into());

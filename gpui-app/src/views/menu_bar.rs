@@ -260,6 +260,8 @@ fn render_view_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_item("Freeze First Column", None, 9, h(9), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_first_column(cx); }))
         .child(menu_item("Freeze Panes", None, 10, h(10), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_panes(cx); }))
         .child(menu_item("Unfreeze Panes", None, 11, h(11), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.unfreeze_panes(cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Approve Model", None, 12, h(12), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.approve_model(None, cx); }))
 }
 
 fn render_insert_menu(text_disabled: Hsla, border: Hsla) -> Div {

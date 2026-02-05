@@ -326,6 +326,64 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    // =========================================================================
+    // Semantic Approval (Fingerprint Boundary)
+    // =========================================================================
+
+    /// Approve the current semantic state.
+    ///
+    /// This captures the current fingerprint as the "known-good" state.
+    /// Future changes to formulas, values, or metadata will invalidate approval.
+    /// Formatting changes (bold, colors, column widths) do NOT affect approval.
+    pub fn approve_model(&mut self, note: Option<String>, cx: &mut Context<Self>) {
+        let fingerprint = self.history.fingerprint();
+        self.approved_fingerprint = Some(fingerprint);
+        self.approval_timestamp = Some(std::time::Instant::now());
+        self.approval_note = note;
+
+        self.status_message = Some("Model approved".to_string());
+        cx.notify();
+    }
+
+    /// Clear the approved state.
+    pub fn clear_approval(&mut self, cx: &mut Context<Self>) {
+        self.approved_fingerprint = None;
+        self.approval_timestamp = None;
+        self.approval_note = None;
+
+        self.status_message = Some("Approval cleared".to_string());
+        cx.notify();
+    }
+
+    /// Get the current approval status.
+    pub fn approval_status(&self) -> crate::app::ApprovalStatus {
+        match &self.approved_fingerprint {
+            None => crate::app::ApprovalStatus::NotApproved,
+            Some(approved) => {
+                let current = self.history.fingerprint();
+                if current == *approved {
+                    crate::app::ApprovalStatus::Approved
+                } else {
+                    crate::app::ApprovalStatus::Drifted
+                }
+            }
+        }
+    }
+
+    /// Check if the current state matches the approved fingerprint.
+    pub fn is_approved(&self) -> bool {
+        self.approval_status() == crate::app::ApprovalStatus::Approved
+    }
+
+    /// Get a display string for the approval status.
+    pub fn approval_display(&self) -> &'static str {
+        match self.approval_status() {
+            crate::app::ApprovalStatus::NotApproved => "",
+            crate::app::ApprovalStatus::Approved => "Approved ✓",
+            crate::app::ApprovalStatus::Drifted => "Drifted ⚠",
+        }
+    }
+
     /// Force full recalculation of all formulas (F9 - Excel muscle memory).
     ///
     /// In Excel, F9 recalculates all formulas in all open workbooks.
