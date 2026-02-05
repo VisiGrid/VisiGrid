@@ -97,3 +97,7 @@ echo "════════════════════════�
 
 # Cleanup (optional - comment out to keep the file)
 # rm -f "$OUTPUT"
+
+echo ""
+echo "  For multi-sheet workbooks, see: multi_sheet_model.lua"
+echo "  Run: visigrid-cli sheet apply workbook.sheet --lua multi_sheet_model.lua --json"

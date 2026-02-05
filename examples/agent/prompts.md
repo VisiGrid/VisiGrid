@@ -114,6 +114,76 @@ Report:
 
 ---
 
+## Prompt 4: Build a Multi-Sheet Workbook
+
+```
+Build a Q1 financial workbook with three sheets:
+
+Sheet 1 (Summary):
+- A1: Title "Q1 Financial Summary"
+- A4:B4: Total Revenue (formula referencing Sheet2)
+- A5:B5: Total Expenses (formula referencing Sheet3)
+- A6:B6: Net Income (Revenue - Expenses)
+
+Sheet 2 (Revenue):
+- Revenue by category (Product Sales, Services, Subscriptions, Licensing)
+- Each with an amount
+- Total row with =SUM formula
+
+Sheet 3 (Expenses):
+- Expenses by category (Salaries, Infrastructure, Marketing, Operations)
+- Each with an amount
+- Total row with =SUM formula
+
+Requirements:
+1. Use grid.set{ sheet=N, ... } for multi-sheet writes (N is 1-indexed)
+2. Use grid.set_batch for efficient bulk updates
+3. Cross-sheet formulas use Sheet2!B:B syntax
+4. Headers and totals should be bold
+
+Workflow:
+1. Write the Lua build script using grid.* API
+2. Run: visigrid-cli sheet apply workbook.sheet --lua build.lua --json
+3. Inspect Sheet1 B4 to verify cross-sheet formula
+4. Inspect Sheet2 B9 and Sheet3 B9 to verify totals
+5. Report the fingerprint
+```
+
+---
+
+## Multi-Sheet Lua API Reference
+
+The default API (`set`, `meta`, `style`) operates on Sheet1. For multi-sheet workbooks, use the `grid.*` namespace:
+
+```lua
+-- Single cell write (sheet is 1-indexed)
+grid.set{ sheet=2, cell="A1", value="Hello" }
+
+-- Batch write (more efficient for multiple cells)
+grid.set_batch{ sheet=2, cells={
+    {cell="A1", value="Region"},
+    {cell="B1", value="Amount"},
+    {cell="A2", value="North"},
+    {cell="B2", value=5000}
+}}
+
+-- Formatting (style only, excluded from fingerprint)
+grid.format{ sheet=2, range="A1:B1", bold=true }
+grid.format{ sheet=3, range="A1", italic=true, underline=true }
+
+-- Cross-sheet formulas
+grid.set{ sheet=1, cell="B4", value="=SUM(Sheet2!B:B)" }
+grid.set{ sheet=1, cell="B5", value="=Sheet3!B9" }
+```
+
+**Key points:**
+- Sheets are 1-indexed (sheet=1, sheet=2, etc.)
+- Sheets are auto-created as needed — referencing sheet=3 creates Sheet2 and Sheet3 if missing
+- Default API (`set`, `meta`, `style`) always targets Sheet1
+- Cross-sheet references use `SheetName!CellRef` syntax
+
+---
+
 ## Key Rules for All Prompts
 
 1. **Always use `--json` output** for parsing tool results
@@ -121,3 +191,4 @@ Report:
 3. **Always capture fingerprint** for audit trail
 4. **Style doesn't affect fingerprint** — format freely
 5. **Meta does affect fingerprint** — use it for semantic tagging
+6. **Use grid.* for multi-sheet** — default API only writes to Sheet1
