@@ -339,7 +339,7 @@ impl Spreadsheet {
     /// If already approved and drifted, shows a confirmation dialog first.
     pub fn approve_model(&mut self, note: Option<String>, cx: &mut Context<Self>) {
         // If drifted from a previous approval, show confirmation
-        if self.approval_status() == crate::app::ApprovalStatus::Drifted {
+        if self.verification_status(cx) == crate::app::VerificationStatus::Drifted {
             self.approval_label_input.clear();
             self.approval_confirm_visible = true;
             cx.notify();
@@ -350,20 +350,38 @@ impl Spreadsheet {
     }
 
     /// Approve without confirmation (called directly or after confirmation).
-    pub fn approve_model_confirmed(&mut self, note: Option<String>, cx: &mut Context<Self>) {
-        let fingerprint = self.history.fingerprint();
-        self.approved_fingerprint = Some(fingerprint);
-        self.approval_timestamp = Some(std::time::Instant::now());
-        self.approval_note = note;
+    pub fn approve_model_confirmed(&mut self, label: Option<String>, cx: &mut Context<Self>) {
+        // Compute the current semantic fingerprint
+        let fingerprint = visigrid_io::native::compute_semantic_fingerprint(self.wb(cx));
+
+        // Update the persisted semantic verification
+        self.semantic_verification = visigrid_io::native::SemanticVerification {
+            fingerprint: Some(fingerprint.clone()),
+            label: label.clone(),
+            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+        };
+
+        // Save to file if we have a path
+        if let Some(ref path) = self.current_file {
+            if let Err(e) = visigrid_io::native::save_semantic_verification(path, &self.semantic_verification) {
+                self.status_message = Some(format!("Approved but save failed: {}", e));
+                cx.notify();
+                return;
+            }
+        }
+
+        // Track history state for "why drifted" dialog
+        self.approved_fingerprint = Some(self.history.fingerprint());
         self.approval_history_len = self.history.undo_count();
+
         self.approval_confirm_visible = false;
         self.approval_drift_visible = false;
         self.approval_label_input.clear();
 
-        let msg = if let Some(label) = &self.approval_note {
-            format!("Model approved: {}", label)
+        let msg = if let Some(ref l) = label {
+            format!("Verified ✓ ({})", l)
         } else {
-            "Model approved".to_string()
+            "Verified ✓".to_string()
         };
         self.status_message = Some(msg);
         cx.notify();
@@ -378,14 +396,18 @@ impl Spreadsheet {
 
     /// Clear the approved state.
     pub fn clear_approval(&mut self, cx: &mut Context<Self>) {
+        self.semantic_verification = visigrid_io::native::SemanticVerification::default();
         self.approved_fingerprint = None;
-        self.approval_timestamp = None;
-        self.approval_note = None;
         self.approval_history_len = 0;
         self.approval_confirm_visible = false;
         self.approval_drift_visible = false;
 
-        self.status_message = Some("Approval cleared".to_string());
+        // Clear from file if we have a path
+        if let Some(ref path) = self.current_file {
+            let _ = visigrid_io::native::save_semantic_verification(path, &self.semantic_verification);
+        }
+
+        self.status_message = Some("Verification cleared".to_string());
         cx.notify();
     }
 
@@ -401,14 +423,38 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Get the current approval status.
+    /// Get the current verification status by comparing expected vs current fingerprint.
+    pub fn verification_status(&self, cx: &Context<Self>) -> crate::app::VerificationStatus {
+        match &self.semantic_verification.fingerprint {
+            None => crate::app::VerificationStatus::Unverified,
+            Some(expected) => {
+                let current = visigrid_io::native::compute_semantic_fingerprint(self.wb(cx));
+                if current == *expected {
+                    crate::app::VerificationStatus::Verified
+                } else {
+                    crate::app::VerificationStatus::Drifted
+                }
+            }
+        }
+    }
+
+    /// Get expected and current semantic fingerprints for display in drift dialog.
+    pub fn semantic_fingerprint_comparison(&self, cx: &Context<Self>) -> Option<(String, String)> {
+        self.semantic_verification.fingerprint.as_ref().map(|expected| {
+            let current = visigrid_io::native::compute_semantic_fingerprint(self.wb(cx));
+            (expected.clone(), current)
+        })
+    }
+
+    /// Legacy: Get the current approval status (alias for verification_status).
     pub fn approval_status(&self) -> crate::app::ApprovalStatus {
+        // Note: Can't compute here without cx, so fall back to history-based check
         match &self.approved_fingerprint {
-            None => crate::app::ApprovalStatus::NotApproved,
+            None => crate::app::ApprovalStatus::Unverified,
             Some(approved) => {
                 let current = self.history.fingerprint();
                 if current == *approved {
-                    crate::app::ApprovalStatus::Approved
+                    crate::app::ApprovalStatus::Verified
                 } else {
                     crate::app::ApprovalStatus::Drifted
                 }
@@ -417,22 +463,39 @@ impl Spreadsheet {
     }
 
     /// Check if the current state matches the approved fingerprint.
-    pub fn is_approved(&self) -> bool {
-        self.approval_status() == crate::app::ApprovalStatus::Approved
+    pub fn is_verified(&self, cx: &Context<Self>) -> bool {
+        self.verification_status(cx) == crate::app::VerificationStatus::Verified
     }
 
-    /// Get a display string for the approval status.
-    pub fn approval_display(&self) -> &'static str {
-        match self.approval_status() {
-            crate::app::ApprovalStatus::NotApproved => "",
-            crate::app::ApprovalStatus::Approved => "Approved ✓",
-            crate::app::ApprovalStatus::Drifted => "Drifted ⚠",
+    /// Get a display string for the verification status.
+    pub fn verification_display(&self, cx: &Context<Self>) -> String {
+        match self.verification_status(cx) {
+            crate::app::VerificationStatus::Unverified => String::new(),
+            crate::app::VerificationStatus::Verified => {
+                if let Some(ref label) = self.semantic_verification.label {
+                    format!("Verified ✓ ({})", label)
+                } else {
+                    "Verified ✓".to_string()
+                }
+            }
+            crate::app::VerificationStatus::Drifted => {
+                if let Some(ref label) = self.semantic_verification.label {
+                    format!("Drifted ⚠ (expected {})", label)
+                } else {
+                    "Drifted ⚠".to_string()
+                }
+            }
         }
     }
 
-    /// Count the number of semantic changes since approval.
+    /// Count the number of semantic changes since approval (for history-based diff).
     pub fn approval_drift_count(&self) -> (usize, usize) {
-        if self.approval_status() != crate::app::ApprovalStatus::Drifted {
+        if self.approved_fingerprint.is_none() {
+            return (0, 0);
+        }
+
+        let current = self.history.fingerprint();
+        if self.approved_fingerprint.as_ref() == Some(&current) {
             return (0, 0);
         }
 

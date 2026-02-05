@@ -170,8 +170,8 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                 .when(app.verified_mode, |d| {
                     d.child(render_verified_indicator(app, cx))
                 })
-                // Approval status indicator (semantic fingerprint)
-                .when(app.approved_fingerprint.is_some(), |d| {
+                // Verification status indicator (semantic fingerprint)
+                .when(app.semantic_verification.fingerprint.is_some(), |d| {
                     d.child(render_approval_indicator(app, cx))
                 })
                 // Manual calc mode indicator
@@ -665,9 +665,9 @@ fn render_verified_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         )
 }
 
-/// Render the semantic approval status indicator
+/// Render the semantic verification status indicator
 fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    use crate::app::ApprovalStatus;
+    use crate::app::VerificationStatus;
 
     let success_color = app.token(TokenKey::Ok);
     let warning_color = app.token(TokenKey::Warn);
@@ -675,37 +675,19 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
     let accent = app.token(TokenKey::Accent);
     let panel_border = app.token(TokenKey::PanelBorder);
 
-    let status = app.approval_status();
-    let is_drifted = status == ApprovalStatus::Drifted;
+    let status = app.verification_status(cx);
+    let is_drifted = status == VerificationStatus::Drifted;
+    let is_verified = status == VerificationStatus::Verified;
 
-    let (status_text, status_color) = match status {
-        ApprovalStatus::NotApproved => ("", text_muted), // Shouldn't render
-        ApprovalStatus::Approved => ("Approved ✓", success_color),
-        ApprovalStatus::Drifted => ("Drifted ⚠", warning_color),
+    let (status_text, status_color): (&str, gpui::Hsla) = match status {
+        VerificationStatus::Unverified => ("", text_muted), // Shouldn't render (filtered by caller)
+        VerificationStatus::Verified => ("Verified ✓", success_color),
+        VerificationStatus::Drifted => ("Drifted ⚠", warning_color),
     };
 
-    // Build context string: label + timestamp
-    let context: SharedString = if let Some(timestamp) = app.approval_timestamp {
-        let elapsed = timestamp.elapsed();
-        let time_str = if elapsed.as_secs() < 60 {
-            "just now".to_string()
-        } else if elapsed.as_secs() < 3600 {
-            format!("{}m ago", elapsed.as_secs() / 60)
-        } else if elapsed.as_secs() < 86400 {
-            format!("{}h ago", elapsed.as_secs() / 3600)
-        } else {
-            format!("{}d ago", elapsed.as_secs() / 86400)
-        };
-
-        if let Some(note) = &app.approval_note {
-            format!("{} · {}", note, time_str).into()
-        } else {
-            time_str.into()
-        }
-    } else {
-        "".into()
-    };
-    let has_context = !context.is_empty();
+    // Build context string: label from verification (persisted)
+    let label = app.semantic_verification.label.clone();
+    let has_label = label.is_some();
 
     div()
         .id("approval-indicator")
@@ -724,7 +706,7 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                 .px_1()
                 .rounded_sm()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    if this.is_approved() {
+                    if this.is_verified(cx) {
                         this.clear_approval(cx);
                     } else {
                         this.approve_model(None, cx);
@@ -732,13 +714,13 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                 }))
                 .child(status_text)
         )
-        // Context: label + timestamp (when approved)
-        .when(has_context && !is_drifted, |d| {
+        // Context: label (when verified)
+        .when(has_label && is_verified, move |d| {
             d.child(
                 div()
                     .text_color(text_muted)
                     .text_xs()
-                    .child(format!("({})", context))
+                    .child(format!("({})", label.as_deref().unwrap_or("")))
             )
         })
         // "Why?" link when drifted

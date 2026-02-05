@@ -1008,6 +1008,7 @@ fn render_approval_drift_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
     let ok_color = app.token(TokenKey::Ok);
 
     let changes = app.approval_drift_changes();
+    let fp_comparison = app.semantic_fingerprint_comparison(cx);
 
     div()
         .absolute()
@@ -1084,13 +1085,65 @@ fn render_approval_drift_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
                         .max_h(px(250.0))
                         .children(
                             if changes.is_empty() {
-                                vec![
-                                    div()
-                                        .text_size(px(13.0))
-                                        .text_color(text_muted)
-                                        .child("No semantic changes detected.")
-                                        .into_any_element()
-                                ]
+                                // No history changes - show fingerprint comparison if available
+                                if let Some((expected, current)) = fp_comparison.clone() {
+                                    if expected != current {
+                                        vec![
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(13.0))
+                                                        .text_color(text_muted)
+                                                        .child("File was modified outside this session.")
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_1()
+                                                        .p_2()
+                                                        .bg(panel_border.opacity(0.3))
+                                                        .rounded_sm()
+                                                        .text_size(px(12.0))
+                                                        .font_family("monospace")
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .gap_2()
+                                                                .child(div().text_color(text_muted).child("Expected:"))
+                                                                .child(div().text_color(error_color).child(expected))
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .gap_2()
+                                                                .child(div().text_color(text_muted).child("Current: "))
+                                                                .child(div().text_color(ok_color).child(current))
+                                                        )
+                                                )
+                                                .into_any_element()
+                                        ]
+                                    } else {
+                                        vec![
+                                            div()
+                                                .text_size(px(13.0))
+                                                .text_color(text_muted)
+                                                .child("No semantic changes detected.")
+                                                .into_any_element()
+                                        ]
+                                    }
+                                } else {
+                                    vec![
+                                        div()
+                                            .text_size(px(13.0))
+                                            .text_color(text_muted)
+                                            .child("No semantic changes detected.")
+                                            .into_any_element()
+                                    ]
+                                }
                             } else {
                                 changes.into_iter().map(|(label, location, cells)| {
                                     let label: SharedString = label.into();

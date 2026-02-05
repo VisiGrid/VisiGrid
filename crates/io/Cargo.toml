@@ -17,6 +17,7 @@ encoding_rs = "0.8"
 quick-xml = "0.38"
 zip = "4"
 regex = "1"
+blake3 = "1"
 
 [dev-dependencies]
 tempfile = "3"

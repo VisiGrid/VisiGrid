@@ -1150,6 +1150,8 @@ enum AnalyzerTokenKind {
     Comma,
     Colon,
     Whitespace,
+    Bang,         // '!' for sheet references
+    SheetPrefix,  // Quoted sheet name like 'Sheet Name'
     Unknown,
 }
 
@@ -1315,6 +1317,32 @@ fn tokenize_for_analysis(formula: &str) -> Vec<AnalyzerToken> {
                     text: chars[start..i].iter().collect(),
                 });
             }
+            '\'' => {
+                // Quoted sheet name like 'Sheet Name' (must be followed by !)
+                i += 1;
+                while i < chars.len() && chars[i] != '\'' {
+                    i += 1;
+                }
+                if i < chars.len() {
+                    i += 1; // Include closing quote
+                }
+                tokens.push(AnalyzerToken {
+                    kind: AnalyzerTokenKind::SheetPrefix,
+                    start,
+                    end: i,
+                    text: chars[start..i].iter().collect(),
+                });
+            }
+            '!' => {
+                // Sheet reference delimiter
+                tokens.push(AnalyzerToken {
+                    kind: AnalyzerTokenKind::Bang,
+                    start,
+                    end: i + 1,
+                    text: "!".to_string(),
+                });
+                i += 1;
+            }
             '0'..='9' | '.' => {
                 // Number
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
@@ -1450,11 +1478,13 @@ pub fn analyze(formula: &str, cursor: usize) -> FormulaContext {
             AnalyzerTokenKind::CellRef => TokenType::CellRef,
             AnalyzerTokenKind::Number => TokenType::Number,
             AnalyzerTokenKind::String => TokenType::String,
+            AnalyzerTokenKind::SheetPrefix => TokenType::String, // Treat quoted sheet names like strings for highlighting
             AnalyzerTokenKind::Operator => TokenType::Operator,
             AnalyzerTokenKind::Comparison => TokenType::Comparison,
             AnalyzerTokenKind::LParen | AnalyzerTokenKind::RParen => TokenType::Paren,
             AnalyzerTokenKind::Comma => TokenType::Comma,
             AnalyzerTokenKind::Colon => TokenType::Colon,
+            AnalyzerTokenKind::Bang => TokenType::Bang,
             AnalyzerTokenKind::Whitespace => TokenType::Whitespace,
             _ => TokenType::Error,
         },
@@ -1726,12 +1756,14 @@ pub fn tokenize_for_highlight(formula: &str) -> Vec<(Range<usize>, TokenType)> {
                 }
                 AnalyzerTokenKind::Number => TokenType::Number,
                 AnalyzerTokenKind::String => TokenType::String,
+                AnalyzerTokenKind::SheetPrefix => TokenType::String, // Quoted sheet names
                 AnalyzerTokenKind::CellRef => TokenType::CellRef,
                 AnalyzerTokenKind::Operator => TokenType::Operator,
                 AnalyzerTokenKind::Comparison => TokenType::Comparison,
                 AnalyzerTokenKind::LParen | AnalyzerTokenKind::RParen => TokenType::Paren,
                 AnalyzerTokenKind::Comma => TokenType::Comma,
                 AnalyzerTokenKind::Colon => TokenType::Colon,
+                AnalyzerTokenKind::Bang => TokenType::Bang,
                 _ => TokenType::Error,
             };
             (t.start..t.end, token_type)
@@ -1937,5 +1969,81 @@ mod tests {
         assert_eq!(char_index_to_byte_offset(s, 3), 4);  // 'A'
         assert_eq!(char_index_to_byte_offset(s, 4), 5);  // '1'
         assert_eq!(char_index_to_byte_offset(s, 5), 6);  // end of string
+    }
+
+    // =========================================================================
+    // Cross-sheet reference tests
+    // =========================================================================
+
+    #[test]
+    fn test_cross_sheet_ref_unquoted() {
+        // Simple cross-sheet reference: =Assumptions!B7
+        let formula = "=Assumptions!B7";
+        let tokens = tokenize_for_highlight(formula);
+
+        // Should have: Identifier(Assumptions), Bang(!), CellRef(B7)
+        let token_types: Vec<_> = tokens.iter().map(|(_, t)| *t).collect();
+
+        assert!(token_types.contains(&TokenType::Bang), "Should have Bang token");
+        assert!(token_types.contains(&TokenType::CellRef), "Should have CellRef token");
+
+        // Should not have any errors
+        let diag = check_errors(formula, formula.len());
+        assert!(diag.is_none(), "Should not have errors: {:?}", diag);
+    }
+
+    #[test]
+    fn test_cross_sheet_ref_quoted() {
+        // Quoted sheet name: ='Income Statement'!B7
+        let formula = "='Income Statement'!B7";
+        let tokens = tokenize_for_highlight(formula);
+
+        // Should have: String('Income Statement'), Bang(!), CellRef(B7)
+        let token_types: Vec<_> = tokens.iter().map(|(_, t)| *t).collect();
+
+        assert!(token_types.contains(&TokenType::String), "Should have String token for sheet name");
+        assert!(token_types.contains(&TokenType::Bang), "Should have Bang token");
+        assert!(token_types.contains(&TokenType::CellRef), "Should have CellRef token");
+
+        // Should not have any errors
+        let diag = check_errors(formula, formula.len());
+        assert!(diag.is_none(), "Should not have errors: {:?}", diag);
+    }
+
+    #[test]
+    fn test_cross_sheet_ref_in_expression() {
+        // Cross-sheet ref in expression: =E6*Assumptions!B7
+        let formula = "=E6*Assumptions!B7";
+        let tokens = tokenize_for_highlight(formula);
+
+        let cell_refs: Vec<_> = tokens.iter()
+            .filter(|(_, t)| *t == TokenType::CellRef)
+            .collect();
+
+        // Should have E6 and B7
+        assert_eq!(cell_refs.len(), 2, "Should find 2 cell refs (E6 and B7)");
+
+        // Should have Bang
+        let bangs: Vec<_> = tokens.iter()
+            .filter(|(_, t)| *t == TokenType::Bang)
+            .collect();
+        assert_eq!(bangs.len(), 1, "Should have 1 bang");
+
+        // Should not have any errors
+        let diag = check_errors(formula, formula.len());
+        assert!(diag.is_none(), "Should not have errors: {:?}", diag);
+    }
+
+    #[test]
+    fn test_cross_sheet_ref_no_invalid_char_error() {
+        // This was the original bug: '!' was treated as unknown character
+        let formula = "=Sheet1!A1";
+        let diag = check_errors(formula, formula.len());
+
+        // Should NOT have "Invalid character: '!'" error
+        if let Some(d) = &diag {
+            assert!(!d.message.contains("Invalid character"),
+                "Should not have invalid character error, got: {}", d.message);
+        }
     }
 }

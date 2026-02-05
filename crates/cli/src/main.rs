@@ -430,6 +430,11 @@ Example Lua script:
         #[arg(long)]
         verify: Option<String>,
 
+        /// Stamp the file with expected fingerprint for GUI verification.
+        /// Optional label (e.g., --stamp "MSFT SEC v1" or just --stamp)
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        stamp: Option<String>,
+
         /// Compute fingerprint but don't write file
         #[arg(long)]
         dry_run: bool,
@@ -467,22 +472,23 @@ Examples:
         json: bool,
     },
 
-    /// Verify a .sheet file's fingerprint
+    /// Verify a .sheet file's semantic fingerprint
     #[command(after_help = "\
 Examples:
-  visigrid sheet verify model.sheet --fingerprint v1:42:abc123...
+  visigrid sheet verify model.sheet                          # uses embedded expected fingerprint
+  visigrid sheet verify model.sheet --fingerprint v1:42:abc  # explicit fingerprint
 
 Exit codes:
-  0  Fingerprint matches
-  1  Fingerprint mismatch
+  0  Verified (fingerprint matches)
+  1  Drifted (fingerprint mismatch) or Unverified (no expected fingerprint)
   2  Usage error")]
     Verify {
         /// Path to .sheet file
         file: PathBuf,
 
-        /// Expected fingerprint
+        /// Expected fingerprint (reads from file if not provided)
         #[arg(long)]
-        fingerprint: String,
+        fingerprint: Option<String>,
     },
 
     /// Compute and print a .sheet file's fingerprint
@@ -971,8 +977,8 @@ fn main() -> ExitCode {
             cmd_view(session, range, sheet, follow, width)
         }
         Some(Commands::Sheet(sheet_cmd)) => match sheet_cmd {
-            SheetCommands::Apply { output, lua, verify, dry_run, json } => {
-                cmd_sheet_apply(output, lua, verify, dry_run, json)
+            SheetCommands::Apply { output, lua, verify, stamp, dry_run, json } => {
+                cmd_sheet_apply(output, lua, verify, stamp, dry_run, json)
             }
             SheetCommands::Inspect { file, target, workbook, include_style, json } => {
                 cmd_sheet_inspect(file, target, workbook, include_style, json)
@@ -3402,10 +3408,11 @@ fn cmd_sheet_apply(
     output: PathBuf,
     lua_path: PathBuf,
     verify: Option<String>,
+    stamp: Option<String>,
     dry_run: bool,
     json: bool,
 ) -> Result<(), CliError> {
-    use visigrid_io::native::save_workbook;
+    use visigrid_io::native::{compute_semantic_fingerprint, save_workbook_with_metadata, save_semantic_verification, SemanticVerification};
 
     // Execute the build script
     let result = sheet_ops::execute_build_script(&lua_path, verify.as_deref())?;
@@ -3437,12 +3444,25 @@ fn cmd_sheet_apply(
     }
 
     // Write output (unless dry-run)
+    let stamped = stamp.is_some();
     if !dry_run {
         // Atomic write: write to temp file first, then rename
         let temp_path = output.with_extension("sheet.tmp");
 
-        visigrid_io::native::save_workbook_with_metadata(&result.workbook, &result.metadata, &temp_path)
+        save_workbook_with_metadata(&result.workbook, &result.metadata, &temp_path)
             .map_err(|e| CliError::io(format!("failed to write temp file: {}", e)))?;
+
+        // If --stamp was provided, write semantic verification info to the file
+        if let Some(label) = &stamp {
+            let semantic_fp = compute_semantic_fingerprint(&result.workbook);
+            let verification = SemanticVerification {
+                fingerprint: Some(semantic_fp),
+                label: if label.is_empty() { None } else { Some(label.clone()) },
+                timestamp: Some(chrono::Utc::now().to_rfc3339()),
+            };
+            save_semantic_verification(&temp_path, &verification)
+                .map_err(|e| CliError::io(format!("failed to write verification: {}", e)))?;
+        }
 
         std::fs::rename(&temp_path, &output)
             .map_err(|e| CliError::io(format!("failed to rename to output: {}", e)))?;
@@ -3453,6 +3473,7 @@ fn cmd_sheet_apply(
         let output_json = serde_json::json!({
             "ok": true,
             "fingerprint": result.fingerprint.to_string(),
+            "stamped": stamped,
             "semantic_ops": result.semantic_ops,
             "style_ops": result.style_ops,
             "cells_changed": result.cells_changed,
@@ -3466,7 +3487,14 @@ fn cmd_sheet_apply(
         } else {
             println!("Wrote {}", output.display());
         }
-        println!("Fingerprint:  {}", result.fingerprint.to_string());
+        // Show semantic fingerprint when stamped, otherwise replay fingerprint
+        if stamped {
+            let semantic_fp = compute_semantic_fingerprint(&result.workbook);
+            println!("Fingerprint:  {}", semantic_fp);
+            println!("Stamped:      yes{}", stamp.as_ref().filter(|s| !s.is_empty()).map(|s| format!(" ({})", s)).unwrap_or_default());
+        } else {
+            println!("Fingerprint:  {}", result.fingerprint.to_string());
+        }
         println!("Semantic ops: {}", result.semantic_ops);
         println!("Style ops:    {}", result.style_ops);
         println!("Cells:        {}", result.cells_changed);
@@ -3641,29 +3669,55 @@ fn cmd_sheet_inspect(
     Ok(())
 }
 
-/// Verify a .sheet file's fingerprint.
-fn cmd_sheet_verify(file: PathBuf, expected: String) -> Result<(), CliError> {
-    use visigrid_io::native::{load_workbook, load_cell_metadata};
+/// Verify a .sheet file's semantic fingerprint.
+///
+/// Exit codes:
+///   0 - Verified (fingerprint matches)
+///   1 - Drifted or Unverified
+fn cmd_sheet_verify(file: PathBuf, fingerprint_arg: Option<String>) -> Result<(), CliError> {
+    use visigrid_io::native::{compute_semantic_fingerprint, load_semantic_verification, load_workbook};
 
     let workbook = load_workbook(&file)
         .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
 
-    let metadata = load_cell_metadata(&file)
-        .map_err(|e| CliError::io(format!("failed to load metadata: {}", e)))?;
+    let current = compute_semantic_fingerprint(&workbook);
 
-    let computed = sheet_ops::compute_sheet_fingerprint_with_meta(&workbook, &metadata);
-    let expected_fp = replay::ReplayFingerprint::parse(&expected)
-        .ok_or_else(|| CliError::args(format!("invalid fingerprint format: {}", expected)))?;
-
-    if computed == expected_fp {
-        println!("Verification: PASS");
-        println!("Fingerprint:  {}", computed.to_string());
-        Ok(())
+    // Get expected fingerprint: from arg or from file metadata
+    let (expected, label) = if let Some(fp) = fingerprint_arg {
+        (Some(fp), None)
     } else {
-        eprintln!("Verification: FAIL");
-        eprintln!("  Expected: {}", expected);
-        eprintln!("  Computed: {}", computed.to_string());
-        Err(CliError { code: EXIT_ERROR, message: "fingerprint mismatch".to_string(), hint: None })
+        let verification = load_semantic_verification(&file).unwrap_or_default();
+        (verification.fingerprint, verification.label)
+    };
+
+    match expected {
+        None => {
+            // Unverified - no expected fingerprint
+            eprintln!("Status: Unverified");
+            eprintln!("  No expected fingerprint found in file.");
+            eprintln!("  Use --stamp when building to enable verification.");
+            eprintln!("  Current: {}", current);
+            Err(CliError { code: EXIT_ERROR, message: "unverified".to_string(), hint: None })
+        }
+        Some(expected_fp) if expected_fp == current => {
+            // Verified
+            println!("Status: Verified ✓");
+            if let Some(lbl) = label {
+                println!("  Label: {}", lbl);
+            }
+            println!("  Fingerprint: {}", current);
+            Ok(())
+        }
+        Some(expected_fp) => {
+            // Drifted
+            eprintln!("Status: Drifted ⚠");
+            if let Some(lbl) = label {
+                eprintln!("  Label: {}", lbl);
+            }
+            eprintln!("  Expected: {}", expected_fp);
+            eprintln!("  Current:  {}", current);
+            Err(CliError { code: EXIT_ERROR, message: "drifted".to_string(), hint: None })
+        }
     }
 }
 

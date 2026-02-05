@@ -6698,6 +6698,7 @@ dependencies = [
 name = "visigrid-io"
 version = "0.5.5"
 dependencies = [
+ "blake3",
  "calamine",
  "csv",
  "encoding_rs",

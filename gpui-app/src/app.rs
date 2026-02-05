@@ -128,16 +128,22 @@ pub enum HistoryFilterMode {
     DataEditsOnly,
 }
 
-/// Semantic approval status for model verification
+/// Semantic verification status based on expected fingerprint.
+///
+/// When a file has an expected semantic fingerprint (from CLI --stamp or GUI Approve),
+/// the GUI compares it against the current computed fingerprint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApprovalStatus {
-    /// No approved fingerprint has been set
-    NotApproved,
-    /// Current state matches the approved fingerprint
-    Approved,
-    /// Current state has drifted from the approved fingerprint
+pub enum VerificationStatus {
+    /// No expected fingerprint - file hasn't been stamped/approved
+    Unverified,
+    /// Current fingerprint matches expected - file unchanged since stamp/approval
+    Verified,
+    /// Current fingerprint doesn't match expected - file has been modified
     Drifted,
 }
+
+// Legacy alias for migration - TODO: remove after updating all usages
+pub type ApprovalStatus = VerificationStatus;
 
 // ============================================================================
 // Soft-Rewind Preview (Phase 8A)
@@ -2179,16 +2185,17 @@ pub struct Spreadsheet {
     pub verified_mode: bool,
     pub last_recalc_report: Option<visigrid_engine::recalc::RecalcReport>,
 
-    // Semantic approval state (fingerprint boundary)
-    // The approved fingerprint captures a "known-good" semantic state.
-    // Formatting changes don't affect it; only logic (formulas, values, metadata) do.
-    pub approved_fingerprint: Option<crate::history::HistoryFingerprint>,
-    pub approval_timestamp: Option<std::time::Instant>,
-    pub approval_note: Option<String>,
-    pub approval_history_len: usize,  // History length at time of approval (for drift diff)
+    // Semantic verification state (persisted expected fingerprint)
+    // Loaded from .sheet file on open, saved when approving/stamping.
+    // Contains the expected semantic fingerprint that the current state is compared against.
+    pub semantic_verification: visigrid_io::native::SemanticVerification,
+    // UI state for approval dialogs
     pub approval_confirm_visible: bool,  // Confirmation dialog when re-approving after drift
     pub approval_drift_visible: bool,    // "Why drifted?" panel showing changes since approval
     pub approval_label_input: String,    // Label input for approval dialog
+    // Legacy fields kept for history diff (shows what changed since approval)
+    pub approved_fingerprint: Option<crate::history::HistoryFingerprint>,
+    pub approval_history_len: usize,  // History length at time of approval (for drift diff)
 
     // VisiHub sync state
     pub hub_link: Option<crate::hub::HubLink>,
@@ -2566,13 +2573,12 @@ impl Spreadsheet {
             verified_mode: false,
             last_recalc_report: None,
 
-            approved_fingerprint: None,
-            approval_timestamp: None,
-            approval_note: None,
-            approval_history_len: 0,
+            semantic_verification: visigrid_io::native::SemanticVerification::default(),
             approval_confirm_visible: false,
             approval_drift_visible: false,
             approval_label_input: String::new(),
+            approved_fingerprint: None,
+            approval_history_len: 0,
 
             hub_link: None,
             hub_status: crate::hub::HubStatus::Unlinked,

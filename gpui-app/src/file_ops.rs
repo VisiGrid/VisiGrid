@@ -114,6 +114,17 @@ impl Spreadsheet {
                 // Load document settings from sidecar file
                 self.doc_settings = load_doc_settings(path);
 
+                // Load semantic verification info for .sheet files
+                if extension == "sheet" {
+                    self.semantic_verification = visigrid_io::native::load_semantic_verification(path)
+                        .unwrap_or_default();
+                    // If file has expected fingerprint, track history state for drift diff
+                    if self.semantic_verification.fingerprint.is_some() {
+                        self.approved_fingerprint = Some(self.history.fingerprint());
+                        self.approval_history_len = 0;
+                    }
+                }
+
                 // Wire calculation mode to engine
                 let auto = self.doc_settings.calculation.mode
                     .resolve(crate::settings::CalculationMode::Automatic)
