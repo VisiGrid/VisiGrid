@@ -10,7 +10,15 @@ use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
 
 const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sheets (
+    sheet_idx INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    row_count INTEGER DEFAULT 1000,
+    col_count INTEGER DEFAULT 26
+);
+
 CREATE TABLE IF NOT EXISTS cells (
+    sheet_idx INTEGER NOT NULL DEFAULT 0,
     row INTEGER NOT NULL,
     col INTEGER NOT NULL,
     value_type INTEGER NOT NULL,  -- 0=empty, 1=number, 2=text, 3=formula
@@ -26,7 +34,7 @@ CREATE TABLE IF NOT EXISTS cells (
     fmt_thousands INTEGER DEFAULT 0,     -- 1 = use thousands separator
     fmt_negative INTEGER DEFAULT 0,      -- 0=minus, 1=parens, 2=red minus, 3=red parens
     fmt_currency_symbol TEXT,            -- NULL = default ($)
-    PRIMARY KEY (row, col)
+    PRIMARY KEY (sheet_idx, row, col)
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -105,7 +113,7 @@ fn alignment_from_db(i: i32) -> Alignment {
 }
 
 /// Current schema version. Increment for each migration.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 /// Run schema migrations for existing databases.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -234,6 +242,41 @@ fn extract_number_format_fields(nf: &NumberFormat) -> (i32, i32, i32, i32, Optio
         NumberFormat::Time => (5, 0, 0, 0, None),
         NumberFormat::DateTime => (6, 0, 0, 0, None),
         NumberFormat::Custom(_) => (0, 2, 0, 0, None),
+    }
+}
+
+/// Reconstruct NumberFormat from database fields
+fn build_number_format(
+    number_type: i32,
+    decimals: i32,
+    thousands: bool,
+    negative: i32,
+    currency_symbol: Option<String>,
+) -> NumberFormat {
+    let negative_style = NegativeStyle::from_int(negative);
+    match number_type {
+        1 => NumberFormat::Number {
+            decimals: decimals as u8,
+            thousands,
+            negative: negative_style,
+        },
+        2 => NumberFormat::Currency {
+            decimals: decimals as u8,
+            thousands,
+            negative: negative_style,
+            symbol: currency_symbol,
+        },
+        3 => NumberFormat::Percent { decimals: decimals as u8 },
+        4 => NumberFormat::Date {
+            style: match decimals {
+                1 => DateStyle::Long,
+                2 => DateStyle::Iso,
+                _ => DateStyle::Short,
+            },
+        },
+        5 => NumberFormat::Time,
+        6 => NumberFormat::DateTime,
+        _ => NumberFormat::General,
     }
 }
 
@@ -381,7 +424,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
     Ok(sheet)
 }
 
-/// Save a complete workbook including named ranges
+/// Save a complete workbook including all sheets and named ranges
 pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
     // Delete existing file if present (SQLite will create fresh)
     if path.exists() {
@@ -394,34 +437,36 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
 
-    // Save the active sheet (for now, single-sheet support)
-    let sheet = workbook.active_sheet();
-
-    // Save metadata
+    // Save active sheet index to meta
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-        params!["sheet_name", &sheet.name],
-    ).map_err(|e| e.to_string())?;
-
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-        params!["rows", sheet.rows.to_string()],
-    ).map_err(|e| e.to_string())?;
-
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-        params!["cols", sheet.cols.to_string()],
+        params!["active_sheet", workbook.active_sheet_index().to_string()],
     ).map_err(|e| e.to_string())?;
 
     // Save cells using a transaction for performance
     conn.execute("BEGIN TRANSACTION", []).map_err(|e| e.to_string())?;
 
+    // Save all sheets
     {
-        let mut stmt = conn.prepare(
-            "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+        let mut sheet_stmt = conn.prepare(
+            "INSERT INTO sheets (sheet_idx, name, row_count, col_count) VALUES (?1, ?2, ?3, ?4)"
         ).map_err(|e| e.to_string())?;
 
-        for (&(row, col), cell) in sheet.cells_iter() {
+        let mut cell_stmt = conn.prepare(
+            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
+        ).map_err(|e| e.to_string())?;
+
+        for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
+            // Save sheet metadata
+            sheet_stmt.execute(params![
+                sheet_idx as i64,
+                &sheet.name,
+                sheet.rows as i64,
+                sheet.cols as i64,
+            ]).map_err(|e| e.to_string())?;
+
+            // Save cells for this sheet
+            for (&(row, col), cell) in sheet.cells_iter() {
                 let raw = cell.value.raw_display();
                 let format = &cell.format;
 
@@ -443,10 +488,10 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     };
 
                 let alignment_int = alignment_to_db(format.alignment);
-
                 let (number_type, decimals, thousands, negative, currency_symbol) = extract_number_format_fields(&format.number_format);
 
-                stmt.execute(params![
+                cell_stmt.execute(params![
+                    sheet_idx as i64,
                     row as i64,
                     col as i64,
                     value_type,
@@ -463,6 +508,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     negative,
                     currency_symbol
                 ]).map_err(|e| e.to_string())?;
+            }
         }
     }
 
@@ -495,8 +541,9 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
         }
     }
 
-    // Save merged regions
+    // Save merged regions for active sheet (TODO: extend to all sheets)
     {
+        let sheet = workbook.active_sheet();
         let mut stmt = conn.prepare(
             "INSERT INTO merged_regions (start_row, start_col, end_row, end_col) VALUES (?1, ?2, ?3, ?4)"
         ).map_err(|e| e.to_string())?;
@@ -536,72 +583,75 @@ pub fn save_workbook_with_metadata(
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
 
-    // Save the active sheet
-    let sheet = workbook.active_sheet();
-
-    // Save workbook-level metadata
+    // Save active sheet index
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-        params!["sheet_name", &sheet.name],
+        params!["active_sheet", workbook.active_sheet_index().to_string()],
     ).map_err(|e| e.to_string())?;
 
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-        params!["rows", sheet.rows.to_string()],
-    ).map_err(|e| e.to_string())?;
-
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-        params!["cols", sheet.cols.to_string()],
-    ).map_err(|e| e.to_string())?;
-
-    // Save cells
+    // Save all sheets and cells
     conn.execute("BEGIN TRANSACTION", []).map_err(|e| e.to_string())?;
 
     {
-        let mut stmt = conn.prepare(
-            "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+        let mut sheet_stmt = conn.prepare(
+            "INSERT INTO sheets (sheet_idx, name, row_count, col_count) VALUES (?1, ?2, ?3, ?4)"
         ).map_err(|e| e.to_string())?;
 
-        for (&(row, col), cell) in sheet.cells_iter() {
-            let raw = cell.value.raw_display();
-            let format = &cell.format;
+        let mut cell_stmt = conn.prepare(
+            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
+        ).map_err(|e| e.to_string())?;
 
-            if raw.is_empty() && format.is_default() {
-                continue;
-            }
-
-            let (value_type, value_num, value_text): (i32, Option<f64>, Option<&str>) =
-                if raw.is_empty() {
-                    (TYPE_EMPTY, None, None)
-                } else if raw.starts_with('=') {
-                    (TYPE_FORMULA, None, Some(&raw))
-                } else if let Ok(num) = raw.parse::<f64>() {
-                    (TYPE_NUMBER, Some(num), None)
-                } else {
-                    (TYPE_TEXT, None, Some(&raw))
-                };
-
-            let alignment_int = alignment_to_db(format.alignment);
-            let (number_type, decimals, thousands, negative, currency_symbol) = extract_number_format_fields(&format.number_format);
-
-            stmt.execute(params![
-                row as i64,
-                col as i64,
-                value_type,
-                value_num,
-                value_text,
-                format.bold as i32,
-                format.italic as i32,
-                format.underline as i32,
-                alignment_int,
-                number_type,
-                decimals,
-                format.font_family.as_deref(),
-                thousands,
-                negative,
-                currency_symbol
+        for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
+            // Save sheet metadata
+            sheet_stmt.execute(params![
+                sheet_idx as i64,
+                &sheet.name,
+                sheet.rows as i64,
+                sheet.cols as i64,
             ]).map_err(|e| e.to_string())?;
+
+            // Save cells for this sheet
+            for (&(row, col), cell) in sheet.cells_iter() {
+                let raw = cell.value.raw_display();
+                let format = &cell.format;
+
+                if raw.is_empty() && format.is_default() {
+                    continue;
+                }
+
+                let (value_type, value_num, value_text): (i32, Option<f64>, Option<&str>) =
+                    if raw.is_empty() {
+                        (TYPE_EMPTY, None, None)
+                    } else if raw.starts_with('=') {
+                        (TYPE_FORMULA, None, Some(&raw))
+                    } else if let Ok(num) = raw.parse::<f64>() {
+                        (TYPE_NUMBER, Some(num), None)
+                    } else {
+                        (TYPE_TEXT, None, Some(&raw))
+                    };
+
+                let alignment_int = alignment_to_db(format.alignment);
+                let (number_type, decimals, thousands, negative, currency_symbol) = extract_number_format_fields(&format.number_format);
+
+                cell_stmt.execute(params![
+                    sheet_idx as i64,
+                    row as i64,
+                    col as i64,
+                    value_type,
+                    value_num,
+                    value_text,
+                    format.bold as i32,
+                    format.italic as i32,
+                    format.underline as i32,
+                    alignment_int,
+                    number_type,
+                    decimals,
+                    format.font_family.as_deref(),
+                    thousands,
+                    negative,
+                    currency_symbol
+                ]).map_err(|e| e.to_string())?;
+            }
         }
     }
 
@@ -647,8 +697,9 @@ pub fn save_workbook_with_metadata(
         }
     }
 
-    // Save merged regions
+    // Save merged regions for active sheet (TODO: extend to all sheets)
     {
+        let sheet = workbook.active_sheet();
         let mut stmt = conn.prepare(
             "INSERT INTO merged_regions (start_row, start_col, end_row, end_col) VALUES (?1, ?2, ?3, ?4)"
         ).map_err(|e| e.to_string())?;
@@ -668,85 +719,150 @@ pub fn save_workbook_with_metadata(
     Ok(())
 }
 
-/// Load a complete workbook including named ranges
-pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
-    // First load the sheet using existing logic
-    let sheet = load(path)?;
+/// Load workbook from v2 multi-sheet format
+fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
+    // Load active sheet index from meta
+    let active_sheet: usize = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'active_sheet'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
-    // Create workbook with the loaded sheet
-    let mut workbook = Workbook::from_sheets(vec![sheet], 0);
+    // Load all sheets
+    let mut sheets_data: Vec<(usize, String, usize, usize)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT sheet_idx, name, row_count, col_count FROM sheets ORDER BY sheet_idx"
+        ).map_err(|e| e.to_string())?;
 
-    // Now load named ranges if the table exists
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as usize,
+                row.get::<_, i64>(3)? as usize,
+            ))
+        }).map_err(|e| e.to_string())?;
 
-    // --- Bloat migration: rebuild cells table if legacy bug filled it ---
-    let total_cells: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM cells", [], |r| r.get(0),
-    ).unwrap_or(0);
+        for row in rows {
+            sheets_data.push(row.map_err(|e| e.to_string())?);
+        }
+    }
 
-    if total_cells > 10_000 {
-        // Count non-junk rows. A row is "real" if it has a value, or any non-default formatting.
-        // Only General (fmt_alignment=3) is treated as default; Left (0) is real formatting.
-        let real_cells: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM cells WHERE value_type != 0 \
-             OR COALESCE(fmt_bold, 0) != 0 \
-             OR COALESCE(fmt_italic, 0) != 0 \
-             OR COALESCE(fmt_underline, 0) != 0 \
-             OR COALESCE(fmt_alignment, 3) != 3 \
-             OR COALESCE(fmt_number_type, 0) != 0 \
-             OR fmt_font_family IS NOT NULL",
-            [], |r| r.get(0),
-        ).unwrap_or(total_cells);
+    // Create sheets
+    let mut sheets: Vec<Sheet> = Vec::new();
+    for (idx, name, rows, cols) in &sheets_data {
+        let mut sheet = Sheet::new(SheetId(*idx as u64 + 1), *rows, *cols);
+        sheet.name = name.clone();
+        sheets.push(sheet);
+    }
 
-        // If >50% of rows are empty default junk, rebuild
-        if real_cells < total_cells / 2 {
-            let _ = conn.execute_batch("BEGIN IMMEDIATE;");
-            // Recreate with explicit schema to preserve PK, constraints, column types
-            let rebuild_ok = (|| -> rusqlite::Result<()> {
-                conn.execute_batch(
-                    "CREATE TABLE cells_clean ( \
-                        row INTEGER NOT NULL, \
-                        col INTEGER NOT NULL, \
-                        value_type INTEGER NOT NULL, \
-                        value_num REAL, \
-                        value_text TEXT, \
-                        fmt_bold INTEGER DEFAULT 0, \
-                        fmt_italic INTEGER DEFAULT 0, \
-                        fmt_underline INTEGER DEFAULT 0, \
-                        fmt_alignment INTEGER DEFAULT 0, \
-                        fmt_number_type INTEGER DEFAULT 0, \
-                        fmt_decimals INTEGER DEFAULT 2, \
-                        fmt_font_family TEXT, \
-                        fmt_thousands INTEGER DEFAULT 0, \
-                        fmt_negative INTEGER DEFAULT 0, \
-                        fmt_currency_symbol TEXT, \
-                        PRIMARY KEY (row, col) \
-                    );"
-                )?;
-                conn.execute_batch(
-                    "INSERT INTO cells_clean \
-                        SELECT * FROM cells \
-                        WHERE value_type != 0 \
-                           OR COALESCE(fmt_bold, 0) != 0 \
-                           OR COALESCE(fmt_italic, 0) != 0 \
-                           OR COALESCE(fmt_underline, 0) != 0 \
-                           OR COALESCE(fmt_alignment, 3) != 3 \
-                           OR COALESCE(fmt_number_type, 0) != 0 \
-                           OR fmt_font_family IS NOT NULL;"
-                )?;
-                conn.execute_batch(
-                    "DROP TABLE cells; \
-                     ALTER TABLE cells_clean RENAME TO cells;"
-                )?;
-                Ok(())
-            })();
-            if rebuild_ok.is_ok() {
-                let _ = conn.execute_batch("COMMIT;");
-            } else {
-                let _ = conn.execute_batch("ROLLBACK;");
+    // If no sheets found, create a default one
+    if sheets.is_empty() {
+        sheets.push(Sheet::new(SheetId(1), 1000, 26));
+    }
+
+    // Load cells for all sheets
+    {
+        let mut stmt = conn.prepare(
+            "SELECT sheet_idx, row, col, value_type, value_num, value_text, \
+             fmt_bold, fmt_italic, fmt_underline, fmt_alignment, \
+             fmt_number_type, fmt_decimals, fmt_font_family, \
+             fmt_thousands, fmt_negative, fmt_currency_symbol \
+             FROM cells ORDER BY sheet_idx, row, col"
+        ).map_err(|e| e.to_string())?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,  // sheet_idx
+                row.get::<_, i64>(1)? as usize,  // row
+                row.get::<_, i64>(2)? as usize,  // col
+                row.get::<_, i32>(3)?,           // value_type
+                row.get::<_, Option<f64>>(4)?,   // value_num
+                row.get::<_, Option<String>>(5)?, // value_text
+                row.get::<_, i32>(6).unwrap_or(0),  // fmt_bold
+                row.get::<_, i32>(7).unwrap_or(0),  // fmt_italic
+                row.get::<_, i32>(8).unwrap_or(0),  // fmt_underline
+                row.get::<_, i32>(9).unwrap_or(0),  // fmt_alignment
+                row.get::<_, i32>(10).unwrap_or(0), // fmt_number_type
+                row.get::<_, i32>(11).unwrap_or(2), // fmt_decimals
+                row.get::<_, Option<String>>(12)?,  // fmt_font_family
+                row.get::<_, i32>(13).unwrap_or(0), // fmt_thousands
+                row.get::<_, i32>(14).unwrap_or(0), // fmt_negative
+                row.get::<_, Option<String>>(15)?,  // fmt_currency_symbol
+            ))
+        }).map_err(|e| e.to_string())?;
+
+        for row_result in rows {
+            let (sheet_idx, row, col, value_type, value_num, value_text,
+                 bold, italic, underline, alignment,
+                 number_type, decimals, font_family,
+                 thousands, negative, currency_symbol) = row_result.map_err(|e| e.to_string())?;
+
+            // Ensure sheet exists
+            while sheets.len() <= sheet_idx {
+                let new_idx = sheets.len();
+                sheets.push(Sheet::new(SheetId(new_idx as u64 + 1), 1000, 26));
+            }
+
+            let sheet = &mut sheets[sheet_idx];
+
+            // Set cell value
+            let value_str = match value_type {
+                TYPE_FORMULA => value_text.unwrap_or_default(),
+                TYPE_NUMBER => value_num.map(|n| {
+                    if n.fract() == 0.0 { (n as i64).to_string() } else { n.to_string() }
+                }).unwrap_or_default(),
+                TYPE_TEXT => value_text.unwrap_or_default(),
+                _ => String::new(),
+            };
+
+            if !value_str.is_empty() {
+                sheet.set_value(row, col, &value_str);
+            }
+
+            // Set formatting
+            let format = CellFormat {
+                bold: bold != 0,
+                italic: italic != 0,
+                underline: underline != 0,
+                alignment: alignment_from_db(alignment),
+                number_format: build_number_format(number_type, decimals, thousands != 0, negative, currency_symbol),
+                font_family,
+                ..Default::default()
+            };
+
+            if !format.is_default() {
+                sheet.set_format(row, col, format);
             }
         }
     }
+
+    let workbook = Workbook::from_sheets(sheets, active_sheet);
+    Ok(workbook)
+}
+
+/// Load a complete workbook including all sheets and named ranges
+pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Check if this is the new multi-sheet format (v2+)
+    let has_sheets_table = conn
+        .prepare("SELECT sheet_idx FROM sheets LIMIT 1")
+        .is_ok();
+
+    let mut workbook = if has_sheets_table {
+        // New multi-sheet format
+        load_workbook_v2(&conn)?
+    } else {
+        // Legacy single-sheet format - use existing load function
+        let sheet = load(path)?;
+        Workbook::from_sheets(vec![sheet], 0)
+    };
 
     // Check if named_ranges table exists (for backward compatibility)
     let has_named_ranges = conn
