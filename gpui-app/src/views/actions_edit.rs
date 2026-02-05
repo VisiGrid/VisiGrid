@@ -63,6 +63,29 @@ pub(crate) fn bind(
                 this.color_picker_paste(cx);
                 return;
             }
+            // Find/Replace dialog: paste into find or replace input
+            if this.mode == Mode::Find {
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        // Filter out newlines but allow other chars
+                        for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+                            this.find_insert_char(c, cx);
+                        }
+                    }
+                }
+                return;
+            }
+            // GoTo dialog: paste into input
+            if this.mode == Mode::GoTo {
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        for c in text.chars().filter(|c| !c.is_control()) {
+                            this.goto_insert_char(c, cx);
+                        }
+                    }
+                }
+                return;
+            }
             this.paste(cx);
             this.update_edit_scroll(window);
             this.update_title_if_needed(window, cx);
