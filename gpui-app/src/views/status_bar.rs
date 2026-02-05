@@ -672,20 +672,16 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
     let success_color = app.token(TokenKey::Ok);
     let warning_color = app.token(TokenKey::Warn);
     let text_muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
     let panel_border = app.token(TokenKey::PanelBorder);
 
     let status = app.approval_status();
+    let is_drifted = status == ApprovalStatus::Drifted;
+
     let (status_text, status_color) = match status {
         ApprovalStatus::NotApproved => ("", text_muted), // Shouldn't render
         ApprovalStatus::Approved => ("Approved ✓", success_color),
         ApprovalStatus::Drifted => ("Drifted ⚠", warning_color),
-    };
-
-    // Build tooltip content - show click hint
-    let tooltip = match status {
-        ApprovalStatus::Approved => "Click to clear approval",
-        ApprovalStatus::Drifted => "Click to approve new logic",
-        ApprovalStatus::NotApproved => "",
     };
 
     div()
@@ -696,25 +692,47 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         .px_2()
         .py_px()
         .rounded_sm()
-        .cursor_pointer()
         .text_color(status_color)
-        .hover(move |s| s.bg(panel_border))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-            // Click to re-approve if drifted (shows confirmation), or clear if approved
-            if this.is_approved() {
-                this.clear_approval(cx);
-            } else {
-                // Shows confirmation dialog since we're drifted
-                this.approve_model(None, cx);
-            }
-        }))
-        .child(status_text)
+        // Main status text - click to approve/clear
         .child(
             div()
-                .text_color(text_muted)
-                .text_xs()
-                .child(format!("({})", tooltip))
+                .cursor_pointer()
+                .hover(move |s| s.bg(panel_border))
+                .px_1()
+                .rounded_sm()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    if this.is_approved() {
+                        this.clear_approval(cx);
+                    } else {
+                        this.approve_model(None, cx);
+                    }
+                }))
+                .child(status_text)
         )
+        // "Why?" link when drifted
+        .when(is_drifted, |d| {
+            d.child(
+                div()
+                    .id("approval-why-link")
+                    .text_color(accent)
+                    .text_xs()
+                    .cursor_pointer()
+                    .hover(|s| s.underline())
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        this.show_approval_drift(cx);
+                    }))
+                    .child("(Why?)")
+            )
+        })
+        // Tooltip for approved state
+        .when(!is_drifted, |d| {
+            d.child(
+                div()
+                    .text_color(text_muted)
+                    .text_xs()
+                    .child("(Click to clear)")
+            )
+        })
 }
 
 /// Render the VisiHub sync status indicator

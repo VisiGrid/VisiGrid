@@ -94,6 +94,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_rewind_success = app.rewind_success.visible;
     let show_merge_confirm = app.merge_confirm.visible;
     let show_approval_confirm = app.approval_confirm_visible;
+    let show_approval_drift = app.approval_drift_visible;
     let show_import_overlay = app.import_overlay_visible;
     let show_name_tooltip = app.should_show_name_tooltip(cx) && app.mode == Mode::Navigation;
     let show_f2_tip = app.should_show_f2_tip(cx);  // Show immediately on trigger, not gated on mode
@@ -593,6 +594,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(show_approval_confirm, |div| {
             div.child(render_approval_confirm_dialog(app, cx))
         })
+        .when(show_approval_drift, |div| {
+            div.child(render_approval_drift_panel(app, cx))
+        })
         .when(show_rewind_success, |div| {
             div.child(rewind_dialogs::render_rewind_success_banner(app, cx))
         })
@@ -912,6 +916,221 @@ fn render_approval_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                                 .hover(|s| s.bg(accent.opacity(0.85)))
                                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                                     this.approve_model_confirmed(None, cx);
+                                }))
+                                .child("Approve New Logic")
+                        )
+                )
+        )
+}
+
+/// Render the "Why drifted?" panel showing changes since approval
+fn render_approval_drift_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
+    let warning_color = app.token(TokenKey::Warn);
+    let error_color = app.token(TokenKey::Error);
+    let ok_color = app.token(TokenKey::Ok);
+
+    let changes = app.approval_drift_changes();
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(hsla(0.0, 0.0, 0.0, 0.6))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .id("approval-drift-panel")
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .rounded_md()
+                .shadow_lg()
+                .w(px(500.0))
+                .max_h(px(400.0))
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.hide_approval_drift(cx);
+                    }
+                }))
+                // Header
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_size(px(20.0))
+                                        .text_color(warning_color)
+                                        .child("⚠")
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(16.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(text_primary)
+                                        .child("Changes since approval")
+                                )
+                        )
+                        .child(
+                            div()
+                                .id("drift-close-btn")
+                                .px_2()
+                                .py_1()
+                                .cursor_pointer()
+                                .text_color(text_muted)
+                                .hover(|s| s.text_color(text_primary))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.hide_approval_drift(cx);
+                                }))
+                                .child("✕")
+                        )
+                )
+                // Body - list of changes
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .overflow_hidden()
+                        .max_h(px(250.0))
+                        .children(
+                            if changes.is_empty() {
+                                vec![
+                                    div()
+                                        .text_size(px(13.0))
+                                        .text_color(text_muted)
+                                        .child("No semantic changes detected.")
+                                        .into_any_element()
+                                ]
+                            } else {
+                                changes.into_iter().map(|(label, location, cells)| {
+                                    let label: SharedString = label.into();
+                                    let location_str: Option<SharedString> = location.map(|s| s.into());
+
+                                    let mut row = div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .p_2()
+                                        .bg(panel_border.opacity(0.3))
+                                        .rounded_sm()
+                                        // Action label
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(13.0))
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(text_primary)
+                                                        .child(label)
+                                                )
+                                                .when_some(location_str, |d, loc| {
+                                                    d.child(
+                                                        div()
+                                                            .text_size(px(11.0))
+                                                            .text_color(text_muted)
+                                                            .child(loc)
+                                                    )
+                                                })
+                                        );
+
+                                    // Cell changes
+                                    for (addr, old, new) in cells {
+                                        let addr: SharedString = addr.into();
+                                        let old_display: SharedString = if old.is_empty() { "(empty)".into() } else { old.into() };
+                                        let new_display: SharedString = if new.is_empty() { "(empty)".into() } else { new.into() };
+
+                                        row = row.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .text_size(px(11.0))
+                                                .child(
+                                                    div()
+                                                        .text_color(accent)
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .child(addr)
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_color(error_color.opacity(0.8))
+                                                        .child(old_display)
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_color(text_muted)
+                                                        .child("→")
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_color(ok_color)
+                                                        .child(new_display)
+                                                )
+                                        );
+                                    }
+
+                                    row.into_any_element()
+                                }).collect()
+                            }
+                        )
+                )
+                // Footer buttons
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("drift-dismiss-btn")
+                                .px_3()
+                                .py_1()
+                                .border_1()
+                                .border_color(panel_border)
+                                .rounded_sm()
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(text_primary))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.hide_approval_drift(cx);
+                                }))
+                                .child("Close")
+                        )
+                        .child(
+                            div()
+                                .id("drift-approve-btn")
+                                .px_3()
+                                .py_1()
+                                .bg(accent)
+                                .rounded_sm()
+                                .text_size(px(12.0))
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(accent.opacity(0.85)))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.hide_approval_drift(cx);
+                                    this.approve_model(None, cx);
                                 }))
                                 .child("Approve New Logic")
                         )

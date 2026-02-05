@@ -2185,7 +2185,9 @@ pub struct Spreadsheet {
     pub approved_fingerprint: Option<crate::history::HistoryFingerprint>,
     pub approval_timestamp: Option<std::time::Instant>,
     pub approval_note: Option<String>,
+    pub approval_history_len: usize,  // History length at time of approval (for drift diff)
     pub approval_confirm_visible: bool,  // Confirmation dialog when re-approving after drift
+    pub approval_drift_visible: bool,    // "Why drifted?" panel showing changes since approval
 
     // VisiHub sync state
     pub hub_link: Option<crate::hub::HubLink>,
@@ -2566,7 +2568,9 @@ impl Spreadsheet {
             approved_fingerprint: None,
             approval_timestamp: None,
             approval_note: None,
+            approval_history_len: 0,
             approval_confirm_visible: false,
+            approval_drift_visible: false,
 
             hub_link: None,
             hub_status: crate::hub::HubStatus::Unlinked,

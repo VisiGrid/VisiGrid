@@ -354,7 +354,9 @@ impl Spreadsheet {
         self.approved_fingerprint = Some(fingerprint);
         self.approval_timestamp = Some(std::time::Instant::now());
         self.approval_note = note;
+        self.approval_history_len = self.history.undo_count();
         self.approval_confirm_visible = false;
+        self.approval_drift_visible = false;
 
         self.status_message = Some("Model approved".to_string());
         cx.notify();
@@ -371,9 +373,23 @@ impl Spreadsheet {
         self.approved_fingerprint = None;
         self.approval_timestamp = None;
         self.approval_note = None;
+        self.approval_history_len = 0;
         self.approval_confirm_visible = false;
+        self.approval_drift_visible = false;
 
         self.status_message = Some("Approval cleared".to_string());
+        cx.notify();
+    }
+
+    /// Show the "Why drifted?" panel.
+    pub fn show_approval_drift(&mut self, cx: &mut Context<Self>) {
+        self.approval_drift_visible = true;
+        cx.notify();
+    }
+
+    /// Hide the "Why drifted?" panel.
+    pub fn hide_approval_drift(&mut self, cx: &mut Context<Self>) {
+        self.approval_drift_visible = false;
         cx.notify();
     }
 
@@ -407,10 +423,50 @@ impl Spreadsheet {
     }
 
     /// Get a summary of what changed since approval (for the drift dialog).
-    /// Returns a list of change descriptions.
-    pub fn approval_drift_summary(&self) -> Vec<String> {
-        // For now, return a simple message. Future: integrate with history diff.
-        vec!["Logic has changed since the model was approved.".to_string()]
+    /// Returns a list of (action_label, affected_range, details) tuples.
+    pub fn approval_drift_changes(&self) -> Vec<(String, Option<String>, Vec<(String, String, String)>)> {
+        if self.approval_status() != crate::app::ApprovalStatus::Drifted {
+            return vec![];
+        }
+
+        // Get history entries since approval
+        let entries = self.history.display_entries();
+        let mut changes = vec![];
+
+        // Show entries after the approval point
+        for entry in entries.iter().skip(self.approval_history_len) {
+            if !entry.is_undoable {
+                continue; // Skip redo entries
+            }
+
+            let label = entry.label.clone();
+            let location = entry.location.clone();
+
+            // Get cell-level changes if available
+            let cell_changes: Vec<(String, String, String)> = entry.affected_cells
+                .iter()
+                .take(5) // Limit to 5 cells to keep it readable
+                .map(|(row, col, old, new)| {
+                    // Convert column index to letter (A, B, ... Z, AA, AB, ...)
+                    let col_letter = {
+                        let mut s = String::new();
+                        let mut n = *col;
+                        loop {
+                            s.insert(0, (b'A' + (n % 26) as u8) as char);
+                            if n < 26 { break; }
+                            n = n / 26 - 1;
+                        }
+                        s
+                    };
+                    let addr = format!("{}{}", col_letter, row + 1);
+                    (addr, old.clone(), new.clone())
+                })
+                .collect();
+
+            changes.push((label, location, cell_changes));
+        }
+
+        changes
     }
 
     /// Force full recalculation of all formulas (F9 - Excel muscle memory).
