@@ -517,6 +517,52 @@ pub fn serial_1904_to_1900(serial_1904: f64) -> f64 {
     serial_1904 + 1462.0
 }
 
+/// Format an f64 for display/editing with limited significant digits.
+///
+/// Float64 has ~15-17 significant decimal digits of precision. We limit
+/// display to 15 significant digits to avoid showing "false precision" -
+/// digits that can't actually be modified because they exceed float64's
+/// representable precision. This matches Excel's behavior.
+pub fn format_f64_display(n: f64) -> String {
+    // Handle special cases
+    if !n.is_finite() {
+        return n.to_string();
+    }
+    if n == 0.0 {
+        return "0".to_string();
+    }
+
+    // For integers that fit in i64, show without decimal
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        return format!("{}", n as i64);
+    }
+
+    // Format with 15 significant digits (float64 precision limit)
+    // Using {:.*} with precision based on magnitude
+    let abs = n.abs();
+    let magnitude = abs.log10().floor() as i32;
+
+    // Calculate decimal places needed for 15 significant digits
+    // For 1234.5, magnitude=3, we want 15-4=11 decimals
+    // For 0.001234, magnitude=-3, we want 15-(-2)=17 decimals (but cap at 15)
+    let decimal_places = (14 - magnitude).max(0).min(15) as usize;
+
+    let formatted = format!("{:.*}", decimal_places, n);
+
+    // Trim trailing zeros after decimal point, but keep at least one decimal
+    // if there was a decimal point
+    if formatted.contains('.') {
+        let trimmed = formatted.trim_end_matches('0');
+        if trimmed.ends_with('.') {
+            trimmed.trim_end_matches('.').to_string()
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        formatted
+    }
+}
+
 /// Format a serial date according to style
 pub fn format_date(serial: f64, style: DateStyle) -> String {
     let (year, month, day) = serial_to_date(serial);
@@ -843,15 +889,7 @@ impl CellValue {
         match self {
             CellValue::Empty => String::new(),
             CellValue::Text(s) => s.clone(),
-            CellValue::Number(n) => {
-                if n.fract() == 0.0 {
-                    format!("{}", *n as i64)
-                } else {
-                    // Use full precision to preserve exact values for storage
-                    // (display formatting is handled separately by format_number)
-                    n.to_string()
-                }
-            }
+            CellValue::Number(n) => format_f64_display(*n),
             CellValue::Formula { source, .. } => source.clone(),
         }
     }
