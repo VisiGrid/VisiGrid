@@ -4,6 +4,14 @@
 -- Run: visigrid-cli sheet apply msft.sheet --lua msft_3statement_model.lua --json
 
 --------------------------------------------------------------------------------
+-- Name the sheets
+--------------------------------------------------------------------------------
+grid.name_sheet{ sheet=1, name="Assumptions" }
+grid.name_sheet{ sheet=2, name="Income Statement" }
+grid.name_sheet{ sheet=3, name="Balance Sheet" }
+grid.name_sheet{ sheet=4, name="Cash Flow" }
+
+--------------------------------------------------------------------------------
 -- Sheet 1: Assumptions & Drivers
 --------------------------------------------------------------------------------
 set("A1", "Microsoft Corporation - 3-Statement Model")

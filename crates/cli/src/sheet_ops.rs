@@ -376,6 +376,29 @@ fn register_grid_api_compat(lua: &Lua, state: Rc<RefCell<BuildState>>) -> LuaRes
         grid.set("format", format_fn)?;
     }
 
+    // grid.name_sheet{ sheet=N, name="..." }
+    // Names a sheet (affects structure, included in fingerprint)
+    {
+        let state = state.clone();
+        let name_sheet_fn = lua.create_function(move |_, args: Table| {
+            let sheet: usize = args.get("sheet")?;
+            let name: String = args.get("name")?;
+
+            let mut state = state.borrow_mut();
+            state.ensure_sheet(sheet - 1);
+
+            if let Some(s) = state.workbook.sheet_mut(sheet - 1) {
+                s.name = name.clone();
+            }
+
+            // Sheet naming is semantic — affects fingerprint
+            state.hash_semantic(&format!("name_sheet:{}:{}", sheet, name));
+
+            Ok(())
+        })?;
+        grid.set("name_sheet", name_sheet_fn)?;
+    }
+
     lua.globals().set("grid", grid)?;
     Ok(())
 }
