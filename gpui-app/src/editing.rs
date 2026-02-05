@@ -335,13 +335,34 @@ impl Spreadsheet {
     /// This captures the current fingerprint as the "known-good" state.
     /// Future changes to formulas, values, or metadata will invalidate approval.
     /// Formatting changes (bold, colors, column widths) do NOT affect approval.
+    ///
+    /// If already approved and drifted, shows a confirmation dialog first.
     pub fn approve_model(&mut self, note: Option<String>, cx: &mut Context<Self>) {
+        // If drifted from a previous approval, show confirmation
+        if self.approval_status() == crate::app::ApprovalStatus::Drifted {
+            self.approval_confirm_visible = true;
+            cx.notify();
+            return;
+        }
+
+        self.approve_model_confirmed(note, cx);
+    }
+
+    /// Approve without confirmation (called directly or after confirmation).
+    pub fn approve_model_confirmed(&mut self, note: Option<String>, cx: &mut Context<Self>) {
         let fingerprint = self.history.fingerprint();
         self.approved_fingerprint = Some(fingerprint);
         self.approval_timestamp = Some(std::time::Instant::now());
         self.approval_note = note;
+        self.approval_confirm_visible = false;
 
         self.status_message = Some("Model approved".to_string());
+        cx.notify();
+    }
+
+    /// Cancel the approval confirmation dialog.
+    pub fn cancel_approval_confirm(&mut self, cx: &mut Context<Self>) {
+        self.approval_confirm_visible = false;
         cx.notify();
     }
 
@@ -350,6 +371,7 @@ impl Spreadsheet {
         self.approved_fingerprint = None;
         self.approval_timestamp = None;
         self.approval_note = None;
+        self.approval_confirm_visible = false;
 
         self.status_message = Some("Approval cleared".to_string());
         cx.notify();
@@ -382,6 +404,13 @@ impl Spreadsheet {
             crate::app::ApprovalStatus::Approved => "Approved ✓",
             crate::app::ApprovalStatus::Drifted => "Drifted ⚠",
         }
+    }
+
+    /// Get a summary of what changed since approval (for the drift dialog).
+    /// Returns a list of change descriptions.
+    pub fn approval_drift_summary(&self) -> Vec<String> {
+        // For now, return a simple message. Future: integrate with history diff.
+        vec!["Logic has changed since the model was approved.".to_string()]
     }
 
     /// Force full recalculation of all formulas (F9 - Excel muscle memory).

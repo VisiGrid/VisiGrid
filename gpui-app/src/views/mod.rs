@@ -93,6 +93,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_rewind_confirm = app.rewind_confirm.visible;
     let show_rewind_success = app.rewind_success.visible;
     let show_merge_confirm = app.merge_confirm.visible;
+    let show_approval_confirm = app.approval_confirm_visible;
     let show_import_overlay = app.import_overlay_visible;
     let show_name_tooltip = app.should_show_name_tooltip(cx) && app.mode == Mode::Navigation;
     let show_f2_tip = app.should_show_f2_tip(cx);  // Show immediately on trigger, not gated on mode
@@ -589,6 +590,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(show_merge_confirm, |div| {
             div.child(render_merge_confirm_dialog(app, cx))
         })
+        .when(show_approval_confirm, |div| {
+            div.child(render_approval_confirm_dialog(app, cx))
+        })
         .when(show_rewind_success, |div| {
             div.child(rewind_dialogs::render_rewind_success_banner(app, cx))
         })
@@ -794,6 +798,122 @@ fn render_merge_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
                                     this.merge_cells_confirmed(cx);
                                 }))
                                 .child("Merge Anyway")
+                        )
+                )
+        )
+}
+
+/// Render the approval confirmation dialog (when re-approving after drift)
+fn render_approval_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
+    let warning_color = app.token(TokenKey::Warn);
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(hsla(0.0, 0.0, 0.0, 0.6))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .id("approval-confirm-dialog")
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .rounded_md()
+                .shadow_lg()
+                .w(px(400.0))
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.cancel_approval_confirm(cx);
+                    }
+                }))
+                // Header
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(20.0))
+                                .text_color(warning_color)
+                                .child("⚠")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(text_primary)
+                                .child("Approve new logic?")
+                        )
+                )
+                // Body
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(text_primary)
+                                .child("This will replace the previously approved logic.")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
+                                .child("Any prior verification will no longer apply.")
+                        )
+                )
+                // Footer buttons
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("approval-cancel-btn")
+                                .px_3()
+                                .py_1()
+                                .border_1()
+                                .border_color(panel_border)
+                                .rounded_sm()
+                                .text_size(px(12.0))
+                                .text_color(text_muted)
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(text_primary))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.cancel_approval_confirm(cx);
+                                }))
+                                .child("Cancel")
+                        )
+                        .child(
+                            div()
+                                .id("approval-confirm-btn")
+                                .px_3()
+                                .py_1()
+                                .bg(accent)
+                                .rounded_sm()
+                                .text_size(px(12.0))
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(accent.opacity(0.85)))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.approve_model_confirmed(None, cx);
+                                }))
+                                .child("Approve New Logic")
                         )
                 )
         )

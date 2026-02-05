@@ -681,10 +681,10 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         ApprovalStatus::Drifted => ("Drifted ⚠", warning_color),
     };
 
-    // Build tooltip content
+    // Build tooltip content - show click hint
     let tooltip = match status {
-        ApprovalStatus::Approved => "Logic unchanged since approval",
-        ApprovalStatus::Drifted => "Logic has changed since approval",
+        ApprovalStatus::Approved => "Click to clear approval",
+        ApprovalStatus::Drifted => "Click to approve new logic",
         ApprovalStatus::NotApproved => "",
     };
 
@@ -700,10 +700,11 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         .text_color(status_color)
         .hover(move |s| s.bg(panel_border))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-            // Click to re-approve if drifted, or clear if approved
+            // Click to re-approve if drifted (shows confirmation), or clear if approved
             if this.is_approved() {
                 this.clear_approval(cx);
             } else {
+                // Shows confirmation dialog since we're drifted
                 this.approve_model(None, cx);
             }
         }))
