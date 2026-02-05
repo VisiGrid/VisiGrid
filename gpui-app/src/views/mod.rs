@@ -815,8 +815,11 @@ fn render_approval_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
     let text_muted = app.token(TokenKey::TextMuted);
     let accent = app.token(TokenKey::Accent);
     let warning_color = app.token(TokenKey::Warn);
+    let error_color = app.token(TokenKey::Error);
 
     let label_input = app.approval_label_input.clone();
+    let (action_count, cell_count) = app.approval_drift_count();
+    let show_count_warning = action_count > 1 || cell_count > 10;
 
     div()
         .absolute()
@@ -896,6 +899,21 @@ fn render_approval_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                                 .text_color(text_muted)
                                 .child("Any prior verification will no longer apply.")
                         )
+                        // Change count warning (when significant)
+                        .when(show_count_warning, |d| {
+                            let msg = if cell_count > 0 {
+                                format!("⚠ {} logic change(s) affecting {} cell(s) detected", action_count, cell_count)
+                            } else {
+                                format!("⚠ {} logic change(s) detected", action_count)
+                            };
+                            d.child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(error_color)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(SharedString::from(msg))
+                            )
+                        })
                 )
                 // Label input
                 .child(
@@ -1148,6 +1166,25 @@ fn render_approval_drift_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
                                 }).collect()
                             }
                         )
+                )
+                // Info: what counts as semantics
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_2()
+                        .bg(panel_border.opacity(0.2))
+                        .rounded_sm()
+                        .text_size(px(10.0))
+                        .text_color(text_muted)
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child("Approval tracks logic, not appearance:")
+                        )
+                        .child("✓ Formulas, values, references, structure")
+                        .child("✗ Formatting, colors, fonts, column widths")
                 )
                 // Footer buttons
                 .child(

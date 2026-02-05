@@ -430,6 +430,27 @@ impl Spreadsheet {
         }
     }
 
+    /// Count the number of semantic changes since approval.
+    pub fn approval_drift_count(&self) -> (usize, usize) {
+        if self.approval_status() != crate::app::ApprovalStatus::Drifted {
+            return (0, 0);
+        }
+
+        let entries = self.history.display_entries();
+        let mut action_count = 0;
+        let mut cell_count = 0;
+
+        for entry in entries.iter().skip(self.approval_history_len) {
+            if !entry.is_undoable {
+                continue;
+            }
+            action_count += 1;
+            cell_count += entry.affected_cells.len();
+        }
+
+        (action_count, cell_count)
+    }
+
     /// Get a summary of what changed since approval (for the drift dialog).
     /// Returns a list of (action_label, affected_range, details) tuples.
     pub fn approval_drift_changes(&self) -> Vec<(String, Option<String>, Vec<(String, String, String)>)> {
