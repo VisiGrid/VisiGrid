@@ -816,6 +816,8 @@ fn render_approval_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
     let accent = app.token(TokenKey::Accent);
     let warning_color = app.token(TokenKey::Warn);
 
+    let label_input = app.approval_label_input.clone();
+
     div()
         .absolute()
         .inset_0()
@@ -839,6 +841,21 @@ fn render_approval_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                     if event.keystroke.key == "escape" {
                         this.cancel_approval_confirm(cx);
+                    } else if event.keystroke.key == "enter" {
+                        let label = if this.approval_label_input.is_empty() {
+                            None
+                        } else {
+                            Some(this.approval_label_input.clone())
+                        };
+                        this.approve_model_confirmed(label, cx);
+                    } else if let Some(key_char) = &event.keystroke.key_char {
+                        if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform {
+                            this.approval_label_input.push_str(key_char);
+                            cx.notify();
+                        }
+                    } else if event.keystroke.key == "backspace" {
+                        this.approval_label_input.pop();
+                        cx.notify();
                     }
                 }))
                 // Header
@@ -880,6 +897,39 @@ fn render_approval_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                                 .child("Any prior verification will no longer apply.")
                         )
                 )
+                // Label input
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_muted)
+                                .child("Label (optional):")
+                        )
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .bg(panel_bg)
+                                .border_1()
+                                .border_color(panel_border)
+                                .rounded_sm()
+                                .text_size(px(12.0))
+                                .text_color(text_primary)
+                                .min_h(px(24.0))
+                                .child(if label_input.is_empty() {
+                                    SharedString::from("e.g., Q3 Final, Reviewed, v2.1")
+                                } else {
+                                    SharedString::from(label_input)
+                                })
+                                .when(app.approval_label_input.is_empty(), |d| {
+                                    d.text_color(text_muted.opacity(0.5))
+                                })
+                        )
+                )
                 // Footer buttons
                 .child(
                     div()
@@ -915,7 +965,12 @@ fn render_approval_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                                 .cursor_pointer()
                                 .hover(|s| s.bg(accent.opacity(0.85)))
                                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.approve_model_confirmed(None, cx);
+                                    let label = if this.approval_label_input.is_empty() {
+                                        None
+                                    } else {
+                                        Some(this.approval_label_input.clone())
+                                    };
+                                    this.approve_model_confirmed(label, cx);
                                 }))
                                 .child("Approve New Logic")
                         )

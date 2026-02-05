@@ -340,6 +340,7 @@ impl Spreadsheet {
     pub fn approve_model(&mut self, note: Option<String>, cx: &mut Context<Self>) {
         // If drifted from a previous approval, show confirmation
         if self.approval_status() == crate::app::ApprovalStatus::Drifted {
+            self.approval_label_input.clear();
             self.approval_confirm_visible = true;
             cx.notify();
             return;
@@ -357,14 +358,21 @@ impl Spreadsheet {
         self.approval_history_len = self.history.undo_count();
         self.approval_confirm_visible = false;
         self.approval_drift_visible = false;
+        self.approval_label_input.clear();
 
-        self.status_message = Some("Model approved".to_string());
+        let msg = if let Some(label) = &self.approval_note {
+            format!("Model approved: {}", label)
+        } else {
+            "Model approved".to_string()
+        };
+        self.status_message = Some(msg);
         cx.notify();
     }
 
     /// Cancel the approval confirmation dialog.
     pub fn cancel_approval_confirm(&mut self, cx: &mut Context<Self>) {
         self.approval_confirm_visible = false;
+        self.approval_label_input.clear();
         cx.notify();
     }
 

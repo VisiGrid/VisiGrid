@@ -2188,6 +2188,7 @@ pub struct Spreadsheet {
     pub approval_history_len: usize,  // History length at time of approval (for drift diff)
     pub approval_confirm_visible: bool,  // Confirmation dialog when re-approving after drift
     pub approval_drift_visible: bool,    // "Why drifted?" panel showing changes since approval
+    pub approval_label_input: String,    // Label input for approval dialog
 
     // VisiHub sync state
     pub hub_link: Option<crate::hub::HubLink>,
@@ -2571,6 +2572,7 @@ impl Spreadsheet {
             approval_history_len: 0,
             approval_confirm_visible: false,
             approval_drift_visible: false,
+            approval_label_input: String::new(),
 
             hub_link: None,
             hub_status: crate::hub::HubStatus::Unlinked,

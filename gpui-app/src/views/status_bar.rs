@@ -684,6 +684,29 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         ApprovalStatus::Drifted => ("Drifted ⚠", warning_color),
     };
 
+    // Build context string: label + timestamp
+    let context: SharedString = if let Some(timestamp) = app.approval_timestamp {
+        let elapsed = timestamp.elapsed();
+        let time_str = if elapsed.as_secs() < 60 {
+            "just now".to_string()
+        } else if elapsed.as_secs() < 3600 {
+            format!("{}m ago", elapsed.as_secs() / 60)
+        } else if elapsed.as_secs() < 86400 {
+            format!("{}h ago", elapsed.as_secs() / 3600)
+        } else {
+            format!("{}d ago", elapsed.as_secs() / 86400)
+        };
+
+        if let Some(note) = &app.approval_note {
+            format!("{} · {}", note, time_str).into()
+        } else {
+            time_str.into()
+        }
+    } else {
+        "".into()
+    };
+    let has_context = !context.is_empty();
+
     div()
         .id("approval-indicator")
         .flex()
@@ -709,6 +732,15 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                 }))
                 .child(status_text)
         )
+        // Context: label + timestamp (when approved)
+        .when(has_context && !is_drifted, |d| {
+            d.child(
+                div()
+                    .text_color(text_muted)
+                    .text_xs()
+                    .child(format!("({})", context))
+            )
+        })
         // "Why?" link when drifted
         .when(is_drifted, |d| {
             d.child(
@@ -722,15 +754,6 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                         this.show_approval_drift(cx);
                     }))
                     .child("(Why?)")
-            )
-        })
-        // Tooltip for approved state
-        .when(!is_drifted, |d| {
-            d.child(
-                div()
-                    .text_color(text_muted)
-                    .text_xs()
-                    .child("(Click to clear)")
             )
         })
 }
