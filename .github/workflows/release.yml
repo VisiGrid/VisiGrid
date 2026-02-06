@@ -113,69 +113,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Add aarch64 architecture and install cross-compilation deps
-        run: |
-          sudo dpkg --add-architecture arm64
-
-          # Add arm64 Ubuntu sources via ports.ubuntu.com
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/ubuntu-arm64.list > /dev/null
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/ubuntu-arm64.list > /dev/null
-
-          # Restrict all existing .list repos to amd64 only
-          # Prevents third-party repos (microsoft, github, etc.) from failing on arm64
-          for f in /etc/apt/sources.list.d/*.list; do
-            [ "$f" = "/etc/apt/sources.list.d/ubuntu-arm64.list" ] && continue
-            # Lines with existing [...] options: insert arch=amd64 inside brackets
-            sudo sed -i 's/^deb \[/deb [arch=amd64,/' "$f"
-            # Lines without [...]: add [arch=amd64] before the URI
-            sudo sed -i 's/^deb http/deb [arch=amd64] http/' "$f"
-          done
-
-          # Handle DEB822 format .sources files (Ubuntu 24.04+)
-          for f in /etc/apt/sources.list.d/*.sources; do
-            [ -f "$f" ] || continue
-            if ! grep -q "^Architectures:" "$f"; then
-              sudo sed -i '/^Types:/a Architectures: amd64' "$f"
-            fi
-          done
-
-          sudo apt-get update
-          sudo apt-get install -y \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            libgtk-3-dev:arm64 libxcb-shape0-dev:arm64 libxcb-xfixes0-dev:arm64 \
-            libxkbcommon-dev:arm64 libxkbcommon-x11-dev:arm64 libwayland-dev:arm64
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
         with:
-          targets: aarch64-unknown-linux-gnu
+          platforms: arm64
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-aarch64-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build release
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          PKG_CONFIG_SYSROOT_DIR: /usr/aarch64-linux-gnu
-          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
-          PKG_CONFIG_ALLOW_CROSS: 1
+      - name: Build in arm64 container
         run: |
-          cargo build --release --target aarch64-unknown-linux-gnu -p visigrid-gpui
-          cargo build --release --target aarch64-unknown-linux-gnu -p visigrid-cli
+          docker run --rm --platform linux/arm64 \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            ubuntu:24.04 bash -c '
+              set -e
+              apt-get update
+              apt-get install -y build-essential pkg-config curl \
+                libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+                libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+              . "$HOME/.cargo/env"
+              cargo build --release -p visigrid-gpui
+              cargo build --release -p visigrid-cli
+            '
 
       - name: Create tarball
         run: |
           mkdir -p dist/VisiGrid-linux-aarch64
-          cp target/aarch64-unknown-linux-gnu/release/visigrid dist/VisiGrid-linux-aarch64/
-          cp target/aarch64-unknown-linux-gnu/release/visigrid-cli dist/VisiGrid-linux-aarch64/
+          cp target/release/visigrid dist/VisiGrid-linux-aarch64/
+          cp target/release/visigrid-cli dist/VisiGrid-linux-aarch64/
           cp assets/visigrid.desktop dist/VisiGrid-linux-aarch64/
           cp gpui-app/assets/icon-256.png dist/VisiGrid-linux-aarch64/visigrid.png
 
