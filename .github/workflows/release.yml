@@ -116,10 +116,29 @@ jobs:
       - name: Add aarch64 architecture and install cross-compilation deps
         run: |
           sudo dpkg --add-architecture arm64
-          # Add arm64 package sources
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+
+          # Add arm64 Ubuntu sources via ports.ubuntu.com
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/ubuntu-arm64.list > /dev/null
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/ubuntu-arm64.list > /dev/null
+
+          # Restrict all existing .list repos to amd64 only
+          # Prevents third-party repos (microsoft, github, etc.) from failing on arm64
+          for f in /etc/apt/sources.list.d/*.list; do
+            [ "$f" = "/etc/apt/sources.list.d/ubuntu-arm64.list" ] && continue
+            # Lines with existing [...] options: insert arch=amd64 inside brackets
+            sudo sed -i 's/^deb \[/deb [arch=amd64,/' "$f"
+            # Lines without [...]: add [arch=amd64] before the URI
+            sudo sed -i 's/^deb http/deb [arch=amd64] http/' "$f"
+          done
+
+          # Handle DEB822 format .sources files (Ubuntu 24.04+)
+          for f in /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            if ! grep -q "^Architectures:" "$f"; then
+              sudo sed -i '/^Types:/a Architectures: amd64' "$f"
+            fi
+          done
+
           sudo apt-get update
           sudo apt-get install -y \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
