@@ -561,6 +561,14 @@ impl Spreadsheet {
                 self.finalize_save(path);
                 self.request_title_refresh(cx);
 
+                // Re-save hub_link if present (save_workbook recreates file fresh)
+                if let Some(ref link) = self.hub_link {
+                    if let Err(e) = crate::hub::save_hub_link(path, link) {
+                        // Log but don't fail the save
+                        eprintln!("Warning: failed to preserve hub link: {}", e);
+                    }
+                }
+
                 // Save document settings to sidecar file
                 // (best-effort - don't fail the whole save if sidecar fails)
                 let _ = save_doc_settings(path, &self.doc_settings);
