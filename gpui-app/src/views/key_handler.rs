@@ -391,7 +391,7 @@ pub(crate) fn handle_key_down(
                 return;
             }
             "enter" => {
-                this.theme_picker_execute(cx);
+                this.theme_picker_execute(window, cx);
                 return;
             }
             "up" => {

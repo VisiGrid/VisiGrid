@@ -1,7 +1,8 @@
 use std::time::Duration;
 use gpui::*;
 use crate::app::Spreadsheet;
-use crate::theme::TokenKey;
+use crate::settings::user_settings;
+use crate::theme::{TokenKey, SYSTEM_THEME_ID};
 
 /// Render the theme picker overlay
 pub fn render_theme_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -10,8 +11,13 @@ pub fn render_theme_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> 
     let query = app.theme_picker_query.clone();
     let has_query = !query.is_empty();
 
-    // Get current theme name
-    let current_theme_id = app.theme.meta.id;
+    // Check persisted theme_id from settings, NOT self.theme.meta.id
+    // This ensures "System" shows Active (not "Ledger Dark")
+    let current_theme_id: String = user_settings(cx)
+        .appearance.theme_id
+        .as_value()
+        .map(|s| s.clone())
+        .unwrap_or_else(|| app.theme.meta.id.to_string());
 
     // Theme colors (use the preview theme if active for live preview effect)
     let panel_bg = app.token(TokenKey::PanelBg);
@@ -126,7 +132,7 @@ pub fn render_theme_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> 
                         .children(
                             filtered.iter().enumerate().take(12).map(|(idx, theme)| {
                                 let is_selected = idx == selected_idx;
-                                let is_current = theme.meta.id == current_theme_id;
+                                let is_current = theme.meta.id == current_theme_id.as_str();
                                 render_theme_item(theme, is_selected, is_current, idx, text_primary, text_muted, selection_bg, toolbar_hover, accent, cx)
                             })
                         );
@@ -195,7 +201,11 @@ fn render_theme_item(
 ) -> impl IntoElement {
     let _theme_id = theme.meta.id;
     let theme_name = theme.meta.name;
-    let theme_appearance = format!("{:?}", theme.meta.appearance);
+    let theme_appearance = if theme.meta.id == SYSTEM_THEME_ID {
+        "Auto".to_string()
+    } else {
+        format!("{:?}", theme.meta.appearance)
+    };
 
     let bg_color = if is_selected { selection_bg } else { hsla(0.0, 0.0, 0.0, 0.0) };
 
@@ -213,8 +223,8 @@ fn render_theme_item(
         .py(px(8.0))
         .cursor_pointer()
         .bg(bg_color)
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            this.apply_theme_at_index(idx, cx);
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+            this.apply_theme_at_index(idx, window, cx);
         }))
         .child(
             div()

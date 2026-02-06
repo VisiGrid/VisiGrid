@@ -13,7 +13,7 @@ use gpui::{*};
 use crate::app::Spreadsheet;
 use crate::mode::Mode;
 use crate::settings::{update_user_settings, Setting};
-use crate::theme::{Theme, builtin_themes};
+use crate::theme::{Theme, builtin_themes, system_placeholder_theme, SYSTEM_THEME_ID, resolve_system_theme_id, get_theme, default_theme};
 
 /// Maximum rows in the spreadsheet
 const NUM_ROWS: usize = 1_000_000;
@@ -215,17 +215,23 @@ impl Spreadsheet {
         self.update_theme_preview(cx);
     }
 
-    pub fn theme_picker_execute(&mut self, cx: &mut Context<Self>) {
-        self.apply_theme_at_index(self.theme_picker_selected, cx);
+    pub fn theme_picker_execute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_theme_at_index(self.theme_picker_selected, window, cx);
     }
 
-    pub fn apply_theme_at_index(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub fn apply_theme_at_index(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let filtered = self.filter_themes();
         if let Some(theme) = filtered.get(index) {
-            self.theme = theme.clone();
-            self.status_message = Some(format!("Applied theme: {}", theme.meta.name));
-            // Persist theme selection to global store
             let theme_id = theme.meta.id.to_string();
+            // Resolve System to the real theme for this window's OS appearance
+            if theme.meta.id == SYSTEM_THEME_ID {
+                let resolved_id = resolve_system_theme_id(window.appearance());
+                self.theme = get_theme(resolved_id).unwrap_or_else(default_theme);
+            } else {
+                self.theme = theme.clone();
+            }
+            self.status_message = Some(format!("Applied theme: {}", theme.meta.name));
+            // Persist the mode ("system"), NOT the resolved theme id
             update_user_settings(cx, |settings| {
                 settings.appearance.theme_id = Setting::Value(theme_id);
             });
@@ -239,7 +245,8 @@ impl Spreadsheet {
 
     /// Filter available themes by query
     pub fn filter_themes(&self) -> Vec<Theme> {
-        let themes = builtin_themes();
+        let mut themes = vec![system_placeholder_theme()];
+        themes.extend(builtin_themes());
         if self.theme_picker_query.is_empty() {
             return themes;
         }

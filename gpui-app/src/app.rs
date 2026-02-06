@@ -16,7 +16,7 @@ use crate::settings::{
     user_settings_path, open_settings_file, user_settings, update_user_settings,
     observe_settings, TipId,
 };
-use crate::theme::{Theme, TokenKey, default_theme, get_theme};
+use crate::theme::{Theme, TokenKey, default_theme, get_theme, SYSTEM_THEME_ID, resolve_system_theme_id};
 use crate::views;
 use crate::workbook_view::WorkbookViewState;
 
@@ -2141,6 +2141,10 @@ pub struct Spreadsheet {
     #[allow(dead_code)]
     settings_subscription: gpui::Subscription,
 
+    // OS appearance observer — kept alive so System theme tracks OS dark/light
+    #[allow(dead_code)]
+    appearance_subscription: Option<gpui::Subscription>,
+
     // Impact preview state
     pub impact_preview_action: Option<crate::views::impact_preview::ImpactAction>,
     pub impact_preview_usages: Vec<crate::views::impact_preview::ImpactedFormula>,
@@ -2336,16 +2340,36 @@ impl Spreadsheet {
         let window_size = window.viewport_size();
         let window_handle = window.window_handle();
 
-        // Get theme from global settings store
-        let theme = user_settings(cx).appearance.theme_id
-            .as_value()
-            .and_then(|id| get_theme(id))
-            .unwrap_or_else(default_theme);
+        // Get theme from global settings store (resolve "system" to OS-appropriate theme)
+        let theme = match user_settings(cx).appearance.theme_id.as_value() {
+            Some(id) if id == SYSTEM_THEME_ID => {
+                let resolved_id = resolve_system_theme_id(window.appearance());
+                get_theme(resolved_id).unwrap_or_else(default_theme)
+            }
+            Some(id) => get_theme(id).unwrap_or_else(default_theme),
+            None => default_theme(),
+        };
 
         // Subscribe to global settings changes - trigger re-render when settings change
         let settings_subscription = observe_settings(cx, |cx| {
             // Notify all windows to re-render when settings change
             cx.refresh_windows();
+        });
+
+        // Observe OS appearance changes so System theme switches live
+        let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
+            let is_system = user_settings(cx).appearance.theme_id
+                .as_value()
+                .map_or(false, |id| id == SYSTEM_THEME_ID);
+            if is_system {
+                let resolved_id = resolve_system_theme_id(window.appearance());
+                if this.theme.meta.id != resolved_id {
+                    if let Some(resolved) = get_theme(resolved_id) {
+                        this.theme = resolved;
+                        cx.notify();
+                    }
+                }
+            }
         });
 
         // Session server channel: requests from TCP server → GUI thread
@@ -2527,6 +2551,7 @@ impl Spreadsheet {
             tour_completed: false,
             show_f2_tip: false,
             settings_subscription,
+            appearance_subscription: Some(appearance_subscription),
 
             impact_preview_action: None,
             impact_preview_usages: Vec::new(),

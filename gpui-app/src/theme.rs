@@ -1101,3 +1101,27 @@ pub fn get_theme(id: &str) -> Option<Theme> {
 pub fn default_theme() -> Theme {
     ledger_dark_theme()
 }
+
+pub const SYSTEM_THEME_ID: &str = "system";
+
+/// Returns the theme ID to use for the given OS appearance.
+pub fn resolve_system_theme_id(appearance: gpui::WindowAppearance) -> &'static str {
+    match appearance {
+        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => "ledger-dark",
+        // Light, VibrantLight, and any future additions → light theme
+        _ => "ledger-light",
+    }
+}
+
+/// Placeholder Theme for the picker list. id="system", name="System".
+/// Uses Ledger Light tokens so swatches are neutral.
+pub fn system_placeholder_theme() -> Theme {
+    let mut t = ledger_light_theme();
+    t.meta = ThemeMeta {
+        id: SYSTEM_THEME_ID,
+        name: "System",
+        author: "VisiGrid",
+        appearance: Appearance::Light,
+    };
+    t
+}

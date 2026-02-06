@@ -207,7 +207,7 @@ pub(crate) fn bind(
             // Handle Enter key based on current mode
             match this.mode {
                 Mode::ColorPicker => this.color_picker_execute(window, cx),
-                Mode::ThemePicker => this.theme_picker_execute(cx),
+                Mode::ThemePicker => this.theme_picker_execute(window, cx),
                 Mode::FontPicker => this.font_picker_execute(cx),
                 Mode::Command => this.palette_execute(window, cx),
                 Mode::GoTo => this.confirm_goto(cx),
