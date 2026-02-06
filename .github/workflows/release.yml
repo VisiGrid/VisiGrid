@@ -106,6 +106,55 @@ jobs:
             dist/*.tar.gz
             dist/*.AppImage
 
+  build-linux-aarch64:
+    name: Build Linux (aarch64)
+    runs-on: ubuntu-24.04-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-aarch64-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: |
+          cargo build --release -p visigrid-gpui
+          cargo build --release -p visigrid-cli
+
+      - name: Create tarball
+        run: |
+          mkdir -p dist/VisiGrid-linux-aarch64
+          cp target/release/visigrid dist/VisiGrid-linux-aarch64/
+          cp target/release/visigrid-cli dist/VisiGrid-linux-aarch64/
+          cp assets/visigrid.desktop dist/VisiGrid-linux-aarch64/
+          cp gpui-app/assets/icon-256.png dist/VisiGrid-linux-aarch64/visigrid.png
+
+          cd dist
+          tar -czvf VisiGrid-linux-aarch64.tar.gz VisiGrid-linux-aarch64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-aarch64-release
+          path: dist/*.tar.gz
+
   build-windows:
     runs-on: windows-latest
     steps:
@@ -418,7 +467,7 @@ jobs:
             dist/*.zip
 
   create-release:
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-linux, build-linux-aarch64, build-windows, build-macos]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -440,6 +489,7 @@ jobs:
           draft: true
           files: |
             artifacts/linux-release/*
+            artifacts/linux-aarch64-release/*
             artifacts/windows-release/*
             artifacts/macos-release/*
           body: |
@@ -452,6 +502,7 @@ jobs:
             | **macOS** (Universal) | `VisiGrid-macOS-universal.dmg` |
             | **Windows** (x64) | `VisiGrid-Setup-x64.exe` (Recommended) |
             | **Linux** (x86_64) | `VisiGrid-linux-x86_64.tar.gz` |
+            | **Linux** (aarch64) | `VisiGrid-linux-aarch64.tar.gz` |
             | **Linux** (AppImage) | `VisiGrid-x86_64.AppImage` |
 
             <details>
