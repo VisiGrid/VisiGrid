@@ -10,6 +10,7 @@ use gpui::{FocusHandle, Hsla};
 pub enum ColorTarget {
     Fill,
     Text,
+    Border,
 }
 
 impl ColorTarget {
@@ -17,15 +18,18 @@ impl ColorTarget {
         match self {
             Self::Fill => "Fill Color",
             Self::Text => "Text Color",
+            Self::Border => "Border Color",
         }
     }
 
     /// Whether the "No Fill" / "Automatic" clear option is available for this target.
     /// For Text, None means Automatic (use theme default text color).
+    /// For Border, None means Automatic (use theme default border color).
     pub fn allow_none(self) -> bool {
         match self {
             Self::Fill => true,
             Self::Text => true,
+            Self::Border => true,
         }
     }
 }

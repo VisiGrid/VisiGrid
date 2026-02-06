@@ -2027,6 +2027,8 @@ pub struct Spreadsheet {
     pub inspector_tab: crate::mode::InspectorTab,
     pub inspector_pinned: Option<(usize, usize)>,  // Pinned cell (None = follows selection)
     pub format_painter_format: Option<visigrid_engine::cell::CellFormat>,  // Captured format for Format Painter
+    /// Current border color for new borders. None = "Automatic" (theme default).
+    pub current_border_color: Option<[u8; 4]>,
     pub tab_chain_origin_col: Option<usize>,  // Tab-chain return: origin column for Enter key
     pub inspector_hover_cell: Option<(usize, usize)>,  // Cell being hovered in inspector (for grid highlight)
     pub inspector_trace_path: Option<Vec<visigrid_engine::cell_id::CellId>>,  // Path trace highlight (Phase 3.5b)
@@ -2478,6 +2480,7 @@ impl Spreadsheet {
             inspector_tab: crate::mode::InspectorTab::default(),
             inspector_pinned: None,
             format_painter_format: None,
+            current_border_color: None,  // Automatic (theme default)
             tab_chain_origin_col: None,
             inspector_hover_cell: None,
             inspector_trace_path: None,
@@ -4594,7 +4597,7 @@ impl Spreadsheet {
     pub fn cell_user_borders(
         &self, row: usize, col: usize, cx: &App,
         boundary_bottom: bool, boundary_right: bool,
-    ) -> (bool, bool, bool, bool) {
+    ) -> (CellBorder, CellBorder, CellBorder, CellBorder) {
         #[cfg(debug_assertions)]
         self.debug_border_call_count.set(self.debug_border_call_count.get() + 1);
 
@@ -4651,11 +4654,12 @@ impl Spreadsheet {
         };
 
         // Check if this cell is a merge interior (not on any perimeter edge)
+        let none = CellBorder::default();
         if let Some(m) = sheet.get_merge(row, col) {
             let on_edge = row == m.start.0 || row == m.end.0
                        || col == m.start.1 || col == m.end.1;
             if !on_edge {
-                return (false, false, false, false); // interior: no borders
+                return (none, none, none, none); // interior: no borders
             }
         }
 
@@ -4665,9 +4669,9 @@ impl Spreadsheet {
             let above_bottom = if row > 0 {
                 effective_side(row - 1, col, 2)
             } else {
-                CellBorder::default()
+                none
             };
-            max_border(my_top, above_bottom).is_set()
+            max_border(my_top, above_bottom)
         };
 
         // Resolve LEFT edge: max(my_left, left_neighbor_right)
@@ -4676,9 +4680,9 @@ impl Spreadsheet {
             let left_right = if col > 0 {
                 effective_side(row, col - 1, 1)
             } else {
-                CellBorder::default()
+                none
             };
-            max_border(my_left, left_right).is_set()
+            max_border(my_left, left_right)
         };
 
         // Resolve BOTTOM edge: only at viewport boundary (last visible row)
@@ -4687,11 +4691,11 @@ impl Spreadsheet {
             let below_top = if row + 1 < NUM_ROWS {
                 effective_side(row + 1, col, 0)
             } else {
-                CellBorder::default()
+                none
             };
-            max_border(my_bottom, below_top).is_set()
+            max_border(my_bottom, below_top)
         } else {
-            false
+            none
         };
 
         // Resolve RIGHT edge: only at viewport boundary (last visible col)
@@ -4700,11 +4704,11 @@ impl Spreadsheet {
             let right_left = if col + 1 < NUM_COLS {
                 effective_side(row, col + 1, 3)
             } else {
-                CellBorder::default()
+                none
             };
-            max_border(my_right, right_left).is_set()
+            max_border(my_right, right_left)
         } else {
-            false
+            none
         };
 
         (top, right, bottom, left)

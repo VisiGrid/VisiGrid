@@ -179,7 +179,7 @@ impl Spreadsheet {
 
         // Spawn async task to check remote status
         cx.spawn(async move |this, cx| {
-            let result = client.get_dataset_status(&dataset_id).await;
+            let result = smol::unblock(move || client.get_dataset_status(&dataset_id)).await;
 
             let _ = this.update(cx, |this, cx| {
                 this.hub_check_in_progress = false;
@@ -247,7 +247,7 @@ impl Spreadsheet {
 
         cx.spawn(async move |this, cx| {
             // Get current revision info
-            let status = match client.get_dataset_status(&dataset_id).await {
+            let status = match {let c = client.clone(); smol::unblock(move || c.get_dataset_status(&dataset_id)).await} {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
@@ -279,7 +279,7 @@ impl Spreadsheet {
             });
 
             // Download the revision
-            let content = match client.download_revision(&revision_id).await {
+            let content = match {let c = client.clone(); let rid = revision_id.clone(); smol::unblock(move || c.download_revision(&rid)).await} {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
@@ -449,7 +449,7 @@ impl Spreadsheet {
 
         cx.spawn(async move |this, cx| {
             // Get current revision info
-            let status = match client.get_dataset_status(&dataset_id).await {
+            let status = match {let c = client.clone(); smol::unblock(move || c.get_dataset_status(&dataset_id)).await} {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
@@ -481,7 +481,7 @@ impl Spreadsheet {
             });
 
             // Download the revision
-            let content = match client.download_revision(&revision_id).await {
+            let content = match {let c = client.clone(); let rid = revision_id.clone(); smol::unblock(move || c.download_revision(&rid)).await} {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
@@ -685,7 +685,7 @@ impl Spreadsheet {
 
         cx.spawn(async move |this, cx| {
             // Step 1: Create revision (get upload URL)
-            let (revision_id, upload_url) = match client.create_revision(&dataset_id, &content_hash, byte_size).await {
+            let (revision_id, upload_url) = match {let c = client.clone(); let did = dataset_id.clone(); let ch = content_hash.clone(); smol::unblock(move || c.create_revision(&did, &ch, byte_size)).await} {
                 Ok(r) => r,
                 Err(e) => {
                     let error_msg = e.to_string();
@@ -709,7 +709,7 @@ impl Spreadsheet {
             };
 
             // Step 2: Upload to signed URL
-            if let Err(e) = client.upload_to_signed_url(&upload_url, file_bytes).await {
+            if let Err(e) = {let c = client.clone(); let url = upload_url.clone(); smol::unblock(move || c.upload_to_signed_url(&url, file_bytes)).await} {
                 let _ = this.update(cx, |this, cx| {
                     this.hub_status = HubStatus::Offline;
                     this.hub_activity = None;
@@ -727,7 +727,7 @@ impl Spreadsheet {
             });
 
             // Step 3: Complete revision
-            if let Err(e) = client.complete_revision(&revision_id, &content_hash).await {
+            if let Err(e) = {let c = client.clone(); let rid = revision_id.clone(); let ch = content_hash.clone(); smol::unblock(move || c.complete_revision(&rid, &ch)).await} {
                 let _ = this.update(cx, |this, cx| {
                     this.hub_status = HubStatus::Offline;
                     this.hub_activity = None;
@@ -879,47 +879,50 @@ impl Spreadsheet {
             "https://api.visihub.app".to_string(),
         );
 
-        // Verify token by fetching user info
+        // Verify token by fetching user info (blocking HTTP in thread)
         let client = HubClient::new(creds.clone());
 
-        cx.spawn(async move |this, cx| {
-            match client.verify_token().await {
-                Ok(user_info) => {
-                    // Save credentials with user info
-                    let mut full_creds = creds;
-                    full_creds.user_slug = Some(user_info.slug.clone());
-                    full_creds.email = Some(user_info.email.clone());
+        let result = std::thread::spawn(move || {
+            client.verify_token()
+        }).join();
 
-                    if let Err(e) = save_auth(&full_creds) {
-                        let _ = this.update(cx, |this, cx| {
-                            this.status_message = Some(format!("Failed to save credentials: {}", e));
-                            cx.notify();
-                        });
-                        return;
-                    }
+        match result {
+            Ok(Ok(user_info)) => {
+                // Save credentials with user info
+                let mut full_creds = creds;
+                full_creds.user_slug = Some(user_info.slug.clone());
+                full_creds.email = Some(user_info.email.clone());
 
-                    let email = user_info.email.clone();
-                    let slug = user_info.slug.clone();
-                    let _ = this.update(cx, |this, cx| {
-                        this.mode = crate::mode::Mode::Navigation;
-                        this.hub_token_input.clear();
-                        // Show verified identity with email for trust
-                        this.status_message = Some(format!("Signed in as @{} ({})", slug, email));
-                        cx.notify();
-                    });
+                if let Err(e) = save_auth(&full_creds) {
+                    self.status_message = Some(format!("Failed to save credentials: {}", e));
+                    cx.notify();
+                    return;
                 }
-                Err(e) => {
-                    let _ = this.update(cx, |this, cx| {
-                        // Better error message mentioning API base
-                        this.status_message = Some(format!(
-                            "Token could not be verified with api.visihub.app. Check you copied the full token. ({})",
-                            e
-                        ));
-                        cx.notify();
-                    });
+
+                self.mode = crate::mode::Mode::Navigation;
+                self.hub_token_input.clear();
+                // Show verified identity with email for trust
+                self.status_message = Some(format!("Signed in as @{} ({})", user_info.slug, user_info.email));
+                cx.notify();
+
+                // Trigger status check if file is linked
+                if self.hub_link.is_some() {
+                    self.hub_check_status(cx);
                 }
             }
-        }).detach();
+            Ok(Err(e)) => {
+                // Better error message mentioning API base
+                self.status_message = Some(format!(
+                    "Token could not be verified with api.visihub.app. Check you copied the full token. ({})",
+                    e
+                ));
+                cx.notify();
+            }
+            Err(_) => {
+                self.status_message = Some("Token verification failed".to_string());
+                cx.notify();
+            }
+        }
     }
 
     /// Cancel sign in dialog
@@ -1030,7 +1033,7 @@ impl Spreadsheet {
         };
 
         cx.spawn(async move |this, cx| {
-            match client.list_repos().await {
+            match {let c = client.clone(); smol::unblock(move || c.list_repos()).await} {
                 Ok(repos) => {
                     let _ = this.update(cx, |this, cx| {
                         this.hub_repos = repos;
@@ -1081,7 +1084,7 @@ impl Spreadsheet {
         let slug = slug.to_string();
 
         cx.spawn(async move |this, cx| {
-            match client.list_datasets(&owner, &slug).await {
+            match {let c = client.clone(); let o = owner.clone(); let s = slug.clone(); smol::unblock(move || c.list_datasets(&o, &s)).await} {
                 Ok(datasets) => {
                     let _ = this.update(cx, |this, cx| {
                         this.hub_datasets = datasets;
@@ -1195,7 +1198,7 @@ impl Spreadsheet {
         };
 
         cx.spawn(async move |this, cx| {
-            match client.create_dataset(&repo.owner, &repo.slug, &name).await {
+            match {let c = client.clone(); let ro = repo.owner.clone(); let rs = repo.slug.clone(); let n = name.clone(); smol::unblock(move || c.create_dataset(&ro, &rs, &n)).await} {
                 Ok(dataset_id) => {
                     // Create and save link
                     let link = HubLink {

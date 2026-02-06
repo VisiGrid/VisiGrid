@@ -48,33 +48,35 @@ where
     let dismiss = on_dismiss.clone();
     let id: SharedString = id.into();
 
-    // Outer container: layout only, no event handlers
+    // Architecture: Dialog is a CHILD of the backdrop container.
+    // The backdrop container catches all clicks, but only dismisses if the click
+    // target is the backdrop itself (not a child element like the dialog).
     div()
+        .id(ElementId::Name(format!("{}-container", id).into()))
         .absolute()
         .inset_0()
         .flex()
         .items_center()
         .justify_center()
-        // Backdrop layer: full-screen, behind dialog, consumes events
-        .child(
-            div()
-                .id(ElementId::Name(format!("{}-backdrop", id).into()))
-                .absolute()
-                .inset_0()
-                .bg(hsla(0.0, 0.0, 0.0, 0.5))
-                // Click backdrop = dismiss
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                    dismiss(this, cx);
-                }))
-                // Consume scroll so grid doesn't move
-                .on_scroll_wheel(|_, _, cx| {
-                    cx.stop_propagation();
-                })
-        )
-        // Dialog layer: sits on top, receives events normally
+        .bg(hsla(0.0, 0.0, 0.0, 0.5)) // Semi-transparent backdrop
+        // Click anywhere in this container - only dismiss if clicking the backdrop itself
+        .on_click(cx.listener(move |this, _event, _, cx| {
+            // on_click only fires if this element was the actual click target,
+            // not if a child element handled the click
+            dismiss(this, cx);
+        }))
+        // Consume scroll so grid doesn't move
+        .on_scroll_wheel(|_, _, cx| {
+            cx.stop_propagation();
+        })
+        // Dialog layer: child of backdrop, clicks on dialog don't bubble to backdrop's on_click
         .child(
             div()
                 .id(ElementId::Name(id))
+                .on_click(|_, _, cx| {
+                    // Clicking dialog (but not a button) - just stop propagation
+                    cx.stop_propagation();
+                })
                 .child(content)
         )
 }
@@ -90,29 +92,19 @@ pub fn modal_backdrop<E: IntoElement>(
 ) -> impl IntoElement {
     let id: SharedString = id.into();
 
-    // Outer container: layout only
     div()
+        .id(ElementId::Name(format!("{}-container", id).into()))
         .absolute()
         .inset_0()
         .flex()
         .items_center()
         .justify_center()
-        // Backdrop layer: event sink
-        .child(
-            div()
-                .id(ElementId::Name(format!("{}-backdrop", id).into()))
-                .absolute()
-                .inset_0()
-                .bg(hsla(0.0, 0.0, 0.0, 0.5))
-                // Consume mouse + scroll events
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .on_scroll_wheel(|_, _, cx| {
-                    cx.stop_propagation();
-                })
-        )
-        // Dialog layer: sits on top, receives events normally
+        .bg(hsla(0.0, 0.0, 0.0, 0.5))
+        // Consume scroll so grid doesn't move
+        .on_scroll_wheel(|_, _, cx| {
+            cx.stop_propagation();
+        })
+        // Dialog layer
         .child(
             div()
                 .id(ElementId::Name(id))

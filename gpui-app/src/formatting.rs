@@ -601,7 +601,11 @@ impl Spreadsheet {
     /// Canonicalization: UI commands set BOTH sides of every shared edge they touch
     /// to prevent conflicting border states from normal use.
     pub fn apply_borders(&mut self, mode: BorderApplyMode, cx: &mut Context<Self>) {
-        let thin = CellBorder::thin();
+        // Use current_border_color if set, otherwise None (Automatic = theme default)
+        let thin = CellBorder {
+            style: visigrid_engine::cell::BorderStyle::Thin,
+            color: self.current_border_color,
+        };
         let none = CellBorder::default();
         let mut patches = Vec::new();
 

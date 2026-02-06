@@ -4323,4 +4323,81 @@ mod tests {
         assert_eq!(cleared.font_size, None);
         assert_eq!(before, cleared, "Clearing font_size should restore default equality");
     }
+
+    // ========================================================================
+    // Border tests
+    // ========================================================================
+
+    #[test]
+    fn test_border_set_all_edges() {
+        use crate::cell::{BorderStyle, CellBorder};
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        let red = CellBorder { style: BorderStyle::Thin, color: Some([0xFF, 0x00, 0x00, 0xFF]) };
+        sheet.set_borders(0, 0, red, red, red, red);
+
+        let fmt = sheet.get_format(0, 0);
+        assert_eq!(fmt.border_top.style, BorderStyle::Thin);
+        assert_eq!(fmt.border_top.color, Some([0xFF, 0x00, 0x00, 0xFF]));
+        assert_eq!(fmt.border_right.color, Some([0xFF, 0x00, 0x00, 0xFF]));
+        assert_eq!(fmt.border_bottom.color, Some([0xFF, 0x00, 0x00, 0xFF]));
+        assert_eq!(fmt.border_left.color, Some([0xFF, 0x00, 0x00, 0xFF]));
+    }
+
+    #[test]
+    fn test_border_individual_edges() {
+        use crate::cell::{BorderStyle, CellBorder};
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        let thin = CellBorder { style: BorderStyle::Thin, color: Some([0x00, 0x00, 0x00, 0xFF]) };
+
+        // Set only top border
+        sheet.set_border_top(0, 0, thin);
+        let fmt = sheet.get_format(0, 0);
+        assert_eq!(fmt.border_top.style, BorderStyle::Thin);
+        assert_eq!(fmt.border_right.style, BorderStyle::None);
+        assert_eq!(fmt.border_bottom.style, BorderStyle::None);
+        assert_eq!(fmt.border_left.style, BorderStyle::None);
+
+        // Set only right border
+        sheet.set_border_right(1, 1, thin);
+        let fmt = sheet.get_format(1, 1);
+        assert_eq!(fmt.border_top.style, BorderStyle::None);
+        assert_eq!(fmt.border_right.style, BorderStyle::Thin);
+    }
+
+    #[test]
+    fn test_border_clear() {
+        use crate::cell::{BorderStyle, CellBorder};
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        let thin = CellBorder { style: BorderStyle::Thin, color: None };
+        let none = CellBorder::default();
+
+        // Set borders
+        sheet.set_borders(0, 0, thin, thin, thin, thin);
+
+        // Clear them
+        sheet.set_borders(0, 0, none, none, none, none);
+
+        let fmt = sheet.get_format(0, 0);
+        assert_eq!(fmt.border_top.style, BorderStyle::None);
+        assert_eq!(fmt.border_right.style, BorderStyle::None);
+        assert_eq!(fmt.border_bottom.style, BorderStyle::None);
+        assert_eq!(fmt.border_left.style, BorderStyle::None);
+    }
+
+    #[test]
+    fn test_border_auto_color_none() {
+        use crate::cell::{BorderStyle, CellBorder};
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // Auto color = None (theme default)
+        let auto = CellBorder { style: BorderStyle::Thin, color: None };
+        sheet.set_borders(0, 0, auto, auto, auto, auto);
+
+        let fmt = sheet.get_format(0, 0);
+        assert_eq!(fmt.border_top.style, BorderStyle::Thin);
+        assert_eq!(fmt.border_top.color, None, "Auto border should have None color");
+    }
 }

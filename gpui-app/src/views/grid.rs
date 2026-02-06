@@ -770,16 +770,23 @@ fn render_cell(
         if !show_gridlines && !sheet_has_borders {
             cell
         } else {
+            use visigrid_engine::cell::CellBorder;
+
             // Resolve user borders only when the sheet actually has borders (avoids
             // calling cell_user_borders() on every visible cell every frame for sheets
             // that have never had border formatting).
-            let (user_top, user_right, user_bottom, user_left) = if sheet_has_borders {
+            let none = CellBorder::default();
+            let (border_top, border_right, border_bottom, border_left) = if sheet_has_borders {
                 app.cell_user_borders(
                     data_row, col, cx, is_last_visible_row, is_last_visible_col,
                 )
             } else {
-                (false, false, false, false)
+                (none, none, none, none)
             };
+            let user_top = border_top.is_set();
+            let user_right = border_right.is_set();
+            let user_bottom = border_bottom.is_set();
+            let user_left = border_left.is_set();
             let has_user_border = user_top || user_right || user_bottom || user_left;
 
             // Suppress interior gridlines within merged regions (computed once, used by gridlines)
@@ -810,7 +817,24 @@ fn render_cell(
                 app.debug_userborder_cells.set(app.debug_userborder_cells.get() + 1);
             }
             if has_user_border {
-                let border_color = app.token(TokenKey::UserBorder);
+                // Border color rendering (v1 simplification):
+                // Use first non-None color found (top → right → bottom → left), or theme default.
+                // Per-edge colors ARE stored and persisted, but rendered uniformly here.
+                // Per-edge color rendering may come in a future version.
+                let rgba_to_hsla = |rgba: [u8; 4]| -> Hsla {
+                    let r = rgba[0] as f32 / 255.0;
+                    let g = rgba[1] as f32 / 255.0;
+                    let b = rgba[2] as f32 / 255.0;
+                    let a = rgba[3] as f32 / 255.0;
+                    Rgba { r, g, b, a }.into()
+                };
+                let border_color = border_top.color
+                    .or(border_right.color)
+                    .or(border_bottom.color)
+                    .or(border_left.color)
+                    .map(rgba_to_hsla)
+                    .unwrap_or_else(|| app.token(TokenKey::UserBorder));
+
                 c = c.child(
                     non_interactive_overlay()
                         .border_color(border_color)

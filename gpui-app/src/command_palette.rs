@@ -707,11 +707,17 @@ impl Spreadsheet {
         self.mode = Mode::ColorPicker;
         self.ui.color_picker.target = target;
         self.ui.color_picker.reset();
-        // Pre-populate hex input with current cell's color
-        let (row, col) = self.view_state.selected;
+        // Pre-populate hex input with current color
         let current = match target {
-            crate::color_palette::ColorTarget::Fill => self.sheet(cx).get_background_color(row, col),
-            crate::color_palette::ColorTarget::Text => self.sheet(cx).get_format(row, col).font_color,
+            crate::color_palette::ColorTarget::Fill => {
+                let (row, col) = self.view_state.selected;
+                self.sheet(cx).get_background_color(row, col)
+            }
+            crate::color_palette::ColorTarget::Text => {
+                let (row, col) = self.view_state.selected;
+                self.sheet(cx).get_format(row, col).font_color
+            }
+            crate::color_palette::ColorTarget::Border => self.current_border_color,
         };
         if let Some(color) = current {
             self.ui.color_picker.hex_input = crate::color_palette::to_hex(color);
@@ -733,6 +739,9 @@ impl Spreadsheet {
             }
             crate::color_palette::ColorTarget::Text => {
                 self.set_font_color_selection(color, cx);
+            }
+            crate::color_palette::ColorTarget::Border => {
+                self.current_border_color = color;
             }
         }
         if let Some(c) = color {

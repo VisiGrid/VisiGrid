@@ -1251,7 +1251,7 @@ fn render_format_tab(
         // Background color section
         .child(render_background_color_section(&state, text_primary, text_muted, accent, panel_border, cx))
         // Borders section
-        .child(render_borders_section(text_primary, text_muted, panel_border, cx))
+        .child(render_borders_section(app, text_primary, text_muted, panel_border, cx))
         // Font section
         .child(render_font_section(&state, text_primary, text_muted, panel_border, cx))
         // Divider + Format Painter + Clear Formatting
@@ -2393,7 +2393,20 @@ fn render_font_section(
         )
 }
 
+/// Border color swatches (8 distinct colors for borders)
+const BORDER_COLOR_SWATCHES: &[([u8; 4], &str)] = &[
+    ([0x00, 0x00, 0x00, 0xFF], "Black"),
+    ([0x80, 0x80, 0x80, 0xFF], "Gray"),
+    ([0xFF, 0x00, 0x00, 0xFF], "Red"),
+    ([0x00, 0x70, 0xC0, 0xFF], "Blue"),
+    ([0x00, 0xB0, 0x50, 0xFF], "Green"),
+    ([0xFF, 0x80, 0x00, 0xFF], "Orange"),
+    ([0x70, 0x30, 0xA0, 0xFF], "Purple"),
+    ([0x00, 0x99, 0x99, 0xFF], "Teal"),
+];
+
 fn render_borders_section(
+    app: &Spreadsheet,
     text_primary: Hsla,
     text_muted: Hsla,
     panel_border: Hsla,
@@ -2405,73 +2418,181 @@ fn render_borders_section(
         "Ctrl+Shift+7 Outline \u{00b7} Ctrl+Shift+- Clear"
     };
 
+    // Current border color for indicator
+    let current_color = app.current_border_color;
+    let current_color_hsla = current_color
+        .map(|rgba| {
+            gpui::Rgba {
+                r: rgba[0] as f32 / 255.0,
+                g: rgba[1] as f32 / 255.0,
+                b: rgba[2] as f32 / 255.0,
+                a: rgba[3] as f32 / 255.0,
+            }.into()
+        })
+        .unwrap_or(text_primary);
+
+    // Check if "Inside" should be disabled (1×N or N×1 selection has no internal edges)
+    let inside_disabled = {
+        let ranges = app.all_selection_ranges();
+        ranges.iter().all(|((min_row, min_col), (max_row, max_col))| {
+            let rows = max_row - min_row + 1;
+            let cols = max_col - min_col + 1;
+            rows == 1 || cols == 1
+        })
+    };
+
     section("Borders", panel_border, text_primary)
-        // Row 1: None | Outline | All | Inside
-        .child(
-            div()
-                .flex()
-                .gap_1()
-                .child(
-                    border_preset_btn("None", text_primary, text_muted, panel_border)
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.apply_borders(BorderApplyMode::Clear, cx);
-                        }))
-                )
-                .child(
-                    border_preset_btn("Out", text_primary, text_muted, panel_border)
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.apply_borders(BorderApplyMode::Outline, cx);
-                        }))
-                )
-                .child(
-                    border_preset_btn("All", text_primary, text_muted, panel_border)
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.apply_borders(BorderApplyMode::All, cx);
-                        }))
-                )
-                .child(
-                    border_preset_btn("In", text_primary, text_muted, panel_border)
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.apply_borders(BorderApplyMode::Inside, cx);
-                        }))
-                )
-        )
-        // Row 2: Top | Bottom | Left | Right + Style label
+        // Border color row
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap_1()
                 .child(
-                    border_preset_btn("T", text_primary, text_muted, panel_border)
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(text_muted)
+                        .min_w(px(36.0))
+                        .child("Color:")
+                )
+                // Automatic button
+                .child(
+                    div()
+                        .id("border-color-auto")
+                        .px_1()
+                        .py(px(2.0))
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_size(px(9.0))
+                        .text_color(if current_color.is_none() { text_primary } else { text_muted })
+                        .bg(if current_color.is_none() { panel_border.opacity(0.4) } else { gpui::transparent_black() })
+                        .when(current_color.is_none(), |d| d.border_1().border_color(text_primary.opacity(0.5)))
+                        .hover(|s| s.bg(panel_border.opacity(0.5)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.current_border_color = None;
+                            cx.notify();
+                        }))
+                        .tooltip(|_window, cx| cx.new(|_| BorderTooltip("Automatic (theme default)".into())).into())
+                        .child("Auto")
+                )
+                // Color swatches
+                .children(
+                    BORDER_COLOR_SWATCHES.iter().enumerate().map(|(i, &(rgba, name))| {
+                        let is_selected = current_color == Some(rgba);
+                        let swatch_color: Hsla = gpui::Rgba {
+                            r: rgba[0] as f32 / 255.0,
+                            g: rgba[1] as f32 / 255.0,
+                            b: rgba[2] as f32 / 255.0,
+                            a: rgba[3] as f32 / 255.0,
+                        }.into();
+                        let tooltip_text: SharedString = name.into();
+                        div()
+                            .id(SharedString::from(format!("border-color-{}", i)))
+                            .w(if is_selected { px(16.0) } else { px(14.0) })
+                            .h(if is_selected { px(16.0) } else { px(14.0) })
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .bg(swatch_color)
+                            .border_1()
+                            .border_color(if is_selected { text_primary } else { panel_border.opacity(0.5) })
+                            .when(is_selected, |d| d.border_2().shadow_sm())
+                            .hover(|s| s.border_color(text_primary))
+                            .tooltip(move |_window, cx| cx.new(|_| BorderTooltip(tooltip_text.clone())).into())
+                            .on_mouse_down(MouseButton::Left, {
+                                cx.listener(move |this, _, _, cx| {
+                                    this.current_border_color = Some(rgba);
+                                    cx.notify();
+                                })
+                            })
+                    })
+                )
+                // "More..." button to open full color picker
+                .child(
+                    div()
+                        .id("border-color-more")
+                        .px_1()
+                        .py(px(2.0))
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_size(px(9.0))
+                        .text_color(text_muted)
+                        .hover(|s| s.bg(panel_border.opacity(0.5)).text_color(text_primary))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                            this.show_color_picker(crate::color_palette::ColorTarget::Border, window, cx);
+                        }))
+                        .tooltip(|_window, cx| cx.new(|_| BorderTooltip("More colors...".into())).into())
+                        .child("...")
+                )
+        )
+        // Border icon buttons - Row 1: None | Outline | All | Inside
+        .child(
+            div()
+                .flex()
+                .gap_1()
+                .mt_1()
+                .child(
+                    border_icon_btn("none", current_color_hsla, text_primary, panel_border, BorderIconKind::None, false)
+                        .tooltip(|_window, cx| cx.new(|_| BorderTooltip("Clear Borders".into())).into())
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::Clear, cx);
+                        }))
+                )
+                .child(
+                    border_icon_btn("outline", current_color_hsla, text_primary, panel_border, BorderIconKind::Outline, false)
+                        .tooltip(|_window, cx| cx.new(|_| BorderTooltip("Outline Border".into())).into())
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::Outline, cx);
+                        }))
+                )
+                .child(
+                    border_icon_btn("all", current_color_hsla, text_primary, panel_border, BorderIconKind::All, false)
+                        .tooltip(|_window, cx| cx.new(|_| BorderTooltip("All Borders".into())).into())
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.apply_borders(BorderApplyMode::All, cx);
+                        }))
+                )
+                .child(
+                    border_icon_btn("inside", current_color_hsla, text_primary, panel_border, BorderIconKind::Inside, inside_disabled)
+                        .tooltip(|_window, cx| cx.new(|_| BorderTooltip("Inside Borders".into())).into())
+                        .when(!inside_disabled, |d| {
+                            d.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.apply_borders(BorderApplyMode::Inside, cx);
+                            }))
+                        })
+                )
+        )
+        // Border icon buttons - Row 2: Top | Bottom | Left | Right
+        .child(
+            div()
+                .flex()
+                .gap_1()
+                .child(
+                    border_icon_btn("top", current_color_hsla, text_primary, panel_border, BorderIconKind::Top, false)
+                        .tooltip(|_window, cx| cx.new(|_| BorderTooltip("Top Border".into())).into())
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.apply_borders(BorderApplyMode::Top, cx);
                         }))
                 )
                 .child(
-                    border_preset_btn("B", text_primary, text_muted, panel_border)
+                    border_icon_btn("bottom", current_color_hsla, text_primary, panel_border, BorderIconKind::Bottom, false)
+                        .tooltip(|_window, cx| cx.new(|_| BorderTooltip("Bottom Border".into())).into())
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.apply_borders(BorderApplyMode::Bottom, cx);
                         }))
                 )
                 .child(
-                    border_preset_btn("L", text_primary, text_muted, panel_border)
+                    border_icon_btn("left", current_color_hsla, text_primary, panel_border, BorderIconKind::Left, false)
+                        .tooltip(|_window, cx| cx.new(|_| BorderTooltip("Left Border".into())).into())
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.apply_borders(BorderApplyMode::Left, cx);
                         }))
                 )
                 .child(
-                    border_preset_btn("R", text_primary, text_muted, panel_border)
+                    border_icon_btn("right", current_color_hsla, text_primary, panel_border, BorderIconKind::Right, false)
+                        .tooltip(|_window, cx| cx.new(|_| BorderTooltip("Right Border".into())).into())
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.apply_borders(BorderApplyMode::Right, cx);
                         }))
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_size(px(9.0))
-                        .text_color(text_muted.opacity(0.5))
-                        .child("Style: Thin")
                 )
         )
         // Shortcut hints
@@ -2479,32 +2600,153 @@ fn render_borders_section(
             div()
                 .text_size(px(9.0))
                 .text_color(text_muted.opacity(0.6))
+                .mt_1()
                 .child(hint)
         )
 }
 
-fn border_preset_btn(
-    label: &'static str,
+/// Visual representation of which borders are applied for icon buttons
+#[derive(Clone, Copy)]
+enum BorderIconKind {
+    None,
+    Outline,
+    All,
+    Inside,
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// Create an icon button that visually shows which borders will be applied.
+/// Each button is a 28px square with a "cell box" showing the relevant edges.
+fn border_icon_btn(
+    id: &'static str,
+    border_color: Hsla,
     text_primary: Hsla,
-    _text_muted: Hsla,
     panel_border: Hsla,
+    kind: BorderIconKind,
+    disabled: bool,
 ) -> Stateful<Div> {
+    // Determine which edges to highlight based on kind
+    let (top, right, bottom, left, h_inner, v_inner) = match kind {
+        BorderIconKind::None => (false, false, false, false, false, false),
+        BorderIconKind::Outline => (true, true, true, true, false, false),
+        BorderIconKind::All => (true, true, true, true, true, true),
+        BorderIconKind::Inside => (false, false, false, false, true, true),
+        BorderIconKind::Top => (true, false, false, false, false, false),
+        BorderIconKind::Bottom => (false, false, true, false, false, false),
+        BorderIconKind::Left => (false, false, false, true, false, false),
+        BorderIconKind::Right => (false, true, false, false, false, false),
+    };
+
+    // Create the icon: a 2x2 grid of "cells" with visible borders
+    let dim = px(18.0);
+    let cell_size = px(8.0);
+    let active_stroke = px(2.0);  // Thicker for active edges
+    let inactive_stroke = px(1.0);
+    let dim_color = panel_border.opacity(0.25);
+    let active_color = if disabled { panel_border.opacity(0.4) } else { border_color };
+
     div()
-        .w(px(24.0))
-        .h(px(22.0))
+        .id(SharedString::from(format!("border-icon-{}", id)))
+        .w(px(28.0))
+        .h(px(28.0))
         .flex()
         .items_center()
         .justify_center()
         .rounded_sm()
-        .cursor_pointer()
+        .when(!disabled, |d| d.cursor_pointer())
+        .when(disabled, |d| d.opacity(0.4))
         .border_1()
         .border_color(panel_border)
-        .text_size(px(10.0))
-        .text_color(text_primary)
         .bg(gpui::transparent_black())
-        .hover(|s| s.bg(panel_border.opacity(0.5)))
-        .child(label)
-        .id(SharedString::from(format!("border-{}", label)))
+        .when(!disabled, |d| d.hover(|s| s.bg(panel_border.opacity(0.3)).border_color(text_primary.opacity(0.5))))
+        .child(
+            // Inner 2x2 grid representation
+            div()
+                .w(dim)
+                .h(dim)
+                .relative()
+                // Top border
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(if top { active_stroke } else { inactive_stroke })
+                        .bg(if top { active_color } else { dim_color })
+                )
+                // Bottom border
+                .child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .h(if bottom { active_stroke } else { inactive_stroke })
+                        .bg(if bottom { active_color } else { dim_color })
+                )
+                // Left border
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(if left { active_stroke } else { inactive_stroke })
+                        .bg(if left { active_color } else { dim_color })
+                )
+                // Right border
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .w(if right { active_stroke } else { inactive_stroke })
+                        .bg(if right { active_color } else { dim_color })
+                )
+                // Horizontal inner line (center)
+                .child(
+                    div()
+                        .absolute()
+                        .top(cell_size)
+                        .left(if left { active_stroke } else { inactive_stroke })
+                        .right(if right { active_stroke } else { inactive_stroke })
+                        .h(if h_inner { active_stroke } else { inactive_stroke })
+                        .bg(if h_inner { active_color } else { dim_color })
+                )
+                // Vertical inner line (center)
+                .child(
+                    div()
+                        .absolute()
+                        .left(cell_size)
+                        .top(if top { active_stroke } else { inactive_stroke })
+                        .bottom(if bottom { active_stroke } else { inactive_stroke })
+                        .w(if v_inner { active_stroke } else { inactive_stroke })
+                        .bg(if v_inner { active_color } else { dim_color })
+                )
+        )
+}
+
+/// Simple tooltip for border controls
+struct BorderTooltip(SharedString);
+
+impl Render for BorderTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0x2d2d2d))
+            .border_1()
+            .border_color(rgb(0x3d3d3d))
+            .text_size(px(11.0))
+            .text_color(rgb(0xcccccc))
+            .child(self.0.clone())
+    }
 }
 
 fn render_number_format_section(

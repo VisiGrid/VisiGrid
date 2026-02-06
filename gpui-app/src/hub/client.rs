@@ -1,7 +1,7 @@
 // VisiHub API client
 //
 // HTTP client for communicating with the VisiHub API.
-// Uses reqwest for async HTTP requests.
+// Uses reqwest blocking client (gpui doesn't use Tokio runtime).
 
 use std::path::Path;
 
@@ -9,8 +9,9 @@ use crate::hub::auth::{load_auth, AuthCredentials};
 use crate::hub::types::RemoteStatus;
 
 /// VisiHub API client
+#[derive(Clone)]
 pub struct HubClient {
-    http: reqwest::Client,
+    http: reqwest::blocking::Client,
     api_base: String,
     token: String,
 }
@@ -54,8 +55,9 @@ impl HubClient {
 
     /// Create a new client with explicit credentials.
     pub fn new(creds: AuthCredentials) -> Self {
-        let http = reqwest::Client::builder()
+        let http = reqwest::blocking::Client::builder()
             .user_agent("VisiGrid/0.1")
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client");
 
@@ -68,45 +70,43 @@ impl HubClient {
 
     /// Verify the current token and get user info.
     /// GET /api/desktop/me
-    pub async fn verify_token(&self) -> Result<UserInfo, HubError> {
+    pub fn verify_token(&self) -> Result<UserInfo, HubError> {
         let url = format!("{}/api/desktop/me", self.api_base);
 
         let response = self.http
             .get(&url)
             .bearer_auth(&self.token)
             .send()
-            .await
             .map_err(|e| HubError::Network(e.to_string()))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().unwrap_or_default();
             return Err(HubError::Http(status, body));
         }
 
-        response.json::<UserInfo>().await
+        response.json::<UserInfo>()
             .map_err(|e| HubError::Parse(e.to_string()))
     }
 
     /// Get the status of a dataset.
     /// GET /api/desktop/datasets/:id/status
-    pub async fn get_dataset_status(&self, dataset_id: &str) -> Result<RemoteStatus, HubError> {
+    pub fn get_dataset_status(&self, dataset_id: &str) -> Result<RemoteStatus, HubError> {
         let url = format!("{}/api/desktop/datasets/{}/status", self.api_base, dataset_id);
 
         let response = self.http
             .get(&url)
             .bearer_auth(&self.token)
             .send()
-            .await
             .map_err(|e| HubError::Network(e.to_string()))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().unwrap_or_default();
             return Err(HubError::Http(status, body));
         }
 
-        let json: serde_json::Value = response.json().await
+        let json: serde_json::Value = response.json()
             .map_err(|e| HubError::Parse(e.to_string()))?;
 
         Ok(RemoteStatus {
@@ -121,46 +121,44 @@ impl HubClient {
     /// Download a revision's content.
     /// GET /api/desktop/revisions/:id/download
     /// Returns the raw bytes of the .sheet file.
-    pub async fn download_revision(&self, revision_id: &str) -> Result<Vec<u8>, HubError> {
+    pub fn download_revision(&self, revision_id: &str) -> Result<Vec<u8>, HubError> {
         let url = format!("{}/api/desktop/revisions/{}/download", self.api_base, revision_id);
 
         let response = self.http
             .get(&url)
             .bearer_auth(&self.token)
             .send()
-            .await
             .map_err(|e| HubError::Network(e.to_string()))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().unwrap_or_default();
             return Err(HubError::Http(status, body));
         }
 
-        response.bytes().await
+        response.bytes()
             .map(|b| b.to_vec())
             .map_err(|e| HubError::Network(e.to_string()))
     }
 
     /// List available repos.
     /// GET /api/desktop/repos
-    pub async fn list_repos(&self) -> Result<Vec<RepoInfo>, HubError> {
+    pub fn list_repos(&self) -> Result<Vec<RepoInfo>, HubError> {
         let url = format!("{}/api/desktop/repos", self.api_base);
 
         let response = self.http
             .get(&url)
             .bearer_auth(&self.token)
             .send()
-            .await
             .map_err(|e| HubError::Network(e.to_string()))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().unwrap_or_default();
             return Err(HubError::Http(status, body));
         }
 
-        let json: serde_json::Value = response.json().await
+        let json: serde_json::Value = response.json()
             .map_err(|e| HubError::Parse(e.to_string()))?;
 
         let repos = json.as_array()
@@ -180,31 +178,34 @@ impl HubClient {
 
     /// List datasets in a repo.
     /// GET /api/desktop/repos/:owner/:slug/datasets
-    pub async fn list_datasets(&self, owner: &str, slug: &str) -> Result<Vec<DatasetInfo>, HubError> {
+    pub fn list_datasets(&self, owner: &str, slug: &str) -> Result<Vec<DatasetInfo>, HubError> {
         let url = format!("{}/api/desktop/repos/{}/{}/datasets", self.api_base, owner, slug);
 
         let response = self.http
             .get(&url)
             .bearer_auth(&self.token)
             .send()
-            .await
             .map_err(|e| HubError::Network(e.to_string()))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().unwrap_or_default();
             return Err(HubError::Http(status, body));
         }
 
-        let json: serde_json::Value = response.json().await
+        let json: serde_json::Value = response.json()
             .map_err(|e| HubError::Parse(e.to_string()))?;
 
         let datasets = json.as_array()
             .unwrap_or(&vec![])
             .iter()
             .filter_map(|d| {
+                // id can be integer or string depending on server
+                let id = d["id"].as_i64()
+                    .map(|n| n.to_string())
+                    .or_else(|| d["id"].as_str().map(String::from))?;
                 Some(DatasetInfo {
-                    id: d["id"].as_str()?.to_string(),
+                    id,
                     name: d["name"].as_str()?.to_string(),
                 })
             })
@@ -215,7 +216,7 @@ impl HubClient {
 
     /// Create a new dataset in a repo.
     /// POST /api/desktop/repos/:owner/:slug/datasets
-    pub async fn create_dataset(&self, owner: &str, slug: &str, name: &str) -> Result<String, HubError> {
+    pub fn create_dataset(&self, owner: &str, slug: &str, name: &str) -> Result<String, HubError> {
         let url = format!("{}/api/desktop/repos/{}/{}/datasets", self.api_base, owner, slug);
 
         let response = self.http
@@ -223,27 +224,28 @@ impl HubClient {
             .bearer_auth(&self.token)
             .json(&serde_json::json!({ "name": name }))
             .send()
-            .await
             .map_err(|e| HubError::Network(e.to_string()))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().unwrap_or_default();
             return Err(HubError::Http(status, body));
         }
 
-        let json: serde_json::Value = response.json().await
+        let json: serde_json::Value = response.json()
             .map_err(|e| HubError::Parse(e.to_string()))?;
 
-        json["dataset_id"].as_str()
-            .map(String::from)
+        // dataset_id can be integer or string depending on server
+        json["dataset_id"].as_i64()
+            .map(|n| n.to_string())
+            .or_else(|| json["dataset_id"].as_str().map(String::from))
             .ok_or_else(|| HubError::Parse("Missing dataset_id in response".to_string()))
     }
 
     /// Create a new revision for publishing.
     /// POST /api/desktop/datasets/:id/revisions
     /// Returns (revision_id, upload_url)
-    pub async fn create_revision(
+    pub fn create_revision(
         &self,
         dataset_id: &str,
         content_hash: &str,
@@ -259,16 +261,15 @@ impl HubClient {
                 "byte_size": byte_size
             }))
             .send()
-            .await
             .map_err(|e| HubError::Network(e.to_string()))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().unwrap_or_default();
             return Err(HubError::Http(status, body));
         }
 
-        let json: serde_json::Value = response.json().await
+        let json: serde_json::Value = response.json()
             .map_err(|e| HubError::Parse(e.to_string()))?;
 
         let revision_id = json["revision_id"].as_str()
@@ -284,18 +285,17 @@ impl HubClient {
 
     /// Upload file bytes to signed URL.
     /// PUT to the signed R2 URL.
-    pub async fn upload_to_signed_url(&self, upload_url: &str, data: Vec<u8>) -> Result<(), HubError> {
+    pub fn upload_to_signed_url(&self, upload_url: &str, data: Vec<u8>) -> Result<(), HubError> {
         let response = self.http
             .put(upload_url)
             .header("Content-Type", "application/octet-stream")
             .body(data)
             .send()
-            .await
             .map_err(|e| HubError::Network(e.to_string()))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().unwrap_or_default();
             return Err(HubError::Http(status, body));
         }
 
@@ -304,7 +304,7 @@ impl HubClient {
 
     /// Complete a revision after upload.
     /// POST /api/desktop/revisions/:id/complete
-    pub async fn complete_revision(&self, revision_id: &str, content_hash: &str) -> Result<(), HubError> {
+    pub fn complete_revision(&self, revision_id: &str, content_hash: &str) -> Result<(), HubError> {
         let url = format!("{}/api/desktop/revisions/{}/complete", self.api_base, revision_id);
 
         let response = self.http
@@ -312,12 +312,11 @@ impl HubClient {
             .bearer_auth(&self.token)
             .json(&serde_json::json!({ "content_hash": content_hash }))
             .send()
-            .await
             .map_err(|e| HubError::Network(e.to_string()))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().unwrap_or_default();
             return Err(HubError::Http(status, body));
         }
 
@@ -328,6 +327,7 @@ impl HubClient {
 /// User info from /api/desktop/me
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct UserInfo {
+    #[serde(alias = "user_slug")]
     pub slug: String,
     pub email: String,
     pub plan: String,

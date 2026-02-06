@@ -235,13 +235,14 @@ pub fn max_border(a: CellBorder, b: CellBorder) -> CellBorder {
     if a.style.weight() >= b.style.weight() { a } else { b }
 }
 
-/// Returns the border to actually draw (v0.2.2: normalize to Thin/black).
-/// Medium/Thick are stored but rendered as Thin to avoid overlay complexity.
+/// Returns the border to actually draw.
+/// Style is normalized to Thin (Medium/Thick rendered as Thin to avoid overlay complexity).
+/// Color is preserved: None falls back to theme default at render time.
 pub fn render_border(border: CellBorder) -> CellBorder {
     if border.style != BorderStyle::None {
         CellBorder {
             style: BorderStyle::Thin,
-            color: None,
+            color: border.color, // Preserve color
         }
     } else {
         border

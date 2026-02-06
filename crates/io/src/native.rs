@@ -4,7 +4,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
-use visigrid_engine::cell::{Alignment, CellBorder, CellFormat, DateStyle, NegativeStyle, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, DateStyle, NegativeStyle, NumberFormat, TextOverflow, VerticalAlignment};
 use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
@@ -99,6 +99,14 @@ CREATE TABLE IF NOT EXISTS cells (
     fmt_thousands INTEGER DEFAULT 0,     -- 1 = use thousands separator
     fmt_negative INTEGER DEFAULT 0,      -- 0=minus, 1=parens, 2=red minus, 3=red parens
     fmt_currency_symbol TEXT,            -- NULL = default ($)
+    fmt_border_top INTEGER DEFAULT 0,    -- style: 0=none, 1=thin, 2=medium, 3=thick
+    fmt_border_right INTEGER DEFAULT 0,
+    fmt_border_bottom INTEGER DEFAULT 0,
+    fmt_border_left INTEGER DEFAULT 0,
+    fmt_border_top_color INTEGER,        -- RGBA as u32 (0xRRGGBBAA), NULL = automatic
+    fmt_border_right_color INTEGER,
+    fmt_border_bottom_color INTEGER,
+    fmt_border_left_color INTEGER,
     PRIMARY KEY (sheet_idx, row, col)
 );
 
@@ -177,8 +185,58 @@ fn alignment_from_db(i: i32) -> Alignment {
     }
 }
 
+/// Encode BorderStyle → DB integer. 0=None, 1=Thin, 2=Medium, 3=Thick.
+fn border_style_to_db(style: BorderStyle) -> i32 {
+    match style {
+        BorderStyle::None => 0,
+        BorderStyle::Thin => 1,
+        BorderStyle::Medium => 2,
+        BorderStyle::Thick => 3,
+    }
+}
+
+/// Decode DB integer → BorderStyle. Unknown codes fall back to None.
+fn border_style_from_db(i: i32) -> BorderStyle {
+    match i {
+        1 => BorderStyle::Thin,
+        2 => BorderStyle::Medium,
+        3 => BorderStyle::Thick,
+        _ => BorderStyle::None,
+    }
+}
+
+/// Encode border color [R,G,B,A] → DB i64 (stored as 0xRRGGBBAA).
+/// None = automatic/theme default.
+fn border_color_to_db(color: Option<[u8; 4]>) -> Option<i64> {
+    color.map(|[r, g, b, a]| {
+        ((r as i64) << 24) | ((g as i64) << 16) | ((b as i64) << 8) | (a as i64)
+    })
+}
+
+/// Decode DB i64 → border color [R,G,B,A].
+/// None = automatic/theme default.
+fn border_color_from_db(val: Option<i64>) -> Option<[u8; 4]> {
+    val.map(|v| {
+        let v = v as u32;
+        [
+            ((v >> 24) & 0xFF) as u8,
+            ((v >> 16) & 0xFF) as u8,
+            ((v >> 8) & 0xFF) as u8,
+            (v & 0xFF) as u8,
+        ]
+    })
+}
+
+/// Reconstruct CellBorder from DB values.
+fn border_from_db(style: i32, color: Option<i64>) -> CellBorder {
+    CellBorder {
+        style: border_style_from_db(style),
+        color: border_color_from_db(color),
+    }
+}
+
 /// Current schema version. Increment for each migration.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// Run schema migrations for existing databases.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -194,7 +252,20 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ")?;
     }
 
-    // Future migrations: if version < 2 { ... PRAGMA user_version = 2; }
+    if version < 2 {
+        // Add border style and color columns
+        conn.execute_batch("
+            ALTER TABLE cells ADD COLUMN fmt_border_top INTEGER DEFAULT 0;
+            ALTER TABLE cells ADD COLUMN fmt_border_right INTEGER DEFAULT 0;
+            ALTER TABLE cells ADD COLUMN fmt_border_bottom INTEGER DEFAULT 0;
+            ALTER TABLE cells ADD COLUMN fmt_border_left INTEGER DEFAULT 0;
+            ALTER TABLE cells ADD COLUMN fmt_border_top_color INTEGER;
+            ALTER TABLE cells ADD COLUMN fmt_border_right_color INTEGER;
+            ALTER TABLE cells ADD COLUMN fmt_border_bottom_color INTEGER;
+            ALTER TABLE cells ADD COLUMN fmt_border_left_color INTEGER;
+            PRAGMA user_version = 2;
+        ")?;
+    }
 
     Ok(())
 }
@@ -518,7 +589,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
         ).map_err(|e| e.to_string())?;
 
         let mut cell_stmt = conn.prepare(
-            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
+            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
         ).map_err(|e| e.to_string())?;
 
         for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
@@ -571,7 +642,17 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     format.font_family.as_deref(),
                     thousands,
                     negative,
-                    currency_symbol
+                    currency_symbol,
+                    // Border styles
+                    border_style_to_db(format.border_top.style),
+                    border_style_to_db(format.border_right.style),
+                    border_style_to_db(format.border_bottom.style),
+                    border_style_to_db(format.border_left.style),
+                    // Border colors
+                    border_color_to_db(format.border_top.color),
+                    border_color_to_db(format.border_right.color),
+                    border_color_to_db(format.border_bottom.color),
+                    border_color_to_db(format.border_left.color)
                 ]).map_err(|e| e.to_string())?;
             }
         }
@@ -663,7 +744,7 @@ pub fn save_workbook_with_metadata(
         ).map_err(|e| e.to_string())?;
 
         let mut cell_stmt = conn.prepare(
-            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
+            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
         ).map_err(|e| e.to_string())?;
 
         for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
@@ -714,7 +795,17 @@ pub fn save_workbook_with_metadata(
                     format.font_family.as_deref(),
                     thousands,
                     negative,
-                    currency_symbol
+                    currency_symbol,
+                    // Border styles
+                    border_style_to_db(format.border_top.style),
+                    border_style_to_db(format.border_right.style),
+                    border_style_to_db(format.border_bottom.style),
+                    border_style_to_db(format.border_left.style),
+                    // Border colors
+                    border_color_to_db(format.border_top.color),
+                    border_color_to_db(format.border_right.color),
+                    border_color_to_db(format.border_bottom.color),
+                    border_color_to_db(format.border_left.color)
                 ]).map_err(|e| e.to_string())?;
             }
         }
@@ -838,7 +929,9 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
             "SELECT sheet_idx, row, col, value_type, value_num, value_text, \
              fmt_bold, fmt_italic, fmt_underline, fmt_alignment, \
              fmt_number_type, fmt_decimals, fmt_font_family, \
-             fmt_thousands, fmt_negative, fmt_currency_symbol \
+             fmt_thousands, fmt_negative, fmt_currency_symbol, \
+             fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, \
+             fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color \
              FROM cells ORDER BY sheet_idx, row, col"
         ).map_err(|e| e.to_string())?;
 
@@ -860,6 +953,16 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
                 row.get::<_, i32>(13).unwrap_or(0), // fmt_thousands
                 row.get::<_, i32>(14).unwrap_or(0), // fmt_negative
                 row.get::<_, Option<String>>(15)?,  // fmt_currency_symbol
+                // Border styles (columns may not exist in old files)
+                row.get::<_, i32>(16).unwrap_or(0), // fmt_border_top
+                row.get::<_, i32>(17).unwrap_or(0), // fmt_border_right
+                row.get::<_, i32>(18).unwrap_or(0), // fmt_border_bottom
+                row.get::<_, i32>(19).unwrap_or(0), // fmt_border_left
+                // Border colors
+                row.get::<_, Option<i64>>(20).ok().flatten(), // fmt_border_top_color
+                row.get::<_, Option<i64>>(21).ok().flatten(), // fmt_border_right_color
+                row.get::<_, Option<i64>>(22).ok().flatten(), // fmt_border_bottom_color
+                row.get::<_, Option<i64>>(23).ok().flatten(), // fmt_border_left_color
             ))
         }).map_err(|e| e.to_string())?;
 
@@ -867,7 +970,10 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
             let (sheet_idx, row, col, value_type, value_num, value_text,
                  bold, italic, underline, alignment,
                  number_type, decimals, font_family,
-                 thousands, negative, currency_symbol) = row_result.map_err(|e| e.to_string())?;
+                 thousands, negative, currency_symbol,
+                 border_top_style, border_right_style, border_bottom_style, border_left_style,
+                 border_top_color, border_right_color, border_bottom_color, border_left_color
+            ) = row_result.map_err(|e| e.to_string())?;
 
             // Ensure sheet exists
             while sheets.len() <= sheet_idx {
@@ -899,6 +1005,10 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
                 alignment: alignment_from_db(alignment),
                 number_format: build_number_format(number_type, decimals, thousands != 0, negative, currency_symbol),
                 font_family,
+                border_top: border_from_db(border_top_style, border_top_color),
+                border_right: border_from_db(border_right_style, border_right_color),
+                border_bottom: border_from_db(border_bottom_style, border_bottom_color),
+                border_left: border_from_db(border_left_style, border_left_color),
                 ..Default::default()
             };
 
@@ -1622,16 +1732,20 @@ mod tests {
         {
             let conn = Connection::open(path).unwrap();
             let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-            assert_eq!(version, 1);
+            assert_eq!(version, 2);  // Both v1 and v2 migrations run
 
             let columns: Vec<String> = conn
                 .prepare("PRAGMA table_info(cells)").unwrap()
                 .query_map([], |row| row.get::<_, String>(1)).unwrap()
                 .filter_map(|r| r.ok())
                 .collect();
+            // v1 migration columns
             assert!(columns.contains(&"fmt_thousands".to_string()));
             assert!(columns.contains(&"fmt_negative".to_string()));
             assert!(columns.contains(&"fmt_currency_symbol".to_string()));
+            // v2 migration columns (borders)
+            assert!(columns.contains(&"fmt_border_top".to_string()));
+            assert!(columns.contains(&"fmt_border_top_color".to_string()));
         }
     }
 
@@ -1995,5 +2109,111 @@ mod tests {
             Some(&current_fingerprint),
             "Modified file should show drift - fingerprints should NOT match"
         );
+    }
+
+    // ========================================================================
+    // Border persistence tests
+    // ========================================================================
+
+    #[test]
+    fn test_border_color_roundtrip_preserves_rgba() {
+        // Set border with explicit RGBA color → save → load → exact same color comes back
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        let mut workbook = Workbook::new();
+        let red_border = CellBorder {
+            style: BorderStyle::Thin,
+            color: Some([0xFF, 0x00, 0x00, 0xFF]), // Pure red
+        };
+        let teal_border = CellBorder {
+            style: BorderStyle::Thin,
+            color: Some([0x00, 0x99, 0x99, 0xFF]), // Teal
+        };
+        workbook.active_sheet_mut().set_borders(0, 0, red_border, red_border, red_border, red_border);
+        workbook.active_sheet_mut().set_borders(1, 1, teal_border, teal_border, teal_border, teal_border);
+
+        save_workbook(&workbook, path).expect("Save should succeed");
+        let loaded = load_workbook(path).expect("Load should succeed");
+
+        // Verify red border preserved exactly
+        let fmt0 = loaded.active_sheet().get_format(0, 0);
+        assert_eq!(fmt0.border_top.style, BorderStyle::Thin);
+        assert_eq!(fmt0.border_top.color, Some([0xFF, 0x00, 0x00, 0xFF]));
+        assert_eq!(fmt0.border_right.color, Some([0xFF, 0x00, 0x00, 0xFF]));
+        assert_eq!(fmt0.border_bottom.color, Some([0xFF, 0x00, 0x00, 0xFF]));
+        assert_eq!(fmt0.border_left.color, Some([0xFF, 0x00, 0x00, 0xFF]));
+
+        // Verify teal border preserved exactly
+        let fmt1 = loaded.active_sheet().get_format(1, 1);
+        assert_eq!(fmt1.border_top.color, Some([0x00, 0x99, 0x99, 0xFF]));
+    }
+
+    #[test]
+    fn test_border_auto_none_survives_roundtrip() {
+        // Set Auto (None) border → save/load → still None (no accidental literal theme color)
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        let mut workbook = Workbook::new();
+        // Set a border with no color (Auto/theme default)
+        let auto_border = CellBorder {
+            style: BorderStyle::Thin,
+            color: None, // Auto = use theme default
+        };
+        workbook.active_sheet_mut().set_borders(0, 0, auto_border, auto_border, auto_border, auto_border);
+
+        save_workbook(&workbook, path).expect("Save should succeed");
+        let loaded = load_workbook(path).expect("Load should succeed");
+
+        // Verify None is preserved, not converted to a literal color
+        let fmt = loaded.active_sheet().get_format(0, 0);
+        assert_eq!(fmt.border_top.style, BorderStyle::Thin);
+        assert_eq!(fmt.border_top.color, None, "Auto border color should remain None after round-trip");
+        assert_eq!(fmt.border_right.color, None);
+        assert_eq!(fmt.border_bottom.color, None);
+        assert_eq!(fmt.border_left.color, None);
+    }
+
+    #[test]
+    fn test_border_style_none_has_no_color() {
+        // BorderStyle::None should not store a color
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        let mut workbook = Workbook::new();
+        // Cell with no borders (default)
+        workbook.active_sheet_mut().set_value(0, 0, "test");
+
+        save_workbook(&workbook, path).expect("Save should succeed");
+        let loaded = load_workbook(path).expect("Load should succeed");
+
+        let fmt = loaded.active_sheet().get_format(0, 0);
+        assert_eq!(fmt.border_top.style, BorderStyle::None);
+        assert_eq!(fmt.border_top.color, None);
+    }
+
+    #[test]
+    fn test_border_mixed_colors_per_edge() {
+        // Different colors on different edges should all persist
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        let mut workbook = Workbook::new();
+        let red = CellBorder { style: BorderStyle::Thin, color: Some([0xFF, 0x00, 0x00, 0xFF]) };
+        let blue = CellBorder { style: BorderStyle::Thin, color: Some([0x00, 0x00, 0xFF, 0xFF]) };
+        let green = CellBorder { style: BorderStyle::Thin, color: Some([0x00, 0xFF, 0x00, 0xFF]) };
+        let black = CellBorder { style: BorderStyle::Thin, color: Some([0x00, 0x00, 0x00, 0xFF]) };
+
+        workbook.active_sheet_mut().set_borders(0, 0, red, blue, green, black);
+
+        save_workbook(&workbook, path).expect("Save should succeed");
+        let loaded = load_workbook(path).expect("Load should succeed");
+
+        let fmt = loaded.active_sheet().get_format(0, 0);
+        assert_eq!(fmt.border_top.color, Some([0xFF, 0x00, 0x00, 0xFF]), "Top should be red");
+        assert_eq!(fmt.border_right.color, Some([0x00, 0x00, 0xFF, 0xFF]), "Right should be blue");
+        assert_eq!(fmt.border_bottom.color, Some([0x00, 0xFF, 0x00, 0xFF]), "Bottom should be green");
+        assert_eq!(fmt.border_left.color, Some([0x00, 0x00, 0x00, 0xFF]), "Left should be black");
     }
 }
