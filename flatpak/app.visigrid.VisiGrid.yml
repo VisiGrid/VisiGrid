@@ -1,0 +1,116 @@
+app-id: app.visigrid.VisiGrid
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: visigrid
+separate-locales: false
+
+finish-args:
+  # GPU access (Vulkan via Blade)
+  - --device=dri
+  # Display protocols
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # File access for opening/saving spreadsheets
+  - --filesystem=home
+  # Network (for VisiHub sync — remove if not needed)
+  - --share=network
+
+modules:
+  - name: visigrid
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 visigrid ${FLATPAK_DEST}/bin/visigrid
+      - install -Dm755 visigrid-cli ${FLATPAK_DEST}/bin/visigrid-cli
+
+      # Desktop file (rename to match Flatpak ID)
+      - install -Dm644 visigrid.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - desktop-file-edit --set-key="Exec" --set-value="visigrid %F" ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - desktop-file-edit --set-key="Icon" --set-value="${FLATPAK_ID}" ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+
+      # Icons
+      - install -Dm644 visigrid.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      - install -Dm644 icon-512.png ${FLATPAK_DEST}/share/icons/hicolor/512x512/apps/${FLATPAK_ID}.png
+      - install -Dm644 icon-256.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/${FLATPAK_ID}.png
+      - install -Dm644 icon-128.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/${FLATPAK_ID}.png
+      - install -Dm644 icon-64.png ${FLATPAK_DEST}/share/icons/hicolor/64x64/apps/${FLATPAK_ID}.png
+      - install -Dm644 icon-32.png ${FLATPAK_DEST}/share/icons/hicolor/32x32/apps/${FLATPAK_ID}.png
+      - install -Dm644 icon-16.png ${FLATPAK_DEST}/share/icons/hicolor/16x16/apps/${FLATPAK_ID}.png
+
+      # Metainfo
+      - install -Dm644 app.visigrid.VisiGrid.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+
+      # License
+      - install -Dm644 LICENSE ${FLATPAK_DEST}/share/licenses/${FLATPAK_ID}/LICENSE
+
+    sources:
+      # Linux x86_64 binary from GitHub Releases
+      # TODO: Fill in sha256 from actual release artifact
+      - type: archive
+        url: https://github.com/VisiGrid/VisiGrid/releases/download/v0.5.8/VisiGrid-linux-x86_64.tar.gz
+        sha256: FILL_IN_SHA256
+        strip-components: 1
+        only-arches:
+          - x86_64
+        x-checker-data:
+          type: json
+          url: https://api.github.com/repos/VisiGrid/VisiGrid/releases/latest
+          version-query: .tag_name
+          url-query: '.assets[] | select(.name=="VisiGrid-linux-x86_64.tar.gz") | .browser_download_url'
+          is-main-source: true
+
+      # Linux aarch64 binary from GitHub Releases
+      # TODO: Fill in sha256 from actual release artifact
+      - type: archive
+        url: https://github.com/VisiGrid/VisiGrid/releases/download/v0.5.8/VisiGrid-linux-aarch64.tar.gz
+        sha256: FILL_IN_SHA256
+        strip-components: 1
+        only-arches:
+          - aarch64
+        x-checker-data:
+          type: json
+          url: https://api.github.com/repos/VisiGrid/VisiGrid/releases/latest
+          version-query: .tag_name
+          url-query: '.assets[] | select(.name=="VisiGrid-linux-aarch64.tar.gz") | .browser_download_url'
+
+      # SVG icon (not in tarball)
+      - type: file
+        url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/assets/visigrid.svg
+        sha256: FILL_IN_SHA256
+        dest-filename: visigrid.svg
+
+      # Icons (not in tarball)
+      - type: file
+        url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-512.png
+        sha256: FILL_IN_SHA256
+        dest-filename: icon-512.png
+      - type: file
+        url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-256.png
+        sha256: FILL_IN_SHA256
+        dest-filename: icon-256.png
+      - type: file
+        url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-128.png
+        sha256: FILL_IN_SHA256
+        dest-filename: icon-128.png
+      - type: file
+        url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-64.png
+        sha256: FILL_IN_SHA256
+        dest-filename: icon-64.png
+      - type: file
+        url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-32.png
+        sha256: FILL_IN_SHA256
+        dest-filename: icon-32.png
+      - type: file
+        url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-16.png
+        sha256: FILL_IN_SHA256
+        dest-filename: icon-16.png
+
+      # Metainfo and license
+      - type: file
+        url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/flatpak/app.visigrid.VisiGrid.metainfo.xml
+        sha256: FILL_IN_SHA256
+      - type: file
+        url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/LICENSE
+        sha256: FILL_IN_SHA256
+        dest-filename: LICENSE
