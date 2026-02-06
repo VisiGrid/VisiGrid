@@ -128,14 +128,21 @@ pub enum LuaOp {
         col: u32,
         formula: String,
     },
+    /// Set cell style on a range (format-only, no recalc needed)
+    SetCellStyle {
+        r1: u32, c1: u32,  // top-left (0-indexed)
+        r2: u32, c2: u32,  // bottom-right (0-indexed)
+        style: u8,          // CellStyle::to_int() value
+    },
 }
 
 impl LuaOp {
-    /// Get the cell key this operation affects
+    /// Get the cell key this operation affects (top-left for range ops)
     pub fn cell_key(&self) -> CellKey {
         match self {
             LuaOp::SetValue { row, col, .. } => CellKey::new(*row, *col),
             LuaOp::SetFormula { row, col, .. } => CellKey::new(*row, *col),
+            LuaOp::SetCellStyle { r1, c1, .. } => CellKey::new(*r1, *c1),
         }
     }
 }

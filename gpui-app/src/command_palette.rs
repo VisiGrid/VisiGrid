@@ -68,6 +68,15 @@ impl Spreadsheet {
         }
     }
 
+    /// Open command palette with a pre-filled query string.
+    /// Used by inspector to link to style commands, etc.
+    pub fn open_command_palette_with_prefill(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.show_palette_with_scope(None, cx);
+        self.palette_query = query.to_string();
+        self.update_palette_results(cx);
+        cx.notify();
+    }
+
     /// Open palette scoped to recent files (Ctrl+K / Cmd+K)
     pub fn show_quick_open(&mut self, cx: &mut Context<Self>) {
         self.show_palette_with_scope(Some(PaletteScope::QuickOpen), cx);

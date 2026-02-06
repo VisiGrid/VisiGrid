@@ -4,7 +4,7 @@
 //! and merge/unmerge cell operations.
 
 use gpui::*;
-use visigrid_engine::cell::{Alignment, CellBorder, CellFormat, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, CellBorder, CellFormat, CellStyle, NumberFormat, TextOverflow, VerticalAlignment};
 use visigrid_engine::sheet::MergedRegion;
 
 use crate::app::{Spreadsheet, TriState, SelectionFormatState};
@@ -61,6 +61,7 @@ impl Spreadsheet {
                         state.background_color = TriState::Uniform(format.background_color);
                         state.font_size = TriState::Uniform(format.font_size);
                         state.font_color = TriState::Uniform(format.font_color);
+                        state.cell_style = TriState::Uniform(format.cell_style);
                         last_display = Some(display);
                         first = false;
                     } else {
@@ -77,6 +78,7 @@ impl Spreadsheet {
                         state.background_color = state.background_color.combine(&format.background_color);
                         state.font_size = state.font_size.combine(&format.font_size);
                         state.font_color = state.font_color.combine(&format.font_color);
+                        state.cell_style = state.cell_style.combine(&format.cell_style);
                         last_display = Some(display);
                     }
                 }
@@ -511,6 +513,34 @@ impl Spreadsheet {
         if count > 0 {
             let desc = if color.is_some() { "Text color" } else { "Clear text color" };
             self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::FontColor, desc.to_string());
+            self.is_modified = true;
+            self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    pub fn set_cell_style_selection(&mut self, style: CellStyle, cx: &mut Context<Self>) {
+        let mut patches = Vec::new();
+        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let before = self.sheet(cx).get_format(row, col);
+                    self.active_sheet_mut(cx, |s| s.set_cell_style(row, col, style));
+                    let after = self.sheet(cx).get_format(row, col);
+                    if before != after {
+                        patches.push(CellFormatPatch { row, col, before, after });
+                    }
+                }
+            }
+        }
+        let count = patches.len();
+        if count > 0 {
+            let desc = if style.is_none() {
+                "Clear cell style".to_string()
+            } else {
+                format!("Cell Style: {}", style.label())
+            };
+            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::CellStyle, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }

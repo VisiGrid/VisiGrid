@@ -529,9 +529,37 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
 
     // Apply operations if any (single undo entry for all)
     if result.has_mutations() {
-        let changes = apply_lua_ops(app, sheet_index, &result.ops, cx);
-        if !changes.is_empty() {
+        let (changes, format_patches) = apply_lua_ops(app, sheet_index, &result.ops, cx);
+        let has_values = !changes.is_empty();
+        let has_formats = !format_patches.is_empty();
+
+        if has_values && has_formats {
+            // Both value and format changes: group into single undo step
+            use crate::history::{UndoAction, FormatActionKind};
+            let group = UndoAction::Group {
+                actions: vec![
+                    UndoAction::Values { sheet_index, changes },
+                    UndoAction::Format {
+                        sheet_index,
+                        patches: format_patches,
+                        kind: FormatActionKind::CellStyle,
+                        description: "Lua: set cell styles".into(),
+                    },
+                ],
+                description: "Lua script".into(),
+            };
+            app.history.record_action_with_provenance(group, None);
+            app.is_modified = true;
+        } else if has_values {
             app.history.record_batch(sheet_index, changes);
+            app.is_modified = true;
+        } else if has_formats {
+            app.history.record_format(
+                sheet_index,
+                format_patches,
+                crate::history::FormatActionKind::CellStyle,
+                "Lua: set cell styles".into(),
+            );
             app.is_modified = true;
         }
     }
@@ -550,21 +578,25 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
 
 /// Apply Lua operations to the sheet and return undo changes.
 /// Uses batched, tracked mutations so dependents recalculate once at the end.
+/// Returns (value_changes, format_patches) for separate undo tracking.
 fn apply_lua_ops(
     app: &mut Spreadsheet,
     sheet_index: usize,
     ops: &[LuaOp],
     cx: &mut gpui::Context<Spreadsheet>,
-) -> Vec<crate::history::CellChange> {
+) -> (Vec<crate::history::CellChange>, Vec<crate::history::CellFormatPatch>) {
     use crate::history::CellChange;
+    use crate::history::CellFormatPatch;
+    use visigrid_engine::cell::CellStyle;
 
     if ops.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     app.workbook.update(cx, |wb, _| {
         let mut guard = wb.batch_guard();
         let mut changes = Vec::new();
+        let mut format_patches = Vec::new();
 
         for op in ops {
             match op {
@@ -603,10 +635,29 @@ fn apply_lua_ops(
                         new_value: formula.clone(),
                     });
                 }
+                LuaOp::SetCellStyle { r1, c1, r2, c2, style } => {
+                    let cell_style = CellStyle::from_int(*style as i32);
+                    for row in (*r1 as usize)..=(*r2 as usize) {
+                        for col in (*c1 as usize)..=(*c2 as usize) {
+                            let before = guard.sheet(sheet_index)
+                                .map(|s| s.get_format(row, col))
+                                .unwrap_or_default();
+                            if let Some(s) = guard.sheet_mut(sheet_index) {
+                                s.set_cell_style(row, col, cell_style);
+                            }
+                            let after = guard.sheet(sheet_index)
+                                .map(|s| s.get_format(row, col))
+                                .unwrap_or_default();
+                            if before != after {
+                                format_patches.push(CellFormatPatch { row, col, before, after });
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        changes
+        (changes, format_patches)
     })
 }
 

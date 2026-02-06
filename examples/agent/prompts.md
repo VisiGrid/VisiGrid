@@ -184,6 +184,37 @@ grid.set{ sheet=1, cell="B5", value="=Sheet3!B9" }
 
 ---
 
+## Semantic Cell Styles (Interactive Console)
+
+The Lua console (`sheet:*` API) supports semantic cell styles. These convey **meaning**, not formatting — the theme resolves styles to colors. Agents should use these instead of painting explicit fill/font/borders.
+
+```lua
+-- Preferred: semantic styling
+sheet:input("B2:D10")
+sheet:total("A12:F12")
+sheet:error("E7")
+sheet:warning("C3:C5")
+sheet:success("D2")
+sheet:note("A1")
+
+-- General method (string name or constant)
+sheet:style("A1:C5", "Error")
+sheet:style("A1:C5", styles.Warning)
+
+-- Clear back to default
+sheet:clear_style("A1:C5")
+```
+
+**Available styles:** `Error`, `Warning`, `Success`, `Input`, `Total`, `Note`, `Default`
+
+**Constants table:** `styles.Error` (1), `styles.Warning` (2), `styles.Success` (3), `styles.Input` (4), `styles.Total` (5), `styles.Note` (6), `styles.Default` (0)
+
+**String aliases:** `"warn"` = Warning, `"ok"` = Success, `"totals"` = Total, `"none"` / `"clear"` = Default
+
+**Key rule:** `sheet:style()` sets `cell_style` only. It does NOT paint explicit fill/font/borders. Style is the base layer — the theme resolves it to visual properties.
+
+---
+
 ## Key Rules for All Prompts
 
 1. **Always use `--json` output** for parsing tool results
@@ -192,3 +223,4 @@ grid.set{ sheet=1, cell="B5", value="=Sheet3!B9" }
 4. **Style doesn't affect fingerprint** — format freely
 5. **Meta does affect fingerprint** — use it for semantic tagging
 6. **Use grid.* for multi-sheet** — default API only writes to Sheet1
+7. **Prefer semantic styles over formatting** — `sheet:error("A1")` over `style("A1", { bg = "red" })`

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
-use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, DateStyle, NegativeStyle, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, CellStyle, DateStyle, NegativeStyle, NumberFormat, TextOverflow, VerticalAlignment};
 use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS cells (
     fmt_border_right_color INTEGER,
     fmt_border_bottom_color INTEGER,
     fmt_border_left_color INTEGER,
+    fmt_cell_style INTEGER DEFAULT 0,
     PRIMARY KEY (sheet_idx, row, col)
 );
 
@@ -236,7 +237,7 @@ fn border_from_db(style: i32, color: Option<i64>) -> CellBorder {
 }
 
 /// Current schema version. Increment for each migration.
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 /// Run schema migrations for existing databases.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -265,6 +266,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             ALTER TABLE cells ADD COLUMN fmt_border_left_color INTEGER;
             PRAGMA user_version = 2;
         ")?;
+    }
+
+    if version < 4 {
+        conn.execute_batch(
+            "ALTER TABLE cells ADD COLUMN fmt_cell_style INTEGER DEFAULT 0;
+             PRAGMA user_version = 4;"
+        )?;
     }
 
     Ok(())
@@ -551,6 +559,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             border_right: CellBorder::default(),
             border_bottom: CellBorder::default(),
             border_left: CellBorder::default(),
+            cell_style: CellStyle::default(),
         };
         if !format.is_default() {
             sheet.set_format(row, col, format);
@@ -589,7 +598,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
         ).map_err(|e| e.to_string())?;
 
         let mut cell_stmt = conn.prepare(
-            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
+            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color, fmt_cell_style) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)"
         ).map_err(|e| e.to_string())?;
 
         for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
@@ -652,7 +661,9 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     border_color_to_db(format.border_top.color),
                     border_color_to_db(format.border_right.color),
                     border_color_to_db(format.border_bottom.color),
-                    border_color_to_db(format.border_left.color)
+                    border_color_to_db(format.border_left.color),
+                    // Cell style
+                    format.cell_style.to_int()
                 ]).map_err(|e| e.to_string())?;
             }
         }
@@ -744,7 +755,7 @@ pub fn save_workbook_with_metadata(
         ).map_err(|e| e.to_string())?;
 
         let mut cell_stmt = conn.prepare(
-            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
+            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color, fmt_cell_style) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)"
         ).map_err(|e| e.to_string())?;
 
         for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
@@ -805,7 +816,9 @@ pub fn save_workbook_with_metadata(
                     border_color_to_db(format.border_top.color),
                     border_color_to_db(format.border_right.color),
                     border_color_to_db(format.border_bottom.color),
-                    border_color_to_db(format.border_left.color)
+                    border_color_to_db(format.border_left.color),
+                    // Cell style
+                    format.cell_style.to_int()
                 ]).map_err(|e| e.to_string())?;
             }
         }
@@ -931,7 +944,8 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
              fmt_number_type, fmt_decimals, fmt_font_family, \
              fmt_thousands, fmt_negative, fmt_currency_symbol, \
              fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, \
-             fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color \
+             fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color, \
+             fmt_cell_style \
              FROM cells ORDER BY sheet_idx, row, col"
         ).map_err(|e| e.to_string())?;
 
@@ -963,6 +977,8 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
                 row.get::<_, Option<i64>>(21).ok().flatten(), // fmt_border_right_color
                 row.get::<_, Option<i64>>(22).ok().flatten(), // fmt_border_bottom_color
                 row.get::<_, Option<i64>>(23).ok().flatten(), // fmt_border_left_color
+                // Cell style
+                row.get::<_, i32>(24).unwrap_or(0),          // fmt_cell_style
             ))
         }).map_err(|e| e.to_string())?;
 
@@ -972,7 +988,8 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
                  number_type, decimals, font_family,
                  thousands, negative, currency_symbol,
                  border_top_style, border_right_style, border_bottom_style, border_left_style,
-                 border_top_color, border_right_color, border_bottom_color, border_left_color
+                 border_top_color, border_right_color, border_bottom_color, border_left_color,
+                 cell_style_int
             ) = row_result.map_err(|e| e.to_string())?;
 
             // Ensure sheet exists
@@ -1009,6 +1026,7 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
                 border_right: border_from_db(border_right_style, border_right_color),
                 border_bottom: border_from_db(border_bottom_style, border_bottom_color),
                 border_left: border_from_db(border_left_style, border_left_color),
+                cell_style: CellStyle::from_int(cell_style_int),
                 ..Default::default()
             };
 
@@ -1732,7 +1750,7 @@ mod tests {
         {
             let conn = Connection::open(path).unwrap();
             let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-            assert_eq!(version, 2);  // Both v1 and v2 migrations run
+            assert_eq!(version, 4);  // All migrations (v1, v2, v4) run
 
             let columns: Vec<String> = conn
                 .prepare("PRAGMA table_info(cells)").unwrap()
@@ -1746,6 +1764,8 @@ mod tests {
             // v2 migration columns (borders)
             assert!(columns.contains(&"fmt_border_top".to_string()));
             assert!(columns.contains(&"fmt_border_top_color".to_string()));
+            // v4 migration column (cell styles)
+            assert!(columns.contains(&"fmt_cell_style".to_string()));
         }
     }
 

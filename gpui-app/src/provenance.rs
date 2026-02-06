@@ -64,6 +64,7 @@ fn format_kind_hash_str(kind: &crate::history::FormatActionKind) -> &'static str
         FormatActionKind::Border => "border",
         FormatActionKind::PasteFormats => "paste_formats",
         FormatActionKind::ClearFormatting => "clear",
+        FormatActionKind::CellStyle => "cell_style",
     }
 }
 
@@ -571,6 +572,9 @@ fn format_to_lua(
         }
         FormatActionKind::ClearFormatting => {
             "format=default".to_string()
+        }
+        FormatActionKind::CellStyle => {
+            format!("cell_style=\"{}\"", first.after.cell_style.label())
         }
     };
 

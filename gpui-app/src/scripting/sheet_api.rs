@@ -235,6 +235,23 @@ impl DynOpSink {
         Ok(())
     }
 
+    /// Push a SetCellStyle range op.
+    /// Range coords are 1-indexed (Lua convention); converted to 0-indexed internally.
+    fn push_style_op(&mut self, r1: usize, c1: usize, r2: usize, c2: usize, style: u8) -> Result<(), String> {
+        self.check_ops_limit()?;
+        if r1 == 0 || c1 == 0 || r2 == 0 || c2 == 0 {
+            return Err("row and column must be >= 1".to_string());
+        }
+        self.ops.push(LuaOp::SetCellStyle {
+            r1: (r1 - 1) as u32,
+            c1: (c1 - 1) as u32,
+            r2: (r2 - 1) as u32,
+            c2: (c2 - 1) as u32,
+            style,
+        });
+        Ok(())
+    }
+
     /// Set formula at (row, col) - 1-indexed
     fn set_formula(&mut self, row: usize, col: usize, formula: String) -> Result<(), String> {
         self.check_ops_limit()?;
@@ -430,6 +447,69 @@ impl UserData for SheetUserData {
         });
 
         // ====================================================================
+        // style("A1:C5", "Error") -> set cell style on a range
+        // ====================================================================
+        methods.add_method("style", |_, this, (range_str, style_val): (String, Value)| {
+            let ((r1, c1), (r2, c2)) = parse_range(&range_str)
+                .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
+            let style = parse_style_arg(style_val)?;
+            this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, style)
+                .map_err(|e| mlua::Error::RuntimeError(e))
+        });
+
+        // ====================================================================
+        // Sugar aliases: sheet:error("A1:C5"), sheet:warning("A1:C5"), etc.
+        // ====================================================================
+        methods.add_method("error", |_, this, range_str: String| {
+            let ((r1, c1), (r2, c2)) = parse_range(&range_str)
+                .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
+            this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 1)
+                .map_err(|e| mlua::Error::RuntimeError(e))
+        });
+
+        methods.add_method("warning", |_, this, range_str: String| {
+            let ((r1, c1), (r2, c2)) = parse_range(&range_str)
+                .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
+            this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 2)
+                .map_err(|e| mlua::Error::RuntimeError(e))
+        });
+
+        methods.add_method("success", |_, this, range_str: String| {
+            let ((r1, c1), (r2, c2)) = parse_range(&range_str)
+                .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
+            this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 3)
+                .map_err(|e| mlua::Error::RuntimeError(e))
+        });
+
+        methods.add_method("input", |_, this, range_str: String| {
+            let ((r1, c1), (r2, c2)) = parse_range(&range_str)
+                .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
+            this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 4)
+                .map_err(|e| mlua::Error::RuntimeError(e))
+        });
+
+        methods.add_method("total", |_, this, range_str: String| {
+            let ((r1, c1), (r2, c2)) = parse_range(&range_str)
+                .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
+            this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 5)
+                .map_err(|e| mlua::Error::RuntimeError(e))
+        });
+
+        methods.add_method("note", |_, this, range_str: String| {
+            let ((r1, c1), (r2, c2)) = parse_range(&range_str)
+                .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
+            this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 6)
+                .map_err(|e| mlua::Error::RuntimeError(e))
+        });
+
+        methods.add_method("clear_style", |_, this, range_str: String| {
+            let ((r1, c1), (r2, c2)) = parse_range(&range_str)
+                .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
+            this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 0)
+                .map_err(|e| mlua::Error::RuntimeError(e))
+        });
+
+        // ====================================================================
         // range("A1:C5") -> Range object for bulk operations
         // ====================================================================
         methods.add_method("range", |_, this, range_str: String| {
@@ -545,6 +625,43 @@ impl UserData for RangeUserData {
 // Type conversion helpers
 // ============================================================================
 
+/// Parse a Lua value as a cell style identifier (string name or integer constant).
+/// Returns the u8 style code (0-6).
+fn parse_style_arg(val: Value) -> Result<u8, mlua::Error> {
+    match val {
+        Value::Integer(i) => {
+            let i = i as i32;
+            if !(0..=6).contains(&i) {
+                return Err(mlua::Error::RuntimeError(format!("Unknown style id: {}. Valid: 0-6", i)));
+            }
+            Ok(i as u8)
+        }
+        Value::Number(n) => {
+            let i = n as i32;
+            if !(0..=6).contains(&i) {
+                return Err(mlua::Error::RuntimeError(format!("Unknown style id: {}. Valid: 0-6", i)));
+            }
+            Ok(i as u8)
+        }
+        Value::String(s) => {
+            let s = s.to_str().map_err(|_| mlua::Error::RuntimeError("Invalid UTF-8 in style name".into()))?;
+            match s.to_lowercase().as_str() {
+                "error" => Ok(1),
+                "warning" | "warn" => Ok(2),
+                "success" | "ok" => Ok(3),
+                "input" => Ok(4),
+                "total" | "totals" => Ok(5),
+                "note" => Ok(6),
+                "default" | "none" | "clear" => Ok(0),
+                other => Err(mlua::Error::RuntimeError(format!(
+                    "Unknown style: '{}'. Valid: error, warning, success, input, total, note, default", other
+                ))),
+            }
+        }
+        _ => Err(mlua::Error::RuntimeError("style must be a string or integer".into())),
+    }
+}
+
 /// Convert LuaCellValue to mlua Value (requires Lua context for strings)
 fn cell_value_to_lua(lua: &Lua, value: LuaCellValue) -> LuaResult<Value> {
     match value {
@@ -592,6 +709,7 @@ pub fn register_sheet_global(lua: &Lua, reader: Box<dyn SheetReader>) -> LuaResu
     let userdata = SheetUserData::new(sink.clone());
 
     lua.globals().set("sheet", userdata)?;
+    register_styles_table(lua)?;
 
     Ok(sink)
 }
@@ -608,8 +726,23 @@ pub fn register_sheet_global_with_selection(
     let userdata = SheetUserData::new(sink.clone());
 
     lua.globals().set("sheet", userdata)?;
+    register_styles_table(lua)?;
 
     Ok(sink)
+}
+
+/// Register the `styles` constant table as a Lua global.
+fn register_styles_table(lua: &Lua) -> LuaResult<()> {
+    let styles = lua.create_table()?;
+    styles.set("Default", 0)?;
+    styles.set("Error", 1)?;
+    styles.set("Warning", 2)?;
+    styles.set("Success", 3)?;
+    styles.set("Input", 4)?;
+    styles.set("Total", 5)?;
+    styles.set("Note", 6)?;
+    lua.globals().set("styles", styles)?;
+    Ok(())
 }
 
 // ============================================================================

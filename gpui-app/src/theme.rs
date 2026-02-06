@@ -115,6 +115,22 @@ pub enum TokenKey {
 
     // User-defined cell borders
     UserBorder,            // Color for user-applied cell borders (themeable)
+
+    // Cell styles (conditional formatting presets)
+    CellStyleErrorBg,
+    CellStyleErrorText,
+    CellStyleErrorBorder,
+    CellStyleWarningBg,
+    CellStyleWarningText,
+    CellStyleWarningBorder,
+    CellStyleSuccessBg,
+    CellStyleSuccessText,
+    CellStyleSuccessBorder,
+    CellStyleInputBg,
+    CellStyleInputBorder,
+    CellStyleTotalBorder,
+    CellStyleNoteBg,
+    CellStyleNoteText,
 }
 
 impl TokenKey {
@@ -206,6 +222,21 @@ impl TokenKey {
         TokenKey::TraceSourceBorder,
         // User-defined cell borders
         TokenKey::UserBorder,
+        // Cell styles
+        TokenKey::CellStyleErrorBg,
+        TokenKey::CellStyleErrorText,
+        TokenKey::CellStyleErrorBorder,
+        TokenKey::CellStyleWarningBg,
+        TokenKey::CellStyleWarningText,
+        TokenKey::CellStyleWarningBorder,
+        TokenKey::CellStyleSuccessBg,
+        TokenKey::CellStyleSuccessText,
+        TokenKey::CellStyleSuccessBorder,
+        TokenKey::CellStyleInputBg,
+        TokenKey::CellStyleInputBorder,
+        TokenKey::CellStyleTotalBorder,
+        TokenKey::CellStyleNoteBg,
+        TokenKey::CellStyleNoteText,
     ];
 }
 
@@ -414,6 +445,22 @@ pub fn ledger_dark_theme() -> Theme {
     // User-defined cell borders
     tokens.insert(TokenKey::UserBorder, rgb(0xd6d9e0));  // Light text color (visible on dark bg)
 
+    // Cell styles
+    tokens.insert(TokenKey::CellStyleErrorBg, rgb(0x3B1210));
+    tokens.insert(TokenKey::CellStyleErrorText, rgb(0xFDA29B));
+    tokens.insert(TokenKey::CellStyleErrorBorder, rgb(0xF04438));
+    tokens.insert(TokenKey::CellStyleWarningBg, rgb(0x3A2A0A));
+    tokens.insert(TokenKey::CellStyleWarningText, rgb(0xFEC84B));
+    tokens.insert(TokenKey::CellStyleWarningBorder, rgb(0xFDB022));
+    tokens.insert(TokenKey::CellStyleSuccessBg, rgb(0x0F2F22));
+    tokens.insert(TokenKey::CellStyleSuccessText, rgb(0x6CE9A6));
+    tokens.insert(TokenKey::CellStyleSuccessBorder, rgb(0x32D583));
+    tokens.insert(TokenKey::CellStyleInputBg, rgb(0x0B2A3F));
+    tokens.insert(TokenKey::CellStyleInputBorder, rgb(0x53B1FD));
+    tokens.insert(TokenKey::CellStyleTotalBorder, rgb(0xEAECF0));
+    tokens.insert(TokenKey::CellStyleNoteBg, rgb(0x1F2933));
+    tokens.insert(TokenKey::CellStyleNoteText, rgb(0xD0D5DD));
+
     Theme {
         meta: ThemeMeta {
             id: "ledger-dark",
@@ -540,6 +587,22 @@ pub fn slate_dark_theme() -> Theme {
 
     // User-defined cell borders
     tokens.insert(TokenKey::UserBorder, grid_200);  // Light text (visible on dark bg)
+
+    // Cell styles
+    tokens.insert(TokenKey::CellStyleErrorBg, rgb(0x3B1210));
+    tokens.insert(TokenKey::CellStyleErrorText, rgb(0xFDA29B));
+    tokens.insert(TokenKey::CellStyleErrorBorder, rgb(0xF04438));
+    tokens.insert(TokenKey::CellStyleWarningBg, rgb(0x3A2A0A));
+    tokens.insert(TokenKey::CellStyleWarningText, rgb(0xFEC84B));
+    tokens.insert(TokenKey::CellStyleWarningBorder, rgb(0xFDB022));
+    tokens.insert(TokenKey::CellStyleSuccessBg, rgb(0x0F2F22));
+    tokens.insert(TokenKey::CellStyleSuccessText, rgb(0x6CE9A6));
+    tokens.insert(TokenKey::CellStyleSuccessBorder, rgb(0x32D583));
+    tokens.insert(TokenKey::CellStyleInputBg, rgb(0x0B2A3F));
+    tokens.insert(TokenKey::CellStyleInputBorder, rgb(0x53B1FD));
+    tokens.insert(TokenKey::CellStyleTotalBorder, rgb(0xEAECF0));
+    tokens.insert(TokenKey::CellStyleNoteBg, rgb(0x1F2933));
+    tokens.insert(TokenKey::CellStyleNoteText, rgb(0xD0D5DD));
 
     Theme {
         meta: ThemeMeta {
@@ -681,6 +744,22 @@ pub fn ledger_light_theme() -> Theme {
     // User-defined cell borders
     tokens.insert(TokenKey::UserBorder, rgb(0x000000));  // Black (standard on light bg)
 
+    // Cell styles
+    tokens.insert(TokenKey::CellStyleErrorBg, rgb(0xFEE4E2));
+    tokens.insert(TokenKey::CellStyleErrorText, rgb(0xB42318));
+    tokens.insert(TokenKey::CellStyleErrorBorder, rgb(0xD92D20));
+    tokens.insert(TokenKey::CellStyleWarningBg, rgb(0xFEF0C7));
+    tokens.insert(TokenKey::CellStyleWarningText, rgb(0xB54708));
+    tokens.insert(TokenKey::CellStyleWarningBorder, rgb(0xF79009));
+    tokens.insert(TokenKey::CellStyleSuccessBg, rgb(0xECFDF3));
+    tokens.insert(TokenKey::CellStyleSuccessText, rgb(0x067647));
+    tokens.insert(TokenKey::CellStyleSuccessBorder, rgb(0x12B76A));
+    tokens.insert(TokenKey::CellStyleInputBg, rgb(0xEFF8FF));
+    tokens.insert(TokenKey::CellStyleInputBorder, rgb(0x2E90FA));
+    tokens.insert(TokenKey::CellStyleTotalBorder, rgb(0x101828));
+    tokens.insert(TokenKey::CellStyleNoteBg, rgb(0xF9FAFB));
+    tokens.insert(TokenKey::CellStyleNoteText, rgb(0x475467));
+
     Theme {
         meta: ThemeMeta {
             id: "ledger-light",
@@ -800,6 +879,22 @@ pub fn visicalc_theme() -> Theme {
 
     // User-defined cell borders
     tokens.insert(TokenKey::UserBorder, green);  // Green (consistent with retro style)
+
+    // Cell styles (light theme colors)
+    tokens.insert(TokenKey::CellStyleErrorBg, rgb(0xFEE4E2));
+    tokens.insert(TokenKey::CellStyleErrorText, rgb(0xB42318));
+    tokens.insert(TokenKey::CellStyleErrorBorder, rgb(0xD92D20));
+    tokens.insert(TokenKey::CellStyleWarningBg, rgb(0xFEF0C7));
+    tokens.insert(TokenKey::CellStyleWarningText, rgb(0xB54708));
+    tokens.insert(TokenKey::CellStyleWarningBorder, rgb(0xF79009));
+    tokens.insert(TokenKey::CellStyleSuccessBg, rgb(0xECFDF3));
+    tokens.insert(TokenKey::CellStyleSuccessText, rgb(0x067647));
+    tokens.insert(TokenKey::CellStyleSuccessBorder, rgb(0x12B76A));
+    tokens.insert(TokenKey::CellStyleInputBg, rgb(0xEFF8FF));
+    tokens.insert(TokenKey::CellStyleInputBorder, rgb(0x2E90FA));
+    tokens.insert(TokenKey::CellStyleTotalBorder, rgb(0x101828));
+    tokens.insert(TokenKey::CellStyleNoteBg, rgb(0xF9FAFB));
+    tokens.insert(TokenKey::CellStyleNoteText, rgb(0x475467));
 
     Theme {
         meta: ThemeMeta {
@@ -941,6 +1036,22 @@ pub fn catppuccin_theme() -> Theme {
 
     // User-defined cell borders (use text color, not pure black — softer on pastel palette)
     tokens.insert(TokenKey::UserBorder, text);
+
+    // Cell styles (dark theme colors)
+    tokens.insert(TokenKey::CellStyleErrorBg, rgb(0x3B1210));
+    tokens.insert(TokenKey::CellStyleErrorText, rgb(0xFDA29B));
+    tokens.insert(TokenKey::CellStyleErrorBorder, rgb(0xF04438));
+    tokens.insert(TokenKey::CellStyleWarningBg, rgb(0x3A2A0A));
+    tokens.insert(TokenKey::CellStyleWarningText, rgb(0xFEC84B));
+    tokens.insert(TokenKey::CellStyleWarningBorder, rgb(0xFDB022));
+    tokens.insert(TokenKey::CellStyleSuccessBg, rgb(0x0F2F22));
+    tokens.insert(TokenKey::CellStyleSuccessText, rgb(0x6CE9A6));
+    tokens.insert(TokenKey::CellStyleSuccessBorder, rgb(0x32D583));
+    tokens.insert(TokenKey::CellStyleInputBg, rgb(0x0B2A3F));
+    tokens.insert(TokenKey::CellStyleInputBorder, rgb(0x53B1FD));
+    tokens.insert(TokenKey::CellStyleTotalBorder, rgb(0xEAECF0));
+    tokens.insert(TokenKey::CellStyleNoteBg, rgb(0x1F2933));
+    tokens.insert(TokenKey::CellStyleNoteText, rgb(0xD0D5DD));
 
     Theme {
         meta: ThemeMeta {

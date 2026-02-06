@@ -99,6 +99,7 @@ pub enum FormatActionKind {
     Border,
     PasteFormats,  // Paste Special > Formats
     ClearFormatting,
+    CellStyle,
 }
 
 /// An undoable action

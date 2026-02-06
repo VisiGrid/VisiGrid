@@ -12,7 +12,7 @@ use crate::trace::TraceRole;
 use crate::workbook_view::WorkbookViewState;
 use super::headers::render_row_header;
 use super::formula_bar;
-use visigrid_engine::cell::{Alignment, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
 
 /// Create a non-interactive overlay div (absolute-positioned, full cell coverage).
@@ -478,6 +478,9 @@ fn render_cell(
     // Role-based auto-styling (from agent metadata)
     let role_style = app.get_cell_role_style(data_row, col);
 
+    // Semantic cell style (base layer — explicit formatting overrides per-property)
+    let cell_style = resolve_cell_style(app, format.cell_style);
+
     let value = if is_merge_hidden {
         String::new()
     } else if is_editing {
@@ -534,7 +537,7 @@ fn render_cell(
         .flex()
         .px_1()
         .overflow_hidden()  // Always clip; spill is rendered in overlay layer
-        .bg(cell_base_background_with_role(app, is_editing, format.background_color, role_style))
+        .bg(cell_base_background_with_role(app, is_editing, format.background_color, cell_style.fill, role_style))
         .border_color(border_color);
 
     // Add selection/formula-ref overlay (semi-transparent, layered on top of cell background)
@@ -766,8 +769,10 @@ fn render_cell(
         // so formula ref cells fall through here for normal gridline/user border handling
         let sheet_has_borders = app.sheet(cx).has_any_borders;
 
-        // Fast path: no gridlines and no borders on this sheet → skip all Tier 5 work
-        if !show_gridlines && !sheet_has_borders {
+        let has_cell_style_border = cell_style.border.is_some();
+
+        // Fast path: no gridlines, no borders, and no cell style border → skip all Tier 5 work
+        if !show_gridlines && !sheet_has_borders && !has_cell_style_border {
             cell
         } else {
             use visigrid_engine::cell::CellBorder;
@@ -843,6 +848,24 @@ fn render_cell(
                         .when(user_bottom, |d| d.border_b_1())
                         .when(user_left, |d| d.border_l_1())
                 );
+            }
+
+            // Cell style borders: render on edges where user hasn't set a border
+            if let Some(style_border_color) = cell_style.border {
+                let style_top = !user_top && (!cell_style.border_top_only || true);
+                let style_right = !user_right && !cell_style.border_top_only;
+                let style_bottom = !user_bottom && !cell_style.border_top_only;
+                let style_left = !user_left && !cell_style.border_top_only;
+                if style_top || style_right || style_bottom || style_left {
+                    c = c.child(
+                        non_interactive_overlay()
+                            .border_color(style_border_color)
+                            .when(style_top, |d| d.border_t_1())
+                            .when(style_right, |d| d.border_r_1())
+                            .when(style_bottom, |d| d.border_b_1())
+                            .when(style_left, |d| d.border_l_1())
+                    );
+                }
             }
             c
         }
@@ -1015,6 +1038,7 @@ fn render_cell(
             let role_has_formatting = role_style.map_or(false, |rs| {
                 rs.bold.is_some() || rs.italic.is_some() || rs.text_color.is_some()
             });
+            let style_has_formatting = cell_style.bold || cell_style.italic || cell_style.text.is_some();
             let has_formatting = format.bold
                 || format.italic
                 || format.underline
@@ -1022,7 +1046,8 @@ fn render_cell(
                 || format.font_family.is_some()
                 || format.font_size.is_some()
                 || format.font_color.is_some()
-                || role_has_formatting;
+                || role_has_formatting
+                || style_has_formatting;
 
             // Build styled text element if needed
             let text_element: AnyElement = if has_formatting {
@@ -1034,6 +1059,13 @@ fn render_cell(
                 if let Some(role_color) = role_style.and_then(|rs| rs.text_color) {
                     if !is_editing && !is_selected && !is_multi_edit_preview && format.font_color.is_none() {
                         text_style.color = role_color;
+                    }
+                }
+
+                // Cell style text color (overrides role, but format.font_color wins)
+                if let Some(style_color) = cell_style.text {
+                    if !is_editing && !is_selected && !is_multi_edit_preview && format.font_color.is_none() {
+                        text_style.color = style_color;
                     }
                 }
 
@@ -1051,11 +1083,11 @@ fn render_cell(
                     }
                 }
 
-                // Role bold (format.bold overrides)
-                if format.bold || role_style.map_or(false, |rs| rs.bold.unwrap_or(false)) {
+                // Bold: format.bold OR cell_style.bold OR role bold
+                if format.bold || cell_style.bold || role_style.map_or(false, |rs| rs.bold.unwrap_or(false)) {
                     text_style.font_weight = FontWeight::BOLD;
                 }
-                if format.italic {
+                if format.italic || cell_style.italic {
                     text_style.font_style = FontStyle::Italic;
                 }
                 if format.underline {
@@ -1690,42 +1722,115 @@ fn cell_base_background(
     app: &Spreadsheet,
     is_editing: bool,
     custom_bg: Option<[u8; 4]>,
+    cell_style_bg: Option<Hsla>,
 ) -> Hsla {
     if is_editing {
         app.token(TokenKey::EditorBg)
     } else if let Some([r, g, b, a]) = custom_bg {
-        // Custom background color from cell format (RGBA → Hsla)
         Hsla::from(gpui::Rgba {
             r: r as f32 / 255.0,
             g: g as f32 / 255.0,
             b: b as f32 / 255.0,
             a: a as f32 / 255.0,
         })
+    } else if let Some(bg) = cell_style_bg {
+        bg
     } else {
         app.token(TokenKey::CellBg)
     }
 }
 
+/// Resolved cell style properties from a semantic CellStyle.
+struct ResolvedCellStyle {
+    fill: Option<Hsla>,
+    text: Option<Hsla>,
+    border: Option<Hsla>,
+    border_top_only: bool,
+    bold: bool,
+    italic: bool,
+}
+
+impl ResolvedCellStyle {
+    fn none() -> Self {
+        Self { fill: None, text: None, border: None, border_top_only: false, bold: false, italic: false }
+    }
+}
+
+fn resolve_cell_style(app: &Spreadsheet, style: CellStyle) -> ResolvedCellStyle {
+    match style {
+        CellStyle::None => ResolvedCellStyle::none(),
+        CellStyle::Error => ResolvedCellStyle {
+            fill: Some(app.token(TokenKey::CellStyleErrorBg)),
+            text: Some(app.token(TokenKey::CellStyleErrorText)),
+            border: Some(app.token(TokenKey::CellStyleErrorBorder)),
+            border_top_only: false,
+            bold: false,
+            italic: false,
+        },
+        CellStyle::Warning => ResolvedCellStyle {
+            fill: Some(app.token(TokenKey::CellStyleWarningBg)),
+            text: Some(app.token(TokenKey::CellStyleWarningText)),
+            border: Some(app.token(TokenKey::CellStyleWarningBorder)),
+            border_top_only: false,
+            bold: false,
+            italic: false,
+        },
+        CellStyle::Success => ResolvedCellStyle {
+            fill: Some(app.token(TokenKey::CellStyleSuccessBg)),
+            text: Some(app.token(TokenKey::CellStyleSuccessText)),
+            border: Some(app.token(TokenKey::CellStyleSuccessBorder)),
+            border_top_only: false,
+            bold: false,
+            italic: false,
+        },
+        CellStyle::Input => ResolvedCellStyle {
+            fill: Some(app.token(TokenKey::CellStyleInputBg)),
+            text: None,
+            border: Some(app.token(TokenKey::CellStyleInputBorder)),
+            border_top_only: false,
+            bold: false,
+            italic: false,
+        },
+        CellStyle::Total => ResolvedCellStyle {
+            fill: None,
+            text: None,
+            border: Some(app.token(TokenKey::CellStyleTotalBorder)),
+            border_top_only: true,
+            bold: true,
+            italic: false,
+        },
+        CellStyle::Note => ResolvedCellStyle {
+            fill: Some(app.token(TokenKey::CellStyleNoteBg)),
+            text: Some(app.token(TokenKey::CellStyleNoteText)),
+            border: None,
+            border_top_only: false,
+            bold: false,
+            italic: true,
+        },
+    }
+}
+
 /// Returns the base background color for a cell, with role-based styling.
-/// Priority: is_editing > custom_bg > role_style > default
+/// Priority: is_editing > custom_bg > cell_style_bg > role_style > default
 fn cell_base_background_with_role(
     app: &Spreadsheet,
     is_editing: bool,
     custom_bg: Option<[u8; 4]>,
+    cell_style_bg: Option<Hsla>,
     role_style: Option<&crate::role_styles::RoleStyle>,
 ) -> Hsla {
     if is_editing {
         app.token(TokenKey::EditorBg)
     } else if let Some([r, g, b, a]) = custom_bg {
-        // Custom background color from cell format (RGBA → Hsla)
         Hsla::from(gpui::Rgba {
             r: r as f32 / 255.0,
             g: g as f32 / 255.0,
             b: b as f32 / 255.0,
             a: a as f32 / 255.0,
         })
+    } else if let Some(bg) = cell_style_bg {
+        bg
     } else if let Some(bg) = role_style.and_then(|rs| rs.background) {
-        // Role-based background color
         bg
     } else {
         app.token(TokenKey::CellBg)
@@ -2070,7 +2175,8 @@ fn render_merge_div(
 ) -> Stateful<Div> {
     let sheet = app.sheet(cx);
     let format = sheet.get_format(m.origin_row, m.origin_col);
-    let bg = cell_base_background(app, false, format.background_color);
+    let merge_cell_style = resolve_cell_style(app, format.cell_style);
+    let bg = cell_base_background(app, false, format.background_color, merge_cell_style.fill);
     let is_editing_this = editing && view_state.selected == (m.origin_row, m.origin_col);
 
     // 1. Background + position
@@ -2366,13 +2472,15 @@ fn render_merge_text(
     window: &Window,
 ) -> AnyElement {
     let text_content: SharedString = value.to_string().into();
+    let cs = resolve_cell_style(app, format.cell_style);
     let has_formatting = format.bold
         || format.italic
         || format.underline
         || format.strikethrough
         || format.font_family.is_some()
         || format.font_size.is_some()
-        || format.font_color.is_some();
+        || format.font_color.is_some()
+        || cs.bold || cs.italic || cs.text.is_some();
 
     let text_color = app.token(TokenKey::CellText);
 
@@ -2381,10 +2489,15 @@ fn render_merge_text(
         text_style.color = text_color;
         text_style.font_size = px(app.metrics.font_size).into();
 
-        if format.bold {
+        // Cell style text color (explicit font_color wins below)
+        if let Some(style_color) = cs.text {
+            text_style.color = style_color;
+        }
+
+        if format.bold || cs.bold {
             text_style.font_weight = FontWeight::BOLD;
         }
-        if format.italic {
+        if format.italic || cs.italic {
             text_style.font_style = FontStyle::Italic;
         }
         if format.underline {
@@ -2607,6 +2720,7 @@ fn render_text_spill_overlay(
             // This prevents double-draw when freeze panes render same cell in multiple quadrants
             // IMPORTANT: Use resolved_alignment to get the effective alignment (General → Left for text)
             let effective_alignment = resolved_alignment(format.alignment, is_number);
+            let spill_cs = resolve_cell_style(app, format.cell_style);
             spill_runs.entry((data_row, col)).or_insert(SpillRun {
                 x,
                 y,
@@ -2622,13 +2736,15 @@ fn render_text_spill_overlay(
                         b: rgba[2] as f32 / 255.0,
                         a: rgba[3] as f32 / 255.0,
                     })
+                } else if let Some(sc) = spill_cs.text {
+                    sc
                 } else {
                     cell_text
                 },
                 font_size: format.font_size.map(|s| s * metrics.zoom).unwrap_or(metrics.font_size),
                 alignment: effective_alignment,  // Resolved alignment for text positioning
-                bold: format.bold,
-                italic: format.italic,
+                bold: format.bold || spill_cs.bold,
+                italic: format.italic || spill_cs.italic,
                 underline: format.underline,
             });
         }

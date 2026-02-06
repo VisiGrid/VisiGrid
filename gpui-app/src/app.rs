@@ -458,7 +458,7 @@ pub enum FillDrag {
     },
 }
 
-use visigrid_engine::cell::{Alignment, CellBorder, NegativeStyle, VerticalAlignment, TextOverflow, NumberFormat, max_border};
+use visigrid_engine::cell::{Alignment, CellBorder, CellStyle, NegativeStyle, VerticalAlignment, TextOverflow, NumberFormat, max_border};
 
 /// Which context menu variant to display on right-click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,6 +509,7 @@ pub struct SelectionFormatState {
     pub background_color: TriState<Option<[u8; 4]>>,
     pub font_size: TriState<Option<f32>>,
     pub font_color: TriState<Option<[u8; 4]>>,
+    pub cell_style: TriState<CellStyle>,
     /// Active cell numeric value for preview (None if non-numeric or multi-cell)
     pub preview_value: Option<f64>,
 }
@@ -531,6 +532,7 @@ impl Default for SelectionFormatState {
             background_color: TriState::Empty,
             font_size: TriState::Empty,
             font_color: TriState::Empty,
+            cell_style: TriState::Empty,
             preview_value: None,
         }
     }
@@ -3778,6 +3780,16 @@ impl Spreadsheet {
             CommandId::BordersLeft => self.apply_borders(BorderApplyMode::Left, cx),
             CommandId::BordersRight => self.apply_borders(BorderApplyMode::Right, cx),
             CommandId::BordersClear => self.apply_borders(BorderApplyMode::Clear, cx),
+
+            // Cell styles
+            CommandId::StyleDefault => self.set_cell_style_selection(CellStyle::None, cx),
+            CommandId::StyleError => self.set_cell_style_selection(CellStyle::Error, cx),
+            CommandId::StyleWarning => self.set_cell_style_selection(CellStyle::Warning, cx),
+            CommandId::StyleSuccess => self.set_cell_style_selection(CellStyle::Success, cx),
+            CommandId::StyleInput => self.set_cell_style_selection(CellStyle::Input, cx),
+            CommandId::StyleTotal => self.set_cell_style_selection(CellStyle::Total, cx),
+            CommandId::StyleNote => self.set_cell_style_selection(CellStyle::Note, cx),
+            CommandId::StyleClear => self.set_cell_style_selection(CellStyle::None, cx),
 
             // File
             // NewWindow dispatches the action which propagates to App-level handler

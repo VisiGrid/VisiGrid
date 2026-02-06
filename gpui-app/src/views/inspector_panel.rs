@@ -6,7 +6,7 @@ use crate::mode::InspectorTab;
 use crate::theme::TokenKey;
 use crate::ui::popup;
 use visigrid_engine::formula::parser::{parse, extract_cell_refs};
-use visigrid_engine::cell::{Alignment, VerticalAlignment, TextOverflow, NumberFormat, DateStyle, NegativeStyle, CellValue};
+use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment, TextOverflow, NumberFormat, DateStyle, NegativeStyle, CellValue};
 use visigrid_engine::cell_id::CellId;
 
 pub const PANEL_WIDTH: f32 = 280.0;
@@ -1254,6 +1254,8 @@ fn render_format_tab(
         .child(render_borders_section(app, text_primary, text_muted, panel_border, cx))
         // Font section
         .child(render_font_section(&state, text_primary, text_muted, panel_border, cx))
+        // Cell style section
+        .child(render_cell_style_section(&state, text_primary, text_muted, panel_border, cx))
         // Divider + Format Painter + Clear Formatting
         .child(
             div()
@@ -2404,6 +2406,52 @@ const BORDER_COLOR_SWATCHES: &[([u8; 4], &str)] = &[
     ([0x70, 0x30, 0xA0, 0xFF], "Purple"),
     ([0x00, 0x99, 0x99, 0xFF], "Teal"),
 ];
+
+fn render_cell_style_section(
+    state: &SelectionFormatState,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let style_display = match &state.cell_style {
+        TriState::Uniform(CellStyle::None) => "Default",
+        TriState::Uniform(style) => style.label(),
+        TriState::Mixed => "Mixed",
+        TriState::Empty => "Default",
+    };
+
+    section("Cell Style", panel_border, text_primary)
+        .child(
+            div()
+                .id("cell-style-row")
+                .flex()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .hover(|s| s.bg(panel_border.opacity(0.3)))
+                .rounded_sm()
+                .px_1()
+                .py(px(2.0))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.open_command_palette_with_prefill("Cell Style: ", cx);
+                }))
+                .child(
+                    div()
+                        .w(px(70.0))
+                        .text_size(px(11.0))
+                        .text_color(text_muted)
+                        .child("Style")
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(11.0))
+                        .text_color(text_primary)
+                        .child(SharedString::from(style_display.to_string()))
+                )
+        )
+}
 
 fn render_borders_section(
     app: &Spreadsheet,

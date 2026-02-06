@@ -118,6 +118,15 @@ pub enum CommandId {
     BackgroundPurple,
     BackgroundGray,
     BackgroundCyan,
+    // Cell styles
+    StyleDefault,
+    StyleError,
+    StyleWarning,
+    StyleSuccess,
+    StyleInput,
+    StyleTotal,
+    StyleNote,
+    StyleClear,
     // Borders
     BordersAll,
     BordersOutline,
@@ -250,6 +259,14 @@ impl CommandId {
             Self::BackgroundPurple => "Background: Purple",
             Self::BackgroundGray => "Background: Gray",
             Self::BackgroundCyan => "Background: Cyan",
+            Self::StyleDefault => "Cell Style: Default",
+            Self::StyleError => "Cell Style: Error",
+            Self::StyleWarning => "Cell Style: Warning",
+            Self::StyleSuccess => "Cell Style: Success",
+            Self::StyleInput => "Cell Style: Input",
+            Self::StyleTotal => "Cell Style: Total",
+            Self::StyleNote => "Cell Style: Note",
+            Self::StyleClear => "Cell Style: Clear",
             Self::BordersAll => "Borders: All",
             Self::BordersOutline => "Borders: Outline",
             Self::BordersInside => "Borders: Inside",
@@ -427,6 +444,14 @@ impl CommandId {
             Self::BackgroundPurple => "format fill color highlight",
             Self::BackgroundGray => "format fill color highlight",
             Self::BackgroundCyan => "format fill color highlight",
+            Self::StyleDefault => "cell style semantic default none",
+            Self::StyleError => "cell style semantic error red danger",
+            Self::StyleWarning => "cell style semantic warning yellow caution",
+            Self::StyleSuccess => "cell style semantic success green ok valid",
+            Self::StyleInput => "cell style semantic input blue editable",
+            Self::StyleTotal => "cell style semantic total sum bold",
+            Self::StyleNote => "cell style semantic note comment info",
+            Self::StyleClear => "cell style semantic clear remove reset",
             Self::BordersAll => "format border grid lines box",
             Self::BordersOutline => "format border box outline perimeter frame",
             Self::BordersInside => "format border inside internal inner grid",
@@ -538,6 +563,14 @@ impl CommandId {
             Self::BackgroundPurple,
             Self::BackgroundGray,
             Self::BackgroundCyan,
+            Self::StyleDefault,
+            Self::StyleError,
+            Self::StyleWarning,
+            Self::StyleSuccess,
+            Self::StyleInput,
+            Self::StyleTotal,
+            Self::StyleNote,
+            Self::StyleClear,
             Self::BordersAll,
             Self::BordersOutline,
             Self::BordersInside,
@@ -697,6 +730,14 @@ impl CommandId {
             | Self::BackgroundPurple
             | Self::BackgroundGray
             | Self::BackgroundCyan
+            | Self::StyleDefault
+            | Self::StyleError
+            | Self::StyleWarning
+            | Self::StyleSuccess
+            | Self::StyleInput
+            | Self::StyleTotal
+            | Self::StyleNote
+            | Self::StyleClear
             | Self::BordersAll
             | Self::BordersOutline
             | Self::BordersInside

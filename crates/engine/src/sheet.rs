@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::cell::{Alignment, Cell, CellBorder, CellFormat, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment, max_border};
+use super::cell::{Alignment, Cell, CellBorder, CellFormat, CellStyle, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment, max_border};
 use super::formula::eval::{self, Array2D, CellLookup, EvalResult, LookupWithContext, Value};
 use super::formula::parser::bind_expr_same_sheet;
 use super::validation::ValidationStore;
@@ -977,6 +977,11 @@ impl Sheet {
     pub fn set_font_color(&mut self, row: usize, col: usize, color: Option<[u8; 4]>) {
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.format.font_color = color;
+    }
+
+    pub fn set_cell_style(&mut self, row: usize, col: usize, style: CellStyle) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.format.cell_style = style;
     }
 
     /// Set all 4 borders on a cell at once

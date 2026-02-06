@@ -32,6 +32,62 @@ pub enum TextOverflow {
     Overflow,   // Text overflows into adjacent empty cells
 }
 
+/// Semantic cell style. Base layer — explicit formatting overrides per-property.
+/// Style remains attached until explicitly cleared.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CellStyle {
+    #[default]
+    None,
+    Error,
+    Warning,
+    Success,
+    Input,
+    Total,
+    Note,
+}
+
+impl CellStyle {
+    pub fn from_int(v: i32) -> Self {
+        match v {
+            1 => Self::Error,
+            2 => Self::Warning,
+            3 => Self::Success,
+            4 => Self::Input,
+            5 => Self::Total,
+            6 => Self::Note,
+            _ => Self::None,
+        }
+    }
+
+    pub fn to_int(self) -> i32 {
+        match self {
+            Self::None => 0,
+            Self::Error => 1,
+            Self::Warning => 2,
+            Self::Success => 3,
+            Self::Input => 4,
+            Self::Total => 5,
+            Self::Note => 6,
+        }
+    }
+
+    pub fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Error => "Error",
+            Self::Warning => "Warning",
+            Self::Success => "Success",
+            Self::Input => "Input",
+            Self::Total => "Total",
+            Self::Note => "Note",
+        }
+    }
+}
+
 /// Date format style
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub enum DateStyle {
@@ -282,6 +338,9 @@ pub struct CellFormat {
     /// Left edge border
     #[serde(default)]
     pub border_left: CellBorder,
+    /// Semantic cell style. Base layer — explicit formatting overrides per-property.
+    #[serde(default)]
+    pub cell_style: CellStyle,
 }
 
 impl CellFormat {
@@ -320,6 +379,7 @@ impl CellFormat {
             border_right: ovr.border_right.unwrap_or(self.border_right),
             border_bottom: ovr.border_bottom.unwrap_or(self.border_bottom),
             border_left: ovr.border_left.unwrap_or(self.border_left),
+            cell_style: ovr.cell_style.unwrap_or(self.cell_style),
         }
     }
 }
@@ -365,6 +425,8 @@ pub struct CellFormatOverride {
     pub border_bottom: Option<CellBorder>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_left: Option<CellBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_style: Option<CellStyle>,
 }
 
 impl CellFormatOverride {
@@ -387,6 +449,7 @@ impl CellFormatOverride {
             border_right: Some(format.border_right),
             border_bottom: Some(format.border_bottom),
             border_left: Some(format.border_left),
+            cell_style: Some(format.cell_style),
         }
     }
 }
