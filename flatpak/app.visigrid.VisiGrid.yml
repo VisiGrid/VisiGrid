@@ -46,10 +46,9 @@ modules:
 
     sources:
       # Linux x86_64 binary from GitHub Releases
-      # TODO: Fill in sha256 from actual release artifact
       - type: archive
         url: https://github.com/VisiGrid/VisiGrid/releases/download/v0.5.8/VisiGrid-linux-x86_64.tar.gz
-        sha256: FILL_IN_SHA256
+        sha256: 0f785504e9829c96cba0057d8782fac9a1d49cceff1e263e772fdd5cf1dbdb98
         strip-components: 1
         only-arches:
           - x86_64
@@ -61,10 +60,9 @@ modules:
           is-main-source: true
 
       # Linux aarch64 binary from GitHub Releases
-      # TODO: Fill in sha256 from actual release artifact
       - type: archive
         url: https://github.com/VisiGrid/VisiGrid/releases/download/v0.5.8/VisiGrid-linux-aarch64.tar.gz
-        sha256: FILL_IN_SHA256
+        sha256: 084d893696117b7290ae815e879c2e7061ade263278fb87c1401493ad06a9e2d
         strip-components: 1
         only-arches:
           - aarch64
@@ -77,40 +75,40 @@ modules:
       # SVG icon (not in tarball)
       - type: file
         url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/assets/visigrid.svg
-        sha256: FILL_IN_SHA256
+        sha256: be9e0d3fd1196fc4626f22c8f566a3c82e28add663bcdc79f2186c200eeab852
         dest-filename: visigrid.svg
 
       # Icons (not in tarball)
       - type: file
         url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-512.png
-        sha256: FILL_IN_SHA256
+        sha256: 8be3cc00f9ff06ecb4181289a79af9d5b7465b00e782a8c160744fe2a4846cb8
         dest-filename: icon-512.png
       - type: file
         url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-256.png
-        sha256: FILL_IN_SHA256
+        sha256: 91665cb0add21790deb08f1da22b520f1302b666ca480df9915e81d86ec75b60
         dest-filename: icon-256.png
       - type: file
         url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-128.png
-        sha256: FILL_IN_SHA256
+        sha256: f655d1b60c3891c5305da433aa81f8034c011882132719a7158241de6223b5b2
         dest-filename: icon-128.png
       - type: file
         url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-64.png
-        sha256: FILL_IN_SHA256
+        sha256: 4c29d9ac2a954f3b8f92beac1987326299511433f039ee4794f5767b6b66face
         dest-filename: icon-64.png
       - type: file
         url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-32.png
-        sha256: FILL_IN_SHA256
+        sha256: 7814c24b730b73ccf318299556a8d96fa242f9f5c7ca3ce975fe97b83e971470
         dest-filename: icon-32.png
       - type: file
         url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/gpui-app/assets/icon-16.png
-        sha256: FILL_IN_SHA256
+        sha256: d43a763f770d2325cf6f6a4fb9e4cddbf063d27bc6bf01342a8138b3289ea24f
         dest-filename: icon-16.png
 
       # Metainfo and license
       - type: file
         url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/flatpak/app.visigrid.VisiGrid.metainfo.xml
-        sha256: FILL_IN_SHA256
+        sha256: 089d352cfdaf3c0550b27215ea15982915c24264ce5ed82132e35ab920f7d8bf
       - type: file
         url: https://raw.githubusercontent.com/VisiGrid/VisiGrid/v0.5.8/LICENSE
-        sha256: FILL_IN_SHA256
+        sha256: 96d4ac99caf3914e8c0f9586097def70fa8223a35efa5ae3e306fc5ee2ee2778
         dest-filename: LICENSE
