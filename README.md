@@ -1,33 +1,154 @@
 # VisiGrid
 
-**A deterministic spreadsheet engine for reconciliation, audit, and reproducible computation.**
+**A fast, keyboard-first, local-only spreadsheet for people who care about flow.**
 
-VisiGrid is a native spreadsheet engine designed for correctness under change. Recomputation is deterministic, structural edits are traceable, and circular dependencies are caught at edit-time.
+VisiGrid is a native spreadsheet app that starts instantly, stays out of your way, and makes its work visible. It's built for Linux-first workflows, power users, and anyone tired of heavyweight, ribbon-driven spreadsheets.
 
 Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)).
 
 ## Why VisiGrid
 
-Most spreadsheets fail quietly.
+Most spreadsheets feel heavy.
 
-A wrong reference. A missed row. A filter changed weeks ago.
-The number still looks right — until it isn't.
+They take seconds to open. They hide actions behind menus. They encourage copy-paste instead of understanding.
 
-VisiGrid is built to make these failures visible before they matter.
+VisiGrid is built to feel light, fast, and intentional:
 
-- **Causality is explicit**: precedents, dependents, and evaluation order are inspectable.
-- **Changes are safe**: structural edits generate provenance you can review and replay.
-- **State is verifiable**: you always know whether values are current or stale.
+- **Instant startup** (~300ms cold launch)
+- **Local-only files** — no accounts, no cloud
+- **Keyboard-first** navigation and editing
+- **Command palette** for every action
+- **Inspectable formulas** and dependencies
+- **Works with existing files** — Excel, CSV, ODS, JSON, TSV
 
-## Determinism
+When correctness matters, VisiGrid also makes failure visible:
 
-Everything in VisiGrid is deterministic: same inputs, same outputs, always. No volatile surprises, no hidden state, no ambient context that changes results between runs.
+- **Deterministic recomputation** — same inputs, same outputs, always
+- **Explicit dependencies** — precedents, dependents, and evaluation order are inspectable
+- **Traceable changes** — structural edits generate provenance you can review and replay
 
-The CLI is the primary interface for automation, verification, and audit trails. The GUI is an inspector and editor built on the same engine.
+For advanced workflows, VisiGrid also includes a CLI and headless mode built on the same engine.
 
-VisiGrid replaces read-and-compare scripts — the ones that end in printing results — not domain code that writes to your database.
+VisiGrid was influenced by keyboard-first Linux environments such as [Omarchy](https://omarchy.com) — prioritizing speed, minimal friction, and staying in flow.
 
-## Headless Spreadsheet Workflows
+## Editing and Navigation
+
+- Command palette for every action
+- Keyboard-first navigation and editing
+- Multi-select editing across non-adjacent cells
+- Format Painter (single-shot and locked mode)
+- 100+ formula functions with autocomplete
+- Instant startup and smooth scrolling
+- 5 built-in themes including System (follows OS dark/light)
+
+## Design Principles
+
+- **Local-first**: Your data lives on your machine. No accounts required.
+- **Native performance**: GPU-accelerated rendering. Smooth at any scale.
+- **Explainable by default**: Causality is visible. Trust is earned.
+- **No lock-in**: Standard formats. Export freely.
+
+## Explainability
+
+The desktop app is the debugger for your data.
+
+- **Cell Inspector** — view formulas, values, precedents, dependents, and recompute timestamps.
+- **Path Tracing** — follow data flow across sheets and ranges.
+- **Provenance History** — structural edits emit replayable scripts.
+- **Cycle Detection** — circular dependencies caught at edit-time.
+- **Deterministic recomputation** — explicit verification of stale vs current values.
+
+## AI Without Sacrificing Trust
+
+Most AI tools trade explainability for convenience. VisiGrid doesn't.
+
+**The problem**: AI in spreadsheets typically means black-box automation — formulas appear, values change, and you're expected to trust the result. When something goes wrong, there's no audit trail.
+
+**VisiGrid's approach**: AI is a witness, not an author.
+
+### Three Layers of Explainability
+
+1. **Cell-level truth** — Inspector shows formula, value, inputs, dependents. Deterministic, local, zero AI involvement.
+
+2. **Change-level accountability** — Every mutation is tagged: Human vs AI (with provider and timestamp). The diff engine surfaces net effects. AI-touched filter exposes exactly where AI participated.
+
+3. **Narrative understanding** — "Explain this change" and "Explain differences" describe what happened in plain language. Both are optional, bounded, and never modify data.
+
+### What AI Can Do
+
+- Answer questions about your data with formula proposals
+- Summarize what changed between two points in history
+- Explain individual cell changes in 2-4 sentences
+
+### What AI Cannot Do
+
+- Edit cells without your explicit approval
+- Run automatically or in the background
+- Hide its participation (provenance is always visible)
+- Suggest changes from the audit view
+
+### Why This Matters
+
+When you open a workbook six months from now, you can answer:
+- Which values came from AI?
+- What exactly did it change?
+- Can I verify the formula it suggested?
+
+The answer to all three is yes. That's what "explainable" means.
+
+## Download
+
+Get the latest release from [Releases](https://github.com/VisiGrid/VisiGrid/releases).
+
+| Platform | Download |
+|----------|----------|
+| macOS (Universal) | `.dmg` |
+| Windows (x64) | `.zip` |
+| Linux (x86_64) | `.tar.gz` / `.AppImage` |
+
+Or via package manager:
+
+```bash
+# macOS
+brew install --cask visigrid/tap/visigrid
+
+# Windows
+winget install VisiGrid.VisiGrid
+
+# Arch Linux
+yay -S visigrid-bin
+```
+
+## Build from Source
+
+Requires [Rust](https://rustup.rs/) 1.80+.
+
+```bash
+git clone https://github.com/VisiGrid/VisiGrid.git
+cd VisiGrid
+cargo build --release -p visigrid-gpui
+./target/release/visigrid
+```
+
+### Linux Dependencies
+
+```bash
+# Ubuntu / Debian
+sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+```
+
+## Formats
+
+- Import: CSV, TSV, JSON, XLSX, XLS, XLSB, ODS
+- Export: CSV, TSV, JSON, .sheet (XLSX export planned)
+- Cross-platform: macOS, Windows, Linux
+
+## Advanced: Automation, CLI, and Reproducible Workflows
+
+For users who treat spreadsheets as part of a larger system, VisiGrid includes a full CLI and headless execution mode built on the same engine.
+
+### Headless Spreadsheet Workflows
 
 VisiGrid ships a CLI that runs without a GUI. Same engine, no window.
 
@@ -97,7 +218,7 @@ Example summary (from `--out json`):
 }
 ```
 
-## Session Control
+### Session Control
 
 Control a running VisiGrid GUI from the terminal. Inspect cells, apply changes, and watch state evolve — all from scripts or the command line.
 
@@ -139,70 +260,7 @@ visigrid view --range A1:D10
 
 **Exit codes** are stable for scripting: 0 = success, 20-29 = session errors (conflict, auth, protocol).
 
-## Explainability
-
-The desktop app is the debugger for your data.
-
-- **Cell Inspector** — view formulas, values, precedents, dependents, and recompute timestamps.
-- **Path Tracing** — follow data flow across sheets and ranges.
-- **Provenance History** — structural edits emit replayable scripts.
-- **Cycle Detection** — circular dependencies caught at edit-time.
-- **Deterministic recomputation** — explicit verification of stale vs current values.
-
-## Editing and Navigation
-
-- Command palette for every action
-- Keyboard-first navigation and editing
-- Multi-select editing across non-adjacent cells
-- 100+ formula functions with autocomplete
-- Instant startup and smooth scrolling
-
-## Design Principles
-
-- **Local-first**: Your data lives on your machine. No accounts required.
-- **Native performance**: GPU-accelerated rendering. Smooth at any scale.
-- **Explainable by default**: Causality is visible. Trust is earned.
-- **No lock-in**: Standard formats. Export freely.
-
-## AI Without Sacrificing Trust
-
-Most AI tools trade explainability for convenience. VisiGrid doesn't.
-
-**The problem**: AI in spreadsheets typically means black-box automation — formulas appear, values change, and you're expected to trust the result. When something goes wrong, there's no audit trail.
-
-**VisiGrid's approach**: AI is a witness, not an author.
-
-### Three Layers of Explainability
-
-1. **Cell-level truth** — Inspector shows formula, value, inputs, dependents. Deterministic, local, zero AI involvement.
-
-2. **Change-level accountability** — Every mutation is tagged: Human vs AI (with provider and timestamp). The diff engine surfaces net effects. AI-touched filter exposes exactly where AI participated.
-
-3. **Narrative understanding** — "Explain this change" and "Explain differences" describe what happened in plain language. Both are optional, bounded, and never modify data.
-
-### What AI Can Do
-
-- Answer questions about your data with formula proposals
-- Summarize what changed between two points in history
-- Explain individual cell changes in 2-4 sentences
-
-### What AI Cannot Do
-
-- Edit cells without your explicit approval
-- Run automatically or in the background
-- Hide its participation (provenance is always visible)
-- Suggest changes from the audit view
-
-### Why This Matters
-
-When you open a workbook six months from now, you can answer:
-- Which values came from AI?
-- What exactly did it change?
-- Can I verify the formula it suggested?
-
-The answer to all three is yes. That's what "explainable" means.
-
-## Agents: Verifiable Spreadsheet Builds
+### Agents: Verifiable Spreadsheet Builds
 
 VisiGrid provides a headless build loop for LLM agents and CI pipelines. Write Lua, build a `.sheet`, inspect results, verify fingerprint.
 
@@ -228,67 +286,11 @@ visigrid-cli sheet verify model.sheet --fingerprint v1:42:abc123...
 
 See [Agent Tools](docs/agent-tools.json) for MCP definitions and [Claude MD Snippet](docs/claude-md-snippet.md) for copy-paste instructions.
 
-## Download
-
-Get the latest release from [Releases](https://github.com/VisiGrid/VisiGrid/releases).
-
-| Platform | Download |
-|----------|----------|
-| macOS (Universal) | `.dmg` |
-| Windows (x64) | `.zip` |
-| Linux (x86_64) | `.tar.gz` / `.AppImage` |
-
-Or via package manager:
-
-```bash
-# macOS
-brew install --cask visigrid/tap/visigrid
-
-# Windows
-winget install VisiGrid.VisiGrid
-
-# Arch Linux
-yay -S visigrid-bin
-```
-
-## Build from Source
-
-Requires [Rust](https://rustup.rs/) 1.80+.
-
-```bash
-git clone https://github.com/VisiGrid/VisiGrid.git
-cd VisiGrid
-cargo build --release -p visigrid-gpui
-./target/release/visigrid
-```
-
-### Linux Dependencies
-
-```bash
-# Ubuntu / Debian
-sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-  libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
-```
-
-## Formats
-
-- Import: CSV, TSV, JSON, XLSX, XLS, XLSB, ODS
-- Export: CSV, TSV, JSON, .sheet (XLSX export planned)
-- Cross-platform: macOS, Windows, Linux
-
-## Known Limitations (v0.4)
-
-- **XLSX export** is not yet implemented — CLI writes CSV, TSV, JSON, .sheet
-- **Replay**: layout operations (sort, column widths, merge) are hashed for fingerprint but not applied to workbook data
-- **Nondeterminism detection** is conservative — `NOW()`, `TODAY()`, `RAND()`, `RANDBETWEEN()` fail `--verify` even in dead-code branches
-- **Multi-sheet export** writes sheet 0 only
-- **CLI `calc`** reads from stdin only; no file-path argument
-
-## CI / Scripting
+### CI / Scripting
 
 Exit 0 means reconciled (within tolerance). Exit 1 means material differences — missing rows or diffs outside tolerance. Exit ≥ 2 means error. No wrapper scripts needed.
 
-### Bank statement vs ledger
+**Bank statement vs ledger:**
 
 ```bash
 # Reconcile bank export against your ledger
@@ -299,7 +301,7 @@ visigrid-cli diff bank_export.csv ledger.csv \
   --out json
 ```
 
-### Vendor export via stdin
+**Vendor export via stdin:**
 
 ```bash
 # Pipe a live vendor export, project to reconciliation columns, then diff
@@ -308,7 +310,7 @@ curl -s https://vendor.example.com/api/export.csv | \
   visigrid-cli diff - our_export.csv --key Invoice --compare Amount --tolerance 0.01
 ```
 
-### CI gate with strict exit
+**CI gate with strict exit:**
 
 ```bash
 # In CI: fail the build if ANY value differs, even within tolerance
@@ -319,7 +321,7 @@ visigrid-cli diff expected.csv actual.csv \
 }
 ```
 
-### More examples
+**More examples:**
 
 ```bash
 # Quiet mode: just the exit code, no output
@@ -331,6 +333,14 @@ rails runner 'Ledger.export_csv' | visigrid-cli diff - expected.csv --key id --q
 # Verify a provenance trail hasn't been tampered with
 visigrid-cli replay audit-trail.lua --verify --quiet
 ```
+
+## Known Limitations (v0.4)
+
+- **XLSX export** is not yet implemented — CLI writes CSV, TSV, JSON, .sheet
+- **Replay**: layout operations (sort, column widths, merge) are hashed for fingerprint but not applied to workbook data
+- **Nondeterminism detection** is conservative — `NOW()`, `TODAY()`, `RAND()`, `RANDBETWEEN()` fail `--verify` even in dead-code branches
+- **Multi-sheet export** writes sheet 0 only
+- **CLI `calc`** reads from stdin only; no file-path argument
 
 ## Commercial Use
 
@@ -362,4 +372,4 @@ Issues and pull requests are welcome.
 CSV fixture that reproduces the issue. Every confirmed diff bug becomes a corpus
 golden test in `tests/cli/diff/` — this is how the contract stays honest.
 
-See the [Roadmap](ROADMAP.md) for what's next.
+See the [Roadmap](docs/roadmap.md) for what's next.
