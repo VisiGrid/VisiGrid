@@ -171,6 +171,7 @@ pub enum CommandId {
     ReturnToTraceSource,
     ToggleVerifiedMode,
     Recalculate,
+    ReloadCustomFunctions,
     ApproveModel,
     ClearApproval,
     NavPerfReport,
@@ -307,6 +308,7 @@ impl CommandId {
             Self::ReturnToTraceSource => "Return to Trace Source",
             Self::ToggleVerifiedMode => "Toggle Verified Mode",
             Self::Recalculate => "Recalculate All",
+            Self::ReloadCustomFunctions => "Reload Custom Functions",
             Self::ApproveModel => "Approve Model",
             Self::ClearApproval => "Clear Approval",
             Self::NavPerfReport => "Navigation Latency Report",
@@ -528,6 +530,7 @@ impl CommandId {
             Self::ReturnToTraceSource => "trace back return source origin home",
             Self::ToggleVerifiedMode => "verified deterministic recalc audit trust",
             Self::Recalculate => "recalc refresh calculate formulas f9",
+            Self::ReloadCustomFunctions => "lua functions reload custom scripting",
             Self::ApproveModel => "approve model fingerprint semantic logic verify lock sign-off audit",
             Self::ClearApproval => "clear approval reset unapprove remove fingerprint",
             Self::NavPerfReport => "navigation latency perf performance timing",
@@ -619,6 +622,7 @@ impl CommandId {
             Self::ReturnToTraceSource,
             Self::ToggleVerifiedMode,
             Self::Recalculate,
+            Self::ReloadCustomFunctions,
             Self::ApproveModel,
             Self::ClearApproval,
             Self::SwitchWindow,
@@ -722,7 +726,8 @@ impl CommandId {
             | Self::ClearApproval
             | Self::InsertFormulaAI
             | Self::AnalyzeAI
-            | Self::NavPerfReport => Some(MenuCategory::Tools),
+            | Self::NavPerfReport
+            | Self::ReloadCustomFunctions => Some(MenuCategory::Tools),
 
             // Format menu
             Self::ToggleBold

@@ -2186,6 +2186,7 @@ pub struct Spreadsheet {
     // Lua scripting state
     pub lua_runtime: crate::scripting::LuaRuntime,
     pub lua_console: crate::scripting::ConsoleState,
+    pub custom_fn_registry: crate::scripting::CustomFunctionRegistry,
 
     // License dialog state
     pub license_input: String,
@@ -2376,7 +2377,7 @@ impl Spreadsheet {
         let (session_tx, session_rx) = std::sync::mpsc::channel();
         let session_server = crate::session_server::SessionServer::new();
 
-        Self {
+        let mut app = Self {
             workbook,
             history: History::new(),
             base_workbook,
@@ -2608,6 +2609,7 @@ impl Spreadsheet {
 
             lua_runtime: crate::scripting::LuaRuntime::default(),
             lua_console: crate::scripting::ConsoleState::default(),
+            custom_fn_registry: crate::scripting::CustomFunctionRegistry::empty(),
 
             license_input: String::new(),
             license_error: None,
@@ -2672,7 +2674,29 @@ impl Spreadsheet {
             session_server: session_server,
             session_request_rx: session_rx,
             session_request_tx: session_tx,
+        };
+
+        // Load custom functions from ~/.config/visigrid/functions.lua (Pro only)
+        #[cfg(feature = "pro")]
+        {
+            match crate::scripting::custom_functions::load_custom_functions(app.lua_runtime.lua()) {
+                Ok(registry) => {
+                    if !registry.functions.is_empty() {
+                        app.status_message = Some(format!(
+                            "Loaded {} custom function{}",
+                            registry.functions.len(),
+                            if registry.functions.len() == 1 { "" } else { "s" },
+                        ));
+                    }
+                    app.custom_fn_registry = registry;
+                }
+                Err(e) => {
+                    eprintln!("Custom functions error: {}", e);
+                }
+            }
         }
+
+        app
     }
 
     // ========================================================================
@@ -3857,6 +3881,7 @@ impl Spreadsheet {
             CommandId::ReturnToTraceSource => self.return_to_trace_source(cx),
             CommandId::ToggleVerifiedMode => self.toggle_verified_mode(cx),
             CommandId::Recalculate => self.recalculate(cx),
+            CommandId::ReloadCustomFunctions => self.reload_custom_functions(cx),
             CommandId::ApproveModel => self.approve_model(None, cx),
             CommandId::ClearApproval => self.clear_approval(cx),
             CommandId::NavPerfReport => {

@@ -789,7 +789,7 @@ fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, ed
 
 /// Render the autocomplete dropdown popup
 pub fn render_autocomplete_popup(
-    suggestions: &[&'static crate::formula_context::FunctionInfo],
+    suggestions: &[crate::autocomplete::AutocompleteEntry],
     selected_index: usize,
     popup_x: f32,
     popup_y: f32,
@@ -818,10 +818,10 @@ pub fn render_autocomplete_popup(
         .overflow_hidden()
         .py_1()
         .children(
-            visible_items.map(|(idx, func)| {
+            visible_items.map(|(idx, entry)| {
                 let is_selected = idx == selected_index;
                 render_autocomplete_item(
-                    func,
+                    entry,
                     idx,
                     is_selected,
                     text_primary,
@@ -833,9 +833,9 @@ pub fn render_autocomplete_popup(
         )
 }
 
-/// Render a single autocomplete item
+/// Render a single autocomplete item (built-in or custom function)
 fn render_autocomplete_item(
-    func: &'static crate::formula_context::FunctionInfo,
+    entry: &crate::autocomplete::AutocompleteEntry,
     idx: usize,
     is_selected: bool,
     text_primary: Hsla,
@@ -849,13 +849,22 @@ fn render_autocomplete_item(
         hsla(0.0, 0.0, 0.0, 0.0)
     };
 
-    let func_name = func.name;
-    let signature = func.signature;
-    // Truncate signature if too long
-    let display_sig = if signature.len() > 35 {
-        format!("{}...", &signature[..32])
-    } else {
-        signature.to_string()
+    let func_name = entry.name().to_string();
+    let is_custom = entry.is_custom();
+
+    // Built-in: show signature. Custom: show "Custom" badge.
+    let subtitle = match entry {
+        crate::autocomplete::AutocompleteEntry::BuiltIn(func) => {
+            let sig = func.signature;
+            if sig.len() > 35 {
+                format!("{}...", &sig[..32])
+            } else {
+                sig.to_string()
+            }
+        }
+        crate::autocomplete::AutocompleteEntry::Custom { .. } => {
+            "Custom".to_string()
+        }
     };
 
     div()
@@ -891,9 +900,15 @@ fn render_autocomplete_item(
                 )
                 .child(
                     div()
-                        .text_color(text_muted)
+                        .text_color(if is_custom {
+                            // Slightly brighter for "Custom" badge
+                            hsla(0.55, 0.5, 0.6, 1.0)
+                        } else {
+                            text_muted
+                        })
                         .text_size(px(11.0))
-                        .child(display_sig)
+                        .when(is_custom, |d| d.italic())
+                        .child(subtitle)
                 )
         )
 }

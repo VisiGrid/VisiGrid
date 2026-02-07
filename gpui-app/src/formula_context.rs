@@ -1644,8 +1644,9 @@ pub struct Diagnostic {
     pub span: Option<Range<usize>>,
 }
 
-/// Check formula for errors
-pub fn check_errors(formula: &str, cursor: usize) -> Option<Diagnostic> {
+/// Check formula for errors.
+/// `custom_fn_names` allows suppressing "Unknown function" for user-defined functions.
+pub fn check_errors(formula: &str, cursor: usize, custom_fn_names: &[&str]) -> Option<Diagnostic> {
     let cursor = cursor.min(formula.chars().count());
     let formula_len = formula.chars().count();
     let tokens = tokenize_for_analysis(formula);
@@ -1672,10 +1673,13 @@ pub fn check_errors(formula: &str, cursor: usize) -> Option<Diagnostic> {
 
             if let Some(next_tok) = next {
                 if next_tok.kind == AnalyzerTokenKind::LParen {
-                    if get_function(&token.text).is_none() {
+                    let upper = token.text.to_uppercase();
+                    let is_known = get_function(&token.text).is_some()
+                        || custom_fn_names.iter().any(|n| n.eq_ignore_ascii_case(&upper));
+                    if !is_known {
                         return Some(Diagnostic {
                             kind: DiagnosticKind::Hard,
-                            message: format!("Unknown function: {}", token.text.to_uppercase()),
+                            message: format!("Unknown function: {}", upper),
                             span: Some(token.start..token.end),
                         });
                     }
@@ -1838,7 +1842,7 @@ mod tests {
 
     #[test]
     fn test_check_errors_unmatched_paren() {
-        let diag = check_errors("=SUM(A1", 7);
+        let diag = check_errors("=SUM(A1", 7, &[]);
         assert!(diag.is_some());
         let d = diag.unwrap();
         assert_eq!(d.kind, DiagnosticKind::Transient); // At end
@@ -1847,7 +1851,7 @@ mod tests {
 
     #[test]
     fn test_check_errors_unknown_function() {
-        let diag = check_errors("=SUMM(A1)", 5);
+        let diag = check_errors("=SUMM(A1)", 5, &[]);
         assert!(diag.is_some());
         let d = diag.unwrap();
         assert_eq!(d.kind, DiagnosticKind::Hard);
@@ -1988,7 +1992,7 @@ mod tests {
         assert!(token_types.contains(&TokenType::CellRef), "Should have CellRef token");
 
         // Should not have any errors
-        let diag = check_errors(formula, formula.len());
+        let diag = check_errors(formula, formula.len(), &[]);
         assert!(diag.is_none(), "Should not have errors: {:?}", diag);
     }
 
@@ -2006,7 +2010,7 @@ mod tests {
         assert!(token_types.contains(&TokenType::CellRef), "Should have CellRef token");
 
         // Should not have any errors
-        let diag = check_errors(formula, formula.len());
+        let diag = check_errors(formula, formula.len(), &[]);
         assert!(diag.is_none(), "Should not have errors: {:?}", diag);
     }
 
@@ -2030,7 +2034,7 @@ mod tests {
         assert_eq!(bangs.len(), 1, "Should have 1 bang");
 
         // Should not have any errors
-        let diag = check_errors(formula, formula.len());
+        let diag = check_errors(formula, formula.len(), &[]);
         assert!(diag.is_none(), "Should not have errors: {:?}", diag);
     }
 
@@ -2038,7 +2042,7 @@ mod tests {
     fn test_cross_sheet_ref_no_invalid_char_error() {
         // This was the original bug: '!' was treated as unknown character
         let formula = "=Sheet1!A1";
-        let diag = check_errors(formula, formula.len());
+        let diag = check_errors(formula, formula.len(), &[]);
 
         // Should NOT have "Invalid character: '!'" error
         if let Some(d) = &diag {

@@ -55,6 +55,35 @@ pub trait CellLookup {
     fn get_merge_start_sheet(&self, _sheet_id: SheetId, _row: usize, _col: usize) -> Option<(usize, usize)> {
         None
     }
+
+    /// Get a cell's typed value from the current sheet.
+    /// Returns Value::Empty for empty/missing cells.
+    /// Default: falls back to get_text() + parse (backward compat).
+    fn get_cell_value(&self, row: usize, col: usize) -> Value {
+        let text = self.get_text(row, col);
+        if text.is_empty() {
+            Value::Empty
+        } else if text.starts_with('#') {
+            Value::Error(text)
+        } else if let Ok(n) = text.parse::<f64>() {
+            Value::Number(n)
+        } else if text.eq_ignore_ascii_case("TRUE") {
+            Value::Boolean(true)
+        } else if text.eq_ignore_ascii_case("FALSE") {
+            Value::Boolean(false)
+        } else {
+            Value::Text(text)
+        }
+    }
+
+    /// Try to evaluate a custom (user-defined) function.
+    /// Args are already evaluated by the engine — scalars resolved, ranges snapshotted as typed Values.
+    /// Returns None if the function is not a custom function.
+    /// Returns Some(EvalResult) if it is (including errors).
+    /// Default: no custom functions available.
+    fn try_custom_function(&self, _name: &str, _args: &[EvalArg]) -> Option<EvalResult> {
+        None
+    }
 }
 
 /// A lookup that wraps another CellLookup and adds named range resolution
@@ -100,6 +129,14 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup 
 
     fn get_merge_start_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Option<(usize, usize)> {
         self.inner.get_merge_start_sheet(sheet_id, row, col)
+    }
+
+    fn get_cell_value(&self, row: usize, col: usize) -> Value {
+        self.inner.get_cell_value(row, col)
+    }
+
+    fn try_custom_function(&self, name: &str, args: &[EvalArg]) -> Option<EvalResult> {
+        self.inner.try_custom_function(name, args)
     }
 }
 
@@ -147,6 +184,14 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
 
     fn get_merge_start_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Option<(usize, usize)> {
         self.inner.get_merge_start_sheet(sheet_id, row, col)
+    }
+
+    fn get_cell_value(&self, row: usize, col: usize) -> Value {
+        self.inner.get_cell_value(row, col)
+    }
+
+    fn try_custom_function(&self, name: &str, args: &[EvalArg]) -> Option<EvalResult> {
+        self.inner.try_custom_function(name, args)
     }
 }
 
@@ -229,6 +274,22 @@ impl Value {
     pub fn is_empty(&self) -> bool {
         matches!(self, Value::Empty)
     }
+}
+
+// =============================================================================
+// EvalArg: Argument passed to custom function hooks (already evaluated)
+// =============================================================================
+
+/// Argument passed to custom function hooks, already evaluated by the engine.
+/// This keeps the engine/app boundary clean: no AST leaks across.
+#[derive(Debug, Clone)]
+pub enum EvalArg {
+    Scalar(Value),
+    Range {
+        /// Typed cell values, row-major flattened. Uses engine Value (not text).
+        values: Vec<Value>,
+        num_cells: usize,
+    },
 }
 
 // =============================================================================
@@ -634,6 +695,36 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
 }
 
 
+/// Evaluate function arguments into typed EvalArg values for custom function hooks.
+fn eval_function_args<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Vec<EvalArg> {
+    args.iter().map(|arg| {
+        match arg {
+            Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
+                let min_r = (*start_row).min(*end_row);
+                let max_r = (*start_row).max(*end_row);
+                let min_c = (*start_col).min(*end_col);
+                let max_c = (*start_col).max(*end_col);
+                let mut values = Vec::new();
+                for r in min_r..=max_r {
+                    for c in min_c..=max_c {
+                        let val = match sheet {
+                            SheetRef::Current => lookup.get_cell_value(r, c),
+                            SheetRef::Id(sid) => lookup.get_value_sheet(*sid, r, c),
+                            SheetRef::RefError { .. } => Value::Error("#REF!".to_string()),
+                        };
+                        values.push(val);
+                    }
+                }
+                let n = values.len();
+                EvalArg::Range { values, num_cells: n }
+            }
+            _ => {
+                EvalArg::Scalar(evaluate(arg, lookup).to_value())
+            }
+        }
+    }).collect()
+}
+
 fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) -> EvalResult {
     None
         .or_else(|| super::eval_math::try_evaluate(name, args, lookup))
@@ -646,6 +737,10 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
         .or_else(|| super::eval_trig::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_statistical::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_array::try_evaluate(name, args, lookup))
+        .or_else(|| {
+            let eval_args = eval_function_args(args, lookup);
+            lookup.try_custom_function(name, &eval_args)
+        })
         .unwrap_or_else(|| EvalResult::Error(format!("Unknown function: {}", name)))
 }
 

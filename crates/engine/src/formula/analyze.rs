@@ -2,6 +2,12 @@
 //
 // Provides static analysis of formula ASTs without evaluation.
 // Used during import to identify unsupported functions.
+//
+// NOTE: Custom functions (user-defined Lua functions loaded from functions.lua)
+// are not known to the engine's static analysis. They will appear as "unknown"
+// in import tallies. This is acceptable because the analyzer only runs on the
+// import path — it does not block formula evaluation, which dispatches custom
+// functions via CellLookup::try_custom_function() at runtime.
 
 use std::collections::HashMap;
 

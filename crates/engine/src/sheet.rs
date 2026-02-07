@@ -360,6 +360,10 @@ impl CellLookup for Sheet {
     fn get_merge_start(&self, row: usize, col: usize) -> Option<(usize, usize)> {
         self.get_merge(row, col).map(|m| m.start)
     }
+
+    fn get_cell_value(&self, row: usize, col: usize) -> Value {
+        self.get_computed_value(row, col)
+    }
 }
 
 impl Sheet {

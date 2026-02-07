@@ -281,6 +281,31 @@ impl SheetReader for SheetSnapshot {
     }
 }
 
+// Stub custom functions types
+pub struct CustomFunctionRegistry {
+    pub functions: std::collections::HashMap<String, CustomFunction>,
+    pub warnings: Vec<String>,
+}
+
+pub struct CustomFunction {
+    pub name: String,
+}
+
+pub struct MemoCache;
+
+impl CustomFunctionRegistry {
+    pub fn empty() -> Self {
+        Self {
+            functions: std::collections::HashMap::new(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+impl MemoCache {
+    pub fn new() -> Self { Self }
+}
+
 // Stub examples module
 pub mod examples {
     pub struct LuaExample {

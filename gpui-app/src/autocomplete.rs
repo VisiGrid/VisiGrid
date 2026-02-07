@@ -9,6 +9,26 @@ use crate::app::Spreadsheet;
 use crate::formula_context;
 use crate::mode::Mode;
 
+/// An autocomplete entry — either a built-in function or a custom (user-defined) one.
+#[derive(Debug, Clone)]
+pub enum AutocompleteEntry {
+    BuiltIn(&'static formula_context::FunctionInfo),
+    Custom { name: String },
+}
+
+impl AutocompleteEntry {
+    pub fn name(&self) -> &str {
+        match self {
+            AutocompleteEntry::BuiltIn(f) => f.name,
+            AutocompleteEntry::Custom { name } => name,
+        }
+    }
+
+    pub fn is_custom(&self) -> bool {
+        matches!(self, AutocompleteEntry::Custom { .. })
+    }
+}
+
 /// Signature help context for rendering
 pub struct SignatureHelpInfo {
     pub function: &'static formula_context::FunctionInfo,
@@ -25,8 +45,9 @@ impl Spreadsheet {
     // Formula Autocomplete
     // ========================================================================
 
-    /// Get filtered autocomplete suggestions based on current edit value
-    pub fn autocomplete_suggestions(&self) -> Vec<&'static formula_context::FunctionInfo> {
+    /// Get filtered autocomplete suggestions based on current edit value.
+    /// Returns both built-in and custom function entries.
+    pub fn autocomplete_suggestions(&self) -> Vec<AutocompleteEntry> {
         // Only show autocomplete for formula mode
         if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
             return Vec::new();
@@ -35,27 +56,48 @@ impl Spreadsheet {
         let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
 
         // Check mode and identifier length
-        match ctx.mode {
+        let prefix = match ctx.mode {
             formula_context::FormulaEditMode::Start
             | formula_context::FormulaEditMode::Operator
             | formula_context::FormulaEditMode::ArgList => {
-                // Show all functions at these positions
-                formula_context::get_functions_by_prefix("")
+                Some("")
             }
             formula_context::FormulaEditMode::Identifier => {
-                // Only show if identifier >= 2 chars (spec: avoid A1 vs AVERAGE ambiguity)
                 if let Some(ref id_text) = ctx.identifier_text {
                     if id_text.len() >= 2 {
-                        formula_context::get_functions_by_prefix(id_text)
+                        Some(id_text.as_str())
                     } else {
-                        Vec::new()
+                        None
                     }
                 } else {
-                    Vec::new()
+                    None
                 }
             }
-            _ => Vec::new(),
+            _ => None,
+        };
+
+        let Some(prefix) = prefix else {
+            return Vec::new();
+        };
+
+        // Built-in functions
+        let mut entries: Vec<AutocompleteEntry> = formula_context::get_functions_by_prefix(prefix)
+            .into_iter()
+            .map(AutocompleteEntry::BuiltIn)
+            .collect();
+
+        // Custom functions from registry
+        let upper = prefix.to_ascii_uppercase();
+        for name in self.custom_fn_registry.functions.keys() {
+            if name.starts_with(&upper) {
+                entries.push(AutocompleteEntry::Custom { name: name.clone() });
+            }
         }
+
+        // Sort all entries by name for stable ordering
+        entries.sort_by(|a, b| a.name().cmp(b.name()));
+
+        entries
     }
 
     /// Update autocomplete state based on current context
@@ -131,8 +173,8 @@ impl Spreadsheet {
             return;
         }
 
-        let func = suggestions[self.autocomplete_selected];
-        let func_name = func.name;
+        let entry = &suggestions[self.autocomplete_selected];
+        let func_name = entry.name();
 
         // Build replacement text: function name + opening paren
         let replacement = format!("{}(", func_name);
@@ -227,7 +269,9 @@ impl Spreadsheet {
 
         // While editing, only show Hard errors (unknown function, invalid token)
         // Transient errors (missing paren, trailing operator) are hidden - we'll auto-fix on confirm
-        check_errors(&self.edit_value, self.edit_cursor)
+        let custom_names: Vec<&str> = self.custom_fn_registry.functions.keys()
+            .map(|s| s.as_str()).collect();
+        check_errors(&self.edit_value, self.edit_cursor, &custom_names)
             .filter(|diag| matches!(diag.kind, DiagnosticKind::Hard))
             .map(|diag| FormulaErrorInfo {
                 message: diag.message,

@@ -41,6 +41,15 @@ pub fn is_known_function(name: &str) -> bool {
     FUNCTION_NAMES.binary_search(&name).is_ok()
 }
 
+/// Check if a name is valid for a user-defined custom function.
+/// Must be non-empty, start with uppercase, and contain only uppercase + digits + underscores.
+pub fn is_valid_custom_function_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes[0].is_ascii_uppercase()
+        && bytes.iter().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_')
+}
+
 pub type FunctionImpl = fn(args: &[EvalResult]) -> EvalResult;
 
 pub fn sum(args: &[EvalResult]) -> EvalResult {

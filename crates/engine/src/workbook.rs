@@ -5,7 +5,7 @@ use crate::cell_id::CellId;
 use crate::dep_graph::DepGraph;
 use crate::sheet::{Sheet, SheetId, normalize_sheet_name, is_valid_sheet_name};
 use crate::named_range::{NamedRange, NamedRangeStore};
-use crate::formula::eval::{CellLookup, NamedRangeResolution, Value};
+use crate::formula::eval::{CellLookup, EvalArg, EvalResult, NamedRangeResolution, Value};
 use crate::formula::parser::bind_expr;
 use crate::formula::refs::extract_cell_ids;
 
@@ -1340,10 +1340,138 @@ impl Workbook {
         report
     }
 
+    /// Full recalc with custom function handler support.
+    ///
+    /// Same as `recompute_full_ordered` but passes the handler through to all
+    /// cell evaluations so custom Lua functions can be resolved.
+    pub fn recompute_full_ordered_with_custom_fns(
+        &mut self,
+        handler: &dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>,
+    ) -> crate::recalc::RecalcReport {
+        use crate::formula::analyze::has_dynamic_deps;
+        use crate::recalc::{CellRecalcInfo, RecalcError, RecalcReport};
+        use rustc_hash::FxHashMap;
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let mut report = RecalcReport::new();
+
+        for sheet in &self.sheets {
+            sheet.clear_computed_cache();
+        }
+
+        let (order, cycle_cells) = match self.dep_graph.topo_order_all_formulas() {
+            Ok(order) => (order, Vec::new()),
+            Err(cycle) => {
+                report.had_cycles = true;
+                let cycle_cells = cycle.cells.clone();
+                let all_formula_cells: Vec<CellId> = self.dep_graph.formula_cells().collect();
+                let non_cycle: Vec<CellId> = all_formula_cells
+                    .into_iter()
+                    .filter(|c| !cycle_cells.contains(c))
+                    .collect();
+                (non_cycle, cycle_cells)
+            }
+        };
+
+        for cell_id in &cycle_cells {
+            if let Some(sheet) = self.sheet_by_id_mut(cell_id.sheet) {
+                sheet.set_cycle_error(cell_id.row, cell_id.col);
+            }
+        }
+
+        let mut known_deps_order = Vec::new();
+        let mut unknown_deps_cells = Vec::new();
+
+        for cell_id in order {
+            if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
+                if let Some(cell) = sheet.cells.get(&(cell_id.row, cell_id.col)) {
+                    if let Some(ast) = cell.value.formula_ast() {
+                        if has_dynamic_deps(ast) {
+                            unknown_deps_cells.push(cell_id);
+                        } else {
+                            known_deps_order.push(cell_id);
+                        }
+                    } else {
+                        known_deps_order.push(cell_id);
+                    }
+                }
+            }
+        }
+
+        let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
+        let mut eval_order: usize = 0;
+
+        for cell_id in &known_deps_order {
+            let mut max_pred_depth = 0;
+            for pred in self.dep_graph.precedents(*cell_id) {
+                let pred_depth = depths.get(&pred).copied().unwrap_or(0);
+                max_pred_depth = max_pred_depth.max(pred_depth);
+            }
+            let cell_depth = max_pred_depth + 1;
+            depths.insert(*cell_id, cell_depth);
+            report.max_depth = report.max_depth.max(cell_depth);
+
+            if let Err(e) = self.evaluate_cell_with_handler(*cell_id, Some(handler)) {
+                if report.errors.len() < 100 {
+                    report.errors.push(RecalcError::new(*cell_id, e));
+                }
+            }
+
+            report.cell_info.insert(
+                *cell_id,
+                CellRecalcInfo::new(cell_depth, eval_order, false),
+            );
+            eval_order += 1;
+            report.cells_recomputed += 1;
+        }
+
+        unknown_deps_cells.sort_by(|a, b| {
+            a.sheet.raw().cmp(&b.sheet.raw())
+                .then(a.row.cmp(&b.row))
+                .then(a.col.cmp(&b.col))
+        });
+
+        for cell_id in &unknown_deps_cells {
+            let cell_depth = report.max_depth + 1;
+            depths.insert(*cell_id, cell_depth);
+
+            if let Err(e) = self.evaluate_cell_with_handler(*cell_id, Some(handler)) {
+                if report.errors.len() < 100 {
+                    report.errors.push(RecalcError::new(*cell_id, e));
+                }
+            }
+
+            report.cell_info.insert(
+                *cell_id,
+                CellRecalcInfo::new(cell_depth, eval_order, true),
+            );
+            eval_order += 1;
+            report.cells_recomputed += 1;
+            report.unknown_deps_recomputed += 1;
+        }
+
+        if !unknown_deps_cells.is_empty() {
+            report.max_depth += 1;
+        }
+
+        report.duration_ms = start.elapsed().as_millis() as u64;
+        report
+    }
+
     /// Evaluate a single cell's formula and return the result.
     ///
     /// This forces evaluation by reading the cell value through the workbook lookup.
     fn evaluate_cell(&self, cell_id: CellId) -> Result<(), String> {
+        self.evaluate_cell_with_handler(cell_id, None)
+    }
+
+    /// Evaluate a single cell's formula, optionally with a custom function handler.
+    fn evaluate_cell_with_handler(
+        &self,
+        cell_id: CellId,
+        custom_fn_handler: Option<&dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
+    ) -> Result<(), String> {
         use crate::formula::eval::evaluate;
         use crate::formula::parser::bind_expr;
 
@@ -1355,7 +1483,14 @@ impl Workbook {
 
         if let Some(ast) = cell.value.formula_ast() {
             let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
-            let lookup = WorkbookLookup::with_cell_context(self, cell_id.sheet, cell_id.row, cell_id.col);
+            let lookup = match custom_fn_handler {
+                Some(handler) => WorkbookLookup::with_custom_functions(
+                    self, cell_id.sheet, cell_id.row, cell_id.col, handler,
+                ),
+                None => WorkbookLookup::with_cell_context(
+                    self, cell_id.sheet, cell_id.row, cell_id.col,
+                ),
+            };
             let result = evaluate(&bound, &lookup);
 
             // Cache the typed Value so subsequent lookups use the topo-consistent value
@@ -1363,7 +1498,7 @@ impl Workbook {
             sheet.cache_computed(cell_id.row, cell_id.col, result.to_value());
 
             // Check for error result
-            if let crate::formula::eval::EvalResult::Error(e) = result {
+            if let EvalResult::Error(e) = result {
                 return Err(e);
             }
         }
@@ -1722,6 +1857,7 @@ pub struct WorkbookLookup<'a> {
     workbook: &'a Workbook,
     current_sheet_id: SheetId,
     current_cell: Option<(usize, usize)>,
+    custom_fn_handler: Option<&'a dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
 }
 
 impl<'a> WorkbookLookup<'a> {
@@ -1731,6 +1867,7 @@ impl<'a> WorkbookLookup<'a> {
             workbook,
             current_sheet_id,
             current_cell: None,
+            custom_fn_handler: None,
         }
     }
 
@@ -1740,6 +1877,23 @@ impl<'a> WorkbookLookup<'a> {
             workbook,
             current_sheet_id,
             current_cell: Some((row, col)),
+            custom_fn_handler: None,
+        }
+    }
+
+    /// Create a new WorkbookLookup with cell context and a custom function handler
+    pub fn with_custom_functions(
+        workbook: &'a Workbook,
+        current_sheet_id: SheetId,
+        row: usize,
+        col: usize,
+        handler: &'a dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>,
+    ) -> Self {
+        Self {
+            workbook,
+            current_sheet_id,
+            current_cell: Some((row, col)),
+            custom_fn_handler: Some(handler),
         }
     }
 
@@ -1816,6 +1970,16 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
         self.workbook.sheet_by_id(sheet_id)
             .and_then(|s| s.get_merge(row, col))
             .map(|m| m.start)
+    }
+
+    fn get_cell_value(&self, row: usize, col: usize) -> Value {
+        self.current_sheet()
+            .map(|sheet| sheet.get_computed_value(row, col))
+            .unwrap_or(Value::Empty)
+    }
+
+    fn try_custom_function(&self, name: &str, args: &[EvalArg]) -> Option<EvalResult> {
+        self.custom_fn_handler.as_ref().and_then(|handler| handler(name, args))
     }
 }
 
