@@ -1,5 +1,8 @@
 # VisiGrid
 
+<img width="1897" height="1030" alt="screenshot-2026-02-07_15-44-09" src="https://github.com/user-attachments/assets/a4674b48-09e2-4ca1-9131-dce45a6b73b5" />
+
+
 **A fast, keyboard-first, local-only spreadsheet for people who care about flow.**
 
 VisiGrid is a native spreadsheet app that starts instantly, stays out of your way, and makes its work visible. It's built for Linux-first workflows, power users, and anyone tired of heavyweight, ribbon-driven spreadsheets.
