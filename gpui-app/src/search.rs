@@ -107,6 +107,9 @@ pub enum CommandId {
     FormatCells,
     ClearFormatting,
     FormatPainter,
+    FormatPainterLocked,
+    CopyFormat,
+    PasteFormat,
     // Background colors
     FillColor,
     ClearBackground,
@@ -249,6 +252,9 @@ impl CommandId {
             Self::FormatCells => "Format Cells...",
             Self::ClearFormatting => "Clear Formatting",
             Self::FormatPainter => "Format Painter",
+            Self::FormatPainterLocked => "Format Painter (Locked)",
+            Self::CopyFormat => "Copy Format",
+            Self::PasteFormat => "Paste Format",
             Self::FillColor => "Fill Color...",
             Self::ClearBackground => "Background: None",
             Self::BackgroundYellow => "Background: Yellow",
@@ -354,7 +360,7 @@ impl CommandId {
             Self::Copy => Some("Ctrl+C"),
             Self::Cut => Some("Ctrl+X"),
             Self::Paste => Some("Ctrl+V"),
-            Self::PasteValues => Some("Ctrl+Shift+V"),
+            Self::PasteValues => Some("Ctrl+Alt+Shift+V"),
             #[cfg(target_os = "macos")]
             Self::PasteSpecial => Some("Cmd+Option+V"),
             #[cfg(not(target_os = "macos"))]
@@ -400,6 +406,8 @@ impl CommandId {
             Self::Recalculate => Some("F9"),
             Self::InsertFormulaAI => Some("Ctrl+Shift+A"),
             Self::AnalyzeAI => Some("Ctrl+Shift+E"),
+            Self::CopyFormat => Some("Ctrl+Shift+C"),
+            Self::PasteFormat => Some("Ctrl+Shift+V"),
             _ => None,
         }
     }
@@ -434,6 +442,9 @@ impl CommandId {
             Self::FormatCells => "format style number date currency",
             Self::ClearFormatting => "clear reset format style default",
             Self::FormatPainter => "paint format brush copy style",
+            Self::FormatPainterLocked => "paint format brush lock persist",
+            Self::CopyFormat => "copy format style brush painter",
+            Self::PasteFormat => "paste format style brush painter apply",
             Self::FillColor => "background color fill paint picker format",
             Self::ClearBackground => "format fill color none clear",
             Self::BackgroundYellow => "format fill color highlight",
@@ -553,6 +564,9 @@ impl CommandId {
             Self::FormatCells,
             Self::ClearFormatting,
             Self::FormatPainter,
+            Self::FormatPainterLocked,
+            Self::CopyFormat,
+            Self::PasteFormat,
             Self::FillColor,
             Self::ClearBackground,
             Self::BackgroundYellow,
@@ -719,6 +733,9 @@ impl CommandId {
             | Self::FormatCells
             | Self::ClearFormatting
             | Self::FormatPainter
+            | Self::FormatPainterLocked
+            | Self::CopyFormat
+            | Self::PasteFormat
             | Self::SelectFont
             | Self::FillColor
             | Self::ClearBackground

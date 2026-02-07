@@ -118,7 +118,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "c"), Copy, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "x"), Cut, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "v"), Paste, Some("Spreadsheet")),
-        KeyBinding::new(&kb_shift(m, "v"), PasteValues, Some("Spreadsheet")),
+        KeyBinding::new(&format!("{}-alt-shift-v", primary_mod(m)), PasteValues, Some("Spreadsheet")),
         KeyBinding::new(&format!("{}-alt-v", primary_mod(m)), PasteSpecial, Some("Spreadsheet")),
 
         // File
@@ -186,6 +186,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "b"), ToggleBold, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "i"), ToggleItalic, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "5"), ToggleStrikethrough, Some("Spreadsheet")),  // Excel: Ctrl+5
+
+        // Format Painter (Ctrl+Shift+C = copy format, Ctrl+Shift+V = paste format)
+        KeyBinding::new(&kb_shift(m, "c"), CopyFormat, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "v"), PasteFormat, Some("Spreadsheet")),
 
         // Number formats (Mod+Shift+4 = $, Mod+Shift+5 = %)
         KeyBinding::new(&kb_shift(m, "4"), FormatCurrency, Some("Spreadsheet")),

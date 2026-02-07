@@ -2028,7 +2028,7 @@ pub struct Spreadsheet {
     pub inspector_visible: bool,
     pub inspector_tab: crate::mode::InspectorTab,
     pub inspector_pinned: Option<(usize, usize)>,  // Pinned cell (None = follows selection)
-    pub format_painter_format: Option<visigrid_engine::cell::CellFormat>,  // Captured format for Format Painter
+    pub format_painter: Option<crate::formatting::FormatPaintState>,  // Format Painter state (snapshot + locked)
     /// Current border color for new borders. None = "Automatic" (theme default).
     pub current_border_color: Option<[u8; 4]>,
     pub tab_chain_origin_col: Option<usize>,  // Tab-chain return: origin column for Enter key
@@ -2505,7 +2505,7 @@ impl Spreadsheet {
             inspector_visible: false,
             inspector_tab: crate::mode::InspectorTab::default(),
             inspector_pinned: None,
-            format_painter_format: None,
+            format_painter: None,
             current_border_color: None,  // Automatic (theme default)
             tab_chain_origin_col: None,
             inspector_hover_cell: None,
@@ -3783,6 +3783,9 @@ impl Spreadsheet {
 
             CommandId::ClearFormatting => self.clear_formatting_selection(cx),
             CommandId::FormatPainter => self.start_format_painter(cx),
+            CommandId::FormatPainterLocked => self.start_format_painter_locked(cx),
+            CommandId::CopyFormat => self.copy_format(cx),
+            CommandId::PasteFormat => self.paste_format(cx),
 
             // Background colors
             CommandId::FillColor => self.show_color_picker(crate::color_palette::ColorTarget::Fill, window, cx),

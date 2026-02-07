@@ -1326,10 +1326,10 @@ fn render_cell(
                 return;
             }
 
-            // Format Painter mode: apply captured format to clicked cell
+            // Format Painter mode: start drag to select destination range.
+            // Format is applied on mouse UP (not down), so user can drag a range first.
             if this.mode == crate::mode::Mode::FormatPainter {
-                this.select_cell(target_row, target_col, false, cx);
-                this.apply_format_painter(cx);
+                this.start_drag_selection(target_row, target_col, cx);
                 return;
             }
 
@@ -1415,6 +1415,12 @@ fn render_cell(
             if this.is_fill_dragging() {
                 let ctrl_held = event.modifiers.control || event.modifiers.platform;
                 this.end_fill_drag(ctrl_held, cx);
+                return;
+            }
+            // Format Painter: apply format on mouse up (after drag selects destination range)
+            if this.mode == crate::mode::Mode::FormatPainter {
+                this.end_drag_selection(cx);
+                this.apply_format_painter(cx);
                 return;
             }
             // End drag selection (works for both normal and formula mode)
@@ -1842,12 +1848,15 @@ fn cell_base_background_with_role(
 /// Selection ALWAYS takes precedence over formula ref highlighting.
 fn selection_overlay_color(app: &Spreadsheet, is_active: bool, is_selected: bool, formula_ref_color: Option<usize>) -> Option<Hsla> {
     // Selection overlay takes precedence over formula ref (user sees their selection clearly)
+    let painter_active = app.mode == crate::mode::Mode::FormatPainter;
     if is_active {
         // Active cell gets slightly stronger highlight
-        Some(app.token(TokenKey::SelectionBg).opacity(0.5))
+        // Format Painter: accent tint so user knows they're about to paint
+        let base = if painter_active { app.token(TokenKey::Accent) } else { app.token(TokenKey::SelectionBg) };
+        Some(base.opacity(0.5))
     } else if is_selected {
-        // Selected cells get standard overlay (selection wins over formula ref)
-        Some(app.token(TokenKey::SelectionBg).opacity(0.4))
+        let base = if painter_active { app.token(TokenKey::Accent) } else { app.token(TokenKey::SelectionBg) };
+        Some(base.opacity(0.4))
     } else if let Some(color_idx) = formula_ref_color {
         // Formula reference highlight with per-ref color (semi-transparent)
         Some(ref_color_hsla(color_idx).opacity(0.25))
@@ -1869,7 +1878,12 @@ fn cell_border(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected
     if is_editing || is_active {
         app.token(TokenKey::CellBorderFocus)
     } else if is_selected {
-        app.token(TokenKey::SelectionBorder)
+        // Format Painter: accent-tinted selection border
+        if app.mode == crate::mode::Mode::FormatPainter {
+            app.token(TokenKey::Accent)
+        } else {
+            app.token(TokenKey::SelectionBorder)
+        }
     } else {
         // Formula refs use dashed border overlay, not per-cell solid borders
         app.token(TokenKey::GridLines)
@@ -1883,10 +1897,9 @@ fn cell_text_color(app: &Spreadsheet, is_editing: bool, is_selected: bool, is_mu
         // Show preview text in a muted/dimmed color to distinguish from the active edit cell
         app.token(TokenKey::TextMuted)
     } else if is_selected {
-        // Use primary text color for selected cells to ensure contrast
-        // SelectionBg is semi-transparent, so text should be visible,
-        // but use a slightly brighter color to ensure readability
-        app.token(TokenKey::TextPrimary)
+        // Use SelectionText token — most themes match TextPrimary,
+        // but VisiCalc uses black for inverse-video on solid green selection
+        app.token(TokenKey::SelectionText)
     } else {
         app.token(TokenKey::CellText)
     }
@@ -2318,8 +2331,7 @@ fn render_merge_div(
             }
 
             if this.mode == crate::mode::Mode::FormatPainter {
-                this.select_cell(target_row, target_col, false, cx);
-                this.apply_format_painter(cx);
+                this.start_drag_selection(target_row, target_col, cx);
                 return;
             }
 
@@ -2377,6 +2389,11 @@ fn render_merge_div(
             if this.is_fill_dragging() {
                 let ctrl_held = event.modifiers.control || event.modifiers.platform;
                 this.end_fill_drag(ctrl_held, cx);
+                return;
+            }
+            if this.mode == crate::mode::Mode::FormatPainter {
+                this.end_drag_selection(cx);
+                this.apply_format_painter(cx);
                 return;
             }
             this.end_drag_selection(cx);

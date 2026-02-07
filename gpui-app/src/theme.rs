@@ -39,6 +39,7 @@ pub enum TokenKey {
     HeaderBorder,
     HeaderHoverBg,
     HeaderActiveBg,
+    HeaderActiveText,
 
     // Cells
     CellBg,
@@ -51,6 +52,7 @@ pub enum TokenKey {
     // Selection + cursor
     SelectionBg,
     SelectionBorder,
+    SelectionText,    // Text color inside selected cells (for opaque selection themes like VisiCalc)
     SelectionHandle,
     CursorBg,
     CursorText,
@@ -156,6 +158,7 @@ impl TokenKey {
         TokenKey::HeaderBorder,
         TokenKey::HeaderHoverBg,
         TokenKey::HeaderActiveBg,
+        TokenKey::HeaderActiveText,
         // Cells
         TokenKey::CellBg,
         TokenKey::CellBgAlt,
@@ -166,6 +169,7 @@ impl TokenKey {
         // Selection + cursor
         TokenKey::SelectionBg,
         TokenKey::SelectionBorder,
+        TokenKey::SelectionText,
         TokenKey::SelectionHandle,
         TokenKey::CursorBg,
         TokenKey::CursorText,
@@ -368,6 +372,7 @@ pub fn ledger_dark_theme() -> Theme {
     tokens.insert(TokenKey::HeaderBorder, grid_bold);
     tokens.insert(TokenKey::HeaderHoverBg, rgb(0x232a38));
     tokens.insert(TokenKey::HeaderActiveBg, accent);
+    tokens.insert(TokenKey::HeaderActiveText, text_muted);
 
     // Cells
     tokens.insert(TokenKey::CellBg, bg_dark);
@@ -380,6 +385,7 @@ pub fn ledger_dark_theme() -> Theme {
     // Selection + cursor - border-first, minimal fill
     tokens.insert(TokenKey::SelectionBg, rgba(0x4f8cff10));  // ~6% alpha - near transparent
     tokens.insert(TokenKey::SelectionBorder, accent);        // Solid border is the focus
+    tokens.insert(TokenKey::SelectionText, text_primary);
     tokens.insert(TokenKey::SelectionHandle, accent_bright);
     tokens.insert(TokenKey::CursorBg, text_primary);
     tokens.insert(TokenKey::CursorText, bg_dark);
@@ -511,6 +517,7 @@ pub fn slate_dark_theme() -> Theme {
     tokens.insert(TokenKey::HeaderBorder, grid_700);
     tokens.insert(TokenKey::HeaderHoverBg, grid_700);
     tokens.insert(TokenKey::HeaderActiveBg, accent_hover);
+    tokens.insert(TokenKey::HeaderActiveText, grid_400);
 
     // Cells
     tokens.insert(TokenKey::CellBg, grid_900);
@@ -523,6 +530,7 @@ pub fn slate_dark_theme() -> Theme {
     // Selection + cursor
     tokens.insert(TokenKey::SelectionBg, rgba(0x3b82f625));
     tokens.insert(TokenKey::SelectionBorder, rgba(0x3b82f680));
+    tokens.insert(TokenKey::SelectionText, grid_100);
     tokens.insert(TokenKey::SelectionHandle, accent);
     tokens.insert(TokenKey::CursorBg, grid_100);
     tokens.insert(TokenKey::CursorText, grid_900);
@@ -667,6 +675,7 @@ pub fn ledger_light_theme() -> Theme {
     tokens.insert(TokenKey::HeaderBorder, border);
     tokens.insert(TokenKey::HeaderHoverBg, rgb(0xdce0e8));
     tokens.insert(TokenKey::HeaderActiveBg, accent_light);
+    tokens.insert(TokenKey::HeaderActiveText, text_muted);
 
     // Cells
     tokens.insert(TokenKey::CellBg, white);
@@ -679,6 +688,7 @@ pub fn ledger_light_theme() -> Theme {
     // Selection + cursor - conservative blue
     tokens.insert(TokenKey::SelectionBg, rgba(0x2563eb20));  // Blue with low alpha
     tokens.insert(TokenKey::SelectionBorder, rgba(0x2563eb80));
+    tokens.insert(TokenKey::SelectionText, text_primary);
     tokens.insert(TokenKey::SelectionHandle, accent);
     tokens.insert(TokenKey::CursorBg, text_primary);
     tokens.insert(TokenKey::CursorText, white);
@@ -802,7 +812,8 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::HeaderTextMuted, green_dim);
     tokens.insert(TokenKey::HeaderBorder, green_dim);
     tokens.insert(TokenKey::HeaderHoverBg, green_bg);
-    tokens.insert(TokenKey::HeaderActiveBg, green_bg);
+    tokens.insert(TokenKey::HeaderActiveBg, green);
+    tokens.insert(TokenKey::HeaderActiveText, black);
 
     // Cells
     tokens.insert(TokenKey::CellBg, black);
@@ -812,9 +823,10 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::CellBorderFocus, green);
     tokens.insert(TokenKey::CellHoverBg, rgb(0x001100));
 
-    // Selection + cursor
-    tokens.insert(TokenKey::SelectionBg, rgba(0x00330060));  // Subtle green for range (37% opacity)
-    tokens.insert(TokenKey::SelectionBorder, rgba(0x00ff66a0));  // Selection border - visible but not harsh
+    // Selection + cursor — original VisiCalc: inverse video (solid green block, black text)
+    tokens.insert(TokenKey::SelectionBg, rgba(0x00ff66ff));  // Fully opaque green — true inverse video
+    tokens.insert(TokenKey::SelectionBorder, green);
+    tokens.insert(TokenKey::SelectionText, black);           // Black text on green (inverse video)
     tokens.insert(TokenKey::SelectionHandle, green);
     tokens.insert(TokenKey::CursorBg, green);
     tokens.insert(TokenKey::CursorText, black);
@@ -960,6 +972,7 @@ pub fn catppuccin_theme() -> Theme {
     tokens.insert(TokenKey::HeaderBorder, surface0);
     tokens.insert(TokenKey::HeaderHoverBg, crust);
     tokens.insert(TokenKey::HeaderActiveBg, surface1);
+    tokens.insert(TokenKey::HeaderActiveText, subtext0);
 
     // Cells
     tokens.insert(TokenKey::CellBg, rgb(0xffffff));
@@ -972,6 +985,7 @@ pub fn catppuccin_theme() -> Theme {
     // Selection + cursor
     tokens.insert(TokenKey::SelectionBg, rgba(0x7287fd30));  // Lavender with alpha
     tokens.insert(TokenKey::SelectionBorder, rgba(0x7287fd80));
+    tokens.insert(TokenKey::SelectionText, text);
     tokens.insert(TokenKey::SelectionHandle, lavender);
     tokens.insert(TokenKey::CursorBg, text);
     tokens.insert(TokenKey::CursorText, base);
@@ -1070,11 +1084,11 @@ pub fn catppuccin_theme() -> Theme {
 // ============================================================================
 
 /// All built-in themes
-/// Order: Ledger Dark (default), Ledger Light, Catppuccin, VisiCalc, Slate Dark
+/// Order: Ledger Light (default), Ledger Dark, Catppuccin, VisiCalc, Slate Dark
 pub fn builtin_themes() -> Vec<Theme> {
     vec![
-        ledger_dark_theme(),    // Recommended dark (default)
-        ledger_light_theme(),   // Recommended light
+        ledger_light_theme(),   // Default
+        ledger_dark_theme(),    // Recommended dark
         catppuccin_theme(),     // Comfort light
         visicalc_theme(),       // Retro fun
         slate_dark_theme(),     // Developer/editor-style dark
@@ -1099,7 +1113,7 @@ pub fn get_theme(id: &str) -> Option<Theme> {
 
 /// Default theme
 pub fn default_theme() -> Theme {
-    ledger_dark_theme()
+    ledger_light_theme()
 }
 
 pub const SYSTEM_THEME_ID: &str = "system";

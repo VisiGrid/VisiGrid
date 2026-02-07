@@ -3065,3 +3065,284 @@ fn test_normalize_clipboard_text_preserves_internal_whitespace() {
     assert_eq!(Spreadsheet::normalize_clipboard_text("a  b"), "a  b");
     assert_eq!(Spreadsheet::normalize_clipboard_text("a\tb"), "a\tb");
 }
+
+// =========================================================================
+// FORMAT PAINTER: Undo correctness
+// =========================================================================
+
+#[test]
+fn test_format_painter_undo_reverts_multi_cell() {
+    use crate::history::{History, CellFormatPatch, FormatActionKind, UndoAction};
+    use visigrid_engine::cell::CellFormat;
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    let mut history = History::new();
+
+    // Set up: A1 bold+italic, B1 default, C1 italic-only
+    let mut fmt_a1 = CellFormat::default();
+    fmt_a1.bold = true;
+    fmt_a1.italic = true;
+    sheet.set_format(0, 0, fmt_a1);
+
+    let mut fmt_c1 = CellFormat::default();
+    fmt_c1.italic = true;
+    sheet.set_format(0, 2, fmt_c1);
+
+    // Capture before states
+    let before = [
+        sheet.get_format(0, 0),
+        sheet.get_format(0, 1),
+        sheet.get_format(0, 2),
+    ];
+
+    // Simulate Format Painter: paint bold+underline onto A1:C1
+    let paint_format = CellFormat {
+        bold: true,
+        underline: true,
+        ..Default::default()
+    };
+
+    let mut patches = Vec::new();
+    for col in 0..3 {
+        let b = sheet.get_format(0, col);
+        if b != paint_format {
+            sheet.set_format(0, col, paint_format.clone());
+            let a = sheet.get_format(0, col);
+            patches.push(CellFormatPatch { row: 0, col, before: b, after: a });
+        }
+    }
+    assert_eq!(patches.len(), 3, "All 3 cells should change");
+    history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+
+    // Verify formats changed
+    for col in 0..3 {
+        let f = sheet.get_format(0, col);
+        assert!(f.bold, "Cell (0,{}) should be bold after paint", col);
+        assert!(f.underline, "Cell (0,{}) should be underline after paint", col);
+        assert!(!f.italic, "Cell (0,{}) should NOT be italic after paint", col);
+    }
+
+    // Undo
+    let entry = history.undo().expect("Should have undo entry");
+    match entry.action {
+        UndoAction::Format { patches, .. } => {
+            assert_eq!(patches.len(), 3, "Undo should revert 3 cells");
+            for patch in &patches {
+                sheet.set_format(patch.row, patch.col, patch.before.clone());
+            }
+        }
+        _ => panic!("Expected Format action"),
+    }
+
+    // Verify exact restoration
+    let after_undo = [
+        sheet.get_format(0, 0),
+        sheet.get_format(0, 1),
+        sheet.get_format(0, 2),
+    ];
+    assert_eq!(before[0], after_undo[0], "A1 format should be exactly restored");
+    assert_eq!(before[1], after_undo[1], "B1 format should be exactly restored");
+    assert_eq!(before[2], after_undo[2], "C1 format should be exactly restored");
+
+    // Verify specific properties survived undo
+    assert!(after_undo[0].bold, "A1 was bold before, should be bold after undo");
+    assert!(after_undo[0].italic, "A1 was italic before, should be italic after undo");
+    assert!(!after_undo[1].bold, "B1 was default, should be default after undo");
+    assert!(after_undo[2].italic, "C1 was italic, should be italic after undo");
+    assert!(!after_undo[2].underline, "C1 had no underline, should have none after undo");
+}
+
+// =========================================================================
+// FORMAT PAINTER: Locked mode persistence
+// =========================================================================
+
+#[test]
+fn test_format_painter_locked_mode_persists() {
+    use crate::formatting::FormatPaintState;
+    use crate::history::{History, CellFormatPatch, FormatActionKind};
+    use visigrid_engine::cell::CellFormat;
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    let mut history = History::new();
+
+    // Source format: bold + italic
+    let source_format = CellFormat {
+        bold: true,
+        italic: true,
+        ..Default::default()
+    };
+
+    // Start locked painter
+    let mut painter: Option<FormatPaintState> = Some(FormatPaintState {
+        snapshot: source_format.clone(),
+        locked: true,
+    });
+
+    // --- Apply to selection A (row 0, cols 0..2) ---
+    {
+        let (snapshot, locked) = match &painter {
+            Some(state) => (state.snapshot.clone(), state.locked),
+            None => panic!("Painter should be active"),
+        };
+        assert!(locked, "Painter should be locked");
+
+        let mut patches = Vec::new();
+        for col in 0..3 {
+            let before = sheet.get_format(0, col);
+            if before != snapshot {
+                sheet.set_format(0, col, snapshot.clone());
+                let after = sheet.get_format(0, col);
+                patches.push(CellFormatPatch { row: 0, col, before, after });
+            }
+        }
+        assert_eq!(patches.len(), 3, "Selection A: all 3 cells should change");
+        history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+
+        // Locked mode: painter stays active (don't clear)
+        assert!(painter.is_some(), "Painter should still be active after apply (locked)");
+    }
+
+    // --- Apply to selection B (row 1, cols 0..2) ---
+    {
+        let (snapshot, locked) = match &painter {
+            Some(state) => (state.snapshot.clone(), state.locked),
+            None => panic!("Painter should still be active for second apply"),
+        };
+        assert!(locked, "Painter should still be locked");
+
+        let mut patches = Vec::new();
+        for col in 0..3 {
+            let before = sheet.get_format(1, col);
+            if before != snapshot {
+                sheet.set_format(1, col, snapshot.clone());
+                let after = sheet.get_format(1, col);
+                patches.push(CellFormatPatch { row: 1, col, before, after });
+            }
+        }
+        assert_eq!(patches.len(), 3, "Selection B: all 3 cells should change");
+        history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+    }
+
+    // Verify painter still active
+    assert!(painter.is_some(), "Painter should persist through both applies");
+    assert!(painter.as_ref().unwrap().locked, "Locked flag should persist");
+
+    // Verify both selections got the format
+    for row in 0..2 {
+        for col in 0..3 {
+            let f = sheet.get_format(row, col);
+            assert!(f.bold, "Cell ({},{}) should be bold", row, col);
+            assert!(f.italic, "Cell ({},{}) should be italic", row, col);
+        }
+    }
+
+    // Esc cancels: clear painter
+    painter = None;
+    assert!(painter.is_none(), "Painter should be cleared after cancel");
+
+    // Two separate undo entries (one per apply)
+    let entry2 = history.undo().expect("Should have undo for selection B");
+    match &entry2.action {
+        crate::history::UndoAction::Format { patches, .. } => {
+            assert_eq!(patches.len(), 3, "Selection B undo should have 3 patches");
+            assert_eq!(patches[0].row, 1, "Selection B patches should be on row 1");
+        }
+        _ => panic!("Expected Format action"),
+    }
+
+    let entry1 = history.undo().expect("Should have undo for selection A");
+    match &entry1.action {
+        crate::history::UndoAction::Format { patches, .. } => {
+            assert_eq!(patches.len(), 3, "Selection A undo should have 3 patches");
+            assert_eq!(patches[0].row, 0, "Selection A patches should be on row 0");
+        }
+        _ => panic!("Expected Format action"),
+    }
+}
+
+// =========================================================================
+// FORMAT PAINTER: Multi-cell range application
+// =========================================================================
+
+#[test]
+fn test_format_painter_applies_to_range() {
+    use crate::history::{History, CellFormatPatch, FormatActionKind, UndoAction};
+    use visigrid_engine::cell::CellFormat;
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    let mut history = History::new();
+
+    // Set up: 3×2 destination range (rows 0-2, cols 0-1) with default format
+    // Source format: bold + underline
+    let paint_format = CellFormat {
+        bold: true,
+        underline: true,
+        ..Default::default()
+    };
+
+    // Give one destination cell a pre-existing format to verify undo precision
+    let mut fmt_b2 = CellFormat::default();
+    fmt_b2.italic = true;
+    sheet.set_format(1, 1, fmt_b2);
+
+    // Capture all before states
+    let mut before_formats = Vec::new();
+    for row in 0..3 {
+        for col in 0..2 {
+            before_formats.push(((row, col), sheet.get_format(row, col)));
+        }
+    }
+
+    // Simulate: apply format painter to the 3×2 selection range (A1:B3)
+    let selection_ranges: Vec<((usize, usize), (usize, usize))> = vec![((0, 0), (2, 1))];
+
+    let mut patches = Vec::new();
+    for ((min_row, min_col), (max_row, max_col)) in &selection_ranges {
+        for row in *min_row..=*max_row {
+            for col in *min_col..=*max_col {
+                let before = sheet.get_format(row, col);
+                if before != paint_format {
+                    sheet.set_format(row, col, paint_format.clone());
+                    let after = sheet.get_format(row, col);
+                    patches.push(CellFormatPatch { row, col, before, after });
+                }
+            }
+        }
+    }
+
+    // All 6 cells should have been painted
+    assert_eq!(patches.len(), 6, "All 6 cells in 3×2 range should change");
+    history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+
+    // Verify all 6 cells have the painted format
+    for row in 0..3 {
+        for col in 0..2 {
+            let f = sheet.get_format(row, col);
+            assert!(f.bold, "Cell ({},{}) should be bold after paint", row, col);
+            assert!(f.underline, "Cell ({},{}) should be underline after paint", row, col);
+            assert!(!f.italic, "Cell ({},{}) should NOT be italic after paint", row, col);
+        }
+    }
+
+    // Single undo should revert ALL 6 cells
+    let entry = history.undo().expect("Should have undo entry");
+    match entry.action {
+        UndoAction::Format { patches, .. } => {
+            assert_eq!(patches.len(), 6, "Undo should contain all 6 patches");
+            for patch in &patches {
+                sheet.set_format(patch.row, patch.col, patch.before.clone());
+            }
+        }
+        _ => panic!("Expected Format action"),
+    }
+
+    // Verify exact restoration for all 6 cells
+    for ((row, col), expected) in &before_formats {
+        let actual = sheet.get_format(*row, *col);
+        assert_eq!(actual, *expected, "Cell ({},{}) format should be exactly restored", row, col);
+    }
+
+    // Specifically verify B2's italic survived undo
+    assert!(sheet.get_format(1, 1).italic, "B2 was italic before, should be italic after undo");
+    assert!(!sheet.get_format(1, 1).bold, "B2 was not bold before, should not be bold after undo");
+}

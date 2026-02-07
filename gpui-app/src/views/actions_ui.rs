@@ -268,6 +268,18 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &FormatPainter, _, cx| {
             this.start_format_painter(cx);
         }))
+        .on_action(cx.listener(|this, _: &FormatPainterLocked, _, cx| {
+            this.start_format_painter_locked(cx);
+        }))
+        .on_action(cx.listener(|this, _: &CopyFormat, _, cx| {
+            this.copy_format(cx);
+        }))
+        .on_action(cx.listener(|this, _: &PasteFormat, _, cx| {
+            this.paste_format(cx);
+        }))
+        .on_action(cx.listener(|this, _: &CancelFormatPainter, _, cx| {
+            this.cancel_format_painter(cx);
+        }))
         .on_action(cx.listener(|this, _: &BackgroundYellow, window, cx| {
             this.set_background_color(Some([255, 255, 0, 255]), cx);
             this.update_title_if_needed(window, cx);

@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, TriState, CELL_HEIGHT};
+use crate::mode::Mode;
 use crate::theme::TokenKey;
 use visigrid_engine::cell::{Alignment, VerticalAlignment};
 
@@ -104,6 +105,8 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
             app.ui.format_menu_open,
             cx,
         ))
+        // Format Painter button
+        .child(render_format_painter_btn(app.mode == Mode::FormatPainter, text_primary, text_muted, accent, panel_border, cx))
         // Separator
         .child(toolbar_separator(panel_border))
         // Fill color button
@@ -481,6 +484,59 @@ fn render_format_dropdown_btn(
         }))
         .child("Format")
         .child(div().text_size(px(7.0)).child("▾"))
+}
+
+/// Format Painter toggle button (paintbrush icon).
+/// Single click → single-shot. Shift+click → locked mode.
+fn render_format_painter_btn(
+    is_active: bool,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let btn_bg = if is_active { accent.opacity(0.2) } else { gpui::transparent_black() };
+    let btn_border = if is_active { accent } else { panel_border };
+    let btn_color = if is_active { text_primary } else { text_muted };
+
+    #[cfg(target_os = "macos")]
+    let tooltip_text = "Format Painter (\u{2318}\u{21e7}C to copy)";
+    #[cfg(not(target_os = "macos"))]
+    let tooltip_text = "Format Painter (Ctrl+Shift+C to copy)";
+
+    div()
+        .id("fmt-painter")
+        .w(px(26.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(btn_border)
+        .bg(btn_bg)
+        .text_size(px(12.0))
+        .text_color(btn_color)
+        .hover(|s| s.bg(panel_border.opacity(0.5)))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+            if this.mode == Mode::FormatPainter {
+                // Already active: cancel
+                this.cancel_format_painter(cx);
+            } else if event.modifiers.shift {
+                // Shift+click: locked mode
+                this.start_format_painter_locked(cx);
+            } else {
+                // Normal click: single-shot
+                this.start_format_painter(cx);
+            }
+        }))
+        .tooltip(move |_window, cx| {
+            cx.new(|_| FormatBarTooltip(tooltip_text)).into()
+        })
+        // Paintbrush icon: 🖌 (U+1F58C)
+        .child("\u{1f58c}\u{fe0e}")
 }
 
 /// Format dropdown panel - rendered at root level so it floats above grid.

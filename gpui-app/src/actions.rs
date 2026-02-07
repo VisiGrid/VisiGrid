@@ -182,7 +182,11 @@ actions!(format, [
     FormatCurrency,
     FormatPercent,
     ClearFormatting,  // Reset all format properties to default
-    FormatPainter,    // Activate Format Painter mode
+    FormatPainter,            // Activate Format Painter mode (single-shot)
+    FormatPainterLocked,      // Activate Format Painter in locked mode (stays active)
+    CopyFormat,               // Copy format from active cell (Ctrl+Shift+C)
+    PasteFormat,              // Paste format to selection (Ctrl+Shift+V)
+    CancelFormatPainter,      // Cancel Format Painter mode
     OpenNumberFormatEditor, // Open number format editor (Ctrl+1 escalation)
     // Background colors
     ClearBackground,

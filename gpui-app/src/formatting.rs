@@ -11,6 +11,15 @@ use crate::app::{Spreadsheet, TriState, SelectionFormatState};
 use crate::history::{CellFormatPatch, FormatActionKind, UndoAction};
 use crate::mode::Mode;
 
+/// Format Painter state: captured format + locked flag.
+#[derive(Debug, Clone)]
+pub struct FormatPaintState {
+    /// The captured cell format snapshot (immutable until next CopyFormat).
+    pub snapshot: CellFormat,
+    /// If true, painter stays active after each apply (double-click / Shift+click).
+    pub locked: bool,
+}
+
 /// Border application mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderApplyMode {
@@ -547,30 +556,83 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Start Format Painter: capture the active cell's format.
+    /// Start Format Painter (single-shot): capture the active cell's format.
     pub fn start_format_painter(&mut self, cx: &mut Context<Self>) {
+        self.start_format_painter_inner(false, cx);
+    }
+
+    /// Start Format Painter in locked mode: stays active until Esc.
+    pub fn start_format_painter_locked(&mut self, cx: &mut Context<Self>) {
+        self.start_format_painter_inner(true, cx);
+    }
+
+    fn start_format_painter_inner(&mut self, locked: bool, cx: &mut Context<Self>) {
         let (row, col) = self.view_state.selected;
-        let format = self.sheet(cx).get_format(row, col);
-        self.format_painter_format = Some(format);
+        let snapshot = self.sheet(cx).get_format(row, col);
+        self.format_painter = Some(FormatPaintState { snapshot, locked });
         self.mode = crate::mode::Mode::FormatPainter;
-        self.status_message = Some("Format Painter: click a cell to apply \u{00b7} Esc to cancel".to_string());
+        if locked {
+            self.status_message = Some("Format Painter: LOCKED (Esc to cancel)".to_string());
+        } else {
+            self.status_message = Some("Format Painter: ON (Esc to cancel)".to_string());
+        }
+        cx.notify();
+    }
+
+    /// Copy format from active cell without entering FormatPainter mode (Ctrl+Shift+C).
+    pub fn copy_format(&mut self, cx: &mut Context<Self>) {
+        let (row, col) = self.view_state.selected;
+        let snapshot = self.sheet(cx).get_format(row, col);
+        self.format_painter = Some(FormatPaintState { snapshot, locked: false });
+        self.status_message = Some("Format copied \u{00b7} Ctrl+Shift+V to paste".to_string());
+        cx.notify();
+    }
+
+    /// Paste previously copied format onto current selection (Ctrl+Shift+V).
+    pub fn paste_format(&mut self, cx: &mut Context<Self>) {
+        let snapshot = match &self.format_painter {
+            Some(state) => state.snapshot.clone(),
+            None => {
+                self.status_message = Some("No format copied \u{00b7} Ctrl+Shift+C first".to_string());
+                cx.notify();
+                return;
+            }
+        };
+        // Paste format does not enter/exit FormatPainter mode — it's a one-shot apply
+        self.apply_format_to_selection(&snapshot, cx);
+        // Clear the captured format after paste (single-shot behavior)
+        self.format_painter = None;
         cx.notify();
     }
 
     /// Apply Format Painter: set captured format on current selection.
     pub fn apply_format_painter(&mut self, cx: &mut Context<Self>) {
-        let format = match self.format_painter_format.take() {
-            Some(f) => f,
+        let (snapshot, locked) = match &self.format_painter {
+            Some(state) => (state.snapshot.clone(), state.locked),
             None => return,
         };
-        self.mode = crate::mode::Mode::Navigation;
 
+        self.apply_format_to_selection(&snapshot, cx);
+
+        if locked {
+            // Stay in FormatPainter mode — don't clear state
+            self.status_message = Some("Format Painter: LOCKED (Esc to cancel)".to_string());
+        } else {
+            // Single-shot: disarm
+            self.format_painter = None;
+            self.mode = crate::mode::Mode::Navigation;
+        }
+        cx.notify();
+    }
+
+    /// Shared helper: apply a format snapshot to all selected cells with undo.
+    fn apply_format_to_selection(&mut self, format: &CellFormat, cx: &mut Context<Self>) {
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
-                    if before != format {
+                    if before != *format {
                         self.active_sheet_mut(cx, |s| s.set_format(row, col, format.clone()));
                         let after = self.sheet(cx).get_format(row, col);
                         patches.push(CellFormatPatch { row, col, before, after });
@@ -586,12 +648,11 @@ impl Spreadsheet {
         } else {
             self.status_message = None;
         }
-        cx.notify();
     }
 
     /// Cancel Format Painter mode.
     pub fn cancel_format_painter(&mut self, cx: &mut Context<Self>) {
-        self.format_painter_format = None;
+        self.format_painter = None;
         self.mode = crate::mode::Mode::Navigation;
         self.status_message = None;
         cx.notify();

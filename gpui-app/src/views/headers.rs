@@ -146,6 +146,8 @@ fn render_column_header(
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
     let header_text = app.token(TokenKey::HeaderTextMuted);
+    let header_active_bg = app.token(TokenKey::HeaderActiveBg);
+    let header_active_text = app.token(TokenKey::HeaderActiveText);
     let accent = app.token(TokenKey::Accent);
     let selection_bg = app.token(TokenKey::SelectionBg);
 
@@ -163,9 +165,10 @@ fn render_column_header(
         .justify_center()
         .border_1()
         .border_color(header_border)
-        .when(is_selected, |div| div.bg(selection_bg.opacity(0.5)))
+        .when(is_selected, |div| div.bg(header_active_bg))
         .when(!is_selected, |div| div.bg(header_bg))
-        .text_color(header_text)
+        .when(is_selected, |div| div.text_color(header_active_text))
+        .when(!is_selected, |div| div.text_color(header_text))
         .text_sm()
         .cursor_pointer()
         .hover(|s| s.bg(selection_bg.opacity(0.3)))
@@ -267,6 +270,8 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
     let header_text = app.token(TokenKey::HeaderTextMuted);
+    let header_active_bg = app.token(TokenKey::HeaderActiveBg);
+    let header_active_text = app.token(TokenKey::HeaderActiveText);
     let accent = app.token(TokenKey::Accent);
     let selection_bg = app.token(TokenKey::SelectionBg);
     let is_selected = app.is_row_header_selected(row);
@@ -280,11 +285,12 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
         .flex()
         .items_center()
         .justify_center()
-        .when(is_selected, |div| div.bg(selection_bg.opacity(0.5)))
+        .when(is_selected, |div| div.bg(header_active_bg))
         .when(!is_selected, |div| div.bg(header_bg))
         .border_1()
         .border_color(header_border)
-        .text_color(header_text)
+        .when(is_selected, |div| div.text_color(header_active_text))
+        .when(!is_selected, |div| div.text_color(header_text))
         .text_size(px(app.metrics.font_size))  // Scaled font size
         .cursor_pointer()
         .hover(|s| s.bg(selection_bg.opacity(0.3)))
