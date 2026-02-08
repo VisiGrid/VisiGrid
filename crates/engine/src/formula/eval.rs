@@ -546,7 +546,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
         }
         Expr::Range { .. } => {
             // Ranges can't be evaluated directly, only within functions
-            EvalResult::Error("Array arithmetic not yet supported. Use SUMPRODUCT or helper columns.".to_string())
+            EvalResult::Error("Array arithmetic not yet supported. Use SUMPRODUCT(A1:A10, B1:B10) instead of SUM(A1:A10*B1:B10).".to_string())
         }
         Expr::NamedRange(name) => {
             // Resolve the named range and evaluate
@@ -571,7 +571,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
                 }
                 Some(NamedRangeResolution::Range { .. }) => {
                     // Ranges can't be evaluated directly, only within functions
-                    EvalResult::Error("Array arithmetic not yet supported. Use SUMPRODUCT or helper columns.".to_string())
+                    EvalResult::Error("Array arithmetic not yet supported. Use SUMPRODUCT(A1:A10, B1:B10) instead of SUM(A1:A10*B1:B10).".to_string())
                 }
             }
         }
@@ -2243,5 +2243,127 @@ mod tests {
         let expr = parse_and_bind("=COUNTBLANK(A1)");
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(0.0));
+    }
+
+    // =========================================================================
+    // SUMPRODUCT tests
+    // =========================================================================
+
+    #[test]
+    fn test_sumproduct_two_ranges_1d() {
+        let mut lookup = TestLookup::new();
+        // A1:A3 = [1, 2, 3], B1:B3 = [4, 5, 6]
+        lookup.set(0, 0, "1"); lookup.set(1, 0, "2"); lookup.set(2, 0, "3");
+        lookup.set(0, 1, "4"); lookup.set(1, 1, "5"); lookup.set(2, 1, "6");
+        // 1*4 + 2*5 + 3*6 = 4 + 10 + 18 = 32
+        let expr = parse_and_bind("=SUMPRODUCT(A1:A3, B1:B3)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(32.0));
+    }
+
+    #[test]
+    fn test_sumproduct_single_range() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "10"); lookup.set(1, 0, "20"); lookup.set(2, 0, "30");
+        // Single range = sum of elements: 10 + 20 + 30 = 60
+        let expr = parse_and_bind("=SUMPRODUCT(A1:A3)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(60.0));
+    }
+
+    #[test]
+    fn test_sumproduct_three_ranges() {
+        let mut lookup = TestLookup::new();
+        // A1:A2 = [2, 3], B1:B2 = [4, 5], C1:C2 = [10, 20]
+        lookup.set(0, 0, "2"); lookup.set(1, 0, "3");
+        lookup.set(0, 1, "4"); lookup.set(1, 1, "5");
+        lookup.set(0, 2, "10"); lookup.set(1, 2, "20");
+        // 2*4*10 + 3*5*20 = 80 + 300 = 380
+        let expr = parse_and_bind("=SUMPRODUCT(A1:A2, B1:B2, C1:C2)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(380.0));
+    }
+
+    #[test]
+    fn test_sumproduct_2d_ranges() {
+        let mut lookup = TestLookup::new();
+        // A1:B2 = [[1,2],[3,4]], C1:D2 = [[5,6],[7,8]]
+        lookup.set(0, 0, "1"); lookup.set(0, 1, "2");
+        lookup.set(1, 0, "3"); lookup.set(1, 1, "4");
+        lookup.set(0, 2, "5"); lookup.set(0, 3, "6");
+        lookup.set(1, 2, "7"); lookup.set(1, 3, "8");
+        // 1*5 + 2*6 + 3*7 + 4*8 = 5 + 12 + 21 + 32 = 70
+        let expr = parse_and_bind("=SUMPRODUCT(A1:B2, C1:D2)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(70.0));
+    }
+
+    #[test]
+    fn test_sumproduct_with_blanks() {
+        let mut lookup = TestLookup::new();
+        // A1:A3 = [1, "", 3], B1:B3 = [4, 5, 6]
+        lookup.set(0, 0, "1"); /* A2 empty */ lookup.set(2, 0, "3");
+        lookup.set(0, 1, "4"); lookup.set(1, 1, "5"); lookup.set(2, 1, "6");
+        // 1*4 + 0*5 + 3*6 = 4 + 0 + 18 = 22
+        let expr = parse_and_bind("=SUMPRODUCT(A1:A3, B1:B3)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(22.0));
+    }
+
+    #[test]
+    fn test_sumproduct_with_text() {
+        let mut lookup = TestLookup::new();
+        // A1:A3 = [1, "hello", 3], B1:B3 = [4, 5, 6]
+        lookup.set(0, 0, "1"); lookup.set(1, 0, "hello"); lookup.set(2, 0, "3");
+        lookup.set(0, 1, "4"); lookup.set(1, 1, "5"); lookup.set(2, 1, "6");
+        // 1*4 + 0*5 + 3*6 = 4 + 0 + 18 = 22 (text → 0)
+        let expr = parse_and_bind("=SUMPRODUCT(A1:A3, B1:B3)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(22.0));
+    }
+
+    #[test]
+    fn test_sumproduct_shape_mismatch() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "1"); lookup.set(1, 0, "2"); lookup.set(2, 0, "3");
+        lookup.set(0, 1, "4"); lookup.set(1, 1, "5");
+        // A1:A3 (3x1) vs B1:B2 (2x1) → shape mismatch
+        let expr = parse_and_bind("=SUMPRODUCT(A1:A3, B1:B2)");
+        let result = evaluate(&expr, &lookup);
+        assert!(matches!(result, EvalResult::Error(_)));
+    }
+
+    #[test]
+    fn test_sumproduct_named_range() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "2"); lookup.set(1, 0, "3");
+        lookup.set(0, 1, "10"); lookup.set(1, 1, "20");
+        lookup.define_range("Prices", 0, 0, 1, 0);
+        lookup.define_range("Quantities", 0, 1, 1, 1);
+        // 2*10 + 3*20 = 20 + 60 = 80
+        let expr = parse_and_bind("=SUMPRODUCT(Prices, Quantities)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(80.0));
+    }
+
+    #[test]
+    fn test_sumproduct_single_cell_refs() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "5"); lookup.set(0, 1, "7");
+        // SUMPRODUCT(A1, B1) = 5*7 = 35
+        let expr = parse_and_bind("=SUMPRODUCT(A1, B1)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(35.0));
+    }
+
+    #[test]
+    fn test_sumproduct_error_propagation() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "1"); lookup.set(1, 0, "#DIV/0!"); lookup.set(2, 0, "3");
+        lookup.set(0, 1, "4"); lookup.set(1, 1, "5"); lookup.set(2, 1, "6");
+        // Error in A2 → propagates
+        let expr = parse_and_bind("=SUMPRODUCT(A1:A3, B1:B3)");
+        let result = evaluate(&expr, &lookup);
+        assert!(matches!(result, EvalResult::Error(_)));
     }
 }
