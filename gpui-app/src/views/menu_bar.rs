@@ -329,7 +329,7 @@ fn render_data_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_item_disabled("Sort...", text_disabled))
         .child(menu_item_disabled("Filter", text_disabled))
         .child(menu_separator(border))
-        .child(menu_item("Insert Formula with AI", Some("Ctrl+Shift+A"), 7, h(7), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_ask_ai(cx); }))
+        .child(menu_item("AI Formula...", Some("Ctrl+Shift+A"), 7, h(7), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_ask_ai(cx); }))
         .child(menu_item("Analyze with AI", Some("Ctrl+Shift+E"), 8, h(8), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_analyze(cx); }))
 }
 
@@ -341,12 +341,16 @@ fn render_help_menu(highlight: Option<usize>, text_primary: Hsla, selection_bg: 
     div()
         .flex()
         .flex_col()
-        .child(menu_item("About VisiGrid", None, 0, h(0), text_primary, text_primary, selection_bg, cx, |this, _window, cx| {
+        .child(menu_item("Documentation", None, 0, h(0), text_primary, text_primary, selection_bg, cx, |this, _window, cx| {
+            this.close_menu(cx);
+            let _ = open::that("https://docs.visigrid.app");
+        }))
+        .child(menu_item("About VisiGrid", None, 1, h(1), text_primary, text_primary, selection_bg, cx, |this, _window, cx| {
             this.close_menu(cx);
             this.show_about(cx);
         }))
         .child(menu_separator(border))
-        .child(menu_item(license_label, None, 1, h(1), text_primary, text_primary, selection_bg, cx, |this, _window, cx| {
+        .child(menu_item(license_label, None, 2, h(2), text_primary, text_primary, selection_bg, cx, |this, _window, cx| {
             this.close_menu(cx);
             this.show_license(cx);
         }))

@@ -186,6 +186,7 @@ pub enum CommandId {
     // Help
     ShowShortcuts,
     OpenKeybindings,
+    OpenDocs,
     ShowAbout,
     TourNamedRanges,
     ShowRefactorLog,
@@ -318,6 +319,7 @@ impl CommandId {
             Self::ExtractNamedRange => "Extract to Named Range...",
             Self::ShowShortcuts => "Show Keyboard Shortcuts",
             Self::OpenKeybindings => "Open Keybindings (JSON)",
+            Self::OpenDocs => "Documentation",
             Self::ShowAbout => "About VisiGrid",
             Self::TourNamedRanges => "Tour: Named Ranges & Refactoring",
             Self::ShowRefactorLog => "Show Refactor Log",
@@ -498,6 +500,7 @@ impl CommandId {
             Self::ExtractNamedRange => "extract refactor variable name range",
             Self::ShowShortcuts => "help keys bindings hotkeys",
             Self::OpenKeybindings => "shortcuts remap customize config json",
+            Self::OpenDocs => "documentation help guide manual reference docs",
             Self::ShowAbout => "version info",
             Self::TourNamedRanges => "tour guide walkthrough refactor learn onboarding",
             Self::ShowRefactorLog => "audit history changes log refactor",
@@ -633,6 +636,7 @@ impl CommandId {
             Self::ExtractNamedRange,
             Self::ShowShortcuts,
             Self::OpenKeybindings,
+            Self::OpenDocs,
             Self::ShowAbout,
             Self::TourNamedRanges,
             Self::ShowRefactorLog,
@@ -792,6 +796,7 @@ impl CommandId {
             // Help menu
             Self::ShowShortcuts
             | Self::OpenKeybindings
+            | Self::OpenDocs
             | Self::ShowAbout
             | Self::TourNamedRanges
             | Self::ShowRefactorLog => Some(MenuCategory::Help),

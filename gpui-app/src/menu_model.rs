@@ -29,7 +29,7 @@ pub enum MenuAction {
     FillDown, FillRight,
     CircleInvalid, ClearCircles,
     InsertFormulaAI, AnalyzeAI,
-    About, License,
+    OpenDocs, About, License,
 }
 
 /// Menu entry descriptor — single source of truth for menu structure.
@@ -152,13 +152,14 @@ pub fn data_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Disabled("Sort..."),
         MenuEntry::Disabled("Filter"),
         MenuEntry::Separator,
-        MenuEntry::Item { label: "Insert Formula with AI", shortcut: Some("Ctrl+Shift+A"), action: MenuAction::InsertFormulaAI, accel: Some('f') },
+        MenuEntry::Item { label: "AI Formula...", shortcut: Some("Ctrl+Shift+A"), action: MenuAction::InsertFormulaAI, accel: Some('f') },
         MenuEntry::Item { label: "Analyze with AI", shortcut: Some("Ctrl+Shift+E"), action: MenuAction::AnalyzeAI, accel: Some('a') },
     ]
 }
 
 pub fn help_menu_entries() -> Vec<MenuEntry> {
     let mut entries = vec![
+        MenuEntry::Item { label: "Documentation", shortcut: None, action: MenuAction::OpenDocs, accel: Some('d') },
         MenuEntry::Item { label: "About VisiGrid", shortcut: None, action: MenuAction::About, accel: None },
         MenuEntry::Separator,
     ];
@@ -263,6 +264,7 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::ClearCircles => app.clear_invalid_circles(cx),
         MenuAction::InsertFormulaAI => app.show_ask_ai(cx),
         MenuAction::AnalyzeAI => app.show_analyze(cx),
+        MenuAction::OpenDocs => { let _ = open::that("https://docs.visigrid.app"); }
         MenuAction::About => app.show_about(cx),
         MenuAction::License => app.show_license(cx),
     }

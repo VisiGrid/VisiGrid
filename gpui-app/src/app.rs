@@ -3929,6 +3929,9 @@ impl Spreadsheet {
             CommandId::OpenKeybindings => {
                 self.open_keybindings(cx);
             }
+            CommandId::OpenDocs => {
+                let _ = open::that("https://docs.visigrid.app");
+            }
             CommandId::ShowAbout => {
                 self.show_about(cx);
             }
