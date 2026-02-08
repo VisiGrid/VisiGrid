@@ -1,9 +1,45 @@
 // Conditional aggregate functions: SUMIF, AVERAGEIF, COUNTIF, COUNTBLANK,
 // SUMIFS, AVERAGEIFS, COUNTIFS
 
-use super::eval::{evaluate, CellLookup, EvalResult};
+use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution};
 use super::eval_helpers::matches_criteria;
 use super::parser::{BoundExpr, Expr};
+
+/// Extract range coordinates from a range-like expression.
+///
+/// Accepts:
+/// - `Expr::Range` — literal range like A1:B5
+/// - `Expr::CellRef` — single cell treated as 1×1 range (common in Excel)
+/// - `Expr::NamedRange` — resolved via lookup
+///
+/// Returns `(start_row, start_col, end_row, end_col)` or an error string.
+fn extract_range<L: CellLookup>(
+    expr: &BoundExpr, lookup: &L, arg_name: &str,
+) -> Result<(usize, usize, usize, usize), String> {
+    match expr {
+        Expr::Range { start_col, start_row, end_col, end_row, .. } => {
+            Ok((*start_row, *start_col, *end_row, *end_col))
+        }
+        Expr::CellRef { col, row, .. } => {
+            Ok((*row, *col, *row, *col))
+        }
+        Expr::NamedRange(name) => {
+            match lookup.resolve_named_range(name) {
+                Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
+                    Ok((start_row, start_col, end_row, end_col))
+                }
+                Some(NamedRangeResolution::Cell { row, col }) => {
+                    Ok((row, col, row, col))
+                }
+                None => Err(format!("#NAME? '{}'", name)),
+            }
+        }
+        _ => Err(format!(
+            "{} must be a range (e.g. A1:A10), cell reference, or named range",
+            arg_name
+        )),
+    }
+}
 
 pub(crate) fn try_evaluate<L: CellLookup>(
     name: &str, args: &[BoundExpr], lookup: &L,
@@ -13,15 +49,15 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if args.len() < 2 || args.len() > 3 {
                 return Some(EvalResult::Error("SUMIF requires 2 or 3 arguments".to_string()));
             }
-            let range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                _ => return Some(EvalResult::Error("SUMIF requires a range as first argument".to_string())),
+            let range = match extract_range(&args[0], lookup, "SUMIF range") {
+                Ok(r) => r,
+                Err(e) => return Some(EvalResult::Error(e)),
             };
             let criteria = evaluate(&args[1], lookup);
             let sum_range = if args.len() == 3 {
-                match &args[2] {
-                    Expr::Range { start_col, start_row, end_col, end_row, .. } => Some((*start_row, *start_col, *end_row, *end_col)),
-                    _ => return Some(EvalResult::Error("SUMIF sum_range must be a range".to_string())),
+                match extract_range(&args[2], lookup, "SUMIF sum_range") {
+                    Ok(r) => Some(r),
+                    Err(e) => return Some(EvalResult::Error(e)),
                 }
             } else {
                 None
@@ -61,15 +97,15 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if args.len() < 2 || args.len() > 3 {
                 return Some(EvalResult::Error("AVERAGEIF requires 2 or 3 arguments".to_string()));
             }
-            let range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                _ => return Some(EvalResult::Error("AVERAGEIF requires a range as first argument".to_string())),
+            let range = match extract_range(&args[0], lookup, "AVERAGEIF range") {
+                Ok(r) => r,
+                Err(e) => return Some(EvalResult::Error(e)),
             };
             let criteria = evaluate(&args[1], lookup);
             let avg_range = if args.len() == 3 {
-                match &args[2] {
-                    Expr::Range { start_col, start_row, end_col, end_row, .. } => Some((*start_row, *start_col, *end_row, *end_col)),
-                    _ => return Some(EvalResult::Error("AVERAGEIF average_range must be a range".to_string())),
+                match extract_range(&args[2], lookup, "AVERAGEIF average_range") {
+                    Ok(r) => Some(r),
+                    Err(e) => return Some(EvalResult::Error(e)),
                 }
             } else {
                 None
@@ -118,9 +154,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if args.len() != 2 {
                 return Some(EvalResult::Error("COUNTIF requires exactly 2 arguments".to_string()));
             }
-            let range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                _ => return Some(EvalResult::Error("COUNTIF requires a range as first argument".to_string())),
+            let range = match extract_range(&args[0], lookup, "COUNTIF range") {
+                Ok(r) => r,
+                Err(e) => return Some(EvalResult::Error(e)),
             };
             let criteria = evaluate(&args[1], lookup);
 
@@ -149,9 +185,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if args.len() != 1 {
                 return Some(EvalResult::Error("COUNTBLANK requires exactly one argument".to_string()));
             }
-            let range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                _ => return Some(EvalResult::Error("COUNTBLANK requires a range".to_string())),
+            let range = match extract_range(&args[0], lookup, "COUNTBLANK range") {
+                Ok(r) => r,
+                Err(e) => return Some(EvalResult::Error(e)),
             };
 
             let mut count = 0;
@@ -172,9 +208,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("SUMIFS requires sum_range and pairs of criteria_range and criteria".to_string()));
             }
 
-            let sum_range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                _ => return Some(EvalResult::Error("SUMIFS sum_range must be a range".to_string())),
+            let sum_range = match extract_range(&args[0], lookup, "SUMIFS sum_range") {
+                Ok(r) => r,
+                Err(e) => return Some(EvalResult::Error(e)),
             };
 
             let (sr_min_row, sr_min_col, sr_max_row, sr_max_col) = (
@@ -193,9 +229,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 let range_arg = &args[1 + i * 2];
                 let criteria_arg = &args[2 + i * 2];
 
-                let crit_range = match range_arg {
-                    Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                    _ => return Some(EvalResult::Error("SUMIFS criteria_range must be a range".to_string())),
+                let crit_range = match extract_range(range_arg, lookup, "SUMIFS criteria_range") {
+                    Ok(r) => r,
+                    Err(e) => return Some(EvalResult::Error(e)),
                 };
 
                 // Verify dimensions match sum_range
@@ -247,9 +283,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("AVERAGEIFS requires average_range and pairs of criteria_range and criteria".to_string()));
             }
 
-            let avg_range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                _ => return Some(EvalResult::Error("AVERAGEIFS average_range must be a range".to_string())),
+            let avg_range = match extract_range(&args[0], lookup, "AVERAGEIFS average_range") {
+                Ok(r) => r,
+                Err(e) => return Some(EvalResult::Error(e)),
             };
 
             let (ar_min_row, ar_min_col, ar_max_row, ar_max_col) = (
@@ -268,9 +304,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 let range_arg = &args[1 + i * 2];
                 let criteria_arg = &args[2 + i * 2];
 
-                let crit_range = match range_arg {
-                    Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                    _ => return Some(EvalResult::Error("AVERAGEIFS criteria_range must be a range".to_string())),
+                let crit_range = match extract_range(range_arg, lookup, "AVERAGEIFS criteria_range") {
+                    Ok(r) => r,
+                    Err(e) => return Some(EvalResult::Error(e)),
                 };
 
                 // Verify dimensions match average_range
@@ -332,9 +368,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
 
             // Use first range to determine dimensions
-            let first_range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                _ => return Some(EvalResult::Error("COUNTIFS criteria_range must be a range".to_string())),
+            let first_range = match extract_range(&args[0], lookup, "COUNTIFS criteria_range") {
+                Ok(r) => r,
+                Err(e) => return Some(EvalResult::Error(e)),
             };
 
             let (fr_min_row, fr_min_col, fr_max_row, fr_max_col) = (
@@ -353,9 +389,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 let range_arg = &args[i * 2];
                 let criteria_arg = &args[i * 2 + 1];
 
-                let crit_range = match range_arg {
-                    Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                    _ => return Some(EvalResult::Error("COUNTIFS criteria_range must be a range".to_string())),
+                let crit_range = match extract_range(range_arg, lookup, "COUNTIFS criteria_range") {
+                    Ok(r) => r,
+                    Err(e) => return Some(EvalResult::Error(e)),
                 };
 
                 // Verify dimensions match first range

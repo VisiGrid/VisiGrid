@@ -546,7 +546,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
         }
         Expr::Range { .. } => {
             // Ranges can't be evaluated directly, only within functions
-            EvalResult::Error("Range must be used in a function".to_string())
+            EvalResult::Error("Array arithmetic not yet supported. Use SUMPRODUCT or helper columns.".to_string())
         }
         Expr::NamedRange(name) => {
             // Resolve the named range and evaluate
@@ -571,7 +571,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
                 }
                 Some(NamedRangeResolution::Range { .. }) => {
                     // Ranges can't be evaluated directly, only within functions
-                    EvalResult::Error("Range must be used in a function".to_string())
+                    EvalResult::Error("Array arithmetic not yet supported. Use SUMPRODUCT or helper columns.".to_string())
                 }
             }
         }
@@ -2161,5 +2161,87 @@ mod tests {
         let lookup = TestLookup::new();
         // 1/(1+8%)^5 = 1/1.08^5 = 0.6806...
         assert_excel("=1/(1+8%)^5", &lookup, 0.6806, 0.0001);
+    }
+
+    // =========================================================================
+    // COUNTIF/SUMIF with single cell refs and named ranges
+    // =========================================================================
+
+    #[test]
+    fn test_countif_single_cell_ref() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "hello");  // A1
+        // COUNTIF(A1, "hello") — single cell as 1x1 range
+        let expr = parse_and_bind(r#"=COUNTIF(A1, "hello")"#);
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(1.0));
+    }
+
+    #[test]
+    fn test_countif_single_cell_no_match() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "world");  // A1
+        let expr = parse_and_bind(r#"=COUNTIF(A1, "hello")"#);
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(0.0));
+    }
+
+    #[test]
+    fn test_countif_named_range() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "10");
+        lookup.set(1, 0, "20");
+        lookup.set(2, 0, "30");
+        lookup.define_range("Data", 0, 0, 2, 0);
+        let expr = parse_and_bind(r#"=COUNTIF(Data, ">15")"#);
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(2.0));
+    }
+
+    #[test]
+    fn test_countif_named_range_single_cell() {
+        let mut lookup = TestLookup::new();
+        lookup.set(3, 3, "42");
+        lookup.define_cell("Target", 3, 3);
+        let expr = parse_and_bind(r#"=COUNTIF(Target, "42")"#);
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(1.0));
+    }
+
+    #[test]
+    fn test_sumif_single_cell_ref() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "50");  // A1
+        // SUMIF(A1, ">0") — single cell, matches
+        let expr = parse_and_bind(r#"=SUMIF(A1, ">0")"#);
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(50.0));
+    }
+
+    #[test]
+    fn test_sumif_named_range() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "10");
+        lookup.set(1, 0, "20");
+        lookup.set(2, 0, "5");
+        lookup.define_range("Amounts", 0, 0, 2, 0);
+        let expr = parse_and_bind(r#"=SUMIF(Amounts, ">=10")"#);
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(30.0));
+    }
+
+    #[test]
+    fn test_countblank_single_cell_ref() {
+        let mut lookup = TestLookup::new();
+        // A1 is empty
+        let expr = parse_and_bind("=COUNTBLANK(A1)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(1.0));
+
+        // A1 has value → not blank
+        lookup.set(0, 0, "x");
+        let expr = parse_and_bind("=COUNTBLANK(A1)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(0.0));
     }
 }
