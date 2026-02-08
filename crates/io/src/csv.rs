@@ -6,11 +6,66 @@ use std::io::Read;
 use visigrid_engine::sheet::{Sheet, SheetId};
 
 pub fn import(path: &Path) -> Result<Sheet, String> {
-    import_with_delimiter(path, b',')
+    let content = read_file_as_utf8(path)?;
+    let delimiter = sniff_delimiter(&content);
+    import_from_string(&content, delimiter)
 }
 
 pub fn import_tsv(path: &Path) -> Result<Sheet, String> {
-    import_with_delimiter(path, b'\t')
+    let content = read_file_as_utf8(path)?;
+    import_from_string(&content, b'\t')
+}
+
+/// Detect the most likely field delimiter by checking consistency across the first few lines.
+///
+/// For each candidate (tab, semicolon, comma, pipe), count fields per line. The delimiter
+/// that produces the most consistent field count (>1 field) wins.
+fn sniff_delimiter(content: &str) -> u8 {
+    let candidates: &[u8] = &[b'\t', b';', b',', b'|'];
+    let sample_lines: Vec<&str> = content.lines().take(10).collect();
+
+    if sample_lines.is_empty() {
+        return b',';
+    }
+
+    let mut best = b',';
+    let mut best_score = 0u64;
+
+    for &delim in candidates {
+        let counts: Vec<usize> = sample_lines
+            .iter()
+            .map(|line| {
+                csv::ReaderBuilder::new()
+                    .delimiter(delim)
+                    .has_headers(false)
+                    .flexible(true)
+                    .from_reader(line.as_bytes())
+                    .records()
+                    .next()
+                    .and_then(|r| r.ok())
+                    .map(|r| r.len())
+                    .unwrap_or(1)
+            })
+            .collect();
+
+        // Must produce >1 field on the first line to be viable
+        if counts.first().copied().unwrap_or(0) <= 1 {
+            continue;
+        }
+
+        // Score: (number of lines with same field count as line 1) * field_count
+        // Higher field count breaks ties — more columns = more likely real delimiter
+        let target = counts[0];
+        let consistent = counts.iter().filter(|&&c| c == target).count() as u64;
+        let score = consistent * target as u64;
+
+        if score > best_score {
+            best_score = score;
+            best = delim;
+        }
+    }
+
+    best
 }
 
 /// Read file and convert to UTF-8 if needed (handles Windows-1252, Latin-1, etc.)
@@ -30,13 +85,11 @@ fn read_file_as_utf8(path: &Path) -> Result<String, String> {
     Ok(decoded.into_owned())
 }
 
-fn import_with_delimiter(path: &Path, delimiter: u8) -> Result<Sheet, String> {
-    // Read file with encoding conversion
-    let content = read_file_as_utf8(path)?;
-
+fn import_from_string(content: &str, delimiter: u8) -> Result<Sheet, String> {
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(delimiter)
         .has_headers(false)
+        .flexible(true)
         .from_reader(content.as_bytes());
 
     // Start with reasonable defaults, will track actual extent
@@ -157,6 +210,52 @@ mod tests {
         assert_eq!(records[1].get(0), Some("A"));
         assert_eq!(records[1].get(1), Some("B"));
         assert_eq!(records[1].get(2), Some("C"));
+    }
+
+    #[test]
+    fn test_sniff_semicolon_delimiter() {
+        let content = "Name;Age;City\nAlice;30;Paris\nBob;25;London\n";
+        assert_eq!(sniff_delimiter(content), b';');
+    }
+
+    #[test]
+    fn test_sniff_comma_delimiter() {
+        let content = "Name,Age,City\nAlice,30,Paris\nBob,25,London\n";
+        assert_eq!(sniff_delimiter(content), b',');
+    }
+
+    #[test]
+    fn test_sniff_tab_delimiter() {
+        let content = "Name\tAge\tCity\nAlice\t30\tParis\nBob\t25\tLondon\n";
+        assert_eq!(sniff_delimiter(content), b'\t');
+    }
+
+    #[test]
+    fn test_sniff_pipe_delimiter() {
+        let content = "Name|Age|City\nAlice|30|Paris\nBob|25|London\n";
+        assert_eq!(sniff_delimiter(content), b'|');
+    }
+
+    #[test]
+    fn test_sniff_semicolon_with_commas_in_values() {
+        // Semicolon delimiter but commas appear inside quoted fields
+        let content = "Name;Address;City\n\"Doe, Jane\";\"123 Main St, Apt 4\";Paris\nBob;\"456 Elm\";London\n";
+        assert_eq!(sniff_delimiter(content), b';');
+    }
+
+    #[test]
+    fn test_semicolon_csv_import() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.csv");
+        fs::write(&path, "Name;Age;City\nAlice;30;Paris\nBob;25;London\n").unwrap();
+
+        let sheet = import(&path).unwrap();
+        assert_eq!(sheet.get_display(0, 0), "Name");
+        assert_eq!(sheet.get_display(0, 1), "Age");
+        assert_eq!(sheet.get_display(0, 2), "City");
+        assert_eq!(sheet.get_display(1, 0), "Alice");
+        assert_eq!(sheet.get_display(1, 1), "30");
+        assert_eq!(sheet.get_display(1, 2), "Paris");
     }
 
     #[test]

@@ -96,6 +96,78 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             let factor = 10_f64.powi(decimals);
             EvalResult::Number((value * factor).round() / factor)
         }
+        "ROUNDUP" => {
+            if args.is_empty() || args.len() > 2 {
+                return Some(EvalResult::Error("ROUNDUP requires 1 or 2 arguments".to_string()));
+            }
+            let value = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let decimals = if args.len() == 2 {
+                match evaluate(&args[1], lookup).to_number() {
+                    Ok(n) => n as i32,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                }
+            } else {
+                0
+            };
+            let factor = 10_f64.powi(decimals);
+            let result = if value >= 0.0 {
+                (value * factor).ceil() / factor
+            } else {
+                (value * factor).floor() / factor
+            };
+            EvalResult::Number(result)
+        }
+        "ROUNDDOWN" => {
+            if args.is_empty() || args.len() > 2 {
+                return Some(EvalResult::Error("ROUNDDOWN requires 1 or 2 arguments".to_string()));
+            }
+            let value = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let decimals = if args.len() == 2 {
+                match evaluate(&args[1], lookup).to_number() {
+                    Ok(n) => n as i32,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                }
+            } else {
+                0
+            };
+            let factor = 10_f64.powi(decimals);
+            let result = if value >= 0.0 {
+                (value * factor).floor() / factor
+            } else {
+                (value * factor).ceil() / factor
+            };
+            EvalResult::Number(result)
+        }
+        "TRUNC" => {
+            if args.is_empty() || args.len() > 2 {
+                return Some(EvalResult::Error("TRUNC requires 1 or 2 arguments".to_string()));
+            }
+            let value = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let decimals = if args.len() == 2 {
+                match evaluate(&args[1], lookup).to_number() {
+                    Ok(n) => n as i32,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                }
+            } else {
+                0
+            };
+            let factor = 10_f64.powi(decimals);
+            let result = if value >= 0.0 {
+                (value * factor).floor() / factor
+            } else {
+                (value * factor).ceil() / factor
+            };
+            EvalResult::Number(result)
+        }
         "INT" => {
             if args.len() != 1 {
                 return Some(EvalResult::Error("INT requires exactly one argument".to_string()));

@@ -130,6 +130,7 @@ actions!(view, [
     ToggleLuaConsole, // Ctrl+Shift+L - Lua scripting REPL
     ToggleFormatBar,
     ToggleFormulaView,
+    ToggleMinimap,
     ToggleShowZeros,
     ToggleVerifiedMode, // Toggle verified/deterministic recalc mode
     Recalculate,        // F9: Force full recalculation (Excel muscle memory)

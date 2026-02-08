@@ -2030,6 +2030,12 @@ pub struct Spreadsheet {
     // Document-level settings (persisted in sidecar file)
     pub doc_settings: crate::settings::DocumentSettings,
 
+    // Minimap state (row-density navigator)
+    pub minimap_visible: bool,
+    pub minimap_cache: crate::minimap::MinimapCache,
+    pub minimap_dragging: bool,
+    pub minimap_drag_offset_y: f32,
+
     // Inspector panel state
     pub inspector_visible: bool,
     pub inspector_tab: crate::mode::InspectorTab,
@@ -2509,6 +2515,10 @@ impl Spreadsheet {
             autocomplete_replace_range: 0..0,
             hover_function: None,
             doc_settings: crate::settings::DocumentSettings::default(),
+            minimap_visible: false,
+            minimap_cache: crate::minimap::MinimapCache::default(),
+            minimap_dragging: false,
+            minimap_drag_offset_y: 0.0,
             inspector_visible: false,
             inspector_tab: crate::mode::InspectorTab::default(),
             inspector_pinned: None,
@@ -3866,6 +3876,10 @@ impl Spreadsheet {
             // View
             CommandId::ToggleInspector => {
                 self.inspector_visible = !self.inspector_visible;
+                cx.notify();
+            }
+            CommandId::ToggleMinimap => {
+                self.minimap_visible = !self.minimap_visible;
                 cx.notify();
             }
             CommandId::ToggleZenMode => {

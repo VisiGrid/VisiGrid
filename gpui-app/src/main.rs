@@ -32,6 +32,7 @@ mod links;
 #[cfg(target_os = "macos")]
 mod menus;
 mod menu_model;
+mod minimap;
 mod user_keybindings;
 mod mode;
 mod navigation;

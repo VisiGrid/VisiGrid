@@ -6,7 +6,7 @@ use crate::mode::Menu;
 use crate::theme::TokenKey;
 
 pub const MENU_HEIGHT: f32 = 22.0;  // Compact chrome height
-const DROPDOWN_WIDTH: f32 = 200.0;
+const DROPDOWN_WIDTH: f32 = 260.0;
 
 /// Render the modern menu bar - compact chrome, not content
 pub fn render_menu_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -255,13 +255,14 @@ fn render_view_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_item("Show Formulas", Some("Ctrl+`"), 5, h(5), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_show_formulas(cx); }))
         .child(menu_item("Show Zeros", None, 6, h(6), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_show_zeros(cx); }))
         .child(menu_item("Format Bar", None, 7, h(7), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_format_bar(cx); }))
+        .child(menu_item("Minimap", None, 8, h(8), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.minimap_visible = !this.minimap_visible; cx.notify(); }))
         .child(menu_separator(border))
-        .child(menu_item("Freeze Top Row", None, 8, h(8), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_top_row(cx); }))
-        .child(menu_item("Freeze First Column", None, 9, h(9), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_first_column(cx); }))
-        .child(menu_item("Freeze Panes", None, 10, h(10), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_panes(cx); }))
-        .child(menu_item("Unfreeze Panes", None, 11, h(11), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.unfreeze_panes(cx); }))
+        .child(menu_item("Freeze Top Row", None, 9, h(9), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_top_row(cx); }))
+        .child(menu_item("Freeze First Column", None, 10, h(10), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_first_column(cx); }))
+        .child(menu_item("Freeze Panes", None, 11, h(11), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_panes(cx); }))
+        .child(menu_item("Unfreeze Panes", None, 12, h(12), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.unfreeze_panes(cx); }))
         .child(menu_separator(border))
-        .child(menu_item("Approve Model", None, 12, h(12), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.approve_model(None, cx); }))
+        .child(menu_item("Approve Model", None, 13, h(13), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.approve_model(None, cx); }))
 }
 
 fn render_insert_menu(text_disabled: Hsla, border: Hsla) -> Div {

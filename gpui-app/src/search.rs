@@ -155,6 +155,7 @@ pub enum CommandId {
 
     // View
     ToggleInspector,
+    ToggleMinimap,
     ToggleZenMode,
     ZoomIn,
     ZoomOut,
@@ -292,6 +293,7 @@ impl CommandId {
             Self::SelectTheme => "Select Theme...",
             Self::SelectFont => "Select Font...",
             Self::ToggleInspector => "Toggle Inspector",
+            Self::ToggleMinimap => "Toggle Minimap",
             Self::ToggleZenMode => "Toggle Zen Mode",
             Self::ZoomIn => "Zoom In",
             Self::ZoomOut => "Zoom Out",
@@ -483,6 +485,7 @@ impl CommandId {
             Self::SelectTheme => "appearance color scheme dark light",
             Self::SelectFont => "appearance typography",
             Self::ToggleInspector => "panel sidebar",
+            Self::ToggleMinimap => "minimap density navigator overview map",
             Self::ToggleZenMode => "distraction free fullscreen focus",
             Self::ZoomIn => "magnify scale enlarge bigger larger",
             Self::ZoomOut => "magnify scale shrink smaller",
@@ -606,6 +609,7 @@ impl CommandId {
             Self::SelectTheme,
             Self::SelectFont,
             Self::ToggleInspector,
+            Self::ToggleMinimap,
             Self::ToggleZenMode,
             Self::ZoomIn,
             Self::ZoomOut,
@@ -704,6 +708,7 @@ impl CommandId {
 
             // View menu
             Self::ToggleInspector
+            | Self::ToggleMinimap
             | Self::ToggleZenMode
             | Self::ZoomIn
             | Self::ZoomOut

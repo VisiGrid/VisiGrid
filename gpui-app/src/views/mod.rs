@@ -26,6 +26,7 @@ mod lua_console_stub;
 #[cfg(not(feature = "pro"))]
 use lua_console_stub as lua_console;
 pub mod license_dialog;
+pub mod minimap;
 mod paste_special_dialog;
 mod preferences_panel;
 pub mod refactor_log;
@@ -464,10 +465,22 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .child(headers::render_column_headers(app, cx))
         // Split view: render two grids side-by-side, or single grid
-        .child(if app.is_split() {
-            render_split_grids(app, window, cx).into_any_element()
-        } else {
-            grid::render_grid(app, window, cx, None).into_any_element()
+        // Wrapped in flex-row to accommodate optional minimap strip on the right
+        .child({
+            let show_minimap = app.minimap_visible && !zen_mode;
+            let grid_element = if app.is_split() {
+                render_split_grids(app, window, cx).into_any_element()
+            } else {
+                grid::render_grid(app, window, cx, None).into_any_element()
+            };
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .child(grid_element)
+                .when(show_minimap, |d| {
+                    d.child(minimap::render_minimap(app, window, cx))
+                })
         })
         // Lua console panel (above status bar)
         .child(lua_console::render_lua_console(app, cx))

@@ -441,6 +441,8 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
                             } else {
                                 format!("={}", formula)
                             };
+                            // Strip ODS OpenFormula namespace prefix (e.g. "=of:SUM()" → "=SUM()")
+                            let formula_str = strip_ods_prefix(&formula_str);
 
                             // Analyze formula for unknown functions
                             match parse_formula(&formula_str) {
@@ -1072,6 +1074,57 @@ fn col_to_letter(col: usize) -> String {
             break;
         }
         n = n / 26 - 1;
+    }
+    result
+}
+
+/// Strip ODS OpenFormula namespace prefixes and convert argument separators.
+///
+/// ODS files use prefixed function names like `=of:SUM(A1:A10)` or `=of:IF(...)`,
+/// and use semicolons (`;`) as argument separators instead of commas.
+/// This converts them to standard `=SUM(A1:A10)` syntax with comma separators.
+fn strip_ods_prefix(formula: &str) -> String {
+    if !formula.starts_with("=of:") && !formula.starts_with("=OF:") {
+        return formula.to_string();
+    }
+
+    let mut result = String::with_capacity(formula.len());
+    result.push('=');
+    let body = &formula[1..]; // skip leading '='
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < bytes.len() {
+        // Track string literals to avoid converting semicolons inside them
+        if bytes[i] == b'"' {
+            in_string = !in_string;
+            result.push('"');
+            i += 1;
+            continue;
+        }
+
+        if in_string {
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        // Strip "of:" prefix (case-insensitive)
+        if i + 3 <= bytes.len()
+            && (bytes[i] == b'o' || bytes[i] == b'O')
+            && (bytes[i + 1] == b'f' || bytes[i + 1] == b'F')
+            && bytes[i + 2] == b':'
+        {
+            i += 3;
+        // Convert ODS semicolon argument separator to comma
+        } else if bytes[i] == b';' {
+            result.push(',');
+            i += 1;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
     }
     result
 }
@@ -2251,6 +2304,41 @@ fn apply_layout(worksheet: &mut Worksheet, layout: &ExportLayout) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_strip_ods_prefix_basic() {
+        assert_eq!(strip_ods_prefix("=of:SUM(A1:A10)"), "=SUM(A1:A10)");
+        assert_eq!(strip_ods_prefix("=OF:SUM(A1:A10)"), "=SUM(A1:A10)");
+    }
+
+    #[test]
+    fn test_strip_ods_prefix_nested_and_semicolons() {
+        // ODS uses semicolons as argument separators — should become commas
+        assert_eq!(
+            strip_ods_prefix("=of:IF(of:AND(A1>0;B1>0);1;0)"),
+            "=IF(AND(A1>0,B1>0),1,0)"
+        );
+        assert_eq!(
+            strip_ods_prefix("=of:VLOOKUP(A1;B1:C10;2;0)"),
+            "=VLOOKUP(A1,B1:C10,2,0)"
+        );
+    }
+
+    #[test]
+    fn test_strip_ods_prefix_preserves_strings() {
+        // Semicolons inside string literals must NOT be converted
+        assert_eq!(
+            strip_ods_prefix("=of:IF(A1>0;\"yes;no\";\"maybe\")"),
+            "=IF(A1>0,\"yes;no\",\"maybe\")"
+        );
+    }
+
+    #[test]
+    fn test_strip_ods_prefix_passthrough() {
+        // Non-ODS formulas should pass through unchanged
+        assert_eq!(strip_ods_prefix("=SUM(A1:A10)"), "=SUM(A1:A10)");
+        assert_eq!(strip_ods_prefix("=A1+B1"), "=A1+B1");
+    }
 
     #[test]
     fn test_import_result_summary() {
