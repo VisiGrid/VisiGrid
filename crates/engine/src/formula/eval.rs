@@ -221,6 +221,10 @@ impl Value {
             Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
             Value::Text(s) if s.is_empty() => Ok(0.0),
             Value::Text(s) => {
+                // Error values stored as text — propagate as-is, don't re-wrap
+                if s.starts_with('#') {
+                    return Err(s.clone());
+                }
                 // Try numeric parse first
                 if let Ok(n) = s.parse::<f64>() {
                     return Ok(n);
@@ -416,6 +420,10 @@ impl EvalResult {
             EvalResult::Number(n) => Ok(*n),
             EvalResult::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
             EvalResult::Text(s) => {
+                // Error values stored as text (e.g. from cell lookup) — propagate as-is
+                if s.starts_with('#') {
+                    return Err(s.clone());
+                }
                 // Try numeric parse first
                 if let Ok(n) = s.parse::<f64>() {
                     return Ok(n);
@@ -546,7 +554,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
         }
         Expr::Range { .. } => {
             // Ranges can't be evaluated directly, only within functions
-            EvalResult::Error("Array arithmetic not yet supported. Use SUMPRODUCT(A1:A10, B1:B10) instead of SUM(A1:A10*B1:B10).".to_string())
+            EvalResult::Error("#VALUE! Array arithmetic not supported".to_string())
         }
         Expr::NamedRange(name) => {
             // Resolve the named range and evaluate
@@ -571,7 +579,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
                 }
                 Some(NamedRangeResolution::Range { .. }) => {
                     // Ranges can't be evaluated directly, only within functions
-                    EvalResult::Error("Array arithmetic not yet supported. Use SUMPRODUCT(A1:A10, B1:B10) instead of SUM(A1:A10*B1:B10).".to_string())
+                    EvalResult::Error("#VALUE! Array arithmetic not supported".to_string())
                 }
             }
         }
