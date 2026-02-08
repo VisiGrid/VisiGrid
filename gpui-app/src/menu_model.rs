@@ -264,7 +264,7 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::ClearCircles => app.clear_invalid_circles(cx),
         MenuAction::InsertFormulaAI => app.show_ask_ai(cx),
         MenuAction::AnalyzeAI => app.show_analyze(cx),
-        MenuAction::OpenDocs => { let _ = open::that("https://docs.visigrid.app"); }
+        MenuAction::OpenDocs => { let _ = open::that(crate::docs_links::DOCS_HOME); }
         MenuAction::About => app.show_about(cx),
         MenuAction::License => app.show_license(cx),
     }

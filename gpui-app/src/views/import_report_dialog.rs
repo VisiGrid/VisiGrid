@@ -22,8 +22,10 @@ pub fn render_import_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
     let text_muted = app.token(TokenKey::TextMuted);
     let text_disabled = app.token(TokenKey::TextDisabled);
     let accent = app.token(TokenKey::Accent);
+    let text_inverse = app.token(TokenKey::TextInverse);
     let warning_color = app.token(TokenKey::Warn);
     let error_color = app.token(TokenKey::Error);
+    let success_color = app.token(TokenKey::CellStyleSuccessText);
 
     let filename = app.import_filename.as_deref().unwrap_or("unknown file");
 
@@ -77,13 +79,13 @@ pub fn render_import_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
                         // Summary section
                         .child(render_summary_section(import_result, text_primary, text_muted))
                         // Quality section (if there are issues)
-                        .child(render_quality_section(import_result, text_primary, text_muted, warning_color, error_color))
+                        .child(render_quality_section(import_result, text_primary, text_muted, warning_color, error_color, success_color, accent))
                         // Per-sheet table
                         .child(render_sheet_table(import_result, text_primary, text_muted, text_disabled, panel_border))
                         // Warnings section
                         .child(render_warnings_section(import_result, text_muted, warning_color))
                 )
-                // Footer with close button
+                // Footer with freeze button (when applicable) and close button
                 .child(
                     div()
                         .w_full()
@@ -93,9 +95,19 @@ pub fn render_import_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
                         .border_color(panel_border)
                         .flex()
                         .justify_end()
+                        .gap_2()
+                        .when(import_result.recalc_circular > 0 && !import_result.freeze_applied, |d| {
+                            d.child(
+                                Button::new("freeze-cycles-btn", "Freeze Cycle Values")
+                                    .secondary(panel_border, text_primary)
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                        this.reimport_with_freeze(cx);
+                                    }))
+                            )
+                        })
                         .child(
                             Button::new("import-report-close-btn", "Close")
-                                .primary(accent, app.token(TokenKey::TextInverse))
+                                .primary(accent, text_inverse)
                                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                                     this.hide_import_report(cx);
                                 }))
@@ -171,12 +183,15 @@ fn render_quality_section(
     text_muted: Hsla,
     warning_color: Hsla,
     error_color: Hsla,
+    success_color: Hsla,
+    accent: Hsla,
 ) -> impl IntoElement {
     let has_issues = ir.formulas_failed > 0
         || ir.formulas_with_unknowns > 0
         || !ir.unsupported_functions.is_empty()
         || ir.recalc_errors > 0
-        || ir.recalc_circular > 0;
+        || ir.recalc_circular > 0
+        || ir.freeze_applied;
 
     if !has_issues {
         return div().into_any_element();
@@ -283,12 +298,63 @@ fn render_quality_section(
     }
 
     // Circular references
-    if ir.recalc_circular > 0 {
+    if ir.recalc_circular > 0 && !ir.freeze_applied {
         children.push(
             div()
                 .text_size(px(11.0))
                 .text_color(error_color)
                 .child(format!("Circular references: {}", ir.recalc_circular))
+                .into_any_element()
+        );
+    }
+
+    // Freeze results — before/after delta
+    if ir.freeze_applied {
+        let total_cycles = ir.cycles_frozen + ir.cycles_no_cached;
+        let remaining = ir.cycles_no_cached;
+        let delta_msg = format!(
+            "#CYCLE! cells: {} \u{2192} {} (frozen {})",
+            total_cycles, remaining, ir.cycles_frozen
+        );
+        children.push(
+            div()
+                .text_size(px(11.0))
+                .text_color(success_color)
+                .child(delta_msg)
+                .into_any_element()
+        );
+        if remaining > 0 {
+            children.push(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(warning_color)
+                    .child(format!("{} cycle cells had no cached value in the XLSX and remain as #CYCLE!.", remaining))
+                    .into_any_element()
+            );
+        }
+        children.push(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(warning_color)
+                        .child("Frozen cells use Excel\u{2019}s cached values and will not recalculate if you edit their inputs.")
+                )
+                .child(
+                    div()
+                        .id("freeze-explain-link")
+                        .text_size(px(10.0))
+                        .text_color(accent)
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .on_click(|_, _, cx| {
+                            let _ = open::that(crate::docs_links::DOCS_CIRCULAR_REFS);
+                        })
+                        .child("Learn more")
+                )
                 .into_any_element()
         );
     }

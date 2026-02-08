@@ -3930,7 +3930,7 @@ impl Spreadsheet {
                 self.open_keybindings(cx);
             }
             CommandId::OpenDocs => {
-                let _ = open::that("https://docs.visigrid.app");
+                let _ = open::that(crate::docs_links::DOCS_HOME);
             }
             CommandId::ShowAbout => {
                 self.show_about(cx);

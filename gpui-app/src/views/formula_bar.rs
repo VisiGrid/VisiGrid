@@ -41,6 +41,15 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
     let scroll_x = app.formula_bar_scroll_x;
     let formula_content = build_formula_content(app, window, &raw_value, editing, scroll_x, selection_bg);
 
+    // Check if current cell is frozen (has frozen_formula from cycle freeze)
+    let frozen_formula = if !editing {
+        app.sheet(cx)
+            .get_cell_opt(app.view_state.selected.0, app.view_state.selected.1)
+            .and_then(|c| c.frozen_formula.clone())
+    } else {
+        None
+    };
+
     // fx button is always visible as a credibility signal (Excel familiarity)
     // Highlighted when editing a formula
     let is_formula_editing = editing && app.edit_value.starts_with('=');
@@ -185,6 +194,28 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                     cx.new(|_| FxTooltip).into()
                 })
                 .child("fx")
+        })
+        // Frozen cell indicator — shown when selected cell was frozen during import
+        .when(frozen_formula.is_some(), |d| {
+            let formula_for_tooltip = frozen_formula.clone().unwrap_or_default();
+            d.child(
+                div()
+                    .id("frozen-indicator")
+                    .px(px(4.0))
+                    .py(px(1.0))
+                    .mx(px(2.0))
+                    .rounded_sm()
+                    .bg(hsla(0.1, 0.7, 0.5, 0.15))
+                    .text_color(hsla(0.1, 0.8, 0.65, 1.0))
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor_default()
+                    .tooltip(move |_window, cx| {
+                        let f = formula_for_tooltip.clone();
+                        cx.new(move |_| FrozenTooltip { formula: f }).into()
+                    })
+                    .child("FROZEN")
+            )
         })
         // Formula/value input area - clickable to start editing
         .child(
@@ -368,6 +399,41 @@ impl Render for ExpandTooltip {
             .text_size(px(11.0))
             .text_color(rgb(0xcccccc))
             .child("Expand/collapse formula bar")
+    }
+}
+
+/// Tooltip for frozen cell indicator — shows original formula and explanation.
+struct FrozenTooltip {
+    formula: String,
+}
+
+impl Render for FrozenTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0x2d2d2d))
+            .border_1()
+            .border_color(rgb(0x3d3d3d))
+            .text_size(px(11.0))
+            .text_color(rgb(0xcccccc))
+            .max_w(px(350.0))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_color(hsla(0.1, 0.8, 0.65, 1.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Frozen (Excel cached result)")
+            )
+            .child(
+                div()
+                    .text_color(rgb(0x999999))
+                    .font_family("monospace")
+                    .child(self.formula.clone())
+            )
     }
 }
 

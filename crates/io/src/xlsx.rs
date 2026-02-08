@@ -112,6 +112,12 @@ pub struct ImportResult {
     pub merges_dropped_overlap: usize,
     /// Merged regions dropped due to invalid cell references
     pub merges_dropped_invalid: usize,
+    /// Cycle cells frozen to cached values (freeze_cycles option)
+    pub cycles_frozen: usize,
+    /// Cycle cells with no cached value (remain #CYCLE!)
+    pub cycles_no_cached: usize,
+    /// Whether freeze was applied (freeze_cycles requested AND cells were frozen)
+    pub freeze_applied: bool,
 }
 
 /// Column/row dimension data imported from XLSX, in raw Excel units.
@@ -205,6 +211,15 @@ impl ImportResult {
     }
 }
 
+/// Import options controlling optional behavior during Excel import.
+#[derive(Default, Clone)]
+pub struct ImportOptions {
+    /// If true, cycle cells are frozen to their cached values from the XLSX file.
+    /// This makes workbooks with circular references (e.g. iterative calculation
+    /// models from Excel) immediately usable.
+    pub freeze_cycles: bool,
+}
+
 /// Maximum number of cells to import (prevents DoS from huge files)
 const MAX_CELLS: usize = 5_000_000;
 
@@ -214,6 +229,11 @@ const MAX_COLS: usize = 256;
 
 /// Import an Excel file (xlsx, xls, xlsb, ods)
 pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
+    import_with_options(path, &ImportOptions::default())
+}
+
+/// Import an Excel file with options (xlsx, xls, xlsb, ods)
+pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Workbook, ImportResult), String> {
     let start_time = Instant::now();
 
     let mut workbook: Sheets<_> = open_workbook_auto(path)
@@ -230,6 +250,12 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
     let mut total_cells = 0;
     let mut hit_cell_limit = false;
     let mut next_sheet_id: u64 = 1;
+
+    // Per-sheet snapshot of typed cached values for cycle freeze.
+    // Key: (row, col), Value: (cached_value_or_none, formula_source)
+    // None means "Calamine had no cached result at all" (distinct from
+    // Some(CellValue::Empty) which means "Calamine had an explicit empty value").
+    let mut cached_snapshots: Vec<HashMap<(usize, usize), (Option<CellValue>, String)>> = Vec::new();
 
     for sheet_name in &sheet_names {
         let range = workbook.worksheet_range(sheet_name)
@@ -252,6 +278,7 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
             result.validations_imported += imported;
             result.validations_skipped += skipped;
 
+            cached_snapshots.push(HashMap::new());
             sheets.push(sheet);
             result.sheets_imported += 1;
             result.sheet_stats.push(stats);
@@ -274,6 +301,7 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
 
         let mut sheet = Sheet::new_with_name(SheetId(next_sheet_id), MAX_ROWS, MAX_COLS, sheet_name);
         next_sheet_id += 1;
+        cached_snapshots.push(HashMap::new());
 
         // Range start offset (data may not begin at A1)
         let (data_start_row, data_start_col) = range.start().unwrap_or((0, 0));
@@ -305,7 +333,12 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
 
                 match cell {
                     Data::Empty => {
-                        // Skip empty cells
+                        // Skip empty cells. For freeze_cycles, the pass-2 snapshot
+                        // will see None (no cell) for these positions. This is
+                        // conservative: a formula whose cached result was truly
+                        // empty gets counted as cycles_no_cached rather than
+                        // frozen-as-empty. Acceptable trade-off vs materializing
+                        // millions of phantom cells in the dense calamine range.
                     }
                     Data::String(s) => {
                         if !s.is_empty() {
@@ -471,6 +504,16 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
                                 }
                             }
 
+                            // Snapshot the typed cached value before formula overwrite
+                            if options.freeze_cycles {
+                                let cached = sheet.get_cell_opt(target_row, target_col)
+                                    .map(|c| c.value.clone());
+                                cached_snapshots.last_mut().unwrap().insert(
+                                    (target_row, target_col),
+                                    (cached, formula_str.clone()),
+                                );
+                            }
+
                             sheet.set_value(target_row, target_col, &formula_str);
                             sheet.set_format(target_row, target_col, existing_format);
 
@@ -572,6 +615,55 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
 
     // Rebuild dependency graph after loading all data
     workbook.rebuild_dep_graph();
+
+    // Freeze cycle cells if requested
+    if options.freeze_cycles {
+        let cycle_members = workbook.dep_graph().find_cycle_members();
+        if !cycle_members.is_empty() {
+            // Build sheet ID → index mapping
+            let sheet_id_to_idx: HashMap<SheetId, usize> = workbook.sheets()
+                .iter()
+                .enumerate()
+                .map(|(idx, s)| (s.id, idx))
+                .collect();
+
+            let mut frozen_count = 0usize;
+            let mut cycles_no_cached = 0usize;
+
+            for cell_id in &cycle_members {
+                let sheet_idx = match sheet_id_to_idx.get(&cell_id.sheet) {
+                    Some(&idx) => idx,
+                    None => continue,
+                };
+
+                match cached_snapshots.get_mut(sheet_idx)
+                    .and_then(|snap| snap.remove(&(cell_id.row, cell_id.col)))
+                {
+                    Some((Some(cached_cv), formula_src)) => {
+                        workbook.sheets_mut()[sheet_idx]
+                            .freeze_cell(cell_id.row, cell_id.col, cached_cv, formula_src);
+                        frozen_count += 1;
+                    }
+                    Some((None, _)) | None => {
+                        // No cached result — cell will get #CYCLE! during recalc
+                        cycles_no_cached += 1;
+                    }
+                }
+            }
+
+            if frozen_count > 0 {
+                // Rebuild dep graph — frozen cells are no longer formula cells
+                workbook.rebuild_dep_graph();
+            }
+
+            result.cycles_frozen = frozen_count;
+            result.cycles_no_cached = cycles_no_cached;
+            result.freeze_applied = frozen_count > 0;
+
+            eprintln!("[XLSX import] Froze {} cycle cells ({} without cached values)",
+                frozen_count, cycles_no_cached);
+        }
+    }
 
     // Recompute all formulas in topological order.
     // Individual set_value() calls during import evaluated formulas at sheet level

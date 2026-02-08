@@ -208,6 +208,154 @@ impl DepGraph {
     }
 
     // =========================================================================
+    // Cycle Membership (Tarjan's SCC)
+    // =========================================================================
+
+    /// Find all cells that are members of true cycles (SCC size > 1 or self-loop).
+    ///
+    /// Uses Tarjan's algorithm. Only considers edges between formula cells.
+    /// Iterates nodes in sorted order (by CellId) for deterministic output.
+    ///
+    /// Edge direction: walks `preds` (depends-on edges) — from cell X, follow
+    /// `preds[X]` to find cells X references. This is the natural cycle direction.
+    pub fn find_cycle_members(&self) -> FxHashSet<CellId> {
+        let formula_cells: FxHashSet<CellId> = self.preds.keys().copied().collect();
+        if formula_cells.is_empty() {
+            return FxHashSet::default();
+        }
+
+        // Sorted iteration order for determinism
+        let mut sorted_cells: Vec<CellId> = formula_cells.iter().copied().collect();
+        sorted_cells.sort_by(|a, b| {
+            a.sheet.raw().cmp(&b.sheet.raw())
+                .then(a.row.cmp(&b.row))
+                .then(a.col.cmp(&b.col))
+        });
+
+        // Tarjan's state
+        let mut index_counter: u32 = 0;
+        let mut stack: Vec<CellId> = Vec::new();
+        let mut on_stack: FxHashSet<CellId> = FxHashSet::default();
+        let mut indices: FxHashMap<CellId, u32> = FxHashMap::default();
+        let mut lowlinks: FxHashMap<CellId, u32> = FxHashMap::default();
+        let mut result: FxHashSet<CellId> = FxHashSet::default();
+
+        // Helper: collect sorted neighbours (preds that are formula cells)
+        let sorted_neighbours = |cell: CellId| -> Vec<CellId> {
+            let mut neighbours: Vec<CellId> = self.preds
+                .get(&cell)
+                .into_iter()
+                .flat_map(|s| s.iter().copied())
+                .filter(|c| formula_cells.contains(c))
+                .collect();
+            neighbours.sort_by(|a, b| {
+                a.sheet.raw().cmp(&b.sheet.raw())
+                    .then(a.row.cmp(&b.row))
+                    .then(a.col.cmp(&b.col))
+            });
+            neighbours
+        };
+
+        // Iterative Tarjan's to avoid stack overflow on deep graphs.
+        struct DfsFrame {
+            cell: CellId,
+            neighbours: Vec<CellId>,
+            next_idx: usize,
+        }
+
+        for &root in &sorted_cells {
+            if indices.contains_key(&root) {
+                continue;
+            }
+
+            let mut dfs_stack: Vec<DfsFrame> = Vec::new();
+
+            // Start visiting root
+            let idx = index_counter;
+            index_counter += 1;
+            indices.insert(root, idx);
+            lowlinks.insert(root, idx);
+            stack.push(root);
+            on_stack.insert(root);
+
+            dfs_stack.push(DfsFrame {
+                cell: root,
+                neighbours: sorted_neighbours(root),
+                next_idx: 0,
+            });
+
+            while let Some(frame) = dfs_stack.last_mut() {
+                if frame.next_idx < frame.neighbours.len() {
+                    let w = frame.neighbours[frame.next_idx];
+                    frame.next_idx += 1;
+
+                    if !indices.contains_key(&w) {
+                        // Recurse into w
+                        let w_idx = index_counter;
+                        index_counter += 1;
+                        indices.insert(w, w_idx);
+                        lowlinks.insert(w, w_idx);
+                        stack.push(w);
+                        on_stack.insert(w);
+
+                        dfs_stack.push(DfsFrame {
+                            cell: w,
+                            neighbours: sorted_neighbours(w),
+                            next_idx: 0,
+                        });
+                    } else if on_stack.contains(&w) {
+                        let w_idx = indices[&w];
+                        let v_low = lowlinks.get_mut(&frame.cell).unwrap();
+                        if w_idx < *v_low {
+                            *v_low = w_idx;
+                        }
+                    }
+                } else {
+                    // All neighbours explored — pop and propagate lowlink
+                    let finished = dfs_stack.pop().unwrap();
+                    let v = finished.cell;
+                    let v_low = lowlinks[&v];
+                    let v_idx = indices[&v];
+
+                    // Propagate lowlink to parent
+                    if let Some(parent) = dfs_stack.last() {
+                        let parent_low = lowlinks.get_mut(&parent.cell).unwrap();
+                        if v_low < *parent_low {
+                            *parent_low = v_low;
+                        }
+                    }
+
+                    // SCC root check
+                    if v_low == v_idx {
+                        // Pop SCC from stack
+                        let mut scc = Vec::new();
+                        loop {
+                            let w = stack.pop().unwrap();
+                            on_stack.remove(&w);
+                            scc.push(w);
+                            if w == v {
+                                break;
+                            }
+                        }
+
+                        // Include SCC if size > 1, or size == 1 with self-loop
+                        if scc.len() > 1 {
+                            result.extend(scc);
+                        } else if scc.len() == 1 {
+                            let cell = scc[0];
+                            if self.preds.get(&cell).map_or(false, |p| p.contains(&cell)) {
+                                result.insert(cell);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    // =========================================================================
     // Topological Ordering + Cycle Detection (Phase 1.2)
     // =========================================================================
 
@@ -916,6 +1064,139 @@ mod tests {
         let d = cell(1, 0, 3);
         let result = graph.would_create_cycle(d, &[c]);
         assert!(result.is_none());
+    }
+
+    // =========================================================================
+    // Tarjan's SCC (find_cycle_members) Tests
+    // =========================================================================
+
+    #[test]
+    fn test_cycle_members_two_node_cycle() {
+        // A1 = B1, B1 = A1 → both flagged
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let b1 = cell(1, 0, 1);
+
+        graph.replace_edges(a1, set(&[b1]));
+        graph.replace_edges(b1, set(&[a1]));
+
+        let members = graph.find_cycle_members();
+        assert!(members.contains(&a1));
+        assert!(members.contains(&b1));
+        assert_eq!(members.len(), 2);
+    }
+
+    #[test]
+    fn test_cycle_members_self_loop() {
+        // A1 = A1 → flagged
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+
+        graph.replace_edges(a1, set(&[a1]));
+
+        let members = graph.find_cycle_members();
+        assert!(members.contains(&a1));
+        assert_eq!(members.len(), 1);
+    }
+
+    #[test]
+    fn test_cycle_members_downstream_excluded() {
+        // A1 = B1, B1 = A1 (cycle), C1 depends on A1 (downstream)
+        // C1 should NOT be in cycle members
+        let mut graph = DepGraph::new();
+        let a1 = cell(1, 0, 0);
+        let b1 = cell(1, 0, 1);
+        let c1 = cell(1, 0, 2);
+
+        graph.replace_edges(a1, set(&[b1]));
+        graph.replace_edges(b1, set(&[a1]));
+        graph.replace_edges(c1, set(&[a1]));
+
+        let members = graph.find_cycle_members();
+        assert!(members.contains(&a1));
+        assert!(members.contains(&b1));
+        assert!(!members.contains(&c1), "Downstream cell C1 should NOT be in cycle members");
+        assert_eq!(members.len(), 2);
+    }
+
+    #[test]
+    fn test_cycle_members_no_cycles() {
+        // A → B → C (no cycles)
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1);
+        let c = cell(1, 0, 2);
+
+        graph.replace_edges(b, set(&[a]));
+        graph.replace_edges(c, set(&[b]));
+
+        let members = graph.find_cycle_members();
+        assert!(members.is_empty());
+    }
+
+    #[test]
+    fn test_cycle_members_three_node_cycle() {
+        // A → B → C → A
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1);
+        let c = cell(1, 0, 2);
+
+        graph.replace_edges(a, set(&[c]));
+        graph.replace_edges(b, set(&[a]));
+        graph.replace_edges(c, set(&[b]));
+
+        let members = graph.find_cycle_members();
+        assert_eq!(members.len(), 3);
+        assert!(members.contains(&a));
+        assert!(members.contains(&b));
+        assert!(members.contains(&c));
+    }
+
+    #[test]
+    fn test_cycle_members_stability() {
+        // Run find_cycle_members twice on same graph → same set
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1);
+
+        graph.replace_edges(a, set(&[b]));
+        graph.replace_edges(b, set(&[a]));
+
+        let members1 = graph.find_cycle_members();
+        let members2 = graph.find_cycle_members();
+        assert_eq!(members1, members2);
+    }
+
+    #[test]
+    fn test_cycle_members_empty_graph() {
+        let graph = DepGraph::new();
+        let members = graph.find_cycle_members();
+        assert!(members.is_empty());
+    }
+
+    #[test]
+    fn test_cycle_members_mixed_cycle_and_acyclic() {
+        // A ↔ B (cycle), C → D (acyclic chain), E → A (downstream of cycle)
+        let mut graph = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1);
+        let c = cell(1, 0, 2);
+        let d = cell(1, 0, 3);
+        let e = cell(1, 0, 4);
+
+        graph.replace_edges(a, set(&[b]));
+        graph.replace_edges(b, set(&[a]));
+        graph.replace_edges(d, set(&[c]));
+        graph.replace_edges(e, set(&[a]));
+
+        let members = graph.find_cycle_members();
+        assert_eq!(members.len(), 2);
+        assert!(members.contains(&a));
+        assert!(members.contains(&b));
+        assert!(!members.contains(&c)); // c is a value cell (not in preds)
+        assert!(!members.contains(&d)); // acyclic
+        assert!(!members.contains(&e)); // downstream
     }
 
     #[test]

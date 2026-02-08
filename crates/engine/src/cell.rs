@@ -1085,6 +1085,11 @@ pub struct Cell {
     /// If this cell has an array formula that can't spill, contains error info
     #[serde(skip)]
     pub spill_error: Option<SpillError>,
+    /// Original formula preserved when a cycle cell was frozen during import.
+    /// The cell's value holds the frozen cached value; this field holds the formula
+    /// that was replaced, for auditability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_formula: Option<String>,
 }
 
 impl Cell {
@@ -1094,7 +1099,14 @@ impl Cell {
 
     pub fn set(&mut self, input: &str) {
         self.value = CellValue::from_input(input);
-        // Clear spill state when cell is edited
+        self.clear_spill_state();
+        self.frozen_formula = None; // User edit clears freeze provenance
+    }
+
+    /// Clear formula runtime/computed state (spill chains, caches).
+    /// Does NOT touch frozen_formula — that's provenance metadata managed
+    /// separately by freeze_cell() and set().
+    pub fn clear_spill_state(&mut self) {
         self.spill_parent = None;
         self.spill_info = None;
         self.spill_error = None;

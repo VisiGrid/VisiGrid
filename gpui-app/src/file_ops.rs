@@ -411,6 +411,241 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Re-import the current file with freeze_cycles enabled.
+    /// Called from the import report dialog's "Freeze Cycle Values" button.
+    pub fn reimport_with_freeze(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.current_file.clone() else { return; };
+        let current_sheet = self.wb(cx).active_sheet_index();
+        self.import_result = None; // hide dialog
+        self.mode = crate::mode::Mode::Navigation;
+        self.status_message = Some("Re-importing with Freeze Cycle Values...".to_string());
+        cx.notify();
+
+        let options = xlsx::ImportOptions { freeze_cycles: true };
+
+        if visigrid_license::is_feature_enabled("fast_large_files") {
+            self.start_excel_import_with_options(&path, options, current_sheet, cx);
+        } else {
+            self.load_excel_sync_with_options(&path, options, current_sheet, cx);
+        }
+    }
+
+    /// Start background Excel import with options and optional sheet restore
+    fn start_excel_import_with_options(
+        &mut self,
+        path: &PathBuf,
+        options: xlsx::ImportOptions,
+        restore_sheet: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "file".to_string());
+        let source_dir = path.parent().map(|p| p.to_path_buf());
+
+        self.import_in_progress = true;
+        self.import_overlay_visible = false;
+        self.import_started_at = Some(Instant::now());
+        self.status_message = Some(format!("Importing {}...", filename));
+
+        let path_for_import = path.clone();
+        let path_for_recent = path.clone();
+        let filename_for_completion = filename.clone();
+
+        cx.notify();
+
+        // Delayed overlay trigger
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(OVERLAY_DELAY_MS)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.import_in_progress {
+                    this.import_overlay_visible = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+
+        // Actual import
+        cx.spawn(async move |this, cx| {
+            let import_result = cx.background_executor()
+                .spawn(async move {
+                    xlsx::import_with_options(&path_for_import, &options)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.import_in_progress = false;
+                this.import_overlay_visible = false;
+
+                let duration_ms = this.import_started_at
+                    .map(|t| t.elapsed().as_millis())
+                    .unwrap_or(0);
+
+                match import_result {
+                    Ok((workbook, mut result)) => {
+                        this.workbook = cx.new(|_| workbook);
+                        this.update_cached_sheet_id(cx);
+                        this.debug_assert_sheet_cache_sync(cx);
+                        this.base_workbook = this.wb(cx).clone();
+                        this.rewind_preview = crate::app::RewindPreviewState::Off;
+                        this.import_filename = Some(filename_for_completion.clone());
+                        this.import_source_dir = source_dir;
+                        this.doc_settings = DocumentSettings::default();
+                        this.view_state.selected = (0, 0);
+                        this.view_state.selection_end = None;
+                        this.view_state.scroll_row = 0;
+                        this.view_state.scroll_col = 0;
+                        this.history.clear();
+                        this.bump_cells_rev();
+                        this.add_recent_file(&path_for_recent);
+
+                        this.finalize_load(&path_for_recent);
+                        this.request_title_refresh(cx);
+
+                        // Restore sheet selection
+                        if restore_sheet < this.wb(cx).sheet_count() {
+                            this.wb_mut(cx, |wb| { wb.set_active_sheet(restore_sheet); });
+                            this.update_cached_sheet_id(cx);
+                        }
+
+                        let duration_str = if duration_ms >= 1000 {
+                            format!("{:.2}s", duration_ms as f64 / 1000.0)
+                        } else {
+                            format!("{}ms", duration_ms)
+                        };
+
+                        let total_errors = result.recalc_errors + result.recalc_circular;
+                        let freeze_note = if result.freeze_applied {
+                            format!(" ({} cycles frozen)", result.cycles_frozen)
+                        } else {
+                            String::new()
+                        };
+                        let status = if total_errors > 0 {
+                            format!("Opened {} in {} \u{2014} {} errors{}",
+                                filename_for_completion, duration_str, total_errors, freeze_note)
+                        } else {
+                            format!("Opened {} in {} \u{2014} 0 errors{}",
+                                filename_for_completion, duration_str, freeze_note)
+                        };
+
+                        result.import_duration_ms = duration_ms;
+                        let show_report = result.recalc_errors > 0
+                            || result.recalc_circular > 0
+                            || result.freeze_applied;
+
+                        this.apply_imported_layouts(&result, cx);
+
+                        this.import_result = Some(result);
+                        this.status_message = Some(status);
+
+                        if show_report {
+                            this.show_import_report(cx);
+                        }
+                    }
+                    Err(e) => {
+                        this.import_result = None;
+                        this.import_filename = None;
+                        this.import_source_dir = None;
+                        this.status_message = Some(format!("Import failed: {}", e));
+                    }
+                }
+
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Synchronous Excel import with options and optional sheet restore
+    fn load_excel_sync_with_options(
+        &mut self,
+        path: &PathBuf,
+        options: xlsx::ImportOptions,
+        restore_sheet: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "file".to_string());
+        let source_dir = path.parent().map(|p| p.to_path_buf());
+        let start_time = std::time::Instant::now();
+
+        match xlsx::import_with_options(path, &options) {
+            Ok((workbook, mut result)) => {
+                let duration_ms = start_time.elapsed().as_millis();
+
+                self.wb_mut(cx, |wb| *wb = workbook);
+                self.update_cached_sheet_id(cx);
+                self.debug_assert_sheet_cache_sync(cx);
+                self.base_workbook = self.wb(cx).clone();
+                self.rewind_preview = crate::app::RewindPreviewState::Off;
+                self.import_filename = Some(filename.clone());
+                self.import_source_dir = source_dir;
+                self.doc_settings = DocumentSettings::default();
+                self.view_state.selected = (0, 0);
+                self.view_state.selection_end = None;
+                self.view_state.scroll_row = 0;
+                self.view_state.scroll_col = 0;
+                self.history.clear();
+                self.bump_cells_rev();
+                self.add_recent_file(path);
+
+                self.finalize_load(path);
+                self.request_title_refresh(cx);
+
+                // Restore sheet selection
+                if restore_sheet < self.wb(cx).sheet_count() {
+                    self.wb_mut(cx, |wb| { wb.set_active_sheet(restore_sheet); });
+                    self.update_cached_sheet_id(cx);
+                }
+
+                let duration_str = if duration_ms >= 1000 {
+                    format!("{:.2}s", duration_ms as f64 / 1000.0)
+                } else {
+                    format!("{}ms", duration_ms)
+                };
+
+                let total_errors = result.recalc_errors + result.recalc_circular;
+                let freeze_note = if result.freeze_applied {
+                    format!(" ({} cycles frozen)", result.cycles_frozen)
+                } else {
+                    String::new()
+                };
+                let status = if total_errors > 0 {
+                    format!("Opened {} in {} \u{2014} {} errors{}",
+                        filename, duration_str, total_errors, freeze_note)
+                } else {
+                    format!("Opened {} in {} \u{2014} 0 errors{}",
+                        filename, duration_str, freeze_note)
+                };
+
+                result.import_duration_ms = duration_ms;
+                let show_report = result.recalc_errors > 0
+                    || result.recalc_circular > 0
+                    || result.freeze_applied;
+
+                self.apply_imported_layouts(&result, cx);
+
+                self.import_result = Some(result);
+                self.status_message = Some(status);
+
+                if show_report {
+                    self.show_import_report(cx);
+                }
+            }
+            Err(e) => {
+                self.import_result = None;
+                self.import_filename = None;
+                self.import_source_dir = None;
+                self.status_message = Some(format!("Import failed: {}", e));
+            }
+        }
+        cx.notify();
+    }
+
     /// Apply imported column widths and row heights from XLSX formatting.
     /// Converts raw Excel units to pixel values used by the app.
     fn apply_imported_layouts(&mut self, result: &xlsx::ImportResult, cx: &mut Context<Self>) {

@@ -468,6 +468,20 @@ impl Sheet {
         cell.value = CellValue::Text("#CYCLE!".to_string());
     }
 
+    /// Replace a formula cell with a static cached value, preserving the
+    /// original formula as audit metadata. Used during cycle freeze on import.
+    pub fn freeze_cell(&mut self, row: usize, col: usize, cached: CellValue, formula_source: String) {
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.value = cached;
+        cell.clear_spill_state(); // Runtime state only — must not touch frozen_formula
+        cell.frozen_formula = Some(formula_source); // Set AFTER clearing runtime state
+    }
+
+    /// Get a reference to a cell if it exists, without creating one.
+    pub fn get_cell_opt(&self, row: usize, col: usize) -> Option<&Cell> {
+        self.cells.get(&(row, col))
+    }
+
     /// Evaluate a cell's formula and apply spill if it returns an array
     fn evaluate_and_spill(&mut self, row: usize, col: usize) {
         // Get the AST if this is a formula

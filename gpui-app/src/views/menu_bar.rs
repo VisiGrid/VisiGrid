@@ -343,7 +343,7 @@ fn render_help_menu(highlight: Option<usize>, text_primary: Hsla, selection_bg: 
         .flex_col()
         .child(menu_item("Documentation", None, 0, h(0), text_primary, text_primary, selection_bg, cx, |this, _window, cx| {
             this.close_menu(cx);
-            let _ = open::that("https://docs.visigrid.app");
+            let _ = open::that(crate::docs_links::DOCS_HOME);
         }))
         .child(menu_item("About VisiGrid", None, 1, h(1), text_primary, text_primary, selection_bg, cx, |this, _window, cx| {
             this.close_menu(cx);

@@ -371,6 +371,11 @@ impl Workbook {
         &self.sheets
     }
 
+    /// Get mutable access to all sheets.
+    pub fn sheets_mut(&mut self) -> &mut [Sheet] {
+        &mut self.sheets
+    }
+
     /// Create a workbook from sheets (for deserialization)
     /// Note: next_sheet_id should be set separately via set_next_sheet_id if loading from file
     /// Call `rebuild_dep_graph()` after loading to populate the dependency graph.
