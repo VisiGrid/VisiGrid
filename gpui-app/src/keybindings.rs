@@ -77,8 +77,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("delete", DeleteCell, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "d"), FillDown, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "r"), FillRight, Some("Spreadsheet")),
-        // Insert/Delete rows/cols (context-sensitive)
-        KeyBinding::new(&kb(m, "="), InsertRowsOrCols, Some("Spreadsheet")),
+        // Insert/Delete rows/cols (Ctrl+Plus, Excel-standard)
+        // gpui reports "+" or "add" depending on input method (shifted = vs numpad)
+        KeyBinding::new(&kb(m, "+"), InsertRowsOrCols, Some("Spreadsheet")),
+        KeyBinding::new(&kb(m, "add"), InsertRowsOrCols, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "-"), DeleteRowsOrCols, Some("Spreadsheet")),
         // Edit mode cursor (Home/End only - left/right handled in MoveLeft/MoveRight)
         KeyBinding::new("home", EditCursorHome, Some("Spreadsheet")),

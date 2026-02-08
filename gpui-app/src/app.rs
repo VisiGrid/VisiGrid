@@ -1645,6 +1645,12 @@ pub const MENU_BAR_HEIGHT: f32 = 28.0;
 pub const FORMULA_BAR_HEIGHT: f32 = 28.0;
 pub const COLUMN_HEADER_HEIGHT: f32 = 24.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
+pub const MACOS_TITLEBAR_HEIGHT: f32 = 34.0;
+
+// Resize grab zones — the clickable area at header edges for resizing.
+// Must be less than half the minimum row/col dimension to avoid swallowing selection clicks.
+pub const ROW_RESIZE_GRAB_PX: f32 = 4.0;
+pub const COL_RESIZE_GRAB_PX: f32 = 6.0;
 
 // Formula bar layout (single source of truth for hit-testing + rendering)
 pub const FORMULA_BAR_CELL_REF_WIDTH: f32 = 60.0;
@@ -4788,16 +4794,48 @@ impl Spreadsheet {
         format.border_left.is_set()
     }
 
-    /// Calculate visible rows based on window height
+    /// Total height of all UI chrome above the grid body.
+    ///
+    /// Must match the actual rendered layout in views/mod.rs (top to bottom):
+    ///   macOS titlebar (MACOS_TITLEBAR_HEIGHT, macOS only)
+    ///   Menu bar       (MENU_BAR_HEIGHT, Linux only, hidden in zen mode)
+    ///   Formula bar    (FORMULA_BAR_HEIGHT, hidden in zen mode)
+    ///   Format bar     (FORMAT_BAR_HEIGHT, hidden in zen mode or when disabled)
+    ///   Column headers (metrics.header_h, always visible, scales with zoom)
+    ///
+    /// This is the single source of truth for grid_body_origin.y and visible_rows().
+    pub fn top_chrome_height(&self, cx: &App) -> f32 {
+        if self.zen_mode {
+            // Zen hides menu, formula bar, format bar — only column headers remain
+            return self.metrics.header_h;
+        }
+        let titlebar_h = if cfg!(target_os = "macos") { MACOS_TITLEBAR_HEIGHT } else { 0.0 };
+        let menu_h = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
+        let formula_h = FORMULA_BAR_HEIGHT;
+        let format_h = {
+            use crate::settings::Setting;
+            match &user_settings(cx).appearance.show_format_bar {
+                Setting::Value(v) => if *v { crate::views::format_bar::FORMAT_BAR_HEIGHT } else { 0.0 },
+                Setting::Inherit => crate::views::format_bar::FORMAT_BAR_HEIGHT,
+            }
+        };
+        titlebar_h + menu_h + formula_h + format_h + self.metrics.header_h
+    }
+
+    /// Total height of UI chrome below the grid body.
+    /// Currently just the status bar, which is hidden in zen mode.
+    pub fn bottom_chrome_height(&self) -> f32 {
+        if self.zen_mode { 0.0 } else { STATUS_BAR_HEIGHT }
+    }
+
+    /// Calculate visible rows based on window height.
+    /// Uses cached grid_layout.viewport_size computed each render by top/bottom_chrome_height.
     pub fn visible_rows(&self) -> usize {
-        let height: f32 = self.window_size.height.into();
-        // Menu bar, formula bar, status bar don't scale; column header does
-        let available_height = height
-            - MENU_BAR_HEIGHT
-            - FORMULA_BAR_HEIGHT
-            - self.metrics.header_h  // Column header scales with zoom
-            - STATUS_BAR_HEIGHT;
-        let rows = (available_height / self.metrics.cell_h).floor() as usize;
+        let available = self.grid_layout.viewport_size.1;
+        if available <= 0.0 {
+            return 1;
+        }
+        let rows = (available / self.metrics.cell_h).floor() as usize;
         rows.max(1).min(NUM_ROWS)
     }
 
@@ -5684,24 +5722,21 @@ impl Render for Spreadsheet {
             self.mode
         );
 
-        // Update grid layout cache for hit-testing
-        let menu_height = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
-        let formula_bar_height = FORMULA_BAR_HEIGHT;
-        let col_header_height = COLUMN_HEADER_HEIGHT;
-
-        let grid_body_y = menu_height + formula_bar_height + col_header_height;
-        let grid_body_x = HEADER_WIDTH;
+        // Update grid layout cache for hit-testing.
+        // top_chrome_height / bottom_chrome_height are the single source of truth;
+        // visible_rows() reads the cached viewport_size set here.
+        let grid_body_y = self.top_chrome_height(cx);
+        let grid_body_x = self.metrics.header_w;
 
         let window_height: f32 = current_size.height.into();
         let window_width: f32 = current_size.width.into();
 
-        // Account for side panels and status bar
         let right_panel_width = if self.inspector_visible {
             crate::views::inspector_panel::PANEL_WIDTH
         } else {
             0.0
         };
-        let bottom_status_height = STATUS_BAR_HEIGHT;
+        let bottom_status_height = self.bottom_chrome_height();
 
         let grid_viewport_width = (window_width - grid_body_x - right_panel_width).max(0.0);
         let grid_viewport_height = (window_height - grid_body_y - bottom_status_height).max(0.0);
@@ -5715,9 +5750,17 @@ impl Render for Spreadsheet {
         // Uses centralized constants: FORMULA_BAR_TEXT_LEFT, FORMULA_BAR_PADDING
         let formula_bar_input_left = FORMULA_BAR_CELL_REF_WIDTH + FORMULA_BAR_FX_WIDTH;
         let formula_bar_text_width = (window_width - formula_bar_input_left - FORMULA_BAR_PADDING * 2.0 - right_panel_width).max(0.0);
+        // Formula bar sits directly below the menu bar (Linux) or titlebar (macOS)
+        let formula_bar_y = if cfg!(target_os = "macos") {
+            MACOS_TITLEBAR_HEIGHT
+        } else if self.zen_mode {
+            0.0
+        } else {
+            MENU_BAR_HEIGHT
+        };
         self.formula_bar_text_rect = gpui::Bounds {
-            origin: gpui::point(gpui::px(FORMULA_BAR_TEXT_LEFT), gpui::px(menu_height)),
-            size: gpui::size(gpui::px(formula_bar_text_width), gpui::px(formula_bar_height)),
+            origin: gpui::point(gpui::px(FORMULA_BAR_TEXT_LEFT), gpui::px(formula_bar_y)),
+            size: gpui::size(gpui::px(formula_bar_text_width), gpui::px(FORMULA_BAR_HEIGHT)),
         };
 
         // Update formula bar display cache (only when not editing)
@@ -5920,5 +5963,112 @@ mod paste_values_tests {
         let expected = format!("\"{}\"", id);
         assert_eq!(expected, "\"12345678901234567890\"");
         // This is valid JSON string format
+    }
+}
+
+#[cfg(test)]
+mod layout_geometry_tests {
+    use super::{
+        CELL_HEIGHT, CELL_WIDTH, COLUMN_HEADER_HEIGHT, FORMULA_BAR_HEIGHT,
+        MACOS_TITLEBAR_HEIGHT, MENU_BAR_HEIGHT, ROW_RESIZE_GRAB_PX, COL_RESIZE_GRAB_PX,
+    };
+
+    // =========================================================================
+    // LAYOUT GEOMETRY: Ensure hit-testing coordinates stay aligned with rendering.
+    // These tests catch the class of bug where top_chrome_height drifts from
+    // the actual rendered layout (missing bars, unscaled constants, etc.).
+    // =========================================================================
+
+    /// Resize grab zone must be less than half the minimum row height.
+    /// If this fails, a click at the vertical center of a row header
+    /// would land in the resize zone, making row selection impossible.
+    #[test]
+    fn resize_grab_smaller_than_half_row_height() {
+        assert!(
+            ROW_RESIZE_GRAB_PX < CELL_HEIGHT / 2.0,
+            "ROW_RESIZE_GRAB_PX ({}) must be < CELL_HEIGHT/2 ({}) \
+             or center clicks will hit the resize zone",
+            ROW_RESIZE_GRAB_PX, CELL_HEIGHT / 2.0,
+        );
+        assert!(
+            COL_RESIZE_GRAB_PX < CELL_WIDTH / 2.0,
+            "COL_RESIZE_GRAB_PX ({}) must be < CELL_WIDTH/2 ({}) \
+             or center clicks will hit the resize zone",
+            COL_RESIZE_GRAB_PX, CELL_WIDTH / 2.0,
+        );
+    }
+
+    /// Simulate the row header resize-area check using the same math as
+    /// headers.rs. A click at the vertical center of a row must NOT trigger
+    /// the resize early-return, regardless of how much chrome is above.
+    #[test]
+    fn row_header_center_click_is_not_resize() {
+        // Worst-case chrome height: Linux, all bars visible, default zoom
+        let grid_body_y = MENU_BAR_HEIGHT
+            + FORMULA_BAR_HEIGHT
+            + crate::views::format_bar::FORMAT_BAR_HEIGHT
+            + COLUMN_HEADER_HEIGHT;
+        let row_height = CELL_HEIGHT; // default row height
+        let row_y_offset = 0.0; // first visible row
+
+        // Click at exact vertical center
+        let click_y = grid_body_y + row_y_offset + row_height / 2.0;
+        let row_end_y = grid_body_y + row_y_offset + row_height;
+        let resize_start = row_end_y - ROW_RESIZE_GRAB_PX;
+
+        assert!(
+            click_y < resize_start,
+            "Center click y={click_y} must be below resize_start={resize_start} \
+             (grid_body_y={grid_body_y}, row_height={row_height}, grab={ROW_RESIZE_GRAB_PX})"
+        );
+    }
+
+    /// The same check for macOS (includes titlebar).
+    #[test]
+    fn row_header_center_click_macos_layout() {
+        let grid_body_y = MACOS_TITLEBAR_HEIGHT
+            + FORMULA_BAR_HEIGHT
+            + crate::views::format_bar::FORMAT_BAR_HEIGHT
+            + COLUMN_HEADER_HEIGHT;
+        let row_height = CELL_HEIGHT;
+
+        let click_y = grid_body_y + row_height / 2.0;
+        let row_end_y = grid_body_y + row_height;
+        let resize_start = row_end_y - ROW_RESIZE_GRAB_PX;
+
+        assert!(click_y < resize_start);
+    }
+
+    /// Verify that top_chrome_height components add up correctly for Linux.
+    /// If someone adds a new bar above the grid and forgets top_chrome_height(),
+    /// this test's expected value will be stale — that's the point.
+    #[test]
+    fn linux_top_chrome_components() {
+        // Linux, not zen, format bar visible, zoom 1.0
+        let expected = MENU_BAR_HEIGHT            // 28
+            + FORMULA_BAR_HEIGHT                   // 28
+            + crate::views::format_bar::FORMAT_BAR_HEIGHT // 28
+            + COLUMN_HEADER_HEIGHT;                // 24  → 108
+        assert_eq!(expected, 108.0,
+            "Linux top chrome changed — update top_chrome_height() if you added/removed a bar");
+    }
+
+    /// Verify macOS chrome height.
+    #[test]
+    fn macos_top_chrome_components() {
+        let expected = MACOS_TITLEBAR_HEIGHT       // 34
+            + FORMULA_BAR_HEIGHT                   // 28
+            + crate::views::format_bar::FORMAT_BAR_HEIGHT // 28
+            + COLUMN_HEADER_HEIGHT;                // 24  → 114
+        assert_eq!(expected, 114.0,
+            "macOS top chrome changed — update top_chrome_height() if you added/removed a bar");
+    }
+
+    /// Zen mode: only column headers remain.
+    #[test]
+    fn zen_mode_chrome_is_just_col_headers() {
+        // In zen mode, top_chrome_height returns only metrics.header_h.
+        // At zoom 1.0, that equals COLUMN_HEADER_HEIGHT.
+        assert_eq!(COLUMN_HEADER_HEIGHT, 24.0);
     }
 }

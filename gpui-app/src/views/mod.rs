@@ -474,6 +474,65 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(!zen_mode, |div| {
             div.child(status_bar::render_status_bar(app, editing, cx))
         })
+        // Debug: layout origin overlay (Cmd+Alt+Shift+G / Ctrl+Alt+Shift+G).
+        // Draws grid_body_origin line and row header resize-band geometry
+        // in window coordinates. If the cyan line doesn't sit exactly at the
+        // top of the first data row, top_chrome_height() is wrong.
+        .when(app.debug_grid_alignment, |d| {
+            let origin_y = app.grid_layout.grid_body_origin.1;
+            let origin_x = app.grid_layout.grid_body_origin.0;
+            let row_h = app.metrics.cell_h;
+            let visible = app.visible_rows().min(20); // cap overlay to avoid perf hit
+            let grab = crate::app::ROW_RESIZE_GRAB_PX;
+
+            let mut overlay = d
+                // Horizontal cyan line at grid_body_origin.y
+                .child(
+                    div().absolute()
+                        .left_0()
+                        .top(px(origin_y))
+                        .w_full()
+                        .h(px(1.0))
+                        .bg(gpui::rgba(0x00ffffff))
+                )
+                // Vertical cyan line at grid_body_origin.x
+                .child(
+                    div().absolute()
+                        .left(px(origin_x))
+                        .top(px(origin_y))
+                        .w(px(1.0))
+                        .h(px(app.grid_layout.viewport_size.1))
+                        .bg(gpui::rgba(0x00ffffff))
+                );
+
+            // Row header rects + resize bands for visible rows
+            for i in 0..visible {
+                let row = app.view_state.scroll_row + i;
+                let y = origin_y + app.row_y_offset(row);
+                let h = app.metrics.row_height(app.row_height(row));
+
+                // Row header outline (yellow, 1px)
+                overlay = overlay.child(
+                    div().absolute()
+                        .left_0()
+                        .top(px(y))
+                        .w(px(origin_x))
+                        .h(px(h))
+                        .border_1()
+                        .border_color(gpui::rgba(0xffff0060))
+                );
+                // Resize grab band (red translucent, bottom ROW_RESIZE_GRAB_PX)
+                overlay = overlay.child(
+                    div().absolute()
+                        .left_0()
+                        .top(px(y + h - grab))
+                        .w(px(origin_x))
+                        .h(px(grab))
+                        .bg(gpui::rgba(0xff000040))
+                );
+            }
+            overlay
+        })
         // Font size dropdown overlay — rendered at root level so it paints above
         // column headers and grid cells. Only visible when dropdown is open.
         .when(app.ui.format_bar.size_dropdown, |d| {

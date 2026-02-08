@@ -1,6 +1,6 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::Spreadsheet;
+use crate::app::{Spreadsheet, ROW_RESIZE_GRAB_PX, COL_RESIZE_GRAB_PX};
 use crate::theme::TokenKey;
 
 /// Render the filter dropdown button for a column header cell
@@ -193,7 +193,7 @@ fn render_column_header(
             // Use scaled header width (col_x_offset already returns scaled value)
             let col_start_x = this.metrics.header_w + this.col_x_offset(col);
             let col_end_x = col_start_x + width; // width is already scaled from caller
-            let resize_area_start = col_end_x - 6.0;
+            let resize_area_start = col_end_x - COL_RESIZE_GRAB_PX;
 
             if click_x >= resize_area_start {
                 // Click is on resize handle, don't change selection
@@ -235,7 +235,7 @@ fn render_column_header(
                 .absolute()
                 .right_0()
                 .top_0()
-                .w(px(6.0))
+                .w(px(COL_RESIZE_GRAB_PX))
                 .h_full()
                 .cursor(CursorStyle::ResizeLeftRight)
                 // Hover highlight
@@ -303,7 +303,7 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
             // row_y_offset returns scaled value
             let row_start_y = this.grid_layout.grid_body_origin.1 + this.row_y_offset(row);
             let row_end_y = row_start_y + this.metrics.row_height(this.row_height(row));
-            let resize_area_start = row_end_y - 4.0;
+            let resize_area_start = row_end_y - ROW_RESIZE_GRAB_PX;
 
             if click_y >= resize_area_start {
                 // Click is on resize handle, don't change selection
@@ -346,7 +346,7 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
                 .bottom_0()
                 .left_0()
                 .w_full()
-                .h(px(4.0))
+                .h(px(ROW_RESIZE_GRAB_PX))
                 .cursor(CursorStyle::ResizeUpDown)
                 .hover(move |s| s.bg(accent.opacity(0.25)))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {

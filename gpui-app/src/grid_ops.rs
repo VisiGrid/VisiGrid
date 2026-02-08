@@ -165,13 +165,12 @@ impl Spreadsheet {
             deleted_row_heights,
         });
 
-        // Move selection up if needed
-        if self.view_state.selected.0 >= at_row + count {
-            self.view_state.selected.0 -= count;
-        } else if self.view_state.selected.0 >= at_row {
-            self.view_state.selected.0 = at_row.saturating_sub(1);
-        }
-        self.view_state.selection_end = None;
+        // Maintain full-row selection at the same position (Excel behavior):
+        // after deleting rows 3-5, the selection highlights rows 3-5 (now shifted-up data)
+        let sel_row = at_row.min(NUM_ROWS - 1);
+        self.view_state.selected = (sel_row, 0);
+        self.view_state.selection_end = Some(((sel_row + count - 1).min(NUM_ROWS - 1), NUM_COLS - 1));
+        self.view_state.additional_selections.clear();
 
         self.bump_cells_rev();
         self.is_modified = true;
@@ -273,13 +272,12 @@ impl Spreadsheet {
             deleted_col_widths,
         });
 
-        // Move selection left if needed
-        if self.view_state.selected.1 >= at_col + count {
-            self.view_state.selected.1 -= count;
-        } else if self.view_state.selected.1 >= at_col {
-            self.view_state.selected.1 = at_col.saturating_sub(1);
-        }
-        self.view_state.selection_end = None;
+        // Maintain full-column selection at the same position (Excel behavior):
+        // after deleting cols C-E, the selection highlights cols C-E (now shifted-left data)
+        let sel_col = at_col.min(NUM_COLS - 1);
+        self.view_state.selected = (0, sel_col);
+        self.view_state.selection_end = Some((NUM_ROWS - 1, (sel_col + count - 1).min(NUM_COLS - 1)));
+        self.view_state.additional_selections.clear();
 
         self.bump_cells_rev();
         self.is_modified = true;
