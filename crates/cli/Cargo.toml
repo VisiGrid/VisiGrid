@@ -25,6 +25,11 @@ which = "6"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 blake3 = "1"
 
+# TUI viewer (peek command)
+ratatui = "0.29"
+crossterm = "0.28"
+unicode-width = "0.2"
+
 # Session client
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["serde"] }
@@ -38,3 +43,4 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 proptest = "1"
+tempfile = "3"

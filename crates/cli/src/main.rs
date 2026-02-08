@@ -5,6 +5,8 @@ mod exit_codes;
 mod replay;
 mod session;
 mod sheet_ops;
+mod tui;
+mod util;
 
 use visigrid_cli::diff;
 
@@ -388,6 +390,49 @@ Examples:
         /// Column width for display (default: 12)
         #[arg(long, default_value = "12")]
         width: usize,
+    },
+
+    /// View a file in the terminal (read-only TUI)
+    #[command(after_help = "\
+Examples:
+  visigrid peek data.csv
+  visigrid peek sales.tsv --headers
+  visigrid peek huge.csv --max-rows 10000
+  visigrid peek data.csv --max-rows 0 --force   # load all rows
+  visigrid peek data.csv --shape                 # print file shape and exit
+  visigrid peek data.csv --delimiter ';'         # semicolon-separated
+  visigrid peek data.csv --delimiter tab         # tab, comma, pipe, semicolon
+  visigrid peek data.csv --plain                 # print table to stdout")]
+    Peek {
+        /// File to view
+        file: PathBuf,
+        /// First row is column headers
+        #[arg(long)]
+        headers: bool,
+        /// First row is NOT headers (override auto-detect)
+        #[arg(long, conflicts_with = "headers")]
+        no_headers: bool,
+        /// Sheet name or 0-based index for multi-sheet files
+        #[arg(long)]
+        sheet: Option<String>,
+        /// Maximum rows to load (default: 5000; use --max-rows 0 for all)
+        #[arg(long, default_value = "5000")]
+        max_rows: usize,
+        /// Allow loading >200k rows with --max-rows 0 (memory safety override)
+        #[arg(long)]
+        force: bool,
+        /// Rows to scan for column width sizing (0 = all loaded rows)
+        #[arg(long, default_value = "500")]
+        width_scan_rows: usize,
+        /// Print file shape (rows, cols, headers, delimiter) and exit
+        #[arg(long)]
+        shape: bool,
+        /// Print table to stdout instead of launching TUI
+        #[arg(long)]
+        plain: bool,
+        /// Override delimiter: single char, or name (tab, comma, pipe, semicolon)
+        #[arg(long)]
+        delimiter: Option<String>,
     },
 
     /// Sheet file operations (headless build/inspect/verify)
@@ -975,6 +1020,12 @@ fn main() -> ExitCode {
         Some(Commands::Stats { session, json }) => cmd_stats(session, json),
         Some(Commands::View { session, range, sheet, follow, width }) => {
             cmd_view(session, range, sheet, follow, width)
+        }
+        Some(Commands::Peek {
+            file, headers, no_headers: _, sheet: _, max_rows,
+            force, width_scan_rows, shape, plain, delimiter,
+        }) => {
+            cmd_peek(file, headers, max_rows, force, width_scan_rows, shape, plain, delimiter)
         }
         Some(Commands::Sheet(sheet_cmd)) => match sheet_cmd {
             SheetCommands::Apply { output, lua, verify, stamp, dry_run, json } => {
@@ -3205,6 +3256,146 @@ fn cmd_stats(session_id: Option<String>, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+const PEEK_FORCE_CAP: usize = 200_000;
+
+/// Parse a delimiter string: supports single chars and names (tab, comma, pipe, semicolon).
+fn parse_delimiter(s: &str) -> Result<u8, CliError> {
+    match s.to_lowercase().as_str() {
+        "tab" | "\\t" | "tsv" => Ok(b'\t'),
+        "comma" | "csv" => Ok(b','),
+        "pipe" => Ok(b'|'),
+        "semicolon" => Ok(b';'),
+        _ => {
+            let chars: Vec<char> = s.chars().collect();
+            if chars.len() == 1 && chars[0].is_ascii() {
+                Ok(chars[0] as u8)
+            } else {
+                Err(CliError::args(format!(
+                    "invalid delimiter '{}' (use a single ASCII char, or: tab, comma, pipe, semicolon)",
+                    s
+                )))
+            }
+        }
+    }
+}
+
+fn cmd_peek(
+    file: PathBuf,
+    headers: bool,
+    max_rows: usize,
+    force: bool,
+    width_scan_rows: usize,
+    shape: bool,
+    plain: bool,
+    delimiter_override: Option<String>,
+) -> Result<(), CliError> {
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let delimiter = if let Some(ref d) = delimiter_override {
+        parse_delimiter(d)?
+    } else {
+        match ext.as_str() {
+            "tsv" | "tab" => b'\t',
+            "csv" | "txt" | "" => b',',
+            other => {
+                return Err(CliError::args(format!(
+                    "unsupported file extension '.{}' (supported: csv, tsv, txt)\n\
+                     hint: use --delimiter to specify a custom delimiter",
+                    other
+                )));
+            }
+        }
+    };
+
+    // Safety cap: refuse --max-rows 0 loading >200k rows without --force.
+    // We enforce this after loading rather than guessing from file size,
+    // since file size is a noisy heuristic — row count is the actual risk.
+    let effective_max = if max_rows == 0 && !force {
+        // Load up to cap+1 to detect overflow, then reject
+        PEEK_FORCE_CAP + 1
+    } else {
+        max_rows
+    };
+
+    let data = tui::data::load_csv(&file, delimiter, headers, effective_max, width_scan_rows)
+        .map_err(|e| CliError::io(e))?;
+
+    if max_rows == 0 && !force && data.num_rows > PEEK_FORCE_CAP {
+        return Err(CliError::args(format!(
+            "file has >{}k rows; --max-rows 0 would load them all into memory\n\
+             hint: use --force to override, or set --max-rows to a specific limit",
+            PEEK_FORCE_CAP / 1000,
+        )));
+    }
+
+    if shape {
+        return cmd_peek_shape(&data, &file);
+    }
+
+    if plain {
+        return tui::print_plain(&data, 0).map_err(|e| CliError::io(e));
+    }
+
+    let file_name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    tui::run(data, file_name).map_err(|e| CliError::io(e))
+}
+
+fn cmd_peek_shape(data: &tui::data::PeekData, file: &std::path::Path) -> Result<(), CliError> {
+    let delim_name = match data.delimiter {
+        b'\t' => "tab (TSV)",
+        b',' => "comma (CSV)",
+        b';' => "semicolon",
+        b'|' => "pipe",
+        d => &format!("'{}' (0x{:02x})", d as char, d),
+    };
+
+    println!("file:       {}", file.display());
+    println!("rows:       {}", data.total_data_rows());
+    if data.total_rows.is_some() {
+        println!("loaded:     {}", data.num_rows);
+        println!("truncated:  true");
+    }
+    println!("cols:       {}", data.num_cols);
+    println!("headers:    {}", if data.has_headers { "yes" } else { "no" });
+    println!("delimiter:  {}", delim_name);
+
+    // Print first 3 rows as preview
+    let preview_rows = data.num_rows.min(3);
+    if preview_rows > 0 {
+        println!();
+        let preview: String = data.col_names.iter()
+            .take(8)
+            .map(|s| util::truncate_display(s, 15))
+            .collect::<Vec<_>>()
+            .join("  ");
+        let suffix = if data.num_cols > 8 { format!("  (+{} more)", data.num_cols - 8) } else { String::new() };
+        println!("columns:    {}{}", preview, suffix);
+
+        println!("preview:");
+        for i in 0..preview_rows {
+            let row = &data.rows[i];
+            let cells: String = row.iter()
+                .take(8)
+                .map(|s| util::truncate_display(s, 15))
+                .collect::<Vec<_>>()
+                .join("  ");
+            let row_suffix = if data.num_cols > 8 { "  ..." } else { "" };
+            println!("  row {}: {}{}", data.file_row(i), cells, row_suffix);
+        }
+    }
+
+    Ok(())
+}
+
 fn cmd_view(
     session_id: Option<String>,
     range: String,
@@ -3333,35 +3524,12 @@ fn print_grid_from_cells(
     }
 }
 
-/// Truncate a string to fit within width, adding ".." if truncated.
-/// Handles UTF-8 safely by finding char boundaries.
 fn truncate_display(s: &str, width: usize) -> String {
-    if width < 3 {
-        return s.chars().next().map(|c| c.to_string()).unwrap_or_default();
-    }
-
-    let char_count = s.chars().count();
-    if char_count <= width {
-        return s.to_string();
-    }
-
-    // Truncate to width - 2 chars, add ".."
-    let truncated: String = s.chars().take(width - 2).collect();
-    format!("{}..", truncated)
+    util::truncate_display(s, width)
 }
 
-/// Convert column index to letter (0 -> A, 1 -> B, 26 -> AA, etc.)
 fn col_to_letter(col: usize) -> String {
-    let mut result = String::new();
-    let mut n = col;
-    loop {
-        result.insert(0, (b'A' + (n % 26) as u8) as char);
-        if n < 26 {
-            break;
-        }
-        n = n / 26 - 1;
-    }
-    result
+    util::col_to_letter(col)
 }
 
 /// Resolve session by ID (prefix match), or auto-select if only one session.
