@@ -401,66 +401,14 @@ pub(crate) fn bind(
             cx.activate(true);
         }))
         .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
-            // Commit any pending edit before closing
             this.commit_pending_edit(cx);
-
-            // If workbook is clean, just close
             if !this.is_modified {
                 this.prepare_close(cx);
                 window.remove_window();
                 return;
             }
-
-            // Workbook is dirty - prompt user to save
-            let filename = this.current_file.as_ref()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("Untitled");
-
-            let receiver = window.prompt(
-                gpui::PromptLevel::Warning,
-                &format!("Do you want to save changes to \"{}\"?", filename),
-                Some("Your changes will be lost if you don't save them."),
-                &["Save", "Don't Save", "Cancel"],
-                cx,
-            );
-
-            // Capture window handle for closing from async context
-            let window_handle = window.window_handle();
-
-            cx.spawn(async move |this, cx| {
-                if let Ok(response) = receiver.await {
-                    match response {
-                        0 => {
-                            // Save, then close
-                            let save_succeeded = this.update(cx, |this, cx| {
-                                this.save_and_close(cx)
-                            }).unwrap_or(false);
-
-                            if save_succeeded {
-                                let _ = this.update(cx, |this, cx| {
-                                    this.prepare_close(cx);
-                                });
-                                let _ = window_handle.update(cx, |_, window, _| {
-                                    window.remove_window();
-                                });
-                            }
-                        }
-                        1 => {
-                            // Don't Save - close without saving
-                            let _ = this.update(cx, |this, cx| {
-                                this.prepare_close(cx);
-                            });
-                            let _ = window_handle.update(cx, |_, window, _| {
-                                window.remove_window();
-                            });
-                        }
-                        _ => {
-                            // Cancel - do nothing
-                        }
-                    }
-                }
-            }).detach();
+            this.close_confirm_visible = true;
+            cx.notify();
         }))
         .on_action(cx.listener(|this, _: &Quit, window, cx| {
             // Commit any pending edit before quitting

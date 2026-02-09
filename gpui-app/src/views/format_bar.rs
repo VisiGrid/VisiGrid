@@ -3,7 +3,7 @@ use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, TriState, CELL_HEIGHT};
 use crate::mode::Mode;
 use crate::theme::TokenKey;
-use visigrid_engine::cell::{Alignment, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, VerticalAlignment, NumberFormat};
 
 pub const FORMAT_BAR_HEIGHT: f32 = 28.0;
 
@@ -74,6 +74,14 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
     let align_center = matches!(state.alignment, TriState::Uniform(Alignment::Center));
     let align_right = matches!(state.alignment, TriState::Uniform(Alignment::Right));
 
+    // Sort/filter state for toolbar buttons
+    let filter_active = app.filter_state.is_enabled();
+    let selected_col = app.view_state.selected.1;
+    let sort_state = app.display_sort_state(cx);
+    let sort_asc_active = sort_state.map_or(false, |(col, asc)| asc && col == selected_col);
+    let sort_desc_active = sort_state.map_or(false, |(col, asc)| !asc && col == selected_col);
+    let number_format_menu_open = app.ui.format_bar.number_format_menu_open;
+
     let size_focus = app.ui.format_bar.size_focus.clone();
 
     div()
@@ -119,6 +127,20 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
         .child(render_align_btn(Alignment::Left, align_left, text_primary, text_muted, accent, panel_border, cx))
         .child(render_align_btn(Alignment::Center, align_center, text_primary, text_muted, accent, panel_border, cx))
         .child(render_align_btn(Alignment::Right, align_right, text_primary, text_muted, accent, panel_border, cx))
+        // Separator — data tools
+        .child(toolbar_separator(panel_border))
+        // Sort Ascending
+        .child(render_sort_btn(true, sort_asc_active, text_primary, text_muted, accent, panel_border, cx))
+        // Sort Descending
+        .child(render_sort_btn(false, sort_desc_active, text_primary, text_muted, accent, panel_border, cx))
+        // Filter toggle
+        .child(render_filter_btn(filter_active, text_primary, text_muted, accent, panel_border, cx))
+        // Separator — functions/format
+        .child(toolbar_separator(panel_border))
+        // AutoSum
+        .child(render_autosum_btn(text_primary, text_muted, panel_border, cx))
+        // Number Format dropdown
+        .child(render_number_format_btn(text_primary, text_muted, accent, panel_border, number_format_menu_open, cx))
 }
 
 // ============================================================================
@@ -965,6 +987,282 @@ pub(super) fn render_align_icon(alignment: Alignment, color: Hsla) -> impl IntoE
     .child(div().w(w1).h(line_h).bg(color).rounded_sm())
     .child(div().w(w2).h(line_h).bg(color).rounded_sm())
     .child(div().w(w3).h(line_h).bg(color).rounded_sm())
+}
+
+// ============================================================================
+// Sort / Filter / AutoSum / Number Format buttons
+// ============================================================================
+
+/// Sort button — "A→Z" (ascending) or "Z→A" (descending).
+fn render_sort_btn(
+    ascending: bool,
+    is_active: bool,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let label = if ascending { "A\u{2192}Z" } else { "Z\u{2192}A" };
+    let id: &str = if ascending { "fmt-sort-asc" } else { "fmt-sort-desc" };
+
+    let btn_bg = if is_active { accent.opacity(0.2) } else { gpui::transparent_black() };
+    let btn_border = if is_active { accent } else { panel_border };
+    let btn_color = if is_active { text_primary } else { text_muted };
+
+    #[cfg(not(target_os = "macos"))]
+    let tooltip_text: &str = if ascending { "Sort rows (A\u{2192}Z)" } else { "Sort rows (Z\u{2192}A)" };
+    #[cfg(target_os = "macos")]
+    let tooltip_text: &str = if ascending { "Sort rows (A\u{2192}Z)" } else { "Sort rows (Z\u{2192}A)" };
+
+    div()
+        .id(SharedString::from(id))
+        .w(px(34.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(btn_border)
+        .bg(btn_bg)
+        .text_size(px(10.0))
+        .text_color(btn_color)
+        .hover(|s| s.bg(panel_border.opacity(0.5)))
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+            use visigrid_engine::filter::SortDirection;
+            let dir = if ascending { SortDirection::Ascending } else { SortDirection::Descending };
+            this.sort_by_current_column(dir, cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .tooltip(move |_window, cx| {
+            cx.new(|_| FormatBarTooltip(tooltip_text)).into()
+        })
+        .child(label)
+}
+
+/// Filter toggle button — funnel icon (three bars of decreasing width).
+fn render_filter_btn(
+    is_active: bool,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let btn_bg = if is_active { accent.opacity(0.2) } else { gpui::transparent_black() };
+    let btn_border = if is_active { accent } else { panel_border };
+    let line_color = if is_active { text_primary } else { text_muted };
+
+    #[cfg(not(target_os = "macos"))]
+    let tooltip_text = "Filter rows (Ctrl+Shift+F)";
+    #[cfg(target_os = "macos")]
+    let tooltip_text = "Filter rows (\u{2318}\u{21e7}F)";
+
+    div()
+        .id("fmt-filter")
+        .w(px(26.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(btn_border)
+        .bg(btn_bg)
+        .hover(|s| s.bg(panel_border.opacity(0.5)))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.toggle_auto_filter(cx);
+        }))
+        .tooltip(move |_window, cx| {
+            cx.new(|_| FormatBarTooltip(tooltip_text)).into()
+        })
+        .child(render_funnel_icon(line_color))
+}
+
+/// Funnel icon: three centered horizontal bars of decreasing width.
+fn render_funnel_icon(color: Hsla) -> impl IntoElement {
+    let line_h = px(1.5);
+    let gap = px(1.5);
+
+    div()
+        .w(px(14.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(gap)
+        .child(div().w(px(12.0)).h(line_h).bg(color).rounded_sm())
+        .child(div().w(px(8.0)).h(line_h).bg(color).rounded_sm())
+        .child(div().w(px(4.0)).h(line_h).bg(color).rounded_sm())
+}
+
+/// AutoSum button — "Σ" (sigma).
+fn render_autosum_btn(
+    _text_primary: Hsla,
+    text_muted: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    #[cfg(not(target_os = "macos"))]
+    let tooltip_text = "Auto Sum (Alt+=)";
+    #[cfg(target_os = "macos")]
+    let tooltip_text = "Auto Sum (\u{2325}=)";
+
+    div()
+        .id("fmt-autosum")
+        .w(px(26.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(panel_border)
+        .bg(gpui::transparent_black())
+        .text_size(px(13.0))
+        .text_color(text_muted)
+        .hover(|s| s.bg(panel_border.opacity(0.5)))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.autosum(cx);
+        }))
+        .tooltip(move |_window, cx| {
+            cx.new(|_| FormatBarTooltip(tooltip_text)).into()
+        })
+        .child("\u{03A3}")
+}
+
+/// Number Format dropdown button — "123 ▾".
+fn render_number_format_btn(
+    _text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    is_open: bool,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let btn_bg = if is_open { accent.opacity(0.15) } else { gpui::transparent_black() };
+    let btn_border = if is_open { accent.opacity(0.5) } else { panel_border };
+    let btn_color = if is_open { accent } else { text_muted };
+
+    #[cfg(not(target_os = "macos"))]
+    let tooltip_text = "Number format (Ctrl+1)";
+    #[cfg(target_os = "macos")]
+    let tooltip_text = "Number format (\u{2318}1)";
+
+    div()
+        .id("fmt-number-format")
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .px(px(4.0))
+        .h(px(22.0))
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(btn_border)
+        .bg(btn_bg)
+        .text_size(px(11.0))
+        .text_color(btn_color)
+        .hover(|s| s.bg(panel_border.opacity(0.3)))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.ui.format_bar.number_format_menu_open = !this.ui.format_bar.number_format_menu_open;
+            cx.notify();
+        }))
+        .tooltip(move |_window, cx| {
+            cx.new(|_| FormatBarTooltip(tooltip_text)).into()
+        })
+        .child("123")
+        .child(div().text_size(px(7.0)).child("\u{25be}"))
+}
+
+/// Number format quick-menu dropdown overlay — rendered at root level.
+pub fn render_number_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
+
+    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
+    let top_offset = chrome_above + CELL_HEIGHT + FORMAT_BAR_HEIGHT;
+
+    // Horizontal offset: sum of all preceding button widths + gaps + padding.
+    // px_2 padding(8) + font family(84+4) + font size(52+4) + sep(5) + format dropdown(~60+4)
+    // + painter(26+4) + sep(5) + fill(26+4) + text(26+4) + sep(5) + align×3(22×3+4×2+4)
+    // + sep(5) + sort×2(34×2+4+4) + filter(26+4) + sep(5) + autosum(26+4)
+    // ≈ 8 + 88 + 56 + 5 + 64 + 30 + 5 + 30 + 30 + 5 + 74 + 5 + 76 + 30 + 5 + 30 = 541
+    let left_offset: f32 = 541.0;
+
+    div()
+        .id("fmt-number-format-dropdown")
+        .absolute()
+        .top(px(top_offset))
+        .left(px(left_offset))
+        .w(px(120.0))
+        .bg(panel_bg)
+        .border_1()
+        .border_color(panel_border)
+        .rounded_sm()
+        .shadow_lg()
+        .py_1()
+        .flex()
+        .flex_col()
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            this.ui.format_bar.number_format_menu_open = false;
+            cx.notify();
+        }))
+        // General
+        .child(render_numfmt_item("General", "fmt-nf-general", text_primary, hover_bg, cx, |this, cx| {
+            this.set_number_format_selection(NumberFormat::General, cx);
+        }))
+        // Number
+        .child(render_numfmt_item("Number", "fmt-nf-number", text_primary, hover_bg, cx, |this, cx| {
+            this.set_number_format_selection(NumberFormat::number(2), cx);
+        }))
+        // Currency
+        .child(render_numfmt_item("Currency", "fmt-nf-currency", text_primary, hover_bg, cx, |this, cx| {
+            this.format_currency(cx);
+        }))
+        // Percent
+        .child(render_numfmt_item("Percent", "fmt-nf-percent", text_primary, hover_bg, cx, |this, cx| {
+            this.format_percent(cx);
+        }))
+        // Separator
+        .child(div().h(px(1.0)).mx_2().my_1().bg(panel_border.opacity(0.5)))
+        // More...
+        .child(render_numfmt_item("More\u{2026}", "fmt-nf-more", text_muted, hover_bg, cx, |this, cx| {
+            this.open_number_format_editor(cx);
+        }))
+}
+
+/// Single item row in the number format dropdown.
+fn render_numfmt_item(
+    label: &'static str,
+    id: &'static str,
+    text_color: Hsla,
+    hover_bg: Hsla,
+    cx: &mut Context<Spreadsheet>,
+    action: impl Fn(&mut Spreadsheet, &mut Context<Spreadsheet>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(id))
+        .flex()
+        .items_center()
+        .px_2()
+        .py(px(4.0))
+        .cursor_pointer()
+        .text_size(px(12.0))
+        .text_color(text_color)
+        .hover(move |s| s.bg(hover_bg))
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            action(this, cx);
+            this.ui.format_bar.number_format_menu_open = false;
+            cx.notify();
+        }))
+        .child(label)
 }
 
 /// Render a 3-line vertical alignment icon (14px wide, 14px tall).

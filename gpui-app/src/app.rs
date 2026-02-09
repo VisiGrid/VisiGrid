@@ -1792,13 +1792,15 @@ pub struct FormatBarState {
     /// True on the first keypress after entering edit mode — clears the buffer
     /// so the user can type a replacement value without manually selecting all.
     pub size_replace_next: bool,
+    /// Number format quick-menu dropdown (123 ▾ button).
+    pub number_format_menu_open: bool,
 }
 
 impl FormatBarState {
     /// Returns true when the format bar owns focus (editing or dropdown open).
     /// Used to gate grid keyboard and mouse handling.
     pub fn is_active(&self, window: &Window) -> bool {
-        self.size_editing || self.size_dropdown || self.size_focus.is_focused(window)
+        self.size_editing || self.size_dropdown || self.number_format_menu_open || self.size_focus.is_focused(window)
     }
 }
 
@@ -2278,6 +2280,9 @@ pub struct Spreadsheet {
     // Merge cells confirmation dialog
     pub merge_confirm: MergeConfirmState,
 
+    // Close-window save confirmation dialog
+    pub close_confirm_visible: bool,
+
     // AI Settings dialog state
     pub ai_settings: AISettingsDialogState,
     pub ask_ai: AskAIDialogState,
@@ -2346,6 +2351,7 @@ impl Spreadsheet {
                 size_dropdown: false,
                 size_focus: cx.focus_handle(),
                 size_replace_next: false,
+                number_format_menu_open: false,
             },
             format_menu_open: false,
         };
@@ -2680,6 +2686,7 @@ impl Spreadsheet {
             rewind_success: RewindSuccessBanner::default(),
 
             merge_confirm: MergeConfirmState::default(),
+            close_confirm_visible: false,
 
             ai_settings: AISettingsDialogState::default(),
             ask_ai: AskAIDialogState::default(),
