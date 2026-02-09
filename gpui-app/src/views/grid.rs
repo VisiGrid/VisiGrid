@@ -1286,7 +1286,7 @@ fn render_cell(
                 this.confirm_sheet_rename(cx);
             }
             // Don't handle clicks if modal/overlay is visible
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() {
                 return;
             }
             // Don't handle clicks if we're resizing
@@ -2305,7 +2305,7 @@ fn render_merge_div(
             if this.renaming_sheet.is_some() {
                 this.confirm_sheet_rename(cx);
             }
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() {
                 return;
             }
             if this.resizing_col.is_some() || this.resizing_row.is_some() {

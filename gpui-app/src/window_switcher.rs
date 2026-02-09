@@ -351,6 +351,34 @@ pub fn register_keybindings(cx: &mut App) {
     ]);
 }
 
+/// Cycle directly to the next or previous window without opening a modal.
+///
+/// `direction`: 1 for next, -1 for previous.
+pub fn cycle_window(cx: &mut App, current: AnyWindowHandle, direction: i32) {
+    let (handle, title) = {
+        let Some(registry) = cx.try_global::<WindowRegistry>() else { return };
+        let windows = registry.windows();
+        if windows.len() <= 1 {
+            return;
+        }
+        let current_idx = windows.iter().position(|w| w.handle == current).unwrap_or(0);
+        let next_idx =
+            ((current_idx as i32 + direction).rem_euclid(windows.len() as i32)) as usize;
+        (windows[next_idx].handle, windows[next_idx].title.clone())
+    };
+
+    let _ = handle.update(cx, |root, target_window, cx| {
+        target_window.activate_window();
+        if let Ok(spreadsheet) = root.downcast::<crate::app::Spreadsheet>() {
+            spreadsheet.update(cx, |app, cx| {
+                target_window.focus(&app.focus_handle, cx);
+                app.status_message = Some(format!("Switched to {}", title));
+                cx.notify();
+            });
+        }
+    });
+}
+
 /// Open the window switcher as a new window
 pub fn open_switcher(cx: &mut App, current_window: AnyWindowHandle) {
     // Only open if there are windows to switch to

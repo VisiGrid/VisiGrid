@@ -620,6 +620,18 @@ fn main() {
             }
         });
 
+        // Direct window cycling (Ctrl+Tab / Ctrl+Shift+Tab)
+        cx.on_action(|_: &actions::NextWindow, cx| {
+            if let Some(window) = cx.active_window() {
+                window_switcher::cycle_window(cx, window, 1);
+            }
+        });
+        cx.on_action(|_: &actions::PrevWindow, cx| {
+            if let Some(window) = cx.active_window() {
+                window_switcher::cycle_window(cx, window, -1);
+            }
+        });
+
         // Set up native macOS menu bar
         #[cfg(target_os = "macos")]
         menus::set_app_menus(cx);

@@ -169,6 +169,8 @@ actions!(window, [
     Zoom,              // Toggle window zoom (maximize/restore)
     BringAllToFront,   // Bring all app windows to front
     SwitchWindow,      // Cmd+` / Ctrl+`: Open window switcher palette
+    NextWindow,        // Ctrl+Tab: Cycle to next window
+    PrevWindow,        // Ctrl+Shift+Tab: Cycle to previous window
 ]);
 
 // Format actions

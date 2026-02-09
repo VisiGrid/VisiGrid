@@ -242,6 +242,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Window switcher: Cmd+` (backtick)
         bindings.push(KeyBinding::new("cmd-`", SwitchWindow, Some("Spreadsheet")));
 
+        // Direct window cycling: Ctrl+Tab / Ctrl+Shift+Tab
+        bindings.push(KeyBinding::new("ctrl-tab", NextWindow, Some("Spreadsheet")));
+        bindings.push(KeyBinding::new("ctrl-shift-tab", PrevWindow, Some("Spreadsheet")));
+
         // Ctrl+U starts edit on Mac (F2 is often brightness)
         bindings.push(KeyBinding::new("ctrl-u", StartEdit, Some("Spreadsheet")));
 
@@ -267,6 +271,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
 
         // Window switcher: Ctrl+` (backtick)
         bindings.push(KeyBinding::new("ctrl-`", SwitchWindow, Some("Spreadsheet")));
+
+        // Direct window cycling: Ctrl+Tab / Ctrl+Shift+Tab
+        bindings.push(KeyBinding::new("ctrl-tab", NextWindow, Some("Spreadsheet")));
+        bindings.push(KeyBinding::new("ctrl-shift-tab", PrevWindow, Some("Spreadsheet")));
 
         // Ctrl+U for underline on non-Mac
         bindings.push(KeyBinding::new(&kb(m, "u"), ToggleUnderline, Some("Spreadsheet")));
