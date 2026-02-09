@@ -11,15 +11,15 @@
 set -euo pipefail
 
 # Find visigrid binary
-VISIGRID="${VISIGRID:-visigrid-cli}"
+VISIGRID="${VISIGRID:-vgrid}"
 if ! command -v "$VISIGRID" >/dev/null 2>&1; then
     # Try common locations
-    if [ -f "./target/release/visigrid-cli" ]; then
-        VISIGRID="./target/release/visigrid-cli"
-    elif [ -f "./target/debug/visigrid-cli" ]; then
-        VISIGRID="./target/debug/visigrid-cli"
+    if [ -f "./target/release/vgrid" ]; then
+        VISIGRID="./target/release/vgrid"
+    elif [ -f "./target/debug/vgrid" ]; then
+        VISIGRID="./target/debug/vgrid"
     else
-        echo "visigrid-cli not found. Build with: cargo build --release -p visigrid-cli" >&2
+        echo "vgrid not found. Build with: cargo build --release -p vgrid" >&2
         exit 1
     fi
 fi
@@ -35,7 +35,7 @@ echo ""
 # Step 1: Build
 echo "Step 1: Build .sheet from Lua script"
 echo "──────────────────────────────────────"
-echo "$ visigrid-cli sheet apply model.sheet --lua revenue_model.lua --json"
+echo "$ vgrid sheet apply model.sheet --lua revenue_model.lua --json"
 echo ""
 
 RESULT=$("$VISIGRID" sheet apply "$OUTPUT" --lua "$DIR/revenue_model.lua" --json)
@@ -52,22 +52,22 @@ echo ""
 echo "Step 2: Inspect key cells"
 echo "──────────────────────────────────────"
 
-echo "$ visigrid-cli sheet inspect model.sheet B4 --json  # Base Revenue (input)"
+echo "$ vgrid sheet inspect model.sheet B4 --json  # Base Revenue (input)"
 "$VISIGRID" sheet inspect "$OUTPUT" B4 --json | jq .
 echo ""
 
-echo "$ visigrid-cli sheet inspect model.sheet B19 --json  # Month 12 (formula)"
+echo "$ vgrid sheet inspect model.sheet B19 --json  # Month 12 (formula)"
 "$VISIGRID" sheet inspect "$OUTPUT" B19 --json | jq .
 echo ""
 
-echo "$ visigrid-cli sheet inspect model.sheet B21 --json  # Total (formula)"
+echo "$ vgrid sheet inspect model.sheet B21 --json  # Total (formula)"
 "$VISIGRID" sheet inspect "$OUTPUT" B21 --json | jq .
 echo ""
 
 # Step 3: Fingerprint
 echo "Step 3: Get file fingerprint (content verification)"
 echo "──────────────────────────────────────"
-echo "$ visigrid-cli sheet fingerprint model.sheet --json"
+echo "$ vgrid sheet fingerprint model.sheet --json"
 FP_RESULT=$("$VISIGRID" sheet fingerprint "$OUTPUT" --json)
 echo "$FP_RESULT" | jq .
 FINGERPRINT=$(echo "$FP_RESULT" | jq -r .fingerprint)
@@ -76,7 +76,7 @@ echo ""
 # Step 4: Verify
 echo "Step 4: Verify fingerprint (the trust proof)"
 echo "──────────────────────────────────────"
-echo "$ visigrid-cli sheet verify model.sheet --fingerprint $FINGERPRINT"
+echo "$ vgrid sheet verify model.sheet --fingerprint $FINGERPRINT"
 "$VISIGRID" sheet verify "$OUTPUT" --fingerprint "$FINGERPRINT"
 echo ""
 
@@ -100,4 +100,4 @@ echo "════════════════════════�
 
 echo ""
 echo "  For multi-sheet workbooks, see: multi_sheet_model.lua"
-echo "  Run: visigrid-cli sheet apply workbook.sheet --lua multi_sheet_model.lua --json"
+echo "  Run: vgrid sheet apply workbook.sheet --lua multi_sheet_model.lua --json"

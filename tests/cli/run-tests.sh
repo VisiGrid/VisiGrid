@@ -4,7 +4,7 @@
 
 set +e  # Don't exit on error so we can see all test results
 
-VISIGRID="${1:-../../target/release/visigrid-cli}"
+VISIGRID="${1:-../../target/release/vgrid}"
 TESTS_DIR="$(dirname "$0")"
 PASSED=0
 FAILED=0

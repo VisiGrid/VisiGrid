@@ -1,6 +1,6 @@
 -- VisiGrid Agent Demo: Multi-Sheet Workbook
 -- Demonstrates writing to multiple sheets in a single workbook.
--- Run: visigrid-cli sheet apply workbook.sheet --lua multi_sheet_model.lua --json
+-- Run: vgrid sheet apply workbook.sheet --lua multi_sheet_model.lua --json
 --
 -- Multi-Sheet API (grid.* namespace):
 --   grid.set{ sheet=N, cell="A1", value="..." }     -- N is 1-indexed

@@ -1,2 +1,2 @@
 error: no input received on stdin
-hint:  cat file.csv | visigrid-cli calc '=SUM(A:A)' --from csv
+hint:  cat file.csv | vgrid calc '=SUM(A:A)' --from csv

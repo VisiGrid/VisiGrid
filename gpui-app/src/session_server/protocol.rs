@@ -77,7 +77,7 @@ pub enum ServerMessage {
 pub struct HelloMessage {
     /// Request ID for correlation.
     pub id: String,
-    /// Client identifier (e.g., "visigrid-cli", "my-agent").
+    /// Client identifier (e.g., "vgrid", "my-agent").
     pub client: String,
     /// Client version.
     pub version: String,

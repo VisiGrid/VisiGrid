@@ -157,17 +157,17 @@ VisiGrid ships a CLI that runs without a GUI. Same engine, no window.
 
 ```bash
 # Evaluate a formula against piped data
-cat sales.csv | visigrid-cli calc "=SUM(B:B)" --from csv
+cat sales.csv | vgrid calc "=SUM(B:B)" --from csv
 
 # Reconcile two datasets by key
-visigrid-cli diff vendor.xlsx ours.csv --key Invoice --compare Total --tolerance 0.01
+vgrid diff vendor.xlsx ours.csv --key Invoice --compare Total --tolerance 0.01
 
 # Convert between formats
-visigrid-cli convert data.xlsx --to csv
+vgrid convert data.xlsx --to csv
 
 # Project a vendor export down to reconciliation columns, then diff
-visigrid-cli convert vendor.xlsx -t csv --headers --select 'Invoice,Amount' | \
-  visigrid-cli diff - our_export.csv --key Invoice --compare Amount --tolerance 0.01
+vgrid convert vendor.xlsx -t csv --headers --select 'Invoice,Amount' | \
+  vgrid diff - our_export.csv --key Invoice --compare Amount --tolerance 0.01
 ```
 
 The CLI reads spreadsheet files (CSV, XLSX, JSON, TSV), runs the same formula engine and comparison logic as the GUI, and writes structured output to stdout. Exit codes are stable for scripting. Output is JSON or CSV.
@@ -176,14 +176,14 @@ The CLI reads spreadsheet files (CSV, XLSX, JSON, TSV), runs the same formula en
 
 ```bash
 # Pending transactions
-visigrid-cli convert rh_transactions.csv -t csv --headers --where 'Status=Pending'
+vgrid convert rh_transactions.csv -t csv --headers --where 'Status=Pending'
 
 # Pending charges (negative amounts)
-visigrid-cli convert rh_transactions.csv -t csv --headers \
+vgrid convert rh_transactions.csv -t csv --headers \
   --where 'Status=Pending' --where 'Amount<0'
 
 # Vendor name contains
-visigrid-cli convert rh_transactions.csv -t csv --headers \
+vgrid convert rh_transactions.csv -t csv --headers \
   --where 'Description~"google workspace"'
 ```
 
@@ -192,10 +192,10 @@ Five operators: `=` `!=` `<` `>` `~` (contains). Typed comparisons — numeric R
 **Column selection** (`convert --select`) — pick and reorder output columns:
 
 ```bash
-visigrid-cli convert data.csv -t csv --headers --select 'Status,Amount'
+vgrid convert data.csv -t csv --headers --select 'Status,Amount'
 
 # Filter by one column, output different ones
-visigrid-cli convert data.csv -t csv --headers \
+vgrid convert data.csv -t csv --headers \
   --where 'Status=Pending' --select 'Amount,Vendor'
 ```
 
@@ -269,18 +269,18 @@ VisiGrid provides a headless build loop for LLM agents and CI pipelines. Write L
 
 ```bash
 # Build from Lua script (replacement semantics — Lua is source of truth)
-visigrid-cli sheet apply model.sheet --lua build.lua --json
+vgrid sheet apply model.sheet --lua build.lua --json
 
 # Inspect cells to verify results
-visigrid-cli sheet inspect model.sheet B3 --json
+vgrid sheet inspect model.sheet B3 --json
 # → {"cell":"B3","value":"220000","formula":"=SUM(B1:B2)","value_type":"formula"}
 
 # Get fingerprint for audit trail
-visigrid-cli sheet fingerprint model.sheet --json
+vgrid sheet fingerprint model.sheet --json
 # → {"fingerprint":"v1:42:abc123...","ops":42}
 
 # Verify in CI (exit 0 = match, exit 1 = mismatch)
-visigrid-cli sheet verify model.sheet --fingerprint v1:42:abc123...
+vgrid sheet verify model.sheet --fingerprint v1:42:abc123...
 ```
 
 **Fingerprint boundary**: `set()`, `clear()`, and `meta()` affect fingerprint. `style()` does not. Agents can format sheets without breaking verification.
@@ -298,7 +298,7 @@ Exit 0 means reconciled (within tolerance). Exit 1 means material differences �
 ```bash
 # Reconcile bank export against your ledger
 # --key-transform digits: match "INV-001" to "PO-001" by extracting "001"
-visigrid-cli diff bank_export.csv ledger.csv \
+vgrid diff bank_export.csv ledger.csv \
   --key Reference --key-transform digits \
   --compare Amount --tolerance 0.01 \
   --out json
@@ -309,15 +309,15 @@ visigrid-cli diff bank_export.csv ledger.csv \
 ```bash
 # Pipe a live vendor export, project to reconciliation columns, then diff
 curl -s https://vendor.example.com/api/export.csv | \
-  visigrid-cli convert - -t csv --headers --select 'Invoice,Amount' | \
-  visigrid-cli diff - our_export.csv --key Invoice --compare Amount --tolerance 0.01
+  vgrid convert - -t csv --headers --select 'Invoice,Amount' | \
+  vgrid diff - our_export.csv --key Invoice --compare Amount --tolerance 0.01
 ```
 
 **CI gate with strict exit:**
 
 ```bash
 # In CI: fail the build if ANY value differs, even within tolerance
-visigrid-cli diff expected.csv actual.csv \
+vgrid diff expected.csv actual.csv \
   --key SKU --tolerance 0.01 --strict-exit --quiet || {
   echo "Reconciliation failed — diffs detected"
   exit 1
@@ -328,13 +328,13 @@ visigrid-cli diff expected.csv actual.csv \
 
 ```bash
 # Quiet mode: just the exit code, no output
-visigrid-cli diff expected.csv actual.csv --key id --quiet
+vgrid diff expected.csv actual.csv --key id --quiet
 
 # Pipe a live export into diff
-rails runner 'Ledger.export_csv' | visigrid-cli diff - expected.csv --key id --quiet
+rails runner 'Ledger.export_csv' | vgrid diff - expected.csv --key id --quiet
 
 # Verify a provenance trail hasn't been tampered with
-visigrid-cli replay audit-trail.lua --verify --quiet
+vgrid replay audit-trail.lua --verify --quiet
 ```
 
 ## Known Limitations (v0.4)

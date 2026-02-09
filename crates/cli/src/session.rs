@@ -218,7 +218,7 @@ impl SessionClient {
         // Send hello
         let hello = ClientMessage::Hello(HelloMessage {
             id: client.next_request_id(),
-            client: "visigrid-cli".to_string(),
+            client: "vgrid".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             token: token.to_string(),
             protocol_version: PROTOCOL_VERSION,

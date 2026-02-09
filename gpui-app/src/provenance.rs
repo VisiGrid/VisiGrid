@@ -780,7 +780,7 @@ pub struct ExportOptions {
 ///
 /// The fingerprint embedded in the script uses the replay-compatible content-level
 /// hashing scheme (matching the CLI replay engine), not the GUI's structural
-/// `HistoryFingerprint`. This ensures `visigrid-cli replay --verify` works on
+/// `HistoryFingerprint`. This ensures `vgrid replay --verify` works on
 /// scripts exported from the GUI.
 pub fn export_script(
     entries: &[HistoryEntry],

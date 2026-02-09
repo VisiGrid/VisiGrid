@@ -33,7 +33,7 @@ pub const EXIT_PARSE_ERROR: u8 = 4;  // TODO: migrate to specific codes
 pub const EXIT_FORMAT_ERROR: u8 = 5; // TODO: migrate to specific codes
 
 #[derive(Parser)]
-#[command(name = "visigrid-cli")]
+#[command(name = "vgrid")]
 #[command(about = "Fast, native spreadsheet (CLI mode, headless)")]
 #[command(long_version = long_version())]
 #[command(version)]
@@ -1165,7 +1165,7 @@ fn cmd_convert(
     // Determine input format
     let input_format = match (&input, from) {
         (None, None) => return Err(CliError::args("stdin requires --from to specify the input format")
-            .with_hint("visigrid-cli convert --from csv -t json")),
+            .with_hint("vgrid convert --from csv -t json")),
         (None, Some(f)) => f,
         (Some(path), None) => infer_format(path)?,
         (Some(_), Some(f)) => f, // --from overrides extension
@@ -1318,7 +1318,7 @@ fn read_stdin(format: Format, delimiter: char, into_row: usize, into_col: usize)
 
     if input.is_empty() {
         return Err(CliError::parse("no input received on stdin")
-            .with_hint("cat file.csv | visigrid-cli calc '=SUM(A:A)' --from csv"));
+            .with_hint("cat file.csv | vgrid calc '=SUM(A:A)' --from csv"));
     }
 
     match format {
@@ -1784,7 +1784,7 @@ fn cmd_calc(
         println!("{}", result);
         let hint = match result.as_str() {
             "#REF!" => "a cell reference is out of range; check your formula references",
-            "#NAME?" => "unrecognized function name; run visigrid-cli list-functions to see all available",
+            "#NAME?" => "unrecognized function name; run vgrid list-functions to see all available",
             "#VALUE!" => "wrong argument type; check that referenced cells contain the expected data",
             "#DIV/0!" => "division by zero in your formula",
             "#N/A" => "lookup function did not find a match",
@@ -2090,10 +2090,12 @@ fn cmd_open(file: Option<PathBuf>) -> Result<(), CliError> {
         app_paths.iter()
             .map(|p| shellexpand::tilde(p).to_string())
             .find(|p| std::path::Path::new(p).exists())
-            .or_else(|| which::which("visigrid-gui").ok().map(|p| p.to_string_lossy().to_string()))
+            .or_else(|| which::which("visigrid").ok().map(|p| p.to_string_lossy().to_string()))
     } else {
-        // Linux/Windows - look for visigrid-gui in PATH
-        which::which("visigrid-gui").ok().map(|p| p.to_string_lossy().to_string())
+        // Linux/Windows - look for visigrid in PATH, then visigrid-gui as fallback
+        which::which("visigrid").ok()
+            .or_else(|| which::which("visigrid-gui").ok())
+            .map(|p| p.to_string_lossy().to_string())
     };
 
     match gui_binary {
@@ -2106,7 +2108,7 @@ fn cmd_open(file: Option<PathBuf>) -> Result<(), CliError> {
             Ok(())
         }
         None => {
-            Err(CliError::io("GUI binary not found. Install VisiGrid GUI or add visigrid-gui to PATH."))
+            Err(CliError::io("GUI binary not found. Install VisiGrid GUI or add visigrid to PATH."))
         }
     }
 }

@@ -962,19 +962,19 @@ VisiGrid can also import/export CSV files.
 
 ## CLI Tools
 
-VisiGrid provides `visigrid-cli` for headless spreadsheet operations in scripts and pipelines.
+VisiGrid provides `vgrid` for headless spreadsheet operations in scripts and pipelines.
 
 ### Quick Examples
 
 ```bash
 # Sum a column from CSV
-cat sales.csv | visigrid-cli calc -f csv --headers '=SUM(revenue)'
+cat sales.csv | vgrid calc -f csv --headers '=SUM(revenue)'
 
 # Convert CSV to JSON
-visigrid-cli convert data.csv -t json --headers
+vgrid convert data.csv -t json --headers
 
 # List all supported functions
-visigrid-cli list-functions
+vgrid list-functions
 ```
 
 ### calc - Evaluate Formulas
@@ -982,7 +982,7 @@ visigrid-cli list-functions
 Evaluate spreadsheet formulas against piped data:
 
 ```bash
-visigrid-cli calc -f <format> [options] '<formula>'
+vgrid calc -f <format> [options] '<formula>'
 ```
 
 | Option | Description |
@@ -997,16 +997,16 @@ visigrid-cli calc -f <format> [options] '<formula>'
 
 ```bash
 # Average of column B
-cat data.csv | visigrid-cli calc -f csv '=AVERAGE(B:B)'
+cat data.csv | vgrid calc -f csv '=AVERAGE(B:B)'
 
 # Sum with headers
-echo -e "amount\n10\n20\n30" | visigrid-cli calc -f csv --headers '=SUM(amount)'
+echo -e "amount\n10\n20\n30" | vgrid calc -f csv --headers '=SUM(amount)'
 
 # Count lines in a file
-cat file.txt | visigrid-cli calc -f lines '=COUNTA(A:A)'
+cat file.txt | vgrid calc -f lines '=COUNTA(A:A)'
 
 # Array formula with spill
-cat data.csv | visigrid-cli calc -f csv --spill json '=FILTER(A:A, B:B>10)'
+cat data.csv | vgrid calc -f csv --spill json '=FILTER(A:A, B:B>10)'
 ```
 
 ### convert - Transform Formats
@@ -1014,7 +1014,7 @@ cat data.csv | visigrid-cli calc -f csv --spill json '=FILTER(A:A, B:B>10)'
 Convert between file formats:
 
 ```bash
-visigrid-cli convert [input] -t <format> [options]
+vgrid convert [input] -t <format> [options]
 ```
 
 | Option | Description |
@@ -1029,19 +1029,19 @@ visigrid-cli convert [input] -t <format> [options]
 
 ```bash
 # CSV to JSON with headers as keys
-visigrid-cli convert data.csv -t json --headers
+vgrid convert data.csv -t json --headers
 
 # JSON to CSV
-curl api.example.com/data | visigrid-cli convert -f json -t csv
+curl api.example.com/data | vgrid convert -f json -t csv
 
 # Pipe CSV to JSON
-cat data.csv | visigrid-cli convert -f csv -t json
+cat data.csv | vgrid convert -f csv -t json
 ```
 
 ### list-functions - Show Available Functions
 
 ```bash
-visigrid-cli list-functions
+vgrid list-functions
 ```
 
 Outputs all 96+ supported functions, one per line.

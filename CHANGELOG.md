@@ -32,21 +32,21 @@
 
   ```bash
   # Filter to pending transactions
-  visigrid-cli convert data.csv -t csv --headers --where 'Status=Pending'
+  vgrid convert data.csv -t csv --headers --where 'Status=Pending'
 
   # Negative amounts only
-  visigrid-cli convert data.csv -t csv --headers --where 'Amount<0'
+  vgrid convert data.csv -t csv --headers --where 'Amount<0'
 
   # AND: pending negative amounts
-  visigrid-cli convert data.csv -t csv --headers \
+  vgrid convert data.csv -t csv --headers \
     --where 'Status=Pending' --where 'Amount<0'
 
   # Substring search
-  visigrid-cli convert data.csv -t csv --headers --where 'Vendor~cloud'
+  vgrid convert data.csv -t csv --headers --where 'Vendor~cloud'
 
   # Pipe into calc
-  visigrid-cli convert data.csv -t csv --headers --where 'Status=Pending' | \
-    visigrid-cli calc '=SUM(E:E)' -f csv --headers
+  vgrid convert data.csv -t csv --headers --where 'Status=Pending' | \
+    vgrid calc '=SUM(E:E)' -f csv --headers
   ```
 
   When a numeric operator encounters a cell that doesn't parse as a number, the row is silently skipped. After output completes, a one-line stderr note reports the count (`note: 3 rows skipped (Amount not numeric)`). Suppressed by `--quiet`.
@@ -55,14 +55,14 @@
 
   ```bash
   # Pick two columns, reorder them
-  visigrid-cli convert data.csv -t csv --headers --select 'Status,Amount'
+  vgrid convert data.csv -t csv --headers --select 'Status,Amount'
 
   # Filter by one column, output different columns
-  visigrid-cli convert data.csv -t csv --headers \
+  vgrid convert data.csv -t csv --headers \
     --where 'Status=Pending' --select 'Amount,Vendor'
 
   # JSON with only selected fields
-  visigrid-cli convert data.csv -t json --headers --select 'Status,Amount'
+  vgrid convert data.csv -t json --headers --select 'Status,Amount'
   ```
 
   Error handling: unknown column → exit 2 with available headers; duplicate column → exit 2; ambiguous headers (case-insensitive collision) → exit 2 for both `--where` and `--select`.
@@ -73,13 +73,13 @@
 
   ```bash
   # Pipe an export into diff
-  cat export.csv | visigrid-cli diff - baseline.csv --key id
+  cat export.csv | vgrid diff - baseline.csv --key id
 
   # Right side from stdin
-  docker exec db dump.sh | visigrid-cli diff expected.csv - --key sku
+  docker exec db dump.sh | vgrid diff expected.csv - --key sku
 
   # Explicit format when the other side has no extension
-  cat data.tsv | visigrid-cli diff - reference.csv --key id --stdin-format tsv
+  cat data.tsv | vgrid diff - reference.csv --key id --stdin-format tsv
   ```
 
 - **`diff` reconciliation exit-code semantics** — exit code 1 now indicates material differences only: missing rows or value diffs outside `--tolerance`. Within-tolerance diffs are reported in JSON (with `within_tolerance: true` and `diff_outside_tolerance` counter) but do not cause a non-zero exit code. This means `--tolerance 0.01` in CI passes when the only differences are rounding — no wrapper scripts needed. Use `--strict-exit` for Unix-diff semantics (any diff → exit 1).
@@ -105,7 +105,7 @@ CLI hardening and documentation truthfulness for public launch.
 Every CLI error now prints an actionable hint below the error line. The goal: a user who hits an error can fix it without leaving the terminal.
 
 - **`error:` / `hint:` pattern** — `CliError` gains an optional `hint` field. When present, printed on a second line after the error message. All error constructors (`args`, `io`, `parse`, `format`, `eval`) default to `hint: None`; callers chain `.with_hint()` to add guidance.
-- **Empty stdin** — `no input received on stdin` now shows a working pipe example (`cat file.csv | visigrid-cli calc '=SUM(A:A)' --from csv`).
+- **Empty stdin** — `no input received on stdin` now shows a working pipe example (`cat file.csv | vgrid calc '=SUM(A:A)' --from csv`).
 - **Formula errors** — context-specific hints per error token: `#REF!` (out-of-range reference), `#NAME?` (suggests `list-functions`), `#DIV/0!`, `#VALUE!`, `#N/A`.
 - **Unknown column in diff** — lists available columns from the header row.
 - **Duplicate keys** — suggests dedup or choosing a different key column.
@@ -123,13 +123,13 @@ Every CLI error now prints an actionable hint below the error line. The goal: a 
 - **`diff --format` alias** — `--format` is now accepted as an alias for `--out`, so both `--out json` and `--format json` work. Prevents a common papercut.
 - **`.xlsb` and `.ods` extension recognition** — `infer_format` now maps `.xlsb` and `.ods` to the XLSX reader (via calamine), matching the desktop app's import support.
 - **JSON trailing newline** — `write_json` and `format_diff_json` now append `\n` after the closing brace. Prevents `bash: warning: here-document delimited by end-of-file` and plays nicely with `jq`, `diff`, and other line-oriented tools.
-- **`--version` enhancement** — `visigrid-cli --version` now prints engine version and build type (debug/release) in addition to the CLI version.
+- **`--version` enhancement** — `vgrid --version` now prints engine version and build type (debug/release) in addition to the CLI version.
 
 ### Documentation & Site Truthfulness
 
 Every CLI example on the marketing site and docs site was audited against the actual binary. Eight discrepancies were found and fixed by correcting the documentation (not by adding features).
 
-- **`calc` examples** — changed from file-path syntax to stdin pipe syntax (`cat file.csv | visigrid-cli calc ...`). Removed multi-formula example that doesn't exist.
+- **`calc` examples** — changed from file-path syntax to stdin pipe syntax (`cat file.csv | vgrid calc ...`). Removed multi-formula example that doesn't exist.
 - **`diff --format`** — site examples updated to `--out` (the real flag; `--format` alias also added to CLI as a safety net).
 - **`replay --stop-at`** — removed from site; flag does not exist.
 - **`convert -t xlsx`** — removed XLSX export examples; not yet implemented.
@@ -708,10 +708,10 @@ Commit to a preview and revert the workbook to that historical state.
 New command for headless provenance verification. Designed for CI pipelines: verify provenance scripts deterministically.
 
 ```bash
-visigrid-cli replay script.lua --verify      # Verify fingerprint
-visigrid-cli replay script.lua -o output.csv # Export to CSV/TSV/JSON
-visigrid-cli replay script.lua --fingerprint # Print fingerprint only
-visigrid-cli replay script.lua --verify -q   # CI mode (quiet)
+vgrid replay script.lua --verify      # Verify fingerprint
+vgrid replay script.lua -o output.csv # Export to CSV/TSV/JSON
+vgrid replay script.lua --fingerprint # Print fingerprint only
+vgrid replay script.lua --verify -q   # CI mode (quiet)
 ```
 
 - Full Lua bindings for all `grid.*` operations.

@@ -1,7 +1,7 @@
 -- Microsoft 3-Statement Financial Model
 -- FY2022-FY2024: SEC 10-K sourced actuals
 -- FY2025-FY2029: Formula-driven projections
--- Run: visigrid-cli sheet apply msft.sheet --lua msft_3statement_model.lua --json
+-- Run: vgrid sheet apply msft.sheet --lua msft_3statement_model.lua --json
 
 --------------------------------------------------------------------------------
 -- Name the sheets

@@ -23,7 +23,7 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm755 visigrid ${FLATPAK_DEST}/bin/visigrid
-      - install -Dm755 visigrid-cli ${FLATPAK_DEST}/bin/visigrid-cli
+      - install -Dm755 vgrid ${FLATPAK_DEST}/bin/vgrid
 
       # Desktop file (rename to match Flatpak ID)
       - install -Dm644 visigrid.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop

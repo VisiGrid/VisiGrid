@@ -287,8 +287,8 @@ This becomes the spine for "agent builds spreadsheet with live preview."
 ┌─────────────────────────────────────────────────────────────┐
 │                    CLI / Agent                               │
 │                                                              │
-│  visigrid-cli attach                                        │
-│  visigrid-cli apply --session <id> ops.jsonl                │
+│  vgrid attach                                        │
+│  vgrid apply --session <id> ops.jsonl                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -385,7 +385,7 @@ Token is sent in `hello` payload:
   "id": "1",
   "type": "hello",
   "payload": {
-    "client": "visigrid-cli",
+    "client": "vgrid",
     "version": "0.4.5",
     "protocol_version": 1,
     "token": "base64-encoded-32-bytes"
@@ -495,7 +495,7 @@ All `apply_ops_error` responses include:
   "id": "1",
   "type": "hello",
   "payload": {
-    "client": "visigrid-cli",
+    "client": "vgrid",
     "version": "0.4.5",
     "protocol_version": 1,
     "token": "dGhpcyBpcyBhIDMyIGJ5dGUgdG9rZW4uLi4="
@@ -1146,7 +1146,7 @@ visigrid watch ops.jsonl --session a1b2c3
 5. Attempt batch with error at op 3 → verify atomic rollback (ops 0-2 also rolled back, single recalc)
 6. Attempt batch with wrong `expected_revision` → receive `revision_mismatch` → agent re-inspects and retries
 7. Save `.sheet`
-8. Run `visigrid-cli replay --verify` → fingerprint matches
+8. Run `vgrid replay --verify` → fingerprint matches
 
 This demo earns the "compiler loop" marketing.
 
@@ -1358,7 +1358,7 @@ Instrument with structured logging. One log line per batch:
 {
   "event": "batch_applied",
   "connection_id": "conn_1",
-  "client": "visigrid-cli",
+  "client": "vgrid",
   "client_version": "0.4.5",
   "protocol_version": 1,
   "batch_name": "agent_step_12",
@@ -1377,7 +1377,7 @@ On error:
 {
   "event": "batch_rejected",
   "connection_id": "conn_1",
-  "client": "visigrid-cli",
+  "client": "vgrid",
   "error_code": "formula_parse_error",
   "op_index": 1,
   "revision": 42,

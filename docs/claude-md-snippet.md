@@ -12,24 +12,24 @@ VisiGrid is a deterministic spreadsheet engine. Use it for calculations, data re
 
 ```bash
 # Evaluate formulas against CSV data
-echo "amount\n100\n200" | visigrid-cli calc "=SUM(A:A)" --from csv --headers
+echo "amount\n100\n200" | vgrid calc "=SUM(A:A)" --from csv --headers
 
 # Reconcile two datasets
-visigrid-cli diff expected.csv actual.csv --key id --tolerance 0.01 --out json
+vgrid diff expected.csv actual.csv --key id --tolerance 0.01 --out json
 
 # Build a .sheet from Lua script
-visigrid-cli sheet apply model.sheet --lua build.lua --json
+vgrid sheet apply model.sheet --lua build.lua --json
 
 # Inspect cells/workbook
-visigrid-cli sheet inspect model.sheet A1 --json
-visigrid-cli sheet inspect model.sheet A1:D10 --json
-visigrid-cli sheet inspect model.sheet --json  # workbook metadata
+vgrid sheet inspect model.sheet A1 --json
+vgrid sheet inspect model.sheet A1:D10 --json
+vgrid sheet inspect model.sheet --json  # workbook metadata
 
 # Get fingerprint
-visigrid-cli sheet fingerprint model.sheet --json
+vgrid sheet fingerprint model.sheet --json
 
 # Verify fingerprint
-visigrid-cli sheet verify model.sheet --fingerprint v1:42:abc123...
+vgrid sheet verify model.sheet --fingerprint v1:42:abc123...
 ```
 
 ### Lua Build API
@@ -69,14 +69,14 @@ This means you can format sheets without breaking verification. Style is present
 
 4. **Capture fingerprint before modifications.** If you need to prove what changed:
    ```bash
-   BEFORE=$(visigrid-cli sheet fingerprint model.sheet --json | jq -r .fingerprint)
+   BEFORE=$(vgrid sheet fingerprint model.sheet --json | jq -r .fingerprint)
    # ... make changes ...
-   AFTER=$(visigrid-cli sheet fingerprint model.sheet --json | jq -r .fingerprint)
+   AFTER=$(vgrid sheet fingerprint model.sheet --json | jq -r .fingerprint)
    ```
 
 5. **Use `--dry-run` to preview.** Before writing, verify the fingerprint:
    ```bash
-   visigrid-cli sheet apply model.sheet --lua build.lua --dry-run --json
+   vgrid sheet apply model.sheet --lua build.lua --dry-run --json
    ```
 
 ### Error Handling
@@ -112,18 +112,18 @@ style("A3:B3", { bold = true })
 EOF
 
 # Build
-visigrid-cli sheet apply model.sheet --lua model.lua --json
+vgrid sheet apply model.sheet --lua model.lua --json
 
 # Inspect the total
-visigrid-cli sheet inspect model.sheet B3 --json
+vgrid sheet inspect model.sheet B3 --json
 # → {"cell":"B3","value":"220000","formula":"=SUM(B1:B2)","value_type":"formula"}
 
 # Get fingerprint for future verification
-visigrid-cli sheet fingerprint model.sheet --json
+vgrid sheet fingerprint model.sheet --json
 # → {"file":"model.sheet","fingerprint":"v1:7:abc123...","ops":7}
 
 # Verify (e.g., in CI)
-visigrid-cli sheet verify model.sheet --fingerprint v1:7:abc123...
+vgrid sheet verify model.sheet --fingerprint v1:7:abc123...
 # → Verification: PASS
 ```
 
@@ -133,4 +133,4 @@ visigrid-cli sheet verify model.sheet --fingerprint v1:7:abc123...
 SUM, AVERAGE, COUNT, VLOOKUP, HLOOKUP, INDEX, MATCH, IF, SUMIF, COUNTIF,
 SUMIFS, AVERAGEIF, LEFT, RIGHT, MID, CONCATENATE, TEXT, DATE, etc.
 
-Run `visigrid-cli list-functions` for the full list.
+Run `vgrid list-functions` for the full list.

@@ -39,7 +39,7 @@
           "output": { "value": 600 }
         }
       ],
-      "invocation": "echo '$DATA' | visigrid-cli calc '$FORMULA' --from csv --headers"
+      "invocation": "echo '$DATA' | vgrid calc '$FORMULA' --from csv --headers"
     },
     {
       "name": "visigrid_diff",
@@ -83,7 +83,7 @@
           "results": { "type": "array" }
         }
       },
-      "invocation": "visigrid-cli diff left.csv right.csv --key '$KEY' --tolerance $TOL --out json"
+      "invocation": "vgrid diff left.csv right.csv --key '$KEY' --tolerance $TOL --out json"
     },
     {
       "name": "visigrid_sheet_apply",
@@ -123,7 +123,7 @@
           "output": { "type": ["string", "null"] }
         }
       },
-      "invocation": "visigrid-cli sheet apply '$OUTPUT' --lua script.lua --json"
+      "invocation": "vgrid sheet apply '$OUTPUT' --lua script.lua --json"
     },
     {
       "name": "visigrid_sheet_inspect",
@@ -178,7 +178,7 @@
           }
         ]
       },
-      "invocation": "visigrid-cli sheet inspect '$FILE' $TARGET --json"
+      "invocation": "vgrid sheet inspect '$FILE' $TARGET --json"
     },
     {
       "name": "visigrid_sheet_fingerprint",
@@ -201,7 +201,7 @@
           "ops": { "type": "integer" }
         }
       },
-      "invocation": "visigrid-cli sheet fingerprint '$FILE' --json"
+      "invocation": "vgrid sheet fingerprint '$FILE' --json"
     },
     {
       "name": "visigrid_sheet_verify",
@@ -228,7 +228,7 @@
           "computed": { "type": "string" }
         }
       },
-      "invocation": "visigrid-cli sheet verify '$FILE' --fingerprint '$FP'"
+      "invocation": "vgrid sheet verify '$FILE' --fingerprint '$FP'"
     }
   ],
   "lua_api": {

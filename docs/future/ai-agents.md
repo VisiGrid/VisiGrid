@@ -105,7 +105,7 @@ See: [phase-2-agent-kit.md](phase-2-agent-kit.md)
 ### Message Format (JSONL)
 
 ```json
-{"id": "1", "type": "hello", "payload": {"client": "visigrid-cli", "version": "0.4.5"}}
+{"id": "1", "type": "hello", "payload": {"client": "vgrid", "version": "0.4.5"}}
 {"id": "2", "type": "apply_ops", "payload": {"atomic": true, "ops": [...]}}
 {"id": "3", "type": "inspect", "payload": {"sheet": 0, "range": "B1"}}
 {"id": "4", "type": "subscribe", "payload": {"topics": ["cells_changed"]}}
@@ -194,7 +194,7 @@ Week 8+:    "VisiGrid for Agents" launch
 3. GUI updates live as each batch applies
 4. Introduce deliberate bad formula → receive structured error → agent fixes → success
 5. Save `.sheet`
-6. Run `visigrid-cli replay --verify` → fingerprint matches
+6. Run `vgrid replay --verify` → fingerprint matches
 
 This demo earns the marketing.
 

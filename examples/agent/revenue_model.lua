@@ -1,6 +1,6 @@
 -- VisiGrid Agent Demo: 12-Month Revenue Model
 -- This script builds a complete revenue projection from scratch.
--- Run: visigrid-cli sheet apply model.sheet --lua revenue_model.lua --json
+-- Run: vgrid sheet apply model.sheet --lua revenue_model.lua --json
 
 -- Title
 set("A1", "Revenue Projection Model")

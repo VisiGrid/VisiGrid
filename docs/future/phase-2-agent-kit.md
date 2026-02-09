@@ -93,7 +93,7 @@ MCP (Model Context Protocol) is becoming the standard for tool definitions.
       "inputSchema": {
         "type": "object",
         "properties": {
-          "session": { "type": "string", "description": "Session ID from 'visigrid-cli sessions'" },
+          "session": { "type": "string", "description": "Session ID from 'vgrid sessions'" },
           "ops": {
             "type": "array",
             "items": {
@@ -130,17 +130,17 @@ VisiGrid is available for spreadsheet calculations and data reconciliation.
 
 ```bash
 # Calculate formula against CSV data
-cat data.csv | visigrid-cli calc "=SUM(A:A)" --from csv --headers
+cat data.csv | vgrid calc "=SUM(A:A)" --from csv --headers
 
 # Reconcile two datasets
-visigrid-cli diff expected.csv actual.csv --key id --tolerance 0.01
+vgrid diff expected.csv actual.csv --key id --tolerance 0.01
 
 # Build a model cell by cell
-visigrid-cli set model.sheet A1 "Revenue" --create
-visigrid-cli set model.sheet B1 "=SUM(B2:B100)"
+vgrid set model.sheet A1 "Revenue" --create
+vgrid set model.sheet B1 "=SUM(B2:B100)"
 
 # Inspect cell dependencies
-visigrid-cli inspect model.sheet B1 --deps
+vgrid inspect model.sheet B1 --deps
 ```
 
 ### When to Use
@@ -169,7 +169,7 @@ to self-correct:
 SUM, AVERAGE, COUNT, VLOOKUP, HLOOKUP, INDEX, MATCH, IF, SUMIF, COUNTIF,
 SUMIFS, AVERAGEIF, LEFT, RIGHT, MID, CONCATENATE, TEXT, DATE, TODAY, etc.
 
-Run `visigrid-cli list-functions` for full list.
+Run `vgrid list-functions` for full list.
 ```
 
 ## Example Prompts for Agents
@@ -177,7 +177,7 @@ Run `visigrid-cli list-functions` for full list.
 ### Prompt 1: Data Reconciliation
 
 ```
-You have access to visigrid-cli for spreadsheet operations.
+You have access to vgrid for spreadsheet operations.
 
 Task: Reconcile the vendor invoice (vendor.csv) against our ledger (ledger.csv).
 Use the Invoice Number column as the key. Allow $0.01 tolerance for rounding.
@@ -191,7 +191,7 @@ Report:
 ### Prompt 2: Build a Financial Model
 
 ```
-You have access to visigrid-cli for spreadsheet operations.
+You have access to vgrid for spreadsheet operations.
 
 Task: Build a revenue projection model in projection.sheet with:
 - Monthly growth rate input in A2 (default 5%)
@@ -200,13 +200,13 @@ Task: Build a revenue projection model in projection.sheet with:
 - Headers in row 1, bold formatting
 - Currency format for all revenue cells
 
-Use visigrid-cli set to create the model. Verify calculations with calc.
+Use vgrid set to create the model. Verify calculations with calc.
 ```
 
 ### Prompt 3: Audit Existing Model
 
 ```
-You have access to visigrid-cli for spreadsheet operations.
+You have access to vgrid for spreadsheet operations.
 
 Task: Audit model.sheet for issues:
 1. Use inspect to trace the dependency graph from the output cell (Z100)
@@ -269,7 +269,7 @@ head -3 ledger.csv
 
 # Step 2: Agent runs diff
 echo "Running reconciliation..."
-visigrid-cli diff vendor.csv ledger.csv --key "Invoice Number" --tolerance 0.01
+vgrid diff vendor.csv ledger.csv --key "Invoice Number" --tolerance 0.01
 
 # Step 3: Agent summarizes (this would be LLM output)
 echo "Summary: X matched, Y only in vendor, Z with differences"
@@ -282,12 +282,12 @@ echo "Summary: X matched, Y only in vendor, Z with differences"
 # Demo: Build a model with live preview
 
 # Terminal 1: Start GUI in watch mode
-# visigrid-cli open projection.sheet --watch
+# vgrid open projection.sheet --watch
 
 # Terminal 2: Build the model
-SESSION=$(visigrid-cli sessions --json | jq -r '.[0].id')
+SESSION=$(vgrid sessions --json | jq -r '.[0].id')
 
-visigrid-cli apply --session $SESSION <<'EOF'
+vgrid apply --session $SESSION <<'EOF'
 {"op":"set_value","cell":"A1","value":"Growth Rate"}
 {"op":"set_value","cell":"A2","value":"0.05"}
 {"op":"set_value","cell":"B1","value":"Base Revenue"}

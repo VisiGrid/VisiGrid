@@ -2,7 +2,7 @@
 //!
 //! Phase 9B: CLI replay with fingerprint verification.
 //!
-//! Usage: visigrid-cli replay script.lua [--verify] [--output file.csv]
+//! Usage: vgrid replay script.lua [--verify] [--output file.csv]
 //!
 //! ## Fingerprint Versioning
 //!

@@ -1593,7 +1593,7 @@ fn tolerance_boundary_ieee754_summary() {
 
 #[test]
 fn contract_version_guard() {
-    let bin = env!("CARGO_BIN_EXE_visigrid-cli");
+    let bin = env!("CARGO_BIN_EXE_vgrid");
     let base = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../tests/cli/diff/contract-json-schema"
@@ -1611,7 +1611,7 @@ fn contract_version_guard() {
             "none",
         ])
         .output()
-        .expect("failed to run visigrid-cli");
+        .expect("failed to run vgrid");
     // diff exits 1 when there are material diffs — that's expected
     assert!(
         output.status.code() == Some(0) || output.status.code() == Some(1),

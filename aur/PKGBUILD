@@ -1,6 +1,6 @@
 # Maintainer: VisiGrid <hello@visigrid.app>
 pkgname=visigrid-bin
-pkgver=0.6.0
+pkgver=0.6.4
 pkgrel=1
 pkgdesc="Fast, native spreadsheet with GPU-accelerated rendering"
 arch=('x86_64')
@@ -10,14 +10,14 @@ depends=('gtk3' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland')
 provides=('visigrid')
 conflicts=('visigrid' 'visigrid-git')
 source=("https://github.com/VisiGrid/VisiGrid/releases/download/v${pkgver}/VisiGrid-linux-x86_64.tar.gz")
-sha256sums=('607a1860e7307b5b5c6017cf11331af4ac18e0fad4cc363a116e5be03caf530d')
+sha256sums=('ccebdbd4352419834b5605eb276f7c16ee97ffd8b96f39ded92fded0756366fa')
 
 package() {
     cd "$srcdir/VisiGrid-linux-x86_64"
 
     # Install binaries
     install -Dm755 visigrid "$pkgdir/usr/bin/visigrid"
-    install -Dm755 visigrid-cli "$pkgdir/usr/bin/visigrid-cli"
+    install -Dm755 vgrid "$pkgdir/usr/bin/vgrid"
 
     # Install desktop file
     install -Dm644 visigrid.desktop "$pkgdir/usr/share/applications/visigrid.desktop"

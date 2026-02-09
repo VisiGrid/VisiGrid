@@ -65,7 +65,7 @@ Name: "addtopath"; Description: "Add to PATH (requires shell restart)"; GroupDes
 Source: "..\target\release\visigrid.exe"; DestDir: "{app}"; DestName: "{#AppExeName}"; Flags: ignoreversion
 
 ; CLI Tool (in cli subfolder)
-Source: "..\target\release\visigrid-cli.exe"; DestDir: "{app}\cli"; DestName: "{#CliExeName}"; Flags: ignoreversion; Tasks: installcli
+Source: "..\target\release\vgrid.exe"; DestDir: "{app}\cli"; DestName: "{#CliExeName}"; Flags: ignoreversion; Tasks: installcli
 
 ; Icon (for file associations)
 Source: "..\gpui-app\windows\visigrid.ico"; DestDir: "{app}"; Flags: ignoreversion

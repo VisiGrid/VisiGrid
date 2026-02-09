@@ -59,7 +59,7 @@ jobs:
         run: |
           mkdir -p dist/VisiGrid-linux-x86_64
           cp target/release/visigrid dist/VisiGrid-linux-x86_64/
-          cp target/release/visigrid-cli dist/VisiGrid-linux-x86_64/
+          cp target/release/vgrid dist/VisiGrid-linux-x86_64/
           cp assets/visigrid.desktop dist/VisiGrid-linux-x86_64/
           cp gpui-app/assets/icon-256.png dist/VisiGrid-linux-x86_64/visigrid.png
 
@@ -76,7 +76,7 @@ jobs:
           mkdir -p dist/AppDir/usr/share/icons/hicolor/256x256/apps
 
           cp target/release/visigrid dist/AppDir/usr/bin/
-          cp target/release/visigrid-cli dist/AppDir/usr/bin/
+          cp target/release/vgrid dist/AppDir/usr/bin/
           cp assets/visigrid.desktop dist/AppDir/usr/share/applications/
           cp assets/visigrid.desktop dist/AppDir/
           cp gpui-app/assets/icon-256.png dist/AppDir/usr/share/icons/hicolor/256x256/apps/visigrid.png
@@ -142,7 +142,7 @@ jobs:
         run: |
           mkdir -p dist/VisiGrid-linux-aarch64
           cp target/release/visigrid dist/VisiGrid-linux-aarch64/
-          cp target/release/visigrid-cli dist/VisiGrid-linux-aarch64/
+          cp target/release/vgrid dist/VisiGrid-linux-aarch64/
           cp assets/visigrid.desktop dist/VisiGrid-linux-aarch64/
           cp gpui-app/assets/icon-256.png dist/VisiGrid-linux-aarch64/visigrid.png
 
@@ -222,7 +222,7 @@ jobs:
 
           New-Item -ItemType Directory -Path $DistDir -Force
           Copy-Item "target\release\visigrid.exe" $DistDir
-          Copy-Item "target\release\visigrid-cli.exe" $DistDir
+          Copy-Item "target\release\vgrid.exe" $DistDir
           Copy-Item "gpui-app\windows\visigrid.ico" $DistDir
 
           @"
@@ -347,9 +347,9 @@ jobs:
             -output dist/universal/visigrid
 
           lipo -create \
-            target/x86_64-apple-darwin/release/visigrid-cli \
-            target/aarch64-apple-darwin/release/visigrid-cli \
-            -output dist/universal/visigrid-cli
+            target/x86_64-apple-darwin/release/vgrid \
+            target/aarch64-apple-darwin/release/vgrid \
+            -output dist/universal/vgrid
 
       - name: Get version
         id: version
@@ -369,7 +369,7 @@ jobs:
           mkdir -p "$APP_DIR/Contents/Resources"
 
           cp dist/universal/visigrid "$APP_DIR/Contents/MacOS/"
-          cp dist/universal/visigrid-cli "$APP_DIR/Contents/MacOS/"
+          cp dist/universal/vgrid "$APP_DIR/Contents/MacOS/"
 
           # Update Info.plist with version
           sed -e "s/0\.1\.0/$VERSION/g" gpui-app/macos/Info.plist > "$APP_DIR/Contents/Info.plist"

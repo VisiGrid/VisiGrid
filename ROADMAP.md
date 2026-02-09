@@ -99,14 +99,14 @@ What's built, what's next, and what's not planned.
 - Zoom (50%-200%, Ctrl+Shift+=/-, Ctrl+Mousewheel, persisted per session)
 
 ### CLI (v0.1.8+)
-- Headless spreadsheet operations via `visigrid-cli`
+- Headless spreadsheet operations via `vgrid`
 - `calc`: Evaluate formulas against piped data (CSV, TSV, JSON, lines)
 - `convert`: Transform between file formats
 - `list-functions`: Show all supported functions
 - Column references (A:A), headers support, spill output
 - Typed JSON output (numbers/booleans preserved)
 - 3ms cold start, pipe-friendly, deterministic
-- See `visigrid-cli --help` for usage
+- See `vgrid --help` for usage
 
 ### Fill Handle (v0.2.1+)
 - Drag the corner handle on the active cell to fill down or right

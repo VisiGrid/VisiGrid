@@ -31,10 +31,10 @@ Requirements:
 
 Workflow:
 1. Write the Lua build script
-2. Run: visigrid-cli sheet apply cashflow.sheet --lua build.lua --json
+2. Run: vgrid sheet apply cashflow.sheet --lua build.lua --json
 3. Inspect B2 (first revenue) and N2 (first cash balance) to verify formulas
 4. Inspect B14 (total revenue) to verify the sum
-5. Run: visigrid-cli sheet fingerprint cashflow.sheet --json
+5. Run: vgrid sheet fingerprint cashflow.sheet --json
 6. Report the fingerprint for future verification
 ```
 
@@ -67,7 +67,7 @@ Requirements:
 
 Workflow:
 1. Write a Lua script that sets each normalized cell
-2. Run: visigrid-cli sheet apply normalized.sheet --lua normalize.lua --json
+2. Run: vgrid sheet apply normalized.sheet --lua normalize.lua --json
 3. Inspect A2:E4 to verify the normalized data
 4. Inspect E5 to verify the total formula
 5. Report the fingerprint
@@ -82,7 +82,7 @@ Given the existing model.sheet with fingerprint v1:48:abc123..., add a totals ro
 
 Task:
 1. First, inspect the current state:
-   visigrid-cli sheet inspect model.sheet --json
+   vgrid sheet inspect model.sheet --json
 
 2. Identify the last data row (let's say it's row 19)
 
@@ -98,7 +98,7 @@ Task:
    - Adds the new totals row
 
 5. Apply and get new fingerprint:
-   visigrid-cli sheet apply model_v2.sheet --lua build_v2.lua --json
+   vgrid sheet apply model_v2.sheet --lua build_v2.lua --json
 
 6. Verify the change:
    - Old fingerprint: v1:48:abc123...
@@ -143,7 +143,7 @@ Requirements:
 
 Workflow:
 1. Write the Lua build script using grid.* API
-2. Run: visigrid-cli sheet apply workbook.sheet --lua build.lua --json
+2. Run: vgrid sheet apply workbook.sheet --lua build.lua --json
 3. Inspect Sheet1 B4 to verify cross-sheet formula
 4. Inspect Sheet2 B9 and Sheet3 B9 to verify totals
 5. Report the fingerprint

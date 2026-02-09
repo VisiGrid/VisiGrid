@@ -5,7 +5,7 @@
 --   cp examples/custom-functions/functions.lua ~/.config/visigrid/functions.lua
 --
 -- Build:
---   visigrid-cli sheet apply portfolio.sheet --lua bond_portfolio.lua --stamp --json
+--   vgrid sheet apply portfolio.sheet --lua bond_portfolio.lua --stamp --json
 --
 -- The formulas =ACCRUED_INTEREST(...) and =HAIRCUT(...) evaluate in the GUI
 -- when custom functions are loaded. The fingerprint covers inputs + formulas,

@@ -15,14 +15,14 @@
 set -euo pipefail
 
 # Find visigrid binary
-VISIGRID="${VISIGRID:-visigrid-cli}"
+VISIGRID="${VISIGRID:-vgrid}"
 if ! command -v "$VISIGRID" >/dev/null 2>&1; then
-    if [ -f "./target/release/visigrid-cli" ]; then
-        VISIGRID="./target/release/visigrid-cli"
-    elif [ -f "./target/debug/visigrid-cli" ]; then
-        VISIGRID="./target/debug/visigrid-cli"
+    if [ -f "./target/release/vgrid" ]; then
+        VISIGRID="./target/release/vgrid"
+    elif [ -f "./target/debug/vgrid" ]; then
+        VISIGRID="./target/debug/vgrid"
     else
-        echo "visigrid-cli not found. Build with: cargo build --release -p visigrid-cli" >&2
+        echo "vgrid not found. Build with: cargo build --release -p vgrid" >&2
         exit 1
     fi
 fi
@@ -38,7 +38,7 @@ echo ""
 # ─── Step 1: Build ───────────────────────────────────────────────
 echo "Step 1: Build sheet from Lua (with custom function formulas)"
 echo "──────────────────────────────────────────────────────────────"
-echo "$ visigrid-cli sheet apply portfolio.sheet --lua bond_portfolio.lua --stamp --json"
+echo "$ vgrid sheet apply portfolio.sheet --lua bond_portfolio.lua --stamp --json"
 echo ""
 
 RESULT=$("$VISIGRID" sheet apply "$OUTPUT" --lua "$DIR/bond_portfolio.lua" --stamp --json)
@@ -48,7 +48,7 @@ echo ""
 # ─── Step 2: Fingerprint ────────────────────────────────────────
 echo "Step 2: Fingerprint (the trust anchor)"
 echo "──────────────────────────────────────────────────────────────"
-echo "$ visigrid-cli sheet fingerprint portfolio.sheet --json"
+echo "$ vgrid sheet fingerprint portfolio.sheet --json"
 
 FP1_RESULT=$("$VISIGRID" sheet fingerprint "$OUTPUT" --json)
 echo "$FP1_RESULT" | jq .
@@ -64,7 +64,7 @@ echo "────────────────────────�
 # Apply a one-liner that changes just the principal
 "$VISIGRID" sheet apply "$OUTPUT" --lua <(echo 'set("B6", 2000000)') --json > /dev/null
 
-echo "$ visigrid-cli sheet fingerprint portfolio.sheet --json"
+echo "$ vgrid sheet fingerprint portfolio.sheet --json"
 FP2_RESULT=$("$VISIGRID" sheet fingerprint "$OUTPUT" --json)
 echo "$FP2_RESULT" | jq .
 FP2=$(echo "$FP2_RESULT" | jq -r .fingerprint)
@@ -85,7 +85,7 @@ echo "────────────────────────�
 
 "$VISIGRID" sheet apply "$OUTPUT" --lua <(echo 'set("B6", 1000000)') --json > /dev/null
 
-echo "$ visigrid-cli sheet fingerprint portfolio.sheet --json"
+echo "$ vgrid sheet fingerprint portfolio.sheet --json"
 FP3_RESULT=$("$VISIGRID" sheet fingerprint "$OUTPUT" --json)
 echo "$FP3_RESULT" | jq .
 FP3=$(echo "$FP3_RESULT" | jq -r .fingerprint)
@@ -108,7 +108,7 @@ echo "────────────────────────�
 
 # Re-stamp with original build
 "$VISIGRID" sheet apply "$OUTPUT" --lua "$DIR/bond_portfolio.lua" --stamp --json > /dev/null
-echo "$ visigrid-cli sheet verify portfolio.sheet --fingerprint $FP1"
+echo "$ vgrid sheet verify portfolio.sheet --fingerprint $FP1"
 "$VISIGRID" sheet verify "$OUTPUT" --fingerprint "$FP1"
 echo ""
 
