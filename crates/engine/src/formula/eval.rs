@@ -384,6 +384,7 @@ pub enum EvalResult {
     Boolean(bool),
     Error(String),
     Array(Array2D),
+    Empty,
 }
 
 impl EvalResult {
@@ -409,6 +410,7 @@ impl EvalResult {
                 // Display top-left value for single-cell display
                 arr.top_left().to_text()
             }
+            EvalResult::Empty => String::new(),
         }
     }
 
@@ -436,6 +438,7 @@ impl EvalResult {
             }
             EvalResult::Error(e) => Err(e.clone()),
             EvalResult::Array(arr) => arr.top_left().to_number(),
+            EvalResult::Empty => Ok(0.0),
         }
     }
 
@@ -456,6 +459,7 @@ impl EvalResult {
                 if e.starts_with('#') { e.clone() } else { format!("#ERR: {}", e) }
             }
             EvalResult::Array(arr) => arr.top_left().to_text(),
+            EvalResult::Empty => String::new(),
         }
     }
 
@@ -473,6 +477,7 @@ impl EvalResult {
             }
             EvalResult::Error(e) => Err(e.clone()),
             EvalResult::Array(arr) => arr.top_left().to_bool(),
+            EvalResult::Empty => Ok(false),
         }
     }
 
@@ -502,13 +507,14 @@ impl EvalResult {
             EvalResult::Boolean(b) => Value::Boolean(*b),
             EvalResult::Error(e) => Value::Error(e.clone()),
             EvalResult::Array(arr) => arr.top_left(),
+            EvalResult::Empty => Value::Empty,
         }
     }
 
     /// Convert Value to EvalResult
     pub fn from_value(v: &Value) -> EvalResult {
         match v {
-            Value::Empty => EvalResult::Number(0.0),
+            Value::Empty => EvalResult::Empty,
             Value::Number(n) => EvalResult::Number(*n),
             Value::Text(s) => EvalResult::Text(s.clone()),
             Value::Boolean(b) => EvalResult::Boolean(*b),
@@ -519,6 +525,7 @@ impl EvalResult {
 
 pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
     match expr {
+        Expr::Empty => EvalResult::Empty,
         Expr::Number(n) => EvalResult::Number(*n),
         Expr::Text(s) => EvalResult::Text(s.clone()),
         Expr::Boolean(b) => EvalResult::Boolean(*b),
@@ -538,7 +545,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
                 SheetRef::RefError { .. } => return EvalResult::Error("#REF!".to_string()),
             };
             if text.is_empty() {
-                EvalResult::Number(0.0)
+                EvalResult::Empty
             } else if text.starts_with('#') {
                 // Propagate errors (e.g., #CIRC!, #REF!, #VALUE!)
                 EvalResult::Error(text)
@@ -564,7 +571,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
                     // Evaluate like a cell reference
                     let text = lookup.get_text(row, col);
                     if text.is_empty() {
-                        EvalResult::Number(0.0)
+                        EvalResult::Empty
                     } else if text.starts_with('#') {
                         EvalResult::Error(text)
                     } else if let Ok(n) = text.parse::<f64>() {
@@ -626,6 +633,33 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
 
                 // Comparison operators
                 Op::Lt | Op::Gt | Op::Eq | Op::LtEq | Op::GtEq | Op::NotEq => {
+                    // Empty coercion: blank cells coerce based on the other operand's type.
+                    // This matches Excel: blank=0 → TRUE, blank="" → TRUE, blank=FALSE → TRUE.
+                    let (left_result, right_result) = match (&left_result, &right_result) {
+                        (EvalResult::Empty, EvalResult::Empty) => {
+                            (EvalResult::Number(0.0), EvalResult::Number(0.0))
+                        }
+                        (EvalResult::Empty, EvalResult::Number(_)) => {
+                            (EvalResult::Number(0.0), right_result)
+                        }
+                        (EvalResult::Number(_), EvalResult::Empty) => {
+                            (left_result, EvalResult::Number(0.0))
+                        }
+                        (EvalResult::Empty, EvalResult::Text(_)) => {
+                            (EvalResult::Text(String::new()), right_result)
+                        }
+                        (EvalResult::Text(_), EvalResult::Empty) => {
+                            (left_result, EvalResult::Text(String::new()))
+                        }
+                        (EvalResult::Empty, EvalResult::Boolean(_)) => {
+                            (EvalResult::Boolean(false), right_result)
+                        }
+                        (EvalResult::Boolean(_), EvalResult::Empty) => {
+                            (left_result, EvalResult::Boolean(false))
+                        }
+                        _ => (left_result, right_result),
+                    };
+
                     // Compare based on types - numbers compare numerically, text alphabetically
                     let result = match (&left_result, &right_result) {
                         (EvalResult::Number(a), EvalResult::Number(b)) => {
@@ -2373,5 +2407,278 @@ mod tests {
         let expr = parse_and_bind("=SUMPRODUCT(A1:A3, B1:B3)");
         let result = evaluate(&expr, &lookup);
         assert!(matches!(result, EvalResult::Error(_)));
+    }
+
+    // ── Empty argument evaluation tests ──────────────────────────
+
+    #[test]
+    fn test_if_trailing_empty_arg() {
+        // =IF(FALSE,1,) → Empty (omitted else branch)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=IF(FALSE,1,)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Empty);
+    }
+
+    #[test]
+    fn test_if_middle_empty_arg() {
+        // =IF(TRUE,,1) → Empty (omitted then branch, condition true)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=IF(TRUE,,1)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Empty);
+    }
+
+    #[test]
+    fn test_empty_numeric_coercion() {
+        // =IF(FALSE,1,)+0 → 0 (Empty coerces to 0 in arithmetic)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=IF(FALSE,1,)+0");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(0.0));
+    }
+
+    #[test]
+    fn test_empty_text_coercion_concat() {
+        // =CONCAT("x",IF(FALSE,"y",)) → "x" (Empty coerces to "" in text, NOT "x0")
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=CONCAT(\"x\",IF(FALSE,\"y\",))");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Text("x".to_string()));
+    }
+
+    #[test]
+    fn test_empty_ampersand_concat() {
+        // ="x"&IF(FALSE,"y",) → "x"
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=\"x\"&IF(FALSE,\"y\",)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Text("x".to_string()));
+    }
+
+    #[test]
+    fn test_empty_display() {
+        // Empty should display as blank
+        assert_eq!(EvalResult::Empty.to_display(), "");
+    }
+
+    #[test]
+    fn test_empty_bool_coercion() {
+        // Empty → false
+        assert_eq!(EvalResult::Empty.to_bool(), Ok(false));
+    }
+
+    // ── NORMSDIST tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_normsdist_zero() {
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=NORMSDIST(0)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 0.5).abs() < 1e-6, "NORMSDIST(0) = {}, expected 0.5", n),
+            _ => panic!("Expected Number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_normsdist_positive() {
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=NORMSDIST(1)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 0.8413).abs() < 1e-3, "NORMSDIST(1) = {}, expected ~0.8413", n),
+            _ => panic!("Expected Number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_normsdist_negative() {
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=NORMSDIST(-1)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 0.1587).abs() < 1e-3, "NORMSDIST(-1) = {}, expected ~0.1587", n),
+            _ => panic!("Expected Number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_normsdist_tail_stability() {
+        let lookup = TestLookup::new();
+        // Far positive tail
+        let expr = parse_and_bind("=NORMSDIST(6)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!(n > 0.999999, "NORMSDIST(6) = {}, expected ~1.0", n),
+            _ => panic!("Expected Number"),
+        }
+        // Far negative tail
+        let expr = parse_and_bind("=NORMSDIST(-6)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!(n < 0.000001, "NORMSDIST(-6) = {}, expected ~0.0", n),
+            _ => panic!("Expected Number"),
+        }
+    }
+
+    #[test]
+    fn test_norm_s_dist_pdf() {
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=NORM.S.DIST(0,FALSE)");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Number(n) => assert!((n - 0.3989).abs() < 1e-3, "PDF(0) = {}, expected ~0.3989", n),
+            _ => panic!("Expected Number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_norm_s_dist_bad_cumulative() {
+        // =NORM.S.DIST(0,"nope") → #VALUE! (can't coerce "nope" to bool)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=NORM.S.DIST(0,\"nope\")");
+        let result = evaluate(&expr, &lookup);
+        match result {
+            EvalResult::Error(e) => assert_eq!(e, "#VALUE!"),
+            _ => panic!("Expected #VALUE! error, got {:?}", result),
+        }
+    }
+
+    // ── Blank cell comparison semantics (Excel-compat) ──────────
+
+    #[test]
+    fn test_blank_cell_equals_zero() {
+        // A1 is blank: =A1=0 → TRUE (Excel behavior)
+        let lookup = TestLookup::new(); // A1 is "" (blank)
+        let expr = parse_and_bind("=A1=0");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(true));
+    }
+
+    #[test]
+    fn test_blank_cell_equals_empty_string() {
+        // A1 is blank: =A1="" → TRUE (Excel behavior)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1=\"\"");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(true));
+    }
+
+    #[test]
+    fn test_blank_cell_equals_false() {
+        // A1 is blank: =A1=FALSE → TRUE (Excel behavior)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1=FALSE");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(true));
+    }
+
+    #[test]
+    fn test_blank_cell_not_equal_one() {
+        // A1 is blank: =A1=1 → FALSE
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1=1");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(false));
+    }
+
+    #[test]
+    fn test_blank_cell_not_equal_text() {
+        // A1 is blank: =A1="hello" → FALSE
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1=\"hello\"");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(false));
+    }
+
+    #[test]
+    fn test_blank_cell_less_than_one() {
+        // A1 is blank: =A1<1 → TRUE (0 < 1)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1<1");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(true));
+    }
+
+    #[test]
+    fn test_blank_cell_less_than_text() {
+        // A1 is blank: =A1<"a" → TRUE ("" < "a")
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1<\"a\"");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(true));
+    }
+
+    #[test]
+    fn test_blank_vs_blank_equal() {
+        // A1 and B1 both blank: =A1=B1 → TRUE
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1=B1");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(true));
+    }
+
+    #[test]
+    fn test_blank_cell_arithmetic_coerces_to_zero() {
+        // A1 is blank: =A1+1 → 1 (blank coerces to 0 in arithmetic)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1+1");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(1.0));
+    }
+
+    #[test]
+    fn test_blank_cell_concat_coerces_to_empty_string() {
+        // A1 is blank: ="x"&A1 → "x" (blank coerces to "" in concat)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=\"x\"&A1");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Text("x".to_string()));
+    }
+
+    #[test]
+    fn test_blank_cell_ref_returns_empty() {
+        // A1 is blank: bare =A1 evaluates to Empty (not Number(0))
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Empty);
+    }
+
+    #[test]
+    fn test_blank_vs_blank_less_than() {
+        // A1 and B1 both blank: =A1<B1 → FALSE (0 < 0 is false)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1<B1");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(false));
+    }
+
+    #[test]
+    fn test_blank_vs_blank_less_equal() {
+        // A1 and B1 both blank: =A1<=B1 → TRUE (0 <= 0)
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=A1<=B1");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Boolean(true));
+    }
+
+    #[test]
+    fn test_countblank_blank_cell() {
+        // =COUNTBLANK(A1) when A1 blank → 1
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=COUNTBLANK(A1)");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(1.0));
+    }
+
+    #[test]
+    fn test_countif_empty_string_matches_blank() {
+        // =COUNTIF(A1,"") when A1 blank → 1 (Excel: blank matches "")
+        let lookup = TestLookup::new();
+        let expr = parse_and_bind("=COUNTIF(A1,\"\")");
+        let result = evaluate(&expr, &lookup);
+        assert_eq!(result, EvalResult::Number(1.0));
     }
 }

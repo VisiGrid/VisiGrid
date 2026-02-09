@@ -2,7 +2,9 @@
 // ROW, COLUMN, ROWS, COLUMNS
 
 use super::eval::{evaluate, CellLookup, EvalResult};
+use super::eval_helpers::get_text_for_sheet;
 use super::parser::{BoundExpr, Expr};
+use crate::sheet::SheetRef;
 
 pub(crate) fn try_evaluate<L: CellLookup>(
     name: &str, args: &[BoundExpr], lookup: &L,
@@ -14,8 +16,8 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("VLOOKUP requires 3 or 4 arguments".to_string()));
             }
             let search_key = evaluate(&args[0], lookup);
-            let range = match &args[1] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
+            let (range, sheet_ref) = match &args[1] {
+                Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => ((*start_row, *start_col, *end_row, *end_col), sheet),
                 _ => return Some(EvalResult::Error("VLOOKUP requires a range as second argument".to_string())),
             };
             let col_index = match evaluate(&args[2], lookup).to_number() {
@@ -45,13 +47,22 @@ pub(crate) fn try_evaluate<L: CellLookup>(
 
             let mut found_row: Option<usize> = None;
 
+            // Helper closure to get text from the correct sheet
+            let get = |r: usize, c: usize| -> String {
+                match get_text_for_sheet(lookup, sheet_ref, r, c) {
+                    Ok(t) => t,
+                    Err(_) => String::new(),
+                }
+            };
+
             if is_sorted {
                 // Approximate match (find largest value <= search_key)
                 if let Some(search_n) = search_num {
+                    // Numeric key: find largest numeric cell <= search_n
                     let mut best_row: Option<usize> = None;
                     let mut best_val = f64::NEG_INFINITY;
                     for r in min_row..=max_row {
-                        let cell_text = lookup.get_text(r, min_col);
+                        let cell_text = get(r, min_col);
                         if let Ok(cell_n) = cell_text.parse::<f64>() {
                             if cell_n <= search_n && cell_n > best_val {
                                 best_val = cell_n;
@@ -60,11 +71,28 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                         }
                     }
                     found_row = best_row;
+                } else {
+                    // Text key: find largest text cell <= search_text (case-insensitive)
+                    let mut best_row: Option<usize> = None;
+                    let mut best_val = String::new();
+                    for r in min_row..=max_row {
+                        let cell_text = get(r, min_col);
+                        let cell_lower = cell_text.to_lowercase();
+                        // Skip numeric cells and empties when searching text
+                        if cell_text.is_empty() || cell_text.parse::<f64>().is_ok() {
+                            continue;
+                        }
+                        if cell_lower <= search_text && (best_row.is_none() || cell_lower > best_val) {
+                            best_val = cell_lower;
+                            best_row = Some(r);
+                        }
+                    }
+                    found_row = best_row;
                 }
             } else {
                 // Exact match
                 for r in min_row..=max_row {
-                    let cell_text = lookup.get_text(r, min_col);
+                    let cell_text = get(r, min_col);
                     let cell_lower = cell_text.to_lowercase();
 
                     // Try numeric comparison first
@@ -83,9 +111,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             match found_row {
                 Some(r) => {
                     let result_col = min_col + col_index - 1;
-                    let result_text = lookup.get_text(r, result_col);
+                    let result_text = get(r, result_col);
                     if result_text.is_empty() {
-                        EvalResult::Number(0.0)
+                        EvalResult::Empty
                     } else if let Ok(n) = result_text.parse::<f64>() {
                         EvalResult::Number(n)
                     } else {
@@ -104,8 +132,8 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             let lookup_value = evaluate(&args[0], lookup);
 
             // Parse lookup array (must be 1D - single row or column)
-            let lookup_array = match &args[1] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
+            let (lookup_array, xl_lookup_sheet) = match &args[1] {
+                Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
                     let (min_row, min_col, max_row, max_col) = (
                         (*start_row).min(*end_row), (*start_col).min(*end_col),
                         (*start_row).max(*end_row), (*start_col).max(*end_col)
@@ -116,19 +144,19 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     if !is_row && !is_col {
                         return Some(EvalResult::Error("XLOOKUP lookup_array must be a single row or column".to_string()));
                     }
-                    (min_row, min_col, max_row, max_col, is_row)
+                    ((min_row, min_col, max_row, max_col, is_row), sheet)
                 }
                 _ => return Some(EvalResult::Error("XLOOKUP lookup_array must be a range".to_string())),
             };
 
             // Parse return array (must have same dimensions)
-            let return_array = match &args[2] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
+            let (return_array, xl_return_sheet) = match &args[2] {
+                Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
                     let (min_row, min_col, max_row, max_col) = (
                         (*start_row).min(*end_row), (*start_col).min(*end_col),
                         (*start_row).max(*end_row), (*start_col).max(*end_col)
                     );
-                    (min_row, min_col, max_row, max_col)
+                    ((min_row, min_col, max_row, max_col), sheet)
                 }
                 _ => return Some(EvalResult::Error("XLOOKUP return_array must be a range".to_string())),
             };
@@ -170,6 +198,13 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             // Search for match
             let mut found_idx: Option<usize> = None;
 
+            let xl_get = |sheet: &SheetRef, r: usize, c: usize| -> String {
+                match get_text_for_sheet(lookup, sheet, r, c) {
+                    Ok(t) => t,
+                    Err(_) => String::new(),
+                }
+            };
+
             for idx in 0..lookup_size {
                 let (r, c) = if lookup_array.4 {
                     (lookup_array.0, lookup_array.1 + idx)
@@ -177,7 +212,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     (lookup_array.0 + idx, lookup_array.1)
                 };
 
-                let cell_text = lookup.get_text(r, c);
+                let cell_text = xl_get(xl_lookup_sheet, r, c);
                 let cell_value = if cell_text.is_empty() {
                     EvalResult::Text(String::new())
                 } else if let Ok(n) = cell_text.parse::<f64>() {
@@ -237,9 +272,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                         (return_array.0 + idx, return_array.1)
                     };
 
-                    let result_text = lookup.get_text(r, c);
+                    let result_text = xl_get(xl_return_sheet, r, c);
                     if result_text.is_empty() {
-                        EvalResult::Text(String::new())
+                        EvalResult::Empty
                     } else if let Ok(n) = result_text.parse::<f64>() {
                         EvalResult::Number(n)
                     } else {
@@ -262,8 +297,8 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("HLOOKUP requires 3 or 4 arguments".to_string()));
             }
             let search_key = evaluate(&args[0], lookup);
-            let range = match &args[1] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
+            let (range, hlookup_sheet) = match &args[1] {
+                Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => ((*start_row, *start_col, *end_row, *end_col), sheet),
                 _ => return Some(EvalResult::Error("HLOOKUP requires a range as second argument".to_string())),
             };
             let row_index = match evaluate(&args[2], lookup).to_number() {
@@ -289,12 +324,19 @@ pub(crate) fn try_evaluate<L: CellLookup>(
 
             let mut found_col: Option<usize> = None;
 
+            let hget = |r: usize, c: usize| -> String {
+                match get_text_for_sheet(lookup, hlookup_sheet, r, c) {
+                    Ok(t) => t,
+                    Err(_) => String::new(),
+                }
+            };
+
             if is_sorted {
                 if let Some(search_n) = search_num {
                     let mut best_col: Option<usize> = None;
                     let mut best_val = f64::NEG_INFINITY;
                     for c in min_col..=max_col {
-                        let cell_text = lookup.get_text(min_row, c);
+                        let cell_text = hget(min_row, c);
                         if let Ok(cell_n) = cell_text.parse::<f64>() {
                             if cell_n <= search_n && cell_n > best_val {
                                 best_val = cell_n;
@@ -303,10 +345,26 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                         }
                     }
                     found_col = best_col;
+                } else {
+                    // Text key: find largest text cell <= search_text (case-insensitive)
+                    let mut best_col: Option<usize> = None;
+                    let mut best_val = String::new();
+                    for c in min_col..=max_col {
+                        let cell_text = hget(min_row, c);
+                        let cell_lower = cell_text.to_lowercase();
+                        if cell_text.is_empty() || cell_text.parse::<f64>().is_ok() {
+                            continue;
+                        }
+                        if cell_lower <= search_text && (best_col.is_none() || cell_lower > best_val) {
+                            best_val = cell_lower;
+                            best_col = Some(c);
+                        }
+                    }
+                    found_col = best_col;
                 }
             } else {
                 for c in min_col..=max_col {
-                    let cell_text = lookup.get_text(min_row, c);
+                    let cell_text = hget(min_row, c);
                     let cell_lower = cell_text.to_lowercase();
 
                     if let (Some(search_n), Ok(cell_n)) = (search_num, cell_text.parse::<f64>()) {
@@ -324,9 +382,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             match found_col {
                 Some(c) => {
                     let result_row = min_row + row_index - 1;
-                    let result_text = lookup.get_text(result_row, c);
+                    let result_text = hget(result_row, c);
                     if result_text.is_empty() {
-                        EvalResult::Number(0.0)
+                        EvalResult::Empty
                     } else if let Ok(n) = result_text.parse::<f64>() {
                         EvalResult::Number(n)
                     } else {
@@ -341,9 +399,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if args.len() < 2 || args.len() > 3 {
                 return Some(EvalResult::Error("INDEX requires 2 or 3 arguments".to_string()));
             }
-            let range = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
-                Expr::CellRef { col, row, .. } => (*row, *col, *row, *col),
+            let (range, idx_sheet) = match &args[0] {
+                Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => ((*start_row, *start_col, *end_row, *end_col), sheet.clone()),
+                Expr::CellRef { sheet, col, row, .. } => ((*row, *col, *row, *col), sheet.clone()),
                 _ => return Some(EvalResult::Error("INDEX requires a range as first argument".to_string())),
             };
             let row_num = match evaluate(&args[1], lookup).to_number() {
@@ -369,10 +427,13 @@ pub(crate) fn try_evaluate<L: CellLookup>(
 
             let target_row = min_row + row_num - 1;
             let target_col = min_col + col_num - 1;
-            let result_text = lookup.get_text(target_row, target_col);
+            let result_text = match get_text_for_sheet(lookup, &idx_sheet, target_row, target_col) {
+                Ok(t) => t,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
 
             if result_text.is_empty() {
-                EvalResult::Number(0.0)
+                EvalResult::Empty
             } else if let Ok(n) = result_text.parse::<f64>() {
                 EvalResult::Number(n)
             } else {
@@ -385,8 +446,8 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("MATCH requires 2 or 3 arguments".to_string()));
             }
             let search_key = evaluate(&args[0], lookup);
-            let range = match &args[1] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => (*start_row, *start_col, *end_row, *end_col),
+            let (range, match_sheet) = match &args[1] {
+                Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => ((*start_row, *start_col, *end_row, *end_col), sheet),
                 _ => return Some(EvalResult::Error("MATCH requires a range as second argument".to_string())),
             };
             let match_type = if args.len() == 3 {
@@ -407,12 +468,19 @@ pub(crate) fn try_evaluate<L: CellLookup>(
 
             let mut found_pos: Option<usize> = None;
 
+            let mget = |r: usize, c: usize| -> String {
+                match get_text_for_sheet(lookup, match_sheet, r, c) {
+                    Ok(t) => t,
+                    Err(_) => String::new(),
+                }
+            };
+
             if is_row {
                 // Search horizontally
                 if match_type == 0 {
                     // Exact match
                     for (i, c) in (min_col..=max_col).enumerate() {
-                        let cell_text = lookup.get_text(min_row, c);
+                        let cell_text = mget(min_row, c);
                         let cell_lower = cell_text.to_lowercase();
                         if let (Some(sn), Ok(cn)) = (search_num, cell_text.parse::<f64>()) {
                             if (sn - cn).abs() < f64::EPSILON {
@@ -430,7 +498,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                         let mut best_pos: Option<usize> = None;
                         let mut best_val = f64::NEG_INFINITY;
                         for (i, c) in (min_col..=max_col).enumerate() {
-                            if let Ok(cn) = lookup.get_text(min_row, c).parse::<f64>() {
+                            if let Ok(cn) = mget(min_row, c).parse::<f64>() {
                                 if cn <= sn && cn > best_val {
                                     best_val = cn;
                                     best_pos = Some(i + 1);
@@ -445,7 +513,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                         let mut best_pos: Option<usize> = None;
                         let mut best_val = f64::INFINITY;
                         for (i, c) in (min_col..=max_col).enumerate() {
-                            if let Ok(cn) = lookup.get_text(min_row, c).parse::<f64>() {
+                            if let Ok(cn) = mget(min_row, c).parse::<f64>() {
                                 if cn >= sn && cn < best_val {
                                     best_val = cn;
                                     best_pos = Some(i + 1);
@@ -459,7 +527,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 // Search vertically
                 if match_type == 0 {
                     for (i, r) in (min_row..=max_row).enumerate() {
-                        let cell_text = lookup.get_text(r, min_col);
+                        let cell_text = mget(r, min_col);
                         let cell_lower = cell_text.to_lowercase();
                         if let (Some(sn), Ok(cn)) = (search_num, cell_text.parse::<f64>()) {
                             if (sn - cn).abs() < f64::EPSILON {
@@ -476,7 +544,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                         let mut best_pos: Option<usize> = None;
                         let mut best_val = f64::NEG_INFINITY;
                         for (i, r) in (min_row..=max_row).enumerate() {
-                            if let Ok(cn) = lookup.get_text(r, min_col).parse::<f64>() {
+                            if let Ok(cn) = mget(r, min_col).parse::<f64>() {
                                 if cn <= sn && cn > best_val {
                                     best_val = cn;
                                     best_pos = Some(i + 1);
@@ -490,7 +558,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                         let mut best_pos: Option<usize> = None;
                         let mut best_val = f64::INFINITY;
                         for (i, r) in (min_row..=max_row).enumerate() {
-                            if let Ok(cn) = lookup.get_text(r, min_col).parse::<f64>() {
+                            if let Ok(cn) = mget(r, min_col).parse::<f64>() {
                                 if cn >= sn && cn < best_val {
                                     best_val = cn;
                                     best_pos = Some(i + 1);

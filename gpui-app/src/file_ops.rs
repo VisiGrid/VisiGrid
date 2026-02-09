@@ -125,11 +125,19 @@ impl Spreadsheet {
                     }
                 }
 
-                // Wire calculation mode to engine
+                // Wire calculation settings to engine
                 let auto = self.doc_settings.calculation.mode
                     .resolve(crate::settings::CalculationMode::Automatic)
                     != crate::settings::CalculationMode::Manual;
-                self.wb_mut(cx, |wb| wb.set_auto_recalc(auto));
+                let iterative = self.doc_settings.calculation.enable_iterative_calc.resolve(false);
+                let max_iters = self.doc_settings.calculation.max_iterations.resolve(100);
+                let tolerance = self.doc_settings.calculation.iteration_tolerance.resolve(1e-9);
+                self.wb_mut(cx, |wb| {
+                    wb.set_auto_recalc(auto);
+                    wb.set_iterative_enabled(iterative);
+                    wb.set_iterative_max_iters(max_iters);
+                    wb.set_iterative_tolerance(tolerance);
+                });
 
                 self.view_state.selected = (0, 0);
                 self.view_state.selection_end = None;
@@ -421,7 +429,7 @@ impl Spreadsheet {
         self.status_message = Some("Re-importing with Freeze Cycle Values...".to_string());
         cx.notify();
 
-        let options = xlsx::ImportOptions { freeze_cycles: true };
+        let options = xlsx::ImportOptions { freeze_cycles: true, ..Default::default() };
 
         if visigrid_license::is_feature_enabled("fast_large_files") {
             self.start_excel_import_with_options(&path, options, current_sheet, cx);

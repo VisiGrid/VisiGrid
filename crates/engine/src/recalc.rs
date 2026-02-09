@@ -72,6 +72,15 @@ pub struct RecalcReport {
     /// Per-cell recalc metadata for Inspector explainability.
     /// Maps CellId -> CellRecalcInfo for all cells that were recomputed.
     pub cell_info: FxHashMap<CellId, CellRecalcInfo>,
+
+    /// Number of SCCs that were iteratively resolved (0 if iteration disabled).
+    pub scc_count: usize,
+
+    /// Maximum iterations performed across all SCCs (0 if no iteration).
+    pub iterations_performed: u32,
+
+    /// True if all SCCs converged within tolerance.
+    pub converged: bool,
 }
 
 impl RecalcReport {
@@ -82,29 +91,58 @@ impl RecalcReport {
 
     /// Format as a concise one-line summary for logging.
     pub fn summary(&self) -> String {
-        format!(
-            "{} cells in {}ms, depth={}, cycles={}, unknown={}",
-            self.cells_recomputed,
-            self.duration_ms,
-            self.max_depth,
-            self.had_cycles,
-            self.unknown_deps_recomputed
-        )
+        if self.scc_count > 0 {
+            format!(
+                "{} cells in {}ms, depth={}, cycles={}, unknown={}, sccs={}, iters={}, converged={}",
+                self.cells_recomputed,
+                self.duration_ms,
+                self.max_depth,
+                self.had_cycles,
+                self.unknown_deps_recomputed,
+                self.scc_count,
+                self.iterations_performed,
+                self.converged,
+            )
+        } else {
+            format!(
+                "{} cells in {}ms, depth={}, cycles={}, unknown={}",
+                self.cells_recomputed,
+                self.duration_ms,
+                self.max_depth,
+                self.had_cycles,
+                self.unknown_deps_recomputed
+            )
+        }
     }
 
     /// Format as a one-line log entry for smoke mode.
     ///
     /// Format: `[recalc/full] 14ms  628 cells  depth=7  unknown=3  cycles=0  errors=0`
     pub fn log_line(&self) -> String {
-        format!(
-            "[recalc/full] {:>4}ms  {} cells  depth={}  unknown={}  cycles={}  errors={}",
-            self.duration_ms,
-            self.cells_recomputed,
-            self.max_depth,
-            self.unknown_deps_recomputed,
-            if self.had_cycles { 1 } else { 0 },
-            self.errors.len()
-        )
+        if self.scc_count > 0 {
+            format!(
+                "[recalc/full] {:>4}ms  {} cells  depth={}  unknown={}  cycles={}  errors={}  sccs={}  iters={}  converged={}",
+                self.duration_ms,
+                self.cells_recomputed,
+                self.max_depth,
+                self.unknown_deps_recomputed,
+                if self.had_cycles { 1 } else { 0 },
+                self.errors.len(),
+                self.scc_count,
+                self.iterations_performed,
+                self.converged,
+            )
+        } else {
+            format!(
+                "[recalc/full] {:>4}ms  {} cells  depth={}  unknown={}  cycles={}  errors={}",
+                self.duration_ms,
+                self.cells_recomputed,
+                self.max_depth,
+                self.unknown_deps_recomputed,
+                if self.had_cycles { 1 } else { 0 },
+                self.errors.len()
+            )
+        }
     }
 
     /// Get recalc info for a specific cell.
@@ -233,6 +271,9 @@ mod tests {
         assert!(!report.had_cycles);
         assert_eq!(report.unknown_deps_recomputed, 0);
         assert!(report.errors.is_empty());
+        assert_eq!(report.scc_count, 0);
+        assert_eq!(report.iterations_performed, 0);
+        assert!(!report.converged);
     }
 
     #[test]
@@ -245,6 +286,7 @@ mod tests {
             unknown_deps_recomputed: 2,
             errors: vec![],
             cell_info: Default::default(),
+            ..Default::default()
         };
         assert_eq!(
             report.summary(),
@@ -262,6 +304,7 @@ mod tests {
             unknown_deps_recomputed: 3,
             errors: vec![],
             cell_info: Default::default(),
+            ..Default::default()
         };
         assert_eq!(
             report.log_line(),
@@ -279,6 +322,7 @@ mod tests {
             unknown_deps_recomputed: 0,
             errors: vec![RecalcError::new(cell(1, 0, 0), "test error")],
             cell_info: Default::default(),
+            ..Default::default()
         };
         assert_eq!(
             report.log_line(),

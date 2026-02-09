@@ -402,20 +402,7 @@ fn lua_return_to_eval_result(val: &mlua::Value) -> EvalResult {
         mlua::Value::Nil => {
             // Lua nil → EvalResult::Text("") → cached as Value::Text("").
             //
-            // Consistency analysis (confirmed identical to Value::Empty for all
-            // built-in formula paths, which are text-based via get_text()):
-            //   Display:        "" (empty cell)           ✓
-            //   CellRef eval:   Number(0.0)               ✓ (same as empty)
-            //   ISBLANK:        false                     ✓ (same as empty)
-            //   COUNT (range):  skipped                   ✓
-            //   COUNTA (range): skipped                   ✓
-            //   SUM (range):    skipped                   ✓
-            //
-            // Known v1 edge case: get_cell_value() returns Value::Text("")
-            // instead of Value::Empty, so a custom function receiving a range
-            // containing this cell sees "" (empty string) not nil. Fixing this
-            // requires adding EvalResult::Empty to the core enum — deferred.
-            EvalResult::Text(String::new())
+            EvalResult::Empty
         }
         _ => EvalResult::Error("#LUA! unsupported return type".to_string()),
     }

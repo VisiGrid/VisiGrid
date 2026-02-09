@@ -212,12 +212,33 @@ impl ImportResult {
 }
 
 /// Import options controlling optional behavior during Excel import.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct ImportOptions {
     /// If true, cycle cells are frozen to their cached values from the XLSX file.
     /// This makes workbooks with circular references (e.g. iterative calculation
     /// models from Excel) immediately usable.
     pub freeze_cycles: bool,
+
+    /// Enable iterative calculation during import recalc.
+    /// When true, SCCs are resolved via Jacobi iteration instead of marking #CYCLE!.
+    pub iterative_enabled: bool,
+
+    /// Maximum iterations per SCC (used when iterative_enabled is true).
+    pub iterative_max_iters: u32,
+
+    /// Convergence tolerance (used when iterative_enabled is true).
+    pub iterative_tolerance: f64,
+}
+
+impl Default for ImportOptions {
+    fn default() -> Self {
+        Self {
+            freeze_cycles: false,
+            iterative_enabled: false,
+            iterative_max_iters: 100,
+            iterative_tolerance: 1e-9,
+        }
+    }
 }
 
 /// Maximum number of cells to import (prevents DoS from huge files)
@@ -663,6 +684,13 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             eprintln!("[XLSX import] Froze {} cycle cells ({} without cached values)",
                 frozen_count, cycles_no_cached);
         }
+    }
+
+    // Wire iteration settings before recalc (if requested)
+    if options.iterative_enabled {
+        workbook.set_iterative_enabled(true);
+        workbook.set_iterative_max_iters(options.iterative_max_iters);
+        workbook.set_iterative_tolerance(options.iterative_tolerance);
     }
 
     // Recompute all formulas in topological order.
@@ -4464,4 +4492,5 @@ mod tests {
             }
         }
     }
+
 }

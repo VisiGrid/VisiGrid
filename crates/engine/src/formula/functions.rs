@@ -18,7 +18,7 @@ const FUNCTION_NAMES: &[&str] = &[
     "ISBLANK", "ISERROR", "ISNA", "ISNUMBER", "ISTEXT",
     "LEFT", "LEN", "LN", "LOG", "LOG10", "LOWER",
     "MATCH", "MAX", "MEDIAN", "MID", "MIN", "MINUTE", "MOD", "MONTH",
-    "NOT", "NOW", "NPV",
+    "NORM.S.DIST", "NORMSDIST", "NOT", "NOW", "NPV",
     "OR",
     "PI", "PMT", "POWER", "PPMT", "PRODUCT", "PV",
     "RADIANS", "RAND", "RANDBETWEEN", "REPT", "RIGHT", "ROUND", "ROUNDDOWN", "ROUNDUP", "ROW", "ROWS",

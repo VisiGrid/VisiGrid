@@ -75,16 +75,41 @@ pub struct DocumentCalculationSettings {
     /// When formulas are recalculated
     #[serde(default = "default_calculation_mode", skip_serializing_if = "Setting::is_inherit")]
     pub mode: Setting<CalculationMode>,
+
+    /// Enable iterative calculation (Excel-style circular calc).
+    /// When enabled, circular references are resolved via Jacobi iteration
+    /// instead of showing #CYCLE!.
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub enable_iterative_calc: Setting<bool>,
+
+    /// Maximum iterations per SCC before declaring non-convergence (#NUM!).
+    #[serde(default = "default_max_iterations", skip_serializing_if = "Setting::is_inherit")]
+    pub max_iterations: Setting<u32>,
+
+    /// Convergence tolerance: iteration stops when max cell delta < tolerance.
+    #[serde(default = "default_iteration_tolerance", skip_serializing_if = "Setting::is_inherit")]
+    pub iteration_tolerance: Setting<f64>,
 }
 
 fn default_calculation_mode() -> Setting<CalculationMode> {
     Setting::Value(CalculationMode::Automatic)
 }
 
+fn default_max_iterations() -> Setting<u32> {
+    Setting::Value(100)
+}
+
+fn default_iteration_tolerance() -> Setting<f64> {
+    Setting::Value(1e-9)
+}
+
 impl Default for DocumentCalculationSettings {
     fn default() -> Self {
         Self {
             mode: Setting::Value(CalculationMode::Automatic),
+            enable_iterative_calc: Setting::Inherit,
+            max_iterations: Setting::Value(100),
+            iteration_tolerance: Setting::Value(1e-9),
         }
     }
 }

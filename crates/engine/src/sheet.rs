@@ -429,6 +429,11 @@ impl Sheet {
         self.computed_cache.borrow_mut().remove(&(row, col));
     }
 
+    /// Get a cached computed value (for iterative calculation snapshot).
+    pub fn get_cached_value(&self, row: usize, col: usize) -> Option<Value> {
+        self.computed_cache.borrow().get(&(row, col)).cloned()
+    }
+
     /// Update the sheet name (also updates name_key)
     pub fn set_name(&mut self, name: &str) {
         let trimmed = name.trim();

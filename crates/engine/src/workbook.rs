@@ -90,10 +90,22 @@ pub struct Workbook {
     ///
     /// Stored as bool to avoid duplicating the settings enum in the engine crate.
     /// Do NOT repurpose this for "should I ever recalc" — it strictly mirrors
-    /// the Automatic/Manual toggle. Future modes (iterative calc, volatile
-    /// function policy) should be separate fields.
+    /// the Automatic/Manual toggle.
     #[serde(skip)]
     auto_recalc: bool,
+
+    /// Iterative calculation mode (Excel-style circular calc).
+    /// When enabled, SCCs are resolved via Jacobi iteration instead of #CYCLE!.
+    #[serde(skip)]
+    iterative_enabled: bool,
+
+    /// Maximum iterations per SCC before declaring non-convergence (#NUM!).
+    #[serde(skip)]
+    iterative_max_iters: u32,
+
+    /// Convergence tolerance: iteration stops when max cell delta < tolerance.
+    #[serde(skip)]
+    iterative_tolerance: f64,
 
     /// Monotonically increasing revision number. Incremented once per successful
     /// batch completion (or single-cell edit outside batch).
@@ -132,6 +144,9 @@ impl Workbook {
             batch_depth: 0,
             batch_changed: Vec::new(),
             auto_recalc: true,
+            iterative_enabled: false,
+            iterative_max_iters: 100,
+            iterative_tolerance: 1e-9,
             revision: 0,
             #[cfg(test)]
             recalc_count: std::cell::Cell::new(0),
@@ -393,6 +408,9 @@ impl Workbook {
             batch_depth: 0,
             batch_changed: Vec::new(),
             auto_recalc: true,
+            iterative_enabled: false,
+            iterative_max_iters: 100,
+            iterative_tolerance: 1e-9,
             revision: 0,
             #[cfg(test)]
             recalc_count: std::cell::Cell::new(0),
@@ -413,6 +431,9 @@ impl Workbook {
             batch_depth: 0,
             batch_changed: Vec::new(),
             auto_recalc: true,
+            iterative_enabled: false,
+            iterative_max_iters: 100,
+            iterative_tolerance: 1e-9,
             revision: 0,
             #[cfg(test)]
             recalc_count: std::cell::Cell::new(0),
@@ -1212,9 +1233,18 @@ impl Workbook {
     /// Formulas with INDIRECT/OFFSET are evaluated after all known-deps formulas
     /// since their dependencies cannot be determined statically.
     pub fn recompute_full_ordered(&mut self) -> crate::recalc::RecalcReport {
+        self.recompute_full_ordered_inner(None)
+    }
+
+    /// Core recompute implementation, optionally with custom function handler.
+    fn recompute_full_ordered_inner(
+        &mut self,
+        custom_fn_handler: Option<&dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
+    ) -> crate::recalc::RecalcReport {
         use crate::formula::analyze::has_dynamic_deps;
+        use crate::formula::eval::Value;
         use crate::recalc::{CellRecalcInfo, RecalcError, RecalcReport};
-        use rustc_hash::FxHashMap;
+        use rustc_hash::{FxHashMap, FxHashSet};
         use std::time::Instant;
 
         let start = Instant::now();
@@ -1230,10 +1260,7 @@ impl Workbook {
             Ok(order) => (order, Vec::new()),
             Err(cycle) => {
                 report.had_cycles = true;
-                // Mark cycle cells - we'll evaluate non-cycle cells only
                 let cycle_cells = cycle.cells.clone();
-
-                // Get partial order excluding cycle cells
                 let all_formula_cells: Vec<CellId> = self.dep_graph.formula_cells().collect();
                 let non_cycle: Vec<CellId> = all_formula_cells
                     .into_iter()
@@ -1243,102 +1270,331 @@ impl Workbook {
             }
         };
 
-        // Mark cycle cells with #CYCLE! error
-        for cell_id in &cycle_cells {
-            if let Some(sheet) = self.sheet_by_id_mut(cell_id.sheet) {
-                sheet.set_cycle_error(cell_id.row, cell_id.col);
-            }
-        }
+        // If cycles exist and iteration is enabled, resolve via Jacobi iteration
+        if !cycle_cells.is_empty() && self.iterative_enabled {
+            let sccs = self.dep_graph.find_cycle_sccs();
+            report.scc_count = sccs.len();
+            report.converged = true; // will be set false if any SCC fails
 
-        // Separate known-deps and unknown-deps formulas
-        let mut known_deps_order = Vec::new();
-        let mut unknown_deps_cells = Vec::new();
+            // Build true cycle set from Tarjan's SCCs (not from Kahn's over-report)
+            let cycle_set: FxHashSet<CellId> = sccs.iter().flat_map(|scc| scc.iter().copied()).collect();
 
-        for cell_id in order {
-            if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
-                if let Some(cell) = sheet.cells.get(&(cell_id.row, cell_id.col)) {
-                    if let Some(ast) = cell.value.formula_ast() {
-                        if has_dynamic_deps(ast) {
-                            unknown_deps_cells.push(cell_id);
+            // Get ALL non-SCC formula cells (Kahn's `order` may exclude downstream cells)
+            let all_formula_cells: Vec<CellId> = self.dep_graph.formula_cells().collect();
+            let non_cycle_cells: Vec<CellId> = all_formula_cells
+                .into_iter()
+                .filter(|c| !cycle_set.contains(c))
+                .collect();
+
+            let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
+            let mut eval_order: usize = 0;
+
+            // Separate known-deps and unknown-deps among non-cycle cells
+            let mut known_deps_order = Vec::new();
+            let mut unknown_deps_cells = Vec::new();
+            for cell_id in &non_cycle_cells {
+                if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
+                    if let Some(cell) = sheet.cells.get(&(cell_id.row, cell_id.col)) {
+                        if let Some(ast) = cell.value.formula_ast() {
+                            if has_dynamic_deps(ast) {
+                                unknown_deps_cells.push(*cell_id);
+                            } else {
+                                known_deps_order.push(*cell_id);
+                            }
                         } else {
-                            known_deps_order.push(cell_id);
+                            known_deps_order.push(*cell_id);
                         }
-                    } else {
-                        known_deps_order.push(cell_id);
                     }
                 }
             }
-        }
 
-        // Compute depths during evaluation
-        // depth(value_cell) = 0, depth(formula_cell) = 1 + max(depth(precedents))
-        let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
-
-        // Track evaluation order for explainability
-        let mut eval_order: usize = 0;
-
-        // Evaluate known-deps formulas in topo order
-        for cell_id in &known_deps_order {
-            // Compute depth
-            let mut max_pred_depth = 0;
-            for pred in self.dep_graph.precedents(*cell_id) {
-                let pred_depth = depths.get(&pred).copied().unwrap_or(0);
-                max_pred_depth = max_pred_depth.max(pred_depth);
-            }
-            let cell_depth = max_pred_depth + 1;
-            depths.insert(*cell_id, cell_depth);
-            report.max_depth = report.max_depth.max(cell_depth);
-
-            // Evaluate the formula
-            if let Err(e) = self.evaluate_cell(*cell_id) {
-                if report.errors.len() < 100 {
-                    report.errors.push(RecalcError::new(*cell_id, e));
+            // Partition non-cycle cells into upstream (no cycle deps) and downstream
+            let mut downstream_known = Vec::new();
+            let mut upstream_known = Vec::new();
+            for cell_id in known_deps_order {
+                // Check transitive dependency on cycle cells
+                let depends_on_cycle = self.dep_graph.precedents(cell_id)
+                    .any(|p| cycle_set.contains(&p));
+                if depends_on_cycle {
+                    downstream_known.push(cell_id);
+                } else {
+                    upstream_known.push(cell_id);
                 }
             }
 
-            // Track per-cell recalc info for Inspector explainability
-            report.cell_info.insert(
-                *cell_id,
-                CellRecalcInfo::new(cell_depth, eval_order, false),
-            );
-            eval_order += 1;
+            // Evaluate upstream non-cycle cells
+            for cell_id in &upstream_known {
+                let mut max_pred_depth = 0;
+                for pred in self.dep_graph.precedents(*cell_id) {
+                    max_pred_depth = max_pred_depth.max(depths.get(&pred).copied().unwrap_or(0));
+                }
+                let cell_depth = max_pred_depth + 1;
+                depths.insert(*cell_id, cell_depth);
+                report.max_depth = report.max_depth.max(cell_depth);
 
-            report.cells_recomputed += 1;
-        }
+                if let Err(e) = self.evaluate_cell_with_handler(*cell_id, custom_fn_handler) {
+                    if report.errors.len() < 100 {
+                        report.errors.push(RecalcError::new(*cell_id, e));
+                    }
+                }
+                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, false));
+                eval_order += 1;
+                report.cells_recomputed += 1;
+            }
 
-        // Evaluate unknown-deps formulas (conservative: always recompute)
-        // Sort by CellId for determinism
-        unknown_deps_cells.sort_by(|a, b| {
-            a.sheet.raw().cmp(&b.sheet.raw())
-                .then(a.row.cmp(&b.row))
-                .then(a.col.cmp(&b.col))
-        });
+            // Phase 2: Jacobi iteration for each SCC
+            let max_iters = self.iterative_max_iters;
+            let tolerance = self.iterative_tolerance;
 
-        for cell_id in &unknown_deps_cells {
-            // Unknown deps get depth = max_known_depth + 1 (after all known)
-            let cell_depth = report.max_depth + 1;
-            depths.insert(*cell_id, cell_depth);
+            for scc in &sccs {
+                // Initialize: seed cache with zero for SCC cells that have no cached value
+                for cell_id in scc {
+                    if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
+                        if sheet.get_cached_value(cell_id.row, cell_id.col).is_none() {
+                            sheet.cache_computed(cell_id.row, cell_id.col, Value::Number(0.0));
+                        }
+                    }
+                }
 
-            if let Err(e) = self.evaluate_cell(*cell_id) {
-                if report.errors.len() < 100 {
-                    report.errors.push(RecalcError::new(*cell_id, e));
+                let mut converged = false;
+                let mut iters_used: u32 = 0;
+
+                for iter in 0..max_iters {
+                    iters_used = iter + 1;
+
+                    // Snapshot previous values
+                    let prev: Vec<(CellId, Value)> = scc.iter().map(|cell_id| {
+                        let val = self.sheet_by_id(cell_id.sheet)
+                            .and_then(|s| s.get_cached_value(cell_id.row, cell_id.col))
+                            .unwrap_or(Value::Empty);
+                        (*cell_id, val)
+                    }).collect();
+
+                    // Evaluate all SCC cells (writes new values to cache)
+                    for cell_id in scc {
+                        let _ = self.evaluate_cell_with_handler(*cell_id, custom_fn_handler);
+                    }
+
+                    // Compute max delta between prev and new
+                    let mut max_delta: f64 = 0.0;
+                    for (cell_id, prev_val) in &prev {
+                        let new_val = self.sheet_by_id(cell_id.sheet)
+                            .and_then(|s| s.get_cached_value(cell_id.row, cell_id.col))
+                            .unwrap_or(Value::Empty);
+
+                        let delta = match (&prev_val, &new_val) {
+                            (Value::Number(a), Value::Number(b)) => (a - b).abs(),
+                            (Value::Empty, Value::Number(b)) => b.abs(),
+                            (Value::Number(a), Value::Empty) => a.abs(),
+                            (Value::Empty, Value::Empty) => 0.0,
+                            // Text/bool/error changes: treat as non-converged
+                            _ => {
+                                if prev_val == &new_val { 0.0 } else { f64::INFINITY }
+                            }
+                        };
+                        if delta > max_delta {
+                            max_delta = delta;
+                        }
+                    }
+
+                    if max_delta < tolerance {
+                        converged = true;
+                        break;
+                    }
+                }
+
+                report.iterations_performed = report.iterations_performed.max(iters_used);
+
+                if converged {
+                    // Commit converged values — they're already in cache.
+                    // Record in report.
+                    for cell_id in scc {
+                        report.cell_info.insert(
+                            *cell_id,
+                            CellRecalcInfo::new(report.max_depth + 1, eval_order, false),
+                        );
+                        eval_order += 1;
+                        report.cells_recomputed += 1;
+                    }
+                } else {
+                    // Mark all SCC cells as #NUM! (did not converge)
+                    report.converged = false;
+                    for cell_id in scc {
+                        if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
+                            sheet.cache_computed(
+                                cell_id.row, cell_id.col,
+                                Value::Error("#NUM!".to_string()),
+                            );
+                        }
+                        report.cell_info.insert(
+                            *cell_id,
+                            CellRecalcInfo::new(report.max_depth + 1, eval_order, false),
+                        );
+                        eval_order += 1;
+                        report.cells_recomputed += 1;
+                    }
                 }
             }
 
-            // Track per-cell recalc info (mark as having unknown deps)
-            report.cell_info.insert(
-                *cell_id,
-                CellRecalcInfo::new(cell_depth, eval_order, true),
-            );
-            eval_order += 1;
+            // Phase 3: Evaluate downstream non-cycle cells (depend on SCC outputs)
+            // Sort by dependency: cells whose precedents are all already evaluated come first.
+            // Simple approach: iteratively evaluate cells whose deps are all ready.
+            let downstream_set: FxHashSet<CellId> = downstream_known.iter().copied().collect();
+            let mut remaining = downstream_known;
+            let mut evaluated: FxHashSet<CellId> = FxHashSet::default();
+            // All upstream + cycle cells are already evaluated
+            for c in &upstream_known {
+                evaluated.insert(*c);
+            }
+            for scc in &sccs {
+                for c in scc {
+                    evaluated.insert(*c);
+                }
+            }
+            let mut progress = true;
+            while !remaining.is_empty() && progress {
+                progress = false;
+                let mut still_remaining = Vec::new();
+                for cell_id in remaining {
+                    let all_deps_ready = self.dep_graph.precedents(cell_id)
+                        .all(|p| !downstream_set.contains(&p) || evaluated.contains(&p));
+                    if all_deps_ready {
+                        evaluated.insert(cell_id);
+                        progress = true;
 
-            report.cells_recomputed += 1;
-            report.unknown_deps_recomputed += 1;
-        }
+                        let mut max_pred_depth = 0;
+                        for pred in self.dep_graph.precedents(cell_id) {
+                            max_pred_depth = max_pred_depth.max(depths.get(&pred).copied().unwrap_or(0));
+                        }
+                        let cell_depth = max_pred_depth + 1;
+                        depths.insert(cell_id, cell_depth);
+                        report.max_depth = report.max_depth.max(cell_depth);
 
-        // Update max_depth if we had unknown deps
-        if !unknown_deps_cells.is_empty() {
-            report.max_depth += 1;
+                        if let Err(e) = self.evaluate_cell_with_handler(cell_id, custom_fn_handler) {
+                            if report.errors.len() < 100 {
+                                report.errors.push(RecalcError::new(cell_id, e));
+                            }
+                        }
+                        report.cell_info.insert(cell_id, CellRecalcInfo::new(cell_depth, eval_order, false));
+                        eval_order += 1;
+                        report.cells_recomputed += 1;
+                    } else {
+                        still_remaining.push(cell_id);
+                    }
+                }
+                remaining = still_remaining;
+            }
+            // Any remaining cells have unresolvable deps — evaluate anyway
+            for cell_id in &remaining {
+                let mut max_pred_depth = 0;
+                for pred in self.dep_graph.precedents(*cell_id) {
+                    max_pred_depth = max_pred_depth.max(depths.get(&pred).copied().unwrap_or(0));
+                }
+                let cell_depth = max_pred_depth + 1;
+                depths.insert(*cell_id, cell_depth);
+                report.max_depth = report.max_depth.max(cell_depth);
+
+                if let Err(e) = self.evaluate_cell_with_handler(*cell_id, custom_fn_handler) {
+                    if report.errors.len() < 100 {
+                        report.errors.push(RecalcError::new(*cell_id, e));
+                    }
+                }
+                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, false));
+                eval_order += 1;
+                report.cells_recomputed += 1;
+            }
+
+            // Phase 4: Unknown-deps formulas (after everything else)
+            unknown_deps_cells.sort_by(|a, b| {
+                a.sheet.raw().cmp(&b.sheet.raw())
+                    .then(a.row.cmp(&b.row))
+                    .then(a.col.cmp(&b.col))
+            });
+            for cell_id in &unknown_deps_cells {
+                let cell_depth = report.max_depth + 1;
+                depths.insert(*cell_id, cell_depth);
+                if let Err(e) = self.evaluate_cell_with_handler(*cell_id, custom_fn_handler) {
+                    if report.errors.len() < 100 {
+                        report.errors.push(RecalcError::new(*cell_id, e));
+                    }
+                }
+                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, true));
+                eval_order += 1;
+                report.cells_recomputed += 1;
+                report.unknown_deps_recomputed += 1;
+            }
+            if !unknown_deps_cells.is_empty() {
+                report.max_depth += 1;
+            }
+        } else {
+            // No iteration: original path (mark cycles as #CYCLE!, eval non-cycle)
+            for cell_id in &cycle_cells {
+                if let Some(sheet) = self.sheet_by_id_mut(cell_id.sheet) {
+                    sheet.set_cycle_error(cell_id.row, cell_id.col);
+                }
+            }
+
+            let mut known_deps_order = Vec::new();
+            let mut unknown_deps_cells = Vec::new();
+            for cell_id in order {
+                if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
+                    if let Some(cell) = sheet.cells.get(&(cell_id.row, cell_id.col)) {
+                        if let Some(ast) = cell.value.formula_ast() {
+                            if has_dynamic_deps(ast) {
+                                unknown_deps_cells.push(cell_id);
+                            } else {
+                                known_deps_order.push(cell_id);
+                            }
+                        } else {
+                            known_deps_order.push(cell_id);
+                        }
+                    }
+                }
+            }
+
+            let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
+            let mut eval_order: usize = 0;
+
+            for cell_id in &known_deps_order {
+                let mut max_pred_depth = 0;
+                for pred in self.dep_graph.precedents(*cell_id) {
+                    max_pred_depth = max_pred_depth.max(depths.get(&pred).copied().unwrap_or(0));
+                }
+                let cell_depth = max_pred_depth + 1;
+                depths.insert(*cell_id, cell_depth);
+                report.max_depth = report.max_depth.max(cell_depth);
+
+                if let Err(e) = self.evaluate_cell_with_handler(*cell_id, custom_fn_handler) {
+                    if report.errors.len() < 100 {
+                        report.errors.push(RecalcError::new(*cell_id, e));
+                    }
+                }
+                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, false));
+                eval_order += 1;
+                report.cells_recomputed += 1;
+            }
+
+            unknown_deps_cells.sort_by(|a, b| {
+                a.sheet.raw().cmp(&b.sheet.raw())
+                    .then(a.row.cmp(&b.row))
+                    .then(a.col.cmp(&b.col))
+            });
+            for cell_id in &unknown_deps_cells {
+                let cell_depth = report.max_depth + 1;
+                depths.insert(*cell_id, cell_depth);
+                if let Err(e) = self.evaluate_cell_with_handler(*cell_id, custom_fn_handler) {
+                    if report.errors.len() < 100 {
+                        report.errors.push(RecalcError::new(*cell_id, e));
+                    }
+                }
+                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, true));
+                eval_order += 1;
+                report.cells_recomputed += 1;
+                report.unknown_deps_recomputed += 1;
+            }
+            if !unknown_deps_cells.is_empty() {
+                report.max_depth += 1;
+            }
         }
 
         report.duration_ms = start.elapsed().as_millis() as u64;
@@ -1353,115 +1609,7 @@ impl Workbook {
         &mut self,
         handler: &dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>,
     ) -> crate::recalc::RecalcReport {
-        use crate::formula::analyze::has_dynamic_deps;
-        use crate::recalc::{CellRecalcInfo, RecalcError, RecalcReport};
-        use rustc_hash::FxHashMap;
-        use std::time::Instant;
-
-        let start = Instant::now();
-        let mut report = RecalcReport::new();
-
-        for sheet in &self.sheets {
-            sheet.clear_computed_cache();
-        }
-
-        let (order, cycle_cells) = match self.dep_graph.topo_order_all_formulas() {
-            Ok(order) => (order, Vec::new()),
-            Err(cycle) => {
-                report.had_cycles = true;
-                let cycle_cells = cycle.cells.clone();
-                let all_formula_cells: Vec<CellId> = self.dep_graph.formula_cells().collect();
-                let non_cycle: Vec<CellId> = all_formula_cells
-                    .into_iter()
-                    .filter(|c| !cycle_cells.contains(c))
-                    .collect();
-                (non_cycle, cycle_cells)
-            }
-        };
-
-        for cell_id in &cycle_cells {
-            if let Some(sheet) = self.sheet_by_id_mut(cell_id.sheet) {
-                sheet.set_cycle_error(cell_id.row, cell_id.col);
-            }
-        }
-
-        let mut known_deps_order = Vec::new();
-        let mut unknown_deps_cells = Vec::new();
-
-        for cell_id in order {
-            if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
-                if let Some(cell) = sheet.cells.get(&(cell_id.row, cell_id.col)) {
-                    if let Some(ast) = cell.value.formula_ast() {
-                        if has_dynamic_deps(ast) {
-                            unknown_deps_cells.push(cell_id);
-                        } else {
-                            known_deps_order.push(cell_id);
-                        }
-                    } else {
-                        known_deps_order.push(cell_id);
-                    }
-                }
-            }
-        }
-
-        let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
-        let mut eval_order: usize = 0;
-
-        for cell_id in &known_deps_order {
-            let mut max_pred_depth = 0;
-            for pred in self.dep_graph.precedents(*cell_id) {
-                let pred_depth = depths.get(&pred).copied().unwrap_or(0);
-                max_pred_depth = max_pred_depth.max(pred_depth);
-            }
-            let cell_depth = max_pred_depth + 1;
-            depths.insert(*cell_id, cell_depth);
-            report.max_depth = report.max_depth.max(cell_depth);
-
-            if let Err(e) = self.evaluate_cell_with_handler(*cell_id, Some(handler)) {
-                if report.errors.len() < 100 {
-                    report.errors.push(RecalcError::new(*cell_id, e));
-                }
-            }
-
-            report.cell_info.insert(
-                *cell_id,
-                CellRecalcInfo::new(cell_depth, eval_order, false),
-            );
-            eval_order += 1;
-            report.cells_recomputed += 1;
-        }
-
-        unknown_deps_cells.sort_by(|a, b| {
-            a.sheet.raw().cmp(&b.sheet.raw())
-                .then(a.row.cmp(&b.row))
-                .then(a.col.cmp(&b.col))
-        });
-
-        for cell_id in &unknown_deps_cells {
-            let cell_depth = report.max_depth + 1;
-            depths.insert(*cell_id, cell_depth);
-
-            if let Err(e) = self.evaluate_cell_with_handler(*cell_id, Some(handler)) {
-                if report.errors.len() < 100 {
-                    report.errors.push(RecalcError::new(*cell_id, e));
-                }
-            }
-
-            report.cell_info.insert(
-                *cell_id,
-                CellRecalcInfo::new(cell_depth, eval_order, true),
-            );
-            eval_order += 1;
-            report.cells_recomputed += 1;
-            report.unknown_deps_recomputed += 1;
-        }
-
-        if !unknown_deps_cells.is_empty() {
-            report.max_depth += 1;
-        }
-
-        report.duration_ms = start.elapsed().as_millis() as u64;
-        report
+        self.recompute_full_ordered_inner(Some(handler))
     }
 
     /// Evaluate a single cell's formula and return the result.
@@ -1604,6 +1752,36 @@ impl Workbook {
     /// Returns true if auto-recalc is enabled (Automatic calculation mode).
     pub fn auto_recalc(&self) -> bool {
         self.auto_recalc
+    }
+
+    /// Enable or disable iterative calculation (Excel-style circular calc).
+    pub fn set_iterative_enabled(&mut self, enabled: bool) {
+        self.iterative_enabled = enabled;
+    }
+
+    /// Returns true if iterative calculation is enabled.
+    pub fn iterative_enabled(&self) -> bool {
+        self.iterative_enabled
+    }
+
+    /// Set maximum iterations per SCC.
+    pub fn set_iterative_max_iters(&mut self, max_iters: u32) {
+        self.iterative_max_iters = max_iters;
+    }
+
+    /// Returns maximum iterations per SCC.
+    pub fn iterative_max_iters(&self) -> u32 {
+        self.iterative_max_iters
+    }
+
+    /// Set convergence tolerance.
+    pub fn set_iterative_tolerance(&mut self, tolerance: f64) {
+        self.iterative_tolerance = tolerance;
+    }
+
+    /// Returns convergence tolerance.
+    pub fn iterative_tolerance(&self) -> f64 {
+        self.iterative_tolerance
     }
 
     /// Returns the current revision number.
@@ -1772,6 +1950,7 @@ impl Workbook {
                     EvalResult::Boolean(b) => if b { "TRUE".to_string() } else { "FALSE".to_string() },
                     EvalResult::Error(e) => e,
                     EvalResult::Array(arr) => arr.top_left().to_text(),
+                    EvalResult::Empty => String::new(),
                 }
             }
             CellValue::Formula { ast: None, .. } => "#ERR".to_string(),
@@ -4211,5 +4390,182 @@ mod tests {
             fingerprint,
             "fingerprint must be deterministic"
         );
+    }
+
+    // =========================================================================
+    // Iteration Mode v1 tests
+    // =========================================================================
+
+    /// Helper: create a workbook with cycle and enable iteration.
+    fn make_iterative_wb() -> Workbook {
+        let mut wb = Workbook::new();
+        wb.set_iterative_enabled(true);
+        wb.set_iterative_max_iters(100);
+        wb.set_iterative_tolerance(1e-9);
+        wb
+    }
+
+    #[test]
+    fn test_iterative_diverges() {
+        // A1 = B1, B1 = A1 + 1 — diverges (grows without bound)
+        let mut wb = make_iterative_wb();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=B1");       // A1 = B1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=A1+1");     // B1 = A1 + 1
+        wb.update_cell_deps(sheet_id, 0, 0);
+        wb.update_cell_deps(sheet_id, 0, 1);
+
+        let report = wb.recompute_full_ordered();
+
+        assert!(report.had_cycles);
+        assert_eq!(report.scc_count, 1);
+        assert!(!report.converged, "divergent SCC should not converge");
+        assert_eq!(report.iterations_performed, 100);
+        // Non-converged cells should show #NUM!
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "#NUM!");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "#NUM!");
+    }
+
+    #[test]
+    fn test_iterative_converges_fixed_point() {
+        // A1 = (B1 + 10) / 2, B1 = (A1 + 10) / 2
+        // Fixed point: A1 = B1 = 10
+        let mut wb = make_iterative_wb();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=(B1+10)/2"); // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=(A1+10)/2"); // B1
+        wb.update_cell_deps(sheet_id, 0, 0);
+        wb.update_cell_deps(sheet_id, 0, 1);
+
+        let report = wb.recompute_full_ordered();
+
+        assert!(report.had_cycles);
+        assert_eq!(report.scc_count, 1);
+        assert!(report.converged, "stable fixed point should converge");
+        assert!(report.iterations_performed < 100, "should converge well before max_iters");
+
+        // Both cells should be ~10.0
+        let a1 = wb.sheet(0).unwrap().get_display(0, 0);
+        let b1 = wb.sheet(0).unwrap().get_display(0, 1);
+        let a1_val: f64 = a1.parse().expect("A1 should be numeric");
+        let b1_val: f64 = b1.parse().expect("B1 should be numeric");
+        assert!((a1_val - 10.0).abs() < 1e-6, "A1={}, expected 10.0", a1_val);
+        assert!((b1_val - 10.0).abs() < 1e-6, "B1={}, expected 10.0", b1_val);
+    }
+
+    #[test]
+    fn test_iterative_disabled_shows_cycle() {
+        // Same cycle but with iteration disabled — should show #CYCLE!
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=(B1+10)/2");
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=(A1+10)/2");
+        wb.update_cell_deps(sheet_id, 0, 0);
+        wb.update_cell_deps(sheet_id, 0, 1);
+
+        let report = wb.recompute_full_ordered();
+
+        assert!(report.had_cycles);
+        assert_eq!(report.scc_count, 0, "no SCCs resolved when iteration disabled");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "#CYCLE!");
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "#CYCLE!");
+    }
+
+    #[test]
+    fn test_iterative_downstream_cells_evaluate() {
+        // A1 = (B1 + 10) / 2, B1 = (A1 + 10) / 2, C1 = A1 * 2
+        // After convergence, C1 should be 20.0
+        let mut wb = make_iterative_wb();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=(B1+10)/2"); // A1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=(A1+10)/2"); // B1
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=A1*2");      // C1 = A1 * 2
+        wb.update_cell_deps(sheet_id, 0, 0);
+        wb.update_cell_deps(sheet_id, 0, 1);
+        wb.update_cell_deps(sheet_id, 0, 2);
+
+        let report = wb.recompute_full_ordered();
+
+        assert!(report.converged);
+        let c1 = wb.sheet(0).unwrap().get_display(0, 2);
+        let c1_val: f64 = c1.parse().expect("C1 should be numeric");
+        assert!((c1_val - 20.0).abs() < 1e-6, "C1={}, expected 20.0", c1_val);
+    }
+
+    #[test]
+    fn test_iterative_self_reference_diverges() {
+        // A1 = A1 + 1 — self-loop, diverges
+        let mut wb = make_iterative_wb();
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=A1+1");
+        wb.update_cell_deps(sheet_id, 0, 0);
+
+        let report = wb.recompute_full_ordered();
+
+        assert!(report.had_cycles);
+        assert_eq!(report.scc_count, 1);
+        assert!(!report.converged);
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "#NUM!");
+    }
+
+    #[test]
+    fn test_iterative_tolerance_matters() {
+        // With loose tolerance, convergence happens faster
+        let mut wb = make_iterative_wb();
+        wb.set_iterative_tolerance(1.0); // very loose
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=(B1+10)/2");
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=(A1+10)/2");
+        wb.update_cell_deps(sheet_id, 0, 0);
+        wb.update_cell_deps(sheet_id, 0, 1);
+
+        let report_loose = wb.recompute_full_ordered();
+
+        // Rebuild with tight tolerance
+        let mut wb2 = make_iterative_wb();
+        wb2.set_iterative_tolerance(1e-15);
+        let sheet_id2 = wb2.sheet_id_at_idx(0).unwrap();
+
+        wb2.sheet_mut(0).unwrap().set_value(0, 0, "=(B1+10)/2");
+        wb2.sheet_mut(0).unwrap().set_value(0, 1, "=(A1+10)/2");
+        wb2.update_cell_deps(sheet_id2, 0, 0);
+        wb2.update_cell_deps(sheet_id2, 0, 1);
+
+        let report_tight = wb2.recompute_full_ordered();
+
+        assert!(report_loose.converged);
+        assert!(report_tight.converged);
+        assert!(
+            report_loose.iterations_performed <= report_tight.iterations_performed,
+            "loose tolerance ({}) should converge in <= iterations than tight ({})",
+            report_loose.iterations_performed, report_tight.iterations_performed,
+        );
+    }
+
+    #[test]
+    fn test_iterative_max_iters_respected() {
+        // Set max_iters=3, convergent system should stop at 3 if tolerance is too tight
+        let mut wb = make_iterative_wb();
+        wb.set_iterative_max_iters(3);
+        wb.set_iterative_tolerance(1e-30); // impossibly tight
+        let sheet_id = wb.sheet_id_at_idx(0).unwrap();
+
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "=(B1+10)/2");
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=(A1+10)/2");
+        wb.update_cell_deps(sheet_id, 0, 0);
+        wb.update_cell_deps(sheet_id, 0, 1);
+
+        let report = wb.recompute_full_ordered();
+
+        assert_eq!(report.iterations_performed, 3);
+        assert!(!report.converged, "should not converge with impossibly tight tolerance in 3 iters");
+        // Should show #NUM! since didn't converge
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "#NUM!");
     }
 }

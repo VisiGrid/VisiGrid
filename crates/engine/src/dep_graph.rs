@@ -355,6 +355,145 @@ impl DepGraph {
         result
     }
 
+    /// Find all non-trivial SCCs (cycle groups), returned as separate groups.
+    ///
+    /// Each inner Vec is one SCC (size > 1, or size == 1 with self-loop).
+    /// Uses the same iterative Tarjan's algorithm as `find_cycle_members`.
+    /// SCCs within each group are sorted by (sheet, row, col) for determinism.
+    pub fn find_cycle_sccs(&self) -> Vec<Vec<CellId>> {
+        let formula_cells: FxHashSet<CellId> = self.preds.keys().copied().collect();
+        if formula_cells.is_empty() {
+            return Vec::new();
+        }
+
+        let mut sorted_cells: Vec<CellId> = formula_cells.iter().copied().collect();
+        sorted_cells.sort_by(|a, b| {
+            a.sheet.raw().cmp(&b.sheet.raw())
+                .then(a.row.cmp(&b.row))
+                .then(a.col.cmp(&b.col))
+        });
+
+        let mut index_counter: u32 = 0;
+        let mut stack: Vec<CellId> = Vec::new();
+        let mut on_stack: FxHashSet<CellId> = FxHashSet::default();
+        let mut indices: FxHashMap<CellId, u32> = FxHashMap::default();
+        let mut lowlinks: FxHashMap<CellId, u32> = FxHashMap::default();
+        let mut sccs: Vec<Vec<CellId>> = Vec::new();
+
+        let sorted_neighbours = |cell: CellId| -> Vec<CellId> {
+            let mut neighbours: Vec<CellId> = self.preds
+                .get(&cell)
+                .into_iter()
+                .flat_map(|s| s.iter().copied())
+                .filter(|c| formula_cells.contains(c))
+                .collect();
+            neighbours.sort_by(|a, b| {
+                a.sheet.raw().cmp(&b.sheet.raw())
+                    .then(a.row.cmp(&b.row))
+                    .then(a.col.cmp(&b.col))
+            });
+            neighbours
+        };
+
+        struct DfsFrame {
+            cell: CellId,
+            neighbours: Vec<CellId>,
+            next_idx: usize,
+        }
+
+        for &root in &sorted_cells {
+            if indices.contains_key(&root) {
+                continue;
+            }
+
+            let mut dfs_stack: Vec<DfsFrame> = Vec::new();
+
+            let idx = index_counter;
+            index_counter += 1;
+            indices.insert(root, idx);
+            lowlinks.insert(root, idx);
+            stack.push(root);
+            on_stack.insert(root);
+
+            dfs_stack.push(DfsFrame {
+                cell: root,
+                neighbours: sorted_neighbours(root),
+                next_idx: 0,
+            });
+
+            while let Some(frame) = dfs_stack.last_mut() {
+                if frame.next_idx < frame.neighbours.len() {
+                    let w = frame.neighbours[frame.next_idx];
+                    frame.next_idx += 1;
+
+                    if !indices.contains_key(&w) {
+                        let w_idx = index_counter;
+                        index_counter += 1;
+                        indices.insert(w, w_idx);
+                        lowlinks.insert(w, w_idx);
+                        stack.push(w);
+                        on_stack.insert(w);
+
+                        dfs_stack.push(DfsFrame {
+                            cell: w,
+                            neighbours: sorted_neighbours(w),
+                            next_idx: 0,
+                        });
+                    } else if on_stack.contains(&w) {
+                        let w_idx = indices[&w];
+                        let v_low = lowlinks.get_mut(&frame.cell).unwrap();
+                        if w_idx < *v_low {
+                            *v_low = w_idx;
+                        }
+                    }
+                } else {
+                    let finished = dfs_stack.pop().unwrap();
+                    let v = finished.cell;
+                    let v_low = lowlinks[&v];
+                    let v_idx = indices[&v];
+
+                    if let Some(parent) = dfs_stack.last() {
+                        let parent_low = lowlinks.get_mut(&parent.cell).unwrap();
+                        if v_low < *parent_low {
+                            *parent_low = v_low;
+                        }
+                    }
+
+                    if v_low == v_idx {
+                        let mut scc = Vec::new();
+                        loop {
+                            let w = stack.pop().unwrap();
+                            on_stack.remove(&w);
+                            scc.push(w);
+                            if w == v {
+                                break;
+                            }
+                        }
+
+                        let is_cycle = if scc.len() > 1 {
+                            true
+                        } else {
+                            // size == 1: only a cycle if self-loop
+                            let cell = scc[0];
+                            self.preds.get(&cell).map_or(false, |p| p.contains(&cell))
+                        };
+
+                        if is_cycle {
+                            scc.sort_by(|a, b| {
+                                a.sheet.raw().cmp(&b.sheet.raw())
+                                    .then(a.row.cmp(&b.row))
+                                    .then(a.col.cmp(&b.col))
+                            });
+                            sccs.push(scc);
+                        }
+                    }
+                }
+            }
+        }
+
+        sccs
+    }
+
     // =========================================================================
     // Topological Ordering + Cycle Detection (Phase 1.2)
     // =========================================================================

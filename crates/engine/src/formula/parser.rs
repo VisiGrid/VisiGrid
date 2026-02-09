@@ -44,6 +44,8 @@ pub enum Expr<S> {
     },
     /// Named range reference (resolved at evaluation time)
     NamedRange(String),
+    /// Empty/omitted argument (e.g. the trailing slot in `=IF(a,b,)`)
+    Empty,
 }
 
 /// Parser output: sheet references are unresolved names
@@ -210,6 +212,32 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
                         ident.push(ch);
                         chars.next();
+                    } else {
+                        break;
+                    }
+                }
+
+                // Dotted function names (e.g. STDEV.P, NORM.S.DIST)
+                // Consume .alpha segments while the ident is not a cell ref
+                while chars.peek() == Some(&'.') {
+                    // Peek past the dot to see if a letter follows
+                    let mut lookahead = chars.clone();
+                    lookahead.next(); // skip '.'
+                    if let Some(&ch) = lookahead.peek() {
+                        if ch.is_ascii_alphabetic() {
+                            chars.next(); // consume '.'
+                            ident.push('.');
+                            while let Some(&ch) = chars.peek() {
+                                if ch.is_ascii_alphabetic() {
+                                    ident.push(ch);
+                                    chars.next();
+                                } else {
+                                    break;
+                                }
+                            }
+                        } else {
+                            break;
+                        }
                     } else {
                         break;
                     }
@@ -611,6 +639,16 @@ fn parse_function_args(tokens: &[Token], pos: usize) -> Result<(Vec<ParsedExpr>,
     }
 
     loop {
+        // Empty argument: next token is , or ) immediately
+        if pos < tokens.len() && matches!(&tokens[pos], Token::Comma | Token::RParen) {
+            args.push(Expr::Empty);
+            match &tokens[pos] {
+                Token::RParen => return Ok((args, pos + 1)),
+                Token::Comma => { pos += 1; continue; }
+                _ => unreachable!(),
+            }
+        }
+
         let (arg, new_pos) = parse_comparison(tokens, pos)?;
         args.push(arg);
         pos = new_pos;
@@ -641,6 +679,7 @@ where
     F: Fn(&str) -> Option<SheetId> + Copy,
 {
     match expr {
+        Expr::Empty => Expr::Empty,
         Expr::Number(n) => Expr::Number(*n),
         Expr::Text(s) => Expr::Text(s.clone()),
         Expr::Boolean(b) => Expr::Boolean(*b),
@@ -732,6 +771,7 @@ where
     F: Fn(SheetId) -> Option<String> + Copy,
 {
     match expr {
+        Expr::Empty => String::new(),
         Expr::Number(n) => {
             if n.fract() == 0.0 && n.abs() < 1e15 {
                 format!("{}", *n as i64)
@@ -863,7 +903,7 @@ pub fn extract_cell_refs<S>(expr: &Expr<S>) -> Vec<(usize, usize)> {
 
 fn collect_cell_refs<S>(expr: &Expr<S>, refs: &mut Vec<(usize, usize)>) {
     match expr {
-        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::NamedRange(_) => {
+        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::NamedRange(_) | Expr::Empty => {
             // NamedRange refs are resolved at evaluation time with access to NamedRangeStore
         }
         Expr::CellRef { col, row, .. } => {
@@ -1207,6 +1247,143 @@ mod tests {
         let expr = parse("=+H14*12").unwrap();
         match &expr {
             Expr::BinaryOp { op: Op::Mul, .. } => {}
+            _ => panic!("Expected Mul op, got {:?}", expr),
+        }
+    }
+
+    // ── Empty argument tests ─────────────────────────────────────
+
+    fn extract_func_args(expr: &ParsedExpr) -> &[ParsedExpr] {
+        match expr {
+            Expr::Function { args, .. } => args,
+            _ => panic!("Expected Function, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_empty_arg_trailing() {
+        // =IF(A1,B1,) → [CellRef, CellRef, Empty]
+        let expr = parse("=IF(A1,B1,)").unwrap();
+        let args = extract_func_args(&expr);
+        assert_eq!(args.len(), 3);
+        assert!(matches!(&args[0], Expr::CellRef { .. }));
+        assert!(matches!(&args[1], Expr::CellRef { .. }));
+        assert!(matches!(&args[2], Expr::Empty));
+    }
+
+    #[test]
+    fn test_empty_arg_middle() {
+        // =IF(A1,,C1) → [CellRef, Empty, CellRef]
+        let expr = parse("=IF(A1,,C1)").unwrap();
+        let args = extract_func_args(&expr);
+        assert_eq!(args.len(), 3);
+        assert!(matches!(&args[0], Expr::CellRef { .. }));
+        assert!(matches!(&args[1], Expr::Empty));
+        assert!(matches!(&args[2], Expr::CellRef { .. }));
+    }
+
+    #[test]
+    fn test_empty_arg_leading() {
+        // =IF(,A1,B1) → [Empty, CellRef, CellRef]
+        let expr = parse("=IF(,A1,B1)").unwrap();
+        let args = extract_func_args(&expr);
+        assert_eq!(args.len(), 3);
+        assert!(matches!(&args[0], Expr::Empty));
+        assert!(matches!(&args[1], Expr::CellRef { .. }));
+        assert!(matches!(&args[2], Expr::CellRef { .. }));
+    }
+
+    #[test]
+    fn test_empty_arg_all_empty() {
+        // =FUNC(,,) → [Empty, Empty, Empty]
+        let expr = parse("=FUNC(,,)").unwrap();
+        let args = extract_func_args(&expr);
+        assert_eq!(args.len(), 3);
+        assert!(args.iter().all(|a| matches!(a, Expr::Empty)));
+    }
+
+    #[test]
+    fn test_empty_arg_no_regression_sum_empty() {
+        // =SUM() → [] (no args, not [Empty])
+        let expr = parse("=SUM()").unwrap();
+        let args = extract_func_args(&expr);
+        assert_eq!(args.len(), 0);
+    }
+
+    #[test]
+    fn test_empty_arg_real_world_pattern() {
+        // =FUNC(A1,B2,) — exact failure pattern from fcffsimpleginzu.xlsx import
+        let expr = parse("=FUNC(A1,B2,)").unwrap();
+        let args = extract_func_args(&expr);
+        assert_eq!(args.len(), 3);
+        assert!(matches!(&args[0], Expr::CellRef { .. }));
+        assert!(matches!(&args[1], Expr::CellRef { .. }));
+        assert!(matches!(&args[2], Expr::Empty));
+    }
+
+    #[test]
+    fn test_empty_arg_roundtrip() {
+        // =IF(A1,B1,) roundtrip through format_expr
+        let parsed = parse("=IF(A1,B1,)").unwrap();
+        let bound = bind_expr_same_sheet(&parsed);
+        let formatted = format_expr(&bound, |_| None);
+        assert_eq!(formatted, "=IF(A1,B1,)");
+    }
+
+    // ── Dotted function name tests ───────────────────────────────
+
+    #[test]
+    fn test_dotted_function_name() {
+        // =NORM.S.DIST(0,TRUE) should parse as a single function
+        let expr = parse("=NORM.S.DIST(0,TRUE)").unwrap();
+        match &expr {
+            Expr::Function { name, args } => {
+                assert_eq!(name, "NORM.S.DIST");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected Function, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_dotted_function_stdev_p() {
+        let expr = parse("=STDEV.P(A1:A10)").unwrap();
+        match &expr {
+            Expr::Function { name, .. } => assert_eq!(name, "STDEV.P"),
+            _ => panic!("Expected Function, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_decimal_numbers_not_broken() {
+        // Dot in numbers must still work
+        let expr = parse("=1.23+4.56").unwrap();
+        match &expr {
+            Expr::BinaryOp { op: Op::Add, left, right } => {
+                match left.as_ref() {
+                    Expr::Number(n) => assert!((n - 1.23).abs() < 1e-10),
+                    _ => panic!("Expected Number on left"),
+                }
+                match right.as_ref() {
+                    Expr::Number(n) => assert!((n - 4.56).abs() < 1e-10),
+                    _ => panic!("Expected Number on right"),
+                }
+            }
+            _ => panic!("Expected Add op, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_decimal_multiply_not_broken() {
+        // =A1*0.5 must still work
+        let expr = parse("=A1*0.5").unwrap();
+        match &expr {
+            Expr::BinaryOp { op: Op::Mul, right, .. } => {
+                match right.as_ref() {
+                    Expr::Number(n) => assert!((n - 0.5).abs() < 1e-10),
+                    _ => panic!("Expected Number(0.5) on right"),
+                }
+            }
             _ => panic!("Expected Mul op, got {:?}", expr),
         }
     }

@@ -58,7 +58,8 @@ fn walk_expr<S, F: FnMut(&str)>(expr: &Expr<S>, visitor: &mut F) {
         Expr::Boolean(_) |
         Expr::CellRef { .. } |
         Expr::Range { .. } |
-        Expr::NamedRange(_) => {}
+        Expr::NamedRange(_) |
+        Expr::Empty => {}
     }
 }
 

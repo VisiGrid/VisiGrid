@@ -19,7 +19,7 @@ use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
 /// hasn't been modified since it was stamped/approved.
 #[derive(Debug, Clone, Default)]
 pub struct SemanticVerification {
-    /// Expected semantic fingerprint (e.g., "v1:186:abc123...")
+    /// Expected semantic fingerprint (e.g., "v2:186:abc123...")
     pub fingerprint: Option<String>,
     /// Optional label (e.g., "MSFT SEC v1")
     pub label: Option<String>,
@@ -28,7 +28,8 @@ pub struct SemanticVerification {
 }
 
 /// Fingerprint format version. Increment on breaking changes to fingerprint computation.
-const FINGERPRINT_VERSION: u32 = 1;
+/// v2: includes iteration settings (enabled, max_iters, tolerance).
+const FINGERPRINT_VERSION: u32 = 2;
 
 /// Compute semantic fingerprint of a workbook.
 ///
@@ -45,6 +46,16 @@ const FINGERPRINT_VERSION: u32 = 1;
 pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
     let mut hasher = blake3::Hasher::new();
     let mut op_count = 0;
+
+    // Include iteration settings — these affect computed results
+    let iter_settings = format!(
+        "iter:{}:{}:{}",
+        workbook.iterative_enabled(),
+        workbook.iterative_max_iters(),
+        workbook.iterative_tolerance(),
+    );
+    hasher.update(iter_settings.as_bytes());
+    hasher.update(b"\n");
 
     // Iterate all sheets
     for sheet_idx in 0..workbook.sheet_count() {
@@ -2043,7 +2054,7 @@ mod tests {
         wb.active_sheet_mut().set_value(0, 0, "test");
 
         let fp = compute_semantic_fingerprint(&wb);
-        assert!(fp.starts_with("v1:"), "Fingerprint should start with version prefix, got: {}", fp);
+        assert!(fp.starts_with("v2:"), "Fingerprint should start with version prefix, got: {}", fp);
     }
 
     #[test]
@@ -2055,8 +2066,34 @@ mod tests {
         wb.active_sheet_mut().set_value(0, 2, "c");
 
         let fp = compute_semantic_fingerprint(&wb);
-        assert!(fp.starts_with("v1:3:"),
+        assert!(fp.starts_with("v2:3:"),
             "Fingerprint should show 3 operations, got: {}", fp);
+    }
+
+    #[test]
+    fn test_fingerprint_changes_with_iteration_settings() {
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "test");
+
+        let fp_default = compute_semantic_fingerprint(&wb);
+
+        // Enable iteration — fingerprint must change
+        wb.set_iterative_enabled(true);
+        let fp_enabled = compute_semantic_fingerprint(&wb);
+        assert_ne!(fp_default, fp_enabled,
+            "Fingerprint must change when iteration is enabled");
+
+        // Change max_iters — fingerprint must change
+        wb.set_iterative_max_iters(50);
+        let fp_max_iters = compute_semantic_fingerprint(&wb);
+        assert_ne!(fp_enabled, fp_max_iters,
+            "Fingerprint must change when max_iters changes");
+
+        // Change tolerance — fingerprint must change
+        wb.set_iterative_tolerance(0.001);
+        let fp_tolerance = compute_semantic_fingerprint(&wb);
+        assert_ne!(fp_max_iters, fp_tolerance,
+            "Fingerprint must change when tolerance changes");
     }
 
     #[test]
