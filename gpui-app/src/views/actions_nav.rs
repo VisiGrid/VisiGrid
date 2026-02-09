@@ -242,6 +242,9 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &JumpUp, _, cx| {
             if this.mode.is_formula() {
+                if this.formula_is_caret_mode() {
+                    return; // no-op: single-line editor
+                }
                 this.formula_jump_ref(-1, 0, cx);
             } else {
                 this.jump_selection(-1, 0, cx);
@@ -249,6 +252,9 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &JumpDown, _, cx| {
             if this.mode.is_formula() {
+                if this.formula_is_caret_mode() {
+                    return; // no-op: single-line editor
+                }
                 this.formula_jump_ref(1, 0, cx);
             } else {
                 this.jump_selection(1, 0, cx);
@@ -256,7 +262,11 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &JumpLeft, window, cx| {
             if this.mode.is_formula() {
-                this.formula_jump_ref(0, -1, cx);
+                if this.formula_is_caret_mode() {
+                    this.move_edit_cursor_word_left(cx);
+                } else {
+                    this.formula_jump_ref(0, -1, cx);
+                }
             } else if this.mode == Mode::Edit {
                 this.move_edit_cursor_word_left(cx);
             } else {
@@ -266,7 +276,11 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &JumpRight, window, cx| {
             if this.mode.is_formula() {
-                this.formula_jump_ref(0, 1, cx);
+                if this.formula_is_caret_mode() {
+                    this.move_edit_cursor_word_right(cx);
+                } else {
+                    this.formula_jump_ref(0, 1, cx);
+                }
             } else if this.mode == Mode::Edit {
                 this.move_edit_cursor_word_right(cx);
             } else {
@@ -311,6 +325,9 @@ pub(crate) fn bind(
         // Selection extension (formula mode: extend range reference)
         .on_action(cx.listener(|this, _: &ExtendUp, _, cx| {
             if this.mode.is_formula() {
+                if this.formula_is_caret_mode() {
+                    return; // no-op: single-line editor
+                }
                 this.formula_extend_ref(-1, 0, cx);
             } else {
                 this.extend_selection(-1, 0, cx);
@@ -318,6 +335,9 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ExtendDown, _, cx| {
             if this.mode.is_formula() {
+                if this.formula_is_caret_mode() {
+                    return; // no-op: single-line editor
+                }
                 this.formula_extend_ref(1, 0, cx);
             } else {
                 this.extend_selection(1, 0, cx);
@@ -325,7 +345,11 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ExtendLeft, window, cx| {
             if this.mode.is_formula() {
-                this.formula_extend_ref(0, -1, cx);
+                if this.formula_is_caret_mode() {
+                    this.select_edit_cursor_left(cx);
+                } else {
+                    this.formula_extend_ref(0, -1, cx);
+                }
             } else if this.mode == Mode::Edit {
                 this.select_edit_cursor_left(cx);
             } else {
@@ -335,7 +359,11 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ExtendRight, window, cx| {
             if this.mode.is_formula() {
-                this.formula_extend_ref(0, 1, cx);
+                if this.formula_is_caret_mode() {
+                    this.select_edit_cursor_right(cx);
+                } else {
+                    this.formula_extend_ref(0, 1, cx);
+                }
             } else if this.mode == Mode::Edit {
                 this.select_edit_cursor_right(cx);
             } else {
@@ -345,6 +373,9 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpUp, _, cx| {
             if this.mode.is_formula() {
+                if this.formula_is_caret_mode() {
+                    return; // no-op: single-line editor
+                }
                 this.formula_extend_jump_ref(-1, 0, cx);
             } else {
                 this.extend_jump_selection(-1, 0, cx);
@@ -352,6 +383,9 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpDown, _, cx| {
             if this.mode.is_formula() {
+                if this.formula_is_caret_mode() {
+                    return; // no-op: single-line editor
+                }
                 this.formula_extend_jump_ref(1, 0, cx);
             } else {
                 this.extend_jump_selection(1, 0, cx);
@@ -359,7 +393,11 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpLeft, window, cx| {
             if this.mode.is_formula() {
-                this.formula_extend_jump_ref(0, -1, cx);
+                if this.formula_is_caret_mode() {
+                    this.select_edit_cursor_word_left(cx);
+                } else {
+                    this.formula_extend_jump_ref(0, -1, cx);
+                }
             } else if this.mode == Mode::Edit {
                 this.select_edit_cursor_word_left(cx);
             } else {
@@ -369,7 +407,11 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpRight, window, cx| {
             if this.mode.is_formula() {
-                this.formula_extend_jump_ref(0, 1, cx);
+                if this.formula_is_caret_mode() {
+                    this.select_edit_cursor_word_right(cx);
+                } else {
+                    this.formula_extend_jump_ref(0, 1, cx);
+                }
             } else if this.mode == Mode::Edit {
                 this.select_edit_cursor_word_right(cx);
             } else {

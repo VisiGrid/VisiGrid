@@ -41,6 +41,8 @@ pub struct InternalClipboard {
     /// relative to the clipboard's top-left (0,0).
     /// Empty when copied from a filtered view.
     pub merges: Vec<MergedRegion>,
+    /// When this clipboard entry was created (for time-bounded Wayland fallback)
+    pub created_at: std::time::Instant,
 }
 
 impl Spreadsheet {
@@ -161,6 +163,7 @@ impl Spreadsheet {
             source: (source_row, min_col),
             id,
             merges,
+            created_at: std::time::Instant::now(),
         });
         // Write clipboard with metadata ID for reliable internal detection
         let id_json = format!("\"{}\"", id);
@@ -323,6 +326,16 @@ impl Spreadsheet {
             metadata.as_deref(),
         );
 
+        #[cfg(debug_assertions)]
+        {
+            let text_match = system_text.as_deref().map_or(false, |st| {
+                self.internal_clipboard.as_ref().map_or(false, |ic| {
+                    Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv)
+                })
+            });
+            eprintln!("[paste] is_internal={}, metadata={:?}, text_match={}", is_internal, metadata.is_some(), text_match);
+        }
+
         // Get the text to paste (prefer system clipboard for interop)
         let text = system_text.or_else(|| self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()));
 
@@ -340,6 +353,17 @@ impl Spreadsheet {
                 let single_value = lines[0].to_string();
                 let primary_cell = self.view_state.selected;
                 let primary_data_row = self.row_view.view_to_data(primary_cell.0);
+
+                // Source cell position for formula rebasing (delta = target - source)
+                let (src_data_row, src_col) = if is_internal {
+                    if let Some(ic) = &self.internal_clipboard {
+                        (self.row_view.view_to_data(ic.source.0) as i32, ic.source.1 as i32)
+                    } else {
+                        (primary_data_row as i32, primary_cell.1 as i32)
+                    }
+                } else {
+                    (primary_data_row as i32, primary_cell.1 as i32)
+                };
 
                 // Collect all target cells (view_row, col) -> (data_row, col)
                 let mut target_cells: Vec<(usize, usize)> = Vec::new();
@@ -383,10 +407,10 @@ impl Spreadsheet {
                 for (data_row, col) in &target_cells {
                     let old_value = self.sheet(cx).get_raw(*data_row, *col);
 
-                    // For formulas, shift relative references based on delta from primary cell (data coords)
+                    // For formulas, shift relative references based on delta from source cell
                     let new_value = if is_formula && is_internal {
-                        let delta_row = *data_row as i32 - primary_data_row as i32;
-                        let delta_col = *col as i32 - primary_cell.1 as i32;
+                        let delta_row = *data_row as i32 - src_data_row;
+                        let delta_col = *col as i32 - src_col;
                         self.adjust_formula_refs(&single_value, delta_row, delta_col)
                     } else {
                         single_value.clone()
@@ -506,10 +530,9 @@ impl Spreadsheet {
                     if target_data_row < NUM_ROWS && col < NUM_COLS {
                         let old_value = self.sheet(cx).get_raw(target_data_row, col);
 
-                        // Adjust formula references based on data row delta
-                        let formula_delta_row = target_data_row as i32 - data_start_row as i32;
+                        // Adjust formula references using constant delta from source to destination
                         let new_value = if value.starts_with('=') && is_internal {
-                            self.adjust_formula_refs(value, delta_row + formula_delta_row, delta_col + col_offset as i32)
+                            self.adjust_formula_refs(value, delta_row, delta_col)
                         } else {
                             value.to_string()
                         };
@@ -663,8 +686,9 @@ impl Spreadsheet {
     ///
     /// Returns true (internal paste) when:
     /// 1. Clipboard metadata matches internal clipboard ID (reliable cross-platform)
-    /// 2. System clipboard text matches internal clipboard text (fallback when metadata unavailable)
-    /// 3. System clipboard is unavailable but internal clipboard exists (Wayland failure mode)
+    /// 2. System clipboard text matches internal clipboard text (fallback when metadata unavailable
+    ///    or when metadata doesn't match but text does — Wayland may garble metadata)
+    /// 3. System clipboard is unavailable AND copy happened recently (< 2s, Wayland failure mode)
     ///
     /// Returns false (external paste) when:
     /// - No internal clipboard exists
@@ -682,19 +706,27 @@ impl Spreadsheet {
 
         let expected_id = format!("\"{}\"", ic.id);
 
-        // Primary: metadata ID match (reliable when available)
+        // Metadata match: definitive yes
         if let Some(m) = metadata {
-            return m == expected_id;
+            if m == expected_id {
+                return true;
+            }
+            // Metadata exists but doesn't match — likely external.
+            // Still check text as defensive fallback (metadata may be garbled on Wayland).
+            if let Some(st) = system_text {
+                return Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv);
+            }
+            return false;
         }
 
-        // Secondary: text comparison fallback (when metadata unavailable)
+        // No metadata: fall back to text comparison
         if let Some(st) = system_text {
             return Self::normalize_clipboard_text(st) == Self::normalize_clipboard_text(&ic.raw_tsv);
         }
 
-        // Tertiary: system clipboard unavailable (Wayland failure mode)
-        // We have internal clipboard data and will use it, so treat as internal
-        true
+        // System clipboard completely unavailable (Wayland failure mode).
+        // Only assume internal if the copy happened recently (< 2s).
+        ic.created_at.elapsed() < std::time::Duration::from_secs(2)
     }
 
     /// Paste clipboard text into the edit buffer (when in editing mode)
@@ -1142,10 +1174,9 @@ impl Spreadsheet {
                 if target_data_row < NUM_ROWS && col < NUM_COLS {
                     let old_value = self.sheet(cx).get_raw(target_data_row, col);
 
-                    // Adjust formula references
-                    let formula_delta_row = target_data_row as i32 - data_start_row as i32;
+                    // Adjust formula references using constant delta from source to destination
                     let new_value = if value.starts_with('=') {
-                        self.adjust_formula_refs(value, delta_row + formula_delta_row, delta_col + col_offset as i32)
+                        self.adjust_formula_refs(value, delta_row, delta_col)
                     } else {
                         value.to_string()
                     };
