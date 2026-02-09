@@ -63,12 +63,13 @@ pub fn load_csv(
     max_rows: usize,
     width_scan_rows: usize,
 ) -> Result<PeekData, String> {
+    let content = visigrid_io::csv::read_file_as_utf8(path)
+        .map_err(|e| format!("failed to open {}: {}", path.display(), e))?;
     let mut rdr = csv::ReaderBuilder::new()
         .delimiter(delimiter)
         .has_headers(false)
         .flexible(true)
-        .from_path(path)
-        .map_err(|e| format!("failed to open {}: {}", path.display(), e))?;
+        .from_reader(content.as_bytes());
 
     let mut all_rows: Vec<Vec<String>> = Vec::new();
     let mut max_cols: usize = 0;

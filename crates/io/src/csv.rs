@@ -69,20 +69,21 @@ fn sniff_delimiter(content: &str) -> u8 {
 }
 
 /// Read file and convert to UTF-8 if needed (handles Windows-1252, Latin-1, etc.)
-fn read_file_as_utf8(path: &Path) -> Result<String, String> {
+pub fn read_file_as_utf8(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
 
-    // Try UTF-8 first
-    if let Ok(s) = String::from_utf8(bytes.clone()) {
-        return Ok(s);
+    // Try UTF-8 first; on failure, recover the buffer from the error
+    match String::from_utf8(bytes) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            let bytes = e.into_bytes();
+            // Fall back to Windows-1252 (common for Excel-exported CSVs)
+            let (decoded, _, _) = encoding_rs::WINDOWS_1252.decode(&bytes);
+            Ok(decoded.into_owned())
+        }
     }
-
-    // Fall back to Windows-1252 (common for Excel-exported CSVs)
-    // This handles most non-UTF-8 files from Windows/Excel
-    let (decoded, _, _) = encoding_rs::WINDOWS_1252.decode(&bytes);
-    Ok(decoded.into_owned())
 }
 
 fn import_from_string(content: &str, delimiter: u8) -> Result<Sheet, String> {

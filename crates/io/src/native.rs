@@ -1,5 +1,6 @@
 // Native .sheet format using SQLite
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, params};
@@ -160,6 +161,20 @@ CREATE TABLE IF NOT EXISTS hub_link (
     api_base TEXT DEFAULT 'https://api.visihub.app'
 );
 
+CREATE TABLE IF NOT EXISTS col_widths (
+    sheet_idx INTEGER NOT NULL,
+    col INTEGER NOT NULL,
+    width REAL NOT NULL,
+    PRIMARY KEY (sheet_idx, col)
+);
+
+CREATE TABLE IF NOT EXISTS row_heights (
+    sheet_idx INTEGER NOT NULL,
+    row INTEGER NOT NULL,
+    height REAL NOT NULL,
+    PRIMARY KEY (sheet_idx, row)
+);
+
 -- Semantic metadata for cells/ranges (affects fingerprint, unlike style)
 -- target: "A1" (cell), "A1:B10" (range), "COL:C" (column), "ROW:5" (row)
 CREATE TABLE IF NOT EXISTS cell_metadata (
@@ -250,7 +265,7 @@ fn border_from_db(style: i32, color: Option<i64>) -> CellBorder {
 }
 
 /// Current schema version. Increment for each migration.
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 /// Run schema migrations for existing databases.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -293,6 +308,24 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE cells ADD COLUMN fmt_font_color INTEGER;
              ALTER TABLE cells ADD COLUMN fmt_background_color INTEGER;
              PRAGMA user_version = 5;"
+        )?;
+    }
+
+    if version < 6 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS col_widths (
+                sheet_idx INTEGER NOT NULL,
+                col INTEGER NOT NULL,
+                width REAL NOT NULL,
+                PRIMARY KEY (sheet_idx, col)
+            );
+            CREATE TABLE IF NOT EXISTS row_heights (
+                sheet_idx INTEGER NOT NULL,
+                row INTEGER NOT NULL,
+                height REAL NOT NULL,
+                PRIMARY KEY (sheet_idx, row)
+            );
+            PRAGMA user_version = 6;"
         )?;
     }
 
@@ -1435,6 +1468,93 @@ pub fn delete_hub_link(path: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Layout data (column widths and row heights) keyed by sheet index.
+pub struct SheetLayout {
+    /// sheet_idx -> (col -> width_px)
+    pub col_widths: HashMap<usize, HashMap<usize, f32>>,
+    /// sheet_idx -> (row -> height_px)
+    pub row_heights: HashMap<usize, HashMap<usize, f32>>,
+}
+
+/// Save column widths and row heights into an existing .sheet file.
+/// Called after save_workbook() which creates the file fresh with the schema.
+pub fn save_layout(path: &Path, layout: &SheetLayout) -> Result<(), String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Tables already exist (created by SCHEMA in save_workbook), just insert rows
+    let mut col_stmt = conn.prepare(
+        "INSERT INTO col_widths (sheet_idx, col, width) VALUES (?1, ?2, ?3)"
+    ).map_err(|e| e.to_string())?;
+
+    for (sheet_idx, widths) in &layout.col_widths {
+        for (col, width) in widths {
+            col_stmt.execute(params![*sheet_idx as i64, *col as i64, *width as f64])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    let mut row_stmt = conn.prepare(
+        "INSERT INTO row_heights (sheet_idx, row, height) VALUES (?1, ?2, ?3)"
+    ).map_err(|e| e.to_string())?;
+
+    for (sheet_idx, heights) in &layout.row_heights {
+        for (row, height) in heights {
+            row_stmt.execute(params![*sheet_idx as i64, *row as i64, *height as f64])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Load column widths and row heights from a .sheet file.
+/// Returns empty maps if the tables don't exist (older files before migration).
+pub fn load_layout(path: &Path) -> SheetLayout {
+    let mut layout = SheetLayout {
+        col_widths: HashMap::new(),
+        row_heights: HashMap::new(),
+    };
+
+    let conn = match Connection::open(path) {
+        Ok(c) => c,
+        Err(_) => return layout,
+    };
+
+    // Load column widths (table may not exist in old files)
+    if let Ok(mut stmt) = conn.prepare("SELECT sheet_idx, col, width FROM col_widths") {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, f64>(2)? as f32,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (sheet_idx, col, width) = row;
+                layout.col_widths.entry(sheet_idx).or_default().insert(col, width);
+            }
+        }
+    }
+
+    // Load row heights
+    if let Ok(mut stmt) = conn.prepare("SELECT sheet_idx, row, height FROM row_heights") {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, f64>(2)? as f32,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (sheet_idx, r, height) = row;
+                layout.row_heights.entry(sheet_idx).or_default().insert(r, height);
+            }
+        }
+    }
+
+    layout
 }
 
 #[cfg(test)]

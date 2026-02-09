@@ -85,13 +85,15 @@ impl Spreadsheet {
             return;
         }
 
-        // Non-Excel files: synchronous load (fast, no need for background)
+        // CSV/TSV: background import (large files can freeze the UI)
+        if matches!(ext_lower.as_str(), "csv" | "tsv") {
+            self.start_csv_import(path, &ext_lower, cx);
+            return;
+        }
+
+        // Remaining formats: synchronous load
         let load_start = Instant::now();
         let result: Result<Workbook, String> = match ext_lower.as_str() {
-            "csv" => csv::import(path)
-                .map(|sheet| Workbook::from_sheets(vec![sheet], 0)),
-            "tsv" => csv::import_tsv(path)
-                .map(|sheet| Workbook::from_sheets(vec![sheet], 0)),
             "sheet" => native::load_workbook(path),
             _ => Err(format!("Unknown file type: {}", extension)),
         };
@@ -114,6 +116,15 @@ impl Spreadsheet {
                 self.import_source_dir = None;
                 // Load document settings from sidecar file
                 self.doc_settings = load_doc_settings(path);
+
+                // Load column widths and row heights for .sheet files
+                if ext_lower == "sheet" {
+                    let layout = native::load_layout(path);
+                    self.apply_sheet_layout(layout, cx);
+                } else {
+                    self.col_widths.clear();
+                    self.row_heights.clear();
+                }
 
                 // Load semantic verification info for .sheet files
                 if extension == "sheet" {
@@ -341,6 +352,119 @@ impl Spreadsheet {
                         this.import_filename = None;
                         this.import_source_dir = None;
                         this.status_message = Some(format!("Import failed: {}", e));
+                    }
+                }
+
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Start background CSV/TSV import with delayed overlay
+    fn start_csv_import(&mut self, path: &PathBuf, ext: &str, cx: &mut Context<Self>) {
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "file".to_string());
+
+        // Set up import state
+        self.import_in_progress = true;
+        self.import_overlay_visible = false;
+        self.import_started_at = Some(Instant::now());
+        self.import_filename = Some(filename.clone());
+        self.status_message = Some(format!("Importing {}...", filename));
+
+        let path_for_import = path.clone();
+        let path_for_recent = path.clone();
+        let filename_for_completion = filename.clone();
+        let is_tsv = ext == "tsv";
+
+        cx.notify();
+
+        // Task A: Delayed overlay trigger
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(OVERLAY_DELAY_MS)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.import_in_progress {
+                    this.import_overlay_visible = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+
+        // Task B: Actual import (runs in background)
+        cx.spawn(async move |this, cx| {
+            let import_result = cx.background_executor()
+                .spawn(async move {
+                    let sheet = if is_tsv {
+                        csv::import_tsv(&path_for_import)
+                    } else {
+                        csv::import(&path_for_import)
+                    }?;
+                    let mut workbook = Workbook::from_sheets(vec![sheet], 0);
+                    workbook.rebuild_dep_graph();
+                    workbook.recompute_full_ordered();
+                    Ok::<Workbook, String>(workbook)
+                })
+                .await;
+
+            // Update UI on main thread
+            let _ = this.update(cx, |this, cx| {
+                this.import_in_progress = false;
+                this.import_overlay_visible = false;
+
+                let duration_ms = this.import_started_at
+                    .map(|t| t.elapsed().as_millis())
+                    .unwrap_or(0);
+
+                match import_result {
+                    Ok(workbook) => {
+                        this.workbook = cx.new(|_| workbook);
+                        this.update_cached_sheet_id(cx);
+                        this.debug_assert_sheet_cache_sync(cx);
+                        this.base_workbook = this.wb(cx).clone();
+                        this.rewind_preview = crate::app::RewindPreviewState::Off;
+                        this.import_result = None;
+                        this.import_filename = Some(filename_for_completion.clone());
+                        this.import_source_dir = None;
+                        this.doc_settings = DocumentSettings::default();
+                        this.col_widths.clear();
+                        this.row_heights.clear();
+                        this.view_state.selected = (0, 0);
+                        this.view_state.selection_end = None;
+                        this.view_state.scroll_row = 0;
+                        this.view_state.scroll_col = 0;
+                        this.history.clear();
+                        this.bump_cells_rev();
+                        this.add_recent_file(&path_for_recent);
+
+                        this.finalize_load(&path_for_recent);
+                        this.request_title_refresh(cx);
+
+                        // Clear hub link (CSV has no hub metadata)
+                        this.hub_link = None;
+                        this.hub_status = crate::hub::HubStatus::Unlinked;
+                        this.cell_metadata.clear();
+
+                        // Update session with new file path
+                        this.update_session_cached(cx);
+
+                        let duration_str = if duration_ms >= 1000 {
+                            format!("{:.2}s", duration_ms as f64 / 1000.0)
+                        } else {
+                            format!("{}ms", duration_ms)
+                        };
+                        this.status_message = Some(
+                            format!("Opened {} in {}", filename_for_completion, duration_str)
+                        );
+                    }
+                    Err(e) => {
+                        this.import_result = None;
+                        this.import_filename = None;
+                        this.import_source_dir = None;
+                        this.status_message = Some(format!("Error opening file: {}", e));
                     }
                 }
 
@@ -859,6 +983,14 @@ impl Spreadsheet {
 
         match result {
             Ok(()) => {
+                // Save column widths and row heights for .sheet files
+                if extension.to_lowercase() != "csv" {
+                    let layout = self.build_sheet_layout(cx);
+                    if let Err(e) = native::save_layout(path, &layout) {
+                        eprintln!("Warning: failed to save layout: {}", e);
+                    }
+                }
+
                 // Update document identity (handles current_file, is_modified, save_point)
                 self.finalize_save(path);
                 self.request_title_refresh(cx);
@@ -1124,5 +1256,54 @@ impl Spreadsheet {
 
         // Limit size
         self.recent_files.truncate(MAX_RECENT);
+    }
+
+    /// Build a SheetLayout from the app's col_widths/row_heights (SheetId-keyed)
+    /// mapped to sheet_idx for database storage.
+    fn build_sheet_layout(&self, cx: &App) -> native::SheetLayout {
+        let mut layout = native::SheetLayout {
+            col_widths: HashMap::new(),
+            row_heights: HashMap::new(),
+        };
+
+        let sheets = self.wb(cx).sheets();
+        for (idx, sheet) in sheets.iter().enumerate() {
+            if let Some(widths) = self.col_widths.get(&sheet.id) {
+                if !widths.is_empty() {
+                    layout.col_widths.insert(idx, widths.clone());
+                }
+            }
+            if let Some(heights) = self.row_heights.get(&sheet.id) {
+                if !heights.is_empty() {
+                    layout.row_heights.insert(idx, heights.clone());
+                }
+            }
+        }
+
+        layout
+    }
+
+    /// Apply a loaded SheetLayout (sheet_idx-keyed) to the app's col_widths/row_heights
+    /// by mapping sheet_idx back to SheetId.
+    fn apply_sheet_layout(&mut self, layout: native::SheetLayout, cx: &App) {
+        // Collect sheet IDs first to avoid borrow conflict
+        let sheet_ids: Vec<(usize, visigrid_engine::sheet::SheetId)> = self.wb(cx).sheets()
+            .iter().enumerate().map(|(i, s)| (i, s.id)).collect();
+
+        self.col_widths.clear();
+        self.row_heights.clear();
+
+        for (idx, sheet_id) in sheet_ids {
+            if let Some(widths) = layout.col_widths.get(&idx) {
+                if !widths.is_empty() {
+                    self.col_widths.insert(sheet_id, widths.clone());
+                }
+            }
+            if let Some(heights) = layout.row_heights.get(&idx) {
+                if !heights.is_empty() {
+                    self.row_heights.insert(sheet_id, heights.clone());
+                }
+            }
+        }
     }
 }

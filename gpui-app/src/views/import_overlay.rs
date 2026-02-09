@@ -16,7 +16,7 @@ pub fn render_import_overlay(app: &Spreadsheet, _cx: &mut Context<Spreadsheet>) 
     let text_muted = app.token(TokenKey::TextMuted);
     let accent = app.token(TokenKey::Accent);
 
-    let filename = app.import_filename.as_deref().unwrap_or("Excel file");
+    let filename = app.import_filename.as_deref().unwrap_or("file");
 
     div()
         .absolute()
