@@ -446,6 +446,7 @@ impl Spreadsheet {
     /// Move to the next sheet
     pub fn next_sheet(&mut self, cx: &mut Context<Self>) {
         if self.wb_mut(cx, |wb| wb.next_sheet()) {
+            self.update_cached_sheet_id(cx);
             self.clear_selection_state();
             cx.notify();
         }
@@ -454,6 +455,7 @@ impl Spreadsheet {
     /// Move to the previous sheet
     pub fn prev_sheet(&mut self, cx: &mut Context<Self>) {
         if self.wb_mut(cx, |wb| wb.prev_sheet()) {
+            self.update_cached_sheet_id(cx);
             self.clear_selection_state();
             cx.notify();
         }
