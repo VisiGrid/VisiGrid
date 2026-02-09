@@ -562,6 +562,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(app.ui.format_bar.number_format_menu_open, |d| {
             d.child(format_bar::render_number_format_dropdown(app, cx))
         })
+        // Cell styles quick-menu dropdown (Styles ▾ button)
+        .when(app.ui.format_bar.cell_style_menu_open, |d| {
+            d.child(format_bar::render_cell_style_dropdown(app, cx))
+        })
         // Inspector panel (right-side drawer) with click-outside-to-close backdrop.
         // Rendered BEFORE modal overlays so modals sit on top in z-order.
         .when(show_inspector, |d| {

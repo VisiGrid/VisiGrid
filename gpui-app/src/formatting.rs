@@ -534,7 +534,14 @@ impl Spreadsheet {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
-                    self.active_sheet_mut(cx, |s| s.set_cell_style(row, col, style));
+                    self.active_sheet_mut(cx, |s| {
+                        s.set_cell_style(row, col, style);
+                        // Clear manual background/font color so style colors aren't hidden
+                        if !style.is_none() {
+                            s.set_background_color(row, col, None);
+                            s.set_font_color(row, col, None);
+                        }
+                    });
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
                         patches.push(CellFormatPatch { row, col, before, after });

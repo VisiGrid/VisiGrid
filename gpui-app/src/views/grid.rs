@@ -850,12 +850,24 @@ fn render_cell(
                 );
             }
 
-            // Cell style borders: render on edges where user hasn't set a border
+            // Cell style borders: render only on perimeter edges of styled regions.
+            // Suppress borders where the neighboring cell shares the same style.
             if let Some(style_border_color) = cell_style.border {
-                let style_top = !user_top && (!cell_style.border_top_only || true);
-                let style_right = !user_right && !cell_style.border_top_only;
-                let style_bottom = !user_bottom && !cell_style.border_top_only;
-                let style_left = !user_left && !cell_style.border_top_only;
+                let cur_style = format.cell_style;
+                let neighbor_top = if data_row > 0 { app.sheet(cx).get_format(data_row - 1, col).cell_style } else { CellStyle::None };
+                let neighbor_bottom = app.sheet(cx).get_format(data_row + 1, col).cell_style;
+                let neighbor_left = if col > 0 { app.sheet(cx).get_format(data_row, col - 1).cell_style } else { CellStyle::None };
+                let neighbor_right = app.sheet(cx).get_format(data_row, col + 1).cell_style;
+
+                let on_top_edge = neighbor_top != cur_style;
+                let on_bottom_edge = neighbor_bottom != cur_style;
+                let on_left_edge = neighbor_left != cur_style;
+                let on_right_edge = neighbor_right != cur_style;
+
+                let style_top = !user_top && on_top_edge && (!cell_style.border_top_only || true);
+                let style_right = !user_right && on_right_edge && !cell_style.border_top_only;
+                let style_bottom = !user_bottom && on_bottom_edge && !cell_style.border_top_only;
+                let style_left = !user_left && on_left_edge && !cell_style.border_top_only;
                 if style_top || style_right || style_bottom || style_left {
                     c = c.child(
                         non_interactive_overlay()
@@ -1791,14 +1803,14 @@ fn resolve_cell_style(app: &Spreadsheet, style: CellStyle) -> ResolvedCellStyle 
         },
         CellStyle::Input => ResolvedCellStyle {
             fill: Some(app.token(TokenKey::CellStyleInputBg)),
-            text: None,
+            text: Some(app.token(TokenKey::CellStyleInputBorder)),
             border: Some(app.token(TokenKey::CellStyleInputBorder)),
             border_top_only: false,
             bold: false,
             italic: false,
         },
         CellStyle::Total => ResolvedCellStyle {
-            fill: None,
+            fill: Some(app.token(TokenKey::CellStyleTotalBorder).opacity(0.12)),
             text: None,
             border: Some(app.token(TokenKey::CellStyleTotalBorder)),
             border_top_only: true,

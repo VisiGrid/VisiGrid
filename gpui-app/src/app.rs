@@ -1838,13 +1838,15 @@ pub struct FormatBarState {
     pub size_replace_next: bool,
     /// Number format quick-menu dropdown (123 ▾ button).
     pub number_format_menu_open: bool,
+    /// Cell style quick-menu dropdown (Styles ▾ button).
+    pub cell_style_menu_open: bool,
 }
 
 impl FormatBarState {
     /// Returns true when the format bar owns focus (editing or dropdown open).
     /// Used to gate grid keyboard and mouse handling.
     pub fn is_active(&self, window: &Window) -> bool {
-        self.size_editing || self.size_dropdown || self.number_format_menu_open || self.size_focus.is_focused(window)
+        self.size_editing || self.size_dropdown || self.number_format_menu_open || self.cell_style_menu_open || self.size_focus.is_focused(window)
     }
 }
 
@@ -2399,6 +2401,7 @@ impl Spreadsheet {
                 size_focus: cx.focus_handle(),
                 size_replace_next: false,
                 number_format_menu_open: false,
+                cell_style_menu_open: false,
             },
             format_menu_open: false,
         };
@@ -4090,6 +4093,7 @@ impl Spreadsheet {
     /// Toggle the Format dropdown menu in the header bar.
     pub fn toggle_format_menu(&mut self, cx: &mut Context<Self>) {
         self.ui.format_menu_open = !self.ui.format_menu_open;
+        self.ui.format_bar.cell_style_menu_open = false;
         cx.notify();
     }
 

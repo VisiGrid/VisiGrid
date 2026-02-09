@@ -3,7 +3,7 @@ use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, TriState, CELL_HEIGHT};
 use crate::mode::Mode;
 use crate::theme::TokenKey;
-use visigrid_engine::cell::{Alignment, VerticalAlignment, NumberFormat};
+use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment, NumberFormat};
 
 pub const FORMAT_BAR_HEIGHT: f32 = 28.0;
 
@@ -81,6 +81,7 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
     let sort_asc_active = sort_state.map_or(false, |(col, asc)| asc && col == selected_col);
     let sort_desc_active = sort_state.map_or(false, |(col, asc)| !asc && col == selected_col);
     let number_format_menu_open = app.ui.format_bar.number_format_menu_open;
+    let cell_style_menu_open = app.ui.format_bar.cell_style_menu_open;
 
     let size_focus = app.ui.format_bar.size_focus.clone();
 
@@ -141,6 +142,10 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
         .child(render_autosum_btn(text_primary, text_muted, panel_border, cx))
         // Number Format dropdown
         .child(render_number_format_btn(text_primary, text_muted, accent, panel_border, number_format_menu_open, cx))
+        // Separator
+        .child(toolbar_separator(panel_border))
+        // Cell Styles dropdown
+        .child(render_cell_style_btn(text_primary, text_muted, accent, panel_border, cell_style_menu_open, cx))
 }
 
 // ============================================================================
@@ -1169,6 +1174,7 @@ fn render_number_format_btn(
         .hover(|s| s.bg(panel_border.opacity(0.3)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
             this.ui.format_bar.number_format_menu_open = !this.ui.format_bar.number_format_menu_open;
+            this.ui.format_bar.cell_style_menu_open = false;
             cx.notify();
         }))
         .tooltip(move |_window, cx| {
@@ -1263,6 +1269,169 @@ fn render_numfmt_item(
             cx.notify();
         }))
         .child(label)
+}
+
+/// Cell Styles dropdown button — "Styles ▾".
+fn render_cell_style_btn(
+    _text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    is_open: bool,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let btn_bg = if is_open { accent.opacity(0.15) } else { gpui::transparent_black() };
+    let btn_border = if is_open { accent.opacity(0.5) } else { panel_border };
+    let btn_color = if is_open { accent } else { text_muted };
+
+    div()
+        .id("fmt-cell-styles")
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .px(px(4.0))
+        .h(px(22.0))
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(btn_border)
+        .bg(btn_bg)
+        .text_size(px(11.0))
+        .text_color(btn_color)
+        .hover(|s| s.bg(panel_border.opacity(0.3)))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.ui.format_bar.cell_style_menu_open = !this.ui.format_bar.cell_style_menu_open;
+            this.ui.format_bar.number_format_menu_open = false;
+            cx.notify();
+        }))
+        .tooltip(move |_window, cx| {
+            cx.new(|_| FormatBarTooltip("Cell Styles")).into()
+        })
+        .child("Styles")
+        .child(div().text_size(px(7.0)).child("\u{25be}"))
+}
+
+/// Cell styles quick-menu dropdown overlay — rendered at root level.
+pub fn render_cell_style_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
+
+    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
+    let top_offset = chrome_above + CELL_HEIGHT + FORMAT_BAR_HEIGHT;
+
+    // Horizontal offset: number format btn left (541) + btn width (~40) + sep (5) ≈ 586
+    let left_offset: f32 = 586.0;
+
+    div()
+        .id("fmt-cell-style-dropdown")
+        .absolute()
+        .top(px(top_offset))
+        .left(px(left_offset))
+        .w(px(140.0))
+        .bg(panel_bg)
+        .border_1()
+        .border_color(panel_border)
+        .rounded_sm()
+        .shadow_lg()
+        .py_1()
+        .flex()
+        .flex_col()
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            this.ui.format_bar.cell_style_menu_open = false;
+            cx.notify();
+        }))
+        // Normal (clear style)
+        .child(render_cell_style_item("Normal", "cs-normal", None, None, text_muted, hover_bg, false, CellStyle::None, cx))
+        // Separator
+        .child(div().h(px(1.0)).mx_2().my_1().bg(panel_border.opacity(0.5)))
+        // Error
+        .child(render_cell_style_item("Error", "cs-error",
+            Some(app.token(TokenKey::CellStyleErrorBg)),
+            Some(app.token(TokenKey::CellStyleErrorBorder)),
+            text_primary, hover_bg, false, CellStyle::Error, cx))
+        // Warning
+        .child(render_cell_style_item("Warning", "cs-warning",
+            Some(app.token(TokenKey::CellStyleWarningBg)),
+            Some(app.token(TokenKey::CellStyleWarningBorder)),
+            text_primary, hover_bg, false, CellStyle::Warning, cx))
+        // Success
+        .child(render_cell_style_item("Success", "cs-success",
+            Some(app.token(TokenKey::CellStyleSuccessBg)),
+            Some(app.token(TokenKey::CellStyleSuccessBorder)),
+            text_primary, hover_bg, false, CellStyle::Success, cx))
+        // Input
+        .child(render_cell_style_item("Input", "cs-input",
+            Some(app.token(TokenKey::CellStyleInputBg)),
+            Some(app.token(TokenKey::CellStyleInputBorder)),
+            text_primary, hover_bg, false, CellStyle::Input, cx))
+        // Total
+        .child(render_cell_style_item("Total", "cs-total",
+            None,
+            Some(app.token(TokenKey::CellStyleTotalBorder)),
+            text_primary, hover_bg, true, CellStyle::Total, cx))
+        // Note
+        .child(render_cell_style_item("Note", "cs-note",
+            Some(app.token(TokenKey::CellStyleNoteBg)),
+            Some(app.token(TokenKey::CellStyleNoteText)),
+            text_primary, hover_bg, false, CellStyle::Note, cx))
+}
+
+/// Single item row in the cell style dropdown.
+/// Shows a mini cell-preview swatch: fill bg + colored border (realistic style preview).
+fn render_cell_style_item(
+    label: &'static str,
+    id: &'static str,
+    swatch_fill: Option<Hsla>,
+    swatch_border: Option<Hsla>,
+    label_color: Hsla,
+    hover_bg: Hsla,
+    bold: bool,
+    style: CellStyle,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let swatch = match (swatch_fill, swatch_border) {
+        (Some(fill), Some(border)) => {
+            // Filled swatch with colored border — realistic mini preview
+            div().w(px(14.0)).h(px(14.0)).rounded_sm().bg(fill).border_1().border_color(border)
+        }
+        (None, Some(border)) => {
+            // Border-only swatch (Total style — top border indicator)
+            div().w(px(14.0)).h(px(14.0)).rounded_sm().border_t_2().border_color(border)
+        }
+        (Some(fill), None) => {
+            div().w(px(14.0)).h(px(14.0)).rounded_sm().bg(fill)
+        }
+        (None, None) => {
+            // No swatch (Normal)
+            div().w(px(14.0)).h(px(14.0))
+        }
+    };
+
+    let label_div = div()
+        .text_size(px(12.0))
+        .text_color(label_color)
+        .when(bold, |d| d.font_weight(FontWeight::BOLD))
+        .child(label);
+
+    div()
+        .id(SharedString::from(id))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .px_2()
+        .py(px(4.0))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover_bg))
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            this.set_cell_style_selection(style, cx);
+            this.ui.format_bar.cell_style_menu_open = false;
+            cx.notify();
+        }))
+        .child(swatch)
+        .child(label_div)
 }
 
 /// Render a 3-line vertical alignment icon (14px wide, 14px tall).
