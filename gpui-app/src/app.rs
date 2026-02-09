@@ -1167,6 +1167,50 @@ impl RewindSuccessBanner {
     }
 }
 
+// ============================================================================
+// Cycle Banner State
+// ============================================================================
+
+/// State for the dismissible cycle-status banner.
+///
+/// Shown after import or iteration toggle when cycles, freeze, or iteration is active.
+/// Dismissed by user click; stays dismissed until next import or explicit toggle.
+#[derive(Clone, Debug, Default)]
+pub struct CycleBannerState {
+    /// Whether the banner is currently visible.
+    pub visible: bool,
+    /// Whether the user has explicitly dismissed the banner.
+    /// When true, don't re-show on recalc — only on new import or explicit toggle.
+    pub dismissed: bool,
+}
+
+impl CycleBannerState {
+    /// Show the banner (only if not already dismissed by user).
+    pub fn show(&mut self) {
+        if !self.dismissed {
+            self.visible = true;
+        }
+    }
+
+    /// Show the banner unconditionally (after import or explicit toggle — overrides dismiss).
+    pub fn show_force(&mut self) {
+        self.dismissed = false;
+        self.visible = true;
+    }
+
+    /// User dismisses the banner. Stays dismissed until next import/reimport.
+    pub fn dismiss(&mut self) {
+        self.visible = false;
+        self.dismissed = true;
+    }
+
+    /// Reset for new file / new import. Clears dismissed state.
+    pub fn reset_for_new_file(&mut self) {
+        self.visible = false;
+        self.dismissed = false;
+    }
+}
+
 /// Lightweight UTC timestamp without external chrono dependency.
 /// Returns ISO 8601 format: "2024-01-15T14:30:00Z"
 pub fn chrono_lite_utc() -> String {
@@ -2277,6 +2321,9 @@ pub struct Spreadsheet {
     // Rewind success banner (Phase 8C: post-rewind feedback)
     pub rewind_success: RewindSuccessBanner,
 
+    // Cycle banner state (cycle/freeze/iteration status)
+    pub cycle_banner: CycleBannerState,
+
     // Merge cells confirmation dialog
     pub merge_confirm: MergeConfirmState,
 
@@ -2360,13 +2407,17 @@ impl Spreadsheet {
         let window_handle = window.window_handle();
 
         // Get theme from global settings store (resolve "system" to OS-appropriate theme)
+        // None (no user preference) is treated as "system" — respects OS dark/light mode.
         let theme = match user_settings(cx).appearance.theme_id.as_value() {
             Some(id) if id == SYSTEM_THEME_ID => {
                 let resolved_id = resolve_system_theme_id(window.appearance());
                 get_theme(resolved_id).unwrap_or_else(default_theme)
             }
             Some(id) => get_theme(id).unwrap_or_else(default_theme),
-            None => default_theme(),
+            None => {
+                let resolved_id = resolve_system_theme_id(window.appearance());
+                get_theme(resolved_id).unwrap_or_else(default_theme)
+            }
         };
 
         // Subscribe to global settings changes - trigger re-render when settings change
@@ -2375,11 +2426,12 @@ impl Spreadsheet {
             cx.refresh_windows();
         });
 
-        // Observe OS appearance changes so System theme switches live
+        // Observe OS appearance changes so System theme switches live.
+        // Triggers for explicit "system" selection OR when no theme is set (default = system).
         let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
             let is_system = user_settings(cx).appearance.theme_id
                 .as_value()
-                .map_or(false, |id| id == SYSTEM_THEME_ID);
+                .map_or(true, |id| id == SYSTEM_THEME_ID);
             if is_system {
                 let resolved_id = resolve_system_theme_id(window.appearance());
                 if this.theme.meta.id != resolved_id {
@@ -2684,6 +2736,7 @@ impl Spreadsheet {
 
             rewind_confirm: RewindConfirmState::default(),
             rewind_success: RewindSuccessBanner::default(),
+            cycle_banner: CycleBannerState::default(),
 
             merge_confirm: MergeConfirmState::default(),
             close_confirm_visible: false,

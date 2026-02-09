@@ -1278,6 +1278,7 @@ impl Workbook {
 
             // Build true cycle set from Tarjan's SCCs (not from Kahn's over-report)
             let cycle_set: FxHashSet<CellId> = sccs.iter().flat_map(|scc| scc.iter().copied()).collect();
+            report.cycle_cells = cycle_set.len();
 
             // Get ALL non-SCC formula cells (Kahn's `order` may exclude downstream cells)
             let all_formula_cells: Vec<CellId> = self.dep_graph.formula_cells().collect();
@@ -1533,6 +1534,10 @@ impl Workbook {
                     sheet.set_cycle_error(cell_id.row, cell_id.col);
                 }
             }
+            // Use Tarjan SCC membership as the canonical cycle count (not Kahn's
+            // remainder, which can include downstream false positives).
+            let sccs = self.dep_graph.find_cycle_sccs();
+            report.cycle_cells = sccs.iter().map(|scc| scc.len()).sum();
 
             let mut known_deps_order = Vec::new();
             let mut unknown_deps_cells = Vec::new();

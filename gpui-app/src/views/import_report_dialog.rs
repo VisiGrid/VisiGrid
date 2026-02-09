@@ -80,13 +80,20 @@ pub fn render_import_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
                         .child(render_summary_section(import_result, text_primary, text_muted))
                         // Quality section (if there are issues)
                         .child(render_quality_section(import_result, text_primary, text_muted, warning_color, error_color, success_color, accent))
+                        // Current calculation mode (live workbook state)
+                        .child(render_calculation_mode_section(app, cx, import_result, text_primary, text_muted, warning_color, error_color, success_color))
                         // Per-sheet table
                         .child(render_sheet_table(import_result, text_primary, text_muted, text_disabled, panel_border))
                         // Warnings section
                         .child(render_warnings_section(import_result, text_muted, warning_color))
                 )
-                // Footer with freeze button (when applicable) and close button
-                .child(
+                // Footer with cycle action buttons and close button
+                .child({
+                    let has_unresolved = app.has_unresolved_cycles(cx);
+                    let is_xlsx = app.current_file.as_ref()
+                        .and_then(|p| p.extension()).and_then(|e| e.to_str())
+                        .map_or(false, |e| matches!(e.to_lowercase().as_str(), "xlsx" | "xls" | "xlsm" | "xlsb" | "ods"));
+
                     div()
                         .w_full()
                         .px_4()
@@ -96,23 +103,40 @@ pub fn render_import_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
                         .flex()
                         .justify_end()
                         .gap_2()
-                        .when(import_result.recalc_circular > 0 && !import_result.freeze_applied, |d| {
+                        // "Turn on iterative calculation..." button (when unresolved cycles exist)
+                        .when(has_unresolved, |d| {
                             d.child(
-                                Button::new("freeze-cycles-btn", "Freeze Cycle Values")
-                                    .secondary(panel_border, text_primary)
+                                Button::new("enable-iter-btn", "Turn on iterative calculation\u{2026}")
+                                    .primary(accent, text_inverse)
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                        this.reimport_with_freeze(cx);
+                                        this.enable_iteration_and_recalc(cx);
                                     }))
                             )
                         })
+                        // "Freeze cycle values" button (when unresolved cycles exist)
+                        .when(has_unresolved, |d| {
+                            let can_freeze = is_xlsx && !import_result.freeze_applied;
+                            let btn = Button::new("freeze-cycles-btn", "Freeze cycle values")
+                                .disabled(!can_freeze)
+                                .secondary(panel_border, text_primary);
+                            if can_freeze {
+                                d.child(
+                                    btn.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                        this.reimport_with_freeze(cx);
+                                    }))
+                                )
+                            } else {
+                                d.child(btn)
+                            }
+                        })
                         .child(
                             Button::new("import-report-close-btn", "Close")
-                                .primary(accent, text_inverse)
+                                .secondary(panel_border, text_primary)
                                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                                     this.hide_import_report(cx);
                                 }))
                         )
-                ),
+                }),
         cx,
     ).into_any_element()
 }
@@ -297,13 +321,13 @@ fn render_quality_section(
         );
     }
 
-    // Circular references
+    // Circular references (at import)
     if ir.recalc_circular > 0 && !ir.freeze_applied {
         children.push(
             div()
                 .text_size(px(11.0))
                 .text_color(error_color)
-                .child(format!("Circular references: {}", ir.recalc_circular))
+                .child(format!("Circular references (at import): {}", ir.recalc_circular))
                 .into_any_element()
         );
     }
@@ -560,6 +584,90 @@ fn render_warnings_section(ir: &ImportResult, text_muted: Hsla, warning_color: H
                         .child(format!("- {}", warning))
                 }))
         )
+        .into_any_element()
+}
+
+/// Render the "Current calculation mode" section reflecting live workbook state.
+fn render_calculation_mode_section(
+    app: &Spreadsheet,
+    cx: &App,
+    ir: &ImportResult,
+    text_primary: Hsla,
+    _text_muted: Hsla,
+    warning_color: Hsla,
+    error_color: Hsla,
+    success_color: Hsla,
+) -> impl IntoElement {
+    let iterative = app.wb(cx).iterative_enabled();
+    let rr = app.last_recalc_report.as_ref();
+    let converged = rr.map_or(false, |r| r.converged);
+    let scc_count = rr.map_or(0, |r| r.scc_count);
+    let iters = rr.map_or(0, |r| r.iterations_performed);
+    let cycle_count = app.current_cycle_count(cx);
+    let unresolved = app.has_unresolved_cycles(cx);
+
+    // Only show if there's something to report
+    let has_content = (iterative && cycle_count > 0) || ir.freeze_applied || unresolved;
+    if !has_content {
+        return div().into_any_element();
+    }
+
+    let mut children: Vec<AnyElement> = Vec::new();
+
+    children.push(
+        div()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(text_primary)
+            .child("Current Calculation Mode")
+            .into_any_element()
+    );
+
+    if iterative && cycle_count > 0 && converged {
+        children.push(
+            div()
+                .text_size(px(11.0))
+                .text_color(success_color)
+                .child(format!(
+                    "Iterative calculation: {} cycle cells in {} groups \u{2014} converged in {} iterations",
+                    cycle_count, scc_count, iters
+                ))
+                .into_any_element()
+        );
+    } else if iterative && cycle_count > 0 && !converged {
+        children.push(
+            div()
+                .text_size(px(11.0))
+                .text_color(warning_color)
+                .child(format!(
+                    "Iterative calculation: {} cycle cells in {} groups \u{2014} did not converge (max iterations hit)",
+                    cycle_count, scc_count
+                ))
+                .into_any_element()
+        );
+    } else if ir.freeze_applied {
+        children.push(
+            div()
+                .text_size(px(11.0))
+                .text_color(warning_color)
+                .child(format!("Cycle values frozen: {} (Excel cached)", ir.cycles_frozen))
+                .into_any_element()
+        );
+    } else if unresolved {
+        children.push(
+            div()
+                .text_size(px(11.0))
+                .text_color(error_color)
+                .child(format!("Circular references: {} cells (#CYCLE!)", cycle_count))
+                .into_any_element()
+        );
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .children(children)
         .into_any_element()
 }
 

@@ -435,6 +435,41 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    pub fn dismiss_cycle_banner(&mut self, cx: &mut Context<Self>) {
+        self.cycle_banner.dismiss();
+        cx.notify();
+    }
+
+    /// Number of cells in circular reference cycles (graph truth — nonzero even when resolved).
+    /// Prefers RecalcReport.cycle_cells (live), falls back to ImportResult.recalc_circular.
+    pub fn current_cycle_count(&self, cx: &App) -> usize {
+        if let Some(rr) = &self.last_recalc_report {
+            rr.cycle_cells
+        } else if let Some(ir) = &self.import_result {
+            ir.recalc_circular
+        } else {
+            0
+        }
+    }
+
+    /// Whether cycles exist but are currently unresolved (showing #CYCLE! or #NUM!).
+    pub fn has_unresolved_cycles(&self, cx: &App) -> bool {
+        let count = self.current_cycle_count(cx);
+        if count == 0 { return false; }
+        let iterative = self.wb(cx).iterative_enabled();
+        let converged = self.last_recalc_report.as_ref().map_or(false, |r| r.converged);
+        !iterative || !converged
+    }
+
+    /// Whether the cycle banner should be shown (any cycle-related state is active).
+    pub fn should_show_cycle_banner(&self, cx: &App) -> bool {
+        let freeze = self.import_result.as_ref().map_or(false, |r| r.freeze_applied);
+        let iterative = self.wb(cx).iterative_enabled();
+        let cycles_exist = self.current_cycle_count(cx) > 0;
+
+        cycles_exist || freeze || iterative
+    }
+
     pub fn show_export_report(&mut self, cx: &mut Context<Self>) {
         if self.export_result.is_some() {
             self.lua_console.visible = false;

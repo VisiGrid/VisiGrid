@@ -81,6 +81,12 @@ pub struct RecalcReport {
 
     /// True if all SCCs converged within tolerance.
     pub converged: bool,
+
+    /// Number of cells participating in circular reference cycles.
+    /// This is the graph truth — nonzero whenever cycles exist, regardless of
+    /// whether iteration has resolved them. Drive "resolved" messaging from
+    /// `converged && iterative_enabled` in the UI, not from this being zero.
+    pub cycle_cells: usize,
 }
 
 impl RecalcReport {

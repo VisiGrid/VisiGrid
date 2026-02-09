@@ -4,6 +4,7 @@ mod ask_ai_dialog;
 mod color_picker;
 pub mod command_palette;
 mod context_menu;
+mod cycle_banner;
 mod hub_dialogs;
 mod export_report_dialog;
 mod filter_dropdown;
@@ -93,6 +94,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_keytips = app.keytips_active;
     let show_rewind_confirm = app.rewind_confirm.visible;
     let show_rewind_success = app.rewind_success.visible;
+    let show_cycle_banner = app.cycle_banner.visible;
     let show_merge_confirm = app.merge_confirm.visible;
     let show_close_confirm = app.close_confirm_visible;
     let show_approval_confirm = app.approval_confirm_visible;
@@ -669,6 +671,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_rewind_success, |div| {
             div.child(rewind_dialogs::render_rewind_success_banner(app, cx))
+        })
+        .when(show_cycle_banner, |div| {
+            div.child(cycle_banner::render_cycle_banner(app, cx))
         })
         .when(show_hub_paste_token, |div| {
             div.child(hub_dialogs::render_paste_token_dialog(app, cx))

@@ -6,6 +6,24 @@ use crate::mode::Mode;
 use crate::theme::TokenKey;
 use crate::ui::popup;
 
+/// Simple tooltip for status bar pills.
+struct PillTooltip(SharedString);
+
+impl Render for PillTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0x2d2d2d))
+            .border_1()
+            .border_color(rgb(0x3d3d3d))
+            .text_size(px(11.0))
+            .text_color(rgb(0xcccccc))
+            .child(self.0.clone())
+    }
+}
+
 /// Render the bottom status bar (Zed-inspired minimal design)
 pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     // Calculate selection stats if multiple cells selected
@@ -183,6 +201,79 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                             .items_center()
                             .text_color(warn_color)
                             .child("MANUAL CALC")
+                    )
+                })
+                // Iteration pill (highest precedence cycle indicator)
+                .when(app.wb(cx).iterative_enabled(), |d| {
+                    let ok_color = app.token(TokenKey::Ok);
+                    let warn_color = app.token(TokenKey::Warn);
+                    let converged = app.last_recalc_report.as_ref().map_or(true, |r| !r.had_cycles || r.converged);
+                    let color = if converged { ok_color } else { warn_color };
+                    let label = if converged { "ITER: ON \u{2713}" } else { "ITER: ON \u{26a0}" };
+                    let tip: SharedString = if converged {
+                        let scc = app.last_recalc_report.as_ref().map_or(0, |r| r.scc_count);
+                        let iters = app.last_recalc_report.as_ref().map_or(0, |r| r.iterations_performed);
+                        format!("Converged in {} iterations across {} cycle groups.", iters, scc).into()
+                    } else {
+                        "Did not converge \u{2014} cycle cells show #NUM!".into()
+                    };
+                    d.child(
+                        div()
+                            .id("iter-pill")
+                            .flex().items_center()
+                            .text_color(color)
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.show_import_report(cx);
+                            }))
+                            .tooltip(move |_window, cx| {
+                                cx.new(|_| PillTooltip(tip.clone())).into()
+                            })
+                            .child(label)
+                    )
+                })
+                // Frozen pill (show alongside iteration if both active, or alone)
+                .when(app.import_result.as_ref().map_or(false, |r| r.freeze_applied && r.cycles_frozen > 0), |d| {
+                    let warn_color = app.token(TokenKey::Warn);
+                    let n = app.import_result.as_ref().map(|r| r.cycles_frozen).unwrap_or(0);
+                    let tip: SharedString = format!("{} cells use Excel cached values (not recalculated).", n).into();
+                    d.child(
+                        div()
+                            .id("frozen-pill")
+                            .flex().items_center()
+                            .text_color(warn_color)
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.show_import_report(cx);
+                            }))
+                            .tooltip(move |_window, cx| {
+                                cx.new(|_| PillTooltip(tip.clone())).into()
+                            })
+                            .child(format!("FROZEN: {}", n))
+                    )
+                })
+                // Cycles pill (only when strict mode — unresolved cycles, no freeze, no iteration)
+                .when(
+                    app.has_unresolved_cycles(cx)
+                        && !app.import_result.as_ref().map_or(false, |r| r.freeze_applied)
+                        && !app.wb(cx).iterative_enabled(),
+                    |d| {
+                    let error_color = app.token(TokenKey::Error);
+                    let n = app.current_cycle_count(cx);
+                    let tip: SharedString = format!("{} cells in circular references (#CYCLE!). Click for details.", n).into();
+                    d.child(
+                        div()
+                            .id("cycles-pill")
+                            .flex().items_center()
+                            .text_color(error_color)
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.show_import_report(cx);
+                            }))
+                            .tooltip(move |_window, cx| {
+                                cx.new(|_| PillTooltip(tip.clone())).into()
+                            })
+                            .child(format!("CYCLES: {}", n))
                     )
                 })
                 // Filter indicator (when filtering is active)

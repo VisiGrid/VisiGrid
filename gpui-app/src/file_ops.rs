@@ -27,6 +27,7 @@ impl Spreadsheet {
         self.debug_assert_sheet_cache_sync(cx);
         self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
         self.rewind_preview = crate::app::RewindPreviewState::Off; // Reset preview state
+        self.cycle_banner.reset_for_new_file();
         self.current_file = None;
         self.is_modified = false;
         self.doc_settings = DocumentSettings::default();  // Reset doc settings
@@ -230,6 +231,7 @@ impl Spreadsheet {
         self.import_in_progress = true;
         self.import_overlay_visible = false;
         self.import_started_at = Some(Instant::now());
+        self.cycle_banner.reset_for_new_file();
         self.status_message = Some(format!("Importing {}...", filename));
 
         // Clone what we need for async tasks
@@ -324,6 +326,11 @@ impl Spreadsheet {
                         this.import_result = Some(result);
                         this.status_message = Some(status);
 
+                        // Show cycle banner if applicable
+                        if this.should_show_cycle_banner(cx) {
+                            this.cycle_banner.show_force();
+                        }
+
                         // Auto-show import report when recalc errors are detected
                         if has_recalc_errors {
                             this.show_import_report(cx);
@@ -350,6 +357,7 @@ impl Spreadsheet {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "file".to_string());
         let source_dir = path.parent().map(|p| p.to_path_buf());
+        self.cycle_banner.reset_for_new_file();
         let start_time = std::time::Instant::now();
 
         match xlsx::import(path) {
@@ -404,6 +412,11 @@ impl Spreadsheet {
                 self.import_result = Some(result);
                 self.status_message = Some(status);
 
+                // Show cycle banner if applicable
+                if self.should_show_cycle_banner(cx) {
+                    self.cycle_banner.show_force();
+                }
+
                 // Auto-show import report when recalc errors are detected
                 if has_recalc_errors {
                     self.show_import_report(cx);
@@ -438,6 +451,40 @@ impl Spreadsheet {
         }
     }
 
+    /// Enable iterative calculation and recompute all formulas in-place.
+    /// No reimport — just toggles the workbook setting and recalcs.
+    pub fn enable_iteration_and_recalc(&mut self, cx: &mut Context<Self>) {
+        let max_iters = self.doc_settings.calculation.max_iterations.resolve(100);
+        let tolerance = self.doc_settings.calculation.iteration_tolerance.resolve(1e-9);
+
+        let report = self.wb_mut(cx, |wb| {
+            wb.set_iterative_enabled(true);
+            wb.set_iterative_max_iters(max_iters);
+            wb.set_iterative_tolerance(tolerance);
+            wb.rebuild_dep_graph();
+            wb.recompute_full_ordered()
+        });
+        self.last_recalc_report = Some(report);
+
+        // Persist to doc settings
+        self.doc_settings.calculation.enable_iterative_calc = crate::settings::Setting::Value(true);
+        if let Some(path) = &self.current_file {
+            let _ = save_doc_settings(path, &self.doc_settings);
+        }
+
+        // Show banner with iteration result (force — user just acted)
+        self.cycle_banner.show_force();
+
+        // Close import report if open
+        if self.mode == crate::mode::Mode::ImportReport {
+            self.mode = crate::mode::Mode::Navigation;
+        }
+
+        self.status_message = Some("Iterative calculation enabled".to_string());
+        self.is_modified = true;
+        cx.notify();
+    }
+
     /// Start background Excel import with options and optional sheet restore
     fn start_excel_import_with_options(
         &mut self,
@@ -455,6 +502,7 @@ impl Spreadsheet {
         self.import_in_progress = true;
         self.import_overlay_visible = false;
         self.import_started_at = Some(Instant::now());
+        self.cycle_banner.reset_for_new_file();
         self.status_message = Some(format!("Importing {}...", filename));
 
         let path_for_import = path.clone();
@@ -548,6 +596,11 @@ impl Spreadsheet {
                         this.import_result = Some(result);
                         this.status_message = Some(status);
 
+                        // Show cycle banner if applicable
+                        if this.should_show_cycle_banner(cx) {
+                            this.cycle_banner.show_force();
+                        }
+
                         if show_report {
                             this.show_import_report(cx);
                         }
@@ -579,6 +632,7 @@ impl Spreadsheet {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "file".to_string());
         let source_dir = path.parent().map(|p| p.to_path_buf());
+        self.cycle_banner.reset_for_new_file();
         let start_time = std::time::Instant::now();
 
         match xlsx::import_with_options(path, &options) {
@@ -639,6 +693,11 @@ impl Spreadsheet {
 
                 self.import_result = Some(result);
                 self.status_message = Some(status);
+
+                // Show cycle banner if applicable
+                if self.should_show_cycle_banner(cx) {
+                    self.cycle_banner.show_force();
+                }
 
                 if show_report {
                     self.show_import_report(cx);
