@@ -1,0 +1,15 @@
+{
+  "run_id": "1",
+  "version": 1,
+  "status": "verified",
+  "check_status": "baseline_created",
+  "diff_summary": null,
+  "row_count": 500,
+  "col_count": 10,
+  "content_hash": "blake3:a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+  "source_metadata": {
+    "type": "dbt",
+    "identity": "models/payments"
+  },
+  "proof_url": "https://api.visihub.app/api/repos/acme/payments/runs/1/proof"
+}

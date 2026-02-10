@@ -48,7 +48,7 @@ to complete and prints the full run result.
 | `run_id` | string | **always** | Server-assigned run identifier |
 | `version` | integer | **always** | Dataset version number |
 | `status` | string | **always** | `"verified"` or `"completed"` |
-| `check_status` | string \| null | optional | `"pass"` or `"fail"` (null if checks disabled) |
+| `check_status` | string \| null | optional | `"pass"`, `"fail"`, or `"baseline_created"` (null if checks disabled) |
 | `diff_summary` | object \| null | optional | Row/column change summary |
 | `row_count` | integer \| null | optional | Total rows in this version |
 | `col_count` | integer \| null | optional | Total columns in this version |

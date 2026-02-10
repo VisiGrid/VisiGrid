@@ -237,7 +237,11 @@ fn print_human_result(r: &RunResult) {
     eprintln!("  Version: v{}", r.version);
     eprintln!("  Status:  {}", r.status);
     if let Some(ref cs) = r.check_status {
-        let marker = if cs == "pass" { "PASS" } else { "FAIL" };
+        let marker = match cs.as_str() {
+            "pass" => "PASS",
+            "baseline_created" => "BASELINE CREATED",
+            _ => "FAIL",
+        };
         eprintln!("  Check:   {}", marker);
     }
     if let Some(ref diff) = r.diff_summary {

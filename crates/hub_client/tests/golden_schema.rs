@@ -88,6 +88,31 @@ fn test_golden_publish_fail() {
 }
 
 #[test]
+fn test_golden_publish_baseline() {
+    let result = RunResult {
+        run_id: "1".into(),
+        version: 1,
+        status: "verified".into(),
+        check_status: Some("baseline_created".into()),
+        diff_summary: None,
+        row_count: Some(500),
+        col_count: Some(10),
+        content_hash: Some("blake3:a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a".into()),
+        source_metadata: Some(serde_json::json!({"type": "dbt", "identity": "models/payments"})),
+        proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/1/proof".into(),
+    };
+
+    validate_golden_keys("tests/golden/publish-baseline.json", &result);
+
+    // check_status must be "baseline_created" — NOT "pass"
+    let json = serde_json::to_value(&result).unwrap();
+    assert_eq!(json["check_status"], "baseline_created");
+
+    // baseline_created must NOT trigger --fail-on-check-failure
+    assert_ne!(result.check_status.as_deref(), Some("fail"));
+}
+
+#[test]
 fn test_golden_no_wait_output() {
     // When --no-wait is used, the CLI emits a minimal JSON with just run_id, status, proof_url.
     // This isn't a RunResult — it's hand-built in hub.rs. Validate the golden shape.
