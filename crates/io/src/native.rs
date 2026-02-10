@@ -1,6 +1,6 @@
 // Native .sheet format using SQLite
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use rusqlite::{Connection, params};
@@ -175,6 +175,18 @@ CREATE TABLE IF NOT EXISTS row_heights (
     PRIMARY KEY (sheet_idx, row)
 );
 
+CREATE TABLE IF NOT EXISTS hidden_rows (
+    sheet_idx INTEGER NOT NULL,
+    row INTEGER NOT NULL,
+    PRIMARY KEY (sheet_idx, row)
+);
+
+CREATE TABLE IF NOT EXISTS hidden_cols (
+    sheet_idx INTEGER NOT NULL,
+    col INTEGER NOT NULL,
+    PRIMARY KEY (sheet_idx, col)
+);
+
 -- Semantic metadata for cells/ranges (affects fingerprint, unlike style)
 -- target: "A1" (cell), "A1:B10" (range), "COL:C" (column), "ROW:5" (row)
 CREATE TABLE IF NOT EXISTS cell_metadata (
@@ -265,7 +277,7 @@ fn border_from_db(style: i32, color: Option<i64>) -> CellBorder {
 }
 
 /// Current schema version. Increment for each migration.
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 /// Run schema migrations for existing databases.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -326,6 +338,22 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 PRIMARY KEY (sheet_idx, row)
             );
             PRAGMA user_version = 6;"
+        )?;
+    }
+
+    if version < 7 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS hidden_rows (
+                sheet_idx INTEGER NOT NULL,
+                row INTEGER NOT NULL,
+                PRIMARY KEY (sheet_idx, row)
+            );
+            CREATE TABLE IF NOT EXISTS hidden_cols (
+                sheet_idx INTEGER NOT NULL,
+                col INTEGER NOT NULL,
+                PRIMARY KEY (sheet_idx, col)
+            );
+            PRAGMA user_version = 7;"
         )?;
     }
 
@@ -1470,12 +1498,19 @@ pub fn delete_hub_link(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Layout data (column widths and row heights) keyed by sheet index.
+/// Layout data (column widths, row heights, hidden rows/cols) keyed by sheet index.
+///
+/// Hidden rows/cols are visual-only state (like formatting) and do NOT affect
+/// the semantic fingerprint. They persist across save/close/reopen cycles.
 pub struct SheetLayout {
     /// sheet_idx -> (col -> width_px)
     pub col_widths: HashMap<usize, HashMap<usize, f32>>,
     /// sheet_idx -> (row -> height_px)
     pub row_heights: HashMap<usize, HashMap<usize, f32>>,
+    /// sheet_idx -> set of hidden row indices
+    pub hidden_rows: HashMap<usize, HashSet<usize>>,
+    /// sheet_idx -> set of hidden col indices
+    pub hidden_cols: HashMap<usize, HashSet<usize>>,
 }
 
 /// Save column widths and row heights into an existing .sheet file.
@@ -1506,6 +1541,30 @@ pub fn save_layout(path: &Path, layout: &SheetLayout) -> Result<(), String> {
         }
     }
 
+    // Save hidden rows
+    let mut hr_stmt = conn.prepare(
+        "INSERT INTO hidden_rows (sheet_idx, row) VALUES (?1, ?2)"
+    ).map_err(|e| e.to_string())?;
+
+    for (sheet_idx, rows) in &layout.hidden_rows {
+        for row in rows {
+            hr_stmt.execute(params![*sheet_idx as i64, *row as i64])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Save hidden cols
+    let mut hc_stmt = conn.prepare(
+        "INSERT INTO hidden_cols (sheet_idx, col) VALUES (?1, ?2)"
+    ).map_err(|e| e.to_string())?;
+
+    for (sheet_idx, cols) in &layout.hidden_cols {
+        for col in cols {
+            hc_stmt.execute(params![*sheet_idx as i64, *col as i64])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
     Ok(())
 }
 
@@ -1515,6 +1574,8 @@ pub fn load_layout(path: &Path) -> SheetLayout {
     let mut layout = SheetLayout {
         col_widths: HashMap::new(),
         row_heights: HashMap::new(),
+        hidden_rows: HashMap::new(),
+        hidden_cols: HashMap::new(),
     };
 
     let conn = match Connection::open(path) {
@@ -1550,6 +1611,36 @@ pub fn load_layout(path: &Path) -> SheetLayout {
             for row in rows.flatten() {
                 let (sheet_idx, r, height) = row;
                 layout.row_heights.entry(sheet_idx).or_default().insert(r, height);
+            }
+        }
+    }
+
+    // Load hidden rows (table may not exist in pre-v7 files)
+    if let Ok(mut stmt) = conn.prepare("SELECT sheet_idx, row FROM hidden_rows") {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, i64>(1)? as usize,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (sheet_idx, r) = row;
+                layout.hidden_rows.entry(sheet_idx).or_default().insert(r);
+            }
+        }
+    }
+
+    // Load hidden cols (table may not exist in pre-v7 files)
+    if let Ok(mut stmt) = conn.prepare("SELECT sheet_idx, col FROM hidden_cols") {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, i64>(1)? as usize,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (sheet_idx, c) = row;
+                layout.hidden_cols.entry(sheet_idx).or_default().insert(c);
             }
         }
     }

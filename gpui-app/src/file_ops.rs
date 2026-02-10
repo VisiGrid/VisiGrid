@@ -1264,6 +1264,8 @@ impl Spreadsheet {
         let mut layout = native::SheetLayout {
             col_widths: HashMap::new(),
             row_heights: HashMap::new(),
+            hidden_rows: HashMap::new(),
+            hidden_cols: HashMap::new(),
         };
 
         let sheets = self.wb(cx).sheets();
@@ -1276,6 +1278,16 @@ impl Spreadsheet {
             if let Some(heights) = self.row_heights.get(&sheet.id) {
                 if !heights.is_empty() {
                     layout.row_heights.insert(idx, heights.clone());
+                }
+            }
+            if let Some(rows) = self.hidden_rows.get(&sheet.id) {
+                if !rows.is_empty() {
+                    layout.hidden_rows.insert(idx, rows.iter().copied().collect());
+                }
+            }
+            if let Some(cols) = self.hidden_cols.get(&sheet.id) {
+                if !cols.is_empty() {
+                    layout.hidden_cols.insert(idx, cols.iter().copied().collect());
                 }
             }
         }
@@ -1292,6 +1304,8 @@ impl Spreadsheet {
 
         self.col_widths.clear();
         self.row_heights.clear();
+        self.hidden_rows.clear();
+        self.hidden_cols.clear();
 
         for (idx, sheet_id) in sheet_ids {
             if let Some(widths) = layout.col_widths.get(&idx) {
@@ -1302,6 +1316,16 @@ impl Spreadsheet {
             if let Some(heights) = layout.row_heights.get(&idx) {
                 if !heights.is_empty() {
                     self.row_heights.insert(sheet_id, heights.clone());
+                }
+            }
+            if let Some(rows) = layout.hidden_rows.get(&idx) {
+                if !rows.is_empty() {
+                    self.hidden_rows.insert(sheet_id, rows.iter().copied().collect());
+                }
+            }
+            if let Some(cols) = layout.hidden_cols.get(&idx) {
+                if !cols.is_empty() {
+                    self.hidden_cols.insert(sheet_id, cols.iter().copied().collect());
                 }
             }
         }

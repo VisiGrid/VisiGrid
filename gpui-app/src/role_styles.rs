@@ -309,14 +309,15 @@ fn format_with_commas(value: f64, decimals: usize) -> String {
     let int_part = parts[0];
     let dec_part = parts.get(1);
 
-    // Add commas to integer part
+    // Add commas to integer part (comma goes after digit in reversed form
+    // so it appears before the group when un-reversed)
     let int_with_commas: String = int_part
         .chars()
         .rev()
         .enumerate()
         .map(|(i, c)| {
             if i > 0 && i % 3 == 0 && c != '-' {
-                format!(",{}", c)
+                format!("{},", c)
             } else {
                 c.to_string()
             }
