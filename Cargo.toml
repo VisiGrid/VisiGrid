@@ -8,6 +8,7 @@ members = [
     "crates/config",
     "crates/license",
     "crates/protocol",
+    "crates/hub_client",
     "crates/cli",
     "gpui-app",
 ]
@@ -33,6 +34,7 @@ visigrid-io = { path = "crates/io" }
 visigrid-config = { path = "crates/config" }
 visigrid-license = { path = "crates/license" }
 visigrid-protocol = { path = "crates/protocol" }
+visigrid-hub-client = { path = "crates/hub_client" }
 
 [profile.release]
 lto = true

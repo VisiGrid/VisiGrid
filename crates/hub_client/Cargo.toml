@@ -1,0 +1,16 @@
+[package]
+name = "visigrid-hub-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VisiHub API client — shared between desktop and CLI"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"

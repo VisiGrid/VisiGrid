@@ -2,6 +2,7 @@
 // See docs/cli-v1.md for specification
 
 mod exit_codes;
+mod hub;
 mod replay;
 mod session;
 mod sheet_ops;
@@ -435,9 +436,96 @@ Examples:
         delimiter: Option<String>,
     },
 
+    /// Authenticate with VisiHub
+    #[command(after_help = "\
+Examples:
+  vgrid login                             # interactive prompt
+  vgrid login --token vht_abc123          # non-interactive (CI)
+  VISIHUB_API_KEY=vht_abc123 vgrid login  # from env var")]
+    Login {
+        /// API token (non-interactive; also reads VISIHUB_API_KEY env var)
+        #[arg(long)]
+        token: Option<String>,
+
+        /// API base URL
+        #[arg(long, default_value = "https://api.visihub.app")]
+        api_base: String,
+    },
+
+    /// Publish a file to VisiHub and verify its integrity
+    #[command(after_help = "\
+Uploads the file to VisiHub as a new dataset revision. VisiHub runs an integrity \
+check (row count, column names, schema structure, content hash) and computes a \
+structural diff against the previous version. A signed proof is available for download.
+
+Exit codes:
+  0   Check passed (or --no-fail)
+  1   Integrity check failed
+  2   Bad arguments
+  42  Network error
+  43  Server validation error
+  44  Timeout waiting for import
+
+Examples:
+  vgrid publish ./exports/data.csv --repo acme/payments
+  vgrid publish ./exports/data.csv --repo acme/payments --source-type dbt
+  vgrid publish ./data.csv --repo acme/analytics --source-identity analytics.monthly_close
+  vgrid publish ./data.csv --repo acme/payments --no-wait
+  vgrid publish ./data.csv --repo acme/payments --output json")]
+    Publish {
+        /// File to publish (CSV, TSV)
+        file: PathBuf,
+
+        /// VisiHub repository (owner/slug format)
+        #[arg(long)]
+        repo: String,
+
+        /// Dataset name in VisiHub (defaults to file basename)
+        #[arg(long)]
+        dataset: Option<String>,
+
+        /// Source system type (e.g., dbt, qbo, snowflake, manual)
+        #[arg(long)]
+        source_type: Option<String>,
+
+        /// Source identity (e.g., warehouse table, realm ID)
+        #[arg(long)]
+        source_identity: Option<String>,
+
+        /// Source query hash (for warehouse extracts)
+        #[arg(long)]
+        query_hash: Option<String>,
+
+        /// Wait for import to complete and return results
+        #[arg(long, default_value = "true")]
+        wait: bool,
+
+        /// Do not wait for import
+        #[arg(long, conflicts_with = "wait")]
+        no_wait: bool,
+
+        /// Fail if integrity check fails (default: true)
+        #[arg(long, default_value = "true")]
+        fail_on_check_failure: bool,
+
+        /// Do not fail on integrity check failure
+        #[arg(long, conflicts_with = "fail_on_check_failure")]
+        no_fail: bool,
+
+        /// Output format (auto-detected: JSON when piped, text when TTY)
+        #[arg(long)]
+        output: Option<OutputFormat>,
+    },
+
     /// Sheet file operations (headless build/inspect/verify)
     #[command(subcommand)]
     Sheet(SheetCommands),
+}
+
+#[derive(Clone, ValueEnum)]
+enum OutputFormat {
+    Json,
+    Text,
 }
 
 /// Sheet subcommands for agent-ready headless workflows.
@@ -1027,6 +1115,14 @@ fn main() -> ExitCode {
         }) => {
             cmd_peek(file, headers, max_rows, force, width_scan_rows, shape, plain, delimiter)
         }
+        Some(Commands::Login { token, api_base }) => hub::cmd_login(token, api_base),
+        Some(Commands::Publish {
+            file, repo, dataset, source_type, source_identity, query_hash,
+            wait, no_wait, fail_on_check_failure, no_fail, output,
+        }) => hub::cmd_publish(
+            file, repo, dataset, source_type, source_identity, query_hash,
+            wait && !no_wait, fail_on_check_failure && !no_fail, output,
+        ),
         Some(Commands::Sheet(sheet_cmd)) => match sheet_cmd {
             SheetCommands::Apply { output, lua, verify, stamp, dry_run, json } => {
                 cmd_sheet_apply(output, lua, verify, stamp, dry_run, json)

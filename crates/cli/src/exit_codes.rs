@@ -105,6 +105,25 @@ pub const EXIT_REPLAY_SCRIPT_ERROR: u8 = 31;
 pub const EXIT_REPLAY_NONDETERMINISTIC: u8 = 32;
 
 // =============================================================================
+// Hub (40-49) — VisiHub publish/verify codes
+// =============================================================================
+
+/// Not authenticated to VisiHub (no saved token).
+pub const EXIT_HUB_NOT_AUTH: u8 = 40;
+
+/// Integrity check failed (and --fail-on-check-failure is set).
+pub const EXIT_HUB_CHECK_FAILED: u8 = 41;
+
+/// Network/HTTP error communicating with VisiHub.
+pub const EXIT_HUB_NETWORK: u8 = 42;
+
+/// Server returned a validation error (bad request, unprocessable entity).
+pub const EXIT_HUB_VALIDATION: u8 = 43;
+
+/// Timeout waiting for import to complete.
+pub const EXIT_HUB_TIMEOUT: u8 = 44;
+
+// =============================================================================
 // Session Error Types
 // =============================================================================
 
