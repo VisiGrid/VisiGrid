@@ -1,0 +1,21 @@
+{
+  "run_id": "99",
+  "version": 5,
+  "status": "verified",
+  "check_status": "fail",
+  "diff_summary": {
+    "row_count_change": -50,
+    "col_count_change": 2,
+    "columns_added": ["new_fee", "tax_rate"],
+    "columns_removed": [],
+    "columns_type_changed": ["amount"]
+  },
+  "row_count": 950,
+  "col_count": 17,
+  "content_hash": "blake3:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+  "source_metadata": {
+    "type": "dbt",
+    "identity": "models/payments"
+  },
+  "proof_url": "https://api.visihub.app/api/repos/acme/payments/runs/99/proof"
+}
