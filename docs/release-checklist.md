@@ -59,12 +59,33 @@ Session file location: `~/.config/visigrid/session.json`
 - [ ] App launches on target platform
 - [ ] Session metadata shows correct version, platform
 
-## Version Bump
+## Releasing
 
-Before tagging:
-1. Update version in `gpui-app/Cargo.toml`
-2. Update version in `crates/*/Cargo.toml` if changed
-3. Set VISIGRID_GIT_SHA in build (optional)
+Use the automated release script:
+
+```bash
+# Dry run (prints what it would do):
+./scripts/release.sh 0.7.0 --dry-run
+
+# Full release:
+./scripts/release.sh 0.7.0
+```
+
+The script handles all of these in order:
+1. Pre-flight checks (branch, clean tree, untracked .rs files, build)
+2. Version bump in workspace `Cargo.toml` + `Cargo.lock` update
+3. Tag + push, wait for CI to pass
+4. Publish the draft release (triggers Homebrew/Winget workflows)
+5. Update AUR PKGBUILD with new SHA
+6. Verify Homebrew and AUR
+
+### Manual version bump (if needed)
+
+Update `version` in the workspace `Cargo.toml` (the workspace version propagates to all crates):
+```bash
+# Edit Cargo.toml [workspace.package] version
+cargo generate-lockfile
+```
 
 ## Platform-Specific
 
