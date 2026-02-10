@@ -52,12 +52,40 @@ impl std::fmt::Display for HubError {
 
 impl std::error::Error for HubError {}
 
+/// A single assertion to evaluate during import.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssertionInput {
+    pub kind: String,
+    pub column: String,
+    pub expected: Option<String>,
+    pub tolerance: Option<String>,
+}
+
+/// Result of an evaluated assertion (from the server).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssertionResult {
+    pub kind: String,
+    pub column: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 /// Options for creating a revision (publish flow step 1).
 #[derive(Debug, Clone, Default)]
 pub struct CreateRevisionOptions {
     pub source_type: Option<String>,
     pub source_identity: Option<String>,
     pub query_hash: Option<String>,
+    pub assertions: Vec<AssertionInput>,
 }
 
 /// Status of a run (from the runs API).
@@ -72,6 +100,8 @@ pub struct RunResult {
     pub col_count: Option<u64>,
     pub content_hash: Option<String>,
     pub source_metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<Vec<AssertionResult>>,
     pub proof_url: String,
 }
 
@@ -197,6 +227,12 @@ impl HubClient {
             body["source_metadata"] = serde_json::Value::Object(sm);
         }
 
+        // Attach assertions if provided
+        if !opts.assertions.is_empty() {
+            body["assertions"] = serde_json::to_value(&opts.assertions)
+                .unwrap_or(serde_json::Value::Array(vec![]));
+        }
+
         let resp = self.post_json(&url, &body)?;
         let json: serde_json::Value = resp.json().map_err(|e| HubError::Parse(e.to_string()))?;
 
@@ -276,6 +312,10 @@ impl HubClient {
                     let status = run["status"].as_str().unwrap_or("unknown");
                     match status {
                         "verified" | "completed" => {
+                            // Parse assertions if present
+                            let assertions: Option<Vec<AssertionResult>> = run.get("assertions")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok());
+
                             return Ok(RunResult {
                                 run_id: revision_id.to_string(),
                                 version: run["version"].as_u64().unwrap_or(0),
@@ -286,6 +326,7 @@ impl HubClient {
                                 col_count: run["col_count"].as_u64(),
                                 content_hash: run["content_hash"].as_str().map(String::from),
                                 source_metadata: run.get("source_metadata").cloned(),
+                                assertions,
                                 proof_url: proof_url.clone(),
                             });
                         }
@@ -472,6 +513,7 @@ mod tests {
             col_count: Some(17),
             content_hash: Some("blake3:deadbeef".into()),
             source_metadata: Some(serde_json::json!({"type": "dbt", "identity": "models/payments"})),
+            assertions: None,
             proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/99/proof".into(),
         };
 
@@ -505,6 +547,7 @@ mod tests {
             col_count: Some(15),
             content_hash: Some("blake3:abc123".into()),
             source_metadata: Some(serde_json::json!({"type": "dbt"})),
+            assertions: None,
             proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/42/proof".into(),
         };
 

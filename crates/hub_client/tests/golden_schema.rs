@@ -7,7 +7,7 @@
 //! The golden files are the public contract. CI scripts parse this JSON.
 //! Breaking it without versioning breaks customers.
 
-use visigrid_hub_client::RunResult;
+use visigrid_hub_client::{RunResult, AssertionResult};
 
 /// Validate that every key in the golden JSON is present in RunResult serialization.
 fn validate_golden_keys(golden_path: &str, result: &RunResult) {
@@ -51,15 +51,26 @@ fn test_golden_publish_pass() {
             "timestamp": "2025-06-15T14:30:00Z",
             "query_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         })),
+        assertions: Some(vec![AssertionResult {
+            kind: "sum".into(),
+            column: "amount".into(),
+            expected: Some("12345.67".into()),
+            actual: Some("12345.66".into()),
+            tolerance: Some("0.01".into()),
+            status: "pass".into(),
+            delta: None,
+            message: None,
+        }]),
         proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/42/proof".into(),
     };
 
     validate_golden_keys("tests/golden/publish-pass.json", &result);
 
-    // check_status must be "pass"
     let json = serde_json::to_value(&result).unwrap();
     assert_eq!(json["check_status"], "pass");
     assert_eq!(json["status"], "verified");
+    assert!(json["assertions"].is_array());
+    assert_eq!(json["assertions"][0]["status"], "pass");
 }
 
 #[test]
@@ -77,14 +88,25 @@ fn test_golden_publish_fail() {
         col_count: Some(17),
         content_hash: Some("blake3:deadbeef".into()),
         source_metadata: Some(serde_json::json!({"type": "dbt", "identity": "models/payments"})),
+        assertions: Some(vec![AssertionResult {
+            kind: "sum".into(),
+            column: "amount".into(),
+            expected: Some("12345.67".into()),
+            actual: Some("12300.00".into()),
+            tolerance: Some("0.01".into()),
+            status: "fail".into(),
+            delta: Some("45.67".into()),
+            message: None,
+        }]),
         proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/99/proof".into(),
     };
 
     validate_golden_keys("tests/golden/publish-fail.json", &result);
 
-    // check_status must be "fail" — CLI uses this to set exit code 41
     let json = serde_json::to_value(&result).unwrap();
     assert_eq!(json["check_status"], "fail");
+    assert_eq!(json["assertions"][0]["status"], "fail");
+    assert!(json["assertions"][0]["delta"].is_string());
 }
 
 #[test]
@@ -99,23 +121,31 @@ fn test_golden_publish_baseline() {
         col_count: Some(10),
         content_hash: Some("blake3:a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a".into()),
         source_metadata: Some(serde_json::json!({"type": "dbt", "identity": "models/payments"})),
+        assertions: Some(vec![AssertionResult {
+            kind: "sum".into(),
+            column: "amount".into(),
+            expected: None,
+            actual: Some("12345.67".into()),
+            tolerance: None,
+            status: "baseline_created".into(),
+            delta: None,
+            message: None,
+        }]),
         proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/1/proof".into(),
     };
 
     validate_golden_keys("tests/golden/publish-baseline.json", &result);
 
-    // check_status must be "baseline_created" — NOT "pass"
     let json = serde_json::to_value(&result).unwrap();
     assert_eq!(json["check_status"], "baseline_created");
-
+    assert_eq!(json["assertions"][0]["status"], "baseline_created");
+    assert!(json["assertions"][0]["actual"].is_string());
     // baseline_created must NOT trigger --fail-on-check-failure
     assert_ne!(result.check_status.as_deref(), Some("fail"));
 }
 
 #[test]
 fn test_golden_no_wait_output() {
-    // When --no-wait is used, the CLI emits a minimal JSON with just run_id, status, proof_url.
-    // This isn't a RunResult — it's hand-built in hub.rs. Validate the golden shape.
     let golden: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string("tests/golden/publish-no-wait.json").unwrap()
     ).unwrap();
@@ -127,8 +157,6 @@ fn test_golden_no_wait_output() {
 
 #[test]
 fn test_run_result_required_fields_never_null() {
-    // These fields are ALWAYS present (not Option). If someone makes them
-    // optional, this test must fail to force a schema version discussion.
     let result = RunResult {
         run_id: "1".into(),
         version: 1,
@@ -139,15 +167,52 @@ fn test_run_result_required_fields_never_null() {
         col_count: None,
         content_hash: None,
         source_metadata: None,
+        assertions: None,
         proof_url: "https://example.com/proof".into(),
     };
 
     let json = serde_json::to_value(&result).unwrap();
     let obj = json.as_object().unwrap();
 
-    // Required: always present, never null
     for key in &["run_id", "version", "status", "proof_url"] {
         assert!(obj.contains_key(*key), "Required field '{}' missing", key);
         assert!(!obj[*key].is_null(), "Required field '{}' is null", key);
     }
+}
+
+#[test]
+fn test_assertion_result_schema() {
+    // Verify the assertion result JSON shape matches the contract
+    let pass = AssertionResult {
+        kind: "sum".into(),
+        column: "amount".into(),
+        expected: Some("12345.67".into()),
+        actual: Some("12345.66".into()),
+        tolerance: Some("0.01".into()),
+        status: "pass".into(),
+        delta: None,
+        message: None,
+    };
+
+    let fail = AssertionResult {
+        kind: "sum".into(),
+        column: "revenue".into(),
+        expected: Some("100000".into()),
+        actual: Some("99950".into()),
+        tolerance: Some("0".into()),
+        status: "fail".into(),
+        delta: Some("50".into()),
+        message: None,
+    };
+
+    let pass_json = serde_json::to_value(&pass).unwrap();
+    assert_eq!(pass_json["kind"], "sum");
+    assert_eq!(pass_json["column"], "amount");
+    assert_eq!(pass_json["status"], "pass");
+    // delta should not appear for pass (skip_serializing_if)
+    assert!(pass_json.get("delta").is_none());
+
+    let fail_json = serde_json::to_value(&fail).unwrap();
+    assert_eq!(fail_json["status"], "fail");
+    assert_eq!(fail_json["delta"], "50");
 }

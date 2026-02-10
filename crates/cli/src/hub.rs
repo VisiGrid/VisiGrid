@@ -10,6 +10,7 @@ use std::time::Duration;
 use visigrid_hub_client::{
     AuthCredentials, save_auth,
     HubClient, HubError, CreateRevisionOptions, RunResult,
+    AssertionInput,
     hash_file,
 };
 
@@ -95,6 +96,7 @@ pub fn cmd_publish(
     wait: bool,
     fail_on_check_failure: bool,
     output_fmt: Option<OutputFormat>,
+    assert_sum: Vec<String>,
 ) -> Result<(), CliError> {
     // Validate inputs
     if !file.exists() {
@@ -160,12 +162,24 @@ pub fn cmd_publish(
         id
     };
 
+    // Parse --assert-sum flags into AssertionInput
+    let assertions: Vec<AssertionInput> = assert_sum.iter().map(|s| {
+        let parts: Vec<&str> = s.splitn(3, ':').collect();
+        AssertionInput {
+            kind: "sum".into(),
+            column: parts.first().unwrap_or(&"").to_string(),
+            expected: parts.get(1).map(|s| s.to_string()),
+            tolerance: parts.get(2).map(|s| s.to_string()),
+        }
+    }).collect();
+
     // Step 3: Create revision
     if !json_output { eprint!("Creating revision... "); }
     let opts = CreateRevisionOptions {
         source_type,
         source_identity,
         query_hash,
+        assertions,
     };
     let (revision_id, upload_url, upload_headers) = client
         .create_revision(&dataset_id, &content_hash, byte_size, &opts)
@@ -255,6 +269,21 @@ fn print_human_result(r: &RunResult) {
             if cc != 0 {
                 let sign = if cc > 0 { "+" } else { "" };
                 eprintln!("  Cols:    {}{}", sign, cc);
+            }
+        }
+    }
+    if let Some(ref assertions) = r.assertions {
+        for a in assertions {
+            let label = format!("{}({})", a.kind, a.column);
+            match a.status.as_str() {
+                "pass" => eprintln!("  {}: PASS (actual={})", label, a.actual.as_deref().unwrap_or("?")),
+                "fail" => eprintln!("  {}: FAIL (expected={} actual={} delta={})",
+                    label,
+                    a.expected.as_deref().unwrap_or("?"),
+                    a.actual.as_deref().unwrap_or("?"),
+                    a.delta.as_deref().unwrap_or("?")),
+                "baseline_created" => eprintln!("  {}: BASELINE (actual={})", label, a.actual.as_deref().unwrap_or("?")),
+                _ => eprintln!("  {}: {}", label, a.status),
             }
         }
     }

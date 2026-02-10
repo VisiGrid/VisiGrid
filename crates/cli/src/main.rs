@@ -515,6 +515,12 @@ Examples:
         /// Output format (auto-detected: JSON when piped, text when TTY)
         #[arg(long)]
         output: Option<OutputFormat>,
+
+        /// Assert sum of a numeric column (repeatable).
+        /// Format: column:expected[:tolerance]
+        /// Example: --assert-sum amount:12345.67:0.01
+        #[arg(long = "assert-sum", value_name = "COL:EXPECTED[:TOLERANCE]")]
+        assert_sum: Vec<String>,
     },
 
     /// Sheet file operations (headless build/inspect/verify)
@@ -1118,10 +1124,10 @@ fn main() -> ExitCode {
         Some(Commands::Login { token, api_base }) => hub::cmd_login(token, api_base),
         Some(Commands::Publish {
             file, repo, dataset, source_type, source_identity, query_hash,
-            wait, no_wait, fail_on_check_failure, no_fail, output,
+            wait, no_wait, fail_on_check_failure, no_fail, output, assert_sum,
         }) => hub::cmd_publish(
             file, repo, dataset, source_type, source_identity, query_hash,
-            wait && !no_wait, fail_on_check_failure && !no_fail, output,
+            wait && !no_wait, fail_on_check_failure && !no_fail, output, assert_sum,
         ),
         Some(Commands::Sheet(sheet_cmd)) => match sheet_cmd {
             SheetCommands::Apply { output, lua, verify, stamp, dry_run, json } => {

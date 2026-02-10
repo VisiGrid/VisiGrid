@@ -11,5 +11,13 @@
     "type": "dbt",
     "identity": "models/payments"
   },
+  "assertions": [
+    {
+      "kind": "sum",
+      "column": "amount",
+      "actual": "12345.67",
+      "status": "baseline_created"
+    }
+  ],
   "proof_url": "https://api.visihub.app/api/repos/acme/payments/runs/1/proof"
 }

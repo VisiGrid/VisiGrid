@@ -54,6 +54,7 @@ to complete and prints the full run result.
 | `col_count` | integer \| null | optional | Total columns in this version |
 | `content_hash` | string \| null | optional | `blake3:<hex>` content hash |
 | `source_metadata` | object \| null | optional | Source provenance (see below) |
+| `assertions` | array \| null | optional | Control total assertion results (see below) |
 | `proof_url` | string | **always** | URL to the cryptographic proof |
 
 ### `diff_summary` Fields
@@ -74,6 +75,34 @@ to complete and prints the full run result.
 | `identity` | string | Model/pipeline identifier |
 | `timestamp` | string | ISO 8601 UTC timestamp of the publish |
 | `query_hash` | string | Hash of the source query (if applicable) |
+
+### `assertions` Array Items
+
+Each item represents a control total assertion result.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `kind` | string | Assertion type (`"sum"`) |
+| `column` | string | Column name the assertion applies to |
+| `expected` | string \| null | Expected value (strings to avoid float issues) |
+| `actual` | string \| null | Computed actual value |
+| `tolerance` | string \| null | Allowed deviation |
+| `status` | string | `"pass"`, `"fail"`, `"baseline_created"`, or `"skipped"` |
+| `delta` | string \| null | Absolute difference (only present on `"fail"`) |
+| `message` | string \| null | Error message (only present on errors) |
+
+### CLI Input
+
+```
+--assert-sum <column>:<expected>[:<tolerance>]
+```
+
+Examples:
+- `--assert-sum amount:12345.67:0.01` — sum of `amount` must equal 12345.67 within 0.01
+- `--assert-sum revenue:100000` — exact match, zero tolerance
+
+On baseline runs (first revision), if no expected value is given, the actual
+value is recorded and status is `"baseline_created"`.
 
 ## JSON Schema: `--no-wait`
 

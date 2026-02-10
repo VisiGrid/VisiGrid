@@ -13,6 +13,17 @@
   "row_count": 950,
   "col_count": 17,
   "content_hash": "blake3:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+  "assertions": [
+    {
+      "kind": "sum",
+      "column": "amount",
+      "expected": "12345.67",
+      "actual": "12300.00",
+      "tolerance": "0.01",
+      "status": "fail",
+      "delta": "45.67"
+    }
+  ],
   "source_metadata": {
     "type": "dbt",
     "identity": "models/payments"
