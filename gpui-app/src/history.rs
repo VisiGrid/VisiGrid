@@ -194,6 +194,20 @@ pub enum UndoAction {
         /// New height (None = reset to default)
         new: Option<f32>,
     },
+    /// Rows hidden/unhidden (for undo: toggle visibility)
+    RowVisibilityChanged {
+        sheet_id: SheetId,
+        rows: Vec<usize>,
+        /// true = rows were hidden, false = rows were unhidden
+        hidden: bool,
+    },
+    /// Columns hidden/unhidden (for undo: toggle visibility)
+    ColVisibilityChanged {
+        sheet_id: SheetId,
+        cols: Vec<usize>,
+        /// true = cols were hidden, false = cols were unhidden
+        hidden: bool,
+    },
     /// Sort applied (for undo: restore previous row order)
     SortApplied {
         /// Sheet where sort was applied (required for replay)
@@ -354,6 +368,14 @@ impl UndoAction {
             }
             UndoAction::RowHeightSet { .. } => {
                 "Set row height".to_string()
+            }
+            UndoAction::RowVisibilityChanged { rows, hidden, .. } => {
+                let action = if *hidden { "Hide" } else { "Unhide" };
+                format!("{} {} row(s)", action, rows.len())
+            }
+            UndoAction::ColVisibilityChanged { cols, hidden, .. } => {
+                let action = if *hidden { "Hide" } else { "Unhide" };
+                format!("{} {} column(s)", action, cols.len())
             }
             UndoAction::SortApplied { .. } => {
                 "Sort".to_string()
@@ -1403,11 +1425,12 @@ impl History {
                     sheet_view.sort = None;
                 }
             }
-            UndoAction::ColumnWidthSet { .. } | UndoAction::RowHeightSet { .. } => {
-                // Column/row sizing is stored at the app level (Spreadsheet), not in Workbook.
+            UndoAction::ColumnWidthSet { .. } | UndoAction::RowHeightSet { .. }
+            | UndoAction::RowVisibilityChanged { .. } | UndoAction::ColVisibilityChanged { .. } => {
+                // Column/row sizing and visibility are stored at the app level (Spreadsheet), not in Workbook.
                 // For preview purposes, we skip these - the preview shows correct data values
-                // even if column widths differ from the historical state.
-                // This is acceptable because sizing is visual-only, not computational.
+                // even if column widths or visibility differ from the historical state.
+                // This is acceptable because sizing/visibility is visual-only, not computational.
             }
             UndoAction::SortApplied { sheet_index, new_row_order, new_sort_state, .. } => {
                 // Validate sheet exists
@@ -1510,6 +1533,8 @@ pub enum UndoActionKind {
     ValidationCleared,
     ValidationExcluded,
     ValidationExclusionCleared,
+    RowVisibilityChanged,
+    ColVisibilityChanged,
     /// Rewind is an audit-only action - it should never appear in replay paths
     /// because rewind truncates history (no actions after it to replay)
     Rewind,
@@ -1543,6 +1568,10 @@ impl UndoActionKind {
             UndoActionKind::SortApplied => true,
             UndoActionKind::SortCleared => true,
 
+            // Visibility changes are view-only (not serialized to file) - skip for replay
+            UndoActionKind::RowVisibilityChanged => false,
+            UndoActionKind::ColVisibilityChanged => false,
+
             // Merge topology changes are replay-supported
             UndoActionKind::SetMerges => true,
 
@@ -1574,6 +1603,8 @@ impl UndoActionKind {
             UndoActionKind::ValidationCleared => "Clear validation",
             UndoActionKind::ValidationExcluded => "Exclude validation",
             UndoActionKind::ValidationExclusionCleared => "Clear exclusion",
+            UndoActionKind::RowVisibilityChanged => "Hide/unhide rows",
+            UndoActionKind::ColVisibilityChanged => "Hide/unhide columns",
             UndoActionKind::Rewind => "Rewind",
             UndoActionKind::SetMerges => "Merge cells",
         }
@@ -1603,6 +1634,8 @@ impl UndoActionKind {
             UndoActionKind::ValidationCleared => 0x0E,
             UndoActionKind::ValidationExcluded => 0x0F,
             UndoActionKind::ValidationExclusionCleared => 0x10,
+            UndoActionKind::RowVisibilityChanged => 0x15,
+            UndoActionKind::ColVisibilityChanged => 0x16,
             UndoActionKind::Rewind => 0xFF, // Sentinel value for audit action
             UndoActionKind::SetMerges => 0x14,
         }
@@ -1632,6 +1665,8 @@ impl UndoAction {
             UndoAction::ValidationCleared { .. } => UndoActionKind::ValidationCleared,
             UndoAction::ValidationExcluded { .. } => UndoActionKind::ValidationExcluded,
             UndoAction::ValidationExclusionCleared { .. } => UndoActionKind::ValidationExclusionCleared,
+            UndoAction::RowVisibilityChanged { .. } => UndoActionKind::RowVisibilityChanged,
+            UndoAction::ColVisibilityChanged { .. } => UndoActionKind::ColVisibilityChanged,
             UndoAction::Rewind { .. } => UndoActionKind::Rewind,
             UndoAction::SetMerges { .. } => UndoActionKind::SetMerges,
         }

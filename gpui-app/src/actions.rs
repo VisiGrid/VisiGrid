@@ -47,6 +47,15 @@ actions!(editing, [
     TrimWhitespace,
     InsertRowsOrCols,    // Ctrl+= / Ctrl++ - insert rows/cols based on selection
     DeleteRowsOrCols,    // Ctrl+- - delete rows/cols based on selection
+    HideRows,            // Ctrl+9 - hide selected rows
+    UnhideRows,          // Ctrl+Shift+9 - unhide rows adjacent to selection
+    HideCols,            // Ctrl+0 - hide selected columns
+    UnhideCols,          // Ctrl+Shift+0 - unhide columns adjacent to selection
+    InsertDate,          // Ctrl+; - insert current date into active cell
+    InsertTime,          // Ctrl+Shift+; - insert current time into active cell
+    CopyFormulaAbove,    // Ctrl+' - copy formula from cell above
+    CopyValueAbove,      // Ctrl+Shift+" - copy display value from cell above
+    InsertNewline,       // Alt+Enter - insert newline in cell
     // Edit mode cursor movement
     EditCursorLeft,
     EditCursorRight,
@@ -87,6 +96,9 @@ actions!(selection, [
     ExtendJumpDown,
     ExtendJumpLeft,
     ExtendJumpRight,
+    ExtendToStart,  // Ctrl+Shift+Home - extend selection to A1
+    ExtendToEnd,    // Ctrl+Shift+End - extend selection to last used cell
+    SelectCurrentRegion,  // Ctrl+Shift+* - select contiguous data region around active cell
 ]);
 
 // Clipboard actions
@@ -127,7 +139,7 @@ actions!(view, [
     OpenKeybindings,  // Open keybindings.json for editing
     ToggleProblems,
     ToggleZenMode,
-    ToggleLuaConsole, // Ctrl+Shift+L - Lua scripting REPL
+    ToggleLuaConsole, // Alt+F11 - Lua scripting REPL (matches Excel VBA Editor)
     ToggleFormatBar,
     ToggleFormulaView,
     ToggleMinimap,
@@ -140,6 +152,7 @@ actions!(view, [
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    OpenContextMenu,     // Shift+F10 - open cell context menu
     ShowAbout,
     ShowLicense,
     ShowFontPicker,
@@ -184,6 +197,11 @@ actions!(format, [
     AlignRight,
     FormatCurrency,
     FormatPercent,
+    FormatDate,        // Ctrl+Shift+# - apply date format
+    FormatNumber,      // Ctrl+Shift+! - apply number (comma) format
+    FormatGeneral,     // Ctrl+Shift+~ - apply general format
+    FormatScientific,  // Ctrl+Shift+^ - apply scientific format
+    FormatTime,        // Ctrl+Shift+@ - apply time format
     ClearFormatting,  // Reset all format properties to default
     FormatPainter,            // Activate Format Painter mode (single-shot)
     FormatPainterLocked,      // Activate Format Painter in locked mode (stays active)

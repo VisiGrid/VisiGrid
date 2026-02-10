@@ -3,6 +3,7 @@
 //! Contains:
 //! - Insert rows/columns
 //! - Delete rows/columns
+//! - Hide/unhide rows/columns
 //! - Row height and column width management during insert/delete
 
 use gpui::*;
@@ -72,7 +73,7 @@ impl Spreadsheet {
     }
 
     /// Insert rows at position with undo support
-    fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
+    pub(crate) fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
         let sheet_index = self.sheet_index(cx);
 
         // Perform the insert
@@ -111,7 +112,7 @@ impl Spreadsheet {
     }
 
     /// Delete rows at position with undo support
-    fn delete_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
+    pub(crate) fn delete_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
         let sheet_index = self.sheet_index(cx);
 
         // Capture cells to be deleted for undo
@@ -179,7 +180,7 @@ impl Spreadsheet {
     }
 
     /// Insert columns at position with undo support
-    fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+    pub(crate) fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
         let sheet_index = self.sheet_index(cx);
 
         // Perform the insert
@@ -218,7 +219,7 @@ impl Spreadsheet {
     }
 
     /// Delete columns at position with undo support
-    fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+    pub(crate) fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
         let sheet_index = self.sheet_index(cx);
 
         // Capture cells to be deleted for undo
@@ -282,6 +283,145 @@ impl Spreadsheet {
         self.bump_cells_rev();
         self.is_modified = true;
         self.status_message = Some(format!("Deleted {} column(s)", count));
+        cx.notify();
+    }
+
+    // =========================================================================
+    // Hide/Unhide rows and columns (Ctrl+9/0, Ctrl+Shift+9/0)
+    // =========================================================================
+
+    /// Hide selected rows (Ctrl+9)
+    pub(crate) fn hide_rows(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        if self.mode.is_editing() { return; }
+
+        let ((min_row, _), (max_row, _)) = self.selection_range();
+        let rows: Vec<usize> = (min_row..=max_row)
+            .filter(|r| !self.is_row_hidden(*r))
+            .collect();
+
+        if rows.is_empty() { return; }
+
+        let sheet_id = self.cached_sheet_id();
+        let set = self.hidden_rows.entry(sheet_id).or_default();
+        for &r in &rows {
+            set.insert(r);
+        }
+
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::RowVisibilityChanged {
+                sheet_id,
+                rows: rows.clone(),
+                hidden: true,
+            },
+            None,
+        );
+        self.is_modified = true;
+        self.status_message = Some(format!("Hidden {} row(s)", rows.len()));
+        cx.notify();
+    }
+
+    /// Unhide rows adjacent to selection (Ctrl+Shift+9)
+    ///
+    /// Excel behavior: select rows spanning the hidden range, then unhide.
+    /// E.g., if rows 5-8 are hidden, select rows 4-9 and press Ctrl+Shift+9.
+    pub(crate) fn unhide_rows(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        if self.mode.is_editing() { return; }
+
+        let ((min_row, _), (max_row, _)) = self.selection_range();
+        let sheet_id = self.cached_sheet_id();
+        let rows: Vec<usize> = (min_row..=max_row)
+            .filter(|r| self.is_row_hidden(*r))
+            .collect();
+
+        if rows.is_empty() {
+            self.status_message = Some("No hidden rows in selection".to_string());
+            cx.notify();
+            return;
+        }
+
+        let set = self.hidden_rows.entry(sheet_id).or_default();
+        for &r in &rows {
+            set.remove(&r);
+        }
+
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::RowVisibilityChanged {
+                sheet_id,
+                rows: rows.clone(),
+                hidden: false,
+            },
+            None,
+        );
+        self.is_modified = true;
+        self.status_message = Some(format!("Unhidden {} row(s)", rows.len()));
+        cx.notify();
+    }
+
+    /// Hide selected columns (Ctrl+0)
+    pub(crate) fn hide_cols(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        if self.mode.is_editing() { return; }
+
+        let ((_, min_col), (_, max_col)) = self.selection_range();
+        let cols: Vec<usize> = (min_col..=max_col)
+            .filter(|c| !self.is_col_hidden(*c))
+            .collect();
+
+        if cols.is_empty() { return; }
+
+        let sheet_id = self.cached_sheet_id();
+        let set = self.hidden_cols.entry(sheet_id).or_default();
+        for &c in &cols {
+            set.insert(c);
+        }
+
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::ColVisibilityChanged {
+                sheet_id,
+                cols: cols.clone(),
+                hidden: true,
+            },
+            None,
+        );
+        self.is_modified = true;
+        self.status_message = Some(format!("Hidden {} column(s)", cols.len()));
+        cx.notify();
+    }
+
+    /// Unhide columns adjacent to selection (Ctrl+Shift+0)
+    pub(crate) fn unhide_cols(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        if self.mode.is_editing() { return; }
+
+        let ((_, min_col), (_, max_col)) = self.selection_range();
+        let sheet_id = self.cached_sheet_id();
+        let cols: Vec<usize> = (min_col..=max_col)
+            .filter(|c| self.is_col_hidden(*c))
+            .collect();
+
+        if cols.is_empty() {
+            self.status_message = Some("No hidden columns in selection".to_string());
+            cx.notify();
+            return;
+        }
+
+        let set = self.hidden_cols.entry(sheet_id).or_default();
+        for &c in &cols {
+            set.remove(&c);
+        }
+
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::ColVisibilityChanged {
+                sheet_id,
+                cols: cols.clone(),
+                hidden: false,
+            },
+            None,
+        );
+        self.is_modified = true;
+        self.status_message = Some(format!("Unhidden {} column(s)", cols.len()));
         cx.notify();
     }
 }

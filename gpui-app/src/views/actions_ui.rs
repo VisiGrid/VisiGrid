@@ -151,6 +151,9 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &ZoomReset, _, cx| {
             this.zoom_reset(cx);
         }))
+        .on_action(cx.listener(|this, _: &OpenContextMenu, _, cx| {
+            this.open_context_menu(cx);
+        }))
         // Freeze panes
         .on_action(cx.listener(|this, _: &FreezeTopRow, _, cx| {
             this.freeze_top_row(cx);
@@ -258,6 +261,26 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &FormatPercent, window, cx| {
             this.format_percent(cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FormatDate, window, cx| {
+            this.format_date_shortcut(cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FormatNumber, window, cx| {
+            this.format_number_shortcut(cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FormatGeneral, window, cx| {
+            this.format_general_shortcut(cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FormatScientific, window, cx| {
+            this.format_scientific_shortcut(cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FormatTime, window, cx| {
+            this.format_time_shortcut(cx);
             this.update_title_if_needed(window, cx);
         }))
         // Background colors

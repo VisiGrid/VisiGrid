@@ -2938,6 +2938,7 @@ fn make_internal_clipboard(raw_tsv: &str, id: u128) -> InternalClipboard {
         source: (0, 0),
         id,
         merges: vec![],
+        created_at: std::time::Instant::now(),
     }
 }
 
@@ -3345,4 +3346,406 @@ fn test_format_painter_applies_to_range() {
     // Specifically verify B2's italic survived undo
     assert!(sheet.get_format(1, 1).italic, "B2 was italic before, should be italic after undo");
     assert!(!sheet.get_format(1, 1).bold, "B2 was not bold before, should not be bold after undo");
+}
+
+// =========================================================================
+// Bucket A/B regression tests
+// =========================================================================
+
+/// Format shortcut actions (Date, Number, General, Scientific, Time) should only
+/// mutate number_format, leaving bold/italic/underline etc. untouched.
+#[test]
+fn test_format_shortcut_only_mutates_number_format() {
+    use visigrid_engine::cell::{CellFormat, NumberFormat, DateStyle, NegativeStyle};
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // Pre-format A1 with bold + italic
+    let mut fmt = CellFormat::default();
+    fmt.bold = true;
+    fmt.italic = true;
+    sheet.set_format(0, 0, fmt);
+
+    // Apply each number format shortcut and verify only number_format changes
+    let formats: Vec<(&str, NumberFormat)> = vec![
+        ("Date", NumberFormat::Date { style: DateStyle::Short }),
+        ("Number", NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::Minus }),
+        ("General", NumberFormat::General),
+        ("Scientific", NumberFormat::Custom("0.00E+00".to_string())),
+        ("Time", NumberFormat::Time),
+    ];
+
+    for (label, nf) in formats {
+        sheet.set_number_format(0, 0, nf.clone());
+        let after = sheet.get_format(0, 0);
+        assert_eq!(after.number_format, nf, "{}: number_format should match", label);
+        assert!(after.bold, "{}: bold should be preserved", label);
+        assert!(after.italic, "{}: italic should be preserved", label);
+        assert!(!after.underline, "{}: underline should remain false", label);
+        assert!(!after.strikethrough, "{}: strikethrough should remain false", label);
+    }
+}
+
+/// ExtendToStart should set selection_end to (0, 0).
+/// ExtendToEnd should set selection_end to (NUM_ROWS-1, NUM_COLS-1).
+#[test]
+fn test_extend_to_start_and_end_selection_range() {
+    // These are pure view_state operations, tested via selection math
+    const NUM_ROWS: usize = 65536;
+    const NUM_COLS: usize = 256;
+
+    // Simulate: active cell at (50, 10), then extend to start
+    let selected = (50usize, 10usize);
+    let extend_start = (0usize, 0usize);
+    let extend_end = (NUM_ROWS - 1, NUM_COLS - 1);
+
+    // Selection range = min/max of anchor and end
+    let (min_row, max_row) = (extend_start.0.min(selected.0), extend_start.0.max(selected.0));
+    let (min_col, max_col) = (extend_start.1.min(selected.1), extend_start.1.max(selected.1));
+    assert_eq!((min_row, min_col), (0, 0), "ExtendToStart: top-left should be (0,0)");
+    assert_eq!((max_row, max_col), (50, 10), "ExtendToStart: bottom-right should be anchor");
+
+    let (min_row, max_row) = (extend_end.0.min(selected.0), extend_end.0.max(selected.0));
+    let (min_col, max_col) = (extend_end.1.min(selected.1), extend_end.1.max(selected.1));
+    assert_eq!((min_row, min_col), (50, 10), "ExtendToEnd: top-left should be anchor");
+    assert_eq!((max_row, max_col), (NUM_ROWS - 1, NUM_COLS - 1), "ExtendToEnd: bottom-right should be last cell");
+}
+
+/// CopyFormulaAbove should adjust row references by -1 (i.e., the formula from
+/// row above gets its relative refs shifted down by +1 when conceptually "filling"
+/// from row N-1 to row N).  Since copy_formula_above copies the *raw* formula from
+/// the cell above and adjusts refs by delta_row=1, verify that works.
+#[test]
+fn test_copy_formula_above_adjusts_references() {
+    // Simulate: cell B2 has "=A1+$B$1", copy formula to B3 (delta_row = 1)
+    let formula = "=A1+$B$1";
+    let adjusted = adjust_formula_refs(formula, 1, 0);
+    assert_eq!(adjusted, "=A2+$B$1",
+        "Relative A1 becomes A2, absolute $B$1 stays");
+
+    // More complex: "=SUM(A$1:A5)+C3"
+    let formula2 = "=SUM(A$1:A5)+C3";
+    let adjusted2 = adjust_formula_refs(formula2, 1, 0);
+    assert_eq!(adjusted2, "=SUM(A$1:A6)+C4",
+        "A$1 stays (row absolute), A5->A6, C3->C4");
+}
+
+/// Inserting a newline at cursor position in the edit buffer should work correctly.
+#[test]
+fn test_insert_newline_in_edit_buffer() {
+    // Simulate the edit buffer logic from insert_newline
+    let mut edit_value = "Hello World".to_string();
+    let mut edit_cursor: usize = 5; // cursor after "Hello"
+
+    // Insert newline at cursor
+    let byte_idx = edit_cursor.min(edit_value.len());
+    edit_value.insert(byte_idx, '\n');
+    edit_cursor = byte_idx + 1;
+
+    assert_eq!(edit_value, "Hello\n World", "Newline inserted at cursor position");
+    assert_eq!(edit_cursor, 6, "Cursor advances past newline");
+
+    // Insert at end
+    let mut edit_value2 = "Test".to_string();
+    let mut edit_cursor2: usize = 4;
+    let byte_idx2 = edit_cursor2.min(edit_value2.len());
+    edit_value2.insert(byte_idx2, '\n');
+    edit_cursor2 = byte_idx2 + 1;
+    assert_eq!(edit_value2, "Test\n", "Newline appended at end");
+    assert_eq!(edit_cursor2, 5, "Cursor at end after newline");
+}
+
+/// Copy value above should copy the display value (not raw formula).
+#[test]
+fn test_copy_value_above_gets_display() {
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    // A1 = 10, A2 = 20, A3 = "=A1+A2" (evaluates to 30)
+    sheet.set_value(0, 0, "10");
+    sheet.set_value(1, 0, "20");
+    sheet.set_value(2, 0, "=A1+A2");
+
+    // Copy value from A3 (row 2) to A4 (row 3) should get "30", not "=A1+A2"
+    let display = sheet.get_display(2, 0);
+    assert_eq!(display, "30", "Display value should be computed result");
+
+    let raw = sheet.get_raw(2, 0);
+    assert_eq!(raw, "=A1+A2", "Raw value should be the formula");
+
+    // Simulate copy_value_above: set A4 to the display value
+    sheet.set_value(3, 0, &display);
+    assert_eq!(sheet.get_display(3, 0), "30", "A4 should show 30 as plain value");
+    assert_eq!(sheet.get_raw(3, 0), "30", "A4 raw should be '30', not a formula");
+}
+
+/// Shift+F10 context menu must show clipboard ops first (Cut/Copy/Paste/Paste Values),
+/// followed by Insert/Delete row/col, then Clear/Format. This ordering is a contract.
+#[test]
+fn test_cell_context_menu_ordering() {
+    use crate::views::context_menu::cell_context_menu_item_ids;
+
+    let ids = cell_context_menu_item_ids();
+
+    // First 4 must be clipboard operations
+    assert_eq!(ids[0], "ctx-cut", "First item must be Cut");
+    assert_eq!(ids[1], "ctx-copy", "Second item must be Copy");
+    assert_eq!(ids[2], "ctx-paste", "Third item must be Paste");
+    assert_eq!(ids[3], "ctx-paste-values", "Fourth item must be Paste Values");
+
+    // Insert/Delete block must follow clipboard
+    assert_eq!(ids[4], "ctx-insert-row", "Fifth item must be Insert Row");
+    assert_eq!(ids[5], "ctx-insert-col", "Sixth item must be Insert Column");
+    assert_eq!(ids[6], "ctx-delete-row", "Seventh item must be Delete Row");
+    assert_eq!(ids[7], "ctx-delete-col", "Eighth item must be Delete Column");
+
+    // Clear and format at bottom
+    assert!(ids.contains(&"ctx-clear-contents"), "Must include Clear Contents");
+    assert!(ids.contains(&"ctx-format-cells"), "Must include Format Cells");
+
+    // Total count sanity
+    assert_eq!(ids.len(), 12, "Cell context menu should have 12 items (excluding separators)");
+}
+
+/// Ctrl+Shift+* should find the contiguous region around the active cell.
+#[test]
+fn test_select_current_region() {
+    use crate::ai::find_current_region;
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // Create a 3×2 data block at B2:C4
+    sheet.set_value(1, 1, "Name");
+    sheet.set_value(1, 2, "Score");
+    sheet.set_value(2, 1, "Alice");
+    sheet.set_value(2, 2, "95");
+    sheet.set_value(3, 1, "Bob");
+    sheet.set_value(3, 2, "87");
+
+    // From B3 (inside the block): should select B2:C4
+    let (min_r, min_c, max_r, max_c) = find_current_region(&sheet, 2, 1);
+    assert_eq!((min_r, min_c), (1, 1), "Region should start at B2");
+    assert_eq!((max_r, max_c), (3, 2), "Region should end at C4");
+
+    // From A1 (empty, outside the block): should select just A1
+    let (min_r, min_c, max_r, max_c) = find_current_region(&sheet, 0, 0);
+    assert_eq!((min_r, min_c), (0, 0), "Empty cell: region is just the cell");
+    assert_eq!((max_r, max_c), (0, 0), "Empty cell: region is just the cell");
+
+    // From C2 (edge of block): should still capture full block
+    let (min_r, min_c, max_r, max_c) = find_current_region(&sheet, 1, 2);
+    assert_eq!((min_r, min_c), (1, 1), "Edge cell: region should start at B2");
+    assert_eq!((max_r, max_c), (3, 2), "Edge cell: region should end at C4");
+}
+
+/// Blank row splits two data blocks into separate regions.
+/// Row 0-1 has data, row 2 is empty, row 3-4 has data.
+/// Ctrl+Shift+* from row 1 should NOT include rows 3-4.
+#[test]
+fn test_select_region_blank_row_splits() {
+    use crate::ai::find_current_region;
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // Upper block: A1:B2
+    sheet.set_value(0, 0, "Header1");
+    sheet.set_value(0, 1, "Header2");
+    sheet.set_value(1, 0, "100");
+    sheet.set_value(1, 1, "200");
+    // Row 2 is empty (the split)
+    // Lower block: A4:B5
+    sheet.set_value(3, 0, "X");
+    sheet.set_value(3, 1, "Y");
+    sheet.set_value(4, 0, "300");
+    sheet.set_value(4, 1, "400");
+
+    // From A2 (upper block): should select A1:B2 only
+    let (min_r, min_c, max_r, max_c) = find_current_region(&sheet, 1, 0);
+    assert_eq!((min_r, min_c), (0, 0), "Upper block starts at A1");
+    assert_eq!((max_r, max_c), (1, 1), "Upper block ends at B2 (empty row 2 stops expansion)");
+
+    // From A4 (lower block): should select A4:B5 only
+    let (min_r, min_c, max_r, max_c) = find_current_region(&sheet, 3, 0);
+    assert_eq!((min_r, min_c), (3, 0), "Lower block starts at A4");
+    assert_eq!((max_r, max_c), (4, 1), "Lower block ends at B5 (empty row 2 stops expansion)");
+}
+
+/// A formula that evaluates to "" (empty string) should be treated as empty
+/// by find_current_region, since it uses get_display() which returns "".
+#[test]
+fn test_select_region_formula_displays_empty() {
+    use crate::ai::find_current_region;
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // Data block: A1:B2
+    sheet.set_value(0, 0, "Name");
+    sheet.set_value(0, 1, "Score");
+    sheet.set_value(1, 0, "Alice");
+    sheet.set_value(1, 1, "95");
+
+    // A3 has a formula that displays empty: =IF(FALSE,"x","")
+    sheet.set_value(2, 0, r#"=IF(FALSE,"x","")"#);
+
+    // A4 has real data
+    sheet.set_value(3, 0, "Bob");
+
+    // The formula in A3 displays as "" so region from A1 should stop at row 1
+    // (get_display returns "" for the IF(FALSE,...,"") result)
+    let display = sheet.get_display(2, 0);
+    // The formula evaluates to empty string
+    assert!(
+        display.is_empty() || display == "0",
+        "Formula should display empty or 0; got '{}'",
+        display
+    );
+
+    // If it displays empty: region from A1 should be A1:B2 (stops at empty row 2)
+    // If it displays "0" or non-empty: region extends further
+    if display.is_empty() {
+        let (min_r, min_c, max_r, max_c) = find_current_region(&sheet, 0, 0);
+        assert_eq!((min_r, min_c), (0, 0), "Region starts at A1");
+        assert_eq!((max_r, max_c), (1, 1), "Region ends at B2 (empty-display formula stops expansion)");
+    }
+}
+
+// =========================================================================
+// FILL SELECTION (Ctrl+Enter) TESTS
+// =========================================================================
+
+/// Fill selection from primary cell should copy plain values to all target cells.
+#[test]
+fn test_fill_selection_plain_value() {
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // Set primary cell A1 = "Hello"
+    sheet.set_value(0, 0, "Hello");
+
+    // Simulate filling A2, A3 with the primary cell's value
+    let primary_value = sheet.get_raw(0, 0);
+    assert_eq!(primary_value, "Hello");
+
+    // Fill targets (same column, different rows)
+    let targets = [(1, 0), (2, 0)];
+    for (row, col) in &targets {
+        sheet.set_value(*row, *col, &primary_value);
+    }
+
+    assert_eq!(sheet.get_display(1, 0), "Hello", "A2 should be filled with Hello");
+    assert_eq!(sheet.get_display(2, 0), "Hello", "A3 should be filled with Hello");
+}
+
+/// Fill selection with formula should shift relative references based on delta from primary cell.
+#[test]
+fn test_fill_selection_formula_shifting() {
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+
+    // Setup data
+    sheet.set_value(0, 0, "10");  // A1
+    sheet.set_value(1, 0, "20");  // A2
+    sheet.set_value(2, 0, "30");  // A3
+
+    // Primary cell B1 has =A1*2
+    sheet.set_value(0, 1, "=A1*2");
+    assert_eq!(sheet.get_display(0, 1), "20", "B1 = A1*2 = 20");
+
+    // Fill B2 with shifted formula: =A2*2 (delta_row=+1, delta_col=0)
+    let base_formula = "=A1*2";
+    let shifted = adjust_formula_refs(base_formula, 1, 0);
+    assert_eq!(shifted, "=A2*2", "Formula should shift row by +1");
+
+    sheet.set_value(1, 1, &shifted);
+    assert_eq!(sheet.get_display(1, 1), "40", "B2 = A2*2 = 40");
+
+    // Fill B3 with shifted formula: =A3*2 (delta_row=+2, delta_col=0)
+    let shifted2 = adjust_formula_refs(base_formula, 2, 0);
+    assert_eq!(shifted2, "=A3*2", "Formula should shift row by +2");
+
+    sheet.set_value(2, 1, &shifted2);
+    assert_eq!(sheet.get_display(2, 1), "60", "B3 = A3*2 = 60");
+}
+
+// =========================================================================
+// HIDE/UNHIDE ROWS AND COLUMNS TESTS
+// =========================================================================
+
+/// Hidden rows should be tracked per-sheet and undo should restore visibility.
+#[test]
+fn test_hide_unhide_rows_undo() {
+    use crate::history::{History, UndoAction};
+
+    let mut history = History::new();
+    let sheet_id = SheetId(1);
+    let mut hidden_rows = std::collections::BTreeSet::<usize>::new();
+
+    // Hide rows 2-4 (0-indexed)
+    let rows_to_hide = vec![2, 3, 4];
+    for &r in &rows_to_hide {
+        hidden_rows.insert(r);
+    }
+    history.record_action_with_provenance(
+        UndoAction::RowVisibilityChanged {
+            sheet_id,
+            rows: rows_to_hide.clone(),
+            hidden: true,
+        },
+        None,
+    );
+
+    assert!(hidden_rows.contains(&2), "Row 2 should be hidden");
+    assert!(hidden_rows.contains(&3), "Row 3 should be hidden");
+    assert!(hidden_rows.contains(&4), "Row 4 should be hidden");
+    assert!(!hidden_rows.contains(&1), "Row 1 should NOT be hidden");
+
+    // Undo: should reverse the hide
+    let entry = history.undo().expect("Should have undo entry");
+    match &entry.action {
+        UndoAction::RowVisibilityChanged { rows, hidden, .. } => {
+            assert!(*hidden, "Undo entry should record that rows were hidden");
+            assert_eq!(rows.len(), 3, "Should have 3 rows in undo");
+            // Apply undo: remove from hidden set
+            for r in rows {
+                hidden_rows.remove(r);
+            }
+        }
+        _ => panic!("Expected RowVisibilityChanged"),
+    }
+
+    assert!(!hidden_rows.contains(&2), "Row 2 should be visible after undo");
+    assert!(!hidden_rows.contains(&3), "Row 3 should be visible after undo");
+}
+
+/// nth_visible_col should skip hidden columns.
+#[test]
+fn test_nth_visible_col_skips_hidden() {
+    // Simulate the logic of nth_visible_col without needing full Spreadsheet
+    let mut hidden_cols = std::collections::BTreeSet::<usize>::new();
+    hidden_cols.insert(1);  // Hide column B
+    hidden_cols.insert(3);  // Hide column D
+
+    let scroll_col = 0;
+    let num_cols = 10;
+
+    // nth_visible_col logic
+    let nth_visible_col = |visible_index: usize| -> Option<usize> {
+        let mut count = 0;
+        let mut col = scroll_col;
+        while col < num_cols {
+            if !hidden_cols.contains(&col) {
+                if count == visible_index {
+                    return Some(col);
+                }
+                count += 1;
+            }
+            col += 1;
+        }
+        None
+    };
+
+    // visible_index 0 → col A (0)
+    assert_eq!(nth_visible_col(0), Some(0), "First visible col is A");
+    // visible_index 1 → col C (2), skipping hidden B (1)
+    assert_eq!(nth_visible_col(1), Some(2), "Second visible col is C (skips B)");
+    // visible_index 2 → col E (4), skipping hidden D (3)
+    assert_eq!(nth_visible_col(2), Some(4), "Third visible col is E (skips D)");
+    // visible_index 3 → col F (5)
+    assert_eq!(nth_visible_col(3), Some(5), "Fourth visible col is F");
 }

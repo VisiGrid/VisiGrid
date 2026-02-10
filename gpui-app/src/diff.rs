@@ -477,8 +477,11 @@ fn process_action(
             }
         }
 
-        // Skip column/row sizing changes (visual only)
-        UndoAction::ColumnWidthSet { .. } | UndoAction::RowHeightSet { .. } => {}
+        // Skip column/row sizing and visibility changes (visual only)
+        UndoAction::ColumnWidthSet { .. }
+        | UndoAction::RowHeightSet { .. }
+        | UndoAction::RowVisibilityChanged { .. }
+        | UndoAction::ColVisibilityChanged { .. } => {}
 
         // Skip rewind entries (audit-only)
         UndoAction::Rewind { .. } => {}

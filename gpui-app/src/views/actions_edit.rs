@@ -128,6 +128,19 @@ pub(crate) fn bind(
                 this.update_title_if_needed(window, cx);
             }
         }))
+        // Hide/Unhide rows/columns (Ctrl+9/0, Ctrl+Shift+9/0)
+        .on_action(cx.listener(|this, _: &HideRows, _, cx| {
+            this.hide_rows(cx);
+        }))
+        .on_action(cx.listener(|this, _: &UnhideRows, _, cx| {
+            this.unhide_rows(cx);
+        }))
+        .on_action(cx.listener(|this, _: &HideCols, _, cx| {
+            this.hide_cols(cx);
+        }))
+        .on_action(cx.listener(|this, _: &UnhideCols, _, cx| {
+            this.unhide_cols(cx);
+        }))
         // Undo/Redo
         .on_action(cx.listener(|this, _: &Undo, window, cx| {
             this.undo(cx);
@@ -491,6 +504,26 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &FillRight, window, cx| {
             this.fill_right(cx);
             this.update_title_if_needed(window, cx);
+        }))
+        // Insert date/time and copy from above
+        .on_action(cx.listener(|this, _: &InsertDate, window, cx| {
+            this.insert_date(cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &InsertTime, window, cx| {
+            this.insert_time(cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &CopyFormulaAbove, window, cx| {
+            this.copy_formula_above(cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &CopyValueAbove, window, cx| {
+            this.copy_value_above(cx);
+            this.update_title_if_needed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &InsertNewline, _, cx| {
+            this.insert_newline(cx);
         }))
         // Edit mode cursor movement
         .on_action(cx.listener(|this, _: &EditCursorLeft, window, cx| {

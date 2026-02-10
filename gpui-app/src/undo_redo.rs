@@ -319,6 +319,32 @@ impl Spreadsheet {
                     self.revalidate_range(&range, cx);
                     self.status_message = Some(format!("Undo: clear exclusions ({} cells)", range.cell_count()));
                 }
+                UndoAction::RowVisibilityChanged { sheet_id, rows, hidden } => {
+                    // Undo: reverse the visibility change
+                    let set = self.hidden_rows.entry(sheet_id).or_default();
+                    for row in &rows {
+                        if hidden {
+                            set.remove(row); // Was hidden → unhide
+                        } else {
+                            set.insert(*row); // Was unhidden → re-hide
+                        }
+                    }
+                    let action = if hidden { "hide" } else { "unhide" };
+                    self.status_message = Some(format!("Undo: {} {} row(s)", action, rows.len()));
+                }
+                UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
+                    // Undo: reverse the visibility change
+                    let set = self.hidden_cols.entry(sheet_id).or_default();
+                    for col in &cols {
+                        if hidden {
+                            set.remove(col); // Was hidden → unhide
+                        } else {
+                            set.insert(*col); // Was unhidden → re-hide
+                        }
+                    }
+                    let action = if hidden { "hide" } else { "unhide" };
+                    self.status_message = Some(format!("Undo: {} {} column(s)", action, cols.len()));
+                }
                 UndoAction::Rewind { .. } => {
                     // Rewind is audit-only - cannot be undone
                     // (It's the last action after truncation, so this shouldn't be reached)
@@ -515,6 +541,18 @@ impl Spreadsheet {
                     sheet_heights.insert(row, old_height);
                 } else {
                     sheet_heights.remove(&row);
+                }
+            }
+            UndoAction::RowVisibilityChanged { sheet_id, rows, hidden } => {
+                let set = self.hidden_rows.entry(sheet_id).or_default();
+                for row in &rows {
+                    if hidden { set.remove(row); } else { set.insert(*row); }
+                }
+            }
+            UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
+                let set = self.hidden_cols.entry(sheet_id).or_default();
+                for col in &cols {
+                    if hidden { set.remove(col); } else { set.insert(*col); }
                 }
             }
             UndoAction::SortApplied { previous_row_order, previous_sort_state, .. } => {
@@ -750,6 +788,20 @@ impl Spreadsheet {
                     sheet_heights.insert(row, new_height);
                 } else {
                     sheet_heights.remove(&row);
+                }
+            }
+            UndoAction::RowVisibilityChanged { sheet_id, rows, hidden } => {
+                // Redo: re-apply the visibility change
+                let set = self.hidden_rows.entry(sheet_id).or_default();
+                for row in &rows {
+                    if hidden { set.insert(*row); } else { set.remove(row); }
+                }
+            }
+            UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
+                // Redo: re-apply the visibility change
+                let set = self.hidden_cols.entry(sheet_id).or_default();
+                for col in &cols {
+                    if hidden { set.insert(*col); } else { set.remove(col); }
                 }
             }
             UndoAction::SortApplied { new_row_order, new_sort_state, .. } => {
@@ -1007,6 +1059,22 @@ impl Spreadsheet {
                         sheet_heights.remove(&row);
                     }
                     self.status_message = Some(format!("Redo: row {} height", row + 1));
+                }
+                UndoAction::RowVisibilityChanged { sheet_id, rows, hidden } => {
+                    let set = self.hidden_rows.entry(sheet_id).or_default();
+                    for row in &rows {
+                        if hidden { set.insert(*row); } else { set.remove(row); }
+                    }
+                    let action = if hidden { "hide" } else { "unhide" };
+                    self.status_message = Some(format!("Redo: {} {} row(s)", action, rows.len()));
+                }
+                UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
+                    let set = self.hidden_cols.entry(sheet_id).or_default();
+                    for col in &cols {
+                        if hidden { set.insert(*col); } else { set.remove(col); }
+                    }
+                    let action = if hidden { "hide" } else { "unhide" };
+                    self.status_message = Some(format!("Redo: {} {} column(s)", action, cols.len()));
                 }
                 UndoAction::SortApplied { new_row_order, new_sort_state, .. } => {
                     // Re-apply the sort

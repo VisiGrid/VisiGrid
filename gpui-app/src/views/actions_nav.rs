@@ -419,6 +419,18 @@ pub(crate) fn bind(
             }
             this.update_edit_scroll(window);
         }))
+        .on_action(cx.listener(|this, _: &ExtendToStart, _, cx| {
+            if this.mode.is_formula() { return; }
+            this.extend_to_start(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ExtendToEnd, _, cx| {
+            if this.mode.is_formula() { return; }
+            this.extend_to_end(cx);
+        }))
+        .on_action(cx.listener(|this, _: &SelectCurrentRegion, _, cx| {
+            if this.mode.is_formula() { return; }
+            this.select_current_region(cx);
+        }))
         .on_action(cx.listener(|this, _: &SelectAll, window, cx| {
             if this.mode == Mode::ColorPicker {
                 this.color_picker_select_all(cx);

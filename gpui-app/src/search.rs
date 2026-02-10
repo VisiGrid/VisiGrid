@@ -79,6 +79,11 @@ pub enum CommandId {
     GoToStart,
     SelectAll,
     SelectBlanks,
+    SelectCurrentRegion,
+    HideRows,
+    UnhideRows,
+    HideCols,
+    UnhideCols,
 
     // Editing
     FillDown,
@@ -233,6 +238,11 @@ impl CommandId {
             Self::GoToStart => "Go to Start (A1)",
             Self::SelectAll => "Select All",
             Self::SelectBlanks => "Select: Blanks in Region",
+            Self::SelectCurrentRegion => "Select Current Region",
+            Self::HideRows => "Hide Rows",
+            Self::UnhideRows => "Unhide Rows",
+            Self::HideCols => "Hide Columns",
+            Self::UnhideCols => "Unhide Columns",
             Self::FillDown => "Fill Down",
             Self::FillRight => "Fill Right",
             Self::ClearCells => "Clear Cells",
@@ -357,6 +367,11 @@ impl CommandId {
             Self::FindInCells => Some("Ctrl+F"),
             Self::GoToStart => Some("Ctrl+Home"),
             Self::SelectAll => Some("Ctrl+A"),
+            Self::SelectCurrentRegion => Some("Ctrl+Shift+*"),
+            Self::HideRows => Some("Ctrl+9"),
+            Self::UnhideRows => Some("Ctrl+Shift+9"),
+            Self::HideCols => Some("Ctrl+0"),
+            Self::UnhideCols => Some("Ctrl+Shift+0"),
             Self::FillDown => Some("Ctrl+D"),
             Self::FillRight => Some("Ctrl+R"),
             Self::ClearCells => Some("Delete"),
@@ -383,10 +398,10 @@ impl CommandId {
             Self::SaveAs => Some("Ctrl+Shift+S"),
             Self::ToggleInspector => Some("Ctrl+Shift+I"),
             Self::ToggleZenMode => Some("F11"),
-            Self::ZoomIn => Some("Ctrl+Shift+="),
-            Self::ZoomOut => Some("Ctrl+Shift+-"),
-            Self::ZoomReset => Some("Ctrl+0"),
-            Self::ToggleAutoFilter => Some("Ctrl+Shift+F"),
+            Self::ZoomIn => Some("Ctrl+Alt+="),
+            Self::ZoomOut => Some("Ctrl+Alt+-"),
+            Self::ZoomReset => Some("Ctrl+Alt+0"),
+            Self::ToggleAutoFilter => Some("Ctrl+Shift+L"),
             #[cfg(target_os = "macos")]
             Self::SwitchWindow => Some("Cmd+`"),
             #[cfg(not(target_os = "macos"))]
@@ -426,6 +441,11 @@ impl CommandId {
             Self::GoToStart => "home beginning",
             Self::SelectAll => "selection",
             Self::SelectBlanks => "empty cells region selection",
+            Self::SelectCurrentRegion => "select region contiguous data block table area ctrl shift star asterisk",
+            Self::HideRows => "hide row invisible conceal",
+            Self::UnhideRows => "unhide row show reveal visible",
+            Self::HideCols => "hide column invisible conceal",
+            Self::UnhideCols => "unhide column show reveal visible",
             Self::FillDown => "copy formula",
             Self::FillRight => "copy formula",
             Self::ClearCells => "delete remove empty",
@@ -551,6 +571,11 @@ impl CommandId {
             Self::GoToStart,
             Self::SelectAll,
             Self::SelectBlanks,
+            Self::SelectCurrentRegion,
+            Self::HideRows,
+            Self::UnhideRows,
+            Self::HideCols,
+            Self::UnhideCols,
             Self::FillDown,
             Self::FillRight,
             Self::ClearCells,
@@ -776,7 +801,11 @@ impl CommandId {
             | Self::BordersBottom
             | Self::BordersLeft
             | Self::BordersRight
-            | Self::BordersClear => Some(MenuCategory::Format),
+            | Self::BordersClear
+            | Self::HideRows
+            | Self::UnhideRows
+            | Self::HideCols
+            | Self::UnhideCols => Some(MenuCategory::Format),
 
             // Data menu
             Self::FillDown
@@ -805,6 +834,7 @@ impl CommandId {
             // These remain accessible via the unscoped Command Palette
             Self::GoToStart
             | Self::SelectBlanks
+            | Self::SelectCurrentRegion
             | Self::ExtractNamedRange
             | Self::SelectTheme
             | Self::SwitchWindow

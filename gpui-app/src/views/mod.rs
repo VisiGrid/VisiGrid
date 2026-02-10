@@ -3,7 +3,7 @@ mod ai_settings_dialog;
 mod ask_ai_dialog;
 mod color_picker;
 pub mod command_palette;
-mod context_menu;
+pub(crate) mod context_menu;
 mod cycle_banner;
 mod hub_dialogs;
 mod export_report_dialog;

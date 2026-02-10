@@ -151,7 +151,7 @@ pub fn render_grid(
                             // Get the view_row and data_row for this screen position
                             // This respects both sort order AND filter visibility
                             let visible_index = scroll_row + screen_row;
-                            let (view_row, data_row) = app.nth_visible_row(visible_index, cx)?;
+                            let (view_row, data_row) = app.nth_visible_row_with_hidden(visible_index, cx)?;
                             let is_last_visible_row = screen_row == total_visible_rows - 1;
                             Some(render_row(
                                 view_row,
@@ -229,9 +229,10 @@ pub fn render_grid(
                                 // No viewport boundary edges — dividers separate from scrollable regions
                                 .when(frozen_cols > 0, |d| {
                                     d.children(
-                                        (0..frozen_cols).map(|col| {
+                                        (0..frozen_cols).filter_map(|col| {
+                                            if app.is_col_hidden(col) { return None; }
                                             let col_width = metrics.col_width(app.col_width(col));
-                                            render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, false, app, window, cx)
+                                            Some(render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, false, app, window, cx))
                                         })
                                     )
                                 })
@@ -247,11 +248,11 @@ pub fn render_grid(
                                 // Frozen row cells (cols scroll_col..scroll_col+scrollable_visible_cols)
                                 // Right boundary at viewport edge; no bottom boundary (divider below)
                                 .children(
-                                    (0..scrollable_visible_cols).map(|visible_col| {
-                                        let col = scroll_col + visible_col;
+                                    (0..scrollable_visible_cols).filter_map(|visible_col| {
+                                        let col = app.nth_visible_col(visible_col, scroll_col)?;
                                         let col_width = metrics.col_width(app.col_width(col));
                                         let is_last_col = visible_col == scrollable_visible_cols - 1;
-                                        render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, is_last_col, app, window, cx)
+                                        Some(render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, is_last_col, app, window, cx))
                                     })
                                 )
                         })
@@ -279,7 +280,7 @@ pub fn render_grid(
                                 // Get the view_row and data_row for this screen position
                                 // Account for frozen rows + scroll position in visible index
                                 let visible_index = frozen_rows + scroll_row + screen_row;
-                                let (view_row, data_row) = app.nth_visible_row(visible_index, cx)?;
+                                let (view_row, data_row) = app.nth_visible_row_with_hidden(visible_index, cx)?;
                                 let row_height = metrics.row_height(app.row_height(view_row));
                                 let is_last_row = screen_row == scrollable_visible_rows - 1;
                                 Some(div()
@@ -292,9 +293,10 @@ pub fn render_grid(
                                     // Bottom boundary at viewport edge; no right boundary (divider separates)
                                     .when(frozen_cols > 0, |d| {
                                         d.children(
-                                            (0..frozen_cols).map(|col| {
+                                            (0..frozen_cols).filter_map(|col| {
+                                                if app.is_col_hidden(col) { return None; }
                                                 let col_width = metrics.col_width(app.col_width(col));
-                                                render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, false, app, window, cx)
+                                                Some(render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, false, app, window, cx))
                                             })
                                         )
                                     })
@@ -309,11 +311,11 @@ pub fn render_grid(
                                     })
                                     // Main grid cells — both bottom and right boundary at viewport edge
                                     .children(
-                                        (0..scrollable_visible_cols).map(|visible_col| {
-                                            let col = scroll_col + visible_col;
+                                        (0..scrollable_visible_cols).filter_map(|visible_col| {
+                                            let col = app.nth_visible_col(visible_col, scroll_col)?;
                                             let col_width = metrics.col_width(app.col_width(col));
                                             let is_last_col = visible_col == scrollable_visible_cols - 1;
-                                            render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, is_last_col, app, window, cx)
+                                            Some(render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, is_last_col, app, window, cx))
                                         })
                                     ))
                             })
@@ -357,12 +359,12 @@ fn render_row(
         .h(px(row_height))
         .child(render_row_header(app, view_row, cx))
         .children(
-            (0..visible_cols).map(|visible_col| {
-                let col = scroll_col + visible_col;
+            (0..visible_cols).filter_map(|visible_col| {
+                let col = app.nth_visible_col(visible_col, scroll_col)?;
                 let col_width = app.metrics.col_width(app.col_width(col));
                 let is_last_visible_col = visible_col == visible_cols - 1;
                 // view_row for selection/display, data_row for cell data access
-                render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, edit_value, show_gridlines, is_last_visible_row, is_last_visible_col, app, window, cx)
+                Some(render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, edit_value, show_gridlines, is_last_visible_row, is_last_visible_col, app, window, cx))
             })
         )
 }
@@ -2631,7 +2633,7 @@ fn render_text_spill_overlay(
         let visible_index = scroll_row + screen_row;
 
         // Get view_row and data_row for this screen position
-        let Some((view_row, data_row)) = app.nth_visible_row(visible_index, cx) else {
+        let Some((view_row, data_row)) = app.nth_visible_row_with_hidden(visible_index, cx) else {
             continue;
         };
 
@@ -2639,14 +2641,14 @@ fn render_text_spill_overlay(
         let mut y: f32 = 0.0;
         for r in 0..screen_row {
             let idx = scroll_row + r;
-            if let Some((vr, _)) = app.nth_visible_row(idx, cx) {
+            if let Some((vr, _)) = app.nth_visible_row_with_hidden(idx, cx) {
                 y += metrics.row_height(app.row_height(vr));
             }
         }
         let row_height = metrics.row_height(app.row_height(view_row));
 
         for screen_col in 0..visible_cols {
-            let col = scroll_col + screen_col;
+            let Some(col) = app.nth_visible_col(screen_col, scroll_col) else { continue; };
 
             // Skip selected/active cells (they don't spill to avoid z-order complexity)
             if view_row == selected_row && col == selected_col {

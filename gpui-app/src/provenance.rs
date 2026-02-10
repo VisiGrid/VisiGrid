@@ -193,6 +193,24 @@ impl UndoAction {
                     ))
                 }
             }
+            UndoAction::RowVisibilityChanged { sheet_id, rows, hidden } => {
+                let row_list: Vec<String> = rows.iter().map(|r| (r + 1).to_string()).collect();
+                Some(format!(
+                    "grid.set_row_visibility{{ sheet_id={}, rows={{{}}}, hidden={} }}",
+                    sheet_id.0,
+                    row_list.join(","),
+                    hidden
+                ))
+            }
+            UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
+                let col_list: Vec<String> = cols.iter().map(|c| col_to_letter(*c)).collect();
+                Some(format!(
+                    "grid.set_col_visibility{{ sheet_id={}, cols={{{}}}, hidden={} }}",
+                    sheet_id.0,
+                    col_list.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(","),
+                    hidden
+                ))
+            }
             UndoAction::SortApplied { sheet_index, new_sort_state, .. } => {
                 let (col, ascending) = new_sort_state;
                 Some(format!(
@@ -358,6 +376,14 @@ impl UndoAction {
                 } else {
                     vec![format!("clear_row_height:{}:{}", sheet_id.0, row + 1)]
                 }
+            }
+            UndoAction::RowVisibilityChanged { sheet_id, rows, hidden } => {
+                let row_list: Vec<String> = rows.iter().map(|r| (r + 1).to_string()).collect();
+                vec![format!("set_row_visibility:{}:{}:{}", sheet_id.0, row_list.join(","), hidden)]
+            }
+            UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
+                let col_list: Vec<String> = cols.iter().map(|c| col_to_letter(*c)).collect();
+                vec![format!("set_col_visibility:{}:{}:{}", sheet_id.0, col_list.join(","), hidden)]
             }
             UndoAction::SortApplied { sheet_index, new_sort_state, .. } => {
                 let (col, ascending) = new_sort_state;
@@ -860,6 +886,8 @@ fn action_affects_sheet(action: &UndoAction, sheet_index: usize) -> bool {
         // For now, always include layout actions (they're rare in per-sheet exports)
         UndoAction::ColumnWidthSet { .. } => true,
         UndoAction::RowHeightSet { .. } => true,
+        UndoAction::RowVisibilityChanged { .. } => true,
+        UndoAction::ColVisibilityChanged { .. } => true,
         UndoAction::SortApplied { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::SortCleared { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::ValidationSet { sheet_index: s, .. } => *s == sheet_index,

@@ -54,6 +54,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "f"), FindInCells, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "h"), FindReplace, Some("Spreadsheet")),
         KeyBinding::new("f3", FindNext, Some("Spreadsheet")),
+        KeyBinding::new("shift-f4", FindNext, Some("Spreadsheet")),  // Excel compat alias
         KeyBinding::new("shift-f3", FindPrev, Some("Spreadsheet")),
         // IDE-style navigation
         KeyBinding::new("shift-f12", FindReferences, Some("Spreadsheet")),
@@ -82,6 +83,11 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "+"), InsertRowsOrCols, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "add"), InsertRowsOrCols, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "-"), DeleteRowsOrCols, Some("Spreadsheet")),
+        // Hide/Unhide rows and columns (Excel standard)
+        KeyBinding::new(&kb(m, "9"), HideRows, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "9"), UnhideRows, Some("Spreadsheet")),
+        KeyBinding::new(&kb(m, "0"), HideCols, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "0"), UnhideCols, Some("Spreadsheet")),
         // Edit mode cursor (Home/End only - left/right handled in MoveLeft/MoveRight)
         KeyBinding::new("home", EditCursorHome, Some("Spreadsheet")),
         KeyBinding::new("end", EditCursorEnd, Some("Spreadsheet")),
@@ -94,6 +100,14 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("f4", CycleReference, Some("Spreadsheet")),
         // Alt+= AutoSum (Excel behavior)
         KeyBinding::new("alt-=", AutoSum, Some("Spreadsheet")),
+        // Insert date/time (Excel: Ctrl+;, Ctrl+Shift+;)
+        KeyBinding::new(&kb(m, ";"), InsertDate, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, ";"), InsertTime, Some("Spreadsheet")),
+        // Copy from cell above (Excel: Ctrl+', Ctrl+Shift+")
+        KeyBinding::new(&kb(m, "'"), CopyFormulaAbove, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "'"), CopyValueAbove, Some("Spreadsheet")),
+        // Alt+Enter - insert newline in cell (Excel behavior)
+        KeyBinding::new("alt-enter", InsertNewline, Some("Spreadsheet")),
         // Alt+Down - open validation dropdown (Excel behavior)
         KeyBinding::new("alt-down", OpenValidationDropdown, Some("Spreadsheet")),
 
@@ -115,6 +129,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb_shift(m, "down"), ExtendJumpDown, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "left"), ExtendJumpLeft, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "right"), ExtendJumpRight, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "home"), ExtendToStart, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "end"), ExtendToEnd, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "8"), SelectCurrentRegion, Some("Spreadsheet")),  // Ctrl+Shift+* (Shift+8 = *)
 
         // Clipboard
         KeyBinding::new(&kb(m, "c"), Copy, Some("Spreadsheet")),
@@ -143,8 +160,20 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("f10", ToggleProblems, Some("Spreadsheet")),
         KeyBinding::new("f11", ToggleZenMode, Some("Spreadsheet")),
         KeyBinding::new("f9", Recalculate, Some("Spreadsheet")),  // Excel: force recalculate
-        KeyBinding::new(&kb_shift(m, "l"), ToggleLuaConsole, Some("Spreadsheet")),
+        KeyBinding::new("alt-f11", ToggleLuaConsole, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "`"), ToggleFormulaView, Some("Spreadsheet")),
+
+        // Zoom (Ctrl+Alt+Plus/Minus/0, safe — avoids collision with insert/delete rows)
+        KeyBinding::new(&format!("{}-alt-=", primary_mod(m)), ZoomIn, Some("Spreadsheet")),
+        KeyBinding::new(&format!("{}-alt-add", primary_mod(m)), ZoomIn, Some("Spreadsheet")),
+        KeyBinding::new(&format!("{}-alt--", primary_mod(m)), ZoomOut, Some("Spreadsheet")),
+        KeyBinding::new(&format!("{}-alt-0", primary_mod(m)), ZoomReset, Some("Spreadsheet")),
+
+        // Context menu (Shift+F10, Excel standard)
+        KeyBinding::new("shift-f10", OpenContextMenu, Some("Spreadsheet")),
+
+        // F6 focus cycling (switch panes, Excel standard)
+        KeyBinding::new("f6", FocusOtherPane, Some("Spreadsheet")),
 
         // Borders (Excel: Ctrl+Shift+& = outline, Ctrl+Shift+_ = clear)
         KeyBinding::new(&kb_shift(m, "7"), BordersOutline, Some("Spreadsheet")),
@@ -193,9 +222,14 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb_shift(m, "c"), CopyFormat, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "v"), PasteFormat, Some("Spreadsheet")),
 
-        // Number formats (Mod+Shift+4 = $, Mod+Shift+5 = %)
-        KeyBinding::new(&kb_shift(m, "4"), FormatCurrency, Some("Spreadsheet")),
-        KeyBinding::new(&kb_shift(m, "5"), FormatPercent, Some("Spreadsheet")),
+        // Number formats (Mod+Shift+key = format shortcut)
+        KeyBinding::new(&kb_shift(m, "4"), FormatCurrency, Some("Spreadsheet")),   // $
+        KeyBinding::new(&kb_shift(m, "5"), FormatPercent, Some("Spreadsheet")),    // %
+        KeyBinding::new(&kb_shift(m, "3"), FormatDate, Some("Spreadsheet")),       // #
+        KeyBinding::new(&kb_shift(m, "1"), FormatNumber, Some("Spreadsheet")),     // !
+        KeyBinding::new(&kb_shift(m, "`"), FormatGeneral, Some("Spreadsheet")),    // ~
+        KeyBinding::new(&kb_shift(m, "6"), FormatScientific, Some("Spreadsheet")), // ^
+        KeyBinding::new(&kb_shift(m, "2"), FormatTime, Some("Spreadsheet")),       // @
 
         // History
         KeyBinding::new(&kb(m, "z"), Undo, Some("Spreadsheet")),
@@ -211,6 +245,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("shift-f11", AddSheet, Some("Spreadsheet")),
 
         // Data operations (sort/filter)
+        KeyBinding::new(&kb_shift(m, "l"), ToggleAutoFilter, Some("Spreadsheet")),  // Excel: Ctrl+Shift+L
         KeyBinding::new(&kb_shift(m, "f"), ToggleAutoFilter, Some("Spreadsheet")),
 
         // Command palette (in CommandPalette context)

@@ -994,7 +994,7 @@ impl Spreadsheet {
     // =========================================================================
 
     /// Delete selected text and return true if there was a selection
-    fn delete_edit_selection(&mut self) -> bool {
+    pub(crate) fn delete_edit_selection(&mut self) -> bool {
         if let Some((start_byte, end_byte)) = self.edit_selection_range() {
             // start_byte and end_byte are already byte offsets
             let start_byte = start_byte.min(self.edit_value.len());

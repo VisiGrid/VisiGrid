@@ -30,7 +30,7 @@ pub fn render_context_menu(
     // Estimate menu height for clamping.
     // Items: ~24px each (py(5) + ~14px text). Separators: ~9px (1px + my_1 = 4+1+4).
     let (n_items, n_seps) = match state.kind {
-        ContextMenuKind::Cell => (8, 3),
+        ContextMenuKind::Cell => (13, 5),
         ContextMenuKind::RowHeader => (4, 1),
         ContextMenuKind::ColHeader => (8, 3),
     };
@@ -142,6 +142,11 @@ fn build_cell_menu(
         "Ctrl+X", "Ctrl+C", "Ctrl+V", "Ctrl+Shift+V", "Ctrl+Shift+I",
     );
 
+    #[cfg(target_os = "macos")]
+    let format_hint = "\u{2318}1";
+    #[cfg(not(target_os = "macos"))]
+    let format_hint = "Ctrl+1";
+
     vec![
         menu_item("ctx-cut", "Cut", Some(cut_hint), true, text_primary, text_muted, selection_bg, cx,
             |this, cx| this.cut(cx),
@@ -156,8 +161,33 @@ fn build_cell_menu(
             |this, cx| this.paste_values(cx),
         ),
         separator(panel_border),
-        menu_item("ctx-format-painter", "Format Painter", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.start_format_painter(cx),
+        menu_item("ctx-insert-row", "Insert Row", None, true, text_primary, text_muted, selection_bg, cx,
+            |this, cx| {
+                let ((min_row, _), (max_row, _)) = this.selection_range();
+                let count = max_row - min_row + 1;
+                this.insert_rows(min_row, count, cx);
+            },
+        ),
+        menu_item("ctx-insert-col", "Insert Column", None, true, text_primary, text_muted, selection_bg, cx,
+            |this, cx| {
+                let ((_, min_col), (_, max_col)) = this.selection_range();
+                let count = max_col - min_col + 1;
+                this.insert_cols(min_col, count, cx);
+            },
+        ),
+        menu_item("ctx-delete-row", "Delete Row", None, true, text_primary, text_muted, selection_bg, cx,
+            |this, cx| {
+                let ((min_row, _), (max_row, _)) = this.selection_range();
+                let count = max_row - min_row + 1;
+                this.delete_rows(min_row, count, cx);
+            },
+        ),
+        menu_item("ctx-delete-col", "Delete Column", None, true, text_primary, text_muted, selection_bg, cx,
+            |this, cx| {
+                let ((_, min_col), (_, max_col)) = this.selection_range();
+                let count = max_col - min_col + 1;
+                this.delete_cols(min_col, count, cx);
+            },
         ),
         separator(panel_border),
         menu_item("ctx-clear-contents", "Clear Contents", Some("Del"), true, text_primary, text_muted, selection_bg, cx,
@@ -167,7 +197,14 @@ fn build_cell_menu(
             |this, cx| this.clear_formatting_selection(cx),
         ),
         separator(panel_border),
-        menu_item("ctx-inspect", "Inspect", Some(inspect_hint), true, text_primary, text_muted, selection_bg, cx,
+        menu_item("ctx-format-cells", "Format Cells...", Some(format_hint), true, text_primary, text_muted, selection_bg, cx,
+            |this, cx| {
+                this.inspector_visible = true;
+                this.inspector_tab = crate::mode::InspectorTab::Format;
+                cx.notify();
+            },
+        ),
+        menu_item("ctx-inspect", "Cell Inspector", Some(inspect_hint), true, text_primary, text_muted, selection_bg, cx,
             |this, cx| { this.inspector_visible = !this.inspector_visible; cx.notify(); },
         ),
     ]
@@ -197,6 +234,29 @@ fn build_row_header_menu(
         menu_item("ctx-clear-formats", "Clear Formats", None, true, text_primary, text_muted, selection_bg, cx,
             |this, cx| this.clear_formatting_selection(cx),
         ),
+    ]
+}
+
+/// Expected cell context menu item IDs in display order.
+/// This is the contract for Shift+F10 — the first 4 items MUST be clipboard operations.
+/// Used by regression tests to prevent accidental reordering.
+pub fn cell_context_menu_item_ids() -> &'static [&'static str] {
+    &[
+        "ctx-cut",
+        "ctx-copy",
+        "ctx-paste",
+        "ctx-paste-values",
+        // separator
+        "ctx-insert-row",
+        "ctx-insert-col",
+        "ctx-delete-row",
+        "ctx-delete-col",
+        // separator
+        "ctx-clear-contents",
+        "ctx-clear-formats",
+        // separator
+        "ctx-format-cells",
+        "ctx-inspect",
     ]
 }
 

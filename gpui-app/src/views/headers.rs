@@ -84,10 +84,11 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         // Frozen column headers (always visible, cols 0 to frozen_cols-1)
         .when(frozen_cols > 0, |d| {
             d.children(
-                (0..frozen_cols).map(|col| {
+                (0..frozen_cols).filter_map(|col| {
+                    if app.is_col_hidden(col) { return None; }
                     let col_width = metrics.col_width(app.col_width(col));
                     let is_selected = app.is_col_header_selected(col);
-                    render_column_header(app, col, col_width, is_selected, cx)
+                    Some(render_column_header(app, col, col_width, is_selected, cx))
                 })
             )
         })
@@ -102,11 +103,11 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         })
         // Scrollable column headers (scroll_col to scroll_col + scrollable_visible_cols)
         .children(
-            (0..scrollable_visible_cols).map(move |i| {
-                let col = scroll_col + i;
+            (0..scrollable_visible_cols).filter_map(move |i| {
+                let col = app.nth_visible_col(i, scroll_col)?;
                 let col_width = metrics.col_width(app.col_width(col));
                 let is_selected = app.is_col_header_selected(col);
-                render_column_header(app, col, col_width, is_selected, cx)
+                Some(render_column_header(app, col, col_width, is_selected, cx))
             })
         )
 }

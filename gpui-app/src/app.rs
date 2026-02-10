@@ -1970,6 +1970,11 @@ pub struct Spreadsheet {
     // New sheets start with defaults (Excel behavior), not inherited from current sheet.
     pub col_widths: HashMap<SheetId, HashMap<usize, f32>>,   // SheetId -> col -> width
     pub row_heights: HashMap<SheetId, HashMap<usize, f32>>,  // SheetId -> row -> height
+
+    // Hidden rows/columns (per-sheet, user-controlled, separate from AutoFilter)
+    pub hidden_rows: HashMap<SheetId, std::collections::BTreeSet<usize>>,
+    pub hidden_cols: HashMap<SheetId, std::collections::BTreeSet<usize>>,
+
     /// Cached active sheet ID for fast lookups without context.
     /// Updated whenever the active sheet changes.
     cached_sheet_id: SheetId,
@@ -2519,6 +2524,8 @@ impl Spreadsheet {
             cached_window_bounds: Some(window.window_bounds()),
             col_widths: HashMap::new(),
             row_heights: HashMap::new(),
+            hidden_rows: HashMap::new(),
+            hidden_cols: HashMap::new(),
             cached_sheet_id: initial_sheet_id,
             resizing_col: None,
             resizing_row: None,
@@ -3852,6 +3859,11 @@ impl Spreadsheet {
             }
             CommandId::SelectAll => self.select_all(cx),
             CommandId::SelectBlanks => self.select_blanks(cx),
+            CommandId::SelectCurrentRegion => self.select_current_region(cx),
+            CommandId::HideRows => self.hide_rows(cx),
+            CommandId::UnhideRows => self.unhide_rows(cx),
+            CommandId::HideCols => self.hide_cols(cx),
+            CommandId::UnhideCols => self.unhide_cols(cx),
 
             // Editing
             CommandId::FillDown => self.fill_down(cx),
@@ -4298,6 +4310,73 @@ impl Spreadsheet {
     /// Check if current sheet has any custom row heights
     pub fn has_custom_row_heights(&self) -> bool {
         self.row_heights.get(&self.cached_sheet_id).map_or(false, |h| !h.is_empty())
+    }
+
+    /// Check if a row is hidden on the current sheet
+    pub fn is_row_hidden(&self, row: usize) -> bool {
+        self.hidden_rows
+            .get(&self.cached_sheet_id)
+            .map_or(false, |set| set.contains(&row))
+    }
+
+    /// Check if a column is hidden on the current sheet
+    pub fn is_col_hidden(&self, col: usize) -> bool {
+        self.hidden_cols
+            .get(&self.cached_sheet_id)
+            .map_or(false, |set| set.contains(&col))
+    }
+
+    /// Check if current sheet has any hidden rows
+    pub fn has_hidden_rows(&self) -> bool {
+        self.hidden_rows.get(&self.cached_sheet_id).map_or(false, |s| !s.is_empty())
+    }
+
+    /// Check if current sheet has any hidden columns
+    pub fn has_hidden_cols(&self) -> bool {
+        self.hidden_cols.get(&self.cached_sheet_id).map_or(false, |s| !s.is_empty())
+    }
+
+    /// Get the nth visible column starting from scroll_col, skipping hidden columns.
+    /// Returns the actual column index, or None if out of bounds.
+    pub fn nth_visible_col(&self, visible_index: usize, scroll_col: usize) -> Option<usize> {
+        if !self.has_hidden_cols() {
+            let col = scroll_col + visible_index;
+            return if col < NUM_COLS { Some(col) } else { None };
+        }
+        let hidden = self.hidden_cols.get(&self.cached_sheet_id).unwrap();
+        let mut count = 0;
+        let mut col = scroll_col;
+        while col < NUM_COLS {
+            if !hidden.contains(&col) {
+                if count == visible_index {
+                    return Some(col);
+                }
+                count += 1;
+            }
+            col += 1;
+        }
+        None
+    }
+
+    /// Get the nth visible row composing RowView filtering with user-hidden rows.
+    /// Returns (view_row, data_row) or None if out of bounds.
+    pub fn nth_visible_row_with_hidden(&self, visible_index: usize, cx: &gpui::App) -> Option<(usize, usize)> {
+        if !self.has_hidden_rows() {
+            return self.nth_visible_row(visible_index, cx);
+        }
+        let hidden = self.hidden_rows.get(&self.cached_sheet_id).unwrap();
+        let mut count = 0;
+        let mut idx = 0;
+        loop {
+            let (view_row, data_row) = self.nth_visible_row(idx, cx)?;
+            if !hidden.contains(&data_row) {
+                if count == visible_index {
+                    return Some((view_row, data_row));
+                }
+                count += 1;
+            }
+            idx += 1;
+        }
     }
 
     /// Update cached sheet ID from the workbook.
@@ -4932,15 +5011,20 @@ impl Spreadsheet {
         // Account for frozen columns first (they consume space before scrollable area)
         let mut used = 0.0_f32;
         for fc in 0..frozen_cols {
-            used += self.metrics.col_width(self.col_width(fc));
+            if !self.is_col_hidden(fc) {
+                used += self.metrics.col_width(self.col_width(fc));
+            }
         }
 
         // Sum actual column widths from scroll position until we exceed available width
+        // Count represents the number of visible (non-hidden) columns
         let mut count = frozen_cols;
         let mut col = scroll_col;
         while used < available_width && col < NUM_COLS {
-            used += self.metrics.col_width(self.col_width(col));
-            count += 1;
+            if !self.is_col_hidden(col) {
+                used += self.metrics.col_width(self.col_width(col));
+                count += 1;
+            }
             col += 1;
         }
 
@@ -5073,6 +5157,181 @@ impl Spreadsheet {
         }
         self.is_modified = true;
         cx.notify();
+    }
+
+    pub fn format_date_shortcut(&mut self, cx: &mut Context<Self>) {
+        self.set_number_format_selection(NumberFormat::Date { style: visigrid_engine::cell::DateStyle::Short }, cx);
+    }
+
+    pub fn format_number_shortcut(&mut self, cx: &mut Context<Self>) {
+        self.set_number_format_selection(NumberFormat::Number { decimals: 2, thousands: true, negative: visigrid_engine::cell::NegativeStyle::Minus }, cx);
+    }
+
+    pub fn format_general_shortcut(&mut self, cx: &mut Context<Self>) {
+        self.set_number_format_selection(NumberFormat::General, cx);
+    }
+
+    pub fn format_scientific_shortcut(&mut self, cx: &mut Context<Self>) {
+        self.set_number_format_selection(NumberFormat::Custom("0.00E+00".to_string()), cx);
+    }
+
+    pub fn format_time_shortcut(&mut self, cx: &mut Context<Self>) {
+        self.set_number_format_selection(NumberFormat::Time, cx);
+    }
+
+    /// Insert current date as text (Ctrl+;)
+    pub fn insert_date(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        let now = chrono::Local::now();
+        let date_str = now.format("%-m/%-d/%Y").to_string();
+        let (row, col) = self.view_state.active_cell();
+        let old_value = self.sheet(cx).get_raw(row, col);
+        self.set_cell_value(row, col, &date_str, cx);
+        self.history.record_change(self.sheet_index(cx), row, col, old_value, date_str);
+        self.is_modified = true;
+        self.status_message = Some("Date inserted".to_string());
+        cx.notify();
+    }
+
+    /// Insert current time as text (Ctrl+Shift+;)
+    pub fn insert_time(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        let now = chrono::Local::now();
+        let time_str = now.format("%-I:%M %p").to_string();
+        let (row, col) = self.view_state.active_cell();
+        let old_value = self.sheet(cx).get_raw(row, col);
+        self.set_cell_value(row, col, &time_str, cx);
+        self.history.record_change(self.sheet_index(cx), row, col, old_value, time_str);
+        self.is_modified = true;
+        self.status_message = Some("Time inserted".to_string());
+        cx.notify();
+    }
+
+    /// Copy formula from cell above (Ctrl+')
+    pub fn copy_formula_above(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        let (row, col) = self.view_state.active_cell();
+        if row == 0 {
+            self.status_message = Some("No cell above".to_string());
+            cx.notify();
+            return;
+        }
+        let source = self.sheet(cx).get_raw(row - 1, col);
+        if source.is_empty() {
+            self.status_message = Some("Cell above is empty".to_string());
+            cx.notify();
+            return;
+        }
+        let new_value = if source.starts_with('=') {
+            self.adjust_formula_refs(&source, 1, 0)
+        } else {
+            source
+        };
+        let old_value = self.sheet(cx).get_raw(row, col);
+        self.set_cell_value(row, col, &new_value, cx);
+        self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value);
+        self.is_modified = true;
+        self.status_message = Some("Copied formula from above".to_string());
+        cx.notify();
+    }
+
+    /// Copy display value from cell above (Ctrl+Shift+")
+    pub fn copy_value_above(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        let (row, col) = self.view_state.active_cell();
+        if row == 0 {
+            self.status_message = Some("No cell above".to_string());
+            cx.notify();
+            return;
+        }
+        let display = self.sheet(cx).get_display(row - 1, col);
+        if display.is_empty() {
+            self.status_message = Some("Cell above is empty".to_string());
+            cx.notify();
+            return;
+        }
+        let old_value = self.sheet(cx).get_raw(row, col);
+        self.set_cell_value(row, col, &display, cx);
+        self.history.record_change(self.sheet_index(cx), row, col, old_value, display);
+        self.is_modified = true;
+        self.status_message = Some("Copied value from above".to_string());
+        cx.notify();
+    }
+
+    /// Extend selection to cell A1 (Ctrl+Shift+Home)
+    pub fn extend_to_start(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() { return; }
+        self.view_state.selection_end = Some((0, 0));
+        self.view_state.scroll_row = 0;
+        self.view_state.scroll_col = 0;
+        cx.notify();
+    }
+
+    /// Extend selection to last cell (Ctrl+Shift+End)
+    pub fn extend_to_end(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() { return; }
+        self.view_state.selection_end = Some((NUM_ROWS - 1, NUM_COLS - 1));
+        self.ensure_visible(cx);
+    }
+
+    /// Select current region (Ctrl+Shift+*) — selects contiguous data block around active cell
+    pub fn select_current_region(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() { return; }
+        let (row, col) = self.view_state.selected;
+        let (min_row, min_col, max_row, max_col) =
+            crate::ai::find_current_region(self.sheet(cx), row, col);
+        // Anchor at top-left, extend to bottom-right
+        self.view_state.selected = (min_row, min_col);
+        self.view_state.selection_end = if (min_row, min_col) == (max_row, max_col) {
+            None  // Single cell — no range needed
+        } else {
+            Some((max_row, max_col))
+        };
+        self.ensure_visible(cx);
+        let rows = max_row - min_row + 1;
+        let cols = max_col - min_col + 1;
+        self.status_message = Some(format!("Selected region: {}×{}", rows, cols));
+        cx.notify();
+    }
+
+    /// Insert a newline character into the edit buffer (Alt+Enter)
+    pub fn insert_newline(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            // Delete selection if any
+            self.delete_edit_selection();
+            let byte_idx = self.edit_cursor.min(self.edit_value.len());
+            self.edit_value.insert(byte_idx, '\n');
+            self.edit_cursor = byte_idx + 1;
+            self.edit_scroll_dirty = true;
+            self.formula_bar_cache_dirty = true;
+            cx.notify();
+        } else {
+            // Start editing then insert newline
+            let (row, col) = self.view_state.selected;
+            self.edit_original = self.sheet(cx).get_raw(row, col);
+            self.edit_value = self.edit_original.clone();
+            self.edit_cursor = self.edit_value.len();
+            self.mode = Mode::Edit;
+            // Now insert the newline
+            let byte_idx = self.edit_cursor.min(self.edit_value.len());
+            self.edit_value.insert(byte_idx, '\n');
+            self.edit_cursor = byte_idx + 1;
+            self.edit_scroll_dirty = true;
+            self.formula_bar_cache_dirty = true;
+            cx.notify();
+        }
+    }
+
+    /// Open context menu at active cell (Shift+F10)
+    pub fn open_context_menu(&mut self, cx: &mut Context<Self>) {
+        // Calculate the active cell's position in window coordinates
+        let rect = self.active_cell_rect();
+        let origin = self.grid_layout.grid_body_origin;
+        let position = gpui::Point {
+            x: gpui::px(origin.0 + rect.x + rect.width * 0.5),
+            y: gpui::px(origin.1 + rect.y + rect.height),
+        };
+        self.show_context_menu(ContextMenuKind::Cell, position, cx);
     }
 
     // =========================================================================
