@@ -29,13 +29,40 @@ jobs:
         run: |
           Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
 
+      - name: Wait for release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $url = "https://github.com/VisiGrid/VisiGrid/releases/download/v$version/VisiGrid-windows-x64.zip"
+          $maxAttempts = 30
+          $delay = 20
+
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri $url -Method Head -MaximumRedirection 0 -ErrorAction Stop
+              if ($response.StatusCode -eq 200) {
+                Write-Host "Asset available at attempt $i"
+                break
+              }
+            } catch {
+              if ($i -eq $maxAttempts) {
+                Write-Error "Asset not available after $maxAttempts attempts: $url"
+                exit 1
+              }
+              Write-Host "Attempt $i/$maxAttempts - asset not yet available, waiting ${delay}s..."
+              Start-Sleep -Seconds $delay
+            }
+          }
+
       - name: Submit to winget-pkgs
         shell: pwsh
         env:
           WINGET_GITHUB_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
         run: |
           $version = "${{ steps.version.outputs.version }}"
-          $url = "https://github.com/VisiGrid/VisiGrid/releases/latest/download/VisiGrid-windows-x64.zip"
+          $url = "https://github.com/VisiGrid/VisiGrid/releases/download/v$version/VisiGrid-windows-x64.zip"
 
           .\wingetcreate.exe update VisiGrid.VisiGrid `
             --version $version `
