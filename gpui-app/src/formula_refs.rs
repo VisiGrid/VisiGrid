@@ -98,6 +98,7 @@ impl Spreadsheet {
     /// Check if a cell is the active reference navigation target (formula_ref_cell).
     /// This is distinct from parsed formula refs - it's where arrow keys are pointing RIGHT NOW.
     /// Used for rendering a bright "target" indicator during formula reference navigation.
+    /// Only shows on the sheet where the ref target lives.
     pub fn is_active_ref_target(&self, row: usize, col: usize) -> bool {
         if !self.mode.is_formula() {
             return false;

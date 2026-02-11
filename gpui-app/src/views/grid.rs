@@ -118,7 +118,11 @@ pub fn render_grid(
     let frozen_rows = view_state.frozen_rows;
     let frozen_cols = view_state.frozen_cols;
 
-    let editing = app.mode.is_editing();
+    // Suppress cell editor overlay when on a cross-sheet ref-picking sheet
+    let on_formula_home_sheet = app.formula_home_sheet
+        .map(|home| app.formula_ref_sheet.is_none() || home == app.wb(cx).active_sheet_index())
+        .unwrap_or(true);
+    let editing = app.mode.is_editing() && on_formula_home_sheet;
     let edit_value = app.edit_value.clone();
     let total_visible_rows = app.visible_rows();
     let total_visible_cols = app.visible_cols();

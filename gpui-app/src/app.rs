@@ -2033,6 +2033,10 @@ pub struct Spreadsheet {
     pub formula_ref_start_cursor: usize,               // Cursor position where reference started
     pub formula_nav_mode: crate::mode::FormulaNavMode, // Caret vs Point submode in Formula mode
     pub formula_nav_manual_override: Option<crate::mode::FormulaNavMode>, // F2 toggle latch - wins over auto-switch
+    pub formula_home_sheet: Option<usize>,              // Sheet where formula is being entered (for cross-sheet refs)
+    pub formula_edit_cell: Option<(usize, usize)>,     // Cell being edited (preserved across sheet switches in formula mode)
+    pub formula_ref_sheet: Option<usize>,               // Sheet where current ref target lives (None = home sheet)
+    pub formula_cross_sheet_name: Option<String>,       // Target sheet name when picking cross-sheet refs (None = same sheet)
 
     // Highlighted formula references (for existing formulas when editing)
     // Each entry has color index, cell bounds, and text position for formula bar coloring
@@ -2336,6 +2340,8 @@ pub struct Spreadsheet {
 
     // Close-window save confirmation dialog
     pub close_confirm_visible: bool,
+    /// Focused button index: 0=Cancel, 1=Don't Save, 2=Save
+    pub close_confirm_focused: u8,
 
     // AI Settings dialog state
     pub ai_settings: AISettingsDialogState,
@@ -2558,6 +2564,10 @@ impl Spreadsheet {
             formula_ref_start_cursor: 0,
             formula_nav_mode: crate::mode::FormulaNavMode::default(),
             formula_nav_manual_override: None,
+            formula_home_sheet: None,
+            formula_edit_cell: None,
+            formula_ref_sheet: None,
+            formula_cross_sheet_name: None,
             formula_highlighted_refs: Vec::new(),
             formula_ref_color_map: std::collections::HashMap::new(),
             formula_ref_next_color: 0,
@@ -2750,6 +2760,7 @@ impl Spreadsheet {
 
             merge_confirm: MergeConfirmState::default(),
             close_confirm_visible: false,
+            close_confirm_focused: 2, // Default to Save button
 
             ai_settings: AISettingsDialogState::default(),
             ask_ai: AskAIDialogState::default(),

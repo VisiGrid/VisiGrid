@@ -465,6 +465,39 @@ impl Spreadsheet {
 
     /// Switch to a specific sheet by index
     pub fn goto_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
+        // In formula mode, switch sheets for cross-sheet reference picking
+        // without committing the formula or clearing edit state.
+        if self.mode.is_formula() {
+            if self.wb_mut(cx, |wb| wb.set_active_sheet(index)) {
+                self.update_cached_sheet_id(cx);
+                // Reset scroll/selection on the target sheet but stay in formula mode
+                self.view_state.selected = (0, 0);
+                self.view_state.selection_end = None;
+                self.view_state.scroll_row = 0;
+                self.view_state.scroll_col = 0;
+                // Track which sheet the ref target is on
+                let home = self.formula_home_sheet.unwrap_or(0);
+                if index != home {
+                    self.formula_ref_sheet = Some(index);
+                    // Cache the sheet name for reference text insertion
+                    let name = self.wb(cx).sheet_names().get(index)
+                        .map(|s| s.to_string()).unwrap_or_default();
+                    self.formula_cross_sheet_name = Some(name);
+                } else {
+                    self.formula_ref_sheet = None;
+                    self.formula_cross_sheet_name = None;
+                }
+                // Clear any in-progress ref when switching sheets
+                self.formula_ref_cell = None;
+                self.formula_ref_end = None;
+                // Hide autocomplete on cross-sheet navigation
+                self.autocomplete_visible = false;
+                self.autocomplete_suppressed = true;
+                cx.notify();
+            }
+            return;
+        }
+
         // Close validation dropdown when switching sheets
         self.close_validation_dropdown(
             crate::validation_dropdown::DropdownCloseReason::SheetSwitch,

@@ -319,11 +319,17 @@ impl Spreadsheet {
             return;
         };
 
-        // Build the reference string
-        let ref_text = if let Some((end_row, end_col)) = self.formula_ref_end {
+        // Build the reference string, prefixed with sheet name if cross-sheet
+        let base_ref = if let Some((end_row, end_col)) = self.formula_ref_end {
             Self::make_range_ref((ref_row, ref_col), (end_row, end_col))
         } else {
             Self::make_cell_ref(ref_row, ref_col)
+        };
+
+        let ref_text = if let Some(sheet_name) = &self.formula_cross_sheet_name {
+            format!("{}!{}", sheet_name, base_ref)
+        } else {
+            base_ref
         };
 
         if is_new {

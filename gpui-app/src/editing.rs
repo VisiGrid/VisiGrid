@@ -18,12 +18,17 @@ impl Spreadsheet {
 
     /// Enter formula mode with clean state. Called from every path that
     /// transitions into Formula mode (initial char, start_edit, recompute).
+    ///
+    /// Cross-sheet references inserted via navigation will be prefixed with the
+    /// target sheet name. `formula_home_sheet` must be set before calling this.
     fn enter_formula_mode(&mut self) {
         self.mode = Mode::Formula;
         self.formula_nav_mode = crate::mode::FormulaNavMode::Point;
         self.formula_nav_manual_override = None;
         self.formula_ref_cell = None;
         self.formula_ref_end = None;
+        self.formula_ref_sheet = None;
+        // formula_home_sheet is set by the caller (start_edit, insert_char) before this
     }
 
     /// Reset formula/edit transient state. Called on every exit from edit mode.
@@ -32,6 +37,10 @@ impl Spreadsheet {
         self.formula_nav_manual_override = None;
         self.formula_ref_cell = None;
         self.formula_ref_end = None;
+        self.formula_home_sheet = None;
+        self.formula_edit_cell = None;
+        self.formula_ref_sheet = None;
+        self.formula_cross_sheet_name = None;
     }
 
     /// Recompute edit mode based on current edit buffer content.
@@ -111,6 +120,10 @@ impl Spreadsheet {
             self.edit_cursor, self.edit_value.len()
         );
 
+        // Record home sheet and cell for cross-sheet formula references
+        self.formula_home_sheet = Some(self.wb(cx).active_sheet_index());
+        self.formula_edit_cell = Some((row, col));
+
         // Set mode based on content: Formula if starts with '=' or '+', else Edit
         let is_formula = self.edit_value.starts_with('=') || self.edit_value.starts_with('+');
         if is_formula {
@@ -124,8 +137,11 @@ impl Spreadsheet {
         self.clear_formula_ref_colors();
         if is_formula {
             self.update_formula_refs();
-            // F2 on existing formula: start in Caret mode (user wants to edit text)
+            // F2 on existing formula: start in Caret mode (user wants to edit text).
+            // Set the manual override so auto-switch doesn't flip to Point when
+            // cursor passes an operator. Override clears on buffer mutation (typing).
             self.formula_nav_mode = crate::mode::FormulaNavMode::Caret;
+            self.formula_nav_manual_override = Some(crate::mode::FormulaNavMode::Caret);
         } else {
             self.formula_highlighted_refs.clear();
         }
@@ -173,6 +189,9 @@ impl Spreadsheet {
         self.formula_bar_scroll_x = 0.0;
         self.active_editor = EditorSurface::Cell;  // Default to cell editor
         self.edit_selection_anchor = None;
+        // Record home sheet and cell for cross-sheet formula references
+        self.formula_home_sheet = Some(self.wb(cx).active_sheet_index());
+        self.formula_edit_cell = Some((row, col));
         // Clear formula state - fresh edit session with empty buffer
         self.clear_formula_ref_colors();
         self.formula_highlighted_refs.clear();
@@ -214,6 +233,9 @@ impl Spreadsheet {
         if !self.mode.is_editing() {
             return;
         }
+
+        // Restore home sheet for cross-sheet formula editing
+        self.restore_formula_home_sheet(cx);
 
         let (row, col) = self.view_state.selected;
         let old_value = self.edit_original.clone();
@@ -903,6 +925,8 @@ impl Spreadsheet {
     }
 
     pub fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        // Restore home sheet for cross-sheet formula editing
+        self.restore_formula_home_sheet(cx);
         self.mode = Mode::Navigation;
         self.reset_edit_state();
         self.edit_value.clear();
@@ -1167,6 +1191,10 @@ impl Spreadsheet {
             self.edit_value = c.to_string();
             self.edit_cursor = c.len_utf8();  // Byte offset after first char
 
+            // Record home sheet and cell for cross-sheet formula references
+            self.formula_home_sheet = Some(self.wb(cx).active_sheet_index());
+            self.formula_edit_cell = Some((row, col));
+
             // Enter Formula mode if starting with = or +
             if c == '=' || c == '+' {
                 self.enter_formula_mode();
@@ -1207,10 +1235,28 @@ impl Spreadsheet {
     /// Commit the current edit without moving the cursor or changing selection.
     /// Returns true if an edit was actually committed (was in editing mode).
     /// Used by `confirm_edit_and_move` and `confirm_edit_enter`.
+    /// If we navigated to another sheet for cross-sheet ref picking,
+    /// switch back to the home sheet and restore the edit cell position.
+    fn restore_formula_home_sheet(&mut self, cx: &mut Context<Self>) {
+        if let Some(home_sheet) = self.formula_home_sheet {
+            let current = self.wb(cx).active_sheet_index();
+            if current != home_sheet {
+                self.wb_mut(cx, |wb| wb.set_active_sheet(home_sheet));
+                self.update_cached_sheet_id(cx);
+            }
+            if let Some(edit_cell) = self.formula_edit_cell {
+                self.view_state.selected = edit_cell;
+            }
+        }
+    }
+
     fn commit_current_edit(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.mode.is_editing() {
             return false;
         }
+
+        // Restore home sheet for cross-sheet formula editing
+        self.restore_formula_home_sheet(cx);
 
         // Clear copy/cut border overlay on edit commit
         self.clipboard_visual_range = None;

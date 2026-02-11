@@ -237,6 +237,11 @@ impl Spreadsheet {
             return None;
         }
 
+        // Don't show when navigating on a cross-sheet for ref picking
+        if self.formula_ref_sheet.is_some() {
+            return None;
+        }
+
         // Don't show signature help when autocomplete is visible
         if self.autocomplete_visible {
             return None;
