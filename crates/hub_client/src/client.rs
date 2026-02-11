@@ -86,6 +86,7 @@ pub struct CreateRevisionOptions {
     pub source_identity: Option<String>,
     pub query_hash: Option<String>,
     pub assertions: Vec<AssertionInput>,
+    pub reset_baseline: bool,
 }
 
 /// Status of a run (from the runs API).
@@ -233,6 +234,10 @@ impl HubClient {
                 .unwrap_or(serde_json::Value::Array(vec![]));
         }
 
+        if opts.reset_baseline {
+            body["reset_baseline"] = serde_json::Value::Bool(true);
+        }
+
         let resp = self.post_json(&url, &body)?;
         let json: serde_json::Value = resp.json().map_err(|e| HubError::Parse(e.to_string()))?;
 
@@ -247,10 +252,9 @@ impl HubClient {
 
     /// Upload file bytes to signed URL (publish flow step 2).
     pub fn upload_bytes(&self, upload_url: &str, data: Vec<u8>, headers: &serde_json::Value) -> Result<(), HubError> {
-        let mut req = self.http.put(upload_url)
-            .header("Content-Type", "application/octet-stream");
+        let mut req = self.http.put(upload_url);
 
-        // Apply upload headers from the server
+        // Apply upload headers from the server (includes Content-Type)
         if let Some(obj) = headers.as_object() {
             for (k, v) in obj {
                 if let Some(val) = v.as_str() {
@@ -300,7 +304,7 @@ impl HubClient {
                 ));
             }
 
-            let url = format!("{}/api/repos/{}/{}/runs?limit=5", self.api_base, owner, slug);
+            let url = format!("{}/api/desktop/repos/{}/{}/runs?limit=5", self.api_base, owner, slug);
             let resp = self.get(&url)?;
             let json: serde_json::Value = resp.json()
                 .map_err(|e| HubError::Parse(e.to_string()))?;

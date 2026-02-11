@@ -97,6 +97,7 @@ pub fn cmd_publish(
     fail_on_check_failure: bool,
     output_fmt: Option<OutputFormat>,
     assert_sum: Vec<String>,
+    reset_baseline: bool,
 ) -> Result<(), CliError> {
     // Validate inputs
     if !file.exists() {
@@ -180,6 +181,7 @@ pub fn cmd_publish(
         source_identity,
         query_hash,
         assertions,
+        reset_baseline,
     };
     let (revision_id, upload_url, upload_headers) = client
         .create_revision(&dataset_id, &content_hash, byte_size, &opts)
@@ -277,11 +279,17 @@ fn print_human_result(r: &RunResult) {
             let label = format!("{}({})", a.kind, a.column);
             match a.status.as_str() {
                 "pass" => eprintln!("  {}: PASS (actual={})", label, a.actual.as_deref().unwrap_or("?")),
-                "fail" => eprintln!("  {}: FAIL (expected={} actual={} delta={})",
-                    label,
-                    a.expected.as_deref().unwrap_or("?"),
-                    a.actual.as_deref().unwrap_or("?"),
-                    a.delta.as_deref().unwrap_or("?")),
+                "fail" => {
+                    if let Some(ref msg) = a.message {
+                        eprintln!("  {}: FAIL ({})", label, msg);
+                    } else {
+                        eprintln!("  {}: FAIL (expected={} actual={} delta={})",
+                            label,
+                            a.expected.as_deref().unwrap_or("?"),
+                            a.actual.as_deref().unwrap_or("?"),
+                            a.delta.as_deref().unwrap_or("?"));
+                    }
+                }
                 "baseline_created" => eprintln!("  {}: BASELINE (actual={})", label, a.actual.as_deref().unwrap_or("?")),
                 _ => eprintln!("  {}: {}", label, a.status),
             }

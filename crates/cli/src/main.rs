@@ -521,6 +521,10 @@ Examples:
         /// Example: --assert-sum amount:12345.67:0.01
         #[arg(long = "assert-sum", value_name = "COL:EXPECTED[:TOLERANCE]")]
         assert_sum: Vec<String>,
+
+        /// Reset integrity baseline (use when schema changes are intentional)
+        #[arg(long)]
+        reset_baseline: bool,
     },
 
     /// Sheet file operations (headless build/inspect/verify)
@@ -1125,9 +1129,11 @@ fn main() -> ExitCode {
         Some(Commands::Publish {
             file, repo, dataset, source_type, source_identity, query_hash,
             wait, no_wait, fail_on_check_failure, no_fail, output, assert_sum,
+            reset_baseline,
         }) => hub::cmd_publish(
             file, repo, dataset, source_type, source_identity, query_hash,
             wait && !no_wait, fail_on_check_failure && !no_fail, output, assert_sum,
+            reset_baseline,
         ),
         Some(Commands::Sheet(sheet_cmd)) => match sheet_cmd {
             SheetCommands::Apply { output, lua, verify, stamp, dry_run, json } => {
