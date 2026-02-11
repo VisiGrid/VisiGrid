@@ -73,11 +73,34 @@ When stdout is piped (the default in CI), output is JSON:
 See [cli-output-schema.md](cli-output-schema.md) for the full field
 reference and stability guarantees.
 
+### Check Policies
+
+By default, row count changes and column additions produce `"warn"` (exit 0),
+while column removals produce `"fail"` (exit 41). Override per-check:
+
+```bash
+# Strict: any drift is a failure (frozen extracts)
+vgrid publish output/payments.csv --repo acme/payments --strict
+
+# Only fail on row count changes (append-only is wrong)
+vgrid publish output/payments.csv --repo acme/payments --row-count-policy fail
+
+# Allow everything except column removal (default)
+vgrid publish output/payments.csv --repo acme/payments
+```
+
+| Flag | Default | Effect when triggered |
+|------|---------|---------------------|
+| `--row-count-policy` | `warn` | Row count changed vs previous revision |
+| `--columns-added-policy` | `warn` | New columns appeared |
+| `--columns-removed-policy` | `fail` | Columns disappeared |
+| `--strict` | — | Sets all three to `fail` |
+
 ### Exit Codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | Check passed (or no check configured) |
+| 0 | Check passed or warned (or no check configured) |
 | 41 | Integrity check failed |
 | 42 | Network error |
 | 43 | Server validation error |
@@ -172,6 +195,8 @@ if [ "$status" = "fail" ]; then
   echo "FAILED — proof: $proof"
   # send alert
   exit 1
+elif [ "$status" = "warn" ]; then
+  echo "WARN (expected drift) — proof: $proof"
 fi
 
 echo "Verified — proof: $proof"

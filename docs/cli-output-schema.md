@@ -48,7 +48,7 @@ to complete and prints the full run result.
 | `run_id` | string | **always** | Server-assigned run identifier |
 | `version` | integer | **always** | Dataset version number |
 | `status` | string | **always** | `"verified"` or `"completed"` |
-| `check_status` | string \| null | optional | `"pass"`, `"fail"`, or `"baseline_created"` (null if checks disabled) |
+| `check_status` | string \| null | optional | `"pass"`, `"warn"`, `"fail"`, or `"baseline_created"` (null if checks disabled) |
 | `diff_summary` | object \| null | optional | Row/column change summary |
 | `row_count` | integer \| null | optional | Total rows in this version |
 | `col_count` | integer \| null | optional | Total columns in this version |
@@ -104,6 +104,28 @@ Examples:
 On baseline runs (first revision), if no expected value is given, the actual
 value is recorded and status is `"baseline_created"`.
 
+### Check Policy Flags
+
+Control which integrity checks produce `"warn"` vs `"fail"`:
+
+```
+--row-count-policy <warn|fail>
+--columns-added-policy <warn|fail>
+--columns-removed-policy <warn|fail>
+--strict                              # sets all policies to fail
+```
+
+Defaults: `row_count=warn`, `columns_added=warn`, `columns_removed=fail`.
+
+- `"warn"` means the check detected drift but it's expected. Exit code stays 0.
+- `"fail"` means the drift is a real breakage. Exit code 41 (with `--fail-on-check-failure`).
+- `--strict` is a macro that sets all three policies to `"fail"`.
+
+Examples:
+- `--strict` — break on any drift (frozen extracts)
+- `--row-count-policy fail` — break on row count changes but allow column adds
+- (no flags) — default: only column removal fails
+
 ## JSON Schema: `--no-wait`
 
 When `--no-wait` is set, `vgrid publish` returns immediately after upload
@@ -127,7 +149,7 @@ without waiting for server-side processing.
 
 | Code | Meaning |
 |------|---------|
-| 0 | Success — check passed (or no check configured) |
+| 0 | Success — check passed or warned (or no check configured) |
 | 2 | Usage error — bad arguments, missing file |
 | 40 | Not authenticated — run `vgrid login` first |
 | 41 | Integrity check failed (only with `--fail-on-check-failure`) |
@@ -136,8 +158,9 @@ without waiting for server-side processing.
 | 44 | Timeout waiting for import to complete |
 
 **Note:** Exit code 41 is only returned when `--fail-on-check-failure` is set
-AND `check_status` is `"fail"`. The JSON output is still printed before exiting,
-so scripts can capture the `run_id` and `proof_url` even on failure.
+AND `check_status` is `"fail"`. A `check_status` of `"warn"` exits 0 (same as
+pass). The JSON output is still printed before exiting, so scripts can capture
+the `run_id` and `proof_url` even on failure.
 
 ## Versioning Policy
 
