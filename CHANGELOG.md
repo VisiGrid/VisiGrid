@@ -1,5 +1,118 @@
 # Changelog
 
+## 0.6.8
+
+- **Performance Profiler panel** — debug recalculation bottlenecks with phase timing (invalidation, topo sort, eval, Lua), hotspot analysis, cycle detection, and heuristic classification. Ctrl+Alt+P to toggle.
+- **Visible-but-locked Pro features** — inspector panel now shows skeleton previews and "Request Early Access" CTAs for locked Pro functionality instead of hiding features entirely. Reusable `LockedFeaturePanel` component.
+- **Trial scaffolding** — local-only 14-day trial infrastructure with explicit feature allowlist. `is_feature_enabled()` now checks dev bypass, real license, and active trial in unified flow.
+
+## 0.6.7
+
+### Cross-Sheet Formula Navigation
+
+- **Cross-sheet formula navigation** — when editing a formula referencing another sheet, arrow keys jump to that sheet to edit references, then return to origin. F2 correctly toggles between caret and point modes.
+- **Fixed cross-sheet formula evaluation** — SUMIF, COUNTIF, AVERAGEIF, VLOOKUP, HLOOKUP, MATCH, INDEX, and XLOOKUP now read from the correct sheet instead of the formula's home sheet.
+
+### VisiHub CI Integration
+
+- **`vgrid login` and `vgrid publish`** — connect spreadsheets to VisiHub for versioned verification in CI pipelines. TTY-aware output: JSON when piped, human text when interactive.
+- **`vgrid fill`** — load CSV into .sheet template with strict financial parsing (rejects currency symbols, commas, malformed decimals, formula injection).
+- **`vgrid peek .sheet`** — interactive multi-sheet TUI viewer with Tab/Shift+Tab for sheet navigation and cell formula display in status bar.
+- **`--assert-cell` on publish** — client-attested cell assertions with engine metadata and tolerance for model verification in CI.
+- **Check policy system** — `--reset-baseline` flag, `check_policy` with warn severity level, CLI schema contract validated via golden tests.
+- **Save Changes dialog** — keyboard focus trapping with Tab/Shift+Tab for button cycling.
+
+## 0.6.6
+
+- **Persist hidden rows and columns** — hide/unhide via Ctrl+9/0 (rows), Ctrl+Shift+9/0 (unhide). Hidden state is per-sheet, undoable/redoable, and skipped during rendering. Schema v6→v7 migration.
+- **Fixed comma formatting** — `format_with_commas()` now places commas correctly (`$1,234.56` was `$,1234.56`).
+- **Keyboard Parity v1 (Windows/Linux)** — complete Excel-compatible shortcuts: Alt+Enter for newline in cell, Shift+F10 for context menu, F6 for pane cycling, Ctrl+Alt+=/- for zoom, Ctrl+Shift+L for AutoFilter, Alt+F11 for Lua Console, Ctrl+Shift+* to select current region, Ctrl+9/0 to hide/unhide rows.
+
+## 0.6.5
+
+- **CLI binary renamed to `vgrid`** — shorter, easier to type.
+- **Background CSV/TSV import** — large files import on background thread with delayed-overlay pattern. Fixed unnecessary 1.9GB buffer clone.
+- **Cell Styles dropdown** — "Styles" button in format bar with presets for Normal, Error, Warning, Success, Input, Total, Note.
+
+## 0.6.3
+
+### Iterative Calculation & Cycle Handling
+
+- **Iterative calculation (Jacobi iteration)** — resolve circular references with max iterations and convergence tolerance. Three-phase evaluation: upstream → SCC iteration → downstream topo sort. Non-converged cells get #NUM!.
+- **Empty formula arguments** — formulas can now omit arguments (e.g., `=IF(a,b,)`) via Expr::Empty with proper coercion.
+- **Blank cell semantics** — formula refs to empty cells return Empty instead of Number(0), fixing comparisons.
+- **NORMSDIST / NORM.S.DIST** — normal distribution CDF/PDF.
+- **SUMPRODUCT** — multiply corresponding cells across equal-shaped ranges and sum products.
+- **Freeze Cycle Values** — XLSX imports with circular references freeze values instead of destroying formula ASTs.
+- **Cycle state UX** — dismissible top banner, clickable ITER/FROZEN/CYCLES status pills, reframed import report with iteration toggle.
+- **In-app Save Changes modal** — replaced OS-native dialog with themed in-app modal.
+- **Number format quick-menu** — "123" dropdown in format bar with common number format presets.
+- **Ctrl+Tab window cycling** — NextWindow/PrevWindow actions.
+- **System theme default** — respect OS dark/light mode preference.
+
+## 0.6.1
+
+- **Minimap** — vertical density strip (View > Minimap) showing data distribution with click-to-jump and drag-to-scrub navigation.
+- **Auto-detect CSV delimiter** — automatically detect semicolon, tab, pipe, or comma on import.
+- **ODS OpenFormula support** — strip `=of:` prefix and convert semicolon arg separators.
+- **ROUNDUP, ROUNDDOWN, TRUNC** — rounding functions.
+
+## 0.6.0
+
+- **Peek command** — interactive Ratatui-based TUI file viewer for CSV/TSV with column packing, cursor navigation, and unicode-aware alignment.
+- **Native aarch64 CI** — switched aarch64 Linux builds from QEMU emulation to native ARM runner.
+- **Flatpak distribution** — published to Flathub with manifest, metainfo, and screenshots.
+
+## 0.5.9
+
+- **Custom Functions v1** — user-defined Lua functions callable in formulas. Write `functions.lua` in `~/.config/visigrid/` and call `=ACCRUED_INTEREST(B2,C2,D2)` in any cell. Sandbox: no os/io/network, 100k instruction limit.
+- **Format Painter v1** — copy formatting from one cell and apply to others. Single-shot or locked mode, Ctrl+Shift+C/V shortcuts, range painting via drag-select, full undo support.
+- **VisiCalc inverse-video theme** — fully opaque green selection with black text matching the classic aesthetic.
+
+## 0.5.8
+
+- **aarch64 Linux builds** — ARM64 Linux now included in release workflow.
+- **System theme** — follows OS dark/light preference.
+- **Semantic cell styles** — Lua helpers and inspector hook for agent-built spreadsheets.
+- **Colored border UI** — border color selection.
+
+## 0.5.7
+
+- **Formula bar polish** — format dropdown improvements.
+- **15-digit precision limit** — number display limited to float64 significant digits.
+- **Fixed Cmd+V paste** in Find and GoTo dialogs.
+
+## 0.5.6
+
+- **Semantic verification system** — model integrity verification.
+- **Cross-sheet reference fix** — use actual sheet names.
+- **`grid.name_sheet` API** — name sheets from Lua.
+- **Multi-sheet .sheet format** — native format now stores multiple sheets.
+- **Global Cmd+O** keybinding.
+
+## 0.5.5
+
+- **Semantic approval system** — model verification with approval, drift detection, and "Why drifted?" panel.
+- **Date string parsing** — formulas can now parse date strings.
+- **Role-based auto-styling** — agent-built spreadsheets get automatic formatting.
+- **Semantic metadata persistence** — fingerprint boundary enforcement.
+
+## 0.5.0 - 0.5.3
+
+- **Windows build fixes** — HANDLE null check, reqwest/blake3 dependency fixes, windows-sys dependency.
+
+## 0.4.7
+
+### Agent-Ready Verifiable Builds
+
+- **Sheet commands** (headless build loop):
+  - `sheet apply` — Lua → .sheet (replacement semantics)
+  - `sheet inspect` — read cells/ranges/workbook
+  - `sheet fingerprint` — compute fingerprint
+  - `sheet verify` — verify fingerprint (exit 0/1)
+- **Lua API for agents** — `set()`, `clear()`, `meta()`, `style()` with fingerprint-affecting semantics.
+- **Agent Kit** — MCP tool definitions, copy-paste instructions, demo script.
+
 ## 0.4.6
 
 ### Spreadsheet

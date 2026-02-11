@@ -157,7 +157,7 @@ What's built, what's next, and what's not planned.
   - Leading zeros preserved: 001→002→003
   - Drag preview: border-only (no fill) for clear action feedback
   - First-use tip in status bar
-- See: [docs/features/done/series-fill-spec.md](docs/features/done/series-fill-spec.md)
+- See: docs/features/done/series-fill-spec.md
 
 ### macOS Keyboard (v0.2.3+)
 - Modifier key preference: choose Cmd (default) or Ctrl for shortcuts
@@ -230,7 +230,7 @@ What's built, what's next, and what's not planned.
 - **Explain This Change** — 2-4 sentence descriptions of individual changes
 - **AI Summary** — optional, manual-trigger summaries of change sets
 - **Trust model**: AI describes but never modifies from audit context
-- See: [docs/features/future/ai-reconciliation-spec.md](docs/features/future/ai-reconciliation-spec.md)
+- See: docs/features/future/ai-reconciliation-spec.md
 
 ### Merged Cells (v0.3.7+)
 - Full merged cell support across engine, rendering, navigation, clipboard, and UI
@@ -242,72 +242,47 @@ What's built, what's next, and what's not planned.
 
 ---
 
+## In Progress
+
+Features with significant implementation already shipped.
+
+- **Data Validation** — Dropdown lists, number/date/text constraints, error alerts, XLSX import/export, circle invalid data. Spec: [docs/features/data-validation-spec.md](docs/features/data-validation-spec.md)
+- **Explainability** — Dependency graph, verified mode, inspector, provenance, history panel, CLI replay. Spec: [docs/features/explainability-roadmap.md](docs/features/explainability-roadmap.md)
+- **Context Menu** — Flat menus complete. Nested submenus blocked on gpui upstream (zed#19837).
+- **Ask AI / AI Reconciliation** — Ask AI + Explain Differences working, OpenAI provider.
+- **Custom Functions** — Lua scripting exists; needs formula integration and sandbox polish.
+
+---
+
 ## Planned
 
 ### Near-term
-- Paste Special expansion (formulas, transpose, operations)
-- Date pattern fill (Jan 1 → Jan 2, Jan 3...)
-- Conditional formatting (basic rules)
-- Comments/notes on cells
-- Print to PDF
+
+Ready to build, no major blockers.
+
+- **Cell Comments** — Text notes on cells with red triangle indicator, hover preview, edit/delete
+- **Print to PDF** — Paginated PDF export with print preview, page setup, headers/footers
+- **Conditional Formatting** — Highlight rules, color scales, data bars, icon sets
+- **Paste Special Phase 2-3** — Arithmetic paste operations and Transpose
+- **Problems Panel** — Bottom panel aggregating all workbook errors with filtering and navigation
+- **Merged Cells extensions** — Merge Across (merge each row separately), context menu integration
 
 ### Medium-term
-- Cell context menu (right-click)
-- Problems panel (Ctrl+Shift+M) - all formula errors
 
-### Explainability Initiative
+Need infrastructure, design decisions, or upstream dependencies.
 
-Make causality, impact, and recomputation visible. VisiGrid becomes an **Explainable Spreadsheet**.
+- **Range Picker** — Excel-style RefEdit control for selecting ranges from modal dialogs
+- **Split View** — Horizontal/vertical/four-way panes for comparing distant regions
+- **Windows Title Bar** — Custom title bar integrating menu bar. See [docs/features/windows-titlebar-spec.md](docs/features/windows-titlebar-spec.md)
 
-See full spec: [docs/features/explainability-roadmap.md](docs/features/explainability-roadmap.md)
+### Long-term
 
-**Phase 1 — Dependency Graph Foundation**
-- Persistent dependency graph (precedents/dependents in O(1))
-- Cross-sheet dependency tracking
-- Ordered recompute engine with cycle detection at edit-time
-- See: [docs/features/dependency-graph-spec.md](docs/features/dependency-graph-spec.md)
+Major infrastructure investment.
 
-**Phase 2 — Verified Mode**
-- User-facing toggle with status bar promise: "Verified ✓ — values are current"
-- Summary stats (recalc time, cells, depth)
-
-**Phase 3 — Inspector Extensions**
-- Dependency depth, recompute timestamps, evaluation traces
-- Mini DAG visualization (fan-in/fan-out)
-- Basic Inspector becomes free; deep explainability stays Pro
-
-**Phase 4+ — Provenance & Beyond**
-- Lua snippets for structural operations (fill, sort, transform)
-- Named ranges as first-class inspector entities
-- Blast radius preview before large operations
-
-### Polish
-- Windows title bar integration (custom titlebar with integrated menu)
-  - Eliminates "menu on 2nd line" non-native feel
-  - See [docs/features/windows-titlebar-spec.md](docs/features/windows-titlebar-spec.md)
-  - Windows-first, behind feature flag, with acceptance checklist
-- Fill handle refinements
-  - Zoom-adaptive size (9px at ≤90%, 10px at 100–150%, 11px at ≥175%)
-  - Optional 1px border radius (if UI language moves to softened edges)
-  - Post-fill dropdown affordance ("I meant copy, not series")
-
-### Long-term: Systems of Record
-
-Connect to authoritative data sources without sync risk.
-
-Import data from ERPs, payment processors, and ledgers as read-only snapshots. Every pull is versioned with a timestamp. User controls when to refresh. No silent syncs. No write-back.
-
-Target sources:
-- Stripe / payment processors
-- QuickBooks / accounting systems
-- Bank feeds
-- Database exports
-
-### Long-term: Extensibility
-- Plugin architecture (WASM-based)
-- Custom functions
-- Data connectors
-- Minimap for large sheets
+- **Plugin Architecture** — WASM-based sandboxed plugins for custom functions, data connectors, UI panels
+- **Data Connectors** — SQL databases, REST APIs, GraphQL, S3
+- **Systems of Record** — Read-only SaaS integrations (Stripe, QuickBooks, Plaid). OAuth, versioned snapshots
+- **Minimap** — Bird's-eye view sidebar showing data density and quick navigation
 
 ---
 
@@ -317,7 +292,7 @@ Fixes we may contribute to dependencies:
 
 | Project | Issue | Details |
 |---------|-------|---------|
-| gpui/Zed | Linux font rendering | Bold, italic, per-cell fonts don't render. See [docs/font-rendering-issue.md](docs/font-rendering-issue.md) |
+| gpui/Zed | Linux font rendering | Bold, italic, per-cell fonts don't render on Linux (gpui framework limitation) |
 | gpui/Zed | Nested submenu support | Cross-platform nested menus for context menus and menu bar. See [#19837](https://github.com/zed-industries/zed/issues/19837) |
 | gpui/Zed | Modifier-only key release events | `KeyUpEvent` not sent when releasing modifier keys (Option/Alt/Ctrl/Cmd) without other keys. Prevents Excel-style double-tap Option for KeyTips. Workaround: Option+Space trigger instead. **Decision: Only implement double-tap Option if gpui adds modifier-only key release events; otherwise KeyTips stays Option+Space.** |
 

@@ -24,7 +24,7 @@ VisiGrid is a high-performance spreadsheet application built for power users.
 Features vim-style navigation, powerful formulas, and a local-first architecture
 that keeps your data yours.
 """
-copyright = "Copyright © 2025 RegAtlas, LLC"
+copyright = "Copyright © 2024-2026 RegAtlas, LLC"
 osx_minimum_system_version = "12.0"
 
 [dependencies]
