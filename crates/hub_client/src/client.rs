@@ -52,6 +52,15 @@ impl std::fmt::Display for HubError {
 
 impl std::error::Error for HubError {}
 
+/// Engine metadata for client-attested assertions.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EngineMetadata {
+    pub name: String,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
 /// A single assertion to evaluate during import.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AssertionInput {
@@ -59,6 +68,12 @@ pub struct AssertionInput {
     pub column: String,
     pub expected: Option<String>,
     pub tolerance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<EngineMetadata>,
 }
 
 /// Result of an evaluated assertion (from the server).
@@ -77,6 +92,10 @@ pub struct AssertionResult {
     pub delta: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<EngineMetadata>,
 }
 
 /// Options for creating a revision (publish flow step 1).
@@ -88,6 +107,9 @@ pub struct CreateRevisionOptions {
     pub assertions: Vec<AssertionInput>,
     pub reset_baseline: bool,
     pub check_policy: Option<std::collections::HashMap<String, String>>,
+    /// File format hint: "csv", "tsv", "xlsx", or "sheet".
+    /// Sent to the server so it can update the dataset format if needed.
+    pub format: Option<String>,
 }
 
 /// Status of a run (from the runs API).
@@ -184,9 +206,14 @@ impl HubClient {
     }
 
     /// Create a new dataset in a repo.
-    pub fn create_dataset(&self, owner: &str, slug: &str, name: &str) -> Result<String, HubError> {
+    /// `format` hint tells the server whether this is "csv", "tsv", "xlsx", or "sheet".
+    pub fn create_dataset(&self, owner: &str, slug: &str, name: &str, format: Option<&str>) -> Result<String, HubError> {
         let url = format!("{}/api/desktop/repos/{}/{}/datasets", self.api_base, owner, slug);
-        let resp = self.post_json(&url, &serde_json::json!({ "name": name }))?;
+        let mut body = serde_json::json!({ "name": name });
+        if let Some(fmt) = format {
+            body["format"] = serde_json::json!(fmt);
+        }
+        let resp = self.post_json(&url, &body)?;
         let json: serde_json::Value = resp.json().map_err(|e| HubError::Parse(e.to_string()))?;
 
         json["dataset_id"].as_i64()
@@ -241,6 +268,10 @@ impl HubClient {
 
         if let Some(ref policy) = opts.check_policy {
             body["check_policy"] = serde_json::to_value(policy).unwrap_or_default();
+        }
+
+        if let Some(ref fmt) = opts.format {
+            body["format"] = serde_json::json!(fmt);
         }
 
         let resp = self.post_json(&url, &body)?;

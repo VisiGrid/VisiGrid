@@ -11,12 +11,13 @@ use std::time::Duration;
 use visigrid_hub_client::{
     AuthCredentials, save_auth,
     HubClient, HubError, CreateRevisionOptions, RunResult,
-    AssertionInput,
+    AssertionInput, EngineMetadata,
     hash_file,
 };
 
 use crate::{CliError, OutputFormat};
 use crate::exit_codes::*;
+use crate::sheet_ops::parse_cell_ref;
 
 // ── Login ───────────────────────────────────────────────────────────
 
@@ -98,6 +99,7 @@ pub fn cmd_publish(
     fail_on_check_failure: bool,
     output_fmt: Option<OutputFormat>,
     assert_sum: Vec<String>,
+    assert_cell: Vec<String>,
     reset_baseline: bool,
     row_count_policy: Option<String>,
     columns_added_policy: Option<String>,
@@ -131,6 +133,14 @@ pub fn cmd_publish(
             .to_string()
     });
 
+    // Detect file format from extension
+    let file_format = match file.extension().and_then(|e| e.to_str()) {
+        Some("sheet") => Some("sheet"),
+        Some("tsv") => Some("tsv"),
+        Some("xlsx") => Some("xlsx"),
+        _ => None, // server defaults to csv
+    };
+
     // Determine output mode
     let json_output = match output_fmt {
         Some(OutputFormat::Json) => true,
@@ -163,21 +173,30 @@ pub fn cmd_publish(
         d.id.clone()
     } else {
         if !json_output { eprint!("creating... "); }
-        let id = client.create_dataset(owner, slug, &dataset_name).map_err(|e| hub_error(e))?;
+        let id = client.create_dataset(owner, slug, &dataset_name, file_format).map_err(|e| hub_error(e))?;
         if !json_output { eprintln!("created #{}", id); }
         id
     };
 
     // Parse --assert-sum flags into AssertionInput
-    let assertions: Vec<AssertionInput> = assert_sum.iter().map(|s| {
+    let mut assertions: Vec<AssertionInput> = assert_sum.iter().map(|s| {
         let parts: Vec<&str> = s.splitn(3, ':').collect();
         AssertionInput {
             kind: "sum".into(),
             column: parts.first().unwrap_or(&"").to_string(),
             expected: parts.get(1).map(|s| s.to_string()),
             tolerance: parts.get(2).map(|s| s.to_string()),
+            actual: None,
+            origin: None,
+            engine: None,
         }
     }).collect();
+
+    // Evaluate --assert-cell flags (requires .sheet file)
+    if !assert_cell.is_empty() {
+        let cell_assertions = evaluate_cell_assertions(&file, &assert_cell)?;
+        assertions.extend(cell_assertions);
+    }
 
     // Build check_policy from flags
     let check_policy = {
@@ -203,6 +222,7 @@ pub fn cmd_publish(
         assertions,
         reset_baseline,
         check_policy,
+        format: file_format.map(String::from),
     };
     let (revision_id, upload_url, upload_headers) = client
         .create_revision(&dataset_id, &content_hash, byte_size, &opts)
@@ -298,22 +318,23 @@ fn print_human_result(r: &RunResult) {
     }
     if let Some(ref assertions) = r.assertions {
         for a in assertions {
+            let origin_tag = if a.origin.as_deref() == Some("client") { " [client]" } else { "" };
             let label = format!("{}({})", a.kind, a.column);
             match a.status.as_str() {
-                "pass" => eprintln!("  {}: PASS (actual={})", label, a.actual.as_deref().unwrap_or("?")),
+                "pass" => eprintln!("  {}: PASS (actual={}){}", label, a.actual.as_deref().unwrap_or("?"), origin_tag),
                 "fail" => {
                     if let Some(ref msg) = a.message {
-                        eprintln!("  {}: FAIL ({})", label, msg);
+                        eprintln!("  {}: FAIL ({}){}", label, msg, origin_tag);
                     } else {
-                        eprintln!("  {}: FAIL (expected={} actual={} delta={})",
-                            label,
+                        eprintln!("  {}: FAIL (expected={} actual={} delta={}){}", label,
                             a.expected.as_deref().unwrap_or("?"),
                             a.actual.as_deref().unwrap_or("?"),
-                            a.delta.as_deref().unwrap_or("?"));
+                            a.delta.as_deref().unwrap_or("?"),
+                            origin_tag);
                     }
                 }
-                "baseline_created" => eprintln!("  {}: BASELINE (actual={})", label, a.actual.as_deref().unwrap_or("?")),
-                _ => eprintln!("  {}: {}", label, a.status),
+                "baseline_created" => eprintln!("  {}: BASELINE (actual={}){}", label, a.actual.as_deref().unwrap_or("?"), origin_tag),
+                _ => eprintln!("  {}: {}{}", label, a.status, origin_tag),
             }
         }
     }
@@ -322,6 +343,172 @@ fn print_human_result(r: &RunResult) {
     }
     eprintln!("  Proof:   {}", r.proof_url);
     eprintln!();
+}
+
+// ── Cell Assertions ──────────────────────────────────────────────────
+
+/// Parse and evaluate `--assert-cell` flags against a .sheet file.
+///
+/// Each spec has the format: `sheet!cell:expected[:tolerance]`
+/// The workbook is loaded once, recalculated, and all assertions evaluated.
+fn evaluate_cell_assertions(
+    file: &std::path::Path,
+    specs: &[String],
+) -> Result<Vec<AssertionInput>, CliError> {
+    use visigrid_engine::formula::eval::Value;
+    use visigrid_io::native;
+
+    // Require .sheet extension
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext != "sheet" {
+        return Err(CliError {
+            code: EXIT_USAGE,
+            message: "--assert-cell requires a .sheet file".into(),
+            hint: Some("cell assertions evaluate formulas in the spreadsheet engine".into()),
+        });
+    }
+
+    // Load workbook once
+    let mut workbook = native::load_workbook(file)
+        .map_err(|e| CliError::io(format!("failed to load .sheet for cell assertions: {}", e)))?;
+    workbook.rebuild_dep_graph();
+    workbook.recompute_full_ordered();
+
+    let fingerprint = native::compute_semantic_fingerprint(&workbook);
+    let engine = EngineMetadata {
+        name: "visigrid-engine".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        fingerprint: Some(fingerprint),
+    };
+
+    let mut assertions = Vec::with_capacity(specs.len());
+
+    for spec in specs {
+        // Parse sheet!cell:expected[:tolerance]
+        // First split on ':' but we need to handle the sheet!cell part
+        // which itself contains no colons.
+        let parts: Vec<&str> = spec.splitn(3, ':').collect();
+        if parts.is_empty() {
+            return Err(CliError::args(format!(
+                "invalid --assert-cell format: {:?}",
+                spec
+            )));
+        }
+
+        let cell_ref_str = parts[0]; // e.g., "summary!B7"
+        let expected = parts.get(1).map(|s| s.to_string());
+        let tolerance = parts.get(2).map(|s| s.to_string());
+
+        // Parse sheet!cell reference
+        let (sheet_name, cell_part) = if let Some(bang) = cell_ref_str.find('!') {
+            let sheet = &cell_ref_str[..bang];
+            let cell = &cell_ref_str[bang + 1..];
+            if sheet.is_empty() {
+                return Err(CliError::args(format!(
+                    "empty sheet name in --assert-cell {:?}",
+                    spec
+                )));
+            }
+            (Some(sheet), cell)
+        } else {
+            (None, cell_ref_str)
+        };
+
+        let (row, col) = match parse_cell_ref(cell_part) {
+            Some(rc) => rc,
+            None => {
+                return Err(CliError::args(format!(
+                    "invalid cell reference in --assert-cell {:?}",
+                    spec
+                )));
+            }
+        };
+
+        // Resolve sheet
+        let sheet_idx = if let Some(name) = sheet_name {
+            let sheet_id = workbook.sheet_id_by_name(name).ok_or_else(|| {
+                CliError::args(format!("sheet {:?} not found in --assert-cell {:?}", name, spec))
+            })?;
+            workbook.idx_for_sheet_id(sheet_id).ok_or_else(|| {
+                CliError::args(format!("sheet {:?} not found", name))
+            })?
+        } else {
+            0
+        };
+
+        let sheet = match workbook.sheet(sheet_idx) {
+            Some(s) => s,
+            None => {
+                assertions.push(AssertionInput {
+                    kind: "cell".into(),
+                    column: cell_ref_str.to_string(),
+                    expected,
+                    tolerance,
+                    actual: None,
+                    origin: Some("client".into()),
+                    engine: Some(engine.clone()),
+                });
+                continue;
+            }
+        };
+
+        // Read computed value
+        let value = sheet.get_computed_value(row, col);
+
+        let assertion = match value {
+            Value::Number(n) => {
+                // Format number without trailing zeros for clean comparison
+                let actual_str = format_number(n);
+                AssertionInput {
+                    kind: "cell".into(),
+                    column: cell_ref_str.to_string(),
+                    expected,
+                    tolerance,
+                    actual: Some(actual_str),
+                    origin: Some("client".into()),
+                    engine: Some(engine.clone()),
+                }
+            }
+            Value::Empty => {
+                AssertionInput {
+                    kind: "cell".into(),
+                    column: cell_ref_str.to_string(),
+                    expected: None,
+                    tolerance: None,
+                    actual: None,
+                    origin: Some("client".into()),
+                    engine: Some(engine.clone()),
+                }
+            }
+            Value::Error(_) | Value::Text(_) | Value::Boolean(_) => {
+                AssertionInput {
+                    kind: "cell".into(),
+                    column: cell_ref_str.to_string(),
+                    expected,
+                    tolerance,
+                    actual: None,
+                    origin: Some("client".into()),
+                    engine: Some(engine.clone()),
+                }
+            }
+        };
+
+        assertions.push(assertion);
+    }
+
+    Ok(assertions)
+}
+
+/// Format a number for assertion comparison: integers as integers,
+/// decimals with minimum necessary precision.
+fn format_number(n: f64) -> String {
+    if n == n.trunc() && n.abs() < 1e15 {
+        format!("{}", n as i64)
+    } else {
+        // Use enough precision to round-trip
+        let s = format!("{}", n);
+        s
+    }
 }
 
 fn hub_error(e: HubError) -> CliError {
