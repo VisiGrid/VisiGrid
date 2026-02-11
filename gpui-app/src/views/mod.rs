@@ -21,12 +21,7 @@ mod import_report_dialog;
 pub mod inspector_panel;
 pub mod profiler_panel;
 mod keytips_overlay;
-#[cfg(feature = "pro")]
 mod lua_console;
-#[cfg(not(feature = "pro"))]
-mod lua_console_stub;
-#[cfg(not(feature = "pro"))]
-use lua_console_stub as lua_console;
 pub mod license_dialog;
 pub mod minimap;
 mod paste_special_dialog;

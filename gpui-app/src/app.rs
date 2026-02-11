@@ -2796,23 +2796,20 @@ impl Spreadsheet {
             session_request_tx: session_tx,
         };
 
-        // Load custom functions from ~/.config/visigrid/functions.lua (Pro only)
-        #[cfg(feature = "pro")]
-        {
-            match crate::scripting::custom_functions::load_custom_functions(app.lua_runtime.lua()) {
-                Ok(registry) => {
-                    if !registry.functions.is_empty() {
-                        app.status_message = Some(format!(
-                            "Loaded {} custom function{}",
-                            registry.functions.len(),
-                            if registry.functions.len() == 1 { "" } else { "s" },
-                        ));
-                    }
-                    app.custom_fn_registry = registry;
+        // Load custom functions from ~/.config/visigrid/functions.lua
+        match crate::scripting::custom_functions::load_custom_functions(app.lua_runtime.lua()) {
+            Ok(registry) => {
+                if !registry.functions.is_empty() {
+                    app.status_message = Some(format!(
+                        "Loaded {} custom function{}",
+                        registry.functions.len(),
+                        if registry.functions.len() == 1 { "" } else { "s" },
+                    ));
                 }
-                Err(e) => {
-                    eprintln!("Custom functions error: {}", e);
-                }
+                app.custom_fn_registry = registry;
+            }
+            Err(e) => {
+                eprintln!("Custom functions error: {}", e);
             }
         }
 

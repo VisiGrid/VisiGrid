@@ -37,12 +37,7 @@ mod minimap;
 mod user_keybindings;
 mod mode;
 mod navigation;
-#[cfg(feature = "pro")]
 mod scripting;
-#[cfg(not(feature = "pro"))]
-mod scripting_stub;
-#[cfg(not(feature = "pro"))]
-use scripting_stub as scripting;
 mod named_ranges;
 mod perf;
 mod provenance;

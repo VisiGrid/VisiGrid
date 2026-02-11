@@ -234,12 +234,6 @@ pub(crate) fn bind(
             this.return_to_trace_source(cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleLuaConsole, window, cx| {
-            // Pro feature gate
-            if !visigrid_license::is_feature_enabled("lua") {
-                this.status_message = Some("Lua scripting requires VisiGrid Pro".to_string());
-                cx.notify();
-                return;
-            }
             this.lua_console.toggle();
             if this.lua_console.visible {
                 window.focus(&this.console_focus_handle, cx);

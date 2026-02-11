@@ -597,12 +597,10 @@ impl Spreadsheet {
         let report = if !has_custom_fns {
             self.wb_mut(cx, |wb| wb.recompute_full_ordered())
         } else {
-            #[cfg(feature = "pro")]
             {
                 use visigrid_engine::formula::eval::{EvalArg, EvalResult};
 
                 let memo_cache = std::cell::RefCell::new(crate::scripting::MemoCache::new());
-                // Borrow registry and lua before entering wb_mut closure
                 let registry = &self.custom_fn_registry;
                 let lua = self.lua_runtime.lua();
 
@@ -615,14 +613,9 @@ impl Spreadsheet {
                     ))
                 };
 
-                // Use workbook.update directly to avoid &mut self conflict
                 self.workbook.update(cx, |wb, _| {
                     wb.recompute_full_ordered_with_custom_fns(&handler)
                 })
-            }
-            #[cfg(not(feature = "pro"))]
-            {
-                self.wb_mut(cx, |wb| wb.recompute_full_ordered())
             }
         };
 
@@ -670,7 +663,6 @@ impl Spreadsheet {
         let report = if !has_custom_fns {
             self.wb_mut(cx, |wb| wb.recompute_full_ordered())
         } else {
-            #[cfg(feature = "pro")]
             {
                 use visigrid_engine::formula::eval::{EvalArg, EvalResult};
                 use std::time::Instant;
@@ -703,10 +695,6 @@ impl Spreadsheet {
                 );
                 report
             }
-            #[cfg(not(feature = "pro"))]
-            {
-                self.wb_mut(cx, |wb| wb.recompute_full_ordered())
-            }
         };
 
         self.in_smoke_recalc = false;
@@ -725,31 +713,23 @@ impl Spreadsheet {
 
     /// Reload custom functions from `functions.lua` and recalculate.
     pub fn reload_custom_functions(&mut self, cx: &mut Context<Self>) {
-        #[cfg(feature = "pro")]
-        {
-            match crate::scripting::custom_functions::load_custom_functions(self.lua_runtime.lua()) {
-                Ok(registry) => {
-                    let count = registry.functions.len();
-                    let warnings = registry.warnings.clone();
-                    self.custom_fn_registry = registry;
-                    let mut msg = format!("Loaded {} custom function{}", count, if count == 1 { "" } else { "s" });
-                    if !warnings.is_empty() {
-                        msg.push_str(&format!(" ({})", warnings.join(", ")));
-                    }
-                    self.status_message = Some(msg);
-                    self.recalculate(cx);
+        match crate::scripting::custom_functions::load_custom_functions(self.lua_runtime.lua()) {
+            Ok(registry) => {
+                let count = registry.functions.len();
+                let warnings = registry.warnings.clone();
+                self.custom_fn_registry = registry;
+                let mut msg = format!("Loaded {} custom function{}", count, if count == 1 { "" } else { "s" });
+                if !warnings.is_empty() {
+                    msg.push_str(&format!(" ({})", warnings.join(", ")));
                 }
-                Err(e) => {
-                    self.status_message = Some(format!("Custom functions error: {}", e));
-                }
+                self.status_message = Some(msg);
+                self.recalculate(cx);
             }
-            cx.notify();
+            Err(e) => {
+                self.status_message = Some(format!("Custom functions error: {}", e));
+            }
         }
-        #[cfg(not(feature = "pro"))]
-        {
-            self.status_message = Some("Custom functions require VisiGrid Pro".to_string());
-            cx.notify();
-        }
+        cx.notify();
     }
 
     /// Commit edit and move right (Right arrow in Edit mode)
