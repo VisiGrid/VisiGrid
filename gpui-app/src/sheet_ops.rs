@@ -202,6 +202,7 @@ impl Spreadsheet {
             let cell_id = visigrid_engine::cell_id::CellId::new(sheet_id, row, col);
             wb.note_cell_changed(cell_id);
         });
+        cx.notify(); // Ensure view re-renders with updated cross-sheet values
     }
 
     /// Clear a cell value on the active sheet and update the dependency graph + recalc.
@@ -214,6 +215,7 @@ impl Spreadsheet {
             let cell_id = visigrid_engine::cell_id::CellId::new(sheet_id, row, col);
             wb.note_cell_changed(cell_id);
         });
+        cx.notify(); // Ensure view re-renders with updated cross-sheet values
     }
 
     /// Execute a mutation on the workbook's active sheet.

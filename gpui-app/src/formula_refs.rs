@@ -313,6 +313,38 @@ impl Spreadsheet {
             let (range, token_type) = &tokens[i];
 
             if *token_type == TokenType::CellRef {
+                // Skip cross-sheet references (preceded by Bang token, e.g., Sheet1!A1)
+                // These reference cells on another sheet and should not be highlighted
+                // on the current sheet.
+                let is_cross_sheet = {
+                    let mut j = i;
+                    let mut found_bang = false;
+                    while j > 0 {
+                        j -= 1;
+                        let (_, prev_type) = &tokens[j];
+                        if *prev_type == TokenType::Whitespace {
+                            continue; // skip whitespace
+                        }
+                        found_bang = *prev_type == TokenType::Bang;
+                        break;
+                    }
+                    found_bang
+                };
+
+                if is_cross_sheet {
+                    // Skip this CellRef and any following :CellRef range
+                    if i + 2 < tokens.len() {
+                        let (_, next_type) = &tokens[i + 1];
+                        let (_, next_next_type) = &tokens[i + 2];
+                        if *next_type == TokenType::Colon && *next_next_type == TokenType::CellRef {
+                            i += 3; // Skip the whole cross-sheet range
+                            continue;
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
+
                 // Convert char indices to byte indices for safe slicing
                 let byte_start = char_index_to_byte_offset(formula, range.start);
                 let byte_end = char_index_to_byte_offset(formula, range.end);

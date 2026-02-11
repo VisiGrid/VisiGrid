@@ -4577,4 +4577,46 @@ mod tests {
         // Should show #NUM! since didn't converge
         assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "#NUM!");
     }
+
+    #[test]
+    fn cross_sheet_incremental_sumif() {
+        // Reproduce the exact recon-template scenario:
+        // summary!B2 = SUMIF(Sheet1!E2:E10, "charge", Sheet1!C2:C10)
+        // Edit Sheet1!E2 and C2, verify summary updates via incremental recalc.
+        let mut wb = Workbook::new();
+        let si = wb.add_sheet_named("summary").expect("add summary sheet");
+
+        wb.set_cell_value_tracked(0, 0, 2, "amount_minor");
+        wb.set_cell_value_tracked(0, 0, 4, "type");
+        wb.set_cell_value_tracked(si, 0, 0, "Charges");
+        wb.set_cell_value_tracked(si, 0, 1, r#"=SUMIF(Sheet1!E2:E10,"charge",Sheet1!C2:C10)"#);
+
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+
+        // Initial: summary!B2 = 0
+        let val = wb.sheet(si).unwrap().get_computed_value(0, 1);
+        assert!(
+            matches!(val, Value::Number(n) if n.abs() < 0.001),
+            "initial should be 0, got {:?}", val
+        );
+
+        // Simulate GUI cell edits (same path as Spreadsheet::set_cell_value)
+        let sheet1_id = wb.sheet(0).unwrap().id;
+
+        wb.sheet_mut(0).unwrap().set_value(1, 4, "charge"); // E2
+        wb.update_cell_deps(sheet1_id, 1, 4);
+        wb.note_cell_changed(CellId::new(sheet1_id, 1, 4));
+
+        wb.sheet_mut(0).unwrap().set_value(1, 2, "50000"); // C2
+        wb.update_cell_deps(sheet1_id, 1, 2);
+        wb.note_cell_changed(CellId::new(sheet1_id, 1, 2));
+
+        // summary!B2 should now be 50000
+        let val = wb.sheet(si).unwrap().get_computed_value(0, 1);
+        assert!(
+            matches!(val, Value::Number(n) if (n - 50000.0).abs() < 0.001),
+            "should be 50000, got {:?}", val
+        );
+    }
 }
