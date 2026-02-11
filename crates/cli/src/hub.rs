@@ -3,6 +3,7 @@
 //! `vgrid login`   — store API token
 //! `vgrid publish`  — upload file, wait for check, print results
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -98,6 +99,10 @@ pub fn cmd_publish(
     output_fmt: Option<OutputFormat>,
     assert_sum: Vec<String>,
     reset_baseline: bool,
+    row_count_policy: Option<String>,
+    columns_added_policy: Option<String>,
+    columns_removed_policy: Option<String>,
+    strict: bool,
 ) -> Result<(), CliError> {
     // Validate inputs
     if !file.exists() {
@@ -174,6 +179,21 @@ pub fn cmd_publish(
         }
     }).collect();
 
+    // Build check_policy from flags
+    let check_policy = {
+        let mut policy = HashMap::new();
+        if strict {
+            policy.insert("row_count".into(), "fail".into());
+            policy.insert("columns_added".into(), "fail".into());
+            policy.insert("columns_removed".into(), "fail".into());
+        } else {
+            if let Some(v) = row_count_policy { policy.insert("row_count".into(), v); }
+            if let Some(v) = columns_added_policy { policy.insert("columns_added".into(), v); }
+            if let Some(v) = columns_removed_policy { policy.insert("columns_removed".into(), v); }
+        }
+        if policy.is_empty() { None } else { Some(policy) }
+    };
+
     // Step 3: Create revision
     if !json_output { eprint!("Creating revision... "); }
     let opts = CreateRevisionOptions {
@@ -182,6 +202,7 @@ pub fn cmd_publish(
         query_hash,
         assertions,
         reset_baseline,
+        check_policy,
     };
     let (revision_id, upload_url, upload_headers) = client
         .create_revision(&dataset_id, &content_hash, byte_size, &opts)
@@ -255,6 +276,7 @@ fn print_human_result(r: &RunResult) {
     if let Some(ref cs) = r.check_status {
         let marker = match cs.as_str() {
             "pass" => "PASS",
+            "warn" => "WARN",
             "baseline_created" => "BASELINE CREATED",
             _ => "FAIL",
         };

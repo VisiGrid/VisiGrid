@@ -525,6 +525,22 @@ Examples:
         /// Reset integrity baseline (use when schema changes are intentional)
         #[arg(long)]
         reset_baseline: bool,
+
+        /// Check policy for row count changes (warn or fail)
+        #[arg(long, value_parser = ["warn", "fail"])]
+        row_count_policy: Option<String>,
+
+        /// Check policy for columns added (warn or fail)
+        #[arg(long, value_parser = ["warn", "fail"])]
+        columns_added_policy: Option<String>,
+
+        /// Check policy for columns removed (warn or fail)
+        #[arg(long, value_parser = ["warn", "fail"])]
+        columns_removed_policy: Option<String>,
+
+        /// Strict mode: all check policies set to fail
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Sheet file operations (headless build/inspect/verify)
@@ -1129,11 +1145,13 @@ fn main() -> ExitCode {
         Some(Commands::Publish {
             file, repo, dataset, source_type, source_identity, query_hash,
             wait, no_wait, fail_on_check_failure, no_fail, output, assert_sum,
-            reset_baseline,
+            reset_baseline, row_count_policy, columns_added_policy,
+            columns_removed_policy, strict,
         }) => hub::cmd_publish(
             file, repo, dataset, source_type, source_identity, query_hash,
             wait && !no_wait, fail_on_check_failure && !no_fail, output, assert_sum,
-            reset_baseline,
+            reset_baseline, row_count_policy, columns_added_policy,
+            columns_removed_policy, strict,
         ),
         Some(Commands::Sheet(sheet_cmd)) => match sheet_cmd {
             SheetCommands::Apply { output, lua, verify, stamp, dry_run, json } => {

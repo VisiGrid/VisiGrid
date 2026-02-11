@@ -145,6 +145,34 @@ fn test_golden_publish_baseline() {
 }
 
 #[test]
+fn test_golden_publish_warn() {
+    let result = RunResult {
+        run_id: "55".into(),
+        version: 4,
+        status: "verified".into(),
+        check_status: Some("warn".into()),
+        diff_summary: Some(serde_json::json!({
+            "row_count_change": 5,
+            "col_count_change": 0,
+        })),
+        row_count: Some(1005),
+        col_count: Some(15),
+        content_hash: Some("blake3:b8ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a".into()),
+        source_metadata: Some(serde_json::json!({"type": "dbt", "identity": "models/payments"})),
+        assertions: None,
+        proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/55/proof".into(),
+    };
+
+    validate_golden_keys("tests/golden/publish-warn.json", &result);
+
+    let json = serde_json::to_value(&result).unwrap();
+    assert_eq!(json["check_status"], "warn");
+    assert_eq!(json["status"], "verified");
+    // warn must NOT match "fail" — so exit code stays 0
+    assert_ne!(result.check_status.as_deref(), Some("fail"));
+}
+
+#[test]
 fn test_golden_no_wait_output() {
     let golden: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string("tests/golden/publish-no-wait.json").unwrap()

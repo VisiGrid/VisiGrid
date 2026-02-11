@@ -87,6 +87,7 @@ pub struct CreateRevisionOptions {
     pub query_hash: Option<String>,
     pub assertions: Vec<AssertionInput>,
     pub reset_baseline: bool,
+    pub check_policy: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Status of a run (from the runs API).
@@ -236,6 +237,10 @@ impl HubClient {
 
         if opts.reset_baseline {
             body["reset_baseline"] = serde_json::Value::Bool(true);
+        }
+
+        if let Some(ref policy) = opts.check_policy {
+            body["check_policy"] = serde_json::to_value(policy).unwrap_or_default();
         }
 
         let resp = self.post_json(&url, &body)?;
