@@ -499,7 +499,15 @@ impl TuiApp {
             String::new()
         };
 
-        let left = format!(" {}{} = {:?}{}", col_name, file_row, cell_value, sheet_info);
+        // Show formula when raw differs from display (i.e. cell contains a formula)
+        let formula_info = data.raw.as_ref()
+            .and_then(|raw| raw.get(self.cursor_row))
+            .and_then(|row| row.get(self.cursor_col))
+            .filter(|raw| raw.starts_with('='))
+            .map(|raw| format!("  {}", raw))
+            .unwrap_or_default();
+
+        let left = format!(" {}{} = {:?}{}{}", col_name, file_row, cell_value, formula_info, sheet_info);
         let right = format!(
             "Row {}/{}  {}  ?: help ",
             file_row, total, col_range

@@ -5,6 +5,8 @@ use crate::util;
 pub struct PeekData {
     /// Row-major cell data (already display-ready strings)
     pub rows: Vec<Vec<String>>,
+    /// Raw cell content (formulas as "=...", values as-is). Only populated for .sheet files.
+    pub raw: Option<Vec<Vec<String>>>,
     pub num_rows: usize,
     pub num_cols: usize,
     /// Pre-computed column widths (display columns, clamped to [3, 40])
@@ -135,6 +137,7 @@ pub fn load_csv(
 
     Ok(PeekData {
         rows,
+        raw: None,
         num_rows,
         num_cols,
         col_widths,
@@ -199,6 +202,7 @@ pub fn load_sheet(
                 name,
                 data: PeekData {
                     rows: vec![],
+                    raw: Some(vec![]),
                     num_rows: 0,
                     num_cols: 0,
                     col_widths: vec![],
@@ -215,14 +219,18 @@ pub fn load_sheet(
         let num_rows = max_row + 1;
         let num_cols = max_col + 1;
 
-        // Extract evaluated values into row-major grid
+        // Extract evaluated values and raw formulas into row-major grids
         let mut rows: Vec<Vec<String>> = Vec::with_capacity(num_rows);
+        let mut raw_rows: Vec<Vec<String>> = Vec::with_capacity(num_rows);
         for r in 0..num_rows {
             let mut row = Vec::with_capacity(num_cols);
+            let mut raw_row = Vec::with_capacity(num_cols);
             for c in 0..num_cols {
                 row.push(sheet.get_display(r, c));
+                raw_row.push(sheet.get_raw(r, c));
             }
             rows.push(row);
+            raw_rows.push(raw_row);
         }
 
         // Generate column names (A, B, C, ...)
@@ -234,6 +242,7 @@ pub fn load_sheet(
             name,
             data: PeekData {
                 rows,
+                raw: Some(raw_rows),
                 num_rows,
                 num_cols,
                 col_widths,
