@@ -41,7 +41,8 @@ jobs:
 
           for ($i = 1; $i -le $maxAttempts; $i++) {
             try {
-              $response = Invoke-WebRequest -Uri $url -Method Head -MaximumRedirection 0 -ErrorAction Stop
+              # GitHub redirects release downloads to CDN — must follow redirects
+              $response = Invoke-WebRequest -Uri $url -Method Head -ErrorAction Stop
               if ($response.StatusCode -eq 200) {
                 Write-Host "Asset available at attempt $i"
                 break
