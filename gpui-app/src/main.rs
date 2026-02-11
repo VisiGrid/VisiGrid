@@ -58,6 +58,7 @@ mod sort_filter;
 mod split_view;
 mod theme;
 mod trace;
+mod transforms;
 mod ui;
 mod undo_redo;
 mod validation_dropdown;

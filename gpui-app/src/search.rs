@@ -220,6 +220,12 @@ pub enum CommandId {
     CircleInvalidData,
     ClearInvalidCircles,
 
+    // Transforms
+    TransformUppercase,
+    TransformLowercase,
+    TransformTitleCase,
+    TransformSentenceCase,
+
     // VisiHub sync
     HubCheckStatus,
     HubPull,
@@ -250,6 +256,10 @@ impl CommandId {
             Self::FillRight => "Fill Right",
             Self::ClearCells => "Clear Cells",
             Self::TrimWhitespace => "Transform: Trim Whitespace",
+            Self::TransformUppercase => "Transform: UPPERCASE",
+            Self::TransformLowercase => "Transform: lowercase",
+            Self::TransformTitleCase => "Transform: Title Case",
+            Self::TransformSentenceCase => "Transform: Sentence Case",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::AutoSum => "AutoSum",
@@ -457,6 +467,10 @@ impl CommandId {
             Self::FillRight => "copy formula",
             Self::ClearCells => "delete remove empty",
             Self::TrimWhitespace => "strip spaces clean transform",
+            Self::TransformUppercase => "transform text case upper capital",
+            Self::TransformLowercase => "transform text case lower small",
+            Self::TransformTitleCase => "transform text case title word capitalize",
+            Self::TransformSentenceCase => "transform text case sentence capitalize first",
             Self::Undo => "revert back",
             Self::Redo => "forward",
             Self::AutoSum => "sum formula total",
@@ -590,6 +604,10 @@ impl CommandId {
             Self::FillRight,
             Self::ClearCells,
             Self::TrimWhitespace,
+            Self::TransformUppercase,
+            Self::TransformLowercase,
+            Self::TransformTitleCase,
+            Self::TransformSentenceCase,
             Self::Undo,
             Self::Redo,
             Self::AutoSum,
@@ -827,6 +845,10 @@ impl CommandId {
             Self::FillDown
             | Self::FillRight
             | Self::TrimWhitespace
+            | Self::TransformUppercase
+            | Self::TransformLowercase
+            | Self::TransformTitleCase
+            | Self::TransformSentenceCase
             | Self::AutoSum
             | Self::SortAscending
             | Self::SortDescending

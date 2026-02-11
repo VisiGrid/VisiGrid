@@ -126,6 +126,7 @@ pub enum HistoryFilterMode {
     CurrentSheet,
     ValidationOnly,
     DataEditsOnly,
+    TransformsOnly,
 }
 
 /// Semantic verification status based on expected fingerprint.
@@ -2140,6 +2141,9 @@ pub struct Spreadsheet {
     /// Entry ID for history context menu (right-click)
     pub history_context_menu_entry_id: Option<u64>,
 
+    // Transform diff preview (Pro)
+    pub transform_preview: Option<crate::transforms::TransformPreview>,
+
     // Zen mode (distraction-free editing)
     pub zen_mode: bool,
 
@@ -2639,6 +2643,7 @@ impl Spreadsheet {
             diff_entry_explanations: std::collections::HashMap::new(),
             diff_explaining_entry: None,
             history_context_menu_entry_id: None,
+            transform_preview: None,
             theme,
             theme_preview: None,
             cells_rev: 1,  // Start at 1 so cache (starting at 0) is immediately stale
@@ -3899,6 +3904,10 @@ impl Spreadsheet {
             CommandId::FillRight => self.fill_right(cx),
             CommandId::ClearCells => self.delete_selection(cx),
             CommandId::TrimWhitespace => self.trim_whitespace(cx),
+            CommandId::TransformUppercase => self.apply_transform_pro(crate::transforms::TransformOp::Uppercase, cx),
+            CommandId::TransformLowercase => self.apply_transform_pro(crate::transforms::TransformOp::Lowercase, cx),
+            CommandId::TransformTitleCase => self.apply_transform_pro(crate::transforms::TransformOp::TitleCase, cx),
+            CommandId::TransformSentenceCase => self.apply_transform_pro(crate::transforms::TransformOp::SentenceCase, cx),
             CommandId::Undo => self.undo(cx),
             CommandId::Redo => self.redo(cx),
             CommandId::AutoSum => self.autosum(cx),

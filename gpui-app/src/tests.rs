@@ -3751,3 +3751,164 @@ fn test_nth_visible_col_skips_hidden() {
     // visible_index 3 → col F (5)
     assert_eq!(nth_visible_col(3), Some(5), "Fourth visible col is F");
 }
+
+// ============================================================================
+// Transform tests
+// ============================================================================
+
+use crate::transforms::{TransformOp, CellPolicy, title_case, sentence_case};
+
+// --- TransformOp::transform() no-op cases ---
+
+#[test]
+fn transform_noop_uppercase_already_upper() {
+    assert_eq!(TransformOp::Uppercase.transform("HELLO"), None);
+}
+
+#[test]
+fn transform_noop_lowercase_already_lower() {
+    assert_eq!(TransformOp::Lowercase.transform("hello"), None);
+}
+
+#[test]
+fn transform_noop_trim_no_whitespace() {
+    assert_eq!(TransformOp::TrimWhitespace.transform("hello"), None);
+}
+
+#[test]
+fn transform_noop_title_already_title() {
+    assert_eq!(TransformOp::TitleCase.transform("Hello World"), None);
+}
+
+#[test]
+fn transform_noop_sentence_already_sentence() {
+    assert_eq!(TransformOp::SentenceCase.transform("Hello. World"), None);
+}
+
+#[test]
+fn transform_noop_empty_string() {
+    // All transforms on "" should return None (unchanged)
+    assert_eq!(TransformOp::Uppercase.transform(""), None);
+    assert_eq!(TransformOp::Lowercase.transform(""), None);
+    assert_eq!(TransformOp::TrimWhitespace.transform(""), None);
+    assert_eq!(TransformOp::TitleCase.transform(""), None);
+    assert_eq!(TransformOp::SentenceCase.transform(""), None);
+}
+
+// --- TransformOp::transform() active cases ---
+
+#[test]
+fn transform_uppercase_basic() {
+    assert_eq!(TransformOp::Uppercase.transform("hello"), Some("HELLO".to_string()));
+    assert_eq!(TransformOp::Uppercase.transform("Hello World"), Some("HELLO WORLD".to_string()));
+}
+
+#[test]
+fn transform_lowercase_basic() {
+    assert_eq!(TransformOp::Lowercase.transform("HELLO"), Some("hello".to_string()));
+    assert_eq!(TransformOp::Lowercase.transform("Hello World"), Some("hello world".to_string()));
+}
+
+#[test]
+fn transform_trim_basic() {
+    assert_eq!(TransformOp::TrimWhitespace.transform("  hello  "), Some("hello".to_string()));
+    assert_eq!(TransformOp::TrimWhitespace.transform("\thello\n"), Some("hello".to_string()));
+}
+
+#[test]
+fn transform_title_case_basic() {
+    assert_eq!(TransformOp::TitleCase.transform("hello world"), Some("Hello World".to_string()));
+    assert_eq!(TransformOp::TitleCase.transform("HELLO WORLD"), Some("Hello World".to_string()));
+}
+
+#[test]
+fn transform_sentence_case_basic() {
+    assert_eq!(TransformOp::SentenceCase.transform("hello. world"), Some("Hello. World".to_string()));
+    assert_eq!(TransformOp::SentenceCase.transform("hello! world? yes."), Some("Hello! World? Yes.".to_string()));
+}
+
+// --- Unicode / emoji safety ---
+
+#[test]
+fn transform_unicode_no_panic() {
+    // CJK characters
+    assert_eq!(TransformOp::Uppercase.transform("你好"), None);
+    assert_eq!(TransformOp::Lowercase.transform("你好"), None);
+    assert_eq!(TransformOp::TitleCase.transform("你好"), None);
+    assert_eq!(TransformOp::SentenceCase.transform("你好"), None);
+}
+
+#[test]
+fn transform_emoji_no_panic() {
+    assert_eq!(TransformOp::Uppercase.transform("😀🎉"), None);
+    assert_eq!(TransformOp::TitleCase.transform("😀 hello"), Some("😀 Hello".to_string()));
+}
+
+#[test]
+fn transform_mixed_unicode() {
+    // German ß → SS for uppercase (Unicode-aware)
+    assert_eq!(TransformOp::Uppercase.transform("straße"), Some("STRASSE".to_string()));
+    // Turkish-like: accented chars
+    assert_eq!(TransformOp::Lowercase.transform("CAFÉ"), Some("café".to_string()));
+}
+
+// --- Title case edge cases ---
+
+#[test]
+fn title_case_preserves_internal_whitespace() {
+    assert_eq!(title_case("  hello  world  "), "  Hello  World  ");
+}
+
+#[test]
+fn title_case_single_word() {
+    assert_eq!(title_case("hello"), "Hello");
+}
+
+#[test]
+fn title_case_tabs_and_newlines() {
+    assert_eq!(title_case("hello\tworld\nfoo"), "Hello\tWorld\nFoo");
+}
+
+// --- Sentence case edge cases ---
+
+#[test]
+fn sentence_case_no_punctuation() {
+    // With no sentence-ending punctuation, only first char is capitalized
+    assert_eq!(sentence_case("HELLO WORLD"), "Hello world");
+}
+
+#[test]
+fn sentence_case_multiple_sentences() {
+    assert_eq!(
+        sentence_case("FIRST SENTENCE. SECOND SENTENCE! THIRD?"),
+        "First sentence. Second sentence! Third?"
+    );
+}
+
+#[test]
+fn sentence_case_leading_whitespace() {
+    // Whitespace before first alpha char — capitalize_next still true
+    assert_eq!(sentence_case("  hello"), "  Hello");
+}
+
+// --- CellPolicy ---
+
+#[test]
+fn cell_policy_values_only_for_text_transforms() {
+    assert_eq!(TransformOp::TrimWhitespace.policy(), CellPolicy::ValuesOnly);
+    assert_eq!(TransformOp::Uppercase.policy(), CellPolicy::ValuesOnly);
+    assert_eq!(TransformOp::Lowercase.policy(), CellPolicy::ValuesOnly);
+    assert_eq!(TransformOp::TitleCase.policy(), CellPolicy::ValuesOnly);
+    assert_eq!(TransformOp::SentenceCase.policy(), CellPolicy::ValuesOnly);
+}
+
+// --- Formulas are not transformed by text ops ---
+
+#[test]
+fn transform_would_alter_formula_text() {
+    // The transform function itself doesn't know about formulas — that's the
+    // policy layer's job. Verify that transform() *would* change formula text
+    // if called directly, confirming the policy guard is necessary.
+    assert_eq!(TransformOp::Uppercase.transform("=sum(a1:b2)"), Some("=SUM(A1:B2)".to_string()));
+    assert_eq!(TransformOp::Lowercase.transform("=SUM(A1:B2)"), Some("=sum(a1:b2)".to_string()));
+}

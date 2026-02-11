@@ -253,6 +253,10 @@ fn create_binding(key: &str, action: &str) -> Option<KeyBinding> {
         "edit.rename" | "refactor.rename" => Some(KeyBinding::new(key, RenameSymbol, context)),
         "edit.createnamedrange" | "range.create" => Some(KeyBinding::new(key, CreateNamedRange, context)),
         "edit.trim" | "transform.trim" => Some(KeyBinding::new(key, TrimWhitespace, context)),
+        "transform.uppercase" | "transform.upper" => Some(KeyBinding::new(key, TransformUppercase, context)),
+        "transform.lowercase" | "transform.lower" => Some(KeyBinding::new(key, TransformLowercase, context)),
+        "transform.titlecase" | "transform.title" => Some(KeyBinding::new(key, TransformTitleCase, context)),
+        "transform.sentencecase" | "transform.sentence" => Some(KeyBinding::new(key, TransformSentenceCase, context)),
 
         // Selection
         "selection.all" | "select.all" => Some(KeyBinding::new(key, SelectAll, context)),

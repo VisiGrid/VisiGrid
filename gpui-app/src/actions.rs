@@ -80,6 +80,11 @@ actions!(editing, [
     RenameSymbol,
     // Create Named Range from selection
     CreateNamedRange,
+    // Text transforms
+    TransformUppercase,
+    TransformLowercase,
+    TransformTitleCase,
+    TransformSentenceCase,
 ]);
 
 // Selection actions

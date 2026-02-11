@@ -48,6 +48,7 @@ mod key_handler;
 mod f1_help;
 mod named_range_dialogs;
 mod rewind_dialogs;
+mod transform_diff_dialog;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
@@ -92,6 +93,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_paste_special = app.mode == Mode::PasteSpecial;
     let show_color_picker = app.mode == Mode::ColorPicker;
     let show_number_format_editor = app.mode == Mode::NumberFormatEditor;
+    let show_transform_preview = app.mode == Mode::TransformPreview;
     let show_keytips = app.keytips_active;
     let show_rewind_confirm = app.rewind_confirm.visible;
     let show_rewind_success = app.rewind_success.visible;
@@ -646,6 +648,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_paste_special, |div| {
             div.child(paste_special_dialog::render_paste_special_dialog(app, cx))
+        })
+        .when(show_transform_preview, |div| {
+            div.child(transform_diff_dialog::render_transform_diff_dialog(app, cx))
         })
         .when(show_number_format_editor, |div| {
             div.child(number_format_dialog::render_number_format_dialog(app, cx))

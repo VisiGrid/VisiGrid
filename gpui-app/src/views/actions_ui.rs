@@ -108,6 +108,18 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &TrimWhitespace, _, cx| {
             this.trim_whitespace(cx);
         }))
+        .on_action(cx.listener(|this, _: &TransformUppercase, _, cx| {
+            this.apply_transform_pro(crate::transforms::TransformOp::Uppercase, cx);
+        }))
+        .on_action(cx.listener(|this, _: &TransformLowercase, _, cx| {
+            this.apply_transform_pro(crate::transforms::TransformOp::Lowercase, cx);
+        }))
+        .on_action(cx.listener(|this, _: &TransformTitleCase, _, cx| {
+            this.apply_transform_pro(crate::transforms::TransformOp::TitleCase, cx);
+        }))
+        .on_action(cx.listener(|this, _: &TransformSentenceCase, _, cx| {
+            this.apply_transform_pro(crate::transforms::TransformOp::SentenceCase, cx);
+        }))
         .on_action(cx.listener(|this, _: &ToggleFormulaView, _, cx| {
             this.toggle_show_formulas(cx);
         }))

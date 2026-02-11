@@ -424,56 +424,7 @@ impl Spreadsheet {
 
     /// Trim whitespace from all cells in the selection
     pub fn trim_whitespace(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_merged("trim", cx) { return; }
-
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-
-        let mut changes = Vec::new();
-        let mut trimmed_count = 0;
-
-        self.workbook.update(cx, |wb, _| wb.begin_batch());
-
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let old_value = self.sheet(cx).get_raw(row, col);
-
-                // Skip empty cells and formulas
-                if old_value.is_empty() || old_value.starts_with('=') {
-                    continue;
-                }
-
-                let new_value = old_value.trim().to_string();
-
-                if old_value != new_value {
-                    changes.push(CellChange {
-                        row,
-                        col,
-                        old_value,
-                        new_value: new_value.clone(),
-                    });
-                    self.set_cell_value(row, col, &new_value, cx);
-                    trimmed_count += 1;
-                }
-            }
-        }
-
-        self.end_batch_and_broadcast(cx);
-
-        if !changes.is_empty() {
-            self.history.record_batch(self.sheet_index(cx), changes);
-            self.bump_cells_rev();
-            self.is_modified = true;
-        }
-
-        let msg = if trimmed_count == 0 {
-            "No whitespace to trim".to_string()
-        } else if trimmed_count == 1 {
-            "Trimmed 1 cell".to_string()
-        } else {
-            format!("Trimmed {} cells", trimmed_count)
-        };
-        self.status_message = Some(msg);
-        cx.notify();
+        self.apply_transform(crate::transforms::TransformOp::TrimWhitespace, cx);
     }
 
     // Selection operations

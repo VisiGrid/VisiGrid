@@ -3731,6 +3731,9 @@ fn render_history_tab(
                     || e.label.starts_with("Clear")
                     || e.label.starts_with("Sort")
             }
+            HistoryFilterMode::TransformsOnly => {
+                e.label.starts_with("Transform:")
+            }
         })
         .collect();
 
@@ -3775,6 +3778,7 @@ fn render_history_tab(
         HistoryFilterMode::CurrentSheet => Some("This Sheet"),
         HistoryFilterMode::ValidationOnly => Some("Validation"),
         HistoryFilterMode::DataEditsOnly => Some("Data Edits"),
+        HistoryFilterMode::TransformsOnly => Some("Transforms"),
     };
 
     div()
@@ -3892,6 +3896,7 @@ fn render_history_tab(
                             (HistoryFilterMode::CurrentSheet, "This Sheet"),
                             (HistoryFilterMode::ValidationOnly, "Validation"),
                             (HistoryFilterMode::DataEditsOnly, "Data"),
+                            (HistoryFilterMode::TransformsOnly, "Transforms"),
                         ].into_iter().map(|(mode, label)| {
                             let is_active = filter_mode == mode;
                             div()
