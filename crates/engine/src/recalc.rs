@@ -87,6 +87,17 @@ pub struct RecalcReport {
     /// whether iteration has resolved them. Drive "resolved" messaging from
     /// `converged && iterative_enabled` in the UI, not from this being zero.
     pub cycle_cells: usize,
+
+    /// Phase timing: microseconds spent clearing caches (invalidation).
+    pub phase_invalidation_us: u64,
+    /// Phase timing: microseconds spent in topological sort.
+    pub phase_topo_sort_us: u64,
+    /// Phase timing: microseconds spent evaluating formulas.
+    pub phase_eval_us: u64,
+    /// Phase timing: aggregate microseconds in Lua custom function calls.
+    /// Subset of phase_eval_us. Set by the caller, not the engine —
+    /// GUI-only for v1 (CLI/headless won't report Lua timing yet).
+    pub phase_lua_total_us: u64,
 }
 
 impl RecalcReport {
@@ -183,6 +194,47 @@ impl RecalcReport {
         let mut cells: Vec<_> = self.cell_info.iter().map(|(c, i)| (*c, i)).collect();
         cells.sort_by_key(|(_, i)| i.eval_order);
         cells
+    }
+}
+
+/// Heuristic hotspot suspect from the dependency graph.
+///
+/// Used by the Performance Profiler to identify cells likely contributing
+/// to slow recalculations.
+#[derive(Debug, Clone)]
+pub struct HotspotEntry {
+    pub cell: CellId,
+    pub fan_in: usize,
+    pub fan_out: usize,
+    pub depth: usize,
+    pub has_unknown_deps: bool,
+    pub score: f64,
+}
+
+impl RecalcReport {
+    /// Compute heuristic hotspot suspects from cells that were actually recomputed.
+    ///
+    /// Only analyzes cells present in `self.cell_info` (the recomputed set),
+    /// NOT the entire graph. This keeps cost proportional to the recalc, not
+    /// the workbook size.
+    ///
+    /// Scoring: fan_out * 3.0 + fan_in * 1.5 + depth * 1.0 + (unknown ? 10.0 : 0.0)
+    /// Returns top N sorted by score descending.
+    pub fn hotspot_analysis(&self, dep_graph: &crate::dep_graph::DepGraph, top_n: usize) -> Vec<HotspotEntry> {
+        let mut entries: Vec<HotspotEntry> = self.cell_info.iter().map(|(cell_id, info)| {
+            let fan_in = dep_graph.precedent_count(*cell_id);
+            let fan_out = dep_graph.dependent_count(*cell_id);
+            let depth = info.depth;
+            let has_unknown_deps = info.has_unknown_deps;
+            let score = fan_out as f64 * 3.0
+                + fan_in as f64 * 1.5
+                + depth as f64 * 1.0
+                + if has_unknown_deps { 10.0 } else { 0.0 };
+            HotspotEntry { cell: *cell_id, fan_in, fan_out, depth, has_unknown_deps, score }
+        }).collect();
+        entries.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        entries.truncate(top_n);
+        entries
     }
 }
 

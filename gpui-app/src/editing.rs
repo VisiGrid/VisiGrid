@@ -641,9 +641,85 @@ impl Spreadsheet {
         };
         self.status_message = Some(msg);
 
+        // Profiler: refresh when panel is open or capture-next is armed
+        if self.profiler_visible || self.profiler_capture_next {
+            let hotspots = report.hotspot_analysis(self.workbook.read(cx).dep_graph(), 20);
+            self.profiler_report = Some(report.clone());
+            self.profiler_hotspots = hotspots;
+            if self.profiler_capture_next {
+                self.profiler_capture_next = false;
+                self.profiler_visible = true;
+                self.inspector_visible = false;
+            }
+        }
+
         if self.verified_mode {
             self.last_recalc_report = Some(report);
         }
+        cx.notify();
+    }
+
+    /// Run a full recalc and capture the profiling report.
+    ///
+    /// Opens the profiler panel with results. Includes Lua timing if custom
+    /// functions are registered (GUI-layer best-effort for v1).
+    pub fn profile_next_recalc(&mut self, cx: &mut Context<Self>) {
+        self.in_smoke_recalc = true;
+
+        let has_custom_fns = !self.custom_fn_registry.functions.is_empty();
+        let report = if !has_custom_fns {
+            self.wb_mut(cx, |wb| wb.recompute_full_ordered())
+        } else {
+            #[cfg(feature = "pro")]
+            {
+                use visigrid_engine::formula::eval::{EvalArg, EvalResult};
+                use std::time::Instant;
+
+                let lua_total_us = std::cell::Cell::new(0u64);
+                let memo_cache = std::cell::RefCell::new(crate::scripting::MemoCache::new());
+                let registry = &self.custom_fn_registry;
+                let lua = self.lua_runtime.lua();
+
+                let handler = |name: &str, args: &[EvalArg]| -> Option<EvalResult> {
+                    if !registry.functions.contains_key(name) {
+                        return None;
+                    }
+                    let fn_start = Instant::now();
+                    let result = crate::scripting::custom_functions::call_custom_function(
+                        lua, name, args, &memo_cache,
+                    );
+                    lua_total_us.set(lua_total_us.get() + fn_start.elapsed().as_micros() as u64);
+                    Some(result)
+                };
+
+                let mut report = self.workbook.update(cx, |wb, _| {
+                    wb.recompute_full_ordered_with_custom_fns(&handler)
+                });
+                report.phase_lua_total_us = lua_total_us.get();
+                debug_assert!(
+                    report.phase_lua_total_us <= report.phase_eval_us + 1000,
+                    "Lua total {}us > eval phase {}us",
+                    report.phase_lua_total_us, report.phase_eval_us,
+                );
+                report
+            }
+            #[cfg(not(feature = "pro"))]
+            {
+                self.wb_mut(cx, |wb| wb.recompute_full_ordered())
+            }
+        };
+
+        self.in_smoke_recalc = false;
+
+        // Compute hotspot analysis
+        let hotspots = report.hotspot_analysis(self.workbook.read(cx).dep_graph(), 20);
+        self.profiler_report = Some(report);
+        self.profiler_hotspots = hotspots;
+
+        // Open profiler panel
+        self.profiler_visible = true;
+        self.inspector_visible = false;
+
         cx.notify();
     }
 

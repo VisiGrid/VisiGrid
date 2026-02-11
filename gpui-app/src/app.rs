@@ -2093,6 +2093,12 @@ pub struct Spreadsheet {
     pub minimap_dragging: bool,
     pub minimap_drag_offset_y: f32,
 
+    // Profiler panel state
+    pub profiler_visible: bool,
+    pub profiler_report: Option<visigrid_engine::recalc::RecalcReport>,
+    pub profiler_hotspots: Vec<visigrid_engine::recalc::HotspotEntry>,
+    pub profiler_capture_next: bool,
+
     // Locked feature panel dismiss (session-only)
     pub locked_panels_dismissed: bool,
 
@@ -2603,6 +2609,10 @@ impl Spreadsheet {
             minimap_cache: crate::minimap::MinimapCache::default(),
             minimap_dragging: false,
             minimap_drag_offset_y: 0.0,
+            profiler_visible: false,
+            profiler_report: None,
+            profiler_hotspots: Vec::new(),
+            profiler_capture_next: false,
             locked_panels_dismissed: false,
             inspector_visible: false,
             inspector_tab: crate::mode::InspectorTab::default(),
@@ -3970,6 +3980,18 @@ impl Spreadsheet {
             // View
             CommandId::ToggleInspector => {
                 self.inspector_visible = !self.inspector_visible;
+                if self.inspector_visible { self.profiler_visible = false; }
+                cx.notify();
+            }
+            CommandId::ToggleProfiler => {
+                self.profiler_visible = !self.profiler_visible;
+                if self.profiler_visible { self.inspector_visible = false; }
+                cx.notify();
+            }
+            CommandId::ProfileNextRecalc => self.profile_next_recalc(cx),
+            CommandId::ClearProfiler => {
+                self.profiler_report = None;
+                self.profiler_hotspots = Vec::new();
                 cx.notify();
             }
             CommandId::ToggleMinimap => {
@@ -6090,7 +6112,7 @@ impl Render for Spreadsheet {
         let window_height: f32 = current_size.height.into();
         let window_width: f32 = current_size.width.into();
 
-        let right_panel_width = if self.inspector_visible {
+        let right_panel_width = if self.inspector_visible || self.profiler_visible {
             crate::views::inspector_panel::PANEL_WIDTH
         } else {
             0.0

@@ -366,6 +366,11 @@ pub(crate) fn bind(
             } else if this.is_previewing() {
                 // Esc exits preview mode
                 this.exit_preview(cx);
+            } else if this.profiler_visible && this.mode == Mode::Navigation {
+                // Esc closes profiler panel when in navigation mode
+                this.profiler_visible = false;
+                window.focus(&this.focus_handle, cx);
+                cx.notify();
             } else if this.inspector_visible && this.mode == Mode::Navigation {
                 // Esc closes inspector panel when in navigation mode
                 this.inspector_visible = false;

@@ -65,6 +65,16 @@ impl DepGraph {
             .flat_map(|s| s.iter().copied())
     }
 
+    /// Number of precedents for a cell. O(1) — reads FxHashSet::len().
+    pub fn precedent_count(&self, cell: CellId) -> usize {
+        self.preds.get(&cell).map_or(0, |s| s.len())
+    }
+
+    /// Number of dependents for a cell. O(1) — reads FxHashSet::len().
+    pub fn dependent_count(&self, cell: CellId) -> usize {
+        self.succs.get(&cell).map_or(0, |s| s.len())
+    }
+
     /// Register a formula cell that has no cell references (e.g., `=1/0`, `=PI()`).
     ///
     /// These "leaf" formulas still need to appear in the topo order so that

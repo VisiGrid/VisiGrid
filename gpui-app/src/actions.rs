@@ -145,6 +145,9 @@ actions!(view, [
     ToggleMinimap,
     ToggleShowZeros,
     ToggleVerifiedMode, // Toggle verified/deterministic recalc mode
+    ToggleProfiler,
+    ProfileNextRecalc,
+    ClearProfiler,
     Recalculate,        // F9: Force full recalculation (Excel muscle memory)
     ApproveModel,       // Approve current semantic state (capture fingerprint)
     ClearApproval,      // Clear the approved state

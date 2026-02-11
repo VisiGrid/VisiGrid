@@ -161,6 +161,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("f11", ToggleZenMode, Some("Spreadsheet")),
         KeyBinding::new("f9", Recalculate, Some("Spreadsheet")),  // Excel: force recalculate
         KeyBinding::new("alt-f11", ToggleLuaConsole, Some("Spreadsheet")),
+        KeyBinding::new(&format!("{}-alt-p", primary_mod(m)), ToggleProfiler, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "`"), ToggleFormulaView, Some("Spreadsheet")),
 
         // Zoom (Ctrl+Alt+Plus/Minus/0, safe — avoids collision with insert/delete rows)

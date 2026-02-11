@@ -19,6 +19,7 @@ pub mod impact_preview;
 mod import_overlay;
 mod import_report_dialog;
 pub mod inspector_panel;
+pub mod profiler_panel;
 mod keytips_overlay;
 #[cfg(feature = "pro")]
 mod lua_console;
@@ -103,6 +104,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_name_tooltip = app.should_show_name_tooltip(cx) && app.mode == Mode::Navigation;
     let show_f2_tip = app.should_show_f2_tip(cx);  // Show immediately on trigger, not gated on mode
     let show_inspector = app.inspector_visible;
+    let show_profiler = app.profiler_visible;
     let zen_mode = app.zen_mode;
 
     // Build element with action handlers from extracted modules
@@ -595,6 +597,27 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     })
                     // The panel itself stops propagation so clicks on it don't close
                     .child(inspector_panel::render_inspector_panel(app, cx))
+            )
+        })
+        // Profiler panel (right-side drawer, mutually exclusive with inspector)
+        .when(show_profiler, |d| {
+            d.child(
+                gpui::div()
+                    .id("profiler-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        if this.mode.is_overlay() { return; }
+                        cx.stop_propagation();
+                        this.profiler_visible = false;
+                        window.focus(&this.focus_handle, cx);
+                        cx.notify();
+                    }))
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(profiler_panel::render_profiler_panel(app, cx))
             )
         })
         .when(show_goto, |div| {

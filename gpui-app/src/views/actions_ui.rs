@@ -116,6 +116,20 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
             this.inspector_visible = !this.inspector_visible;
+            if this.inspector_visible { this.profiler_visible = false; }
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &ToggleProfiler, _, cx| {
+            this.profiler_visible = !this.profiler_visible;
+            if this.profiler_visible { this.inspector_visible = false; }
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &ProfileNextRecalc, _, cx| {
+            this.profile_next_recalc(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ClearProfiler, _, cx| {
+            this.profiler_report = None;
+            this.profiler_hotspots = Vec::new();
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &ToggleFormatBar, _, cx| {
@@ -226,6 +240,7 @@ pub(crate) fn bind(
                 this.open_number_format_editor(cx);
             } else {
                 this.inspector_visible = true;
+                this.profiler_visible = false;
                 this.inspector_tab = InspectorTab::Format;
                 cx.notify();
             }
@@ -235,6 +250,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ShowHistoryPanel, _, cx| {
             this.inspector_visible = true;
+            this.profiler_visible = false;
             this.inspector_tab = InspectorTab::History;
             cx.notify();
         }))

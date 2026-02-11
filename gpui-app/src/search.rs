@@ -160,6 +160,9 @@ pub enum CommandId {
 
     // View
     ToggleInspector,
+    ToggleProfiler,
+    ProfileNextRecalc,
+    ClearProfiler,
     ToggleMinimap,
     ToggleZenMode,
     ZoomIn,
@@ -304,6 +307,9 @@ impl CommandId {
             Self::SelectTheme => "Select Theme...",
             Self::SelectFont => "Select Font...",
             Self::ToggleInspector => "Toggle Inspector",
+            Self::ToggleProfiler => "Toggle Profiler",
+            Self::ProfileNextRecalc => "Profile Next Recalc",
+            Self::ClearProfiler => "Clear Profiler",
             Self::ToggleMinimap => "Toggle Minimap",
             Self::ToggleZenMode => "Toggle Zen Mode",
             Self::ZoomIn => "Zoom In",
@@ -397,6 +403,7 @@ impl CommandId {
             Self::Save => Some("Ctrl+S"),
             Self::SaveAs => Some("Ctrl+Shift+S"),
             Self::ToggleInspector => Some("Ctrl+Shift+I"),
+            Self::ToggleProfiler => Some("Ctrl+Alt+P"),
             Self::ToggleZenMode => Some("F11"),
             Self::ZoomIn => Some("Ctrl+Alt+="),
             Self::ZoomOut => Some("Ctrl+Alt+-"),
@@ -507,6 +514,9 @@ impl CommandId {
             Self::SelectTheme => "appearance color scheme dark light",
             Self::SelectFont => "appearance typography",
             Self::ToggleInspector => "panel sidebar",
+            Self::ToggleProfiler => "profiler performance timing hotspot",
+            Self::ProfileNextRecalc => "profile recalc run",
+            Self::ClearProfiler => "clear profiler reset",
             Self::ToggleMinimap => "minimap density navigator overview map",
             Self::ToggleZenMode => "distraction free fullscreen focus",
             Self::ZoomIn => "magnify scale enlarge bigger larger",
@@ -637,6 +647,9 @@ impl CommandId {
             Self::SelectTheme,
             Self::SelectFont,
             Self::ToggleInspector,
+            Self::ToggleProfiler,
+            Self::ProfileNextRecalc,
+            Self::ClearProfiler,
             Self::ToggleMinimap,
             Self::ToggleZenMode,
             Self::ZoomIn,
@@ -737,6 +750,7 @@ impl CommandId {
 
             // View menu
             Self::ToggleInspector
+            | Self::ToggleProfiler
             | Self::ToggleMinimap
             | Self::ToggleZenMode
             | Self::ZoomIn
@@ -761,7 +775,9 @@ impl CommandId {
             | Self::InsertFormulaAI
             | Self::AnalyzeAI
             | Self::NavPerfReport
-            | Self::ReloadCustomFunctions => Some(MenuCategory::Tools),
+            | Self::ReloadCustomFunctions
+            | Self::ProfileNextRecalc
+            | Self::ClearProfiler => Some(MenuCategory::Tools),
 
             // Format menu
             Self::ToggleBold

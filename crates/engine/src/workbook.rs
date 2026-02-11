@@ -1254,11 +1254,16 @@ impl Workbook {
         let start = Instant::now();
         let mut report = RecalcReport::new();
 
+        // --- Phase 1: Invalidation (clear caches) ---
+        let phase_start = Instant::now();
         // Clear computed value caches from previous recalc
         for sheet in &self.sheets {
             sheet.clear_computed_cache();
         }
+        report.phase_invalidation_us = phase_start.elapsed().as_micros() as u64;
 
+        // --- Phase 2: Topo Sort ---
+        let phase_start = Instant::now();
         // Get topo order (or detect cycles)
         let (order, cycle_cells) = match self.dep_graph.topo_order_all_formulas() {
             Ok(order) => (order, Vec::new()),
@@ -1273,6 +1278,10 @@ impl Workbook {
                 (non_cycle, cycle_cells)
             }
         };
+        report.phase_topo_sort_us = phase_start.elapsed().as_micros() as u64;
+
+        // --- Phase 3: Evaluation ---
+        let phase_start = Instant::now();
 
         // If cycles exist and iteration is enabled, resolve via Jacobi iteration
         if !cycle_cells.is_empty() && self.iterative_enabled {
@@ -1606,7 +1615,27 @@ impl Workbook {
             }
         }
 
+        report.phase_eval_us = phase_start.elapsed().as_micros() as u64;
+
         report.duration_ms = start.elapsed().as_millis() as u64;
+
+        // Phase timing invariants — catch bogus data before it reaches the UI.
+        // lua_total is set by the GUI caller, so it's 0 here and the assertion
+        // only fires when populated (profile_next_recalc sets it after return).
+        #[cfg(debug_assertions)]
+        {
+            let phase_sum_us = report.phase_invalidation_us
+                + report.phase_topo_sort_us
+                + report.phase_eval_us;
+            let total_us = report.duration_ms * 1000;
+            // Phase sum should not wildly exceed total (allow 10% overhead + 1ms floor for rounding)
+            debug_assert!(
+                phase_sum_us <= total_us + 1000 + total_us / 10,
+                "Phase sum {}us exceeds total {}us by unreasonable margin",
+                phase_sum_us, total_us,
+            );
+        }
+
         report
     }
 
