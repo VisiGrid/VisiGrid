@@ -1747,6 +1747,17 @@ impl Workbook {
         if self.batch_depth > 0 {
             self.batch_changed.push(cell_id);
         } else {
+            // If the changed cell is itself a formula (e.g., a newly-entered
+            // cross-sheet formula), evaluate it at the workbook level. This
+            // handles formulas that evaluate_and_spill skipped (cross-sheet refs)
+            // and also correctly re-evaluates same-sheet formulas.
+            let is_formula = self.sheet_by_id(cell_id.sheet)
+                .and_then(|s| s.cells.get(&(cell_id.row, cell_id.col)))
+                .map(|c| c.value.formula_ast().is_some())
+                .unwrap_or(false);
+            if is_formula {
+                let _ = self.evaluate_cell(cell_id);
+            }
             self.recalc_dirty_set(&[cell_id]);
             self.increment_revision();
         }
@@ -4617,6 +4628,36 @@ mod tests {
         assert!(
             matches!(val, Value::Number(n) if (n - 50000.0).abs() < 0.001),
             "should be 50000, got {:?}", val
+        );
+    }
+
+    #[test]
+    fn cross_sheet_formula_entry_no_ref_error() {
+        // Reproduce the GUI bug: entering =Sheet1!A1+Sheet1!B1 on another sheet
+        // should NOT show #REF!. The sheet-local evaluate_and_spill must skip
+        // cross-sheet formulas and let the workbook-level recalc handle them.
+        let mut wb = Workbook::new();
+        let si = wb.add_sheet_named("summary").expect("add summary sheet");
+
+        // Put values on Sheet1
+        wb.set_cell_value_tracked(0, 0, 0, "10"); // Sheet1!A1 = 10
+        wb.set_cell_value_tracked(0, 0, 1, "20"); // Sheet1!B1 = 20
+
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+
+        // Now simulate typing a cross-sheet formula on the summary sheet
+        // This is the exact GUI path: set_value → update_cell_deps → note_cell_changed
+        let summary_id = wb.sheet(si).unwrap().id;
+        wb.sheet_mut(si).unwrap().set_value(0, 0, "=Sheet1!A1+Sheet1!B1");
+        wb.update_cell_deps(summary_id, 0, 0);
+        wb.note_cell_changed(CellId::new(summary_id, 0, 0));
+
+        // Should be 30, NOT #REF!
+        let val = wb.sheet(si).unwrap().get_computed_value(0, 0);
+        assert!(
+            matches!(val, Value::Number(n) if (n - 30.0).abs() < 0.001),
+            "cross-sheet formula should evaluate to 30, got {:?}", val
         );
     }
 }

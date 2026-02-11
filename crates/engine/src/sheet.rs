@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::cell::{Alignment, Cell, CellBorder, CellFormat, CellStyle, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment, max_border};
 use super::formula::eval::{self, Array2D, CellLookup, EvalResult, LookupWithContext, Value};
-use super::formula::parser::bind_expr_same_sheet;
+use super::formula::parser::{bind_expr_same_sheet, Expr as ExprAst};
 use super::validation::ValidationStore;
 
 // Thread-local set to track cells currently being evaluated (for cycle detection)
@@ -130,6 +130,19 @@ impl UnboundSheetRef {
 /// Future: Could use Unicode casefold for full international support.
 pub fn normalize_sheet_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
+}
+
+/// Check if a parsed formula AST contains any cross-sheet references.
+fn has_cross_sheet_refs(expr: &ExprAst<UnboundSheetRef>) -> bool {
+    match expr {
+        ExprAst::CellRef { sheet: UnboundSheetRef::Named(_), .. } => true,
+        ExprAst::Range { sheet: UnboundSheetRef::Named(_), .. } => true,
+        ExprAst::Function { args, .. } => args.iter().any(has_cross_sheet_refs),
+        ExprAst::BinaryOp { left, right, .. } => {
+            has_cross_sheet_refs(left) || has_cross_sheet_refs(right)
+        }
+        _ => false,
+    }
 }
 
 /// Check if a sheet name is valid.
@@ -497,6 +510,14 @@ impl Sheet {
             },
             None => return,
         };
+
+        // Skip sheet-local evaluation for cross-sheet formulas.
+        // bind_expr_same_sheet treats all Named sheet refs as #REF!, which would
+        // cache a bogus error. The workbook-level recalc (evaluate_cell) will
+        // handle these with the real sheet resolver.
+        if has_cross_sheet_refs(&ast) {
+            return;
+        }
 
         // Evaluate the formula with current cell context for ROW()/COLUMN()
         let lookup = LookupWithContext::new(self, row, col);
