@@ -2093,6 +2093,9 @@ pub struct Spreadsheet {
     pub minimap_dragging: bool,
     pub minimap_drag_offset_y: f32,
 
+    // Locked feature panel dismiss (session-only)
+    pub locked_panels_dismissed: bool,
+
     // Inspector panel state
     pub inspector_visible: bool,
     pub inspector_tab: crate::mode::InspectorTab,
@@ -2260,6 +2263,9 @@ pub struct Spreadsheet {
     // License dialog state
     pub license_input: String,
     pub license_error: Option<String>,
+
+    // Trial CTA state (inline confirm in locked feature panels)
+    pub trial_confirm_visible: bool,
 
     // Default app prompt state (macOS title bar chip)
     pub default_app_prompt_state: DefaultAppPromptState,
@@ -2597,6 +2603,7 @@ impl Spreadsheet {
             minimap_cache: crate::minimap::MinimapCache::default(),
             minimap_dragging: false,
             minimap_drag_offset_y: 0.0,
+            locked_panels_dismissed: false,
             inspector_visible: false,
             inspector_tab: crate::mode::InspectorTab::default(),
             inspector_pinned: None,
@@ -2707,6 +2714,7 @@ impl Spreadsheet {
 
             license_input: String::new(),
             license_error: None,
+            trial_confirm_visible: false,
 
             default_app_prompt_state: DefaultAppPromptState::Hidden,
             default_app_prompt_file_type: None,

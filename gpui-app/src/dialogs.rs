@@ -374,6 +374,21 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    pub fn start_pro_trial(&mut self, cx: &mut Context<Self>) {
+        match visigrid_license::start_trial() {
+            Ok(days) => {
+                self.status_message = Some(format!("Pro trial started \u{2014} {} days remaining", days));
+                self.trial_confirm_visible = false;
+                cx.notify();
+            }
+            Err(msg) => {
+                self.status_message = Some(msg);
+                self.trial_confirm_visible = false;
+                cx.notify();
+            }
+        }
+    }
+
     pub fn license_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
         self.license_input.push(c);
         self.license_error = None;

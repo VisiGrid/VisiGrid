@@ -4,7 +4,7 @@ use crate::app::{Spreadsheet, SelectionFormatState, TriState};
 use crate::formatting::BorderApplyMode;
 use crate::mode::InspectorTab;
 use crate::theme::TokenKey;
-use crate::ui::popup;
+use crate::ui::{popup, render_locked_feature_panel};
 use visigrid_engine::formula::parser::{parse, extract_cell_refs};
 use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment, TextOverflow, NumberFormat, DateStyle, NegativeStyle, CellValue};
 use visigrid_engine::cell_id::CellId;
@@ -1029,15 +1029,24 @@ fn render_inspector_tab(
                 .text_color(text_muted)
                 .child("Enable Verified Mode (F9) for proof")
         );
-    } else if !is_pro && is_formula && (!precedents.is_empty() || !dependents.is_empty()) {
-        // Upsell for Free users with formulas
-        content = content.child(
-            div()
-                .py_2()
-                .text_size(px(10.0))
-                .text_color(text_muted)
-                .child("Upgrade to Pro for trust verification")
-        );
+    }
+
+    // Locked panel for Free users (replaces hidden Pro features)
+    if !is_pro && (!precedents.is_empty() || !dependents.is_empty() || is_formula) {
+        let text_inverse = app.token(TokenKey::TextInverse);
+        if let Some(panel) = render_locked_feature_panel(
+            "Dependency Graph & Impact",
+            "Visualize cross-sheet dependencies, trace upstream and downstream impact, and see verification certificates proving correct evaluation order.",
+            render_inspector_skeleton_preview(text_muted),
+            panel_border,
+            text_primary,
+            text_muted,
+            accent,
+            text_inverse,
+            cx,
+        ) {
+            content = content.child(panel);
+        }
     }
 
     // Empty state for non-formula cells with no dependencies
@@ -1052,6 +1061,84 @@ fn render_inspector_tab(
     }
 
     content.into_any_element()
+}
+
+/// Skeleton preview for the Inspector tab locked panel (mock verification badge + DAG nodes)
+fn render_inspector_skeleton_preview(text_muted: Hsla) -> AnyElement {
+    div()
+        .p_2()
+        .rounded(px(4.0))
+        .bg(text_muted.opacity(0.04))
+        .border_1()
+        .border_color(text_muted.opacity(0.08))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().w(px(90.0)).h(px(14.0)).rounded_sm().bg(text_muted.opacity(0.1)))
+        .child(div().w(px(130.0)).h(px(12.0)).rounded_sm().bg(text_muted.opacity(0.08)))
+        .child(div().w(px(180.0)).h(px(10.0)).rounded_sm().bg(text_muted.opacity(0.06)))
+        .child(
+            div()
+                .flex()
+                .gap_1()
+                .mt_1()
+                .child(div().w(px(60.0)).h(px(16.0)).rounded(px(3.0)).bg(text_muted.opacity(0.08)))
+                .child(div().w(px(50.0)).h(px(16.0)).rounded(px(3.0)).bg(text_muted.opacity(0.06)))
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .mt_2()
+                .py_2()
+                .child(div().w(px(24.0)).h(px(24.0)).rounded_full().bg(text_muted.opacity(0.08)))
+                .child(div().w(px(20.0)).h(px(2.0)).bg(text_muted.opacity(0.06)))
+                .child(div().w(px(28.0)).h(px(28.0)).rounded_full().border_1().border_color(text_muted.opacity(0.12)))
+                .child(div().w(px(20.0)).h(px(2.0)).bg(text_muted.opacity(0.06)))
+                .child(div().w(px(24.0)).h(px(24.0)).rounded_full().bg(text_muted.opacity(0.08)))
+        )
+        .into_any_element()
+}
+
+/// Skeleton preview for the History tab locked panel (mock code lines)
+fn render_code_skeleton_preview(text_muted: Hsla) -> AnyElement {
+    div()
+        .p_2()
+        .rounded_md()
+        .bg(text_muted.opacity(0.04))
+        .border_1()
+        .border_color(text_muted.opacity(0.08))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().w(px(140.0)).h(px(10.0)).rounded_sm().bg(text_muted.opacity(0.08)))
+        .child(div().w(px(180.0)).h(px(10.0)).rounded_sm().bg(text_muted.opacity(0.06)))
+        .child(div().w(px(100.0)).h(px(10.0)).rounded_sm().bg(text_muted.opacity(0.08)))
+        .child(div().w(px(160.0)).h(px(10.0)).rounded_sm().bg(text_muted.opacity(0.06)))
+        .into_any_element()
+}
+
+/// Skeleton preview for the Names tab locked panel (mock detail rows)
+fn render_names_skeleton_preview(text_muted: Hsla) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(skeleton_row(px(50.0), px(80.0), text_muted))
+        .child(skeleton_row(px(45.0), px(60.0), text_muted))
+        .child(skeleton_row(px(55.0), px(70.0), text_muted))
+        .into_any_element()
+}
+
+fn skeleton_row(label_w: Pixels, value_w: Pixels, color: Hsla) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().w(label_w).h(px(10.0)).rounded_sm().bg(color.opacity(0.08)))
+        .child(div().w(value_w).h(px(10.0)).rounded_sm().bg(color.opacity(0.06)))
 }
 
 /// Render a mini DAG visualization showing precedents → cell → dependents flow
@@ -1535,6 +1622,24 @@ fn render_names_tab(
         list
     };
 
+    // Pre-build locked panel (needs &mut cx, can't go inside .when() closure)
+    let names_locked_panel: Option<AnyElement> = if !is_pro && selected_name.is_some() {
+        let text_inverse = app.token(TokenKey::TextInverse);
+        render_locked_feature_panel(
+            "Named Range Detail",
+            "View value previews, formula depth, and verification status for each named range.",
+            render_names_skeleton_preview(text_muted),
+            panel_border,
+            text_primary,
+            text_muted,
+            accent,
+            text_inverse,
+            cx,
+        )
+    } else {
+        None
+    };
+
     div()
         .p_3()
         .flex()
@@ -1609,20 +1714,9 @@ fn render_names_tab(
             let detail = selected_detail.as_ref().unwrap();
             el.child(render_named_range_detail(detail, text_primary, text_muted, accent, panel_border))
         })
-        // Pro upsell when not licensed and has selection
-        .when(!is_pro && selected_name.is_some(), |el| {
-            el.child(
-                div()
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(panel_border)
-                    .p_2()
-                    .bg(panel_border.opacity(0.2))
-                    .rounded_sm()
-                    .text_size(px(10.0))
-                    .text_color(text_muted)
-                    .child("Pro: View value preview, depth, and verification status")
-            )
+        // Locked panel when not licensed and has selection
+        .when(names_locked_panel.is_some(), |el| {
+            el.child(names_locked_panel.unwrap())
         })
         // Keyboard hint
         .child(
@@ -4157,6 +4251,24 @@ fn render_history_detail(
     let has_changes = !entry.affected_cells.is_empty();
     let entry_is_undoable = entry.is_undoable;
 
+    // Pre-build locked Lua panel for Free users (needs &mut cx, can't go inside .when())
+    let lua_locked_panel: Option<AnyElement> = if !is_pro && (lua_code.is_some() || generated_lua.is_some()) {
+        let text_inverse = cx.entity().read(cx).token(TokenKey::TextInverse);
+        render_locked_feature_panel(
+            "Lua Provenance",
+            "View the Lua script that produced this change, with full source and execution context.",
+            render_code_skeleton_preview(text_muted),
+            panel_border,
+            text_primary,
+            text_muted,
+            accent,
+            text_inverse,
+            cx,
+        )
+    } else {
+        None
+    };
+
     // AI badge color
     let ai_badge_color = hsla(0.8, 0.6, 0.55, 1.0);
 
@@ -4309,8 +4421,8 @@ fn render_history_detail(
                     })
             )
         })
-        // Provenance section (when there's Lua code)
-        .when(lua_code.is_some(), |el: Div| {
+        // Provenance section (when there's Lua code and user is Pro)
+        .when(lua_code.is_some() && is_pro, |el: Div| {
             let code = lua_code.clone().unwrap();
             el.child(
                 div()
@@ -4327,31 +4439,26 @@ fn render_history_detail(
                             .child("Provenance")
                     )
                     .child(
-                        if is_pro {
-                            div()
-                                .p_2()
-                                .rounded_md()
-                                .bg(rgb(0x1a1a1a))
-                                .border_1()
-                                .border_color(panel_border)
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .font_family("monospace")
-                                        .text_color(text_primary)
-                                        .child(SharedString::from(code))
-                                )
-                                .into_any_element()
-                        } else {
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(accent)
-                                .child("View Lua with Pro")
-                                .into_any_element()
-                        }
+                        div()
+                            .p_2()
+                            .rounded_md()
+                            .bg(rgb(0x1a1a1a))
+                            .border_1()
+                            .border_color(panel_border)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_family("monospace")
+                                    .text_color(text_primary)
+                                    .child(SharedString::from(code))
+                            )
                     )
             )
+        })
+        // Locked Lua panel for Free users
+        .when(lua_locked_panel.is_some(), |el: Div| {
+            el.child(lua_locked_panel.unwrap())
         })
         // Empty state
         .when(!has_changes && lua_code.is_none(), |el: Div| {

@@ -422,11 +422,40 @@ impl LicenseFile {
 }
 
 // ============================================================================
+// Trial State
+// ============================================================================
+
+/// Persistent license + trial state. Stored at ~/.config/visigrid/license_state.json
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LicenseState {
+    #[serde(default)]
+    trial: Option<TrialState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TrialState {
+    started_at: DateTime<Utc>,
+    duration_days: u32,
+}
+
+/// Public trial info for display
+pub struct TrialInfo {
+    pub started_at: DateTime<Utc>,
+    pub remaining_days: u32,
+    pub expired: bool,
+}
+
+// ============================================================================
 // Global License State
 // ============================================================================
 
 /// Global license state, loaded at startup
 static LICENSE_STATE: Lazy<RwLock<Option<Arc<LicenseValidation>>>> = Lazy::new(|| {
+    RwLock::new(None)
+});
+
+/// Global trial/license persistent state
+static PERSISTENT_STATE: Lazy<RwLock<Option<LicenseState>>> = Lazy::new(|| {
     RwLock::new(None)
 });
 
@@ -447,6 +476,14 @@ pub fn license_file_path() -> PathBuf {
         .join("license.json")
 }
 
+/// Get the persistent license state file path
+fn license_state_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("visigrid")
+        .join("license_state.json")
+}
+
 /// Set a custom license file path (for testing)
 pub fn set_license_path(path: PathBuf) {
     *LICENSE_PATH.write() = Some(path);
@@ -454,6 +491,7 @@ pub fn set_license_path(path: PathBuf) {
 
 /// Initialize the license system (call at startup)
 pub fn init() {
+    // Load license file
     let path = license_file_path();
 
     if path.exists() {
@@ -471,6 +509,16 @@ pub fn init() {
             }
             Err(e) => {
                 eprintln!("Failed to read license file: {}", e);
+            }
+        }
+    }
+
+    // Load persistent state (trial info)
+    let state_path = license_state_path();
+    if state_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&state_path) {
+            if let Ok(state) = serde_json::from_str::<LicenseState>(&contents) {
+                *PERSISTENT_STATE.write() = Some(state);
             }
         }
     }
@@ -537,32 +585,104 @@ pub fn is_pro_plus() -> bool {
 ///
 /// Dev bypass: Set VISIGRID_PRO=1 to enable all Pro features for testing.
 pub fn is_feature_enabled(feature: &str) -> bool {
-    // Dev bypass for testing (works in any build)
+    // 1. Dev bypass (always first)
     if std::env::var("VISIGRID_PRO").map(|v| v == "1").unwrap_or(false) {
         return true;
     }
 
-    // In OSS builds, this always returns false (compile-time gating takes precedence)
-    #[cfg(not(feature = "commercial"))]
-    {
-        let _ = feature;
-        return false;
-    }
-
-    // In commercial builds, check the license
+    // 2. Real license (commercial builds only)
     #[cfg(feature = "commercial")]
     {
-        LICENSE_STATE.read()
+        if LICENSE_STATE.read()
             .as_ref()
             .filter(|v| v.valid)
             .map(|v| v.features.iter().any(|f| f == feature))
             .unwrap_or(false)
+        {
+            return true;
+        }
     }
+
+    // 3. Active trial with allowlist
+    if is_trial_active() && trial_allows(feature) {
+        return true;
+    }
+
+    false
+}
+
+/// Features unlocked by trial. Explicit allowlist — change this to control trial scope.
+fn trial_allows(feature: &str) -> bool {
+    matches!(feature, "inspector" | "lua" | "performance" | "transforms")
 }
 
 /// Check if running a commercial build
 pub fn is_commercial_build() -> bool {
     cfg!(feature = "commercial")
+}
+
+// ============================================================================
+// Trial API
+// ============================================================================
+
+/// Start a 14-day Pro trial. Writes to license_state.json.
+/// Returns Ok(remaining_days) or Err if trial already used.
+pub fn start_trial() -> Result<u32, String> {
+    let state = PERSISTENT_STATE.read().clone().unwrap_or_default();
+    if state.trial.is_some() {
+        return Err("Trial already used. Upgrade to continue using Pro features.".to_string());
+    }
+
+    let trial = TrialState {
+        started_at: Utc::now(),
+        duration_days: 14,
+    };
+    let new_state = LicenseState {
+        trial: Some(trial),
+        ..state
+    };
+
+    // Save to disk
+    let path = license_state_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&new_state) {
+        let _ = std::fs::write(&path, json);
+    }
+
+    *PERSISTENT_STATE.write() = Some(new_state);
+    Ok(14)
+}
+
+/// Check if a trial is currently active (within duration of start).
+pub fn is_trial_active() -> bool {
+    trial_info().map(|i| !i.expired).unwrap_or(false)
+}
+
+/// Days remaining in trial. Returns 0 if expired or no trial.
+pub fn trial_remaining_days() -> u32 {
+    trial_info().map(|i| i.remaining_days).unwrap_or(0)
+}
+
+/// Get trial state for display.
+pub fn trial_info() -> Option<TrialInfo> {
+    let state = PERSISTENT_STATE.read();
+    let trial = state.as_ref()?.trial.as_ref()?;
+    let elapsed = Utc::now().signed_duration_since(trial.started_at);
+    let total = chrono::Duration::days(trial.duration_days as i64);
+    let remaining = total - elapsed;
+    let remaining_days = if remaining.num_seconds() > 0 {
+        // Round up: any partial day counts as a day
+        remaining.num_days() as u32 + if remaining.num_seconds() % 86400 > 0 { 1 } else { 0 }
+    } else {
+        0
+    };
+    Some(TrialInfo {
+        started_at: trial.started_at,
+        remaining_days,
+        expired: remaining_days == 0,
+    })
 }
 
 // ============================================================================
@@ -747,5 +867,36 @@ mod tests {
         // Verify keys are in alphabetical order
         assert!(canonical.starts_with(r#"{"a":"#));
         assert!(canonical.contains(r#""m":{"a":"nested_first","z":"nested_last"}"#));
+    }
+
+    #[test]
+    fn test_trial_info_none_by_default() {
+        let state = LicenseState::default();
+        assert!(state.trial.is_none());
+    }
+
+    #[test]
+    fn test_trial_state_serialization() {
+        let state = LicenseState {
+            trial: Some(TrialState {
+                started_at: Utc::now(),
+                duration_days: 14,
+            }),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let parsed: LicenseState = serde_json::from_str(&json).unwrap();
+        assert!(parsed.trial.is_some());
+        assert_eq!(parsed.trial.unwrap().duration_days, 14);
+    }
+
+    #[test]
+    fn test_trial_allows_allowlist() {
+        assert!(trial_allows("inspector"));
+        assert!(trial_allows("lua"));
+        assert!(trial_allows("performance"));
+        assert!(trial_allows("transforms"));
+        assert!(!trial_allows("fast_large_files"));
+        assert!(!trial_allows("plugins"));
+        assert!(!trial_allows("unknown_feature"));
     }
 }
