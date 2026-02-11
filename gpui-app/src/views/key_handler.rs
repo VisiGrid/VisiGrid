@@ -79,6 +79,47 @@ pub(crate) fn handle_key_down(
         return;
     }
 
+    // Close-confirm dialog traps all keyboard input
+    if this.close_confirm_visible {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                this.close_confirm_visible = false;
+                cx.notify();
+            }
+            "tab" => {
+                if event.keystroke.modifiers.shift {
+                    this.close_confirm_focused = if this.close_confirm_focused == 0 { 2 } else { this.close_confirm_focused - 1 };
+                } else {
+                    this.close_confirm_focused = (this.close_confirm_focused + 1) % 3;
+                }
+                cx.notify();
+            }
+            "enter" | "space" => {
+                match this.close_confirm_focused {
+                    0 => {
+                        this.close_confirm_visible = false;
+                        cx.notify();
+                    }
+                    1 => {
+                        this.close_confirm_visible = false;
+                        this.prepare_close(cx);
+                        window.remove_window();
+                    }
+                    _ => {
+                        this.close_confirm_visible = false;
+                        let saved = this.save_and_close(cx);
+                        if saved {
+                            this.prepare_close(cx);
+                            window.remove_window();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // Handle sheet context menu (close on any key)
     if this.sheet_context_menu.is_some() {
         this.hide_sheet_context_menu(cx);

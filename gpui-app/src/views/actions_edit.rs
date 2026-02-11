@@ -164,6 +164,29 @@ pub(crate) fn bind(
             this.maybe_show_f2_tip(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
+            // Close-confirm dialog: Enter activates focused button
+            if this.close_confirm_visible {
+                match this.close_confirm_focused {
+                    0 => {
+                        this.close_confirm_visible = false;
+                        cx.notify();
+                    }
+                    1 => {
+                        this.close_confirm_visible = false;
+                        this.prepare_close(cx);
+                        window.remove_window();
+                    }
+                    _ => {
+                        this.close_confirm_visible = false;
+                        let saved = this.save_and_close(cx);
+                        if saved {
+                            this.prepare_close(cx);
+                            window.remove_window();
+                        }
+                    }
+                }
+                return;
+            }
             if this.open_menu.is_some() {
                 this.menu_execute_highlighted(window, cx);
                 return;
@@ -250,6 +273,12 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &CancelEdit, window, cx| {
+            // Close-confirm dialog: Escape dismisses
+            if this.close_confirm_visible {
+                this.close_confirm_visible = false;
+                cx.notify();
+                return;
+            }
             // Format bar editing consumes actions before Spreadsheet editing.
             // See ConfirmEdit guard above for rationale.
             if this.ui.format_bar.size_editing {
@@ -356,6 +385,12 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &TabNext, window, cx| {
+            // Close-confirm dialog traps Tab
+            if this.close_confirm_visible {
+                this.close_confirm_focused = (this.close_confirm_focused + 1) % 3;
+                cx.notify();
+                return;
+            }
             // Format bar editing consumes actions before Spreadsheet editing.
             // See ConfirmEdit guard above for rationale.
             if this.ui.format_bar.size_editing {
@@ -390,6 +425,12 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &TabPrev, window, cx| {
+            // Close-confirm dialog traps Shift+Tab
+            if this.close_confirm_visible {
+                this.close_confirm_focused = if this.close_confirm_focused == 0 { 2 } else { this.close_confirm_focused - 1 };
+                cx.notify();
+                return;
+            }
             // Let AI dialogs handle their own keys
             if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
                 return;

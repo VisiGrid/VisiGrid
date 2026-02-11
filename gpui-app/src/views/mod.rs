@@ -887,12 +887,15 @@ fn render_merge_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
 }
 
 /// Render the close-window save confirmation dialog.
-fn render_close_confirm_dialog(app: &Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+fn render_close_confirm_dialog(app: &Spreadsheet, _window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    use crate::ui::{modal_backdrop, Button, DialogFrame, DialogSize};
+
     let panel_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
     let text_muted = app.token(TokenKey::TextMuted);
     let accent = app.token(TokenKey::Accent);
+    let focused = app.close_confirm_focused;
 
     let filename = app.current_file.as_ref()
         .and_then(|p| p.file_name())
@@ -901,136 +904,73 @@ fn render_close_confirm_dialog(app: &Spreadsheet, window: &mut Window, cx: &mut 
 
     let body_msg = format!("Do you want to save changes to \"{}\"?", filename);
 
-    div()
-        .absolute()
-        .inset_0()
-        .bg(hsla(0.0, 0.0, 0.0, 0.6))
+    // Body content
+    let body = div()
         .flex()
-        .items_center()
-        .justify_center()
+        .flex_col()
+        .gap_2()
         .child(
             div()
-                .id("close-confirm-dialog")
-                .bg(panel_bg)
-                .border_1()
-                .border_color(panel_border)
-                .rounded_md()
-                .shadow_lg()
-                .w(px(380.0))
-                .p_4()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "escape" {
-                        this.close_confirm_visible = false;
-                        cx.notify();
-                    } else if event.keystroke.key == "enter" {
-                        this.close_confirm_visible = false;
-                        let saved = this.save_and_close(cx);
-                        if saved {
-                            this.prepare_close(cx);
-                            window.remove_window();
-                        }
-                        // If not saved (Save As needed), close_after_save flag handles it
-                    }
-                }))
-                // Header
-                .child(
-                    div()
-                        .text_size(px(16.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(text_primary)
-                        .child("Save Changes")
-                )
-                // Body
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(text_primary)
-                                .child(SharedString::from(body_msg))
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(text_muted)
-                                .child("Your changes will be lost if you don't save.")
-                        )
-                )
-                // Footer buttons
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        // Cancel
-                        .child(
-                            div()
-                                .id("close-cancel-btn")
-                                .px_3()
-                                .py_1()
-                                .border_1()
-                                .border_color(panel_border)
-                                .rounded_sm()
-                                .text_size(px(12.0))
-                                .text_color(text_muted)
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(text_primary))
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.close_confirm_visible = false;
-                                    cx.notify();
-                                }))
-                                .child("Cancel")
-                        )
-                        // Don't Save
-                        .child(
-                            div()
-                                .id("close-dont-save-btn")
-                                .px_3()
-                                .py_1()
-                                .border_1()
-                                .border_color(panel_border)
-                                .rounded_sm()
-                                .text_size(px(12.0))
-                                .text_color(text_muted)
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(text_primary))
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                                    this.close_confirm_visible = false;
-                                    this.prepare_close(cx);
-                                    window.remove_window();
-                                }))
-                                .child("Don't Save")
-                        )
-                        // Save (primary)
-                        .child(
-                            div()
-                                .id("close-save-btn")
-                                .px_3()
-                                .py_1()
-                                .bg(accent)
-                                .rounded_sm()
-                                .text_size(px(12.0))
-                                .text_color(rgb(0xffffff))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(accent.opacity(0.85)))
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                                    this.close_confirm_visible = false;
-                                    let saved = this.save_and_close(cx);
-                                    if saved {
-                                        this.prepare_close(cx);
-                                        window.remove_window();
-                                    }
-                                }))
-                                .child("Save")
-                        )
-                )
+                .text_size(px(13.0))
+                .text_color(text_primary)
+                .child(SharedString::from(body_msg))
         )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(text_muted)
+                .child("Your changes will be lost if you don't save.")
+        );
+
+    // Footer buttons with focus ring
+    let cancel_btn = Button::new("close-cancel-btn", "Cancel")
+        .secondary(if focused == 0 { accent } else { panel_border }, if focused == 0 { text_primary } else { text_muted })
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.close_confirm_visible = false;
+            cx.notify();
+        }));
+
+    let dont_save_btn = Button::new("close-dont-save-btn", "Don't Save")
+        .secondary(if focused == 1 { accent } else { panel_border }, if focused == 1 { text_primary } else { text_muted })
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+            this.close_confirm_visible = false;
+            this.prepare_close(cx);
+            window.remove_window();
+        }));
+
+    let save_btn = Button::new("close-save-btn", "Save")
+        .primary(accent, rgb(0xffffff).into())
+        .when(focused == 2, |b| b.border_1().border_color(hsla(0.0, 0.0, 1.0, 1.0)))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+            this.close_confirm_visible = false;
+            let saved = this.save_and_close(cx);
+            if saved {
+                this.prepare_close(cx);
+                window.remove_window();
+            }
+        }));
+
+    let footer = div()
+        .flex()
+        .justify_end()
+        .gap_2()
+        .child(cancel_btn)
+        .child(dont_save_btn)
+        .child(save_btn);
+
+    let header = div()
+        .text_size(px(14.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(text_primary)
+        .child("Save Changes");
+
+    modal_backdrop(
+        "close-confirm-dialog",
+        DialogFrame::new(body, panel_bg, panel_border)
+            .size(DialogSize::Md)
+            .header(header)
+            .footer(footer),
+    )
 }
 
 /// Render the approval confirmation dialog (when re-approving after drift)

@@ -431,6 +431,7 @@ pub(crate) fn bind(
                 return;
             }
             this.close_confirm_visible = true;
+            this.close_confirm_focused = 2; // Default to Save
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &Quit, window, cx| {
