@@ -18,10 +18,13 @@ use ratatui::{
 };
 
 use crate::util;
-use data::PeekData;
+use data::{PeekData, SheetData};
 
 struct TuiApp {
-    data: PeekData,
+    /// All sheets (for .sheet files) or a single sheet (for CSV)
+    sheets: Vec<SheetData>,
+    /// Index into `sheets` for the active sheet
+    active_sheet: usize,
     cursor_row: usize,
     cursor_col: usize,
     scroll_row: usize,
@@ -31,20 +34,19 @@ struct TuiApp {
     show_help: bool,
     /// Width of the row-number gutter, computed from max file row number
     row_num_width: usize,
+    /// Whether this is a multi-sheet workbook
+    multi_sheet: bool,
 }
 
 impl TuiApp {
     fn new(data: PeekData, file_name: String) -> Self {
-        let max_file_row = data.file_row(data.num_rows.saturating_sub(1));
-        let digits = if max_file_row == 0 {
-            1
-        } else {
-            (max_file_row as f64).log10().floor() as usize + 1
-        };
-        let row_num_width = digits.max(3) + 1;
-
+        let row_num_width = Self::compute_row_num_width(&data);
         Self {
-            data,
+            sheets: vec![SheetData {
+                name: String::new(),
+                data,
+            }],
+            active_sheet: 0,
             cursor_row: 0,
             cursor_col: 0,
             scroll_row: 0,
@@ -53,6 +55,70 @@ impl TuiApp {
             should_quit: false,
             show_help: false,
             row_num_width,
+            multi_sheet: false,
+        }
+    }
+
+    fn new_multi(sheets: Vec<SheetData>, file_name: String, initial_sheet: usize) -> Self {
+        let active = initial_sheet.min(sheets.len().saturating_sub(1));
+        let row_num_width = Self::compute_row_num_width(&sheets[active].data);
+        let multi = sheets.len() > 1;
+        Self {
+            sheets,
+            active_sheet: active,
+            cursor_row: 0,
+            cursor_col: 0,
+            scroll_row: 0,
+            scroll_col: 0,
+            file_name,
+            should_quit: false,
+            show_help: false,
+            row_num_width,
+            multi_sheet: multi,
+        }
+    }
+
+    fn compute_row_num_width(data: &PeekData) -> usize {
+        let max_file_row = data.file_row(data.num_rows.saturating_sub(1));
+        let digits = if max_file_row == 0 {
+            1
+        } else {
+            (max_file_row as f64).log10().floor() as usize + 1
+        };
+        digits.max(3) + 1
+    }
+
+    fn data(&self) -> &PeekData {
+        &self.sheets[self.active_sheet].data
+    }
+
+    fn switch_sheet(&mut self, idx: usize) {
+        if idx >= self.sheets.len() || idx == self.active_sheet {
+            return;
+        }
+        self.active_sheet = idx;
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+        self.scroll_row = 0;
+        self.scroll_col = 0;
+        self.row_num_width = Self::compute_row_num_width(self.data());
+    }
+
+    fn next_sheet(&mut self) {
+        if self.sheets.len() > 1 {
+            let next = (self.active_sheet + 1) % self.sheets.len();
+            self.switch_sheet(next);
+        }
+    }
+
+    fn prev_sheet(&mut self) {
+        if self.sheets.len() > 1 {
+            let prev = if self.active_sheet == 0 {
+                self.sheets.len() - 1
+            } else {
+                self.active_sheet - 1
+            };
+            self.switch_sheet(prev);
         }
     }
 
@@ -70,42 +136,72 @@ impl TuiApp {
             KeyCode::Down | KeyCode::Char('j') => self.move_cursor(1, 0),
             KeyCode::Left | KeyCode::Char('h') => self.move_cursor(0, -1),
             KeyCode::Right | KeyCode::Char('l') => self.move_cursor(0, 1),
-            KeyCode::PageUp => self.page_up(),
-            KeyCode::PageDown => self.page_down(),
+            KeyCode::PageUp => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.prev_sheet();
+                } else {
+                    self.page_up();
+                }
+            }
+            KeyCode::PageDown => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.next_sheet();
+                } else {
+                    self.page_down();
+                }
+            }
             KeyCode::Home | KeyCode::Char('g') => self.cursor_row = 0,
             KeyCode::End | KeyCode::Char('G') => {
-                if self.data.num_rows > 0 {
-                    self.cursor_row = self.data.num_rows - 1;
+                if self.data().num_rows > 0 {
+                    self.cursor_row = self.data().num_rows - 1;
                 }
             }
             KeyCode::Char('0') => self.cursor_col = 0,
             KeyCode::Char('$') => {
-                if self.data.num_cols > 0 {
-                    self.cursor_col = self.data.num_cols - 1;
+                if self.data().num_cols > 0 {
+                    self.cursor_col = self.data().num_cols - 1;
                 }
             }
+            // 1-9: jump to sheet by index
+            KeyCode::Char(c @ '1'..='9') if self.multi_sheet => {
+                let idx = (c as usize) - ('1' as usize);
+                self.switch_sheet(idx);
+            }
             KeyCode::Tab => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if self.multi_sheet {
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        self.prev_sheet();
+                    } else {
+                        self.next_sheet();
+                    }
+                } else if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.move_cursor(0, -1);
                 } else {
                     self.move_cursor(0, 1);
                 }
             }
-            KeyCode::BackTab => self.move_cursor(0, -1),
+            KeyCode::BackTab => {
+                if self.multi_sheet {
+                    self.prev_sheet();
+                } else {
+                    self.move_cursor(0, -1);
+                }
+            }
             _ => {}
         }
     }
 
     fn move_cursor(&mut self, drow: i32, dcol: i32) {
-        if self.data.num_rows == 0 || self.data.num_cols == 0 {
+        let data = self.data();
+        if data.num_rows == 0 || data.num_cols == 0 {
             return;
         }
         let new_row = (self.cursor_row as i32 + drow)
             .max(0)
-            .min(self.data.num_rows as i32 - 1) as usize;
+            .min(data.num_rows as i32 - 1) as usize;
         let new_col = (self.cursor_col as i32 + dcol)
             .max(0)
-            .min(self.data.num_cols as i32 - 1) as usize;
+            .min(data.num_cols as i32 - 1) as usize;
         self.cursor_row = new_row;
         self.cursor_col = new_col;
     }
@@ -117,8 +213,9 @@ impl TuiApp {
 
     fn page_down(&mut self) {
         let jump = 20;
-        if self.data.num_rows > 0 {
-            self.cursor_row = (self.cursor_row + jump).min(self.data.num_rows - 1);
+        let num_rows = self.data().num_rows;
+        if num_rows > 0 {
+            self.cursor_row = (self.cursor_row + jump).min(num_rows - 1);
         }
     }
 
@@ -146,7 +243,7 @@ impl TuiApp {
                         break;
                     }
                     sc += 1;
-                    if sc >= self.data.num_cols {
+                    if sc >= self.data().num_cols {
                         break;
                     }
                 }
@@ -156,10 +253,11 @@ impl TuiApp {
     }
 
     fn visible_columns(&self, start_col: usize, available: usize) -> Vec<usize> {
+        let data = self.data();
         let mut cols = Vec::new();
         let mut used = 0usize;
-        for c in start_col..self.data.num_cols {
-            let w = self.data.col_widths.get(c).copied().unwrap_or(3) + 1;
+        for c in start_col..data.num_cols {
+            let w = data.col_widths.get(c).copied().unwrap_or(3) + 1;
             if used + w > available && !cols.is_empty() {
                 break;
             }
@@ -176,33 +274,84 @@ impl TuiApp {
 
     fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
-        let chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .split(area);
+        if self.multi_sheet {
+            let chunks = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
 
-        self.draw_title(frame, chunks[0]);
-        self.draw_grid(frame, chunks[1]);
-        self.draw_status(frame, chunks[2]);
+            self.draw_title(frame, chunks[0]);
+            self.draw_tab_bar(frame, chunks[1]);
+            self.draw_grid(frame, chunks[2]);
+            self.draw_status(frame, chunks[3]);
+        } else {
+            let chunks = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+            self.draw_title(frame, chunks[0]);
+            self.draw_grid(frame, chunks[1]);
+            self.draw_status(frame, chunks[2]);
+        }
 
         if self.show_help {
             self.draw_help(frame, area);
         }
     }
 
+    fn draw_tab_bar(&self, frame: &mut Frame, area: Rect) {
+        let mut spans = Vec::new();
+        for (i, sheet) in self.sheets.iter().enumerate() {
+            let label = if i < 9 {
+                format!(" {}:{} ", i + 1, sheet.name)
+            } else {
+                format!(" {} ", sheet.name)
+            };
+            if i == self.active_sheet {
+                spans.push(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    label,
+                    Style::default().fg(Color::Gray).bg(Color::DarkGray),
+                ));
+            }
+            spans.push(Span::styled(" ", Style::default().bg(Color::Black)));
+        }
+        let line = Line::from(spans);
+        let para = Paragraph::new(line).style(Style::default().bg(Color::Black));
+        frame.render_widget(para, area);
+    }
+
     fn draw_title(&self, frame: &mut Frame, area: Rect) {
-        let row_info = if let Some(total) = self.data.total_rows {
+        let data = self.data();
+        let row_info = if let Some(total) = data.total_rows {
             format!(
                 "{} rows x {} cols (showing {})",
-                total, self.data.num_cols, self.data.num_rows
+                total, data.num_cols, data.num_rows
             )
         } else {
-            format!("{} rows x {} cols", self.data.num_rows, self.data.num_cols)
+            format!("{} rows x {} cols", data.num_rows, data.num_cols)
         };
 
-        let title = format!(" visigrid: {} | {} ", self.file_name, row_info);
+        let sheet_info = if self.multi_sheet {
+            format!(" | {} sheets", self.sheets.len())
+        } else {
+            String::new()
+        };
+
+        let title = format!(" visigrid: {} | {}{} ", self.file_name, row_info, sheet_info);
         let para = Paragraph::new(Line::from(vec![Span::styled(
             title,
             Style::default()
@@ -215,7 +364,8 @@ impl TuiApp {
     }
 
     fn draw_grid(&self, frame: &mut Frame, area: Rect) {
-        if self.data.num_rows == 0 || self.data.num_cols == 0 {
+        let data = self.data();
+        if data.num_rows == 0 || data.num_cols == 0 {
             let msg =
                 Paragraph::new("(empty)").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, area);
@@ -236,13 +386,12 @@ impl TuiApp {
             Style::default().fg(Color::DarkGray),
         )];
         for &c in &vis_cols {
-            let name = self
-                .data
+            let name = data
                 .col_names
                 .get(c)
                 .map(|s| s.as_str())
                 .unwrap_or("?");
-            let w = self.data.col_widths.get(c).copied().unwrap_or(3);
+            let w = data.col_widths.get(c).copied().unwrap_or(3);
             let display = util::pad_right(&util::truncate_display(name, w), w);
             let style = if c == self.cursor_col {
                 Style::default()
@@ -258,15 +407,15 @@ impl TuiApp {
 
         // Data lines
         let visible_rows = data_height as usize;
-        let end_row = (self.scroll_row + visible_rows).min(self.data.num_rows);
+        let end_row = (self.scroll_row + visible_rows).min(data.num_rows);
 
         let mut lines: Vec<Line> = Vec::with_capacity(visible_rows + 1);
         lines.push(Line::from(header_spans));
 
         for r in self.scroll_row..end_row {
-            let row_data = &self.data.rows[r];
+            let row_data = &data.rows[r];
             let is_cursor_row = r == self.cursor_row;
-            let file_row = self.data.file_row(r);
+            let file_row = data.file_row(r);
 
             let row_num_style = if is_cursor_row {
                 Style::default()
@@ -283,7 +432,7 @@ impl TuiApp {
 
             for &c in &vis_cols {
                 let value = row_data.get(c).map(|s| s.as_str()).unwrap_or("");
-                let w = self.data.col_widths.get(c).copied().unwrap_or(3);
+                let w = data.col_widths.get(c).copied().unwrap_or(3);
                 let display = util::pad_right(&util::truncate_display(value, w), w);
 
                 let style = if is_cursor_row && c == self.cursor_col {
@@ -310,23 +459,22 @@ impl TuiApp {
     }
 
     fn draw_status(&self, frame: &mut Frame, area: Rect) {
-        let cell_value = self
-            .data
+        let data = self.data();
+        let cell_value = data
             .rows
             .get(self.cursor_row)
             .and_then(|row| row.get(self.cursor_col))
             .map(|s| s.as_str())
             .unwrap_or("");
 
-        let col_name = self
-            .data
+        let col_name = data
             .col_names
             .get(self.cursor_col)
             .map(|s| s.as_str())
             .unwrap_or("?");
 
-        let file_row = self.data.file_row(self.cursor_row);
-        let total = self.data.total_data_rows();
+        let file_row = data.file_row(self.cursor_row);
+        let total = data.total_data_rows();
 
         // Column locator: show visible column range
         let grid_available =
@@ -344,7 +492,14 @@ impl TuiApp {
             }
         };
 
-        let left = format!(" {}{} = {:?}", col_name, file_row, cell_value);
+        let sheet_info = if self.multi_sheet {
+            let name = &self.sheets[self.active_sheet].name;
+            format!("  sheet: {} ({}/{})", name, self.active_sheet + 1, self.sheets.len())
+        } else {
+            String::new()
+        };
+
+        let left = format!(" {}{} = {:?}{}", col_name, file_row, cell_value, sheet_info);
         let right = format!(
             "Row {}/{}  {}  ?: help ",
             file_row, total, col_range
@@ -363,7 +518,7 @@ impl TuiApp {
     }
 
     fn draw_help(&self, frame: &mut Frame, area: Rect) {
-        let help_lines = vec![
+        let mut help_lines = vec![
             "",
             "  Navigation",
             "  ----------",
@@ -373,14 +528,29 @@ impl TuiApp {
             "  End  / G          Last row",
             "  0                 First column",
             "  $                 Last column",
-            "  Tab / Shift+Tab   Next/prev column",
+        ];
+
+        if self.multi_sheet {
+            help_lines.extend_from_slice(&[
+                "",
+                "  Sheets",
+                "  ------",
+                "  Tab / Shift+Tab     Next/prev sheet",
+                "  Ctrl+PgDn/PgUp     Next/prev sheet",
+                "  1..9                Jump to sheet",
+            ]);
+        } else {
+            help_lines.push("  Tab / Shift+Tab   Next/prev column");
+        }
+
+        help_lines.extend_from_slice(&[
             "",
             "  General",
             "  -------",
             "  q / Esc           Quit",
             "  ?                 Toggle this help",
             "",
-        ];
+        ]);
         let help_width: u16 = 44;
         let help_height: u16 = help_lines.len() as u16;
 
@@ -426,8 +596,19 @@ impl TuiApp {
     }
 }
 
-/// Run the interactive TUI viewer.
+/// Run the interactive TUI viewer for a single CSV/TSV file.
 pub fn run(data: PeekData, file_name: String) -> Result<(), String> {
+    let app = TuiApp::new(data, file_name);
+    run_app(app)
+}
+
+/// Run the interactive TUI viewer for a multi-sheet .sheet workbook.
+pub fn run_multi(sheets: Vec<SheetData>, file_name: String, initial_sheet: usize) -> Result<(), String> {
+    let app = TuiApp::new_multi(sheets, file_name, initial_sheet);
+    run_app(app)
+}
+
+fn run_app(mut app: TuiApp) -> Result<(), String> {
     terminal::enable_raw_mode()
         .map_err(|e| format!("failed to enable raw mode: {}", e))?;
     stdout()
@@ -447,14 +628,13 @@ pub fn run(data: PeekData, file_name: String) -> Result<(), String> {
     let mut terminal =
         Terminal::new(backend).map_err(|e| format!("failed to create terminal: {}", e))?;
 
-    let mut app = TuiApp::new(data, file_name);
-
     loop {
         let term_size = terminal
             .size()
             .map(|s| Rect::new(0, 0, s.width, s.height))
             .unwrap_or_default();
-        let visible_rows = term_size.height.saturating_sub(3) as usize;
+        let chrome = if app.multi_sheet { 4u16 } else { 3u16 };
+        let visible_rows = term_size.height.saturating_sub(chrome) as usize;
         app.ensure_visible(visible_rows, term_size.width);
 
         terminal

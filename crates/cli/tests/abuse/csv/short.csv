@@ -1,0 +1,2 @@
+effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,description,amount
+2026-01-20,2026-01-20,200000,USD,charge,stripe,ch_099,po_099,New sale,2000.00

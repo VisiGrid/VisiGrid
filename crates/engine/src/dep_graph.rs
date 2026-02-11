@@ -65,6 +65,14 @@ impl DepGraph {
             .flat_map(|s| s.iter().copied())
     }
 
+    /// Register a formula cell that has no cell references (e.g., `=1/0`, `=PI()`).
+    ///
+    /// These "leaf" formulas still need to appear in the topo order so that
+    /// `recompute_full_ordered` evaluates them after clearing the cache.
+    pub fn register_leaf_formula(&mut self, cell: CellId) {
+        self.preds.entry(cell).or_default();
+    }
+
     /// Returns true if this cell has formula dependencies tracked in the graph.
     pub fn is_formula_cell(&self, cell: CellId) -> bool {
         self.preds.contains_key(&cell)

@@ -938,10 +938,14 @@ impl Workbook {
                         |idx| self.sheet_id_at_idx(idx),
                     );
 
+                    let formula_cell = CellId::new(sheet_id, *row, *col);
                     if !refs.is_empty() {
-                        let formula_cell = CellId::new(sheet_id, *row, *col);
                         let preds: FxHashSet<CellId> = refs.into_iter().collect();
                         self.dep_graph.replace_edges(formula_cell, preds);
+                    } else {
+                        // Leaf formula (no cell refs, e.g. =1/0, =PI())
+                        // Must still be tracked so recompute evaluates it.
+                        self.dep_graph.register_leaf_formula(formula_cell);
                     }
                 }
             }

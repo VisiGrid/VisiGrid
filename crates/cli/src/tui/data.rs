@@ -34,7 +34,7 @@ impl PeekData {
 
     /// Compute column widths by scanning up to `scan_rows` data rows (0 = all).
     /// Always includes the header names in the scan.
-    fn compute_widths(col_names: &[String], rows: &[Vec<String>], num_cols: usize, scan_rows: usize) -> Vec<usize> {
+    pub(crate) fn compute_widths(col_names: &[String], rows: &[Vec<String>], num_cols: usize, scan_rows: usize) -> Vec<usize> {
         let scan_limit = if scan_rows == 0 { rows.len() } else { scan_rows.min(rows.len()) };
         (0..num_cols)
             .map(|c| {
@@ -144,6 +144,109 @@ pub fn load_csv(
         total_rows,
         delimiter,
     })
+}
+
+/// A sheet within a workbook, extracted as display-ready data.
+pub struct SheetData {
+    pub name: String,
+    pub data: PeekData,
+}
+
+/// Load a .sheet workbook file and return a PeekData for each sheet.
+///
+/// Loads the workbook, rebuilds the dependency graph, recomputes all formulas,
+/// then extracts evaluated cell values as display strings.
+pub fn load_sheet(
+    path: &Path,
+    width_scan_rows: usize,
+) -> Result<Vec<SheetData>, String> {
+    let mut workbook = visigrid_io::native::load_workbook(path)
+        .map_err(|e| format!("failed to load {}: {}", path.display(), e))?;
+
+    workbook.rebuild_dep_graph();
+    workbook.recompute_full_ordered();
+
+    let sheet_count = workbook.sheet_count();
+    if sheet_count == 0 {
+        return Ok(vec![]);
+    }
+
+    let mut sheets = Vec::with_capacity(sheet_count);
+
+    for idx in 0..sheet_count {
+        let sheet = workbook.sheet(idx).unwrap();
+        let name = sheet.name.clone();
+
+        // Find the bounding box of non-empty cells
+        let mut max_row: usize = 0;
+        let mut max_col: usize = 0;
+        let mut has_cells = false;
+        for (&(r, c), _) in sheet.cells_iter() {
+            has_cells = true;
+            if r > max_row {
+                max_row = r;
+            }
+            if c > max_col {
+                max_col = c;
+            }
+        }
+        // Also check spill values (array formula results)
+        // They may extend beyond the cell map
+
+        if !has_cells {
+            // Empty sheet — still include it with zero rows/cols
+            sheets.push(SheetData {
+                name,
+                data: PeekData {
+                    rows: vec![],
+                    num_rows: 0,
+                    num_cols: 0,
+                    col_widths: vec![],
+                    col_names: vec![],
+                    has_headers: false,
+                    first_data_file_row: 1,
+                    total_rows: None,
+                    delimiter: 0,
+                },
+            });
+            continue;
+        }
+
+        let num_rows = max_row + 1;
+        let num_cols = max_col + 1;
+
+        // Extract evaluated values into row-major grid
+        let mut rows: Vec<Vec<String>> = Vec::with_capacity(num_rows);
+        for r in 0..num_rows {
+            let mut row = Vec::with_capacity(num_cols);
+            for c in 0..num_cols {
+                row.push(sheet.get_display(r, c));
+            }
+            rows.push(row);
+        }
+
+        // Generate column names (A, B, C, ...)
+        let col_names: Vec<String> = (0..num_cols).map(|c| util::col_to_letter(c)).collect();
+
+        let col_widths = PeekData::compute_widths(&col_names, &rows, num_cols, width_scan_rows);
+
+        sheets.push(SheetData {
+            name,
+            data: PeekData {
+                rows,
+                num_rows,
+                num_cols,
+                col_widths,
+                col_names,
+                has_headers: false,
+                first_data_file_row: 1,
+                total_rows: None,
+                delimiter: 0,
+            },
+        });
+    }
+
+    Ok(sheets)
 }
 
 #[cfg(test)]

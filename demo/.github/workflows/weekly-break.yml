@@ -1,0 +1,117 @@
+name: Weekly Break Test
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Monday 6 AM UTC
+  workflow_dispatch:
+
+env:
+  VISIHUB_API_KEY: ${{ secrets.VISIHUB_API_KEY }}
+  VISIHUB_REPO: ${{ vars.VISIHUB_REPO }}
+
+jobs:
+  structural-drift:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - name: append-rows
+            file: data/ledger-bad-append.csv
+          - name: remove-rows
+            file: data/ledger-bad-remove.csv
+          - name: add-column
+            file: data/ledger-bad-column-add.csv
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install vgrid
+        run: |
+          curl -fsSL https://get.visigrid.app/cli | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Authenticate
+        run: vgrid login --token "$VISIHUB_API_KEY"
+
+      - name: "Publish bad data: ${{ matrix.scenario.name }}"
+        id: publish
+        continue-on-error: true
+        run: |
+          vgrid publish "${{ matrix.scenario.file }}" \
+            --repo "$VISIHUB_REPO" \
+            --dataset "break-${{ matrix.scenario.name }}" \
+            --source-type manual \
+            --wait --output json | tee /tmp/result.json
+
+      - name: Verify drift detected
+        run: |
+          STATUS=$(python3 -c "import json; print(json.load(open('/tmp/result.json'))['check_status'])")
+          echo "check_status: $STATUS"
+          if [ "$STATUS" = "pass" ]; then
+            echo "ERROR: Expected drift to be detected but got pass"
+            exit 1
+          fi
+          echo "Drift correctly detected: $STATUS"
+
+      - name: Write summary
+        if: always()
+        run: |
+          STATUS=$(python3 -c "import json; print(json.load(open('/tmp/result.json'))['check_status'])" 2>/dev/null || echo "unknown")
+          PROOF=$(python3 -c "import json; print(json.load(open('/tmp/result.json')).get('proof_url', 'N/A'))" 2>/dev/null || echo "N/A")
+          echo "## ${{ matrix.scenario.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- check_status: \`$STATUS\`" >> $GITHUB_STEP_SUMMARY
+          echo "- proof: $PROOF" >> $GITHUB_STEP_SUMMARY
+
+  invariant-break:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install vgrid
+        run: |
+          curl -fsSL https://get.visigrid.app/cli | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Authenticate
+        run: vgrid login --token "$VISIHUB_API_KEY"
+
+      - name: Fill template with unbalanced data
+        run: |
+          vgrid fill templates/recon-template.sheet \
+            --csv data/ledger-bad-undistributed.csv \
+            --target "Sheet1!A2" --headers --clear \
+            --out /tmp/recon-break.sheet --json
+
+      - name: "Assert variance = 0 (should FAIL)"
+        id: assert
+        continue-on-error: true
+        run: |
+          vgrid publish /tmp/recon-break.sheet \
+            --repo "$VISIHUB_REPO" \
+            --dataset "break-invariant" \
+            --source-type manual \
+            --assert-cell "summary!B7:0:0" \
+            --wait --output json | tee /tmp/result.json
+
+      - name: Verify invariant violation caught
+        run: |
+          STATUS=$(python3 -c "import json; print(json.load(open('/tmp/result.json'))['check_status'])")
+          ACTUAL=$(python3 -c "import json; a=json.load(open('/tmp/result.json'))['assertions'][0]; print(a['actual'])")
+          echo "check_status: $STATUS"
+          echo "variance actual: $ACTUAL"
+          if [ "$STATUS" != "fail" ]; then
+            echo "ERROR: Expected invariant violation but got $STATUS"
+            exit 1
+          fi
+          echo "Invariant violation correctly caught (variance=$ACTUAL)"
+
+      - name: Write summary
+        if: always()
+        run: |
+          STATUS=$(python3 -c "import json; print(json.load(open('/tmp/result.json'))['check_status'])" 2>/dev/null || echo "unknown")
+          ACTUAL=$(python3 -c "import json; a=json.load(open('/tmp/result.json'))['assertions'][0]; print(a['actual'])" 2>/dev/null || echo "unknown")
+          PROOF=$(python3 -c "import json; print(json.load(open('/tmp/result.json')).get('proof_url', 'N/A'))" 2>/dev/null || echo "N/A")
+          echo "## Invariant Break" >> $GITHUB_STEP_SUMMARY
+          echo "- check_status: \`$STATUS\`" >> $GITHUB_STEP_SUMMARY
+          echo "- variance (expected 0): \`$ACTUAL\`" >> $GITHUB_STEP_SUMMARY
+          echo "- proof: $PROOF" >> $GITHUB_STEP_SUMMARY

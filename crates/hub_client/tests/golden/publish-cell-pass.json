@@ -1,0 +1,20 @@
+{
+  "run_id": "100",
+  "version": 2,
+  "status": "verified",
+  "check_status": "pass",
+  "assertions": [{
+    "kind": "cell",
+    "column": "summary!B7",
+    "expected": "0",
+    "actual": "4520",
+    "tolerance": "10000",
+    "status": "pass",
+    "origin": "client",
+    "engine": {
+      "name": "visigrid-engine",
+      "version": "0.1.0"
+    }
+  }],
+  "proof_url": "https://api.visihub.app/api/repos/acme/recon/runs/100/proof"
+}

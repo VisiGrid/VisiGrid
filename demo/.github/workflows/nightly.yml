@@ -1,0 +1,44 @@
+name: Nightly Recon Check
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # 6 AM UTC daily
+  workflow_dispatch:
+
+env:
+  VISIHUB_API_KEY: ${{ secrets.VISIHUB_API_KEY }}
+  VISIHUB_REPO: ${{ vars.VISIHUB_REPO }}
+
+jobs:
+  recon-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install vgrid
+        run: |
+          curl -fsSL https://get.visigrid.app/cli | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Authenticate
+        run: vgrid login --token "$VISIHUB_API_KEY"
+
+      - name: Publish good data
+        run: |
+          vgrid publish data/ledger-good.csv \
+            --repo "$VISIHUB_REPO" \
+            --dataset ledger-recon-nightly \
+            --source-type manual \
+            --wait --output json | tee /tmp/result.json
+
+      - name: Write summary
+        if: always()
+        run: |
+          STATUS=$(python3 -c "import json; print(json.load(open('/tmp/result.json'))['check_status'])" 2>/dev/null || echo "unknown")
+          PROOF=$(python3 -c "import json; print(json.load(open('/tmp/result.json')).get('proof_url', 'N/A'))" 2>/dev/null || echo "N/A")
+          echo "## Nightly Check" >> $GITHUB_STEP_SUMMARY
+          echo "- check_status: \`$STATUS\`" >> $GITHUB_STEP_SUMMARY
+          echo "- proof: $PROOF" >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify exit code
+        run: echo "Nightly check passed"

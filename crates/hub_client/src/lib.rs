@@ -12,6 +12,6 @@ pub use auth::{AuthCredentials, auth_file_path, load_auth, save_auth, delete_aut
 pub use client::{
     HubClient, HubError, UserInfo, RepoInfo, DatasetInfo,
     CreateRevisionOptions, RunResult,
-    AssertionInput, AssertionResult,
+    AssertionInput, AssertionResult, EngineMetadata,
     hash_file, hash_bytes,
 };

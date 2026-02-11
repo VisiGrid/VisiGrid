@@ -7,7 +7,7 @@
 //! The golden files are the public contract. CI scripts parse this JSON.
 //! Breaking it without versioning breaks customers.
 
-use visigrid_hub_client::{RunResult, AssertionResult};
+use visigrid_hub_client::{RunResult, AssertionResult, EngineMetadata};
 
 /// Validate that every key in the golden JSON is present in RunResult serialization.
 fn validate_golden_keys(golden_path: &str, result: &RunResult) {
@@ -60,6 +60,8 @@ fn test_golden_publish_pass() {
             status: "pass".into(),
             delta: None,
             message: None,
+            origin: None,
+            engine: None,
         }]),
         proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/42/proof".into(),
     };
@@ -97,6 +99,8 @@ fn test_golden_publish_fail() {
             status: "fail".into(),
             delta: Some("45.67".into()),
             message: None,
+            origin: None,
+            engine: None,
         }]),
         proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/99/proof".into(),
     };
@@ -130,6 +134,8 @@ fn test_golden_publish_baseline() {
             status: "baseline_created".into(),
             delta: None,
             message: None,
+            origin: None,
+            engine: None,
         }]),
         proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/1/proof".into(),
     };
@@ -220,6 +226,8 @@ fn test_assertion_result_schema() {
         status: "pass".into(),
         delta: None,
         message: None,
+        origin: None,
+        engine: None,
     };
 
     let fail = AssertionResult {
@@ -231,6 +239,8 @@ fn test_assertion_result_schema() {
         status: "fail".into(),
         delta: Some("50".into()),
         message: None,
+        origin: None,
+        engine: None,
     };
 
     let pass_json = serde_json::to_value(&pass).unwrap();
@@ -243,4 +253,47 @@ fn test_assertion_result_schema() {
     let fail_json = serde_json::to_value(&fail).unwrap();
     assert_eq!(fail_json["status"], "fail");
     assert_eq!(fail_json["delta"], "50");
+}
+
+#[test]
+fn test_golden_publish_cell_assertion_pass() {
+    let result = RunResult {
+        run_id: "100".into(),
+        version: 2,
+        status: "verified".into(),
+        check_status: Some("pass".into()),
+        diff_summary: None,
+        row_count: None,
+        col_count: None,
+        content_hash: None,
+        source_metadata: None,
+        assertions: Some(vec![AssertionResult {
+            kind: "cell".into(),
+            column: "summary!B7".into(),
+            expected: Some("0".into()),
+            actual: Some("4520".into()),
+            tolerance: Some("10000".into()),
+            status: "pass".into(),
+            delta: None,
+            message: None,
+            origin: Some("client".into()),
+            engine: Some(EngineMetadata {
+                name: "visigrid-engine".into(),
+                version: "0.1.0".into(),
+                fingerprint: None,
+            }),
+        }]),
+        proof_url: "https://api.visihub.app/api/repos/acme/recon/runs/100/proof".into(),
+    };
+
+    validate_golden_keys("tests/golden/publish-cell-pass.json", &result);
+
+    let json = serde_json::to_value(&result).unwrap();
+    assert_eq!(json["check_status"], "pass");
+    assert_eq!(json["status"], "verified");
+    assert_eq!(json["assertions"][0]["kind"], "cell");
+    assert_eq!(json["assertions"][0]["status"], "pass");
+    assert_eq!(json["assertions"][0]["origin"], "client");
+    assert!(json["assertions"][0]["engine"].is_object());
+    assert_eq!(json["assertions"][0]["engine"]["name"], "visigrid-engine");
 }

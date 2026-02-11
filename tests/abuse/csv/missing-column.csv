@@ -1,0 +1,3 @@
+effective_date,posted_date,currency,type,source,source_id,group_id,description
+2026-01-15,2026-01-15,USD,charge,stripe,ch_001,po_001,Widget sale
+2026-01-15,2026-01-15,USD,charge,stripe,ch_002,po_001,Gadget sale

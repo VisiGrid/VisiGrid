@@ -2,6 +2,7 @@
 // See docs/cli-v1.md for specification
 
 mod exit_codes;
+mod fill;
 mod hub;
 mod replay;
 mod session;
@@ -398,6 +399,8 @@ Examples:
 Examples:
   visigrid peek data.csv
   visigrid peek sales.tsv --headers
+  visigrid peek recon.sheet                      # .sheet workbook (multi-tab)
+  visigrid peek recon.sheet --sheet summary       # open specific sheet
   visigrid peek huge.csv --max-rows 10000
   visigrid peek data.csv --max-rows 0 --force   # load all rows
   visigrid peek data.csv --shape                 # print file shape and exit
@@ -522,6 +525,12 @@ Examples:
         #[arg(long = "assert-sum", value_name = "COL:EXPECTED[:TOLERANCE]")]
         assert_sum: Vec<String>,
 
+        /// Assert a computed cell value in a .sheet file (repeatable).
+        /// Format: sheet!cell:expected[:tolerance]
+        /// Example: --assert-cell summary!B7:0:10000
+        #[arg(long = "assert-cell", value_name = "SHEET!CELL:EXPECTED[:TOLERANCE]")]
+        assert_cell: Vec<String>,
+
         /// Reset integrity baseline (use when schema changes are intentional)
         #[arg(long)]
         reset_baseline: bool,
@@ -541,6 +550,56 @@ Examples:
         /// Strict mode: all check policies set to fail
         #[arg(long)]
         strict: bool,
+    },
+
+    /// Fill a .sheet template with CSV data (strict financial parsing)
+    #[command(after_help = "\
+Loads CSV data into a .sheet template at a target cell. Uses strict numeric \
+parsing: integers and exact 2-decimal amounts only. Rejects currency symbols, \
+commas in numbers, and formula injection. All other values are treated as text.
+
+Exit codes:
+  0   Success
+  2   Bad arguments (invalid target, missing flags)
+  3   IO error (file not found, write failure)
+  4   Parse error (CSV format violation)
+
+Examples:
+  vgrid fill model.sheet --csv data.csv --target tx!A1 --headers --out filled.sheet
+  vgrid fill model.sheet --csv data.csv --target A1 --out filled.sheet
+  vgrid fill model.sheet --csv data.csv --target tx!A1 --headers --clear --out filled.sheet
+  vgrid fill model.sheet --csv data.csv --target tx!A1 --headers --out filled.sheet --json")]
+    Fill {
+        /// Input .sheet template file
+        template: PathBuf,
+
+        /// CSV file to load
+        #[arg(long)]
+        csv: PathBuf,
+
+        /// Target cell, sheet-prefixed (e.g., tx!A1)
+        #[arg(long)]
+        target: String,
+
+        /// First CSV row is headers
+        #[arg(long)]
+        headers: bool,
+
+        /// Clear all data cells on the target sheet before filling
+        #[arg(long)]
+        clear: bool,
+
+        /// Output .sheet file path
+        #[arg(long)]
+        out: PathBuf,
+
+        /// CSV delimiter (default: comma)
+        #[arg(long, default_value = ",")]
+        delimiter: char,
+
+        /// Output JSON result
+        #[arg(long)]
+        json: bool,
     },
 
     /// Sheet file operations (headless build/inspect/verify)
@@ -1136,21 +1195,24 @@ fn main() -> ExitCode {
             cmd_view(session, range, sheet, follow, width)
         }
         Some(Commands::Peek {
-            file, headers, no_headers: _, sheet: _, max_rows,
+            file, headers, no_headers: _, sheet, max_rows,
             force, width_scan_rows, shape, plain, delimiter,
         }) => {
-            cmd_peek(file, headers, max_rows, force, width_scan_rows, shape, plain, delimiter)
+            cmd_peek(file, headers, sheet, max_rows, force, width_scan_rows, shape, plain, delimiter)
         }
         Some(Commands::Login { token, api_base }) => hub::cmd_login(token, api_base),
+        Some(Commands::Fill {
+            template, csv, target, headers, clear, out, delimiter, json,
+        }) => fill::cmd_fill(template, csv, target, headers, clear, out, delimiter, json),
         Some(Commands::Publish {
             file, repo, dataset, source_type, source_identity, query_hash,
             wait, no_wait, fail_on_check_failure, no_fail, output, assert_sum,
-            reset_baseline, row_count_policy, columns_added_policy,
+            assert_cell, reset_baseline, row_count_policy, columns_added_policy,
             columns_removed_policy, strict,
         }) => hub::cmd_publish(
             file, repo, dataset, source_type, source_identity, query_hash,
             wait && !no_wait, fail_on_check_failure && !no_fail, output, assert_sum,
-            reset_baseline, row_count_policy, columns_added_policy,
+            assert_cell, reset_baseline, row_count_policy, columns_added_policy,
             columns_removed_policy, strict,
         ),
         Some(Commands::Sheet(sheet_cmd)) => match sheet_cmd {
@@ -3410,6 +3472,7 @@ fn parse_delimiter(s: &str) -> Result<u8, CliError> {
 fn cmd_peek(
     file: PathBuf,
     headers: bool,
+    sheet: Option<String>,
     max_rows: usize,
     force: bool,
     width_scan_rows: usize,
@@ -3423,6 +3486,11 @@ fn cmd_peek(
         .unwrap_or("")
         .to_lowercase();
 
+    // .sheet files use a completely separate path
+    if ext == "sheet" {
+        return cmd_peek_sheet(file, sheet, width_scan_rows, shape, plain);
+    }
+
     let delimiter = if let Some(ref d) = delimiter_override {
         parse_delimiter(d)?
     } else {
@@ -3431,7 +3499,7 @@ fn cmd_peek(
             "csv" | "txt" | "" => b',',
             other => {
                 return Err(CliError::args(format!(
-                    "unsupported file extension '.{}' (supported: csv, tsv, txt)\n\
+                    "unsupported file extension '.{}' (supported: csv, tsv, txt, sheet)\n\
                      hint: use --delimiter to specify a custom delimiter",
                     other
                 )));
@@ -3475,6 +3543,82 @@ fn cmd_peek(
         .to_string();
 
     tui::run(data, file_name).map_err(|e| CliError::io(e))
+}
+
+fn cmd_peek_sheet(
+    file: PathBuf,
+    sheet: Option<String>,
+    width_scan_rows: usize,
+    shape: bool,
+    plain: bool,
+) -> Result<(), CliError> {
+    let sheets = tui::data::load_sheet(&file, width_scan_rows)
+        .map_err(|e| CliError::io(e))?;
+
+    if sheets.is_empty() {
+        return Err(CliError::io("workbook has no sheets".to_string()));
+    }
+
+    // Resolve initial sheet from --sheet arg (name or 0-based index)
+    let initial_sheet = if let Some(ref s) = sheet {
+        if let Ok(idx) = s.parse::<usize>() {
+            if idx >= sheets.len() {
+                return Err(CliError::args(format!(
+                    "sheet index {} out of range (workbook has {} sheets)",
+                    idx, sheets.len()
+                )));
+            }
+            idx
+        } else {
+            sheets.iter().position(|sd| sd.name.eq_ignore_ascii_case(s))
+                .ok_or_else(|| {
+                    let names: Vec<&str> = sheets.iter().map(|sd| sd.name.as_str()).collect();
+                    CliError::args(format!(
+                        "sheet '{}' not found (available: {})",
+                        s, names.join(", ")
+                    ))
+                })?
+        }
+    } else {
+        0
+    };
+
+    if shape {
+        return cmd_peek_sheet_shape(&sheets, &file);
+    }
+
+    if plain {
+        if sheets.len() > 1 {
+            for (i, sd) in sheets.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                }
+                println!("--- {} ---", sd.name);
+                tui::print_plain(&sd.data, 0).map_err(|e| CliError::io(e))?;
+            }
+            return Ok(());
+        }
+        return tui::print_plain(&sheets[initial_sheet].data, 0).map_err(|e| CliError::io(e));
+    }
+
+    let file_name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    tui::run_multi(sheets, file_name, initial_sheet).map_err(|e| CliError::io(e))
+}
+
+fn cmd_peek_sheet_shape(sheets: &[tui::data::SheetData], file: &std::path::Path) -> Result<(), CliError> {
+    println!("file:       {}", file.display());
+    println!("format:     sheet (VisiGrid workbook)");
+    println!("sheets:     {}", sheets.len());
+    println!();
+    for (i, sd) in sheets.iter().enumerate() {
+        println!("  [{}] {:?}: {} rows x {} cols", i, sd.name, sd.data.num_rows, sd.data.num_cols);
+    }
+    Ok(())
 }
 
 fn cmd_peek_shape(data: &tui::data::PeekData, file: &std::path::Path) -> Result<(), CliError> {
