@@ -224,3 +224,156 @@ sheet:clear_style("A1:C5")
 5. **Meta does affect fingerprint** — use it for semantic tagging
 6. **Use grid.* for multi-sheet** — default API only writes to Sheet1
 7. **Prefer semantic styles over formatting** — `sheet:error("A1")` over `style("A1", { bg = "red" })`
+
+---
+
+## CLI Quick Reference
+
+Beyond `sheet apply` / `inspect` / `fingerprint` / `verify`, agents have access to these commands:
+
+### `vgrid calc` — Evaluate formulas on piped data
+
+Pipe CSV/TSV/JSON into stdin and evaluate a spreadsheet formula against it.
+
+```bash
+cat data.csv | vgrid calc "=SUM(B:B)" --from csv --headers
+cat data.csv | vgrid calc "=AVERAGE(C2:C100)" --from csv --into A1
+# Array results require --spill
+cat data.csv | vgrid calc "=FILTER(A:C, B:B>1000)" --from csv --headers --spill csv
+```
+
+**Key flags:** `--from` (required: csv, tsv, json, lines, xlsx), `--headers`, `--into` (default A1), `--spill` (csv or json for array results)
+
+### `vgrid convert` — Format conversion with filtering
+
+Convert between formats with optional row filtering (`--where`) and column selection (`--select`).
+
+```bash
+vgrid convert sales.csv -t json --headers
+vgrid convert data.xlsx -t csv --sheet "Q1" --headers --where "region=North" --select date,amount
+vgrid convert report.sheet -t tsv --sheet 0
+```
+
+**Where operators:** `col=val` (equals), `col!=val`, `col<num`, `col>num`, `col~substr` (case-insensitive contains)
+
+**Key flags:** `--from` (required for stdin), `--to` (required), `--headers`, `--where` (repeatable), `--select` (repeatable), `--sheet`, `-o` output file, `-q` quiet
+
+### `vgrid diff` — Dataset reconciliation
+
+Compare two datasets by key column with optional fuzzy matching and numeric tolerance.
+
+```bash
+vgrid diff expected.csv actual.csv --key id --no-fail --out json
+vgrid diff orders.csv invoices.csv --key Invoice --match contains \
+  --contains-column description --key-transform alnum --no-fail --out json
+vgrid diff budget.csv actuals.csv --key account --tolerance 0.01 --no-fail --out json
+```
+
+**Key flags:** `--key` (required), `--match` (exact or contains), `--key-transform` (none, trim, digits, alnum), `--tolerance`, `--compare` (columns to compare), `--no-fail`, `--out` (json or csv), `--on-duplicate`, `--on-ambiguous`, `--save-ambiguous`
+
+### `vgrid fill` — Fill a .sheet template with CSV data
+
+Inject CSV rows into a pre-built .sheet at a target cell.
+
+```bash
+vgrid fill template.sheet --csv data.csv --target A2 --headers --out filled.sheet --json
+vgrid fill template.sheet --csv data.csv --target "Details!A2" --headers --clear --out filled.sheet --json
+```
+
+**Key flags:** `--csv` (required), `--target` (required, optionally sheet-prefixed: `Sheet2!A1`), `--out` (required), `--headers`, `--clear` (clear data cells before filling), `--json`
+
+### `vgrid replay` — Replay/verify provenance scripts
+
+Re-execute a Lua script and optionally verify the output matches a recorded fingerprint.
+
+```bash
+vgrid replay build.lua -o model.sheet
+vgrid replay build.lua --verify --fingerprint
+vgrid replay build.lua -o model.sheet -f sheet --quiet
+```
+
+**Key flags:** `--verify` (verify fingerprint from script header), `-o` output file, `-f` output format, `--fingerprint` (print fingerprint and exit), `-q` quiet
+
+### `vgrid peek` — Quick terminal inspection
+
+View a file in the terminal. Use `--shape` and `--plain` for non-interactive (agent-friendly) output.
+
+```bash
+vgrid peek data.csv --headers --shape          # Print row/col counts only
+vgrid peek data.csv --headers --plain          # Print table to stdout (no TUI)
+vgrid peek report.sheet --sheet "Summary" --plain --max-rows 50
+```
+
+**Key flags:** `--shape` (print dimensions, exit), `--plain` (stdout table, no TUI), `--headers`, `--sheet`, `--max-rows` (default 5000)
+
+---
+
+## Agent-Specific Patterns
+
+### Structured output and error handling
+
+- **Always use `--no-fail`** on `diff` so the command exits 0 even when differences exist
+- **Always use `--json`** (or `--out json`) to get structured output agents can parse
+- **Never rely on exit codes** to determine whether data was returned — parse the JSON output
+- Parse errors still exit non-zero (exit 5 for parse errors, exit 2 for bad arguments)
+
+### Key transforms for ID normalization
+
+When matching keys across datasets with inconsistent formatting:
+
+- `--key-transform trim` — Strip leading/trailing whitespace
+- `--key-transform digits` — Extract only ASCII digits (e.g., "INV-00123" → "00123")
+- `--key-transform alnum` — Strip non-ASCII-alphanumeric and uppercase (best default for agent workflows)
+
+### Inspecting workbooks
+
+```bash
+# Discover sheets
+vgrid sheet inspect model.sheet --sheets --json
+
+# Dump non-empty cells with formulas (sparse)
+vgrid sheet inspect model.sheet --sheet "Forecast" --non-empty --json
+
+# Inspect a specific range
+vgrid sheet inspect model.sheet --sheet 1 A1:M100 --non-empty --json
+
+# Stream large output as newline-delimited JSON
+vgrid sheet inspect model.sheet --sheet "Forecast" --non-empty --ndjson
+```
+
+---
+
+## Pipeline Composition
+
+Chain commands via pipes for multi-step data workflows.
+
+### Filter then compute
+
+```bash
+# Select rows and columns, then compute an aggregate
+vgrid convert sales.csv -t csv --headers --where "region=North" --select amount \
+  | vgrid calc "=SUM(A:A)" --from csv --headers
+```
+
+### Reshape then reconcile
+
+```bash
+# Normalize both sides, then diff
+vgrid convert raw_orders.csv -t csv --headers --select id,total \
+  > /tmp/orders_clean.csv
+vgrid diff /tmp/orders_clean.csv invoices.csv --key id --tolerance 0.01 --no-fail --out json
+```
+
+### Build template then fill
+
+```bash
+# Step 1: Build template with headers, formulas, and styling
+vgrid sheet apply template.sheet --lua fill_template.lua --json
+
+# Step 2: Fill with data (headers row excluded, data starts at A2)
+vgrid fill template.sheet --csv data.csv --target A2 --headers --out filled.sheet --json
+```
+
+### Full pipeline: convert → diff → calc → build
+
+See `pipeline_demo.sh` for a self-contained example combining all four stages.
