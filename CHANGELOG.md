@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.1
+
+### CLI
+
+- **`vgrid peek` xlsx/ods support** — peek now opens Excel (.xlsx) and OpenDocument (.ods) workbooks using calamine import. Shows cached cell values by default (fast); `--recompute` flag triggers full engine recalc. Multi-sheet navigation with `--sheet` (name or index).
+- **Unified safety caps** — all peek formats (csv, tsv, sheet, xlsx, ods) now enforce the same 200k row guard with `--max-rows 0`. Cell-count guard (10M cells) for xlsx/ods prevents catastrophic allocation from "used range" formatting artifacts. `--force` overrides both.
+- **Multi-sheet hint** — when `--sheet` is not specified on a multi-sheet workbook, peek prints available sheet names to stderr.
+- **Bbox filtering** — xlsx/ods bounding box computed from non-empty cell values only, ignoring format-only cells that inflate the used range.
+
+### Docs
+
+- **peek.md rewrite** — format support table, multi-sheet behavior, safety limits, xlsx shape output examples.
+- **Agent patterns** — new "Quick file inspection" section in agents.md with peek patterns and peek vs `sheet inspect` guidance.
+
+### Housekeeping
+
+- Updated installer URLs to `get.visigrid.app/install.sh`.
+- Updated homebrew-tap submodule and dispatch repo name.
+- Removed deferred array-semantics spec.
+- 8 new integration tests for peek safety caps.
+
 ## 0.7.0
 
 ### Lua Debugger
