@@ -409,6 +409,10 @@ Examples:
 Examples:
   visigrid peek data.csv
   visigrid peek sales.tsv --headers
+  visigrid peek report.xlsx                      # Excel workbook (multi-tab)
+  visigrid peek report.xlsx --sheet summary       # open specific sheet
+  visigrid peek data.ods                          # OpenDocument spreadsheet
+  visigrid peek report.xlsx --recompute           # recompute formulas (slow)
   visigrid peek recon.sheet                      # .sheet workbook (multi-tab)
   visigrid peek recon.sheet --sheet summary       # open specific sheet
   visigrid peek huge.csv --max-rows 10000
@@ -416,7 +420,10 @@ Examples:
   visigrid peek data.csv --shape                 # print file shape and exit
   visigrid peek data.csv --delimiter ';'         # semicolon-separated
   visigrid peek data.csv --delimiter tab         # tab, comma, pipe, semicolon
-  visigrid peek data.csv --plain                 # print table to stdout")]
+  visigrid peek data.csv --plain                 # print table to stdout
+
+Safety: preview is capped by row count (200k) and cell count (10M for xlsx/ods). \
+Use --force to override.")]
     Peek {
         /// File to view
         file: PathBuf,
@@ -432,7 +439,7 @@ Examples:
         /// Maximum rows to load (default: 5000; use --max-rows 0 for all)
         #[arg(long, default_value = "5000")]
         max_rows: usize,
-        /// Allow loading >200k rows with --max-rows 0 (memory safety override)
+        /// Override safety limits (>200k rows or >10M cells in workbooks)
         #[arg(long)]
         force: bool,
         /// Rows to scan for column width sizing (0 = all loaded rows)
@@ -447,6 +454,9 @@ Examples:
         /// Override delimiter: single char, or name (tab, comma, pipe, semicolon)
         #[arg(long)]
         delimiter: Option<String>,
+        /// Recompute formulas after import (xlsx/ods only; default: show cached values)
+        #[arg(long)]
+        recompute: bool,
     },
 
     /// Authenticate with VisiHub
@@ -1228,9 +1238,9 @@ fn main() -> ExitCode {
         }
         Some(Commands::Peek {
             file, headers, no_headers: _, sheet, max_rows,
-            force, width_scan_rows, shape, plain, delimiter,
+            force, width_scan_rows, shape, plain, delimiter, recompute,
         }) => {
-            cmd_peek(file, headers, sheet, max_rows, force, width_scan_rows, shape, plain, delimiter)
+            cmd_peek(file, headers, sheet, max_rows, force, width_scan_rows, shape, plain, delimiter, recompute)
         }
         Some(Commands::Login { token, api_base }) => hub::cmd_login(token, api_base),
         Some(Commands::Fill {
@@ -3536,6 +3546,7 @@ fn cmd_peek(
     shape: bool,
     plain: bool,
     delimiter_override: Option<String>,
+    recompute: bool,
 ) -> Result<(), CliError> {
     let ext = file
         .extension()
@@ -3545,7 +3556,12 @@ fn cmd_peek(
 
     // .sheet files use a completely separate path
     if ext == "sheet" {
-        return cmd_peek_sheet(file, sheet, width_scan_rows, shape, plain);
+        return cmd_peek_sheet(file, sheet, max_rows, force, width_scan_rows, shape, plain);
+    }
+
+    // xlsx/ods use the workbook import path
+    if ext == "xlsx" || ext == "ods" {
+        return cmd_peek_workbook(file, sheet, max_rows, force, width_scan_rows, shape, plain, recompute);
     }
 
     let delimiter = if let Some(ref d) = delimiter_override {
@@ -3556,8 +3572,8 @@ fn cmd_peek(
             "csv" | "txt" | "" => b',',
             other => {
                 return Err(CliError::args(format!(
-                    "unsupported file extension '.{}' (supported: csv, tsv, txt, sheet)\n\
-                     hint: use --delimiter to specify a custom delimiter",
+                    "unsupported file extension '.{}' (supported: csv, tsv, txt, xlsx, ods, sheet)\n\
+                     hint: use --delimiter to specify a custom delimiter for delimited text files",
                     other
                 )));
             }
@@ -3605,40 +3621,41 @@ fn cmd_peek(
 fn cmd_peek_sheet(
     file: PathBuf,
     sheet: Option<String>,
+    max_rows: usize,
+    force: bool,
     width_scan_rows: usize,
     shape: bool,
     plain: bool,
 ) -> Result<(), CliError> {
-    let sheets = tui::data::load_sheet(&file, width_scan_rows)
+    // Safety cap: same pattern as CSV/workbook paths
+    let effective_max = if max_rows == 0 && !force {
+        PEEK_FORCE_CAP + 1
+    } else {
+        max_rows
+    };
+
+    let sheets = tui::data::load_sheet(&file, effective_max, width_scan_rows)
         .map_err(|e| CliError::io(e))?;
 
     if sheets.is_empty() {
         return Err(CliError::io("workbook has no sheets".to_string()));
     }
 
-    // Resolve initial sheet from --sheet arg (name or 0-based index)
-    let initial_sheet = if let Some(ref s) = sheet {
-        if let Ok(idx) = s.parse::<usize>() {
-            if idx >= sheets.len() {
+    // Check safety cap: if any sheet exceeded the cap, reject
+    if max_rows == 0 && !force {
+        for sd in &sheets {
+            if sd.data.num_rows > PEEK_FORCE_CAP {
                 return Err(CliError::args(format!(
-                    "sheet index {} out of range (workbook has {} sheets)",
-                    idx, sheets.len()
+                    "sheet '{}' has >{}k rows; --max-rows 0 would load them all into memory\n\
+                     hint: use --force to override, or set --max-rows to a specific limit",
+                    sd.name, PEEK_FORCE_CAP / 1000,
                 )));
             }
-            idx
-        } else {
-            sheets.iter().position(|sd| sd.name.eq_ignore_ascii_case(s))
-                .ok_or_else(|| {
-                    let names: Vec<&str> = sheets.iter().map(|sd| sd.name.as_str()).collect();
-                    CliError::args(format!(
-                        "sheet '{}' not found (available: {})",
-                        s, names.join(", ")
-                    ))
-                })?
         }
-    } else {
-        0
-    };
+    }
+
+    // Resolve initial sheet from --sheet arg (name or 0-based index)
+    let initial_sheet = resolve_peek_sheet(&sheet, &sheets)?;
 
     if shape {
         return cmd_peek_sheet_shape(&sheets, &file);
@@ -3665,6 +3682,136 @@ fn cmd_peek_sheet(
         .to_string();
 
     tui::run_multi(sheets, file_name, initial_sheet).map_err(|e| CliError::io(e))
+}
+
+fn cmd_peek_workbook(
+    file: PathBuf,
+    sheet: Option<String>,
+    max_rows: usize,
+    force: bool,
+    width_scan_rows: usize,
+    shape: bool,
+    plain: bool,
+    recompute: bool,
+) -> Result<(), CliError> {
+    if recompute {
+        eprintln!("peek: recompute enabled; may be slow on large workbooks");
+    }
+
+    // Safety cap: same pattern as CSV path
+    let effective_max = if max_rows == 0 && !force {
+        PEEK_FORCE_CAP + 1
+    } else {
+        max_rows
+    };
+
+    let sheets = tui::data::load_workbook_peek(&file, effective_max, width_scan_rows, recompute, force)
+        .map_err(|e| CliError::io(e))?;
+
+    if sheets.is_empty() {
+        return Err(CliError::io("workbook has no sheets".to_string()));
+    }
+
+    // Check safety cap: if any sheet exceeded the cap, reject
+    if max_rows == 0 && !force {
+        for sd in &sheets {
+            if sd.data.num_rows > PEEK_FORCE_CAP {
+                return Err(CliError::args(format!(
+                    "sheet '{}' has >{}k rows; --max-rows 0 would load them all into memory\n\
+                     hint: use --force to override, or set --max-rows to a specific limit",
+                    sd.name, PEEK_FORCE_CAP / 1000,
+                )));
+            }
+        }
+    }
+
+    // Resolve initial sheet from --sheet arg (name or 0-based index)
+    let initial_sheet = resolve_peek_sheet(&sheet, &sheets)?;
+
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    if shape {
+        return cmd_peek_workbook_shape(&sheets, &file, ext);
+    }
+
+    if plain {
+        if sheets.len() > 1 {
+            for (i, sd) in sheets.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                }
+                println!("--- {} ---", sd.name);
+                tui::print_plain(&sd.data, 0).map_err(|e| CliError::io(e))?;
+            }
+            return Ok(());
+        }
+        return tui::print_plain(&sheets[initial_sheet].data, 0).map_err(|e| CliError::io(e));
+    }
+
+    let file_name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    tui::run_multi(sheets, file_name, initial_sheet).map_err(|e| CliError::io(e))
+}
+
+fn cmd_peek_workbook_shape(sheets: &[tui::data::SheetData], file: &std::path::Path, ext: &str) -> Result<(), CliError> {
+    let format_name = match ext.to_lowercase().as_str() {
+        "xlsx" => "xlsx (Excel)",
+        "ods" => "ods (OpenDocument)",
+        _ => ext,
+    };
+    println!("file:       {}", file.display());
+    println!("format:     {}", format_name);
+    println!("sheets:     {}", sheets.len());
+    println!();
+    for (i, sd) in sheets.iter().enumerate() {
+        println!("  [{}] {:?}: {} rows x {} cols", i, sd.name, sd.data.num_rows, sd.data.num_cols);
+    }
+    Ok(())
+}
+
+/// Resolve --sheet arg to a sheet index.  When no --sheet is given and the
+/// workbook has multiple sheets, prints a hint to stderr so the user knows
+/// they're seeing the first sheet by default.
+///
+/// NOTE: the stderr hint here (and the --recompute hint in cmd_peek_workbook)
+/// must be suppressed if peek ever gains --quiet or --json flags.
+fn resolve_peek_sheet(
+    sheet: &Option<String>,
+    sheets: &[tui::data::SheetData],
+) -> Result<usize, CliError> {
+    if let Some(ref s) = sheet {
+        if let Ok(idx) = s.parse::<usize>() {
+            if idx >= sheets.len() {
+                return Err(CliError::args(format!(
+                    "sheet index {} out of range (workbook has {} sheets)",
+                    idx, sheets.len()
+                )));
+            }
+            Ok(idx)
+        } else {
+            sheets.iter().position(|sd| sd.name.eq_ignore_ascii_case(s))
+                .ok_or_else(|| {
+                    let names: Vec<&str> = sheets.iter().map(|sd| sd.name.as_str()).collect();
+                    CliError::args(format!(
+                        "sheet '{}' not found (available: {})",
+                        s, names.join(", ")
+                    ))
+                })
+        }
+    } else {
+        if sheets.len() > 1 {
+            let names: Vec<&str> = sheets.iter().map(|sd| sd.name.as_str()).collect();
+            eprintln!(
+                "peek: {} sheets found; showing '{}' (use --sheet to select: {})",
+                sheets.len(), names[0], names.join(", ")
+            );
+        }
+        Ok(0)
+    }
 }
 
 fn cmd_peek_sheet_shape(sheets: &[tui::data::SheetData], file: &std::path::Path) -> Result<(), CliError> {
