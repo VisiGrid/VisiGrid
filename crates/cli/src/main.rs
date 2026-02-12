@@ -669,7 +669,10 @@ Examples:
   visigrid sheet inspect model.sheet A1:D10
   visigrid sheet inspect model.sheet --workbook
   visigrid sheet inspect model.sheet A1 --json
-  visigrid sheet inspect model.sheet A1 --include-style")]
+  visigrid sheet inspect model.sheet A1 --include-style
+  visigrid sheet inspect model.sheet --sheets --json
+  visigrid sheet inspect model.sheet --sheet 1 A1:M100 --json
+  visigrid sheet inspect model.sheet --sheet Forecast --non-empty --json")]
     Inspect {
         /// Path to .sheet file
         file: PathBuf,
@@ -681,6 +684,18 @@ Examples:
         #[arg(long)]
         workbook: bool,
 
+        /// Select sheet by index (0-based) or name (case-insensitive)
+        #[arg(long)]
+        sheet: Option<String>,
+
+        /// List all sheets with dimensions and cell counts
+        #[arg(long)]
+        sheets: bool,
+
+        /// Only include non-empty cells (sparse output)
+        #[arg(long)]
+        non_empty: bool,
+
         /// Include style information
         #[arg(long)]
         include_style: bool,
@@ -688,6 +703,10 @@ Examples:
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Output as newline-delimited JSON (one object per line, streamable)
+        #[arg(long)]
+        ndjson: bool,
     },
 
     /// Verify a .sheet file's semantic fingerprint
@@ -1219,8 +1238,8 @@ fn main() -> ExitCode {
             SheetCommands::Apply { output, lua, verify, stamp, dry_run, json } => {
                 cmd_sheet_apply(output, lua, verify, stamp, dry_run, json)
             }
-            SheetCommands::Inspect { file, target, workbook, include_style, json } => {
-                cmd_sheet_inspect(file, target, workbook, include_style, json)
+            SheetCommands::Inspect { file, target, workbook, sheet, sheets, non_empty, include_style, json, ndjson } => {
+                cmd_sheet_inspect(file, target, workbook, sheet, sheets, non_empty, include_style, json, ndjson)
             }
             SheetCommands::Verify { file, fingerprint } => {
                 cmd_sheet_verify(file, fingerprint)
@@ -1330,7 +1349,7 @@ fn cmd_convert(
     from: Option<Format>,
     to: Format,
     output: Option<PathBuf>,
-    _sheet: Option<String>,
+    sheet_arg: Option<String>,
     delimiter: char,
     headers: bool,
     where_clauses: Vec<String>,
@@ -1359,9 +1378,15 @@ fn cmd_convert(
         (Some(_), Some(f)) => f, // --from overrides extension
     };
 
+    // Validate --sheet is only used with multi-sheet formats
+    if sheet_arg.is_some() && !matches!(input_format, Format::Xlsx | Format::Sheet) {
+        return Err(CliError::args("--sheet is not supported for single-sheet formats")
+            .with_hint("--sheet works with .sheet and .xlsx files"));
+    }
+
     // Read input into sheet (convert always starts at A1)
     let sheet = match &input {
-        Some(path) => read_file(path, input_format, delimiter)?,
+        Some(path) => read_file(path, input_format, delimiter, sheet_arg.as_deref())?,
         None => read_stdin(input_format, delimiter, 0, 0)?,
     };
 
@@ -1462,7 +1487,7 @@ fn infer_format(path: &PathBuf) -> Result<Format, CliError> {
     }
 }
 
-fn read_file(path: &PathBuf, format: Format, _delimiter: char) -> Result<visigrid_engine::sheet::Sheet, CliError> {
+fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_arg: Option<&str>) -> Result<visigrid_engine::sheet::Sheet, CliError> {
     // TODO: Use custom delimiter when io crate supports it
     match format {
         Format::Csv => {
@@ -1476,14 +1501,14 @@ fn read_file(path: &PathBuf, format: Format, _delimiter: char) -> Result<visigri
         Format::Xlsx => {
             let (workbook, _stats) = visigrid_io::xlsx::import(path)
                 .map_err(|e| CliError::parse(e))?;
-            // Return the first sheet (clone it since we can't move out of workbook)
-            workbook.sheet(0)
-                .cloned()
-                .ok_or_else(|| CliError::parse("xlsx file has no sheets"))
+            let (_, sheet) = resolve_sheet(&workbook, sheet_arg)?;
+            Ok(sheet.clone())
         }
         Format::Sheet => {
-            visigrid_io::native::load(path)
-                .map_err(|e| CliError::io(e))
+            let workbook = visigrid_io::native::load_workbook(path)
+                .map_err(|e| CliError::io(e))?;
+            let (_, sheet) = resolve_sheet(&workbook, sheet_arg)?;
+            Ok(sheet.clone())
         }
         Format::Json => {
             let content = std::fs::read_to_string(path)
@@ -2363,7 +2388,7 @@ fn cmd_diff(
         let p = left_path.as_ref().unwrap();
         let fmt = infer_format(p)?;
         let label = p.display().to_string();
-        (read_file(p, fmt, delimiter)?, label)
+        (read_file(p, fmt, delimiter, None)?, label)
     };
 
     let (right_sheet, right_label) = if right_is_stdin {
@@ -2373,7 +2398,7 @@ fn cmd_diff(
         let p = right_path.as_ref().unwrap();
         let fmt = infer_format(p)?;
         let label = p.display().to_string();
-        (read_file(p, fmt, delimiter)?, label)
+        (read_file(p, fmt, delimiter, None)?, label)
     };
 
     let (left_bounds_rows, left_bounds_cols) = get_data_bounds(&left_sheet);
@@ -3943,13 +3968,76 @@ fn cmd_sheet_apply(
     Ok(())
 }
 
+/// Resolve a `--sheet` argument to (index, &Sheet).
+///
+/// - `None` → sheet 0
+/// - Numeric string → `workbook.sheet(n)`
+/// - Otherwise → case-insensitive name lookup
+fn resolve_sheet<'a>(
+    workbook: &'a visigrid_engine::workbook::Workbook,
+    sheet_arg: Option<&str>,
+) -> Result<(usize, &'a visigrid_engine::sheet::Sheet), CliError> {
+    let names = || -> String {
+        workbook.sheet_names().iter().enumerate()
+            .map(|(i, n)| format!("{}: {}", i, n))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    match sheet_arg {
+        None => {
+            workbook.sheet(0)
+                .map(|s| (0, s))
+                .ok_or_else(|| CliError::io("no sheets in workbook"))
+        }
+        Some(arg) => {
+            // Try numeric index first
+            if let Ok(idx) = arg.parse::<usize>() {
+                workbook.sheet(idx)
+                    .map(|s| (idx, s))
+                    .ok_or_else(|| {
+                        CliError::args(format!(
+                            "sheet index {} out of range (0..{}). Available: {}",
+                            idx, workbook.sheet_count(), names()
+                        ))
+                    })
+            } else {
+                // Name lookup (case-insensitive via workbook API)
+                let arg_lower = arg.trim().to_ascii_lowercase();
+                let mut found = None;
+                for (i, name) in workbook.sheet_names().iter().enumerate() {
+                    if name.trim().to_ascii_lowercase() == arg_lower {
+                        found = Some(i);
+                        break;
+                    }
+                }
+                match found {
+                    Some(idx) => {
+                        Ok((idx, workbook.sheet(idx).unwrap()))
+                    }
+                    None => {
+                        Err(CliError::args(format!(
+                            "no sheet named {:?}. Available: {}",
+                            arg, names()
+                        )))
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Inspect cells/ranges in a .sheet file.
 fn cmd_sheet_inspect(
     file: PathBuf,
     target: Option<String>,
     workbook_mode: bool,
+    sheet_arg: Option<String>,
+    sheets_mode: bool,
+    non_empty: bool,
     include_style: bool,
     json: bool,
+    ndjson: bool,
 ) -> Result<(), CliError> {
     use visigrid_io::native::load_workbook;
 
@@ -3961,13 +4049,60 @@ fn cmd_sheet_inspect(
     workbook.rebuild_dep_graph();
     workbook.recompute_full_ordered();
 
-    if workbook_mode || target.is_none() {
+    // --sheets: list all sheets
+    if sheets_mode {
+        let mut entries = Vec::new();
+        for i in 0..workbook.sheet_count() {
+            let s = workbook.sheet(i).unwrap();
+            let mut non_empty_cells = 0usize;
+            let mut max_row = 0usize;
+            let mut max_col = 0usize;
+            for (&(r, c), cell) in s.cells_iter() {
+                if !cell.value.raw_display().is_empty() {
+                    non_empty_cells += 1;
+                    if r + 1 > max_row { max_row = r + 1; }
+                    if c + 1 > max_col { max_col = c + 1; }
+                }
+            }
+            entries.push(sheet_ops::SheetListEntry {
+                index: i,
+                name: s.name.clone(),
+                non_empty_cells,
+                max_row,
+                max_col,
+            });
+        }
+
+        if ndjson {
+            for e in &entries {
+                println!("{}", serde_json::to_string(e).unwrap());
+            }
+        } else if json {
+            println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+        } else {
+            println!("File: {}", file.display());
+            println!("Sheets: {}", entries.len());
+            for e in &entries {
+                println!("  [{}] {:?}  ({} cells, {}x{})",
+                    e.index, e.name, e.non_empty_cells, e.max_row, e.max_col);
+            }
+        }
+        return Ok(());
+    }
+
+    if workbook_mode || (target.is_none() && !non_empty) {
         // Workbook metadata
         let fingerprint = sheet_ops::compute_sheet_fingerprint(&workbook);
-        let sheet = workbook.sheet(0);
-        let cell_count = sheet.map(|s| {
+        let cell_count = if let Some(ref sa) = sheet_arg {
+            let (_, s) = resolve_sheet(&workbook, Some(sa))?;
             s.cells_iter().filter(|(_, c)| !c.value.raw_display().is_empty()).count()
-        }).unwrap_or(0);
+        } else {
+            // Count across all sheets
+            (0..workbook.sheet_count())
+                .filter_map(|i| workbook.sheet(i))
+                .map(|s| s.cells_iter().filter(|(_, c)| !c.value.raw_display().is_empty()).count())
+                .sum()
+        };
 
         let result = sheet_ops::WorkbookInspectResult {
             fingerprint: fingerprint.to_string(),
@@ -3983,10 +4118,54 @@ fn cmd_sheet_inspect(
             println!("Sheets:      {}", result.sheet_count);
             println!("Cells:       {}", result.cell_count);
         }
+    } else if non_empty && target.is_none() {
+        // Sparse: all non-empty cells on selected sheet
+        let (idx, sheet) = resolve_sheet(&workbook, sheet_arg.as_deref())?;
+
+        let mut cells: Vec<((usize, usize), sheet_ops::CellInspectResult)> = Vec::new();
+        for (&(row, col), cell) in sheet.cells_iter() {
+            let raw_str = cell.value.raw_display();
+            if raw_str.is_empty() { continue; }
+            let display = sheet.get_display(row, col);
+            let value_type = classify_value_type(&raw_str, &display);
+            let formula = if raw_str.starts_with('=') { Some(raw_str.to_string()) } else { None };
+            cells.push(((row, col), sheet_ops::CellInspectResult {
+                cell: sheet_ops::format_cell_ref(row, col),
+                value: display,
+                formula,
+                value_type: value_type.to_string(),
+                format: None,
+            }));
+        }
+        cells.sort_by_key(|((r, c), _)| (*r, *c));
+
+        let sorted_cells: Vec<sheet_ops::CellInspectResult> = cells.into_iter().map(|(_, c)| c).collect();
+
+        if ndjson {
+            for cell in &sorted_cells {
+                println!("{}", serde_json::to_string(cell).unwrap());
+            }
+        } else {
+            let result = sheet_ops::SparseInspectResult {
+                sheet_index: idx,
+                sheet_name: sheet.name.clone(),
+                range: None,
+                cells: sorted_cells,
+            };
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            } else {
+                println!("Sheet [{}] {:?}  ({} non-empty cells)", result.sheet_index, result.sheet_name, result.cells.len());
+                for cell in &result.cells {
+                    let formula_marker = if cell.formula.is_some() { " [f]" } else { "" };
+                    println!("  {} = {}{}", cell.cell, cell.value, formula_marker);
+                }
+            }
+        }
     } else {
         let target_str = target.unwrap();
-        let sheet = workbook.sheet(0)
-            .ok_or_else(|| CliError::io("no sheets in workbook"))?;
+        let (sheet_idx, sheet) = resolve_sheet(&workbook, sheet_arg.as_deref())?;
 
         // Parse target
         let parsed = sheet_ops::parse_cell_ref(&target_str)
@@ -4005,22 +4184,59 @@ fn cmd_sheet_inspect(
 
         let (start_row, start_col, end_row, end_col) = parsed;
 
-        if start_row == end_row && start_col == end_col {
-            // Single cell
+        if non_empty {
+            // Sparse within range
+            let populated = sheet.cells_in_range(start_row, end_row, start_col, end_col);
+            let mut cells: Vec<((usize, usize), sheet_ops::CellInspectResult)> = Vec::new();
+            for (row, col) in populated {
+                let raw = sheet.get_raw(row, col);
+                if raw.is_empty() { continue; }
+                let display = sheet.get_display(row, col);
+                let value_type = classify_value_type(&raw, &display);
+                let formula = if raw.starts_with('=') { Some(raw.clone()) } else { None };
+                cells.push(((row, col), sheet_ops::CellInspectResult {
+                    cell: sheet_ops::format_cell_ref(row, col),
+                    value: display,
+                    formula,
+                    value_type: value_type.to_string(),
+                    format: None,
+                }));
+            }
+            cells.sort_by_key(|((r, c), _)| (*r, *c));
+            let sorted_cells: Vec<sheet_ops::CellInspectResult> = cells.into_iter().map(|(_, c)| c).collect();
+
+            if ndjson {
+                for cell in &sorted_cells {
+                    println!("{}", serde_json::to_string(cell).unwrap());
+                }
+            } else {
+                let result = sheet_ops::SparseInspectResult {
+                    sheet_index: sheet_idx,
+                    sheet_name: sheet.name.clone(),
+                    range: Some(target_str.to_uppercase()),
+                    cells: sorted_cells,
+                };
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                } else {
+                    println!("Sheet [{}] {:?}  range {}  ({} non-empty cells)",
+                        result.sheet_index, result.sheet_name,
+                        result.range.as_deref().unwrap_or(""),
+                        result.cells.len());
+                    for cell in &result.cells {
+                        let formula_marker = if cell.formula.is_some() { " [f]" } else { "" };
+                        println!("  {} = {}{}", cell.cell, cell.value, formula_marker);
+                    }
+                }
+            }
+        } else if start_row == end_row && start_col == end_col {
+            // Single cell (dense)
             let raw = sheet.get_raw(start_row, start_col);
             let display = sheet.get_display(start_row, start_col);
             let format = sheet.get_format(start_row, start_col);
 
-            let value_type = if raw.starts_with('=') {
-                "formula"
-            } else if display.parse::<f64>().is_ok() {
-                "number"
-            } else if display.is_empty() {
-                "empty"
-            } else {
-                "text"
-            };
-
+            let value_type = classify_value_type(&raw, &display);
             let formula = if raw.starts_with('=') { Some(raw.clone()) } else { None };
 
             let format_info = if include_style {
@@ -4060,23 +4276,14 @@ fn cmd_sheet_inspect(
                 }
             }
         } else {
-            // Range
+            // Range (dense)
             let mut cells = Vec::new();
             for row in start_row..=end_row {
                 for col in start_col..=end_col {
                     let raw = sheet.get_raw(row, col);
                     let display = sheet.get_display(row, col);
 
-                    let value_type = if raw.starts_with('=') {
-                        "formula"
-                    } else if display.parse::<f64>().is_ok() {
-                        "number"
-                    } else if display.is_empty() {
-                        "empty"
-                    } else {
-                        "text"
-                    };
-
+                    let value_type = classify_value_type(&raw, &display);
                     let formula = if raw.starts_with('=') { Some(raw.clone()) } else { None };
 
                     cells.push(sheet_ops::CellInspectResult {
@@ -4107,6 +4314,19 @@ fn cmd_sheet_inspect(
     }
 
     Ok(())
+}
+
+/// Classify a cell value type from its raw and display strings.
+fn classify_value_type(raw: &str, display: &str) -> &'static str {
+    if raw.starts_with('=') {
+        "formula"
+    } else if display.parse::<f64>().is_ok() {
+        "number"
+    } else if display.is_empty() {
+        "empty"
+    } else {
+        "text"
+    }
 }
 
 /// Verify a .sheet file's semantic fingerprint.

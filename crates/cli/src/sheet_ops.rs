@@ -511,6 +511,26 @@ pub struct WorkbookInspectResult {
     pub cell_count: usize,
 }
 
+/// Entry in the sheet list returned by `--sheets`.
+#[derive(Debug, serde::Serialize)]
+pub struct SheetListEntry {
+    pub index: usize,
+    pub name: String,
+    pub non_empty_cells: usize,
+    pub max_row: usize,
+    pub max_col: usize,
+}
+
+/// Sparse inspect result (non-empty cells only).
+#[derive(Debug, serde::Serialize)]
+pub struct SparseInspectResult {
+    pub sheet_index: usize,
+    pub sheet_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+    pub cells: Vec<CellInspectResult>,
+}
+
 /// Compute fingerprint of a .sheet file by rebuilding from cell data.
 ///
 /// This computes the fingerprint that would result from building the sheet
