@@ -31,6 +31,13 @@ pub fn render_locked_feature_panel(
     let title_owned: SharedString = title.to_string().into();
     let desc_owned: SharedString = description.to_string().into();
 
+    // Derive unique IDs from the title to prevent gpui duplicate-ID panics
+    // when multiple locked panels are rendered simultaneously.
+    let slug = title.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-");
+    let dismiss_id = ElementId::Name(format!("locked-dismiss-{slug}").into());
+    let cta_btn_id: SharedString = format!("locked-cta-{slug}").into();
+    let whats_pro_id = ElementId::Name(format!("locked-whats-pro-{slug}").into());
+
     Some(div()
         .mt_2()
         .rounded(px(6.0))
@@ -78,7 +85,7 @@ pub fn render_locked_feature_panel(
                 // Session dismiss "×"
                 .child(
                     div()
-                        .id("locked-panel-dismiss")
+                        .id(dismiss_id)
                         .ml_1()
                         .px(px(4.0))
                         .py(px(2.0))
@@ -113,12 +120,14 @@ pub fn render_locked_feature_panel(
                 .child(desc_owned)
         )
         // CTA area
-        .child(render_cta(trial, accent, text_inverse, text_muted, cx))
+        .child(render_cta(trial, cta_btn_id, whats_pro_id, accent, text_inverse, text_muted, cx))
         .into_any_element())
 }
 
 fn render_cta(
     trial: Option<visigrid_license::TrialInfo>,
+    cta_btn_id: SharedString,
+    whats_pro_id: ElementId,
     accent: Hsla,
     text_inverse: Hsla,
     text_muted: Hsla,
@@ -152,7 +161,7 @@ fn render_cta(
         _ => {
             cta = cta
                 .child(
-                    Button::new("locked-early-access-btn", "Request Early Access")
+                    Button::new(cta_btn_id, "Request Early Access")
                         .primary(accent, text_inverse)
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.show_license(cx);
@@ -160,7 +169,7 @@ fn render_cta(
                 )
                 .child(
                     div()
-                        .id("locked-whats-pro-btn")
+                        .id(whats_pro_id)
                         .text_size(px(10.0))
                         .text_color(accent)
                         .cursor_pointer()

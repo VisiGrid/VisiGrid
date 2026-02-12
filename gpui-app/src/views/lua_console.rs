@@ -1339,23 +1339,58 @@ mod debug_ui {
 
     /// Idle help text shown when no debug session is active.
     pub(super) fn render_idle_help(text_muted: Hsla) -> Div {
+        let kbd_bg = text_muted.opacity(0.1);
+        let kbd_border = text_muted.opacity(0.2);
+
+        let kbd = |key: &'static str, label: &'static str| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .px(px(5.0))
+                        .py(px(1.0))
+                        .rounded(px(3.0))
+                        .bg(kbd_bg)
+                        .border_1()
+                        .border_color(kbd_border)
+                        .text_size(px(10.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(key)
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(text_muted.opacity(0.6))
+                        .child(label)
+                )
+        };
+
         div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
-            .py_2()
-            .px_2()
-            .text_xs()
+            .gap(px(8.0))
+            .py_3()
+            .px_3()
             .text_color(text_muted.opacity(0.7))
-            .child("Enter a script in the Run tab, then press F5 or Shift+Enter to debug.")
-            .child("")
-            .child("Keyboard shortcuts:")
-            .child("  F5           Start / Continue")
-            .child("  F10          Step Over")
-            .child("  F11          Step In")
-            .child("  Shift+F11    Step Out")
-            .child("  Shift+F5     Stop")
-            .child("  F9           Toggle Breakpoint")
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .child("Enter a script in the Run tab, then press F5 or Shift+Enter to debug.")
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .child(kbd("F5", "Continue"))
+                    .child(kbd("F10", "Step Over"))
+                    .child(kbd("F11", "Step In"))
+                    .child(kbd("Shift+F11", "Step Out"))
+                    .child(kbd("Shift+F5", "Stop"))
+                    .child(kbd("F9", "Breakpoint"))
+            )
     }
 
     /// Preview skeleton for the locked feature panel.

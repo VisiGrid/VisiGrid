@@ -404,7 +404,7 @@ Examples:
         width: usize,
     },
 
-    /// View a file in the terminal (read-only TUI)
+    /// View a file in the terminal — CSV, TSV, XLSX, ODS, .sheet
     #[command(after_help = "\
 Examples:
   visigrid peek data.csv
