@@ -8,6 +8,15 @@
 //! all lines, it shows a window of `VIEW_LEN` lines at a time. This prevents
 //! performance issues with very long outputs (scripts can print thousands of lines).
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+
+use super::debugger::{
+    DebugAction, DebugCommand, DebugEvent, DebugSession, DebugSessionState, DebugSnapshot,
+    SessionId,
+};
+
 /// Default number of visible lines in the console output
 pub const VIEW_LEN: usize = 200;
 
@@ -70,6 +79,34 @@ impl OutputEntry {
     }
 }
 
+/// Which tab is active in the console panel
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleTab {
+    Run,
+    Debug,
+}
+
+/// An active debug session, owned by ConsoleState.
+pub struct ActiveDebugSession {
+    pub id: SessionId,
+    pub cmd_tx: mpsc::Sender<DebugCommand>,
+    pub event_rx: mpsc::Receiver<DebugEvent>,
+    pub cancel: Arc<AtomicBool>,
+    pub state: DebugSessionState,
+    pub start_sheet_index: usize,
+}
+
+// Manual Debug impl because mpsc types don't implement Debug
+impl std::fmt::Debug for ActiveDebugSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveDebugSession")
+            .field("id", &self.id)
+            .field("state", &self.state)
+            .field("start_sheet_index", &self.start_sheet_index)
+            .finish_non_exhaustive()
+    }
+}
+
 /// State for the Lua console panel
 #[derive(Debug)]
 pub struct ConsoleState {
@@ -123,6 +160,25 @@ pub struct ConsoleState {
 
     /// Panel height at resize start
     pub resize_start_height: f32,
+
+    // ========================================================================
+    // Debug session state
+    // ========================================================================
+
+    /// Which tab is active (Run or Debug)
+    pub active_tab: ConsoleTab,
+
+    /// Breakpoints as (source_name, line) pairs
+    pub breakpoints: HashSet<(String, usize)>,
+
+    /// Current debug session (if any)
+    pub debug_session: Option<ActiveDebugSession>,
+
+    /// Debug tab output log (cleared on session start, persists after stop)
+    pub debug_output: Vec<OutputEntry>,
+
+    /// Last pause snapshot from the debugger
+    pub debug_snapshot: Option<DebugSnapshot>,
 }
 
 /// Default and minimum console height
@@ -156,6 +212,11 @@ impl ConsoleState {
             resizing: false,
             resize_start_y: 0.0,
             resize_start_height: 0.0,
+            active_tab: ConsoleTab::Run,
+            breakpoints: HashSet::new(),
+            debug_session: None,
+            debug_output: Vec::new(),
+            debug_snapshot: None,
         }
     }
 
@@ -285,6 +346,54 @@ impl ConsoleState {
         let start = self.view_start + 1;
         let end = (self.view_start + VIEW_LEN).min(self.output.len());
         Some(format!("{}-{} of {}", start, end, self.output.len()))
+    }
+
+    // ========================================================================
+    // Debug Session Lifecycle
+    // ========================================================================
+
+    /// Start a new debug session, stopping any existing one first.
+    pub fn start_debug_session(&mut self, session: DebugSession, start_sheet_index: usize) {
+        self.stop_debug_session();
+
+        self.debug_session = Some(ActiveDebugSession {
+            id: session.id,
+            cmd_tx: session.cmd_tx,
+            event_rx: session.event_rx,
+            cancel: session.cancel,
+            state: session.state,
+            start_sheet_index,
+        });
+        self.active_tab = ConsoleTab::Debug;
+        self.debug_output.clear();
+        self.debug_snapshot = None;
+    }
+
+    /// Stop the current debug session (idempotent).
+    /// Sets cancel flag and drops the session (closing cmd_tx).
+    pub fn stop_debug_session(&mut self) {
+        if let Some(session) = self.debug_session.take() {
+            session.cancel.store(true, Ordering::Relaxed);
+            // Dropping session closes cmd_tx, which unblocks recv() in the debug thread
+        }
+        self.debug_snapshot = None;
+    }
+
+    /// Send a debug action to the active session (no-op if no session).
+    pub fn send_debug_action(&self, action: DebugAction) {
+        if let Some(ref session) = self.debug_session {
+            let _ = session.cmd_tx.send(DebugCommand {
+                session_id: session.id,
+                action,
+            });
+        }
+    }
+
+    /// Optimistically set session state to Running after sending a step/continue command.
+    pub fn set_debug_running(&mut self) {
+        if let Some(ref mut session) = self.debug_session {
+            session.state = DebugSessionState::Running;
+        }
     }
 
     /// Get current input, consuming it and adding to history

@@ -9,19 +9,21 @@
 //! PageUp/PageDown navigate through output history. Ctrl+Home/End jump to
 //! start/end. The view auto-scrolls to bottom when new output arrives.
 
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::TryRecvError;
+
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 
+use crate::actions::*;
 use crate::app::Spreadsheet;
-use crate::scripting::{OutputEntry, OutputKind, SheetSnapshot, LuaOp, LuaCellValue, MAX_CONSOLE_HEIGHT};
+use crate::scripting::{
+    ConsoleTab, DebugAction, DebugConfig, DebugEventPayload, DebugSessionState,
+    LuaCellValue, LuaEvalResult, LuaOp, OutputEntry, OutputKind, SheetSnapshot,
+    MAX_CONSOLE_HEIGHT, spawn_debug_session,
+};
 use crate::scripting::examples::{EXAMPLES, get_example, find_example};
 use crate::theme::TokenKey;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ConsoleTab {
-    Console,
-    // Future: Debug
-}
 
 /// Render the Lua console panel (if visible)
 pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -54,7 +56,7 @@ pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
         console.height
     };
 
-    let current_tab = ConsoleTab::Console;
+    let current_tab = console.active_tab;
     let is_maximized = console.is_maximized;
     let has_output = !console.output.is_empty();
 
@@ -99,101 +101,130 @@ pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                 cx,
             )
         )
+        .when(current_tab == ConsoleTab::Run, |d| {
+            d.child(
+                // Run tab: output area with virtual scroll
+                render_run_tab_content(console, text_primary, text_muted, accent, error_color, panel_border, editor_bg, cx)
+            )
+            .child(
+                // Input area
+                render_input_bar(app, panel_border, editor_bg, text_primary, accent, cx)
+            )
+        })
+        .when(current_tab == ConsoleTab::Debug, |d| {
+            d.child(
+                render_debug_tab_content(app, text_primary, text_muted, accent, error_color, panel_border, editor_bg, cx)
+            )
+        })
+        .into_any_element()
+}
+
+/// Render the Run tab content area (output + scroll indicator)
+fn render_run_tab_content(
+    console: &crate::scripting::ConsoleState,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    error_color: Hsla,
+    panel_border: Hsla,
+    editor_bg: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
         .child(
-            // Output area with virtual scroll
             div()
                 .flex_1()
-                .flex()
-                .flex_col()
                 .overflow_hidden()
-                .child(
-                    // Output lines
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .px_2()
-                        .py_1()
-                        .when(console.output.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(2.0))
-                                    .py_2()
-                                    .text_xs()
-                                    .text_color(text_muted.opacity(0.5))
-                                    .child("Enter run \u{00B7} Shift+Enter newline \u{00B7} Ctrl+L clear")
-                                    .child("help \u{2192} commands \u{00B7} examples \u{2192} scripts")
-                            )
-                        })
-                        .children(
-                            console.visible_output().iter().enumerate().map(|(i, entry)| {
-                                render_output_entry(entry, console.view_start + i, text_primary, text_muted, accent, error_color)
-                            })
-                        )
-                )
-                .when(console.scroll_info().is_some(), |d| {
+                .px_2()
+                .py_1()
+                .when(console.output.is_empty(), |d| {
                     d.child(
-                        // Scroll indicator bar
                         div()
-                            .h(px(16.0))
-                            .px_2()
                             .flex()
-                            .items_center()
-                            .justify_between()
-                            .border_t_1()
-                            .border_color(panel_border)
-                            .bg(editor_bg)
-                            .child(
-                                // Scroll position info
-                                div()
-                                    .text_xs()
-                                    .text_color(text_muted)
-                                    .child(console.scroll_info().unwrap_or_default())
-                            )
-                            .child(
-                                // Scroll controls
-                                div()
-                                    .flex()
-                                    .gap_1()
-                                    .child(
-                                        scroll_button("\u{25B2}", console.can_scroll_up(), text_muted, text_primary, cx, |this, cx| {
-                                            this.lua_console.scroll_page_up();
-                                            cx.notify();
-                                        })
-                                    )
-                                    .child(
-                                        scroll_button("\u{25BC}", console.can_scroll_down(), text_muted, text_primary, cx, |this, cx| {
-                                            this.lua_console.scroll_page_down();
-                                            cx.notify();
-                                        })
-                                    )
-                            )
+                            .flex_col()
+                            .gap(px(2.0))
+                            .py_2()
+                            .text_xs()
+                            .text_color(text_muted.opacity(0.5))
+                            .child("Enter run \u{00B7} Shift+Enter newline \u{00B7} Ctrl+L clear")
+                            .child("help \u{2192} commands \u{00B7} examples \u{2192} scripts")
                     )
                 })
+                .children(
+                    console.visible_output().iter().enumerate().map(|(i, entry)| {
+                        render_output_entry(entry, "run", console.view_start + i, text_primary, text_muted, accent, error_color)
+                    })
+                )
+        )
+        .when(console.scroll_info().is_some(), |d| {
+            d.child(
+                div()
+                    .h(px(16.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_t_1()
+                    .border_color(panel_border)
+                    .bg(editor_bg)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(text_muted)
+                            .child(console.scroll_info().unwrap_or_default())
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(
+                                scroll_button("\u{25B2}", console.can_scroll_up(), text_muted, text_primary, cx, |this, cx| {
+                                    this.lua_console.scroll_page_up();
+                                    cx.notify();
+                                })
+                            )
+                            .child(
+                                scroll_button("\u{25BC}", console.can_scroll_down(), text_muted, text_primary, cx, |this, cx| {
+                                    this.lua_console.scroll_page_down();
+                                    cx.notify();
+                                })
+                            )
+                    )
+            )
+        })
+}
+
+/// Render the input bar (prompt + input area)
+fn render_input_bar(
+    app: &Spreadsheet,
+    panel_border: Hsla,
+    editor_bg: Hsla,
+    text_primary: Hsla,
+    accent: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    div()
+        .h(px(28.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_2()
+        .border_t_1()
+        .border_color(panel_border)
+        .bg(editor_bg.opacity(0.5))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(accent)
+                .child(">")
         )
         .child(
-            // Input area
-            div()
-                .h(px(28.0))
-                .px_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .border_t_1()
-                .border_color(panel_border)
-                .bg(editor_bg.opacity(0.5))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(accent)
-                        .child(">")
-                )
-                .child(
-                    render_input_area(app, editor_bg, text_primary, accent, cx)
-                )
+            render_input_area(app, editor_bg, text_primary, accent, cx)
         )
-        .into_any_element()
 }
 
 /// Render the tab bar with toolbar buttons
@@ -208,7 +239,8 @@ fn render_console_tab_bar(
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    let is_active = current_tab == ConsoleTab::Console;
+    let run_active = current_tab == ConsoleTab::Run;
+    let debug_active = current_tab == ConsoleTab::Debug;
 
     div()
         .flex()
@@ -221,19 +253,24 @@ fn render_console_tab_bar(
             div()
                 .flex()
                 .child(
-                    div()
-                        .id("console-tab-console")
-                        .px_3()
-                        .py(px(6.0))
-                        .text_size(px(12.0))
-                        .text_color(if is_active { text_primary } else { text_muted })
-                        .font_weight(if is_active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                        .bg(if is_active { selection_bg.opacity(0.3) } else { gpui::transparent_black() })
-                        .border_b_2()
-                        .border_color(if is_active { text_primary } else { gpui::transparent_black() })
-                        .cursor_pointer()
-                        .hover(|s| s.bg(panel_border.opacity(0.5)))
-                        .child("Console")
+                    render_tab_button(
+                        "console-tab-run", "Run", run_active,
+                        text_primary, text_muted, selection_bg, panel_border, cx,
+                        |this, cx| {
+                            this.lua_console.active_tab = ConsoleTab::Run;
+                            cx.notify();
+                        },
+                    )
+                )
+                .child(
+                    render_tab_button(
+                        "console-tab-debug", "Debug", debug_active,
+                        text_primary, text_muted, selection_bg, panel_border, cx,
+                        |this, cx| {
+                            this.lua_console.active_tab = ConsoleTab::Debug;
+                            cx.notify();
+                        },
+                    )
                 )
         )
         // Right side: toolbar buttons
@@ -287,6 +324,39 @@ fn render_console_tab_bar(
         )
 }
 
+/// Render a single tab button in the tab bar
+fn render_tab_button<F>(
+    id: &'static str,
+    label: &'static str,
+    is_active: bool,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    selection_bg: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+    on_click: F,
+) -> Stateful<Div>
+where
+    F: Fn(&mut Spreadsheet, &mut Context<Spreadsheet>) + 'static,
+{
+    div()
+        .id(id)
+        .px_3()
+        .py(px(6.0))
+        .text_size(px(12.0))
+        .text_color(if is_active { text_primary } else { text_muted })
+        .font_weight(if is_active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+        .bg(if is_active { selection_bg.opacity(0.3) } else { gpui::transparent_black() })
+        .border_b_2()
+        .border_color(if is_active { text_primary } else { gpui::transparent_black() })
+        .cursor_pointer()
+        .hover(|s| s.bg(panel_border.opacity(0.5)))
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            on_click(this, cx);
+        }))
+        .child(label)
+}
+
 /// Toolbar button helper for console header
 fn console_toolbar_btn<F>(
     id: &'static str,
@@ -327,6 +397,7 @@ where
 /// Render a single output entry
 fn render_output_entry(
     entry: &OutputEntry,
+    tab: &str,
     index: usize,
     text_primary: Hsla,
     text_muted: Hsla,
@@ -342,7 +413,7 @@ fn render_output_entry(
     };
 
     div()
-        .id(ElementId::Name(format!("lua-output-{}", index).into()))
+        .id(ElementId::Name(format!("lua-{}-output-{}", tab, index).into()))
         .text_xs()
         .font_family("monospace")
         .text_color(color)
@@ -429,8 +500,13 @@ pub fn handle_console_key_from_main(app: &mut Spreadsheet, event: &KeyDownEvent,
                 // Ctrl+Enter: always execute (power user shortcut)
                 execute_console(app, cx);
             } else if shift {
-                // Shift+Enter: insert newline for multiline input
-                app.lua_console.insert("\n");
+                if app.lua_console.active_tab == ConsoleTab::Debug {
+                    // Shift+Enter on Debug tab: start debug session
+                    start_debug_session(app, cx);
+                } else {
+                    // Shift+Enter on Run tab: insert newline for multiline input
+                    app.lua_console.insert("\n");
+                }
             } else {
                 // Enter: execute
                 execute_console(app, cx);
@@ -794,5 +870,521 @@ fn lua_cell_value_to_string(value: &LuaCellValue) -> String {
         LuaCellValue::String(s) => s.clone(),
         LuaCellValue::Bool(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
         LuaCellValue::Error(e) => format!("#ERROR: {}", e),
+    }
+}
+
+// =============================================================================
+// Debug session integration (Phase 4)
+// =============================================================================
+
+/// Drain debug events from the background thread and apply them to state.
+///
+/// Called every render frame from `views/mod.rs`, before `render_lua_console`.
+/// Two-pass design avoids split borrows: pass 1 drains `event_rx` (needs `&mut session`),
+/// pass 2 processes payloads (needs `&mut app`).
+pub fn pump_debug_events(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
+    const MAX_EVENTS_PER_TICK: usize = 200;
+
+    // Pass 1: drain events into a local vec
+    let mut events = Vec::new();
+    if let Some(ref mut session) = app.lua_console.debug_session {
+        let session_id = session.id;
+        let cancelled = session.cancel.load(Ordering::Relaxed);
+        for _ in 0..MAX_EVENTS_PER_TICK {
+            match session.event_rx.try_recv() {
+                Ok(event) if event.session_id == session_id => {
+                    events.push(event.payload);
+                }
+                Ok(_) => continue, // stale session_id — discard
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !cancelled {
+                        events.push(DebugEventPayload::Error(
+                            "debugger crashed unexpectedly".to_string(),
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if events.is_empty() {
+        return;
+    }
+
+    // Pass 2: process events (full &mut app available)
+    for payload in events {
+        match payload {
+            DebugEventPayload::OutputChunk(chunk) => {
+                for line in chunk.lines() {
+                    app.lua_console
+                        .debug_output
+                        .push(OutputEntry::print(line.to_string()));
+                }
+            }
+            DebugEventPayload::Paused(snapshot) => {
+                if let Some(ref mut s) = app.lua_console.debug_session {
+                    s.state = DebugSessionState::Paused;
+                }
+                app.lua_console.debug_snapshot = Some(snapshot);
+            }
+            DebugEventPayload::Completed(result) => {
+                handle_debug_completed(app, result, cx);
+            }
+            DebugEventPayload::Error(msg) => {
+                app.lua_console
+                    .debug_output
+                    .push(OutputEntry::error(msg.clone()));
+                app.lua_console
+                    .push_output(OutputEntry::error(format!("[debug] {}", msg)));
+                app.lua_console.debug_session = None;
+                app.lua_console.debug_snapshot = None;
+            }
+            DebugEventPayload::FrameVars { .. } => { /* Phase 5 */ }
+            DebugEventPayload::VariableExpanded { .. } => { /* Phase 5 */ }
+        }
+    }
+    cx.notify();
+}
+
+/// Handle a Completed event from the debug thread.
+fn handle_debug_completed(
+    app: &mut Spreadsheet,
+    result: LuaEvalResult,
+    cx: &mut Context<Spreadsheet>,
+) {
+    if result.cancelled {
+        app.lua_console
+            .push_output(OutputEntry::system("[debug] session stopped"));
+    } else if let Some(ref error) = result.error {
+        app.lua_console
+            .push_output(OutputEntry::error(format!("[debug] error: {}", error)));
+        app.lua_console
+            .debug_output
+            .push(OutputEntry::error(error.clone()));
+    } else {
+        // Apply ops
+        let start_sheet_index = app
+            .lua_console
+            .debug_session
+            .as_ref()
+            .map(|s| s.start_sheet_index)
+            .unwrap_or(0);
+
+        let sheet_count = app.wb(cx).sheet_count();
+        let target_index = if start_sheet_index < sheet_count {
+            start_sheet_index
+        } else {
+            let current = app.sheet_index(cx);
+            app.lua_console.debug_output.push(OutputEntry::system(
+                "[debug] target sheet no longer exists; applied to current sheet",
+            ));
+            app.lua_console.push_output(OutputEntry::system(
+                "[debug] target sheet no longer exists; applied to current sheet",
+            ));
+            current
+        };
+
+        if result.has_mutations() {
+            let (changes, format_patches) = apply_lua_ops(app, target_index, &result.ops, cx);
+            let has_values = !changes.is_empty();
+            let has_formats = !format_patches.is_empty();
+
+            if has_values && has_formats {
+                use crate::history::{FormatActionKind, UndoAction};
+                let group = UndoAction::Group {
+                    actions: vec![
+                        UndoAction::Values {
+                            sheet_index: target_index,
+                            changes,
+                        },
+                        UndoAction::Format {
+                            sheet_index: target_index,
+                            patches: format_patches,
+                            kind: FormatActionKind::CellStyle,
+                            description: "Lua debug: set cell styles".into(),
+                        },
+                    ],
+                    description: "Lua debug".into(),
+                };
+                app.history.record_action_with_provenance(group, None);
+                app.is_modified = true;
+            } else if has_values {
+                app.history.record_batch(target_index, changes);
+                app.is_modified = true;
+            } else if has_formats {
+                app.history.record_format(
+                    target_index,
+                    format_patches,
+                    crate::history::FormatActionKind::CellStyle,
+                    "Lua debug: set cell styles".into(),
+                );
+                app.is_modified = true;
+            }
+        }
+
+        let stats = format!(
+            "[debug] session completed (ops: {} | cells: {})",
+            result.ops.len(),
+            result.mutations
+        );
+        app.lua_console.push_output(OutputEntry::system(stats));
+    }
+
+    app.lua_console.debug_session = None;
+    app.lua_console.debug_snapshot = None;
+}
+
+/// Start a debug session from the current console input.
+pub fn start_debug_session(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
+    let input = app.lua_console.input.clone(); // Don't consume — keep for re-debug
+    if input.trim().is_empty() {
+        return;
+    }
+
+    let snapshot = SheetSnapshot::from_sheet(app.sheet(cx));
+    let sheet_index = app.sheet_index(cx);
+    let (anchor_row, anchor_col) = app.view_state.selected;
+    let (end_row, end_col) = app
+        .view_state
+        .selection_end
+        .unwrap_or(app.view_state.selected);
+    let selection = (
+        anchor_row.min(end_row),
+        anchor_col.min(end_col),
+        anchor_row.max(end_row),
+        anchor_col.max(end_col),
+    );
+
+    let config = DebugConfig {
+        code: input,
+        snapshot,
+        selection,
+        breakpoints: app.lua_console.breakpoints.clone(),
+    };
+
+    let session = spawn_debug_session(config);
+    app.lua_console.start_debug_session(session, sheet_index);
+    app.lua_console
+        .push_output(OutputEntry::system("[debug] session started"));
+    cx.notify();
+}
+
+/// Check whether the debug tab is active, visible, and focused.
+fn is_debug_active(app: &Spreadsheet, window: &Window) -> bool {
+    app.lua_console.visible
+        && app.lua_console.active_tab == ConsoleTab::Debug
+        && app.console_focus_handle.is_focused(window)
+}
+
+/// Render the Debug tab content with action handlers.
+fn render_debug_tab_content(
+    app: &Spreadsheet,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    error_color: Hsla,
+    panel_border: Hsla,
+    _editor_bg: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let has_session = app.lua_console.debug_session.is_some();
+    let session_state = app
+        .lua_console
+        .debug_session
+        .as_ref()
+        .map(|s| s.state);
+    let is_paused = session_state == Some(DebugSessionState::Paused);
+
+    div()
+        .id("debug-tab-content")
+        .key_context("LuaDebug")
+        .flex_1()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .px_2()
+        .py_1()
+        // Action handlers
+        .on_action(cx.listener(|this, _: &DebugStartOrContinue, window, cx| {
+            if !is_debug_active(this, window) {
+                return;
+            }
+            if let Some(ref s) = this.lua_console.debug_session {
+                if s.state == DebugSessionState::Paused {
+                    this.lua_console.send_debug_action(DebugAction::Continue);
+                    this.lua_console.set_debug_running();
+                }
+            } else {
+                start_debug_session(this, cx);
+            }
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &DebugStepOver, window, cx| {
+            if !is_debug_active(this, window) {
+                return;
+            }
+            if let Some(ref s) = this.lua_console.debug_session {
+                if s.state == DebugSessionState::Paused {
+                    this.lua_console.send_debug_action(DebugAction::StepOver);
+                    this.lua_console.set_debug_running();
+                    cx.notify();
+                }
+            }
+        }))
+        .on_action(cx.listener(|this, _: &DebugStepIn, window, cx| {
+            if !is_debug_active(this, window) {
+                return;
+            }
+            if let Some(ref s) = this.lua_console.debug_session {
+                if s.state == DebugSessionState::Paused {
+                    this.lua_console.send_debug_action(DebugAction::StepIn);
+                    this.lua_console.set_debug_running();
+                    cx.notify();
+                }
+            }
+        }))
+        .on_action(cx.listener(|this, _: &DebugStepOut, window, cx| {
+            if !is_debug_active(this, window) {
+                return;
+            }
+            if let Some(ref s) = this.lua_console.debug_session {
+                if s.state == DebugSessionState::Paused {
+                    this.lua_console.send_debug_action(DebugAction::StepOut);
+                    this.lua_console.set_debug_running();
+                    cx.notify();
+                }
+            }
+        }))
+        .on_action(cx.listener(|this, _: &DebugStop, window, cx| {
+            if !is_debug_active(this, window) {
+                return;
+            }
+            this.lua_console.stop_debug_session();
+            this.lua_console.push_output(OutputEntry::system("[debug] session stopped"));
+            cx.notify();
+        }))
+        .on_action(cx.listener(|_this, _: &DebugToggleBreakpoint, _window, _cx| {
+            // Phase 5: toggle breakpoint at current line in source view
+        }))
+        // Content
+        .when(!has_session, |d| {
+            // Idle: show help text
+            d.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .py_2()
+                    .text_xs()
+                    .text_color(text_muted.opacity(0.7))
+                    .child("Enter a script in the Run tab, then press F5 or Shift+Enter to debug.")
+                    .child("")
+                    .child("Keyboard shortcuts:")
+                    .child("  F5           Start / Continue")
+                    .child("  F10          Step Over")
+                    .child("  F11          Step In")
+                    .child("  Shift+F11    Step Out")
+                    .child("  Shift+F5     Stop")
+                    .child("  F9           Toggle Breakpoint (Phase 5)")
+            )
+        })
+        .when(has_session && !is_paused, |d| {
+            // Running state
+            d.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .py_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(accent)
+                            .child("Running...")
+                    )
+                    .child(
+                        debug_action_btn("debug-stop-running", "Stop", true, text_muted, text_primary, error_color, panel_border, cx, |this, cx| {
+                            this.lua_console.stop_debug_session();
+                            this.lua_console.push_output(OutputEntry::system("[debug] session stopped"));
+                            cx.notify();
+                        })
+                    )
+            )
+            .child(render_debug_output_lines(&app.lua_console.debug_output, text_primary, text_muted, accent, error_color))
+        })
+        .when(is_paused, |d| {
+            // Paused state: show snapshot info + controls + output
+            let snapshot = app.lua_console.debug_snapshot.as_ref();
+            let pause_info = if let Some(snap) = snapshot {
+                let reason = match snap.reason {
+                    crate::scripting::PauseReason::Breakpoint => "breakpoint",
+                    crate::scripting::PauseReason::StepIn => "step in",
+                    crate::scripting::PauseReason::StepOver => "step over",
+                    crate::scripting::PauseReason::StepOut => "step out",
+                    crate::scripting::PauseReason::Entry => "entry",
+                };
+                format!("Paused at line {} ({})", snap.line, reason)
+            } else {
+                "Paused".to_string()
+            };
+
+            d.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        // Pause info + buttons
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .py_1()
+                            .child(
+                                div().text_xs().text_color(accent).child(pause_info)
+                            )
+                            .child(debug_action_btn("debug-continue", "Continue", true, text_muted, text_primary, accent, panel_border, cx, |this, cx| {
+                                this.lua_console.send_debug_action(DebugAction::Continue);
+                                this.lua_console.set_debug_running();
+                                cx.notify();
+                            }))
+                            .child(debug_action_btn("debug-step-in", "Step In", true, text_muted, text_primary, accent, panel_border, cx, |this, cx| {
+                                this.lua_console.send_debug_action(DebugAction::StepIn);
+                                this.lua_console.set_debug_running();
+                                cx.notify();
+                            }))
+                            .child(debug_action_btn("debug-step-over", "Step Over", true, text_muted, text_primary, accent, panel_border, cx, |this, cx| {
+                                this.lua_console.send_debug_action(DebugAction::StepOver);
+                                this.lua_console.set_debug_running();
+                                cx.notify();
+                            }))
+                            .child(debug_action_btn("debug-step-out", "Step Out", true, text_muted, text_primary, accent, panel_border, cx, |this, cx| {
+                                this.lua_console.send_debug_action(DebugAction::StepOut);
+                                this.lua_console.set_debug_running();
+                                cx.notify();
+                            }))
+                            .child(debug_action_btn("debug-stop-paused", "Stop", true, text_muted, text_primary, error_color, panel_border, cx, |this, cx| {
+                                this.lua_console.stop_debug_session();
+                                this.lua_console.push_output(OutputEntry::system("[debug] session stopped"));
+                                cx.notify();
+                            }))
+                    )
+                    // Call stack summary
+                    .when(snapshot.is_some(), |d| {
+                        let snap = app.lua_console.debug_snapshot.as_ref().unwrap();
+                        let stack_summary = snap.call_stack.iter().take(2).map(|frame| {
+                            let name = frame.source.as_deref().unwrap_or("?");
+                            format!("{}:{}", name, frame.line)
+                        }).collect::<Vec<_>>().join(" \u{2192} ");
+
+                        d.child(
+                            div()
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(text_muted)
+                                .child(format!("Stack: {}", stack_summary))
+                        )
+                    })
+                    // Locals
+                    .when(snapshot.map_or(false, |s| !s.locals.is_empty()), |d| {
+                        let snap = app.lua_console.debug_snapshot.as_ref().unwrap();
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(text_muted)
+                                .pt_1()
+                                .child("Locals (frame 0):")
+                        )
+                        .children(snap.locals.iter().enumerate().map(|(i, var)| {
+                            div()
+                                .id(ElementId::Name(format!("debug-local-{}", i).into()))
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(text_primary)
+                                .child(format!("  {} = {}", var.name, var.value))
+                        }))
+                    })
+                    // Upvalues
+                    .when(snapshot.map_or(false, |s| !s.upvalues.is_empty()), |d| {
+                        let snap = app.lua_console.debug_snapshot.as_ref().unwrap();
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(text_muted)
+                                .pt_1()
+                                .child("Upvalues (frame 0):")
+                        )
+                        .children(snap.upvalues.iter().enumerate().map(|(i, var)| {
+                            div()
+                                .id(ElementId::Name(format!("debug-upvalue-{}", i).into()))
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(text_primary)
+                                .child(format!("  {} = {}", var.name, var.value))
+                        }))
+                    })
+            )
+            .child(render_debug_output_lines(&app.lua_console.debug_output, text_primary, text_muted, accent, error_color))
+        })
+}
+
+/// Render the debug output log lines
+fn render_debug_output_lines(
+    output: &[OutputEntry],
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    error_color: Hsla,
+) -> Div {
+    div()
+        .flex_1()
+        .overflow_hidden()
+        .pt_1()
+        .children(
+            output.iter().enumerate().map(|(i, entry)| {
+                render_output_entry(entry, "dbg", i, text_primary, text_muted, accent, error_color)
+            })
+        )
+}
+
+/// A small button for debug actions (Continue, Step, Stop, etc.)
+fn debug_action_btn<F>(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    text_muted: Hsla,
+    text_primary: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+    on_click: F,
+) -> Stateful<Div>
+where
+    F: Fn(&mut Spreadsheet, &mut Context<Spreadsheet>) + 'static,
+{
+    let btn = div()
+        .id(id)
+        .px(px(6.0))
+        .py(px(2.0))
+        .rounded(px(3.0))
+        .text_size(px(10.0))
+        .border_1()
+        .border_color(panel_border);
+
+    if enabled {
+        btn
+            .text_color(accent)
+            .cursor_pointer()
+            .hover(|s| s.bg(panel_border.opacity(0.5)).text_color(text_primary))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                on_click(this, cx);
+            }))
+            .child(label)
+    } else {
+        btn
+            .text_color(text_muted.opacity(0.3))
+            .child(label)
     }
 }

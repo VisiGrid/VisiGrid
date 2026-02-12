@@ -256,6 +256,14 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("shift-enter", PalettePreview, Some("CommandPalette")),
         KeyBinding::new("escape", PaletteCancel, Some("CommandPalette")),
 
+        // Lua debugger (in LuaDebug context — active when Debug tab is focused)
+        KeyBinding::new("f5", DebugStartOrContinue, Some("LuaDebug")),
+        KeyBinding::new("f10", DebugStepOver, Some("LuaDebug")),
+        KeyBinding::new("f11", DebugStepIn, Some("LuaDebug")),
+        KeyBinding::new("shift-f11", DebugStepOut, Some("LuaDebug")),
+        KeyBinding::new("shift-f5", DebugStop, Some("LuaDebug")),
+        KeyBinding::new("f9", DebugToggleBreakpoint, Some("LuaDebug")),
+
         // Find dialog (in FindDialog context)
         KeyBinding::new(&kb(m, "f"), FindInCells, Some("FindDialog")),
         KeyBinding::new(&kb(m, "h"), FindReplace, Some("FindDialog")),

@@ -306,6 +306,16 @@ actions!(accelerators, [
     AltHelp,    // Alt+H - opens palette scoped to Help
 ]);
 
+// Debugger actions (Lua debug session control)
+actions!(debugger, [
+    DebugStartOrContinue,       // F5: start if idle, continue if paused
+    DebugStepIn,                // F11
+    DebugStepOver,              // F10
+    DebugStepOut,               // Shift+F11
+    DebugStop,                  // Shift+F5
+    DebugToggleBreakpoint,      // F9 (no-op until Phase 5 gutter)
+]);
+
 // Default app prompt actions (macOS title bar chip)
 actions!(default_app, [
     SetDefaultApp,        // Set VisiGrid as default for current file type
