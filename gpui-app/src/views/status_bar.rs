@@ -75,6 +75,7 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
     let text_muted = app.token(TokenKey::TextMuted);
     let text_primary = app.token(TokenKey::TextPrimary);
     let panel_bg = app.token(TokenKey::PanelBg);
+    let selection_bg = app.token(TokenKey::SelectionBg);
 
     div()
         .relative()
@@ -296,6 +297,12 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                         .text_color(text_muted)
                         .child(app.zoom_display())
                 )
+                // Separator before panel toggles
+                .child(
+                    div().w(px(1.0)).h(px(12.0)).bg(panel_border.opacity(0.3)).mx_1()
+                )
+                // Panel toggle icons
+                .child(render_panel_toggles(app, text_muted, text_primary, selection_bg, panel_border, cx))
         )
         // Context menu overlay
         .when(context_menu_sheet.is_some(), |d| {
@@ -905,4 +912,104 @@ fn render_hub_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
                 .text_xs()
                 .child(label_text)
         )
+}
+
+/// Render the panel toggle icon buttons (Inspector, Profiler, Console, Minimap)
+fn render_panel_toggles(
+    app: &Spreadsheet,
+    text_muted: Hsla,
+    text_primary: Hsla,
+    selection_bg: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .child(panel_toggle_btn(
+            "toggle-inspector",
+            "\u{229E}",
+            app.inspector_visible,
+            text_muted, text_primary, selection_bg, panel_border,
+            cx,
+            |this, _, cx| {
+                this.inspector_visible = !this.inspector_visible;
+                if this.inspector_visible { this.profiler_visible = false; }
+                cx.notify();
+            },
+        ))
+        .child(panel_toggle_btn(
+            "toggle-profiler",
+            "\u{23F1}",
+            app.profiler_visible,
+            text_muted, text_primary, selection_bg, panel_border,
+            cx,
+            |this, _, cx| {
+                this.profiler_visible = !this.profiler_visible;
+                if this.profiler_visible { this.inspector_visible = false; }
+                cx.notify();
+            },
+        ))
+        .child(panel_toggle_btn(
+            "toggle-console",
+            "\u{276F}_",
+            app.lua_console.visible,
+            text_muted, text_primary, selection_bg, panel_border,
+            cx,
+            |this, window, cx| {
+                this.lua_console.toggle();
+                if this.lua_console.visible {
+                    window.focus(&this.console_focus_handle, cx);
+                }
+                cx.notify();
+            },
+        ))
+        .child(panel_toggle_btn(
+            "toggle-minimap",
+            "\u{25A6}",
+            app.minimap_visible,
+            text_muted, text_primary, selection_bg, panel_border,
+            cx,
+            |this, _, cx| {
+                this.minimap_visible = !this.minimap_visible;
+                cx.notify();
+            },
+        ))
+}
+
+/// Render a single panel toggle button for the status bar
+fn panel_toggle_btn(
+    id: &'static str,
+    icon: &'static str,
+    active: bool,
+    text_muted: Hsla,
+    text_primary: Hsla,
+    selection_bg: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+    on_click: impl Fn(&mut Spreadsheet, &mut Window, &mut Context<Spreadsheet>) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px(px(4.0))
+        .py(px(2.0))
+        .text_size(px(11.0))
+        .rounded(px(2.0))
+        .cursor_pointer()
+        .when(active, move |d: Stateful<Div>| {
+            d.text_color(text_primary)
+                .bg(selection_bg.opacity(0.3))
+        })
+        .when(!active, move |d: Stateful<Div>| {
+            d.text_color(text_muted.opacity(0.5))
+        })
+        .hover(move |s| {
+            s.text_color(text_primary)
+                .bg(panel_border.opacity(0.5))
+        })
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+            on_click(this, window, cx);
+        }))
+        .child(icon)
 }
