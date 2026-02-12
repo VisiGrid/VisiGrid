@@ -17,7 +17,7 @@ jobs:
 
       - name: Install vgrid
         run: |
-          curl -fsSL https://get.visigrid.app/cli | sh
+          curl -fsSL https://get.visigrid.app/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Authenticate

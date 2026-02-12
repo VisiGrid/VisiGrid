@@ -10,7 +10,7 @@ Treat finance data like code: versioned, reviewed, enforced, and cryptographical
 
 ```bash
 # Install
-curl -fsSL https://get.visigrid.app/cli | sh
+curl -fsSL https://get.visigrid.app/install.sh | sh
 
 # Publish baseline (4 balanced rows — charges, fees, payout net to zero)
 vgrid publish data/ledger-good.csv \
@@ -67,7 +67,7 @@ If undistributed balance != 0:
 ```yaml
 - name: Install vgrid
   run: |
-    curl -fsSL https://get.visigrid.app/cli | sh
+    curl -fsSL https://get.visigrid.app/install.sh | sh
     echo "$HOME/.local/bin" >> $GITHUB_PATH
 
 - name: Publish and check
