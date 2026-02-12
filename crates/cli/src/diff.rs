@@ -16,6 +16,10 @@ pub struct DiffOptions {
     pub key_transform: KeyTransform,
     pub on_ambiguous: AmbiguityPolicy,
     pub tolerance: f64,
+    /// Right-side column to search for substring matches (contains mode only).
+    /// When None, the right key column is searched. When Some, this column is
+    /// searched instead. Index into headers[].
+    pub contains_col: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +33,8 @@ pub enum KeyTransform {
     None,
     Trim,
     Digits,
+    /// Strip non-ASCII-alphanumeric characters and uppercase.
+    Alnum,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +193,11 @@ pub fn apply_key_transform(raw: &str, transform: KeyTransform) -> String {
         KeyTransform::None => raw.to_string(),
         KeyTransform::Trim => raw.trim().to_string(),
         KeyTransform::Digits => raw.chars().filter(|c| c.is_ascii_digit()).collect(),
+        KeyTransform::Alnum => raw
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_uppercase())
+            .collect(),
     }
 }
 
@@ -245,10 +256,15 @@ pub fn reconcile(
     headers: &[String],
     options: &DiffOptions,
 ) -> Result<DiffResult, DiffError> {
-    // 1. Check for duplicate keys in each side
+    // 1. Check for duplicate keys.
+    // Left duplicates are always an error (each left row is processed once).
+    // Right duplicates are only checked in exact mode. In contains mode,
+    // duplicate right keys are expected — they become ambiguity candidates.
     let mut duplicates = Vec::new();
     check_duplicates(left_rows, Side::Left, &mut duplicates);
-    check_duplicates(right_rows, Side::Right, &mut duplicates);
+    if options.match_mode == MatchMode::Exact {
+        check_duplicates(right_rows, Side::Right, &mut duplicates);
+    }
     if !duplicates.is_empty() {
         return Err(DiffError::DuplicateKeys(duplicates));
     }
@@ -312,10 +328,23 @@ pub fn reconcile(
                 }
             }
             MatchMode::Contains => {
-                // Left key must be substring of right key (directional)
+                // Left key must be substring of right search text.
+                // Search text is either the right key column (default) or
+                // --contains-column if specified.
                 let mut matches: Vec<(usize, &DataRow)> = Vec::new();
                 for (i, right_row) in right_rows.iter().enumerate() {
-                    if !right_consumed[i] && right_row.key_norm.contains(&left_row.key_norm) {
+                    if right_consumed[i] {
+                        continue;
+                    }
+                    let search_text = match options.contains_col {
+                        Some(col_idx) => {
+                            let col_name = headers.get(col_idx).map(|s| s.as_str()).unwrap_or("");
+                            let raw = right_row.values.get(col_name).map(|s| s.as_str()).unwrap_or("");
+                            apply_key_transform(raw, options.key_transform)
+                        }
+                        None => right_row.key_norm.clone(),
+                    };
+                    if search_text.contains(&left_row.key_norm) {
                         matches.push((i, right_row));
                     }
                 }

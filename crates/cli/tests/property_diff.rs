@@ -373,6 +373,7 @@ fn exact_opts(tolerance: f64) -> DiffOptions {
         key_transform: KeyTransform::None,
         on_ambiguous: AmbiguityPolicy::Error,
         tolerance,
+        contains_col: None,
     }
 }
 
@@ -384,6 +385,7 @@ fn contains_opts(policy: AmbiguityPolicy) -> DiffOptions {
         key_transform: KeyTransform::None,
         on_ambiguous: policy,
         tolerance: 0.0,
+        contains_col: None,
     }
 }
 
@@ -1254,6 +1256,7 @@ fn combo_exact_digits_tolerance() {
         key_transform: t,
         on_ambiguous: AmbiguityPolicy::Error,
         tolerance: 1.0,
+        contains_col: None,
     };
     let left = vec![
         make_row_transformed("INV-001", t, "$101.00", "", ""),
@@ -1284,6 +1287,7 @@ fn combo_exact_digits_tolerance_zero() {
         key_transform: t,
         on_ambiguous: AmbiguityPolicy::Error,
         tolerance: 0.0,
+        contains_col: None,
     };
     let left = vec![
         make_row_transformed("INV-001", t, "$100.50", "", ""),
@@ -1314,6 +1318,7 @@ fn combo_contains_digits_ambiguity_error() {
         key_transform: t,
         on_ambiguous: AmbiguityPolicy::Error,
         tolerance: 0.01,
+        contains_col: None,
     };
     let left = vec![make_row_transformed("12", t, "$100.00", "", "")];
     let right = vec![
@@ -1346,6 +1351,7 @@ fn combo_contains_digits_ambiguity_report() {
         key_transform: t,
         on_ambiguous: AmbiguityPolicy::Report,
         tolerance: 0.01,
+        contains_col: None,
     };
     let left = vec![make_row_transformed("12", t, "$100.00", "", "")];
     let right = vec![
@@ -1384,6 +1390,7 @@ fn combo_contains_trim_tolerance() {
         key_transform: t,
         on_ambiguous: AmbiguityPolicy::Error,
         tolerance: 1.0,
+        contains_col: None,
     };
     let left = vec![make_row_transformed("  INV  ", t, "$101.00", "", "")];
     let right = vec![make_row_transformed(" PREFIX-INV-SUFFIX ", t, "100.00", "", "")];
@@ -1410,6 +1417,7 @@ fn combo_exact_compare_cols_tolerance() {
         key_transform: KeyTransform::None,
         on_ambiguous: AmbiguityPolicy::Error,
         tolerance: 1.0,
+        contains_col: None,
     };
     let left = vec![
         // K1: amount diff within tolerance, label/qty differ (but not compared)
@@ -1447,6 +1455,7 @@ fn combo_exact_tolerance_boundary() {
         key_transform: KeyTransform::None,
         on_ambiguous: AmbiguityPolicy::Error,
         tolerance: 0.25,
+        contains_col: None,
     };
     let left = vec![
         make_row("K1", "100.50", "", ""), // delta=0.25 → exactly at boundary
@@ -1486,6 +1495,7 @@ fn combo_mixed_type_with_tolerance() {
         key_transform: KeyTransform::None,
         on_ambiguous: AmbiguityPolicy::Error,
         tolerance: 1.0, // generous, but shouldn't matter for non-numeric
+        contains_col: None,
     };
     let left = vec![
         make_row("K1", "1234.56", "", ""), // numeric vs non-numeric
@@ -1554,6 +1564,7 @@ fn tolerance_boundary_ieee754_summary() {
         key_transform: KeyTransform::None,
         on_ambiguous: AmbiguityPolicy::Error,
         tolerance: 0.01,
+        contains_col: None,
     };
     let left = vec![
         make_row("K1", "100.50", "", ""),      // boundary: delta ≈ 0.01 → within
@@ -1632,4 +1643,202 @@ fn contract_version_guard() {
     );
     assert!(obj.contains_key("summary"), "summary key must exist");
     assert!(obj.contains_key("results"), "results key must exist");
+}
+
+// ===========================================================================
+// Contains mode: duplicate right keys, contains-column, alnum transform
+// ===========================================================================
+
+/// Contains mode must not error on duplicate right-side keys.
+/// Duplicates become ambiguity candidates routed through on_ambiguous.
+#[test]
+fn contains_tolerates_duplicate_right_keys() {
+    let headers = vec![
+        "key".to_string(),
+        "amount".to_string(),
+    ];
+
+    let left = vec![make_row("123", "100", "", "")];
+
+    // Right has 3 rows with the same key — would error in exact mode.
+    let right = vec![
+        make_row("INV-123-A", "50", "", ""),
+        make_row("INV-123-B", "60", "", ""),
+        make_row("INV-123-C", "70", "", ""),
+    ];
+
+    let options = DiffOptions {
+        key_col: 0,
+        compare_cols: None,
+        match_mode: MatchMode::Contains,
+        key_transform: KeyTransform::None,
+        on_ambiguous: AmbiguityPolicy::Report,
+        tolerance: 0.0,
+        contains_col: None,
+    };
+
+    let result = reconcile(&left, &right, &headers, &options);
+    assert!(result.is_ok(), "contains mode must not error on duplicate right keys");
+    let result = result.unwrap();
+    assert_eq!(result.ambiguous_keys.len(), 1, "should have 1 ambiguous left key");
+    assert_eq!(result.ambiguous_keys[0].candidates.len(), 3, "should have 3 candidates");
+    // Ambiguous row appears in results when policy is Report
+    assert!(
+        result.results.iter().any(|r| r.status == RowStatus::Ambiguous),
+        "ambiguous row must appear in results with Report policy"
+    );
+}
+
+/// contains-column searches a different right-side column for substring matches.
+#[test]
+fn contains_column_searches_different_column() {
+    let headers = vec![
+        "key".to_string(),
+        "description".to_string(),
+        "amount".to_string(),
+        "label".to_string(),
+    ];
+
+    // Left key is "123" — should NOT match right key column ("R1"),
+    // but SHOULD match the description column ("Order #123 from vendor").
+    let left = vec![{
+        let mut values = std::collections::HashMap::new();
+        values.insert("key".to_string(), "123".to_string());
+        values.insert("description".to_string(), "".to_string());
+        values.insert("amount".to_string(), "100".to_string());
+        values.insert("label".to_string(), "".to_string());
+        DataRow {
+            key_raw: "123".to_string(),
+            key_norm: "123".to_string(),
+            values,
+        }
+    }];
+
+    let right = vec![{
+        let mut values = std::collections::HashMap::new();
+        values.insert("key".to_string(), "R1".to_string());
+        values.insert("description".to_string(), "Order #123 from vendor".to_string());
+        values.insert("amount".to_string(), "100".to_string());
+        values.insert("label".to_string(), "".to_string());
+        DataRow {
+            key_raw: "R1".to_string(),
+            key_norm: "R1".to_string(),
+            values,
+        }
+    }];
+
+    // Without contains_col: no match (R1 doesn't contain "123")
+    let options_no_col = DiffOptions {
+        key_col: 0,
+        compare_cols: None,
+        match_mode: MatchMode::Contains,
+        key_transform: KeyTransform::None,
+        on_ambiguous: AmbiguityPolicy::Report,
+        tolerance: 0.0,
+        contains_col: None,
+    };
+    let result = reconcile(&left, &right, &headers, &options_no_col).unwrap();
+    assert_eq!(result.summary.only_left, 1, "without contains_col, key 123 should not match R1");
+
+    // With contains_col = description (index 1): match found
+    let options_with_col = DiffOptions {
+        key_col: 0,
+        compare_cols: None,
+        match_mode: MatchMode::Contains,
+        key_transform: KeyTransform::None,
+        on_ambiguous: AmbiguityPolicy::Report,
+        tolerance: 0.0,
+        contains_col: Some(1), // description column
+    };
+    let result = reconcile(&left, &right, &headers, &options_with_col).unwrap();
+    assert_eq!(result.summary.matched + result.summary.diff, 1, "with contains_col=description, should find a match");
+    assert_eq!(result.summary.only_left, 0, "left key 123 should be matched via description");
+}
+
+/// KeyTransform::Alnum strips non-ASCII-alphanumeric and uppercases.
+#[test]
+fn alnum_key_transform() {
+    assert_eq!(apply_key_transform("Order #O2025-X", KeyTransform::Alnum), "ORDERO2025X");
+    assert_eq!(apply_key_transform("INV-123-AB", KeyTransform::Alnum), "INV123AB");
+    assert_eq!(apply_key_transform("  hello world! 42  ", KeyTransform::Alnum), "HELLOWORLD42");
+    assert_eq!(apply_key_transform("", KeyTransform::Alnum), "");
+    assert_eq!(apply_key_transform("---", KeyTransform::Alnum), "");
+    // Idempotence: applying twice = applying once
+    let once = apply_key_transform("Order #O2025-X", KeyTransform::Alnum);
+    let twice = apply_key_transform(&once, KeyTransform::Alnum);
+    assert_eq!(once, twice, "alnum transform must be idempotent");
+}
+
+/// Contains mode with duplicate right descriptions: deterministic ambiguity.
+/// Ensures the right side is not stored in a unique-key map that would drop rows.
+#[test]
+fn contains_reports_ambiguous_when_multiple_right_rows_match() {
+    let headers = vec![
+        "key".to_string(),
+        "description".to_string(),
+        "amount".to_string(),
+        "label".to_string(),
+    ];
+
+    let left = vec![{
+        let mut values = std::collections::HashMap::new();
+        values.insert("key".to_string(), "123".to_string());
+        values.insert("description".to_string(), "".to_string());
+        values.insert("amount".to_string(), "".to_string());
+        values.insert("label".to_string(), "".to_string());
+        DataRow {
+            key_raw: "123".to_string(),
+            key_norm: "123".to_string(),
+            values,
+        }
+    }];
+
+    // Two right rows whose description both contain "123"
+    let make_right = |id: &str, desc: &str| {
+        let mut values = std::collections::HashMap::new();
+        values.insert("key".to_string(), id.to_string());
+        values.insert("description".to_string(), desc.to_string());
+        values.insert("amount".to_string(), "50".to_string());
+        values.insert("label".to_string(), "".to_string());
+        DataRow {
+            key_raw: id.to_string(),
+            key_norm: id.to_string(),
+            values,
+        }
+    };
+
+    let right = vec![
+        make_right("R1", "Invoice 123 payment"),
+        make_right("R2", "Order 123 shipment"),
+    ];
+
+    let options = DiffOptions {
+        key_col: 0,
+        compare_cols: None,
+        match_mode: MatchMode::Contains,
+        key_transform: KeyTransform::None,
+        on_ambiguous: AmbiguityPolicy::Report,
+        tolerance: 0.0,
+        contains_col: Some(1), // search description column
+    };
+
+    let result = reconcile(&left, &right, &headers, &options).unwrap();
+    assert_eq!(result.ambiguous_keys.len(), 1, "left key 123 should be ambiguous");
+    assert_eq!(
+        result.ambiguous_keys[0].candidates.len(), 2,
+        "both right rows should be candidates"
+    );
+    // Verify the ambiguous row is in results
+    let amb_row = result.results.iter().find(|r| r.status == RowStatus::Ambiguous);
+    assert!(amb_row.is_some(), "ambiguous row must be in results");
+    let candidates = amb_row.unwrap().candidates.as_ref().unwrap();
+    assert_eq!(candidates.len(), 2, "candidates must list both right rows");
+
+    // Run twice to confirm determinism
+    let result2 = reconcile(&left, &right, &headers, &options).unwrap();
+    assert_eq!(result.ambiguous_keys.len(), result2.ambiguous_keys.len());
+    for (a, b) in result.ambiguous_keys[0].candidates.iter().zip(&result2.ambiguous_keys[0].candidates) {
+        assert_eq!(a.right_key_raw, b.right_key_raw, "candidate order must be deterministic");
+        assert_eq!(a.right_row_index, b.right_row_index);
+    }
 }

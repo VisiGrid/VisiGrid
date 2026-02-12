@@ -268,6 +268,16 @@ Examples:
         /// Export ambiguous matches to CSV file (written before exit, even on --on-ambiguous error)
         #[arg(long)]
         save_ambiguous: Option<PathBuf>,
+
+        /// Column to search for substring matches on the right side (default: key column).
+        /// Accepts column name, letter (A), or 1-indexed number. Only valid with --match contains.
+        #[arg(long)]
+        contains_column: Option<String>,
+
+        /// Exit 0 even with diffs, ambiguous, or missing rows (agent-friendly mode).
+        /// Parse errors and usage errors still exit non-zero.
+        #[arg(long)]
+        no_fail: bool,
     },
 
     /// List running VisiGrid sessions
@@ -784,6 +794,7 @@ enum DiffKeyTransform {
     None,
     Trim,
     Digits,
+    Alnum,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -1198,10 +1209,12 @@ fn main() -> ExitCode {
             strict_exit,
             quiet,
             save_ambiguous,
+            contains_column,
+            no_fail,
         }) => cmd_diff(
             left, right, key, r#match, key_transform, compare, tolerance,
             on_ambiguous, out, output, summary, no_headers, header_row, delimiter,
-            stdin_format, strict_exit, quiet, save_ambiguous,
+            stdin_format, strict_exit, quiet, save_ambiguous, contains_column, no_fail,
         ),
         Some(Commands::Sessions { json }) => cmd_sessions(json),
         Some(Commands::Attach { session }) => cmd_attach(session),
@@ -2356,6 +2369,8 @@ fn cmd_diff(
     strict_exit: bool,
     quiet: bool,
     save_ambiguous: Option<PathBuf>,
+    contains_column: Option<String>,
+    no_fail: bool,
 ) -> Result<(), CliError> {
     let left_is_stdin = left_arg == "-";
     let right_is_stdin = right_arg == "-";
@@ -2462,11 +2477,23 @@ fn cmd_diff(
         DiffKeyTransform::None => diff::KeyTransform::None,
         DiffKeyTransform::Trim => diff::KeyTransform::Trim,
         DiffKeyTransform::Digits => diff::KeyTransform::Digits,
+        DiffKeyTransform::Alnum => diff::KeyTransform::Alnum,
     };
 
     let amb = match on_ambiguous {
         DiffAmbiguousPolicy::Error => diff::AmbiguityPolicy::Error,
         DiffAmbiguousPolicy::Report => diff::AmbiguityPolicy::Report,
+    };
+
+    // Resolve --contains-column (only valid with --match contains)
+    let contains_col = match contains_column {
+        Some(ref spec) => {
+            if mode != diff::MatchMode::Contains {
+                return Err(CliError::args("--contains-column requires --match contains"));
+            }
+            Some(resolve_column(spec, &headers)?)
+        }
+        None => None,
     };
 
     let options = diff::DiffOptions {
@@ -2476,6 +2503,7 @@ fn cmd_diff(
         key_transform: kt,
         on_ambiguous: amb,
         tolerance,
+        contains_col,
     };
 
     // Extract data rows
@@ -2514,8 +2542,8 @@ fn cmd_diff(
         }
     }
 
-    // Check ambiguous error condition
-    if !result.ambiguous_keys.is_empty() && amb == diff::AmbiguityPolicy::Error {
+    // Check ambiguous error condition (--no-fail suppresses this exit)
+    if !no_fail && !result.ambiguous_keys.is_empty() && amb == diff::AmbiguityPolicy::Error {
         let mut msg = String::from("ambiguous matches found:\n");
         for ak in &result.ambiguous_keys {
             msg.push_str(&format!("  key {:?} matches {} right rows:", ak.key, ak.candidates.len()));
@@ -2570,10 +2598,13 @@ fn cmd_diff(
     // Exit 1 for material differences: missing rows or diffs outside tolerance.
     // Within-tolerance diffs are reported but do not cause a non-zero exit code.
     // --strict-exit: any diff (even within tolerance) causes exit 1.
-    let s = &result.summary;
-    let diff_count = if strict_exit { s.diff } else { s.diff_outside_tolerance };
-    if s.only_left > 0 || s.only_right > 0 || diff_count > 0 {
-        return Err(CliError { code: EXIT_EVAL_ERROR, message: String::new(), hint: None });
+    // --no-fail: always exit 0 (parse/usage errors still exit non-zero).
+    if !no_fail {
+        let s = &result.summary;
+        let diff_count = if strict_exit { s.diff } else { s.diff_outside_tolerance };
+        if s.only_left > 0 || s.only_right > 0 || diff_count > 0 {
+            return Err(CliError { code: EXIT_EVAL_ERROR, message: String::new(), hint: None });
+        }
     }
 
     Ok(())
@@ -2684,6 +2715,7 @@ fn format_diff_json(
         diff::KeyTransform::None => "none",
         diff::KeyTransform::Trim => "trim",
         diff::KeyTransform::Digits => "digits",
+        diff::KeyTransform::Alnum => "alnum",
     };
 
     // Build results array
