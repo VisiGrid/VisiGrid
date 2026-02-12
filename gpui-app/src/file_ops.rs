@@ -922,11 +922,20 @@ impl Spreadsheet {
             .or_else(|| self.import_source_dir.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-        // For filename: prefer current file name, then import filename (with .sheet extension)
+        // For filename: use current file name but default to .sheet for non-native formats
         let suggested_name = self.current_file.as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string())
+            .and_then(|p| {
+                let name = p.file_name()?.to_str()?;
+                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+                // If already a VisiGrid native format, keep the name as-is
+                if matches!(ext.to_lowercase().as_str(), "sheet" | "vgrid") {
+                    Some(name.to_string())
+                } else {
+                    // Non-native format (xlsx, csv, etc.) — suggest .sheet
+                    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled");
+                    Some(format!("{}.sheet", stem))
+                }
+            })
             .or_else(|| {
                 // Convert import filename to .sheet extension
                 self.import_filename.as_ref().map(|name| {
