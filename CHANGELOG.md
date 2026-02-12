@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.7.0
+
+### Lua Debugger
+
+- **Debug panel UI** — source pane with gutter breakpoints (click to toggle, F9 at paused line), current-line highlight, call stack with frame selection, and variables pane with lazy tree expansion (locals, upvalues, nested tables). Controls bar with Continue (F5), Step Over (F10), Step In (F11), Step Out (Shift+F11), Stop (Shift+F5).
+- **Debug session backend** — background thread with its own Lua VM, hook-based pause/resume, breakpoint/stepping support, variable inspection per frame, and table expansion. Timeout and instruction limits exclude paused time.
+- **Console debug integration** — Run and Debug tabs in the Lua console. Shift+Enter or F5 starts a debug session. Two-pass event pump streams output, pause snapshots, and completion results. Completed sessions apply ops as a single undo group.
+- **Production hardening** — frame_index in VariableExpanded prevents race conditions on frame switch, debug output ring buffer (10K cap) prevents unbounded memory, viewport_lines recomputed every frame for stable scroll across resize/maximize.
+
+### Lua Console
+
+- **Redesigned console panel** — tab bar with Run/Debug tabs, toolbar with Clear, Maximize/Restore, and Close buttons. Viewport-relative max height (60% of window). Empty-state hint that disappears when output exists.
+- **Pro gating** — Debug tab gated by `lua_tooling` feature flag (REPL stays free). Locked panel with skeleton preview and CTA for non-Pro users.
+
+### CLI
+
+- **Multi-sheet inspect** — `--sheet` (index or name), `--sheets` (list mode), `--non-empty` (sparse output), `--ndjson` (streamable). `convert --sheet` now works for .sheet and .xlsx.
+- **diff --match contains** — `--contains-column` for substring matching, `--no-fail` for agent-friendly exit semantics, `KeyTransform::Alnum` for fuzzy key normalization.
+
+### UI Polish
+
+- **Panel toggle icons** — status bar icons for Inspector, Profiler, and Console with tooltips.
+- **Save As defaults to .sheet** — imported files (xlsx, csv) now suggest `.sheet` extension to prevent format confusion.
+
+### Advanced Transforms (0.6.9)
+
+- **Transform pipeline** — Pro-gated column transforms with diff preview and history filter.
+- **Ungated Lua runtime** — mlua always compiled, Lua REPL available to all users.
+
 ## 0.6.8
 
 - **Performance Profiler panel** — debug recalculation bottlenecks with phase timing (invalidation, topo sort, eval, Lua), hotspot analysis, cycle detection, and heuristic classification. Ctrl+Alt+P to toggle.
