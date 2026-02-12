@@ -767,6 +767,17 @@ pub struct SheetSnapshot {
 }
 
 impl SheetSnapshot {
+    /// Create a snapshot from raw data (for testing and debug sessions).
+    #[cfg(test)]
+    pub(crate) fn from_mock(
+        values: std::collections::HashMap<(usize, usize), LuaCellValue>,
+        formulas: std::collections::HashMap<(usize, usize), String>,
+        rows: usize,
+        cols: usize,
+    ) -> Self {
+        Self { values, formulas, rows, cols }
+    }
+
     /// Create a snapshot from a Sheet reference.
     ///
     /// Uses sparse iteration - only copies cells that actually exist.

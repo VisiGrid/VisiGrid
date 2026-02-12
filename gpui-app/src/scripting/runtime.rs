@@ -454,15 +454,7 @@ impl LuaRuntime {
     ///
     /// Returns (code_to_execute, was_expression).
     fn prepare_code(&self, input: &str) -> (String, bool) {
-        // First, check if it's a valid expression by trying to parse `return (input)`
-        let as_expr = format!("return ({})", input);
-        if self.lua.load(&as_expr).into_function().is_ok() {
-            // It's a valid expression
-            return (as_expr, true);
-        }
-
-        // Otherwise, execute as-is (statement or multi-statement)
-        (input.to_string(), false)
+        prepare_code(&self.lua, input)
     }
 
     /// Get a reference to the Lua instance (for M2 extension).
@@ -481,8 +473,19 @@ impl Default for LuaRuntime {
     }
 }
 
+/// Prepare code for execution: try expression wrapping first, fall back to statement.
+///
+/// Returns (code_to_execute, was_expression).
+pub(crate) fn prepare_code(lua: &Lua, input: &str) -> (String, bool) {
+    let as_expr = format!("return ({})", input);
+    if lua.load(&as_expr).into_function().is_ok() {
+        return (as_expr, true);
+    }
+    (input.to_string(), false)
+}
+
 /// Convert a Lua value to a display string.
-fn lua_value_to_string(value: &Value) -> String {
+pub(crate) fn lua_value_to_string(value: &Value) -> String {
     match value {
         Value::Nil => "nil".to_string(),
         Value::Boolean(b) => b.to_string(),
@@ -507,7 +510,7 @@ fn lua_value_to_string(value: &Value) -> String {
 }
 
 /// Format a Lua error for display.
-fn format_lua_error(error: &mlua::Error) -> String {
+pub(crate) fn format_lua_error(error: &mlua::Error) -> String {
     match error {
         mlua::Error::SyntaxError { message, .. } => {
             // Strip the "[string \"...\"]:1: " prefix if present
