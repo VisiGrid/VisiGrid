@@ -163,10 +163,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             if this.lua_console.resizing {
                 let y: f32 = event.position.y.into();
                 let delta = this.lua_console.resize_start_y - y; // Inverted: dragging up increases height
-                let new_height = (this.lua_console.resize_start_height + delta)
-                    .max(crate::scripting::MIN_CONSOLE_HEIGHT)
-                    .min(crate::scripting::MAX_CONSOLE_HEIGHT);
-                this.lua_console.height = new_height;
+                let new_height = this.lua_console.resize_start_height + delta;
+                this.lua_console.set_height_from_drag(new_height);
                 cx.notify();
                 return; // Don't process other drags while resizing console
             }
@@ -479,6 +477,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 .flex()
                 .flex_row()
                 .flex_1()
+                .min_h(px(0.0))  // Allow grid to shrink below content size for console panel
                 .child(grid_element)
                 .when(show_minimap, |d| {
                     d.child(minimap::render_minimap(app, window, cx))

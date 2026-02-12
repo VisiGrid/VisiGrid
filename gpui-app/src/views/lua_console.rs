@@ -13,9 +13,15 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 
 use crate::app::Spreadsheet;
-use crate::scripting::{OutputEntry, OutputKind, SheetSnapshot, LuaOp, LuaCellValue, MIN_CONSOLE_HEIGHT, MAX_CONSOLE_HEIGHT};
+use crate::scripting::{OutputEntry, OutputKind, SheetSnapshot, LuaOp, LuaCellValue, MAX_CONSOLE_HEIGHT};
 use crate::scripting::examples::{EXAMPLES, get_example, find_example};
 use crate::theme::TokenKey;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ConsoleTab {
+    Console,
+    // Future: Debug
+}
 
 /// Render the Lua console panel (if visible)
 pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -29,11 +35,28 @@ pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
     let text_muted = app.token(TokenKey::TextMuted);
+    let selection_bg = app.token(TokenKey::SelectionBg);
     let accent = app.token(TokenKey::Accent);
     let error_color = app.token(TokenKey::Error);
     let editor_bg = app.token(TokenKey::EditorBg);
 
-    let console_height = console.height;
+    // Viewport-relative max height: cap at 60% of window height
+    let window_height: f32 = app.window_size.height.into();
+    let effective_max = if window_height > 0.0 {
+        MAX_CONSOLE_HEIGHT.min(window_height * 0.6)
+    } else {
+        MAX_CONSOLE_HEIGHT  // Window size not yet known; use absolute max
+    };
+
+    let console_height = if console.is_maximized {
+        effective_max
+    } else {
+        console.height
+    };
+
+    let current_tab = ConsoleTab::Console;
+    let is_maximized = console.is_maximized;
+    let has_output = !console.output.is_empty();
 
     div()
         .id("lua-console-panel")
@@ -69,36 +92,12 @@ pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                 }))
         )
         .child(
-            // Header bar
-            div()
-                .h(px(24.0))
-                .px_2()
-                .flex()
-                .items_center()
-                .justify_between()
-                .border_b_1()
-                .border_color(panel_border)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(text_muted)
-                        .child("Lua Console")
-                )
-                .child(
-                    // Close button
-                    div()
-                        .id("lua-console-close")
-                        .px_1()
-                        .cursor_pointer()
-                        .text_xs()
-                        .text_color(text_muted)
-                        .hover(|s| s.text_color(text_primary))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.lua_console.hide();
-                            cx.notify();
-                        }))
-                        .child("×")
-                )
+            // Tab bar + toolbar header
+            render_console_tab_bar(
+                current_tab, is_maximized, has_output,
+                text_primary, text_muted, selection_bg, accent, panel_border,
+                cx,
+            )
         )
         .child(
             // Output area with virtual scroll
@@ -117,9 +116,14 @@ pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                         .when(console.output.is_empty(), |d| {
                             d.child(
                                 div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .py_2()
                                     .text_xs()
                                     .text_color(text_muted.opacity(0.5))
-                                    .child("Output appears here. Press Enter to run.")
+                                    .child("Enter run \u{00B7} Shift+Enter newline \u{00B7} Ctrl+L clear")
+                                    .child("help \u{2192} commands \u{00B7} examples \u{2192} scripts")
                             )
                         })
                         .children(
@@ -153,13 +157,13 @@ pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                                     .flex()
                                     .gap_1()
                                     .child(
-                                        scroll_button("▲", console.can_scroll_up(), text_muted, text_primary, cx, |this, cx| {
+                                        scroll_button("\u{25B2}", console.can_scroll_up(), text_muted, text_primary, cx, |this, cx| {
                                             this.lua_console.scroll_page_up();
                                             cx.notify();
                                         })
                                     )
                                     .child(
-                                        scroll_button("▼", console.can_scroll_down(), text_muted, text_primary, cx, |this, cx| {
+                                        scroll_button("\u{25BC}", console.can_scroll_down(), text_muted, text_primary, cx, |this, cx| {
                                             this.lua_console.scroll_page_down();
                                             cx.notify();
                                         })
@@ -178,30 +182,146 @@ pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                 .gap_2()
                 .border_t_1()
                 .border_color(panel_border)
+                .bg(editor_bg.opacity(0.5))
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(11.0))
                         .text_color(accent)
                         .child(">")
                 )
                 .child(
-                    // Input display (we'll render the input text here)
                     render_input_area(app, editor_bg, text_primary, accent, cx)
                 )
         )
+        .into_any_element()
+}
+
+/// Render the tab bar with toolbar buttons
+fn render_console_tab_bar(
+    current_tab: ConsoleTab,
+    is_maximized: bool,
+    has_output: bool,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    selection_bg: Hsla,
+    _accent: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let is_active = current_tab == ConsoleTab::Console;
+
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .border_b_1()
+        .border_color(panel_border)
+        // Left side: tabs
         .child(
-            // Hint footer
             div()
-                .h(px(16.0))
-                .px_2()
+                .flex()
+                .child(
+                    div()
+                        .id("console-tab-console")
+                        .px_3()
+                        .py(px(6.0))
+                        .text_size(px(12.0))
+                        .text_color(if is_active { text_primary } else { text_muted })
+                        .font_weight(if is_active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                        .bg(if is_active { selection_bg.opacity(0.3) } else { gpui::transparent_black() })
+                        .border_b_2()
+                        .border_color(if is_active { text_primary } else { gpui::transparent_black() })
+                        .cursor_pointer()
+                        .hover(|s| s.bg(panel_border.opacity(0.5)))
+                        .child("Console")
+                )
+        )
+        // Right side: toolbar buttons
+        .child(
+            div()
                 .flex()
                 .items_center()
-                .justify_end()
-                .text_xs()
-                .text_color(text_muted.opacity(0.6))
-                .child("Ctrl+Enter to run · Undo reverses the entire script")
+                .gap(px(2.0))
+                .pr_1()
+                .child(
+                    console_toolbar_btn(
+                        "console-clear-btn",
+                        "Clear",
+                        has_output,
+                        text_muted, text_primary, panel_border,
+                        cx,
+                        |this, cx| {
+                            this.lua_console.clear_output();
+                            cx.notify();
+                        },
+                    )
+                )
+                .child(
+                    console_toolbar_btn(
+                        "console-maximize-btn",
+                        if is_maximized { "Restore" } else { "Maximize" },
+                        true,
+                        text_muted, text_primary, panel_border,
+                        cx,
+                        move |this, cx| {
+                            let window_h: f32 = this.window_size.height.into();
+                            let eff_max = MAX_CONSOLE_HEIGHT.min(window_h * 0.6);
+                            this.lua_console.toggle_maximize(eff_max);
+                            cx.notify();
+                        },
+                    )
+                )
+                .child(
+                    console_toolbar_btn(
+                        "console-close-btn",
+                        "\u{2715}",
+                        true,
+                        text_muted, text_primary, panel_border,
+                        cx,
+                        |this, cx| {
+                            this.lua_console.hide();
+                            cx.notify();
+                        },
+                    )
+                )
         )
-        .into_any_element()
+}
+
+/// Toolbar button helper for console header
+fn console_toolbar_btn<F>(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    text_muted: Hsla,
+    text_primary: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+    on_click: F,
+) -> Stateful<Div>
+where
+    F: Fn(&mut Spreadsheet, &mut Context<Spreadsheet>) + 'static,
+{
+    let btn = div()
+        .id(id)
+        .px(px(6.0))
+        .py(px(3.0))
+        .rounded(px(3.0))
+        .text_size(px(10.0));
+
+    if enabled {
+        btn
+            .text_color(text_muted)
+            .cursor_pointer()
+            .hover(|s| s.bg(panel_border.opacity(0.5)).text_color(text_primary))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                on_click(this, cx);
+            }))
+            .child(label)
+    } else {
+        btn
+            .text_color(text_muted.opacity(0.3))
+            .child(label)
+    }
 }
 
 /// Render a single output entry
@@ -280,11 +400,10 @@ fn render_input_area(
         .flex_1()
         .h_full()
         .px_1()
-        .bg(editor_bg)
         .rounded_sm()
         .flex()
         .items_center()
-        .text_xs()
+        .text_size(px(11.0))
         .font_family("monospace")
         .text_color(text_primary)
         .child(before.to_string())

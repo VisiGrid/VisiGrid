@@ -109,6 +109,12 @@ pub struct ConsoleState {
     /// Panel height in pixels (resizable)
     pub height: f32,
 
+    /// Whether the panel is maximized
+    pub is_maximized: bool,
+
+    /// Height to restore when un-maximizing
+    pub restore_height: f32,
+
     /// Whether currently resizing the panel
     pub resizing: bool,
 
@@ -120,7 +126,7 @@ pub struct ConsoleState {
 }
 
 /// Default and minimum console height
-pub const DEFAULT_CONSOLE_HEIGHT: f32 = 200.0;
+pub const DEFAULT_CONSOLE_HEIGHT: f32 = 250.0;
 pub const MIN_CONSOLE_HEIGHT: f32 = 100.0;
 pub const MAX_CONSOLE_HEIGHT: f32 = 600.0;
 
@@ -145,6 +151,8 @@ impl ConsoleState {
             executing: false,
             first_open: true,
             height: DEFAULT_CONSOLE_HEIGHT,
+            is_maximized: false,
+            restore_height: DEFAULT_CONSOLE_HEIGHT,
             resizing: false,
             resize_start_y: 0.0,
             resize_start_height: 0.0,
@@ -175,6 +183,24 @@ impl ConsoleState {
     /// Hide the console
     pub fn hide(&mut self) {
         self.visible = false;
+    }
+
+    /// Toggle maximize/restore
+    pub fn toggle_maximize(&mut self, effective_max: f32) {
+        if self.is_maximized {
+            self.height = self.restore_height;
+            self.is_maximized = false;
+        } else {
+            self.restore_height = self.height;
+            self.height = effective_max;
+            self.is_maximized = true;
+        }
+    }
+
+    /// Set height from drag resize. Exits maximize mode.
+    pub fn set_height_from_drag(&mut self, new_height: f32) {
+        self.height = new_height.max(MIN_CONSOLE_HEIGHT).min(MAX_CONSOLE_HEIGHT);
+        self.is_maximized = false;
     }
 
     /// Clear the output log
