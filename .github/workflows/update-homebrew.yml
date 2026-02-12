@@ -26,6 +26,6 @@ jobs:
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          repository: VisiGrid/homebrew-visigrid
+          repository: VisiGrid/homebrew-tap
           event-type: release-published
           client-payload: '{"version": "${{ steps.version.outputs.version }}"}'
