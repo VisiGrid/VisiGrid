@@ -286,6 +286,16 @@ impl Spreadsheet {
         }
     }
 
+    /// Check for newly-detected cycles after a cell edit or recalc and show
+    /// the cycle banner if needed. This is the single hook that ensures the
+    /// "Turn on iterative calculation..." button appears regardless of whether
+    /// cycles were introduced via file import, manual editing, or Lua scripting.
+    pub(crate) fn maybe_show_cycle_banner(&mut self, cx: &App) {
+        if self.should_show_cycle_banner(cx) && !self.cycle_banner.visible {
+            self.cycle_banner.show_force();
+        }
+    }
+
     /// Run full ordered recompute if enabled (smoke mode or verified mode).
     ///
     /// - Smoke mode (VISIGRID_RECALC=full): Logs to file for dogfooding
@@ -646,9 +656,12 @@ impl Spreadsheet {
             }
         }
 
-        if self.verified_mode {
-            self.last_recalc_report = Some(report);
-        }
+        // Always store the report so cycle detection works outside verified mode
+        self.last_recalc_report = Some(report);
+
+        // Show cycle banner if cycles were newly detected
+        self.maybe_show_cycle_banner(cx);
+
         cx.notify();
     }
 
@@ -971,6 +984,9 @@ impl Spreadsheet {
         self.bump_cells_rev();
         self.is_modified = true;
         self.maybe_smoke_recalc(cx);
+
+        // Show cycle banner if this edit introduced circular references
+        self.maybe_show_cycle_banner(cx);
 
         // Invalidate trace cache (dependencies may have changed)
         if had_changes {
@@ -1373,6 +1389,9 @@ impl Spreadsheet {
 
         // Smoke mode: trigger full ordered recompute for dogfooding
         self.maybe_smoke_recalc(cx);
+
+        // Show cycle banner if this edit introduced circular references
+        self.maybe_show_cycle_banner(cx);
 
         cx.notify();
 

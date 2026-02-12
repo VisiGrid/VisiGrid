@@ -769,6 +769,9 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
     );
     app.lua_console.push_output(OutputEntry::system(stats));
 
+    // Show cycle banner if Lua script introduced circular references
+    app.maybe_show_cycle_banner(cx);
+
     cx.notify();
 }
 
