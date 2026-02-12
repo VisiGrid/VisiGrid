@@ -6,7 +6,7 @@
 //!
 //! - **Offline-first**: License verified locally, no phoning home
 //! - **Signed payload**: Ed25519 signature over canonical JSON
-//! - **Feature flags**: `is_feature_enabled("lua")` for runtime checks
+//! - **Feature flags**: `is_feature_enabled("lua_tooling")` for runtime checks
 //! - **Graceful degradation**: Expired licenses downgrade to Free
 //!
 //! # License File Format
@@ -613,7 +613,7 @@ pub fn is_feature_enabled(feature: &str) -> bool {
 
 /// Features unlocked by trial. Explicit allowlist — change this to control trial scope.
 fn trial_allows(feature: &str) -> bool {
-    matches!(feature, "inspector" | "lua" | "performance" | "transforms")
+    matches!(feature, "inspector" | "lua" | "lua_tooling" | "performance" | "transforms")
 }
 
 /// Check if running a commercial build
@@ -893,6 +893,7 @@ mod tests {
     fn test_trial_allows_allowlist() {
         assert!(trial_allows("inspector"));
         assert!(trial_allows("lua"));
+        assert!(trial_allows("lua_tooling"));
         assert!(trial_allows("performance"));
         assert!(trial_allows("transforms"));
         assert!(!trial_allows("fast_large_files"));

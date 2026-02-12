@@ -32,7 +32,7 @@ mod ops;
 mod runtime;
 mod sheet_api;
 
-pub use console_state::{ConsoleState, ConsoleTab, ActiveDebugSession, OutputEntry, OutputKind, VIEW_LEN, DEFAULT_CONSOLE_HEIGHT, MIN_CONSOLE_HEIGHT, MAX_CONSOLE_HEIGHT};
+pub use console_state::{ConsoleState, ConsoleTab, ActiveDebugSession, OutputEntry, OutputKind, VIEW_LEN, DEFAULT_CONSOLE_HEIGHT, MIN_CONSOLE_HEIGHT, MAX_CONSOLE_HEIGHT, DEBUG_OUTPUT_CAP};
 pub use ops::{CellKey, LuaCellValue, LuaOp, LuaOpSink, PendingCell, SheetReader, parse_a1, format_a1};
 pub use runtime::{LuaEvalResult, LuaRuntime, CancelToken, INSTRUCTION_LIMIT, INSTRUCTION_HOOK_INTERVAL, DEFAULT_TIMEOUT};
 pub use sheet_api::{DynOpSink, SheetUserData, SheetSnapshot, register_sheet_global, MAX_OPS, MAX_OUTPUT_LINES};

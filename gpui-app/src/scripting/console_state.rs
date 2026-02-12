@@ -8,13 +8,13 @@
 //! all lines, it shows a window of `VIEW_LEN` lines at a time. This prevents
 //! performance issues with very long outputs (scripts can print thousands of lines).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use super::debugger::{
     DebugAction, DebugCommand, DebugEvent, DebugSession, DebugSessionState, DebugSnapshot,
-    SessionId,
+    SessionId, Variable, VarPathSegment,
 };
 
 /// Default number of visible lines in the console output
@@ -179,7 +179,25 @@ pub struct ConsoleState {
 
     /// Last pause snapshot from the debugger
     pub debug_snapshot: Option<DebugSnapshot>,
+
+    /// Currently selected call stack frame index (0 = top frame)
+    pub selected_frame: usize,
+
+    /// Cache of (locals, upvalues) per frame index — populated by FrameVars events
+    pub frame_vars_cache: HashMap<usize, (Vec<Variable>, Vec<Variable>)>,
+
+    /// Expanded variable children, keyed by "F{frame}:{path}" string
+    pub expanded_vars: HashMap<String, Vec<Variable>>,
+
+    /// Source pane scroll offset (line index of first visible line, 0-indexed)
+    pub debug_source_scroll: usize,
+
+    /// Last known visible line count in source pane (updated by render)
+    pub debug_source_viewport_lines: usize,
 }
+
+/// Ring buffer cap for debug_output (prevent unbounded memory growth)
+pub const DEBUG_OUTPUT_CAP: usize = 10_000;
 
 /// Default and minimum console height
 pub const DEFAULT_CONSOLE_HEIGHT: f32 = 250.0;
@@ -217,6 +235,11 @@ impl ConsoleState {
             debug_session: None,
             debug_output: Vec::new(),
             debug_snapshot: None,
+            selected_frame: 0,
+            frame_vars_cache: HashMap::new(),
+            expanded_vars: HashMap::new(),
+            debug_source_scroll: 0,
+            debug_source_viewport_lines: 20,
         }
     }
 
@@ -367,6 +390,10 @@ impl ConsoleState {
         self.active_tab = ConsoleTab::Debug;
         self.debug_output.clear();
         self.debug_snapshot = None;
+        self.selected_frame = 0;
+        self.frame_vars_cache.clear();
+        self.expanded_vars.clear();
+        self.debug_source_scroll = 0;
     }
 
     /// Stop the current debug session (idempotent).
@@ -377,6 +404,9 @@ impl ConsoleState {
             // Dropping session closes cmd_tx, which unblocks recv() in the debug thread
         }
         self.debug_snapshot = None;
+        self.expanded_vars.clear();
+        self.frame_vars_cache.clear();
+        self.selected_frame = 0;
     }
 
     /// Send a debug action to the active session (no-op if no session).
@@ -394,6 +424,48 @@ impl ConsoleState {
         if let Some(ref mut session) = self.debug_session {
             session.state = DebugSessionState::Running;
         }
+    }
+
+    /// Called when debugger pauses. Resets UI state and ensures paused line is visible.
+    /// `paused_line_0` is 0-indexed (caller normalizes from 1-indexed Lua line).
+    pub fn on_debug_paused(&mut self, paused_line_0: usize, total_lines: usize) {
+        self.selected_frame = 0;
+        self.frame_vars_cache.clear();
+        self.expanded_vars.clear();
+
+        // Ensure paused line visible with 3-line margin
+        let visible = self.debug_source_viewport_lines;
+        let scroll = &mut self.debug_source_scroll;
+        if paused_line_0 < *scroll + 3 {
+            *scroll = paused_line_0.saturating_sub(3);
+        } else if paused_line_0 > *scroll + visible.saturating_sub(3) {
+            *scroll = paused_line_0.saturating_sub(visible.saturating_sub(3));
+        }
+        *scroll = (*scroll).min(total_lines.saturating_sub(1));
+    }
+
+    /// Select a call stack frame for variable inspection.
+    pub fn select_frame(&mut self, frame_index: usize) {
+        self.selected_frame = frame_index;
+        self.expanded_vars.clear();
+        if frame_index != 0 && !self.frame_vars_cache.contains_key(&frame_index) {
+            self.send_debug_action(DebugAction::RequestFrameVars { frame_index });
+        }
+    }
+
+    /// Build an expansion key for the variable cache, including frame index.
+    pub fn var_expansion_key(frame_index: usize, path: &[VarPathSegment]) -> String {
+        let mut key = format!("F{}:", frame_index);
+        for seg in path {
+            match seg {
+                VarPathSegment::Local(i) => key.push_str(&format!("L{}", i)),
+                VarPathSegment::Upvalue(i) => key.push_str(&format!("U{}", i)),
+                VarPathSegment::KeyString(s) => key.push_str(&format!(".{}", s)),
+                VarPathSegment::KeyInt(i) => key.push_str(&format!("[{}]", i)),
+                VarPathSegment::KeyOther(s) => key.push_str(&format!("?{}", s)),
+            }
+        }
+        key
     }
 
     /// Get current input, consuming it and adding to history
