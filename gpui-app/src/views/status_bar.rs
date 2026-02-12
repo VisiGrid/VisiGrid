@@ -930,6 +930,7 @@ fn render_panel_toggles(
         .child(panel_toggle_btn(
             "toggle-inspector",
             "\u{229E}",
+            "Inspector (Ctrl+Shift+I)",
             app.inspector_visible,
             text_muted, text_primary, selection_bg, panel_border,
             cx,
@@ -942,6 +943,7 @@ fn render_panel_toggles(
         .child(panel_toggle_btn(
             "toggle-profiler",
             "\u{23F1}",
+            "Profiler (Ctrl+Alt+P)",
             app.profiler_visible,
             text_muted, text_primary, selection_bg, panel_border,
             cx,
@@ -954,6 +956,7 @@ fn render_panel_toggles(
         .child(panel_toggle_btn(
             "toggle-console",
             "\u{276F}_",
+            "Lua Console (Alt+F11)",
             app.lua_console.visible,
             text_muted, text_primary, selection_bg, panel_border,
             cx,
@@ -968,6 +971,7 @@ fn render_panel_toggles(
         .child(panel_toggle_btn(
             "toggle-minimap",
             "\u{25A6}",
+            "Minimap",
             app.minimap_visible,
             text_muted, text_primary, selection_bg, panel_border,
             cx,
@@ -982,6 +986,7 @@ fn render_panel_toggles(
 fn panel_toggle_btn(
     id: &'static str,
     icon: &'static str,
+    tooltip_text: &'static str,
     active: bool,
     text_muted: Hsla,
     text_primary: Hsla,
@@ -990,6 +995,7 @@ fn panel_toggle_btn(
     cx: &mut Context<Spreadsheet>,
     on_click: impl Fn(&mut Spreadsheet, &mut Window, &mut Context<Spreadsheet>) + 'static,
 ) -> Stateful<Div> {
+    let tip: SharedString = tooltip_text.into();
     div()
         .id(id)
         .px(px(4.0))
@@ -1007,6 +1013,9 @@ fn panel_toggle_btn(
         .hover(move |s| {
             s.text_color(text_primary)
                 .bg(panel_border.opacity(0.5))
+        })
+        .tooltip(move |_window, cx| {
+            cx.new(|_| PillTooltip(tip.clone())).into()
         })
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
             on_click(this, window, cx);
