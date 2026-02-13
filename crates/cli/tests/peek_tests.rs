@@ -1,5 +1,9 @@
 // Integration tests for `vgrid peek` across formats and safety caps.
 // Run with: cargo test -p visigrid-cli --test peek_tests -- --nocapture
+//
+// Manual smoke test (cannot be automated — requires a real TTY):
+//   vgrid peek tests/fixtures/inspect_small.xlsx --headers
+//   Verify: TUI launches, tab switching works, q exits cleanly, terminal state restored.
 
 use std::path::Path;
 use std::process::Command;

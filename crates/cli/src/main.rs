@@ -421,6 +421,14 @@ Examples:
   visigrid peek data.csv --delimiter ';'         # semicolon-separated
   visigrid peek data.csv --delimiter tab         # tab, comma, pipe, semicolon
   visigrid peek data.csv --plain                 # print table to stdout
+  visigrid peek data.csv --no-tui               # same as --plain
+  visigrid peek data.csv --tui                  # force interactive (error if no TTY)
+
+TTY behavior:
+  Default: interactive TUI when stdin+stdout are TTY, otherwise prints plain preview.
+  --tui   forces interactive (errors if not a TTY).
+  --no-tui / --plain  forces plain preview.
+  Safe for pipes, CI, and agents — no raw-mode crash in headless environments.
 
 Safety: preview is capped by row count (200k) and cell count (10M for xlsx/ods). \
 Use --force to override.")]
