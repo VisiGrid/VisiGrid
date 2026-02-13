@@ -461,7 +461,7 @@ Use --force to override.")]
         #[arg(long, conflicts_with = "tui")]
         no_tui: bool,
         /// Force interactive TUI; error if not possible
-        #[arg(long, conflicts_with = "no_tui")]
+        #[arg(long, conflicts_with_all = ["no_tui", "plain", "shape"])]
         tui: bool,
     },
 

@@ -251,6 +251,23 @@ fn peek_tui_flag_errors_when_not_tty() {
 }
 
 #[test]
+fn peek_tui_conflicts_with_plain() {
+    let csv = std::env::temp_dir().join("vgrid_peek_tui_plain.csv");
+    std::fs::write(&csv, "X,Y\n1,2\n").unwrap();
+
+    let output = vgrid()
+        .args(["peek", csv.to_str().unwrap(), "--tui", "--plain"])
+        .output()
+        .expect("vgrid peek --tui --plain");
+
+    assert!(!output.status.success(), "--tui --plain should conflict");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--tui") || stderr.contains("cannot be used with"),
+        "error should mention conflict, got: {}", stderr);
+    std::fs::remove_file(&csv).ok();
+}
+
+#[test]
 fn peek_xlsx_non_tty_auto_fallback() {
     let xlsx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inspect_small.xlsx");
 
