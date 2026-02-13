@@ -472,7 +472,7 @@ fn parse_target(s: &str) -> Option<(usize, usize, usize, usize)> {
     }
 }
 
-/// Inspect a cell from a .sheet file.
+/// Inspect a cell from a spreadsheet file.
 #[derive(Debug, serde::Serialize)]
 pub struct CellInspectResult {
     pub cell: String,
@@ -482,6 +482,10 @@ pub struct CellInspectResult {
     pub value_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<CellFormatInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_name: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -503,12 +507,19 @@ pub struct RangeInspectResult {
     pub cells: Vec<CellInspectResult>,
 }
 
-/// Inspect workbook metadata from a .sheet file.
+/// Inspect workbook metadata from a spreadsheet file.
 #[derive(Debug, serde::Serialize)]
 pub struct WorkbookInspectResult {
-    pub fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
     pub sheet_count: usize,
     pub cell_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import_notes: Option<Vec<String>>,
 }
 
 /// Entry in the sheet list returned by `--sheets`.

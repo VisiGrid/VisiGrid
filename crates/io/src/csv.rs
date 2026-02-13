@@ -16,6 +16,11 @@ pub fn import_tsv(path: &Path) -> Result<Sheet, String> {
     import_from_string(&content, b'\t')
 }
 
+pub fn import_with_delimiter(path: &Path, delimiter: u8) -> Result<Sheet, String> {
+    let content = read_file_as_utf8(path)?;
+    import_from_string(&content, delimiter)
+}
+
 /// Detect the most likely field delimiter by checking consistency across the first few lines.
 ///
 /// For each candidate (tab, semicolon, comma, pipe), count fields per line. The delimiter

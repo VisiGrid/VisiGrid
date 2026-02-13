@@ -118,6 +118,10 @@ pub struct ImportResult {
     pub cycles_no_cached: usize,
     /// Whether freeze was applied (freeze_cycles requested AND cells were frozen)
     pub freeze_applied: bool,
+    /// Formula strings collected during values_only import.
+    /// Key: (sheet_index, row, col), Value: formula string (with leading =).
+    /// Empty unless values_only is true.
+    pub formula_strings: HashMap<(usize, usize, usize), String>,
 }
 
 /// Column/row dimension data imported from XLSX, in raw Excel units.
@@ -228,6 +232,12 @@ pub struct ImportOptions {
 
     /// Convergence tolerance (used when iterative_enabled is true).
     pub iterative_tolerance: f64,
+
+    /// When true, preserve cached cell values instead of replacing them with formulas.
+    /// Formula strings are collected in ImportResult.formula_strings instead.
+    /// Skips dependency graph rebuild and formula recomputation.
+    /// Cell values remain as calamine extracted them (strings, numbers, dates as serials).
+    pub values_only: bool,
 }
 
 impl Default for ImportOptions {
@@ -237,6 +247,7 @@ impl Default for ImportOptions {
             iterative_enabled: false,
             iterative_max_iters: 100,
             iterative_tolerance: 1e-9,
+            values_only: false,
         }
     }
 }
@@ -525,18 +536,27 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                                 }
                             }
 
-                            // Snapshot the typed cached value before formula overwrite
-                            if options.freeze_cycles {
-                                let cached = sheet.get_cell_opt(target_row, target_col)
-                                    .map(|c| c.value.clone());
-                                cached_snapshots.last_mut().unwrap().insert(
-                                    (target_row, target_col),
-                                    (cached, formula_str.clone()),
+                            if options.values_only {
+                                // Preserve cached value; stash formula string for inspect
+                                let sheet_idx = sheets.len();
+                                result.formula_strings.insert(
+                                    (sheet_idx, target_row, target_col),
+                                    formula_str.clone(),
                                 );
-                            }
+                            } else {
+                                // Snapshot the typed cached value before formula overwrite
+                                if options.freeze_cycles {
+                                    let cached = sheet.get_cell_opt(target_row, target_col)
+                                        .map(|c| c.value.clone());
+                                    cached_snapshots.last_mut().unwrap().insert(
+                                        (target_row, target_col),
+                                        (cached, formula_str.clone()),
+                                    );
+                                }
 
-                            sheet.set_value(target_row, target_col, &formula_str);
-                            sheet.set_format(target_row, target_col, existing_format);
+                                sheet.set_value(target_row, target_col, &formula_str);
+                                sheet.set_format(target_row, target_col, existing_format);
+                            }
 
                             stats.formulas_imported += 1;
 
@@ -584,168 +604,170 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     // Import formatting from styles.xml and per-cell style IDs
     import_formatting(path, &sheet_names, &mut workbook, &mut result);
 
-    // Detect shared formula groups from XLSX XML (diagnostic guardrail)
-    result.shared_formula_groups = count_shared_formula_groups(path);
+    if !options.values_only {
+        // Detect shared formula groups from XLSX XML (diagnostic guardrail)
+        result.shared_formula_groups = count_shared_formula_groups(path);
 
-    // Extract formula-only cells from worksheet XML (cells with <f> but possibly no <v>).
-    // calamine may skip these, causing "phantom blank" cells where formulas should exist.
-    let xml_formulas = extract_xml_formula_cells(path);
-    let mut formula_backfill_count = 0usize;
-    for (sheet_idx, row, col, formula_text) in &xml_formulas {
-        if let Some(sheet) = workbook.sheet_mut(*sheet_idx) {
-            // Only backfill if the cell is currently empty (calamine didn't import it)
-            if sheet.get_raw(*row, *col).is_empty() {
-                let formula_str = if formula_text.starts_with('=') {
-                    formula_text.clone()
-                } else {
-                    format!("={}", formula_text)
-                };
-                eprintln!("[XLSX backfill] {}{}: ={}",
-                    col_to_letter(*col), *row + 1, formula_text);
-                sheet.set_value(*row, *col, &formula_str);
-                formula_backfill_count += 1;
-            }
-        }
-    }
-    result.formula_cells_without_values = formula_backfill_count;
-    if formula_backfill_count > 0 {
-        eprintln!("[XLSX import] Backfilled {} formula-only cells from XML ({} total XML formulas parsed)",
-            formula_backfill_count, xml_formulas.len());
-    }
-
-    // Backfill value-only cells from XLSX XML.
-    // calamine may skip cells stored as shared strings, inline strings, or numbers
-    // that it doesn't surface through its cell iterator.
-    let xml_values = extract_xml_value_cells(path);
-    let mut value_backfill_count = 0usize;
-    for (sheet_idx, row, col, value_text) in &xml_values {
-        if let Some(sheet) = workbook.sheet_mut(*sheet_idx) {
-            if sheet.get_raw(*row, *col).is_empty() {
-                eprintln!("[XLSX backfill] {}{}: value=\"{}\"",
-                    col_to_letter(*col), *row + 1, value_text);
-                sheet.set_value(*row, *col, value_text);
-                value_backfill_count += 1;
-            }
-        }
-    }
-    result.value_cells_backfilled = value_backfill_count;
-    if value_backfill_count > 0 {
-        eprintln!("[XLSX import] Backfilled {} value cells from XML ({} total XML value cells parsed)",
-            value_backfill_count, xml_values.len());
-    }
-
-    // Rebuild dependency graph after loading all data
-    workbook.rebuild_dep_graph();
-
-    // Freeze cycle cells if requested
-    if options.freeze_cycles {
-        let cycle_members = workbook.dep_graph().find_cycle_members();
-        if !cycle_members.is_empty() {
-            // Build sheet ID → index mapping
-            let sheet_id_to_idx: HashMap<SheetId, usize> = workbook.sheets()
-                .iter()
-                .enumerate()
-                .map(|(idx, s)| (s.id, idx))
-                .collect();
-
-            let mut frozen_count = 0usize;
-            let mut cycles_no_cached = 0usize;
-
-            for cell_id in &cycle_members {
-                let sheet_idx = match sheet_id_to_idx.get(&cell_id.sheet) {
-                    Some(&idx) => idx,
-                    None => continue,
-                };
-
-                match cached_snapshots.get_mut(sheet_idx)
-                    .and_then(|snap| snap.remove(&(cell_id.row, cell_id.col)))
-                {
-                    Some((Some(cached_cv), formula_src)) => {
-                        workbook.sheets_mut()[sheet_idx]
-                            .freeze_cell(cell_id.row, cell_id.col, cached_cv, formula_src);
-                        frozen_count += 1;
-                    }
-                    Some((None, _)) | None => {
-                        // No cached result — cell will get #CYCLE! during recalc
-                        cycles_no_cached += 1;
-                    }
+        // Extract formula-only cells from worksheet XML (cells with <f> but possibly no <v>).
+        // calamine may skip these, causing "phantom blank" cells where formulas should exist.
+        let xml_formulas = extract_xml_formula_cells(path);
+        let mut formula_backfill_count = 0usize;
+        for (sheet_idx, row, col, formula_text) in &xml_formulas {
+            if let Some(sheet) = workbook.sheet_mut(*sheet_idx) {
+                // Only backfill if the cell is currently empty (calamine didn't import it)
+                if sheet.get_raw(*row, *col).is_empty() {
+                    let formula_str = if formula_text.starts_with('=') {
+                        formula_text.clone()
+                    } else {
+                        format!("={}", formula_text)
+                    };
+                    eprintln!("[XLSX backfill] {}{}: ={}",
+                        col_to_letter(*col), *row + 1, formula_text);
+                    sheet.set_value(*row, *col, &formula_str);
+                    formula_backfill_count += 1;
                 }
             }
-
-            if frozen_count > 0 {
-                // Rebuild dep graph — frozen cells are no longer formula cells
-                workbook.rebuild_dep_graph();
-            }
-
-            result.cycles_frozen = frozen_count;
-            result.cycles_no_cached = cycles_no_cached;
-            result.freeze_applied = frozen_count > 0;
-
-            eprintln!("[XLSX import] Froze {} cycle cells ({} without cached values)",
-                frozen_count, cycles_no_cached);
         }
-    }
+        result.formula_cells_without_values = formula_backfill_count;
+        if formula_backfill_count > 0 {
+            eprintln!("[XLSX import] Backfilled {} formula-only cells from XML ({} total XML formulas parsed)",
+                formula_backfill_count, xml_formulas.len());
+        }
 
-    // Wire iteration settings before recalc (if requested)
-    if options.iterative_enabled {
-        workbook.set_iterative_enabled(true);
-        workbook.set_iterative_max_iters(options.iterative_max_iters);
-        workbook.set_iterative_tolerance(options.iterative_tolerance);
-    }
-
-    // Recompute all formulas in topological order.
-    // Individual set_value() calls during import evaluated formulas at sheet level
-    // without proper dependency ordering — upstream cells may not have existed yet.
-    // This full ordered recompute clears stale caches and evaluates everything correctly.
-    let recalc_report = workbook.recompute_full_ordered();
-    eprintln!("[XLSX import] Recomputed {} formulas in topo order (cycles: {})",
-        recalc_report.cells_recomputed, recalc_report.had_cycles);
-
-    // Post-recalc error counting: detect circular refs and formula evaluation errors
-    for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
-        let mut sheet_errors = 0usize;
-        let mut sheet_circular = 0usize;
-        for ((_row, _col), cell) in sheet.cells_iter() {
-            // Circulars: structural graph property (set during dep graph cycle detection)
-            if cell.value.is_cycle_error() {
-                sheet_circular += 1;
-                if result.recalc_error_examples.len() < MAX_ERROR_EXAMPLES {
-                    result.recalc_error_examples.push(RecalcErrorExample {
-                        sheet: sheet.name.clone(),
-                        address: cell_address(*_row, *_col),
-                        kind: "circular",
-                        error: "#CYCLE!".to_string(),
-                        formula: None, // Source is lost when cycle is detected
-                    });
+        // Backfill value-only cells from XLSX XML.
+        // calamine may skip cells stored as shared strings, inline strings, or numbers
+        // that it doesn't surface through its cell iterator.
+        let xml_values = extract_xml_value_cells(path);
+        let mut value_backfill_count = 0usize;
+        for (sheet_idx, row, col, value_text) in &xml_values {
+            if let Some(sheet) = workbook.sheet_mut(*sheet_idx) {
+                if sheet.get_raw(*row, *col).is_empty() {
+                    eprintln!("[XLSX backfill] {}{}: value=\"{}\"",
+                        col_to_letter(*col), *row + 1, value_text);
+                    sheet.set_value(*row, *col, value_text);
+                    value_backfill_count += 1;
                 }
-                continue;
             }
-            // Formula errors: evaluate formula cells, check for Value::Error
-            if cell.value.formula_ast().is_some() {
-                if let Value::Error(ref e) = sheet.get_computed_value(*_row, *_col) {
-                    sheet_errors += 1;
+        }
+        result.value_cells_backfilled = value_backfill_count;
+        if value_backfill_count > 0 {
+            eprintln!("[XLSX import] Backfilled {} value cells from XML ({} total XML value cells parsed)",
+                value_backfill_count, xml_values.len());
+        }
+
+        // Rebuild dependency graph after loading all data
+        workbook.rebuild_dep_graph();
+
+        // Freeze cycle cells if requested
+        if options.freeze_cycles {
+            let cycle_members = workbook.dep_graph().find_cycle_members();
+            if !cycle_members.is_empty() {
+                // Build sheet ID → index mapping
+                let sheet_id_to_idx: HashMap<SheetId, usize> = workbook.sheets()
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, s)| (s.id, idx))
+                    .collect();
+
+                let mut frozen_count = 0usize;
+                let mut cycles_no_cached = 0usize;
+
+                for cell_id in &cycle_members {
+                    let sheet_idx = match sheet_id_to_idx.get(&cell_id.sheet) {
+                        Some(&idx) => idx,
+                        None => continue,
+                    };
+
+                    match cached_snapshots.get_mut(sheet_idx)
+                        .and_then(|snap| snap.remove(&(cell_id.row, cell_id.col)))
+                    {
+                        Some((Some(cached_cv), formula_src)) => {
+                            workbook.sheets_mut()[sheet_idx]
+                                .freeze_cell(cell_id.row, cell_id.col, cached_cv, formula_src);
+                            frozen_count += 1;
+                        }
+                        Some((None, _)) | None => {
+                            // No cached result — cell will get #CYCLE! during recalc
+                            cycles_no_cached += 1;
+                        }
+                    }
+                }
+
+                if frozen_count > 0 {
+                    // Rebuild dep graph — frozen cells are no longer formula cells
+                    workbook.rebuild_dep_graph();
+                }
+
+                result.cycles_frozen = frozen_count;
+                result.cycles_no_cached = cycles_no_cached;
+                result.freeze_applied = frozen_count > 0;
+
+                eprintln!("[XLSX import] Froze {} cycle cells ({} without cached values)",
+                    frozen_count, cycles_no_cached);
+            }
+        }
+
+        // Wire iteration settings before recalc (if requested)
+        if options.iterative_enabled {
+            workbook.set_iterative_enabled(true);
+            workbook.set_iterative_max_iters(options.iterative_max_iters);
+            workbook.set_iterative_tolerance(options.iterative_tolerance);
+        }
+
+        // Recompute all formulas in topological order.
+        // Individual set_value() calls during import evaluated formulas at sheet level
+        // without proper dependency ordering — upstream cells may not have existed yet.
+        // This full ordered recompute clears stale caches and evaluates everything correctly.
+        let recalc_report = workbook.recompute_full_ordered();
+        eprintln!("[XLSX import] Recomputed {} formulas in topo order (cycles: {})",
+            recalc_report.cells_recomputed, recalc_report.had_cycles);
+
+        // Post-recalc error counting: detect circular refs and formula evaluation errors
+        for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
+            let mut sheet_errors = 0usize;
+            let mut sheet_circular = 0usize;
+            for ((_row, _col), cell) in sheet.cells_iter() {
+                // Circulars: structural graph property (set during dep graph cycle detection)
+                if cell.value.is_cycle_error() {
+                    sheet_circular += 1;
                     if result.recalc_error_examples.len() < MAX_ERROR_EXAMPLES {
-                        let formula_source = match &cell.value {
-                            CellValue::Formula { source, .. } => Some(source.clone()),
-                            _ => None,
-                        };
                         result.recalc_error_examples.push(RecalcErrorExample {
                             sheet: sheet.name.clone(),
                             address: cell_address(*_row, *_col),
-                            kind: "error",
-                            error: e.clone(),
-                            formula: formula_source,
+                            kind: "circular",
+                            error: "#CYCLE!".to_string(),
+                            formula: None, // Source is lost when cycle is detected
                         });
+                    }
+                    continue;
+                }
+                // Formula errors: evaluate formula cells, check for Value::Error
+                if cell.value.formula_ast().is_some() {
+                    if let Value::Error(ref e) = sheet.get_computed_value(*_row, *_col) {
+                        sheet_errors += 1;
+                        if result.recalc_error_examples.len() < MAX_ERROR_EXAMPLES {
+                            let formula_source = match &cell.value {
+                                CellValue::Formula { source, .. } => Some(source.clone()),
+                                _ => None,
+                            };
+                            result.recalc_error_examples.push(RecalcErrorExample {
+                                sheet: sheet.name.clone(),
+                                address: cell_address(*_row, *_col),
+                                kind: "error",
+                                error: e.clone(),
+                                formula: formula_source,
+                            });
+                        }
                     }
                 }
             }
+            if sheet_idx < result.sheet_stats.len() {
+                result.sheet_stats[sheet_idx].recalc_errors = sheet_errors;
+                result.sheet_stats[sheet_idx].recalc_circular = sheet_circular;
+            }
+            result.recalc_errors += sheet_errors;
+            result.recalc_circular += sheet_circular;
         }
-        if sheet_idx < result.sheet_stats.len() {
-            result.sheet_stats[sheet_idx].recalc_errors = sheet_errors;
-            result.sheet_stats[sheet_idx].recalc_circular = sheet_circular;
-        }
-        result.recalc_errors += sheet_errors;
-        result.recalc_circular += sheet_circular;
     }
 
     Ok((workbook, result))
