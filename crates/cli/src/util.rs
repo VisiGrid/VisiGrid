@@ -1,5 +1,7 @@
 use unicode_width::UnicodeWidthStr;
 
+use crate::CliError;
+
 /// Display width of a string, accounting for CJK double-width, emoji, etc.
 pub(crate) fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
@@ -64,6 +66,26 @@ pub(crate) fn col_to_letter(col: usize) -> String {
         n = n / 26 - 1;
     }
     result
+}
+
+/// Parse a delimiter spec into a byte. Accepts: tab, comma, pipe, semicolon, or single ASCII char.
+pub(crate) fn parse_delimiter(s: &str) -> Result<u8, CliError> {
+    match s.to_lowercase().as_str() {
+        "tab" | "\\t" | "tsv" => Ok(b'\t'),
+        "comma" | "csv" => Ok(b','),
+        "pipe" => Ok(b'|'),
+        "semicolon" => Ok(b';'),
+        _ => {
+            let chars: Vec<char> = s.chars().collect();
+            if chars.len() == 1 && chars[0].is_ascii() {
+                Ok(chars[0] as u8)
+            } else {
+                Err(CliError::args(format!(
+                    "invalid delimiter '{}' (use a single ASCII char, or: tab, comma, pipe, semicolon)", s
+                )))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

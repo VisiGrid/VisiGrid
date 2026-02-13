@@ -10,7 +10,7 @@ mod client;
 
 pub use auth::{AuthCredentials, auth_file_path, load_auth, save_auth, delete_auth};
 pub use client::{
-    HubClient, HubError, UserInfo, RepoInfo, DatasetInfo,
+    HubClient, HubError, UserInfo, RepoInfo, DatasetInfo, DatasetStatus,
     CreateRevisionOptions, RunResult,
     AssertionInput, AssertionResult, EngineMetadata,
     hash_file, hash_bytes,

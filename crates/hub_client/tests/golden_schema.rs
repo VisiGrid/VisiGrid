@@ -7,7 +7,7 @@
 //! The golden files are the public contract. CI scripts parse this JSON.
 //! Breaking it without versioning breaks customers.
 
-use visigrid_hub_client::{RunResult, AssertionResult, EngineMetadata};
+use visigrid_hub_client::{RunResult, AssertionResult, EngineMetadata, CreateRevisionOptions};
 
 /// Validate that every key in the golden JSON is present in RunResult serialization.
 fn validate_golden_keys(golden_path: &str, result: &RunResult) {
@@ -296,4 +296,167 @@ fn test_golden_publish_cell_assertion_pass() {
     assert_eq!(json["assertions"][0]["origin"], "client");
     assert!(json["assertions"][0]["engine"].is_object());
     assert_eq!(json["assertions"][0]["engine"]["name"], "visigrid-engine");
+}
+
+// ===========================================================================
+// DatasetStatus + CreateRevisionOptions tests
+// ===========================================================================
+
+#[test]
+fn test_create_revision_options_defaults_have_none_for_new_fields() {
+    let opts = CreateRevisionOptions::default();
+    assert!(opts.source_metadata.is_none(), "source_metadata should default to None");
+    assert!(opts.message.is_none(), "message should default to None");
+}
+
+#[test]
+fn test_create_revision_options_with_source_metadata() {
+    let sm = serde_json::json!({
+        "type": "trust_pipeline",
+        "fingerprint": "v2:42:abc123",
+        "timestamp": "2026-02-12T00:00:00Z",
+        "trust_pipeline": {
+            "stamp": {
+                "expected_fingerprint": "v2:42:abc123",
+                "label": "Q4 Filing"
+            }
+        }
+    });
+
+    let opts = CreateRevisionOptions {
+        source_metadata: Some(sm.clone()),
+        message: Some("Q4 close".into()),
+        format: Some("sheet".into()),
+        ..Default::default()
+    };
+
+    assert_eq!(opts.source_metadata.unwrap(), sm);
+    assert_eq!(opts.message.unwrap(), "Q4 close");
+    // Individual fields should be None (source_metadata takes priority)
+    assert!(opts.source_type.is_none());
+    assert!(opts.source_identity.is_none());
+    assert!(opts.query_hash.is_none());
+}
+
+#[test]
+fn test_dataset_status_parse_with_source_metadata() {
+    // Simulate parsing a JSON response with source_metadata
+    let json: serde_json::Value = serde_json::json!({
+        "current_revision_id": 42,
+        "content_hash": "blake3:abc123",
+        "byte_size": 1024,
+        "updated_at": "2026-02-12T00:00:00Z",
+        "updated_by": "alice",
+        "source_metadata": {
+            "type": "trust_pipeline",
+            "fingerprint": "v2:42:abc123"
+        }
+    });
+
+    let status = visigrid_hub_client::DatasetStatus {
+        current_revision_id: json["current_revision_id"].as_i64()
+            .map(|n| n.to_string()),
+        content_hash: json["content_hash"].as_str().map(String::from),
+        byte_size: json["byte_size"].as_u64(),
+        source_metadata: json.get("source_metadata").cloned()
+            .filter(|v| !v.is_null()),
+    };
+
+    assert_eq!(status.current_revision_id.as_deref(), Some("42"));
+    assert_eq!(status.content_hash.as_deref(), Some("blake3:abc123"));
+    assert_eq!(status.byte_size, Some(1024));
+    let sm = status.source_metadata.unwrap();
+    assert_eq!(sm["type"], "trust_pipeline");
+    assert_eq!(sm["fingerprint"], "v2:42:abc123");
+}
+
+#[test]
+fn test_dataset_status_parse_without_source_metadata() {
+    let json: serde_json::Value = serde_json::json!({
+        "current_revision_id": null,
+        "content_hash": null,
+        "byte_size": null,
+        "updated_at": "2026-02-12T00:00:00Z",
+        "updated_by": null,
+        "source_metadata": null
+    });
+
+    let status = visigrid_hub_client::DatasetStatus {
+        current_revision_id: json["current_revision_id"].as_i64()
+            .map(|n| n.to_string()),
+        content_hash: json["content_hash"].as_str().map(String::from),
+        byte_size: json["byte_size"].as_u64(),
+        source_metadata: json.get("source_metadata").cloned()
+            .filter(|v| !v.is_null()),
+    };
+
+    assert!(status.current_revision_id.is_none());
+    assert!(status.content_hash.is_none());
+    assert!(status.byte_size.is_none());
+    assert!(status.source_metadata.is_none());
+}
+
+/// Idempotency edge cases: source_metadata exists but is not a trust_pipeline,
+/// or has a different type, or has no fingerprint. CLI should publish (not skip).
+#[test]
+fn test_idempotency_non_trust_pipeline_type_should_not_match() {
+    // Latest revision was uploaded by legacy `vgrid publish` with type=dbt
+    let sm = serde_json::json!({
+        "type": "dbt",
+        "identity": "models/payments",
+        "timestamp": "2026-02-12T00:00:00Z"
+    });
+
+    let local_fingerprint = "v2:42:abc123";
+
+    // This should NOT trigger idempotency — type is not "trust_pipeline"
+    let is_match = sm["type"].as_str() == Some("trust_pipeline")
+        && sm["fingerprint"].as_str() == Some(local_fingerprint);
+    assert!(!is_match, "non-trust_pipeline type must not match");
+}
+
+#[test]
+fn test_idempotency_trust_pipeline_missing_fingerprint_should_not_match() {
+    // trust_pipeline type but fingerprint field is missing
+    let sm = serde_json::json!({
+        "type": "trust_pipeline",
+        "timestamp": "2026-02-12T00:00:00Z"
+    });
+
+    let local_fingerprint = "v2:42:abc123";
+
+    let is_match = sm["type"].as_str() == Some("trust_pipeline")
+        && sm["fingerprint"].as_str() == Some(local_fingerprint);
+    assert!(!is_match, "trust_pipeline without fingerprint must not match");
+}
+
+#[test]
+fn test_idempotency_trust_pipeline_different_fingerprint_should_not_match() {
+    // trust_pipeline with a DIFFERENT fingerprint
+    let sm = serde_json::json!({
+        "type": "trust_pipeline",
+        "fingerprint": "v2:99:different",
+        "timestamp": "2026-02-12T00:00:00Z"
+    });
+
+    let local_fingerprint = "v2:42:abc123";
+
+    let is_match = sm["type"].as_str() == Some("trust_pipeline")
+        && sm["fingerprint"].as_str() == Some(local_fingerprint);
+    assert!(!is_match, "different fingerprint must not match");
+}
+
+#[test]
+fn test_idempotency_trust_pipeline_matching_fingerprint_should_match() {
+    let sm = serde_json::json!({
+        "type": "trust_pipeline",
+        "fingerprint": "v2:42:abc123",
+        "timestamp": "2026-02-12T00:00:00Z"
+    });
+
+    let local_fingerprint = "v2:42:abc123";
+
+    let is_match = sm["type"].as_str() == Some("trust_pipeline")
+        && sm["fingerprint"].as_str() == Some(local_fingerprint);
+    assert!(is_match, "matching trust_pipeline + fingerprint must match");
 }

@@ -522,6 +522,56 @@ pub struct WorkbookInspectResult {
     pub import_notes: Option<Vec<String>>,
 }
 
+/// Wrapper for --calc output with metadata.
+#[derive(Debug, serde::Serialize)]
+pub struct CalcOutput {
+    pub format: String,
+    pub sheet: String,
+    pub results: Vec<CalcResult>,
+}
+
+/// Result of a single --calc expression evaluation.
+#[derive(Debug, serde::Serialize)]
+pub struct CalcResult {
+    pub expr: String,
+    pub value: String,
+    pub value_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Result of a `sheet import` operation.
+#[derive(Debug, serde::Serialize)]
+pub struct ImportSummary {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub source: String,
+    pub format: String,
+    pub sheet: String,
+    pub rows: usize,
+    pub cols: usize,
+    pub cells: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formulas: Option<FormulaSummary>,
+    pub fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stamped: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
+/// Formula handling summary for XLSX imports.
+#[derive(Debug, serde::Serialize)]
+pub struct FormulaSummary {
+    pub policy: String,
+    pub kept: usize,
+    pub captured: usize,
+    pub failed: usize,
+}
+
 /// Entry in the sheet list returned by `--sheets`.
 #[derive(Debug, serde::Serialize)]
 pub struct SheetListEntry {
@@ -598,6 +648,167 @@ pub fn compute_sheet_fingerprint_with_meta(workbook: &Workbook, metadata: &CellM
     let hash = hasher.finalize();
     let bytes: [u8; 16] = hash.as_bytes()[0..16].try_into().unwrap();
     ReplayFingerprint::new(op_count, bytes)
+}
+
+/// Compute (rows, cols) non-empty data bounds of a sheet.
+pub fn get_data_bounds(sheet: &Sheet) -> (usize, usize) {
+    let mut max_row = 0;
+    let mut max_col = 0;
+    for row in 0..sheet.rows {
+        for col in 0..sheet.cols {
+            if !sheet.get_display(row, col).is_empty() {
+                max_row = max_row.max(row + 1);
+                max_col = max_col.max(col + 1);
+            }
+        }
+    }
+    (max_row, max_col)
+}
+
+/// Resolve sheet by arg (index or name, case-insensitive).
+pub fn resolve_sheet_by_arg(workbook: &Workbook, arg: &str) -> Result<usize, CliError> {
+    if let Ok(idx) = arg.parse::<usize>() {
+        if idx < workbook.sheet_count() {
+            return Ok(idx);
+        }
+        let names: Vec<String> = workbook.sheet_names().iter()
+            .enumerate()
+            .map(|(i, n)| format!("{} ({:?})", i, n))
+            .collect();
+        return Err(CliError::args(format!(
+            "sheet index {} out of range (0..{}). Available: {}",
+            idx, workbook.sheet_count(), names.join(", ")
+        )));
+    }
+    let arg_lower = arg.trim().to_ascii_lowercase();
+    for (i, name) in workbook.sheet_names().iter().enumerate() {
+        if name.trim().to_ascii_lowercase() == arg_lower {
+            return Ok(i);
+        }
+    }
+    let names: Vec<String> = workbook.sheet_names().iter()
+        .enumerate()
+        .map(|(i, n)| format!("{} ({:?})", i, n))
+        .collect();
+    Err(CliError::args(format!(
+        "no sheet named {:?}. Available: {}",
+        arg, names.join(", ")
+    )))
+}
+
+/// Resolve header names in formula expressions to column references.
+///
+/// Supports `[Header Name]` bracket syntax and bare identifier matching.
+pub fn resolve_header_refs(formula: &str, header_map: &std::collections::HashMap<String, String>) -> String {
+    if header_map.is_empty() {
+        return formula.to_string();
+    }
+    let chars: Vec<char> = formula.chars().collect();
+    let mut result = String::with_capacity(formula.len());
+    let mut i = 0;
+    while i < chars.len() {
+        // Skip string literals
+        if chars[i] == '"' {
+            result.push('"');
+            i += 1;
+            while i < chars.len() && chars[i] != '"' { result.push(chars[i]); i += 1; }
+            if i < chars.len() { result.push('"'); i += 1; }
+            continue;
+        }
+        // Bracket syntax: [Header Name] → COL:COL
+        if chars[i] == '[' {
+            let start = i;
+            i += 1;
+            while i < chars.len() && chars[i] != ']' { i += 1; }
+            if i < chars.len() {
+                let name: String = chars[start + 1..i].iter().collect();
+                let key = name.trim().to_ascii_lowercase();
+                if let Some(col_ref) = header_map.get(&key) {
+                    result.push_str(col_ref);
+                } else {
+                    result.push('[');
+                    result.push_str(&name);
+                    result.push(']');
+                }
+                i += 1;
+            } else {
+                for j in start..chars.len() { result.push(chars[j]); }
+                i = chars.len();
+            }
+            continue;
+        }
+        // $ prefix passthrough
+        if chars[i] == '$' { result.push('$'); i += 1; continue; }
+        // Identifier matching
+        if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') { i += 1; }
+            let ident: String = chars[start..i].iter().collect();
+            let preceded_by_ref = result.ends_with('$') || result.ends_with(':');
+            let followed_by_paren = i < chars.len() && chars[i] == '(';
+            let has_digits = ident.chars().any(|c| c.is_ascii_digit());
+            let followed_by_colon = i < chars.len() && chars[i] == ':';
+            if !preceded_by_ref && !followed_by_paren && !has_digits && !followed_by_colon {
+                let key = ident.to_ascii_lowercase();
+                if let Some(col_ref) = header_map.get(&key) {
+                    result.push_str(col_ref);
+                    continue;
+                }
+            }
+            result.push_str(&ident);
+            continue;
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
+}
+
+/// Translate column references (A:A) to bounded cell ranges (A1:A<max_row>).
+pub fn translate_column_refs(formula: &str, start_row: usize, end_row: usize) -> String {
+    use std::collections::HashSet;
+    let mut result = formula.to_string();
+    let mut seen: HashSet<String> = HashSet::new();
+    let chars: Vec<char> = formula.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let dollar1 = if i < chars.len() && chars[i] == '$' { i += 1; true } else { false };
+        if i < chars.len() && chars[i].is_ascii_alphabetic() {
+            let mut col1 = String::new();
+            while i < chars.len() && chars[i].is_ascii_alphabetic() {
+                col1.push(chars[i].to_ascii_uppercase());
+                i += 1;
+            }
+            if i < chars.len() && chars[i] == ':' {
+                i += 1;
+                let dollar2 = if i < chars.len() && chars[i] == '$' { i += 1; true } else { false };
+                let mut col2 = String::new();
+                while i < chars.len() && chars[i].is_ascii_alphabetic() {
+                    col2.push(chars[i].to_ascii_uppercase());
+                    i += 1;
+                }
+                if !col2.is_empty() && (i >= chars.len() || !chars[i].is_ascii_digit()) {
+                    let pattern = format!(
+                        "{}{}:{}{}",
+                        if dollar1 { "$" } else { "" }, col1,
+                        if dollar2 { "$" } else { "" }, col2
+                    );
+                    if !seen.contains(&pattern) {
+                        seen.insert(pattern.clone());
+                        let replacement = format!(
+                            "{}{}{}:{}{}{}",
+                            if dollar1 { "$" } else { "" }, col1, start_row,
+                            if dollar2 { "$" } else { "" }, col2, end_row
+                        );
+                        result = result.replace(&pattern, &replacement);
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    result
 }
 
 /// Format a cell reference from (row, col).

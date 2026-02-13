@@ -639,6 +639,14 @@ Examples:
     /// Sheet file operations (headless build/inspect/verify)
     #[command(subcommand)]
     Sheet(SheetCommands),
+
+    /// VisiHub cloud operations
+    #[command(subcommand)]
+    Hub(HubCommands),
+
+    /// End-to-end trust pipeline (inspect → import → verify → publish)
+    #[command(subcommand)]
+    Pipeline(PipelineCommands),
 }
 
 #[derive(Clone, ValueEnum)]
@@ -709,7 +717,13 @@ Examples:
   visigrid sheet inspect model.sheet A1 --include-style
   visigrid sheet inspect model.sheet --sheets --json
   visigrid sheet inspect model.sheet --sheet 1 A1:M100 --json
-  visigrid sheet inspect model.sheet --sheet Forecast --non-empty --json")]
+  visigrid sheet inspect model.sheet --sheet Forecast --non-empty --json
+
+Formula evaluation (--calc):
+  visigrid sheet inspect data.csv --calc \"SUM(A:A)\"
+  visigrid sheet inspect data.csv --headers --calc \"SUM(Amount)\"
+  visigrid sheet inspect data.csv --calc \"SUM(A:A)\" --calc \"AVERAGE(B:B)\"
+  visigrid sheet inspect data.xlsx --sheet Invoices --headers --calc \"SUM([WO Number])\"")]
     Inspect {
         /// Path to spreadsheet file (.sheet, .xlsx, .csv, .tsv)
         file: PathBuf,
@@ -756,6 +770,11 @@ Examples:
         /// CSV field delimiter (single char or name: tab, comma, pipe, semicolon)
         #[arg(long)]
         delimiter: Option<String>,
+
+        /// Evaluate formula(s) against the loaded data (repeatable).
+        /// Output is always JSON. Exit 1 if any formula errors.
+        #[arg(long)]
+        calc: Vec<String>,
     },
 
     /// Verify a .sheet file's semantic fingerprint
@@ -789,6 +808,191 @@ Examples:
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+
+    /// Import a foreign spreadsheet into canonical .sheet format
+    #[command(after_help = "\
+Examples:
+  vgrid sheet import data.xlsx report.sheet
+  vgrid sheet import data.xlsx report.sheet --sheet Revenue --formulas values
+  vgrid sheet import data.csv report.sheet --headers
+  vgrid sheet import data.csv report.sheet --delimiter semicolon
+  vgrid sheet import data.xlsx report.sheet --stamp \"Q4 Filing\"
+  vgrid sheet import data.xlsx report.sheet --verify v2:42:abc123...
+  vgrid sheet import data.xlsx report.sheet --formulas keep --json
+  vgrid sheet import data.xlsx report.sheet --formulas recalc --json
+  vgrid sheet import data.xlsx report.sheet --dry-run --json")]
+    Import {
+        /// Source file (.xlsx, .csv, .tsv)
+        source: PathBuf,
+
+        /// Output .sheet file (replacement semantics)
+        output: PathBuf,
+
+        /// Sheet to import by index or name (xlsx only)
+        #[arg(long)]
+        sheet: Option<String>,
+
+        /// Treat first row as column headers (semantic metadata)
+        #[arg(long)]
+        headers: bool,
+
+        /// Formula handling: values (cached only), keep (store as metadata), recalc (recompute)
+        #[arg(long, value_enum, default_value = "values")]
+        formulas: FormulaPolicy,
+
+        /// Empty cell handling: empty (leave empty) or error (store #NULL!)
+        #[arg(long, value_enum, default_value = "empty")]
+        nulls: NullPolicy,
+
+        /// Stamp with provenance fingerprint + optional label
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        stamp: Option<String>,
+
+        /// Verify fingerprint matches (exit 1 on mismatch)
+        #[arg(long)]
+        verify: Option<String>,
+
+        /// Compute fingerprint and validate args but don't write file
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output structured JSON summary
+        #[arg(long)]
+        json: bool,
+
+        /// CSV field delimiter
+        #[arg(long)]
+        delimiter: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum HubCommands {
+    /// Publish a verified .sheet file to VisiHub
+    #[command(after_help = "\
+Examples:
+  vgrid hub publish invoices.sheet --repo quarry/invoices
+  vgrid hub publish invoices.sheet --repo quarry/invoices --message \"Q4 close\"
+  vgrid hub publish invoices.sheet --repo quarry/invoices --checks checks.json --json
+  vgrid hub publish invoices.sheet --repo quarry/invoices --no-wait --json
+  vgrid hub publish invoices.sheet --repo quarry/invoices --dry-run --json")]
+    Publish {
+        /// .sheet file to publish
+        file: PathBuf,
+
+        /// VisiHub repository (owner/slug)
+        #[arg(long)]
+        repo: String,
+
+        /// Commit message (default: "Publish <filename>")
+        #[arg(long)]
+        message: Option<String>,
+
+        /// Path to markdown notes file
+        #[arg(long)]
+        notes: Option<PathBuf>,
+
+        /// Path to checks JSON (output from `sheet inspect --calc`)
+        #[arg(long)]
+        checks: Option<PathBuf>,
+
+        /// Lock snapshot immutably (requires paid tier)
+        #[arg(long)]
+        lock: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Validate + compute fingerprint locally without auth or upload
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Return immediately after upload completes (skip polling)
+        #[arg(long)]
+        no_wait: bool,
+
+        /// Poll timeout in seconds (default: 120)
+        #[arg(long, default_value = "120")]
+        timeout: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum PipelineCommands {
+    /// Import, verify, and publish a source file to VisiHub in one step
+    #[command(after_help = "\
+Examples:
+  vgrid pipeline publish data.csv --repo quarry/invoices --headers
+  vgrid pipeline publish data.xlsx --repo quarry/invoices --stamp \"Q4 Filing\"
+  vgrid pipeline publish data.csv --repo quarry/invoices --headers --checks-calc \"SUM(Amount)\"
+  vgrid pipeline publish data.csv --repo quarry/invoices --headers --checks-file checks.json
+  vgrid pipeline publish data.xlsx --repo quarry/invoices --formulas keep --json
+  vgrid pipeline publish data.csv --repo quarry/invoices --headers --out report.sheet --dry-run --json")]
+    Publish {
+        /// Source file (.csv, .tsv, .xlsx)
+        source: PathBuf,
+
+        /// VisiHub repository (owner/slug)
+        #[arg(long)]
+        repo: String,
+
+        /// Treat first row as column headers
+        #[arg(long)]
+        headers: bool,
+
+        /// Formula handling: values (cached only), keep (store as metadata), recalc (recompute)
+        #[arg(long, value_enum, default_value = "values")]
+        formulas: FormulaPolicy,
+
+        /// Stamp with provenance fingerprint + optional label
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        stamp: Option<String>,
+
+        /// Evaluate formula(s) against the data as checks (repeatable)
+        #[arg(long = "checks-calc")]
+        checks_calc: Vec<String>,
+
+        /// Path to pre-computed checks JSON
+        #[arg(long = "checks-file")]
+        checks_file: Option<PathBuf>,
+
+        /// CSV field delimiter
+        #[arg(long)]
+        delimiter: Option<String>,
+
+        /// Sheet to import by index or name (xlsx only)
+        #[arg(long)]
+        sheet: Option<String>,
+
+        /// Commit message
+        #[arg(long)]
+        message: Option<String>,
+
+        /// Path to markdown notes file
+        #[arg(long)]
+        notes: Option<PathBuf>,
+
+        /// Save .sheet to this path (default: temp file, deleted after publish)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Validate locally without auth or upload
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Return immediately after upload (skip polling)
+        #[arg(long)]
+        no_wait: bool,
+
+        /// Poll timeout in seconds (default: 120)
+        #[arg(long, default_value = "120")]
+        timeout: u64,
     },
 }
 
@@ -828,6 +1032,22 @@ enum InspectFormat {
 enum SpillFormat {
     Csv,
     Json,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum FormulaPolicy {
+    /// Cached values only — no formulas stored, no recalc (default)
+    Values,
+    /// Store formula strings as cell metadata, but no recalc — values stay as cached
+    Keep,
+    /// Store formulas in cells AND recompute via VisiGrid engine
+    Recalc,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum NullPolicy {
+    Empty,
+    Error,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -1315,14 +1535,33 @@ fn main() -> ExitCode {
             SheetCommands::Apply { output, lua, verify, stamp, dry_run, json } => {
                 cmd_sheet_apply(output, lua, verify, stamp, dry_run, json)
             }
-            SheetCommands::Inspect { file, target, workbook, sheet, sheets, non_empty, include_style, json, ndjson, format, headers, delimiter } => {
-                cmd_sheet_inspect(file, target, workbook, sheet, sheets, non_empty, include_style, json, ndjson, format, headers, delimiter)
+            SheetCommands::Inspect { file, target, workbook, sheet, sheets, non_empty, include_style, json, ndjson, format, headers, delimiter, calc } => {
+                cmd_sheet_inspect(file, target, workbook, sheet, sheets, non_empty, include_style, json, ndjson, format, headers, delimiter, calc)
             }
             SheetCommands::Verify { file, fingerprint } => {
                 cmd_sheet_verify(file, fingerprint)
             }
             SheetCommands::Fingerprint { file, json } => {
                 cmd_sheet_fingerprint(file, json)
+            }
+            SheetCommands::Import { source, output, sheet, headers, formulas, nulls, stamp, verify, dry_run, json, delimiter } => {
+                cmd_sheet_import(source, output, sheet, headers, formulas, nulls, stamp, verify, dry_run, json, delimiter)
+            }
+        }
+        Some(Commands::Hub(hub_cmd)) => match hub_cmd {
+            HubCommands::Publish { file, repo, message, notes, checks, lock, json, dry_run, no_wait, timeout } => {
+                hub::cmd_hub_publish(file, repo, message, notes, checks, lock, json, dry_run, no_wait, timeout)
+            }
+        }
+        Some(Commands::Pipeline(pipeline_cmd)) => match pipeline_cmd {
+            PipelineCommands::Publish {
+                source, repo, headers, formulas, stamp, checks_calc, checks_file,
+                delimiter, sheet, message, notes, out, json, dry_run, no_wait, timeout,
+            } => {
+                hub::cmd_pipeline_publish(
+                    source, repo, headers, formulas, stamp, checks_calc, checks_file,
+                    delimiter, sheet, message, notes, out, json, dry_run, no_wait, timeout,
+                )
             }
         }
     };
@@ -2030,19 +2269,7 @@ fn write_lines(
 }
 
 fn get_data_bounds(sheet: &visigrid_engine::sheet::Sheet) -> (usize, usize) {
-    let mut max_row = 0;
-    let mut max_col = 0;
-
-    for row in 0..sheet.rows {
-        for col in 0..sheet.cols {
-            if !sheet.get_display(row, col).is_empty() {
-                max_row = max_row.max(row + 1);
-                max_col = max_col.max(col + 1);
-            }
-        }
-    }
-
-    (max_row, max_col)
+    sheet_ops::get_data_bounds(sheet)
 }
 
 // ============================================================================
@@ -2187,95 +2414,12 @@ fn format_output_value(value: &str) -> String {
     }
 }
 
-// ============================================================================
-// Column reference translation (A:A → A1:A<max_row>)
-// ============================================================================
+fn resolve_header_refs(formula: &str, header_map: &std::collections::HashMap<String, String>) -> String {
+    sheet_ops::resolve_header_refs(formula, header_map)
+}
 
 fn translate_column_refs(formula: &str, start_row: usize, end_row: usize) -> String {
-    use std::collections::HashSet;
-
-    // Patterns to translate: A:A, $A:$A, $A:A, A:$A, A:B, etc.
-    // Translates to A<start_row>:A<end_row> (1-indexed)
-    let mut result = formula.to_string();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    let chars: Vec<char> = formula.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        // Check for optional $ before column
-        let dollar1 = if i < chars.len() && chars[i] == '$' {
-            i += 1;
-            true
-        } else {
-            false
-        };
-
-        // Look for letter sequence
-        if i < chars.len() && chars[i].is_ascii_alphabetic() {
-            let mut col1 = String::new();
-
-            // Collect first column letters
-            while i < chars.len() && chars[i].is_ascii_alphabetic() {
-                col1.push(chars[i].to_ascii_uppercase());
-                i += 1;
-            }
-
-            // Check for colon (not followed by digit = column ref, not cell ref like A1:B2)
-            if i < chars.len() && chars[i] == ':' {
-                i += 1;
-
-                // Check for optional $ before second column
-                let dollar2 = if i < chars.len() && chars[i] == '$' {
-                    i += 1;
-                    true
-                } else {
-                    false
-                };
-
-                let mut col2 = String::new();
-
-                // Collect second column letters
-                while i < chars.len() && chars[i].is_ascii_alphabetic() {
-                    col2.push(chars[i].to_ascii_uppercase());
-                    i += 1;
-                }
-
-                // It's a column reference if:
-                // - col2 is not empty
-                // - Next char is NOT a digit (otherwise it's like A:A1 which is invalid/different)
-                if !col2.is_empty() && (i >= chars.len() || !chars[i].is_ascii_digit()) {
-                    // Build the original pattern with $ signs
-                    let pattern = format!(
-                        "{}{}:{}{}",
-                        if dollar1 { "$" } else { "" },
-                        col1,
-                        if dollar2 { "$" } else { "" },
-                        col2
-                    );
-
-                    if !seen.contains(&pattern) {
-                        seen.insert(pattern.clone());
-                        // Preserve $ in output, use start_row and end_row
-                        let replacement = format!(
-                            "{}{}{}:{}{}{}",
-                            if dollar1 { "$" } else { "" },
-                            col1,
-                            start_row,
-                            if dollar2 { "$" } else { "" },
-                            col2,
-                            end_row
-                        );
-                        result = result.replace(&pattern, &replacement);
-                    }
-                }
-            }
-        } else {
-            i += 1;
-        }
-    }
-
-    result
+    sheet_ops::translate_column_refs(formula, start_row, end_row)
 }
 
 // ============================================================================
@@ -3589,23 +3733,7 @@ const PEEK_FORCE_CAP: usize = 200_000;
 
 /// Parse a delimiter string: supports single chars and names (tab, comma, pipe, semicolon).
 fn parse_delimiter(s: &str) -> Result<u8, CliError> {
-    match s.to_lowercase().as_str() {
-        "tab" | "\\t" | "tsv" => Ok(b'\t'),
-        "comma" | "csv" => Ok(b','),
-        "pipe" => Ok(b'|'),
-        "semicolon" => Ok(b';'),
-        _ => {
-            let chars: Vec<char> = s.chars().collect();
-            if chars.len() == 1 && chars[0].is_ascii() {
-                Ok(chars[0] as u8)
-            } else {
-                Err(CliError::args(format!(
-                    "invalid delimiter '{}' (use a single ASCII char, or: tab, comma, pipe, semicolon)",
-                    s
-                )))
-            }
-        }
-    }
+    util::parse_delimiter(s)
 }
 
 fn cmd_peek(
@@ -4228,13 +4356,6 @@ fn resolve_sheet<'a>(
     workbook: &'a visigrid_engine::workbook::Workbook,
     sheet_arg: Option<&str>,
 ) -> Result<(usize, &'a visigrid_engine::sheet::Sheet), CliError> {
-    let names = || -> String {
-        workbook.sheet_names().iter().enumerate()
-            .map(|(i, n)| format!("{}: {}", i, n))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
     match sheet_arg {
         None => {
             workbook.sheet(0)
@@ -4242,38 +4363,8 @@ fn resolve_sheet<'a>(
                 .ok_or_else(|| CliError::io("no sheets in workbook"))
         }
         Some(arg) => {
-            // Try numeric index first
-            if let Ok(idx) = arg.parse::<usize>() {
-                workbook.sheet(idx)
-                    .map(|s| (idx, s))
-                    .ok_or_else(|| {
-                        CliError::args(format!(
-                            "sheet index {} out of range (0..{}). Available: {}",
-                            idx, workbook.sheet_count(), names()
-                        ))
-                    })
-            } else {
-                // Name lookup (case-insensitive via workbook API)
-                let arg_lower = arg.trim().to_ascii_lowercase();
-                let mut found = None;
-                for (i, name) in workbook.sheet_names().iter().enumerate() {
-                    if name.trim().to_ascii_lowercase() == arg_lower {
-                        found = Some(i);
-                        break;
-                    }
-                }
-                match found {
-                    Some(idx) => {
-                        Ok((idx, workbook.sheet(idx).unwrap()))
-                    }
-                    None => {
-                        Err(CliError::args(format!(
-                            "no sheet named {:?}. Available: {}",
-                            arg, names()
-                        )))
-                    }
-                }
-            }
+            let idx = sheet_ops::resolve_sheet_by_arg(workbook, arg)?;
+            Ok((idx, workbook.sheet(idx).unwrap()))
         }
     }
 }
@@ -4292,6 +4383,7 @@ fn cmd_sheet_inspect(
     format_override: Option<InspectFormat>,
     headers: bool,
     delimiter: Option<String>,
+    calc: Vec<String>,
 ) -> Result<(), CliError> {
     // Phase A: Resolve format & validate
     let fmt = match format_override {
@@ -4305,6 +4397,21 @@ fn cmd_sheet_inspect(
 
     if delimiter.is_some() && !matches!(fmt, InspectFormat::Csv) {
         return Err(CliError::args("--delimiter is only valid with CSV format"));
+    }
+
+    if !calc.is_empty() {
+        if workbook_mode {
+            return Err(CliError::args("--calc cannot be used with --workbook"));
+        }
+        if sheets_mode {
+            return Err(CliError::args("--calc cannot be used with --sheets"));
+        }
+        if include_style {
+            return Err(CliError::args("--calc cannot be used with --include-style"));
+        }
+        if ndjson {
+            return Err(CliError::args("--calc cannot be used with --ndjson"));
+        }
     }
 
     // Phase B: Load workbook by format
@@ -4349,6 +4456,113 @@ fn cmd_sheet_inspect(
             (wb, false, vec![], HashMap::new())
         }
     };
+
+    // --calc: evaluate formulas against loaded data, output JSON, early return
+    if !calc.is_empty() {
+        let (sheet_idx, sheet) = resolve_sheet(&workbook, sheet_arg.as_deref())?;
+        let sheet_id = workbook.sheet_id_at_idx(sheet_idx)
+            .ok_or_else(|| CliError::io("cannot resolve sheet ID"))?;
+        let (max_row, _max_col) = get_data_bounds(sheet);
+
+        // get_data_bounds returns (row_count, col_count) — already 1-indexed.
+        // translate_column_refs expects (start_row_1indexed, end_row_1indexed).
+        let start_row1 = if headers { 2 } else { 1 };
+        let end_row1 = if max_row < start_row1 { start_row1 } else { max_row };
+
+        // Build header map for semantic column-name resolution (only when --headers).
+        // Normalization: trim + to_ascii_lowercase. Duplicate keys are an error.
+        let header_map: HashMap<String, String> = if headers {
+            let (_, max_col) = get_data_bounds(sheet);
+            let mut map: HashMap<String, String> = HashMap::new();
+            let mut originals: HashMap<String, (String, usize)> = HashMap::new(); // key → (original, col)
+            for col_idx in 0..max_col {
+                let val = sheet.get_display(0, col_idx);
+                if !val.is_empty() {
+                    let key = val.trim().to_ascii_lowercase();
+                    let col_letter = col_to_letter(col_idx);
+                    let col_ref = format!("{}:{}", col_letter, col_letter);
+                    if let Some((prev_orig, prev_col)) = originals.get(&key) {
+                        return Err(CliError::args(format!(
+                            "ambiguous header: column {} ({:?}) and column {} ({:?}) both normalize to {:?}",
+                            col_to_letter(*prev_col), prev_orig, col_letter, val.trim(), key
+                        )));
+                    }
+                    originals.insert(key.clone(), (val.trim().to_string(), col_idx));
+                    map.insert(key, col_ref);
+                }
+            }
+            map
+        } else {
+            HashMap::new()
+        };
+
+        let lookup = visigrid_engine::workbook::WorkbookLookup::new(&workbook, sheet_id);
+        let mut results: Vec<sheet_ops::CalcResult> = Vec::new();
+        let mut any_error = false;
+
+        for expr_str in &calc {
+            let with_eq = if expr_str.starts_with('=') {
+                expr_str.clone()
+            } else {
+                format!("={}", expr_str)
+            };
+            let resolved = resolve_header_refs(&with_eq, &header_map);
+            let formula_str = translate_column_refs(&resolved, start_row1, end_row1);
+
+            let result = match visigrid_engine::formula::parser::parse(&formula_str) {
+                Ok(parsed) => {
+                    let bound = visigrid_engine::formula::parser::bind_expr_same_sheet(&parsed);
+                    let eval = visigrid_engine::formula::eval::evaluate(&bound, &lookup);
+                    let display = eval.to_text();
+                    let is_error = matches!(eval, visigrid_engine::formula::eval::EvalResult::Error(_));
+                    if is_error { any_error = true; }
+                    let value_type = match &eval {
+                        visigrid_engine::formula::eval::EvalResult::Number(_) => "number",
+                        visigrid_engine::formula::eval::EvalResult::Text(_) => "text",
+                        visigrid_engine::formula::eval::EvalResult::Boolean(_) => "boolean",
+                        visigrid_engine::formula::eval::EvalResult::Error(_) => "error",
+                        visigrid_engine::formula::eval::EvalResult::Empty => "empty",
+                        visigrid_engine::formula::eval::EvalResult::Array(_) => "array",
+                    };
+                    sheet_ops::CalcResult {
+                        expr: expr_str.clone(),
+                        value: display.clone(),
+                        value_type: value_type.to_string(),
+                        error: if is_error { Some(display) } else { None },
+                    }
+                }
+                Err(e) => {
+                    any_error = true;
+                    sheet_ops::CalcResult {
+                        expr: expr_str.clone(),
+                        value: format!("#PARSE: {}", e),
+                        value_type: "error".to_string(),
+                        error: Some(e.to_string()),
+                    }
+                }
+            };
+            results.push(result);
+        }
+
+        let format_name = match fmt {
+            InspectFormat::Sheet => "sheet",
+            InspectFormat::Xlsx => "xlsx",
+            InspectFormat::Csv => "csv",
+            InspectFormat::Tsv => "tsv",
+        };
+        let output = sheet_ops::CalcOutput {
+            format: format_name.to_string(),
+            sheet: sheet.name.clone(),
+            results,
+        };
+
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+
+        if any_error {
+            return Err(CliError { code: EXIT_EVAL_ERROR, message: String::new(), hint: None });
+        }
+        return Ok(());
+    }
 
     // Format label for foreign formats
     let format_label = match fmt {
@@ -4810,6 +5024,289 @@ fn cmd_sheet_fingerprint(file: PathBuf, json: bool) -> Result<(), CliError> {
         println!("{}", serde_json::to_string_pretty(&output).unwrap());
     } else {
         println!("{}", fingerprint.to_string());
+    }
+
+    Ok(())
+}
+
+/// Infer source format for import, rejecting .sheet sources.
+fn infer_source_format(path: &PathBuf) -> Result<InspectFormat, CliError> {
+    let fmt = infer_inspect_format(path)?;
+    if matches!(fmt, InspectFormat::Sheet) {
+        return Err(CliError::args("source is already .sheet format")
+            .with_hint("use cp or sheet apply to transform .sheet files"));
+    }
+    Ok(fmt)
+}
+
+/// Import a foreign spreadsheet into canonical .sheet format.
+fn cmd_sheet_import(
+    source: PathBuf,
+    output: PathBuf,
+    sheet_arg: Option<String>,
+    _headers: bool,
+    formulas: FormulaPolicy,
+    nulls: NullPolicy,
+    stamp: Option<String>,
+    verify: Option<String>,
+    dry_run: bool,
+    json: bool,
+    delimiter: Option<String>,
+) -> Result<(), CliError> {
+    use std::collections::BTreeMap;
+    use visigrid_io::native::{
+        compute_semantic_fingerprint, save_workbook, save_workbook_with_metadata,
+        save_semantic_verification, CellMetadata, SemanticVerification,
+    };
+
+    // 1. Infer format (rejects .sheet)
+    let fmt = infer_source_format(&source)?;
+
+    // 2. Validate arg combinations
+    let is_csv_tsv = matches!(fmt, InspectFormat::Csv | InspectFormat::Tsv);
+    if sheet_arg.is_some() && is_csv_tsv {
+        return Err(CliError::args("--sheet is only valid for XLSX"));
+    }
+    if !matches!(formulas, FormulaPolicy::Values) && is_csv_tsv {
+        return Err(CliError::args("--formulas keep/recalc only valid for XLSX"));
+    }
+    if delimiter.is_some() && !matches!(fmt, InspectFormat::Csv) {
+        return Err(CliError::args("--delimiter is only valid for CSV"));
+    }
+
+    // 3. Load source
+    let format_str: &str;
+    let (mut workbook, import_result) = match fmt {
+        InspectFormat::Xlsx => {
+            format_str = "xlsx";
+            let values_only = !matches!(formulas, FormulaPolicy::Recalc);
+            let opts = visigrid_io::xlsx::ImportOptions { values_only, ..Default::default() };
+            visigrid_io::xlsx::import_with_options(&source, &opts)
+                .map_err(|e| CliError::io(format!("failed to load {}: {}", source.display(), e)))?
+        }
+        InspectFormat::Csv => {
+            format_str = "csv";
+            let sheet = if let Some(ref d) = delimiter {
+                let delim = parse_delimiter(d)?;
+                visigrid_io::csv::import_with_delimiter(&source, delim)
+                    .map_err(|e| CliError::parse(e))?
+            } else {
+                visigrid_io::csv::import(&source)
+                    .map_err(|e| CliError::parse(e))?
+            };
+            let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
+            (wb, visigrid_io::xlsx::ImportResult::default())
+        }
+        InspectFormat::Tsv => {
+            format_str = "tsv";
+            let sheet = visigrid_io::csv::import_tsv(&source)
+                .map_err(|e| CliError::parse(e))?;
+            let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
+            (wb, visigrid_io::xlsx::ImportResult::default())
+        }
+        InspectFormat::Sheet => unreachable!(), // already rejected
+    };
+
+    // 4. Select sheet (XLSX + --sheet)
+    let selected_sheet_idx: usize;
+    let sheet_name: String;
+    if let Some(ref arg) = sheet_arg {
+        let (idx, sheet) = resolve_sheet(&workbook, Some(arg))?;
+        selected_sheet_idx = idx;
+        sheet_name = sheet.name.clone();
+        // Extract selected sheet into a single-sheet workbook
+        let extracted = sheet.clone();
+        workbook = visigrid_engine::workbook::Workbook::from_sheets(vec![extracted], 0);
+    } else {
+        selected_sheet_idx = 0;
+        let (_, sheet) = resolve_sheet(&workbook, None)?;
+        sheet_name = sheet.name.clone();
+    }
+
+    // 5. Apply null policy
+    if matches!(nulls, NullPolicy::Error) {
+        let sheet = workbook.sheet(0)
+            .ok_or_else(|| CliError::io("no sheets in workbook"))?;
+        let (max_row, max_col) = get_data_bounds(sheet);
+        let sheet_mut = workbook.sheet_mut(0)
+            .ok_or_else(|| CliError::io("no sheets in workbook"))?;
+        for r in 0..max_row {
+            for c in 0..max_col {
+                let is_empty = match sheet_mut.get_cell_opt(r, c) {
+                    None => true,
+                    Some(cell) => cell.value.raw_display().is_empty(),
+                };
+                if is_empty {
+                    sheet_mut.set_value(r, c, "#NULL!");
+                }
+            }
+        }
+    }
+
+    // 6. Compute stats
+    let sheet = workbook.sheet(0)
+        .ok_or_else(|| CliError::io("no sheets in workbook"))?;
+    let (rows, cols) = get_data_bounds(sheet);
+    let mut cells = 0;
+    for (&(_row, _col), cell) in sheet.cells_iter() {
+        if !cell.value.raw_display().is_empty() {
+            cells += 1;
+        }
+    }
+
+    let formula_summary = if matches!(fmt, InspectFormat::Xlsx) {
+        let policy_str = match formulas {
+            FormulaPolicy::Values => "values",
+            FormulaPolicy::Keep => "keep",
+            FormulaPolicy::Recalc => "recalc",
+        };
+        // Count formula strings relevant to the selected sheet
+        let captured = import_result.formula_strings.iter()
+            .filter(|((si, _, _), _)| *si == selected_sheet_idx)
+            .count();
+        Some(sheet_ops::FormulaSummary {
+            policy: policy_str.to_string(),
+            kept: if matches!(formulas, FormulaPolicy::Recalc) { import_result.formulas_imported } else { 0 },
+            captured,
+            failed: import_result.formulas_failed,
+        })
+    } else {
+        None
+    };
+
+    // 7. Build cell metadata (for --formulas keep only)
+    let metadata: CellMetadata = if matches!(formulas, FormulaPolicy::Keep) {
+        import_result.formula_strings.iter()
+            .filter(|((si, _, _), _)| *si == selected_sheet_idx)
+            .map(|((_, r, c), f)| {
+                let ref_str = sheet_ops::format_cell_ref(*r, *c);
+                let mut map = BTreeMap::new();
+                map.insert("formula".to_string(), f.clone());
+                (ref_str, map)
+            })
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+
+    // 8. Compute fingerprint once
+    let fingerprint = compute_semantic_fingerprint(&workbook);
+
+    // 9. Verify (pre-write)
+    if let Some(ref expected) = verify {
+        if *expected != fingerprint {
+            let summary = sheet_ops::ImportSummary {
+                ok: false,
+                error: Some("fingerprint_mismatch".to_string()),
+                source: source.display().to_string(),
+                format: format_str.to_string(),
+                sheet: sheet_name.clone(),
+                rows,
+                cols,
+                cells,
+                formulas: formula_summary,
+                fingerprint: fingerprint.clone(),
+                stamped: None,
+                dry_run: None,
+                output: None,
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+            } else {
+                eprintln!("fingerprint mismatch: expected {}, computed {}", expected, fingerprint);
+            }
+            return Err(CliError { code: EXIT_ERROR, message: "fingerprint mismatch".to_string(), hint: None });
+        }
+    }
+
+    // 10. Dry-run exit
+    if dry_run {
+        let summary = sheet_ops::ImportSummary {
+            ok: true,
+            error: None,
+            source: source.display().to_string(),
+            format: format_str.to_string(),
+            sheet: sheet_name,
+            rows,
+            cols,
+            cells,
+            formulas: formula_summary,
+            fingerprint: fingerprint.clone(),
+            stamped: stamp.as_ref().map(|_| true),
+            dry_run: Some(true),
+            output: None,
+        };
+        if json {
+            println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+        } else {
+            println!("(dry run - file not written)");
+            println!("Source:      {}", source.display());
+            println!("Format:      {}", format_str);
+            println!("Sheet:       {}", summary.sheet);
+            println!("Rows:        {}", rows);
+            println!("Cols:        {}", cols);
+            println!("Cells:       {}", cells);
+            println!("Fingerprint: {}", fingerprint);
+        }
+        return Ok(());
+    }
+
+    // 11. Atomic write
+    let temp_path = output.with_extension("sheet.tmp");
+
+    if metadata.is_empty() {
+        save_workbook(&workbook, &temp_path)
+            .map_err(|e| CliError::io(format!("failed to write temp file: {}", e)))?;
+    } else {
+        save_workbook_with_metadata(&workbook, &metadata, &temp_path)
+            .map_err(|e| CliError::io(format!("failed to write temp file: {}", e)))?;
+    }
+
+    let stamped = stamp.is_some();
+    if let Some(ref label) = stamp {
+        let verification = SemanticVerification {
+            fingerprint: Some(fingerprint.clone()),
+            label: if label.is_empty() { None } else { Some(label.clone()) },
+            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+        };
+        save_semantic_verification(&temp_path, &verification)
+            .map_err(|e| CliError::io(format!("failed to write verification: {}", e)))?;
+    }
+
+    std::fs::rename(&temp_path, &output)
+        .map_err(|e| CliError::io(format!("failed to rename to output: {}", e)))?;
+
+    // 12. Output
+    let summary = sheet_ops::ImportSummary {
+        ok: true,
+        error: None,
+        source: source.display().to_string(),
+        format: format_str.to_string(),
+        sheet: sheet_name,
+        rows,
+        cols,
+        cells,
+        formulas: formula_summary,
+        fingerprint: fingerprint.clone(),
+        stamped: if stamped { Some(true) } else { None },
+        dry_run: None,
+        output: Some(output.display().to_string()),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+    } else {
+        println!("Wrote {}", output.display());
+        println!("Source:      {}", source.display());
+        println!("Format:      {}", format_str);
+        println!("Sheet:       {}", summary.sheet);
+        println!("Rows:        {}", rows);
+        println!("Cols:        {}", cols);
+        println!("Cells:       {}", cells);
+        println!("Fingerprint: {}", fingerprint);
+        if stamped {
+            println!("Stamped:     yes{}", stamp.as_ref().filter(|s| !s.is_empty()).map(|s| format!(" ({})", s)).unwrap_or_default());
+        }
     }
 
     Ok(())

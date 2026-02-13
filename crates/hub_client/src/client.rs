@@ -110,6 +110,10 @@ pub struct CreateRevisionOptions {
     /// File format hint: "csv", "tsv", "xlsx", or "sheet".
     /// Sent to the server so it can update the dataset format if needed.
     pub format: Option<String>,
+    /// Raw source_metadata JSON (overrides source_type/identity/query_hash if set).
+    pub source_metadata: Option<serde_json::Value>,
+    /// Commit message for the revision.
+    pub message: Option<String>,
 }
 
 /// Status of a run (from the runs API).
@@ -151,6 +155,15 @@ pub struct RepoInfo {
 pub struct DatasetInfo {
     pub id: String,
     pub name: String,
+}
+
+/// Dataset status for idempotency checking.
+#[derive(Debug, Clone)]
+pub struct DatasetStatus {
+    pub current_revision_id: Option<String>,
+    pub content_hash: Option<String>,
+    pub byte_size: Option<u64>,
+    pub source_metadata: Option<serde_json::Value>,
 }
 
 impl HubClient {
@@ -205,6 +218,23 @@ impl HubClient {
         Ok(datasets)
     }
 
+    /// Get current dataset status (latest revision info for idempotency).
+    pub fn get_dataset_status(&self, dataset_id: &str) -> Result<DatasetStatus, HubError> {
+        let url = format!("{}/api/desktop/datasets/{}/status", self.api_base, dataset_id);
+        let resp = self.get(&url)?;
+        let json: serde_json::Value = resp.json()
+            .map_err(|e| HubError::Parse(e.to_string()))?;
+        Ok(DatasetStatus {
+            current_revision_id: json["current_revision_id"].as_i64()
+                .map(|n| n.to_string())
+                .or_else(|| json["current_revision_id"].as_str().map(String::from)),
+            content_hash: json["content_hash"].as_str().map(String::from),
+            byte_size: json["byte_size"].as_u64(),
+            source_metadata: json.get("source_metadata").cloned()
+                .filter(|v| !v.is_null()),
+        })
+    }
+
     /// Create a new dataset in a repo.
     /// `format` hint tells the server whether this is "csv", "tsv", "xlsx", or "sheet".
     pub fn create_dataset(&self, owner: &str, slug: &str, name: &str, format: Option<&str>) -> Result<String, HubError> {
@@ -238,8 +268,10 @@ impl HubClient {
             "byte_size": byte_size,
         });
 
-        // Attach source metadata if provided
-        if opts.source_type.is_some() || opts.source_identity.is_some() || opts.query_hash.is_some() {
+        // Attach source metadata: raw JSON takes priority over individual fields
+        if let Some(ref sm) = opts.source_metadata {
+            body["source_metadata"] = sm.clone();
+        } else if opts.source_type.is_some() || opts.source_identity.is_some() || opts.query_hash.is_some() {
             let mut sm = serde_json::Map::new();
             if let Some(ref t) = opts.source_type {
                 sm.insert("type".into(), serde_json::Value::String(t.clone()));
@@ -254,6 +286,10 @@ impl HubClient {
                 chrono_now_utc()
             ));
             body["source_metadata"] = serde_json::Value::Object(sm);
+        }
+
+        if let Some(ref msg) = opts.message {
+            body["message"] = serde_json::json!(msg);
         }
 
         // Attach assertions if provided
