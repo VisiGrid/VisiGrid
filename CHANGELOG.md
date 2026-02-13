@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.7.2
+
+### Script View
+
+- **Full-panel script editor** — Cmd+Shift+E (Ctrl+Shift+E on Windows/Linux) opens a syntax-highlighted Lua code editor in place of the grid. Line numbers, cursor highlight, virtual scroll, Ctrl+Enter to run. Content persists independently of the REPL input.
+- **Reusable TextBuffer** — extracted shared text editing primitive (cursor movement, insert/delete, cached tokenization, cached line offsets) used by both the REPL and Script View. Eliminates code duplication and ensures consistent editing behavior.
+- **Performance** — binary search for token lookup in the render path (O(log N) instead of O(N) per line), cached line offsets for O(1) cursor up/down, zero per-frame Vec allocations for line rendering.
+- **CRLF normalization** — insert and paste automatically convert \r\n and lone \r to \n.
+- **Unicode safety** — cursor up/down snaps to char boundaries, preventing panics on multi-byte characters.
+
+### Lua Console
+
+- **Mini code editor** — REPL input upgraded from single-line to a 12-line syntax-highlighted editor with line numbers, cursor navigation (arrow keys, Home/End, Ctrl+Home/End), and scroll.
+- **Grouped output blocks** — each script execution produces a collapsible group with echoed input, output, stats, and errors.
+- **Expand button** — opens the Script View from the console, copying multi-line REPL input to the script buffer.
+- **Clipboard support** — copy, cut, and paste work in both REPL and Script View.
+
+### CLI
+
+- **`vgrid hub publish`** — publish .sheet files to VisiHub with fingerprint-based idempotency. Skips upload when content hasn't changed.
+- **`vgrid pipeline publish`** — end-to-end CSV/XLSX to verified snapshot workflow. Source metadata (fingerprint, stamp, checks, notes) attached to revisions.
+- **`vgrid sheet inspect` for foreign formats** — inspect .xlsx, .csv, and .tsv files directly without `vgrid convert`. New `--format`, `--headers`, and `--delimiter` flags.
+- **`vgrid peek` fixes** — fixed crash in headless/CI environments with TTY auto-detection. `--tui` now conflicts with `--plain`/`--shape`. TTY behavior documented in `--help`.
+
+### Bug Fixes
+
+- Fixed locked feature panel crash (`cx.entity().read(cx)` during render).
+- Fixed cycle banner not showing after cell edits and Lua scripts.
+
 ## 0.7.1
 
 ### CLI
