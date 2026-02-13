@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.4
+
+### Data Import
+
+- **Comma-formatted number parsing** — pasting or typing values like "5,369.89", "$1,234.56", "(500)", or "-17,616.16" now correctly produces numeric cells instead of text. Supports US-style thousands separators, currency prefix, and parenthesized negatives. Strict grouping validation rejects ambiguous input like "ACME, Inc." or "1,23".
+
+### Editing
+
+- **Backspace quick-edit for text cells** — pressing Backspace on a single text cell in Navigation mode now enters Edit mode and deletes the last character, enabling quick corrections without reaching for F2 first. Multi-cell selections, numbers, formulas, and empty cells retain standard clear behavior.
+- **F2 toggles edit mode** — F2 now acts as a binary toggle: Navigation → Edit (cursor at end), Edit → Navigation (discard changes, same as Escape). Formula mode Caret/Point toggle is unchanged.
+
 ## 0.7.3
 
 ### Lua Script Persistence
