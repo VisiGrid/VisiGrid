@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.7.3
+
+### Lua Script Persistence
+
+- **Persistent scripts** — Lua scripts can now be attached to .sheet files, stored in project directories (`<project>/.visigrid/scripts/`), or installed globally (`~/.config/visigrid/scripts/`). Resolution order: attached → project → global, with shadowing.
+- **Content-addressed scripts** — every script identified by `sha256(source)`. Enables deduplication, tamper detection, and Hub verification.
+- **Capability enforcement** — scripts declare capabilities (`sheet.read`, `sheet.write.values`, `sheet.write.formulas`). The sandbox enforces declared capabilities at runtime — no bypass mode. Console gets explicit `all_sheet_caps()`, not a backdoor.
+- **Run records** — every script execution produces a run record with full source snapshot, before/after fingerprints, diff hash, structured origin tracking, duration, and cells read/modified. Run records are stored in the .sheet file alongside the data.
+- **Canonical diff hashing** — typed `PatchLine` struct with explicit kind (value/formula), old/new as canonical engine strings, sorted deterministically. NDJSON with alphabetical keys. GUI and CLI share the same construction, sorting, and hashing logic.
+- **Schema v7→v8** — new `scripts` and `run_records` tables with indexes. `save_workbook_full()` atomically saves cells + scripts + run records.
+- **Console history persistence** — JSONL format, crash-safe per-execution.
+
+### CLI
+
+- **`vgrid scripts list`** — list available scripts (attached, project, global) with origin, capabilities, and hash. `--json` for structured output.
+- **`vgrid scripts run`** — execute a named script against a .sheet file. `--plan` for dry run, `--apply` to modify. Produces a run record with fingerprint provenance.
+- **`vgrid runs list`** — list run records from a .sheet file with pagination (`--limit`, `--offset`).
+- **`vgrid runs show`** — show full details of a specific run record.
+- **`vgrid runs verify`** — recompute script hash and run fingerprint from stored data. Exit 1 on tamper. Verifies all records or a specific `--run-id`.
+- **`vgrid diff --export`** — export rows by status to CSV files. Repeatable: `--export only_left:/tmp/unmatched.csv --export matched:/tmp/matched.csv`. Exports are written before exit code decisions, so files always exist if requested.
+- **`vgrid diff --export-side`** — control which columns appear in exports: `left` (default, feedable into next diff pass), `right`, or `both` (metadata prefix + left + `right_`-prefixed columns). Ambiguous rows in `both` mode expand to one row per candidate.
+- **`vgrid convert --rename`** — rename header columns before output. Comma-separated `OLD:NEW` pairs. Renames apply before `--where` and `--select`, so new names flow through the pipeline. Designed for schema alignment before `vgrid diff`.
+- **`vgrid diff` trust guards** — `--compare` with a named column now verifies the column exists on both sides when headers are present. Error includes a `fix:` line with exact `vgrid convert --rename` syntax. Positional specs (`B`, `2`) bypass the guard.
+- **`--contains-column` error fix** — error message now shows right-side column names (was incorrectly showing left-side columns).
+- **Colon syntax fix** — `sheet:method()` now works in CLI (was passing table as first arg).
+- **Project dir fix** — project script directory resolution no longer double-nests `.visigrid/scripts/`.
+
+### Desktop App
+
+- **Always-on capability enforcement** — `DynOpSink` enforces capabilities for all Lua execution paths (console, script view, debugger).
+- **Run record assembly** — console writes produce run records with provenance tracking.
+
+### Docs
+
+- **Agent reconciliation playbook** — two-pass reconciliation pattern with `--export` for pipeline chaining, schema alignment with `--rename`, and flag reference table.
+- **`diff --export` reference** — export side semantics, CSV schemas, and chaining examples.
+- **`convert --rename` reference** — usage, order of operations, and schema alignment examples.
+
 ## 0.7.2
 
 ### Script View
