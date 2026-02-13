@@ -171,6 +171,104 @@ fn peek_sheet_explicit_max_rows_avoids_cap() {
 }
 
 // ---------------------------------------------------------------------------
+// Non-TTY auto-fallback: peek exits 0 with table output when stdout is piped
+// ---------------------------------------------------------------------------
+
+#[test]
+fn peek_csv_non_tty_auto_fallback() {
+    let csv = std::env::temp_dir().join("vgrid_peek_tty_test.csv");
+    std::fs::write(&csv, "Name,Age\nAlice,30\nBob,25\n").unwrap();
+
+    // Command::output() captures stdout → not a TTY → should auto-fallback
+    let output = vgrid()
+        .args(["peek", csv.to_str().unwrap()])
+        .output()
+        .expect("vgrid peek csv (non-TTY)");
+
+    assert!(output.status.success(), "peek should exit 0 in non-TTY mode\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.is_empty(), "should produce table output");
+    // Should contain data rows, not raw-mode error
+    assert!(!stdout.contains("raw mode"), "should not mention raw mode errors");
+    assert!(stdout.contains("Alice") || stdout.contains("Name"),
+        "output should contain data from CSV");
+
+    std::fs::remove_file(&csv).ok();
+}
+
+#[test]
+fn peek_sheet_non_tty_auto_fallback() {
+    // .sheet file with stdout captured → should auto-fallback to plain
+    let output = vgrid()
+        .args(["peek", template_path().to_str().unwrap()])
+        .output()
+        .expect("vgrid peek sheet (non-TTY)");
+
+    assert!(output.status.success(), "peek should exit 0 in non-TTY mode\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.is_empty(), "should produce table output");
+    assert!(!stdout.contains("raw mode"), "should not mention raw mode errors");
+}
+
+#[test]
+fn peek_no_tui_flag() {
+    let csv = std::env::temp_dir().join("vgrid_peek_no_tui.csv");
+    std::fs::write(&csv, "X,Y\n1,2\n3,4\n").unwrap();
+
+    let output = vgrid()
+        .args(["peek", csv.to_str().unwrap(), "--no-tui"])
+        .output()
+        .expect("vgrid peek --no-tui");
+
+    assert!(output.status.success(), "exit code: {:?}\nstderr: {}",
+        output.status, String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.is_empty(), "should produce output");
+    std::fs::remove_file(&csv).ok();
+}
+
+#[test]
+fn peek_tui_flag_errors_when_not_tty() {
+    let csv = std::env::temp_dir().join("vgrid_peek_force_tui.csv");
+    std::fs::write(&csv, "X,Y\n1,2\n").unwrap();
+
+    // stdout captured → not a TTY → --tui should error
+    let output = vgrid()
+        .args(["peek", csv.to_str().unwrap(), "--tui"])
+        .output()
+        .expect("vgrid peek --tui (non-TTY)");
+
+    assert!(!output.status.success(), "--tui should fail when not a TTY");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("interactive terminal") || stderr.contains("TTY"),
+        "error should mention TTY requirement, got: {}", stderr);
+    std::fs::remove_file(&csv).ok();
+}
+
+#[test]
+fn peek_xlsx_non_tty_auto_fallback() {
+    let xlsx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inspect_small.xlsx");
+
+    let output = vgrid()
+        .args(["peek", xlsx.to_str().unwrap()])
+        .output()
+        .expect("vgrid peek xlsx (non-TTY)");
+
+    assert!(output.status.success(), "peek xlsx should exit 0 in non-TTY\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.is_empty(), "should produce table output");
+    assert!(stdout.contains("Amount") || stdout.contains("100"),
+        "output should contain data from XLSX");
+}
+
+// ---------------------------------------------------------------------------
 // Unsupported extension gives helpful error
 // ---------------------------------------------------------------------------
 

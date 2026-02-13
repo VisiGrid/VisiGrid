@@ -457,6 +457,12 @@ Use --force to override.")]
         /// Recompute formulas after import (xlsx/ods only; default: show cached values)
         #[arg(long)]
         recompute: bool,
+        /// Force non-interactive output even in a TTY
+        #[arg(long, conflicts_with = "tui")]
+        no_tui: bool,
+        /// Force interactive TUI; error if not possible
+        #[arg(long, conflicts_with = "no_tui")]
+        tui: bool,
     },
 
     /// Authenticate with VisiHub
@@ -1262,8 +1268,25 @@ fn main() -> ExitCode {
         Some(Commands::Peek {
             file, headers, no_headers: _, sheet, max_rows,
             force, width_scan_rows, shape, plain, delimiter, recompute,
+            no_tui, tui: force_tui,
         }) => {
-            cmd_peek(file, headers, sheet, max_rows, force, width_scan_rows, shape, plain, delimiter, recompute)
+            // TTY detection: interactive only when stdin+stdout are TTY and not --no-tui
+            let stdin_tty = atty::is(atty::Stream::Stdin);
+            let stdout_tty = atty::is(atty::Stream::Stdout);
+            if force_tui && (!stdin_tty || !stdout_tty) {
+                Err(CliError::args(
+                    "--tui requires an interactive terminal (stdin and stdout must be TTY)"
+                ))
+            } else {
+                let interactive = if no_tui || plain {
+                    false
+                } else if force_tui {
+                    true
+                } else {
+                    stdin_tty && stdout_tty
+                };
+                cmd_peek(file, headers, sheet, max_rows, force, width_scan_rows, shape, interactive, delimiter, recompute)
+            }
         }
         Some(Commands::Login { token, api_base }) => hub::cmd_login(token, api_base),
         Some(Commands::Fill {
@@ -3585,7 +3608,7 @@ fn cmd_peek(
     force: bool,
     width_scan_rows: usize,
     shape: bool,
-    plain: bool,
+    interactive: bool,
     delimiter_override: Option<String>,
     recompute: bool,
 ) -> Result<(), CliError> {
@@ -3597,12 +3620,12 @@ fn cmd_peek(
 
     // .sheet files use a completely separate path
     if ext == "sheet" {
-        return cmd_peek_sheet(file, sheet, max_rows, force, width_scan_rows, shape, plain);
+        return cmd_peek_sheet(file, sheet, max_rows, force, width_scan_rows, shape, interactive);
     }
 
     // xlsx/ods use the workbook import path
     if ext == "xlsx" || ext == "ods" {
-        return cmd_peek_workbook(file, sheet, max_rows, force, width_scan_rows, shape, plain, recompute);
+        return cmd_peek_workbook(file, sheet, max_rows, force, width_scan_rows, shape, interactive, recompute);
     }
 
     let delimiter = if let Some(ref d) = delimiter_override {
@@ -3646,7 +3669,7 @@ fn cmd_peek(
         return cmd_peek_shape(&data, &file);
     }
 
-    if plain {
+    if !interactive {
         return tui::print_plain(&data, 0).map_err(|e| CliError::io(e));
     }
 
@@ -3666,7 +3689,7 @@ fn cmd_peek_sheet(
     force: bool,
     width_scan_rows: usize,
     shape: bool,
-    plain: bool,
+    interactive: bool,
 ) -> Result<(), CliError> {
     // Safety cap: same pattern as CSV/workbook paths
     let effective_max = if max_rows == 0 && !force {
@@ -3702,7 +3725,7 @@ fn cmd_peek_sheet(
         return cmd_peek_sheet_shape(&sheets, &file);
     }
 
-    if plain {
+    if !interactive {
         if sheets.len() > 1 {
             for (i, sd) in sheets.iter().enumerate() {
                 if i > 0 {
@@ -3732,7 +3755,7 @@ fn cmd_peek_workbook(
     force: bool,
     width_scan_rows: usize,
     shape: bool,
-    plain: bool,
+    interactive: bool,
     recompute: bool,
 ) -> Result<(), CliError> {
     if recompute {
@@ -3775,7 +3798,7 @@ fn cmd_peek_workbook(
         return cmd_peek_workbook_shape(&sheets, &file, ext);
     }
 
-    if plain {
+    if !interactive {
         if sheets.len() > 1 {
             for (i, sd) in sheets.iter().enumerate() {
                 if i > 0 {
