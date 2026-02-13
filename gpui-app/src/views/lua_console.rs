@@ -155,11 +155,22 @@ fn render_run_tab_content(
                             .child("help \u{2192} commands \u{00B7} examples \u{2192} scripts")
                     )
                 })
-                .children(
-                    console.visible_output().iter().enumerate().map(|(i, entry)| {
-                        render_output_entry(entry, "run", console.view_start + i, text_primary, text_muted, accent, error_color)
-                    })
-                )
+                .children({
+                    let visible = console.visible_output();
+                    let base = console.view_start;
+                    let prev_gid = if base > 0 { console.group_id_at(base - 1) } else { 0 };
+
+                    visible.iter().enumerate().map(move |(i, entry)| {
+                        let prev = if i == 0 { prev_gid } else { visible[i - 1].group_id };
+                        let is_group_start = entry.group_id != 0
+                            && entry.group_id != prev
+                            && (base + i) > 0;
+                        render_output_entry_grouped(
+                            entry, "run", base + i, is_group_start,
+                            text_primary, text_muted, accent, error_color, panel_border,
+                        )
+                    }).collect::<Vec<_>>()
+                })
         )
         .when(console.scroll_info().is_some(), |d| {
             d.child(
@@ -412,7 +423,7 @@ fn render_output_entry(
         OutputKind::Result => ("", accent),
         OutputKind::Print => ("", text_primary),
         OutputKind::Error => ("", error_color),
-        OutputKind::System => ("", text_muted),
+        OutputKind::System | OutputKind::Stats => ("", text_muted),
     };
 
     div()
@@ -421,6 +432,95 @@ fn render_output_entry(
         .font_family("monospace")
         .text_color(color)
         .child(format!("{}{}", prefix, entry.text))
+}
+
+/// Render a single output entry with group-aware visual treatment (Run tab only).
+fn render_output_entry_grouped(
+    entry: &OutputEntry,
+    tab: &str,
+    index: usize,
+    is_group_start: bool,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    error_color: Hsla,
+    panel_border: Hsla,
+) -> Stateful<Div> {
+    let id = ElementId::Name(format!("lua-{}-output-{}", tab, index).into());
+
+    match entry.kind {
+        OutputKind::Input => {
+            // Code card: left accent border, split multiline.
+            // Separator border lives on the outer wrapper so border_color
+            // doesn't conflict with the accent left border on the inner card.
+            let mut card = div()
+                .border_l_2()
+                .border_color(accent.opacity(0.3))
+                .pl(px(8.0))
+                .py(px(2.0))
+                .text_xs()
+                .font_family("monospace")
+                .text_color(text_muted);
+
+            for line in entry.text.split('\n') {
+                card = card.child(div().child(line.to_string()));
+            }
+
+            let mut wrapper = div().id(id);
+            if is_group_start {
+                wrapper = wrapper
+                    .mt(px(6.0))
+                    .border_t_1()
+                    .border_color(panel_border.opacity(0.3))
+                    .pt(px(4.0));
+            }
+            wrapper.child(card)
+        }
+        OutputKind::Stats => {
+            // Dimmed metadata footer
+            let mut wrapper = div()
+                .id(id)
+                .text_xs()
+                .font_family("monospace")
+                .text_color(text_muted.opacity(0.45))
+                .child(entry.text.clone());
+
+            if is_group_start {
+                wrapper = wrapper
+                    .mt(px(6.0))
+                    .border_t_1()
+                    .border_color(panel_border.opacity(0.3))
+                    .pt(px(4.0));
+            }
+            wrapper
+        }
+        _ => {
+            // Result/Print/Error/System — same logic as render_output_entry
+            let (prefix, color) = match entry.kind {
+                OutputKind::Result => ("", accent),
+                OutputKind::Print => ("", text_primary),
+                OutputKind::Error => ("", error_color),
+                OutputKind::System => ("", text_muted),
+                _ => ("", text_primary),
+            };
+
+            let mut wrapper = div()
+                .id(id)
+                .text_xs()
+                .font_family("monospace")
+                .text_color(color)
+                .child(format!("{}{}", prefix, entry.text));
+
+            if is_group_start {
+                wrapper = wrapper
+                    .mt(px(6.0))
+                    .border_t_1()
+                    .border_color(panel_border.opacity(0.3))
+                    .pt(px(4.0));
+            }
+            wrapper
+        }
+    }
 }
 
 /// Render a scroll button (▲ or ▼)
@@ -784,24 +884,33 @@ pub fn handle_console_key_from_main(app: &mut Spreadsheet, event: &KeyDownEvent,
     cx.notify();
 }
 
-/// Execute the current input (public for action handlers)
+/// Execute the current input (public for action handlers).
+///
+/// Group lifetime is managed here: begin before the body, end after it returns.
+/// The body can early-return on any path without leaking group state.
 pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
-    use std::time::Instant;
-
     let input = app.lua_console.consume_input();
     if input.trim().is_empty() {
         return;
     }
 
-    // Echo input
+    app.lua_console.begin_group();
     app.lua_console.push_output(OutputEntry::input(&input));
 
-    // Handle special commands
+    execute_console_body(app, input, cx);
+
+    app.lua_console.end_group();
+    cx.notify();
+}
+
+/// Inner body — all early returns are safe because the caller manages the group.
+fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mut Context<Spreadsheet>) {
+    use std::time::Instant;
+
     let trimmed = input.trim();
 
     if trimmed == "clear" {
         app.lua_console.clear_output();
-        cx.notify();
         return;
     }
 
@@ -820,7 +929,6 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
         app.lua_console.push_output(OutputEntry::system("  PageUp/Down  - Scroll output"));
         app.lua_console.push_output(OutputEntry::system("  Ctrl+L       - Clear output"));
         app.lua_console.push_output(OutputEntry::system("  Escape       - Close console"));
-        cx.notify();
         return;
     }
 
@@ -831,7 +939,6 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
                 format!("  {}. {} - {}", i + 1, example.name, example.description)
             ));
         }
-        cx.notify();
         return;
     }
 
@@ -849,7 +956,6 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
             app.lua_console.push_output(OutputEntry::system(
                 format!("-- {} --", ex.name)
             ));
-            // Show code line by line
             for line in ex.code.lines() {
                 app.lua_console.push_output(OutputEntry::print(line.to_string()));
             }
@@ -861,7 +967,6 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
                 format!("Unknown example: '{}'. Type 'examples' to see list.", arg)
             ));
         }
-        cx.notify();
         return;
     }
 
@@ -876,7 +981,6 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
         };
 
         if let Some(ex) = example {
-            // Show which example is running
             app.lua_console.push_output(OutputEntry::system(
                 format!("Running '{}'...", ex.name)
             ));
@@ -885,7 +989,6 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
             app.lua_console.push_output(OutputEntry::error(
                 format!("Unknown example: '{}'. Type 'examples' to see list.", arg)
             ));
-            cx.notify();
             return;
         }
     } else {
@@ -937,7 +1040,6 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
         let has_formats = !format_patches.is_empty();
 
         if has_values && has_formats {
-            // Both value and format changes: group into single undo step
             use crate::history::{UndoAction, FormatActionKind};
             let group = UndoAction::Group {
                 actions: vec![
@@ -967,19 +1069,17 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
         }
     }
 
-    // Show execution stats: ops + cells + time
+    // Show execution stats
     let stats = format!(
         "ops: {} | cells: {} | time: {:.1}ms",
         result.ops.len(),
         result.mutations,
         elapsed.as_secs_f64() * 1000.0
     );
-    app.lua_console.push_output(OutputEntry::system(stats));
+    app.lua_console.push_output(OutputEntry::stats(stats));
 
     // Show cycle banner if Lua script introduced circular references
     app.maybe_show_cycle_banner(cx);
-
-    cx.notify();
 }
 
 /// Apply Lua operations to the sheet and return undo changes.
@@ -1182,7 +1282,7 @@ pub fn pump_debug_events(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
                     .debug_output
                     .push(OutputEntry::error(msg.clone()));
                 app.lua_console
-                    .push_output(OutputEntry::error(format!("[debug] {}", msg)));
+                    .push_output_ungrouped(OutputEntry::error(format!("[debug] {}", msg)));
                 app.lua_console.debug_session = None;
                 app.lua_console.debug_snapshot = None;
             }
@@ -1206,10 +1306,10 @@ fn handle_debug_completed(
 ) {
     if result.cancelled {
         app.lua_console
-            .push_output(OutputEntry::system("[debug] session stopped"));
+            .push_output_ungrouped(OutputEntry::system("[debug] session stopped"));
     } else if let Some(ref error) = result.error {
         app.lua_console
-            .push_output(OutputEntry::error(format!("[debug] error: {}", error)));
+            .push_output_ungrouped(OutputEntry::error(format!("[debug] error: {}", error)));
         app.lua_console
             .debug_output
             .push(OutputEntry::error(error.clone()));
@@ -1230,7 +1330,7 @@ fn handle_debug_completed(
             app.lua_console.debug_output.push(OutputEntry::system(
                 "[debug] target sheet no longer exists; applied to current sheet",
             ));
-            app.lua_console.push_output(OutputEntry::system(
+            app.lua_console.push_output_ungrouped(OutputEntry::system(
                 "[debug] target sheet no longer exists; applied to current sheet",
             ));
             current
@@ -1279,7 +1379,7 @@ fn handle_debug_completed(
             result.ops.len(),
             result.mutations
         );
-        app.lua_console.push_output(OutputEntry::system(stats));
+        app.lua_console.push_output_ungrouped(OutputEntry::stats(stats));
     }
 
     app.lua_console.debug_session = None;
@@ -1317,7 +1417,7 @@ pub fn start_debug_session(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>)
     let session = spawn_debug_session(config);
     app.lua_console.start_debug_session(session, sheet_index);
     app.lua_console
-        .push_output(OutputEntry::system("[debug] session started"));
+        .push_output_ungrouped(OutputEntry::system("[debug] session started"));
     cx.notify();
 }
 
@@ -1477,7 +1577,7 @@ fn render_debug_tab_content(
                 return;
             }
             this.lua_console.stop_debug_session();
-            this.lua_console.push_output(OutputEntry::system("[debug] session stopped"));
+            this.lua_console.push_output_ungrouped(OutputEntry::system("[debug] session stopped"));
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &DebugToggleBreakpoint, window, cx| {
@@ -1749,7 +1849,7 @@ mod debug_ui {
                         text_muted, text_primary, error_color, panel_border, cx,
                         |this, cx| {
                             this.lua_console.stop_debug_session();
-                            this.lua_console.push_output(OutputEntry::system("[debug] session stopped"));
+                            this.lua_console.push_output_ungrouped(OutputEntry::system("[debug] session stopped"));
                             cx.notify();
                         },
                     ))
@@ -2204,7 +2304,7 @@ mod debug_ui {
                     let color = match entry.kind {
                         OutputKind::Error => error_color,
                         OutputKind::Result => accent,
-                        OutputKind::System => text_muted,
+                        OutputKind::System | OutputKind::Stats => text_muted,
                         _ => text_muted.opacity(0.7),
                     };
                     div()

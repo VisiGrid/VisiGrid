@@ -35,6 +35,8 @@ pub enum OutputKind {
     Error,
     /// System message (e.g., "100 cells modified")
     System,
+    /// Execution metadata (ops/cells/time)
+    Stats,
 }
 
 /// A single entry in the console output log
@@ -42,42 +44,33 @@ pub enum OutputKind {
 pub struct OutputEntry {
     pub kind: OutputKind,
     pub text: String,
+    /// Group id for visual grouping (0 = ungrouped)
+    pub group_id: u32,
 }
 
 impl OutputEntry {
     pub fn input(text: impl Into<String>) -> Self {
-        Self {
-            kind: OutputKind::Input,
-            text: text.into(),
-        }
+        Self { kind: OutputKind::Input, text: text.into(), group_id: 0 }
     }
 
     pub fn result(text: impl Into<String>) -> Self {
-        Self {
-            kind: OutputKind::Result,
-            text: text.into(),
-        }
+        Self { kind: OutputKind::Result, text: text.into(), group_id: 0 }
     }
 
     pub fn print(text: impl Into<String>) -> Self {
-        Self {
-            kind: OutputKind::Print,
-            text: text.into(),
-        }
+        Self { kind: OutputKind::Print, text: text.into(), group_id: 0 }
     }
 
     pub fn error(text: impl Into<String>) -> Self {
-        Self {
-            kind: OutputKind::Error,
-            text: text.into(),
-        }
+        Self { kind: OutputKind::Error, text: text.into(), group_id: 0 }
     }
 
     pub fn system(text: impl Into<String>) -> Self {
-        Self {
-            kind: OutputKind::System,
-            text: text.into(),
-        }
+        Self { kind: OutputKind::System, text: text.into(), group_id: 0 }
+    }
+
+    pub fn stats(text: impl Into<String>) -> Self {
+        Self { kind: OutputKind::Stats, text: text.into(), group_id: 0 }
     }
 }
 
@@ -209,6 +202,16 @@ pub struct ConsoleState {
 
     /// Cached tokens from last tokenize
     pub cached_tokens: Vec<(Range<usize>, LuaTokenType)>,
+
+    // ========================================================================
+    // Output grouping
+    // ========================================================================
+
+    /// Next group id to assign (monotonically increasing)
+    pub next_group_id: u32,
+
+    /// Current group id (set by begin_group, used by push_output; 0 = ungrouped)
+    pub current_group_id: u32,
 }
 
 /// Ring buffer cap for debug_output (prevent unbounded memory growth)
@@ -258,6 +261,8 @@ impl ConsoleState {
             input_scroll_offset: 0,
             cached_input_snapshot: String::new(),
             cached_tokens: Vec::new(),
+            next_group_id: 0,
+            current_group_id: 0,
         }
     }
 
@@ -310,16 +315,53 @@ impl ConsoleState {
         self.output.clear();
         self.view_start = 0;
         self.view_pinned_to_bottom = true;
+        self.current_group_id = 0;
     }
 
-    /// Add an entry to the output log
+    /// Add an entry to the output log, tagged with the current group id.
     pub fn push_output(&mut self, entry: OutputEntry) {
+        let mut entry = entry;
+        entry.group_id = self.current_group_id;
         self.output.push(entry);
 
-        // If pinned to bottom, auto-scroll to show new content
         if self.view_pinned_to_bottom {
             self.scroll_to_end();
         }
+    }
+
+    /// Push an entry that is never grouped, regardless of current group state.
+    pub fn push_output_ungrouped(&mut self, entry: OutputEntry) {
+        let mut entry = entry;
+        entry.group_id = 0;
+        self.output.push(entry);
+
+        if self.view_pinned_to_bottom {
+            self.scroll_to_end();
+        }
+    }
+
+    // ========================================================================
+    // Output Grouping
+    // ========================================================================
+
+    /// Start a new output group. Returns the new group_id.
+    pub fn begin_group(&mut self) -> u32 {
+        self.next_group_id = self.next_group_id.wrapping_add(1);
+        if self.next_group_id == 0 {
+            self.next_group_id = 1;
+        }
+        self.current_group_id = self.next_group_id;
+        self.current_group_id
+    }
+
+    /// End the current group. Resets to ungrouped (0).
+    pub fn end_group(&mut self) {
+        self.current_group_id = 0;
+    }
+
+    /// Get the group_id of the entry at `index`, or 0 if out of bounds.
+    pub fn group_id_at(&self, index: usize) -> u32 {
+        self.output.get(index).map(|e| e.group_id).unwrap_or(0)
     }
 
     // ========================================================================
@@ -646,6 +688,31 @@ impl ConsoleState {
     pub fn cursor_end(&mut self) {
         self.cursor = self.input.len();
         self.ensure_input_cursor_visible(12);
+    }
+
+    /// RAII guard: begin a group that ends when the guard is dropped.
+    /// Restores the previous group_id (usually 0) even on early return or panic.
+    ///
+    /// Note: this borrows `&mut ConsoleState` for the guard's lifetime, so it
+    /// cannot be used in contexts that also need `&mut Spreadsheet`.  For those,
+    /// use the wrapper-function pattern (begin in outer, body can early-return,
+    /// end in outer after body returns).
+    pub fn begin_group_scoped(&mut self) -> OutputGroupGuard<'_> {
+        let prev = self.current_group_id;
+        self.begin_group();
+        OutputGroupGuard { console: self, prev_gid: prev }
+    }
+}
+
+/// RAII guard that restores `current_group_id` when dropped.
+pub struct OutputGroupGuard<'a> {
+    pub console: &'a mut ConsoleState,
+    prev_gid: u32,
+}
+
+impl Drop for OutputGroupGuard<'_> {
+    fn drop(&mut self) {
+        self.console.current_group_id = self.prev_gid;
     }
 }
 
