@@ -195,6 +195,48 @@ CREATE TABLE IF NOT EXISTS cell_metadata (
     value TEXT NOT NULL,
     PRIMARY KEY (target, key)
 );
+
+-- Lua scripts attached to this workbook
+CREATE TABLE IF NOT EXISTS scripts (
+    name TEXT PRIMARY KEY,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    description TEXT,
+    hash TEXT NOT NULL,
+    source TEXT NOT NULL,
+    capabilities TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    origin TEXT,
+    author TEXT,
+    version TEXT
+);
+
+-- Run records for script executions
+CREATE TABLE IF NOT EXISTS run_records (
+    run_id TEXT PRIMARY KEY,
+    run_fingerprint TEXT NOT NULL,
+    script_name TEXT NOT NULL,
+    script_hash TEXT NOT NULL,
+    script_source TEXT NOT NULL,
+    script_origin TEXT NOT NULL,
+    capabilities_used TEXT NOT NULL DEFAULT '',
+    params TEXT,
+    fingerprint_before TEXT NOT NULL,
+    fingerprint_after TEXT NOT NULL,
+    diff_hash TEXT,
+    diff_summary TEXT,
+    cells_read INTEGER NOT NULL DEFAULT 0,
+    cells_modified INTEGER NOT NULL DEFAULT 0,
+    ops_count INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    ran_at TEXT NOT NULL,
+    ran_by TEXT,
+    status TEXT NOT NULL DEFAULT 'ok',
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_records_ran_at ON run_records(ran_at);
+CREATE INDEX IF NOT EXISTS idx_run_records_script_name ON run_records(script_name);
 "#;
 
 // Value type constants
@@ -277,7 +319,7 @@ fn border_from_db(style: i32, color: Option<i64>) -> CellBorder {
 }
 
 /// Current schema version. Increment for each migration.
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 
 /// Run schema migrations for existing databases.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -354,6 +396,49 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 PRIMARY KEY (sheet_idx, col)
             );
             PRAGMA user_version = 7;"
+        )?;
+    }
+
+    if version < 8 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS scripts (
+                name TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                description TEXT,
+                hash TEXT NOT NULL,
+                source TEXT NOT NULL,
+                capabilities TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                origin TEXT,
+                author TEXT,
+                version TEXT
+            );
+            CREATE TABLE IF NOT EXISTS run_records (
+                run_id TEXT PRIMARY KEY,
+                run_fingerprint TEXT NOT NULL,
+                script_name TEXT NOT NULL,
+                script_hash TEXT NOT NULL,
+                script_source TEXT NOT NULL,
+                script_origin TEXT NOT NULL,
+                capabilities_used TEXT NOT NULL DEFAULT '',
+                params TEXT,
+                fingerprint_before TEXT NOT NULL,
+                fingerprint_after TEXT NOT NULL,
+                diff_hash TEXT,
+                diff_summary TEXT,
+                cells_read INTEGER NOT NULL DEFAULT 0,
+                cells_modified INTEGER NOT NULL DEFAULT 0,
+                ops_count INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                ran_at TEXT NOT NULL,
+                ran_by TEXT,
+                status TEXT NOT NULL DEFAULT 'ok',
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_records_ran_at ON run_records(ran_at);
+            CREATE INDEX IF NOT EXISTS idx_run_records_script_name ON run_records(script_name);
+            PRAGMA user_version = 8;"
         )?;
     }
 
@@ -1648,6 +1733,451 @@ pub fn load_layout(path: &Path) -> SheetLayout {
     layout
 }
 
+// ============================================================================
+// Scripts CRUD
+// ============================================================================
+
+use crate::scripting::{ScriptMeta, RunRecord, Capability};
+
+/// Load all attached scripts from a .sheet file.
+pub fn load_scripts(path: &Path) -> Result<Vec<ScriptMeta>, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let _ = migrate(&conn);
+
+    let has_scripts = conn.prepare("SELECT name FROM scripts LIMIT 1").is_ok();
+    if !has_scripts {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT name, schema_version, description, hash, source, capabilities, \
+         created_at, updated_at, origin, author, version FROM scripts ORDER BY name"
+    ).map_err(|e| e.to_string())?;
+
+    let rows = stmt.query_map([], |row| {
+        let caps_json: String = row.get(5)?;
+        let capabilities: Vec<Capability> = serde_json::from_str(&caps_json).unwrap_or_default();
+        Ok(ScriptMeta {
+            schema_version: row.get::<_, i32>(1)? as u32,
+            name: row.get(0)?,
+            description: row.get(2)?,
+            hash: row.get(3)?,
+            source: row.get(4)?,
+            capabilities,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            origin: row.get(8)?,
+            author: row.get(9)?,
+            version: row.get(10)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    let mut scripts = Vec::new();
+    for row in rows {
+        scripts.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(scripts)
+}
+
+/// Save attached scripts to an open database connection.
+pub fn save_scripts(conn: &Connection, scripts: &[ScriptMeta]) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM scripts", [])?;
+
+    let mut stmt = conn.prepare(
+        "INSERT INTO scripts (name, schema_version, description, hash, source, capabilities, \
+         created_at, updated_at, origin, author, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+    )?;
+
+    for script in scripts {
+        let caps_json = serde_json::to_string(&script.capabilities).unwrap_or_else(|_| "[]".into());
+        stmt.execute(params![
+            &script.name,
+            script.schema_version as i32,
+            &script.description,
+            &script.hash,
+            &script.source,
+            &caps_json,
+            &script.created_at,
+            &script.updated_at,
+            &script.origin,
+            &script.author,
+            &script.version,
+        ])?;
+    }
+    Ok(())
+}
+
+/// Count attached scripts in a .sheet file.
+pub fn count_scripts(path: &Path) -> Result<usize, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let has_scripts = conn.prepare("SELECT name FROM scripts LIMIT 1").is_ok();
+    if !has_scripts {
+        return Ok(0);
+    }
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM scripts", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(count as usize)
+}
+
+// ============================================================================
+// Run Records CRUD
+// ============================================================================
+
+/// Load all run records from a .sheet file.
+pub fn load_run_records(path: &Path) -> Result<Vec<RunRecord>, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let _ = migrate(&conn);
+
+    let has_records = conn.prepare("SELECT run_id FROM run_records LIMIT 1").is_ok();
+    if !has_records {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT run_id, run_fingerprint, script_name, script_hash, script_source, script_origin, \
+         capabilities_used, params, fingerprint_before, fingerprint_after, diff_hash, diff_summary, \
+         cells_read, cells_modified, ops_count, duration_ms, ran_at, ran_by, status, error \
+         FROM run_records ORDER BY ran_at"
+    ).map_err(|e| e.to_string())?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(RunRecord {
+            run_id: row.get(0)?,
+            run_fingerprint: row.get(1)?,
+            script_name: row.get(2)?,
+            script_hash: row.get(3)?,
+            script_source: row.get(4)?,
+            script_origin: row.get(5)?,
+            capabilities_used: row.get(6)?,
+            params: row.get(7)?,
+            fingerprint_before: row.get(8)?,
+            fingerprint_after: row.get(9)?,
+            diff_hash: row.get(10)?,
+            diff_summary: row.get(11)?,
+            cells_read: row.get(12)?,
+            cells_modified: row.get(13)?,
+            ops_count: row.get(14)?,
+            duration_ms: row.get(15)?,
+            ran_at: row.get(16)?,
+            ran_by: row.get(17)?,
+            status: row.get(18)?,
+            error: row.get(19)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(records)
+}
+
+/// Load run records with pagination (most recent first).
+///
+/// Use this instead of `load_run_records()` when the file may contain many records.
+/// Returns records ordered by ran_at DESC (newest first).
+pub fn load_run_records_paginated(
+    path: &Path,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<RunRecord>, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let _ = migrate(&conn);
+
+    let has_records = conn.prepare("SELECT run_id FROM run_records LIMIT 1").is_ok();
+    if !has_records {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT run_id, run_fingerprint, script_name, script_hash, script_source, script_origin, \
+         capabilities_used, params, fingerprint_before, fingerprint_after, diff_hash, diff_summary, \
+         cells_read, cells_modified, ops_count, duration_ms, ran_at, ran_by, status, error \
+         FROM run_records ORDER BY ran_at DESC LIMIT ?1 OFFSET ?2"
+    ).map_err(|e| e.to_string())?;
+
+    let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
+        Ok(RunRecord {
+            run_id: row.get(0)?,
+            run_fingerprint: row.get(1)?,
+            script_name: row.get(2)?,
+            script_hash: row.get(3)?,
+            script_source: row.get(4)?,
+            script_origin: row.get(5)?,
+            capabilities_used: row.get(6)?,
+            params: row.get(7)?,
+            fingerprint_before: row.get(8)?,
+            fingerprint_after: row.get(9)?,
+            diff_hash: row.get(10)?,
+            diff_summary: row.get(11)?,
+            cells_read: row.get(12)?,
+            cells_modified: row.get(13)?,
+            ops_count: row.get(14)?,
+            duration_ms: row.get(15)?,
+            ran_at: row.get(16)?,
+            ran_by: row.get(17)?,
+            status: row.get(18)?,
+            error: row.get(19)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(records)
+}
+
+/// Count total run records in a .sheet file.
+pub fn count_run_records(path: &Path) -> Result<usize, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let _ = migrate(&conn);
+
+    conn.query_row(
+        "SELECT COUNT(*) FROM run_records",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|c| c as usize)
+    .or(Ok(0))
+}
+
+/// Load a single run record by ID (or prefix match).
+pub fn load_run_record(path: &Path, run_id: &str) -> Result<Option<RunRecord>, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let _ = migrate(&conn);
+
+    let has_records = conn.prepare("SELECT run_id FROM run_records LIMIT 1").is_ok();
+    if !has_records {
+        return Ok(None);
+    }
+
+    // Try exact match first, then prefix match
+    let result = conn.query_row(
+        "SELECT run_id, run_fingerprint, script_name, script_hash, script_source, script_origin, \
+         capabilities_used, params, fingerprint_before, fingerprint_after, diff_hash, diff_summary, \
+         cells_read, cells_modified, ops_count, duration_ms, ran_at, ran_by, status, error \
+         FROM run_records WHERE run_id = ?1 OR run_id LIKE ?2 LIMIT 1",
+        params![run_id, format!("{}%", run_id)],
+        |row| {
+            Ok(RunRecord {
+                run_id: row.get(0)?,
+                run_fingerprint: row.get(1)?,
+                script_name: row.get(2)?,
+                script_hash: row.get(3)?,
+                script_source: row.get(4)?,
+                script_origin: row.get(5)?,
+                capabilities_used: row.get(6)?,
+                params: row.get(7)?,
+                fingerprint_before: row.get(8)?,
+                fingerprint_after: row.get(9)?,
+                diff_hash: row.get(10)?,
+                diff_summary: row.get(11)?,
+                cells_read: row.get(12)?,
+                cells_modified: row.get(13)?,
+                ops_count: row.get(14)?,
+                duration_ms: row.get(15)?,
+                ran_at: row.get(16)?,
+                ran_by: row.get(17)?,
+                status: row.get(18)?,
+                error: row.get(19)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(record) => Ok(Some(record)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Insert a run record into an open database connection.
+pub fn insert_run_record(conn: &Connection, record: &RunRecord) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO run_records (run_id, run_fingerprint, script_name, script_hash, script_source, \
+         script_origin, capabilities_used, params, fingerprint_before, fingerprint_after, \
+         diff_hash, diff_summary, cells_read, cells_modified, ops_count, duration_ms, \
+         ran_at, ran_by, status, error) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        params![
+            &record.run_id, &record.run_fingerprint,
+            &record.script_name, &record.script_hash, &record.script_source,
+            &record.script_origin, &record.capabilities_used, &record.params,
+            &record.fingerprint_before, &record.fingerprint_after,
+            &record.diff_hash, &record.diff_summary,
+            record.cells_read, record.cells_modified, record.ops_count, record.duration_ms,
+            &record.ran_at, &record.ran_by, &record.status, &record.error,
+        ],
+    )?;
+    Ok(())
+}
+
+// ============================================================================
+// Full Workbook Save (with scripts + run records)
+// ============================================================================
+
+/// Save a complete workbook with metadata, scripts, and run records in a single transaction.
+///
+/// This is the extended save path that preserves script and run record state.
+/// Used by both GUI (on Ctrl+S) and CLI (after script apply).
+pub fn save_workbook_full(
+    workbook: &Workbook,
+    metadata: &CellMetadata,
+    scripts: &[ScriptMeta],
+    run_records: &[RunRecord],
+    path: &Path,
+) -> Result<(), String> {
+    // Delete existing file if present (SQLite will create fresh)
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Create schema (includes scripts + run_records tables)
+    conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
+
+    // Save active sheet index
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params!["active_sheet", workbook.active_sheet_index().to_string()],
+    ).map_err(|e| e.to_string())?;
+
+    // Begin single transaction for all data
+    conn.execute("BEGIN TRANSACTION", []).map_err(|e| e.to_string())?;
+
+    // Save all sheets and cells
+    {
+        let mut sheet_stmt = conn.prepare(
+            "INSERT INTO sheets (sheet_idx, name, row_count, col_count) VALUES (?1, ?2, ?3, ?4)"
+        ).map_err(|e| e.to_string())?;
+
+        let mut cell_stmt = conn.prepare(
+            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, \
+             fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, \
+             fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, \
+             fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, \
+             fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color, \
+             fmt_cell_style, fmt_font_color, fmt_background_color) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)"
+        ).map_err(|e| e.to_string())?;
+
+        for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
+            sheet_stmt.execute(params![
+                sheet_idx as i64, &sheet.name, sheet.rows as i64, sheet.cols as i64,
+            ]).map_err(|e| e.to_string())?;
+
+            for (&(row, col), cell) in sheet.cells_iter() {
+                let raw = cell.value.raw_display();
+                let format = &cell.format;
+
+                if raw.is_empty() && format.is_default() {
+                    continue;
+                }
+
+                let (value_type, value_num, value_text): (i32, Option<f64>, Option<&str>) =
+                    if raw.is_empty() {
+                        (TYPE_EMPTY, None, None)
+                    } else if raw.starts_with('=') {
+                        (TYPE_FORMULA, None, Some(&raw))
+                    } else if let Ok(num) = raw.parse::<f64>() {
+                        (TYPE_NUMBER, Some(num), None)
+                    } else {
+                        (TYPE_TEXT, None, Some(&raw))
+                    };
+
+                let alignment_int = alignment_to_db(format.alignment);
+                let (number_type, decimals, thousands, negative, currency_symbol) =
+                    extract_number_format_fields(&format.number_format);
+
+                cell_stmt.execute(params![
+                    sheet_idx as i64, row as i64, col as i64,
+                    value_type, value_num, value_text,
+                    format.bold as i32, format.italic as i32, format.underline as i32,
+                    alignment_int, number_type, decimals, format.font_family.as_deref(),
+                    thousands, negative, currency_symbol,
+                    border_style_to_db(format.border_top.style),
+                    border_style_to_db(format.border_right.style),
+                    border_style_to_db(format.border_bottom.style),
+                    border_style_to_db(format.border_left.style),
+                    border_color_to_db(format.border_top.color),
+                    border_color_to_db(format.border_right.color),
+                    border_color_to_db(format.border_bottom.color),
+                    border_color_to_db(format.border_left.color),
+                    format.cell_style.to_int(),
+                    border_color_to_db(format.font_color),
+                    border_color_to_db(format.background_color)
+                ]).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    // Save semantic metadata
+    {
+        let mut stmt = conn.prepare(
+            "INSERT INTO cell_metadata (target, key, value) VALUES (?1, ?2, ?3)"
+        ).map_err(|e| e.to_string())?;
+
+        for (target, props) in metadata.iter() {
+            for (key, value) in props.iter() {
+                stmt.execute(params![target, key, value]).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    // Save named ranges
+    {
+        let mut stmt = conn.prepare(
+            "INSERT INTO named_ranges (name, target_type, sheet, start_row, start_col, end_row, end_col, description) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        ).map_err(|e| e.to_string())?;
+
+        for nr in workbook.list_named_ranges() {
+            let (target_type, sheet_idx, start_row, start_col, end_row, end_col) = match &nr.target {
+                NamedRangeTarget::Cell { sheet, row, col } => {
+                    (0i32, *sheet as i64, *row as i64, *col as i64, None::<i64>, None::<i64>)
+                }
+                NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
+                    (1i32, *sheet as i64, *start_row as i64, *start_col as i64, Some(*end_row as i64), Some(*end_col as i64))
+                }
+            };
+
+            stmt.execute(params![
+                &nr.name, target_type, sheet_idx, start_row, start_col, end_row, end_col,
+                nr.description.as_deref()
+            ]).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Save merged regions for active sheet
+    {
+        let sheet = workbook.active_sheet();
+        let mut stmt = conn.prepare(
+            "INSERT INTO merged_regions (start_row, start_col, end_row, end_col) VALUES (?1, ?2, ?3, ?4)"
+        ).map_err(|e| e.to_string())?;
+
+        for merge in &sheet.merged_regions {
+            stmt.execute(params![
+                merge.start.0 as i64, merge.start.1 as i64,
+                merge.end.0 as i64, merge.end.1 as i64,
+            ]).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Save scripts
+    save_scripts(&conn, scripts).map_err(|e| e.to_string())?;
+
+    // Save run records
+    for record in run_records {
+        insert_run_record(&conn, record).map_err(|e| e.to_string())?;
+    }
+
+    conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1997,7 +2527,7 @@ mod tests {
         {
             let conn = Connection::open(path).unwrap();
             let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-            assert_eq!(version, 4);  // All migrations (v1, v2, v4) run
+            assert_eq!(version, SCHEMA_VERSION);  // All migrations run
 
             let columns: Vec<String> = conn
                 .prepare("PRAGMA table_info(cells)").unwrap()

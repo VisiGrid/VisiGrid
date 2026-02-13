@@ -197,10 +197,19 @@ impl Spreadsheet {
                             self.cell_metadata.clear();
                         }
                     }
+                    // Load attached scripts and run records
+                    self.attached_scripts = visigrid_io::native::load_scripts(path)
+                        .unwrap_or_default();
+                    self.loaded_run_records = visigrid_io::native::load_run_records(path)
+                        .unwrap_or_default();
+                    self.pending_run_records.clear();
                 } else {
                     self.hub_link = None;
                     self.hub_status = crate::hub::HubStatus::Unlinked;
                     self.cell_metadata.clear();
+                    self.attached_scripts.clear();
+                    self.loaded_run_records.clear();
+                    self.pending_run_records.clear();
                 }
                 // Update session with new file path
                 self.update_session_cached(cx);
@@ -983,11 +992,27 @@ impl Spreadsheet {
     fn save_to_path(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("sheet");
 
-        // For .sheet files, use workbook-level save to preserve named ranges
+        // For .sheet files, use full save (workbook + scripts + run records)
         // For CSV, use sheet-level export (named ranges not supported in CSV)
         let result = match extension.to_lowercase().as_str() {
             "csv" => csv::export(self.sheet(cx), path),
-            _ => native::save_workbook(self.wb(cx), path),  // Default to .sheet format
+            _ => {
+                // Convert HashMap<String, HashMap<String, String>> → BTreeMap<String, BTreeMap<String, String>>
+                let metadata: visigrid_io::native::CellMetadata = self.cell_metadata.iter()
+                    .map(|(k, v)| (k.clone(), v.iter().map(|(k2, v2)| (k2.clone(), v2.clone())).collect()))
+                    .collect();
+                let all_run_records: Vec<_> = self.loaded_run_records.iter()
+                    .chain(self.pending_run_records.iter())
+                    .cloned()
+                    .collect();
+                native::save_workbook_full(
+                    self.wb(cx),
+                    &metadata,
+                    &self.attached_scripts,
+                    &all_run_records,
+                    path,
+                )
+            }
         };
 
         match result {
@@ -1003,6 +1028,11 @@ impl Spreadsheet {
                 // Update document identity (handles current_file, is_modified, save_point)
                 self.finalize_save(path);
                 self.request_title_refresh(cx);
+
+                // Merge pending run records into loaded (now persisted)
+                if !self.pending_run_records.is_empty() {
+                    self.loaded_run_records.append(&mut self.pending_run_records);
+                }
 
                 // Re-save hub_link if present (save_workbook recreates file fresh)
                 if let Some(ref link) = self.hub_link {

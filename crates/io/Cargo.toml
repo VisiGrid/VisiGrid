@@ -18,6 +18,10 @@ quick-xml = "0.38"
 zip = "4"
 regex = "1"
 blake3 = "1"
+sha2 = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

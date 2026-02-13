@@ -9,7 +9,9 @@
 //! performance issues with very long outputs (scripts can print thousands of lines).
 
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, Write};
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
@@ -207,6 +209,75 @@ pub const DEFAULT_CONSOLE_HEIGHT: f32 = 250.0;
 pub const MIN_CONSOLE_HEIGHT: f32 = 100.0;
 pub const MAX_CONSOLE_HEIGHT: f32 = 600.0;
 
+// ============================================================================
+// Console History Persistence (JSONL)
+// ============================================================================
+
+/// Maximum number of history entries to persist.
+const MAX_HISTORY_ENTRIES: usize = 1000;
+
+/// Path to the console history file.
+fn history_file_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("visigrid")
+        .join("console_history")
+}
+
+/// Load console history from the JSONL file.
+///
+/// Each line is a JSON object: `{"ts":"...","input":"..."}`.
+/// Returns last `MAX_HISTORY_ENTRIES` entries (input field only).
+pub fn load_history() -> Vec<String> {
+    let path = history_file_path();
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+
+    let reader = std::io::BufReader::new(file);
+    let mut entries = Vec::new();
+
+    for line in reader.lines().flatten() {
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(input) = obj.get("input").and_then(|v| v.as_str()) {
+                entries.push(input.to_string());
+            }
+        }
+    }
+
+    // Keep only the last MAX_HISTORY_ENTRIES
+    if entries.len() > MAX_HISTORY_ENTRIES {
+        entries = entries.split_off(entries.len() - MAX_HISTORY_ENTRIES);
+    }
+
+    entries
+}
+
+/// Append a single history entry to the JSONL file (crash-safe — written immediately).
+pub fn append_history_entry(entry: &str) {
+    let path = history_file_path();
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let ts = chrono::Utc::now().to_rfc3339();
+    let obj = serde_json::json!({
+        "ts": ts,
+        "input": entry,
+    });
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{}", obj);
+    }
+}
+
 impl Default for ConsoleState {
     fn default() -> Self {
         Self::new()
@@ -215,13 +286,14 @@ impl Default for ConsoleState {
 
 impl ConsoleState {
     pub fn new() -> Self {
+        let history = load_history();
         Self {
             visible: false,
             input_buffer: TextBuffer::new(),
             output: Vec::new(),
             view_start: 0,
             view_pinned_to_bottom: true,
-            history: Vec::new(),
+            history,
             history_index: None,
             saved_input: None,
             executing: false,
@@ -518,7 +590,9 @@ impl ConsoleState {
         self.input_buffer.tokens()
     }
 
-    /// Get current input, consuming it and adding to history
+    /// Get current input, consuming it and adding to history.
+    ///
+    /// Persists to JSONL history file immediately (crash-safe).
     pub fn consume_input(&mut self) -> String {
         let input = self.input_buffer.consume();
 
@@ -526,6 +600,8 @@ impl ConsoleState {
         if !input.trim().is_empty() {
             if self.history.last().map(|s| s.as_str()) != Some(&input) {
                 self.history.push(input.clone());
+                // Persist immediately (crash-safe)
+                append_history_entry(&input);
             }
         }
 
@@ -671,6 +747,7 @@ mod tests {
     #[test]
     fn test_history_navigation() {
         let mut state = ConsoleState::new();
+        state.history.clear(); // Clear any persisted history for deterministic test
 
         // Add some history
         state.input_buffer.set_text("first".to_string());
@@ -708,6 +785,7 @@ mod tests {
     #[test]
     fn test_duplicate_history_prevention() {
         let mut state = ConsoleState::new();
+        state.history.clear(); // Clear any persisted history for deterministic test
 
         state.input_buffer.set_text("same".to_string());
         state.consume_input();

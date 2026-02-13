@@ -26,6 +26,7 @@ dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
 ordered-float = "4"
+sha2 = "0.10"
 
 # Internal crates
 visigrid-engine = { path = "crates/engine" }

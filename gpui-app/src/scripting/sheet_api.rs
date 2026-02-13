@@ -38,9 +38,11 @@
 
 use mlua::{Lua, Result as LuaResult, UserData, UserDataMethods, Value};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use super::ops::{parse_a1, parse_range, format_a1, CellKey, LuaCellValue, LuaOp, PendingCell, SheetReader};
+use visigrid_io::scripting::{Capability, all_sheet_caps};
 
 // ============================================================================
 // Limits
@@ -71,10 +73,17 @@ pub struct DynOpSink {
     ops_limit_exceeded: bool,
     /// Current selection (start_row, start_col, end_row, end_col) - 0-indexed
     selection: (usize, usize, usize, usize),
+    /// Capabilities granted to this execution. ALWAYS present — no bypass mode.
+    /// Console passes `all_sheet_caps()`, saved scripts pass their declared caps.
+    capabilities: HashSet<Capability>,
+    /// Number of cell read operations performed (for run record tracking).
+    cells_read_count: usize,
 }
 
 impl DynOpSink {
-    /// Create a new sink with a boxed reader (default selection at A1)
+    /// Create a new sink with a boxed reader, default selection at A1, and ALL capabilities.
+    ///
+    /// Use `with_capabilities()` for scripts with restricted caps.
     pub fn new(reader: Box<dyn SheetReader>) -> Self {
         Self {
             ops: Vec::new(),
@@ -82,10 +91,12 @@ impl DynOpSink {
             reader,
             ops_limit_exceeded: false,
             selection: (0, 0, 0, 0),  // A1:A1
+            capabilities: all_sheet_caps(),
+            cells_read_count: 0,
         }
     }
 
-    /// Create a new sink with a boxed reader and selection info
+    /// Create a new sink with a boxed reader and selection info (ALL capabilities).
     pub fn with_selection(
         reader: Box<dyn SheetReader>,
         selection: (usize, usize, usize, usize),
@@ -96,6 +107,44 @@ impl DynOpSink {
             reader,
             ops_limit_exceeded: false,
             selection,
+            capabilities: all_sheet_caps(),
+            cells_read_count: 0,
+        }
+    }
+
+    /// Create a new sink with explicit capabilities. No bypass mode.
+    ///
+    /// Console: pass `all_sheet_caps()`.
+    /// Saved scripts: pass `script.capabilities`.
+    pub fn with_capabilities(
+        reader: Box<dyn SheetReader>,
+        capabilities: HashSet<Capability>,
+    ) -> Self {
+        Self {
+            ops: Vec::new(),
+            pending: std::collections::HashMap::new(),
+            reader,
+            ops_limit_exceeded: false,
+            selection: (0, 0, 0, 0),
+            capabilities,
+            cells_read_count: 0,
+        }
+    }
+
+    /// Create a new sink with selection and explicit capabilities.
+    pub fn with_selection_and_capabilities(
+        reader: Box<dyn SheetReader>,
+        selection: (usize, usize, usize, usize),
+        capabilities: HashSet<Capability>,
+    ) -> Self {
+        Self {
+            ops: Vec::new(),
+            pending: std::collections::HashMap::new(),
+            reader,
+            ops_limit_exceeded: false,
+            selection,
+            capabilities,
+            cells_read_count: 0,
         }
     }
 
@@ -114,62 +163,108 @@ impl DynOpSink {
         std::mem::take(&mut self.ops)
     }
 
+    /// Get the number of cell read operations performed.
+    pub fn cells_read_count(&self) -> usize {
+        self.cells_read_count
+    }
+
+    /// Get a reference to the granted capabilities.
+    pub fn capabilities(&self) -> &HashSet<Capability> {
+        &self.capabilities
+    }
+
+    // ========================================================================
+    // Capability checks (always-on, no bypass mode)
+    // ========================================================================
+
+    fn check_read(&self) -> Result<(), String> {
+        if self.capabilities.contains(&Capability::SheetRead) {
+            Ok(())
+        } else {
+            Err("capability denied: sheet_read not granted".to_string())
+        }
+    }
+
+    fn check_write(&self) -> Result<(), String> {
+        if self.capabilities.contains(&Capability::SheetWriteValues) {
+            Ok(())
+        } else {
+            Err("capability denied: sheet_write_values not granted".to_string())
+        }
+    }
+
+    fn check_write_formula(&self) -> Result<(), String> {
+        if self.capabilities.contains(&Capability::SheetWriteFormulas) {
+            Ok(())
+        } else {
+            Err("capability denied: sheet_write_formulas not granted".to_string())
+        }
+    }
+
     // ========================================================================
     // Read operations (check pending first, then fall back to reader)
     // ========================================================================
 
-    /// Get value at (row, col) - 1-indexed
-    fn get_value(&self, row: usize, col: usize) -> LuaCellValue {
+    /// Get value at (row, col) - 1-indexed. Requires SheetRead capability.
+    fn get_value(&mut self, row: usize, col: usize) -> Result<LuaCellValue, String> {
+        self.check_read()?;
         // Convert 1-indexed to 0-indexed for internal use
         if row == 0 || col == 0 {
-            return LuaCellValue::Error("Row and column must be >= 1".to_string());
+            return Ok(LuaCellValue::Error("Row and column must be >= 1".to_string()));
         }
         let row = row - 1;
         let col = col - 1;
+        self.cells_read_count += 1;
 
         let key = CellKey::from((row, col));
 
         // Check pending first (read-after-write)
         if let Some(pending) = self.pending.get(&key) {
-            return pending.read_value();
+            return Ok(pending.read_value());
         }
 
         // Fall back to workbook
-        self.reader.get_value(row, col)
+        Ok(self.reader.get_value(row, col))
     }
 
-    /// Get formula at (row, col) - 1-indexed
-    fn get_formula(&self, row: usize, col: usize) -> Option<String> {
+    /// Get formula at (row, col) - 1-indexed. Requires SheetRead capability.
+    fn get_formula(&mut self, row: usize, col: usize) -> Result<Option<String>, String> {
+        self.check_read()?;
         if row == 0 || col == 0 {
-            return None;
+            return Ok(None);
         }
         let row = row - 1;
         let col = col - 1;
+        self.cells_read_count += 1;
 
         let key = CellKey::from((row, col));
 
         // Check pending first
         if let Some(pending) = self.pending.get(&key) {
-            return pending.formula().map(|s| s.to_string());
+            return Ok(pending.formula().map(|s| s.to_string()));
         }
 
         // Fall back to workbook
-        self.reader.get_formula(row, col)
+        Ok(self.reader.get_formula(row, col))
     }
 
-    /// Get row count
-    fn rows(&self) -> usize {
-        self.reader.rows()
+    /// Get row count. Requires SheetRead capability.
+    fn rows(&self) -> Result<usize, String> {
+        self.check_read()?;
+        Ok(self.reader.rows())
     }
 
-    /// Get column count
-    fn cols(&self) -> usize {
-        self.reader.cols()
+    /// Get column count. Requires SheetRead capability.
+    fn cols(&self) -> Result<usize, String> {
+        self.check_read()?;
+        Ok(self.reader.cols())
     }
 
-    /// Get current selection (start_row, start_col, end_row, end_col) - 0-indexed
-    fn selection(&self) -> (usize, usize, usize, usize) {
-        self.selection
+    /// Get current selection (start_row, start_col, end_row, end_col) - 0-indexed.
+    /// Requires SheetRead capability.
+    fn selection(&self) -> Result<(usize, usize, usize, usize), String> {
+        self.check_read()?;
+        Ok(self.selection)
     }
 
     // ========================================================================
@@ -210,8 +305,9 @@ impl DynOpSink {
         }
     }
 
-    /// Set value at (row, col) - 1-indexed
+    /// Set value at (row, col) - 1-indexed. Requires SheetWriteValues capability.
     fn set_value(&mut self, row: usize, col: usize, value: LuaCellValue) -> Result<(), String> {
+        self.check_write()?;
         self.check_ops_limit()?;
 
         if row == 0 || col == 0 {
@@ -252,8 +348,9 @@ impl DynOpSink {
         Ok(())
     }
 
-    /// Set formula at (row, col) - 1-indexed
+    /// Set formula at (row, col) - 1-indexed. Requires SheetWriteFormulas capability.
     fn set_formula(&mut self, row: usize, col: usize, formula: String) -> Result<(), String> {
+        self.check_write_formula()?;
         self.check_ops_limit()?;
 
         if row == 0 || col == 0 {
@@ -305,8 +402,9 @@ impl UserData for SheetUserData {
         // get_value(row, col) -> value or nil
         // ====================================================================
         methods.add_method("get_value", |lua, this, (row, col): (usize, usize)| {
-            let sink = this.sink.borrow();
-            cell_value_to_lua(lua, sink.get_value(row, col))
+            let mut sink = this.sink.borrow_mut();
+            let val = sink.get_value(row, col).map_err(|e| mlua::Error::RuntimeError(e))?;
+            cell_value_to_lua(lua, val)
         });
 
         // ====================================================================
@@ -322,8 +420,8 @@ impl UserData for SheetUserData {
         // get_formula(row, col) -> formula string or nil
         // ====================================================================
         methods.add_method("get_formula", |_, this, (row, col): (usize, usize)| {
-            let sink = this.sink.borrow();
-            Ok(sink.get_formula(row, col))
+            let mut sink = this.sink.borrow_mut();
+            sink.get_formula(row, col).map_err(|e| mlua::Error::RuntimeError(e))
         });
 
         // ====================================================================
@@ -339,8 +437,9 @@ impl UserData for SheetUserData {
         // ====================================================================
         methods.add_method("get_a1", |lua, this, a1: String| {
             if let Some((row, col)) = parse_a1(&a1) {
-                let sink = this.sink.borrow();
-                cell_value_to_lua(lua, sink.get_value(row, col))
+                let mut sink = this.sink.borrow_mut();
+                let val = sink.get_value(row, col).map_err(|e| mlua::Error::RuntimeError(e))?;
+                cell_value_to_lua(lua, val)
             } else {
                 Ok(Value::Nil)
             }
@@ -363,8 +462,9 @@ impl UserData for SheetUserData {
         // ====================================================================
         methods.add_method("get", |lua, this, a1: String| {
             if let Some((row, col)) = parse_a1(&a1) {
-                let sink = this.sink.borrow();
-                cell_value_to_lua(lua, sink.get_value(row, col))
+                let mut sink = this.sink.borrow_mut();
+                let val = sink.get_value(row, col).map_err(|e| mlua::Error::RuntimeError(e))?;
+                cell_value_to_lua(lua, val)
             } else {
                 Ok(Value::Nil)
             }
@@ -386,14 +486,14 @@ impl UserData for SheetUserData {
         // rows() -> number of rows with data
         // ====================================================================
         methods.add_method("rows", |_, this, ()| {
-            Ok(this.sink.borrow().rows())
+            this.sink.borrow().rows().map_err(|e| mlua::Error::RuntimeError(e))
         });
 
         // ====================================================================
         // cols() -> number of columns with data
         // ====================================================================
         methods.add_method("cols", |_, this, ()| {
-            Ok(this.sink.borrow().cols())
+            this.sink.borrow().cols().map_err(|e| mlua::Error::RuntimeError(e))
         });
 
         // ====================================================================
@@ -401,7 +501,7 @@ impl UserData for SheetUserData {
         // ====================================================================
         methods.add_method("selection", |lua, this, ()| {
             let sink = this.sink.borrow();
-            let sel = sink.selection();
+            let sel = sink.selection().map_err(|e| mlua::Error::RuntimeError(e))?;
 
             // Return as Lua table with named fields (1-indexed for Lua)
             let table = lua.create_table()?;
@@ -550,13 +650,14 @@ impl UserData for RangeUserData {
         // values() -> 2D table of values
         // ====================================================================
         methods.add_method("values", |lua, this, ()| {
-            let sink = this.sink.borrow();
+            let mut sink = this.sink.borrow_mut();
             let outer = lua.create_table()?;
 
             for row in this.start_row..=this.end_row {
                 let inner = lua.create_table()?;
                 for col in this.start_col..=this.end_col {
-                    let value = sink.get_value(row, col);
+                    let value = sink.get_value(row, col)
+                        .map_err(|e| mlua::Error::RuntimeError(e))?;
                     let lua_value = cell_value_to_lua(lua, value)?;
                     // Use 1-indexed within the range (Lua convention)
                     inner.set(col - this.start_col + 1, lua_value)?;
@@ -701,7 +802,7 @@ fn lua_to_cell_value(value: Value) -> LuaCellValue {
 // Registration helper
 // ============================================================================
 
-/// Register the `sheet` global in a Lua instance.
+/// Register the `sheet` global in a Lua instance (all capabilities).
 ///
 /// Returns the sink wrapped in Rc<RefCell<>> so the caller can extract ops after eval.
 pub fn register_sheet_global(lua: &Lua, reader: Box<dyn SheetReader>) -> LuaResult<Rc<RefCell<DynOpSink>>> {
@@ -714,7 +815,7 @@ pub fn register_sheet_global(lua: &Lua, reader: Box<dyn SheetReader>) -> LuaResu
     Ok(sink)
 }
 
-/// Register the `sheet` global with selection info.
+/// Register the `sheet` global with selection info (all capabilities).
 ///
 /// Selection is (start_row, start_col, end_row, end_col) in 0-indexed coords.
 pub fn register_sheet_global_with_selection(
@@ -723,6 +824,40 @@ pub fn register_sheet_global_with_selection(
     selection: (usize, usize, usize, usize),
 ) -> LuaResult<Rc<RefCell<DynOpSink>>> {
     let sink = Rc::new(RefCell::new(DynOpSink::with_selection(reader, selection)));
+    let userdata = SheetUserData::new(sink.clone());
+
+    lua.globals().set("sheet", userdata)?;
+    register_styles_table(lua)?;
+
+    Ok(sink)
+}
+
+/// Register the `sheet` global with explicit capabilities.
+///
+/// Console: pass `all_sheet_caps()`.
+/// Saved scripts: pass `script.capabilities`.
+pub fn register_sheet_global_with_caps(
+    lua: &Lua,
+    reader: Box<dyn SheetReader>,
+    capabilities: HashSet<Capability>,
+) -> LuaResult<Rc<RefCell<DynOpSink>>> {
+    let sink = Rc::new(RefCell::new(DynOpSink::with_capabilities(reader, capabilities)));
+    let userdata = SheetUserData::new(sink.clone());
+
+    lua.globals().set("sheet", userdata)?;
+    register_styles_table(lua)?;
+
+    Ok(sink)
+}
+
+/// Register the `sheet` global with selection and explicit capabilities.
+pub fn register_sheet_global_with_selection_and_caps(
+    lua: &Lua,
+    reader: Box<dyn SheetReader>,
+    selection: (usize, usize, usize, usize),
+    capabilities: HashSet<Capability>,
+) -> LuaResult<Rc<RefCell<DynOpSink>>> {
+    let sink = Rc::new(RefCell::new(DynOpSink::with_selection_and_capabilities(reader, selection, capabilities)));
     let userdata = SheetUserData::new(sink.clone());
 
     lua.globals().set("sheet", userdata)?;
@@ -901,10 +1036,10 @@ mod tests {
         let mut sink = DynOpSink::new(Box::new(reader));
 
         // Lua uses 1-indexed, so (1,1) maps to internal (0,0)
-        assert_eq!(sink.get_value(1, 1), LuaCellValue::Number(42.0));
+        assert_eq!(sink.get_value(1, 1).unwrap(), LuaCellValue::Number(42.0));
 
-        // Invalid coords return error
-        assert!(matches!(sink.get_value(0, 1), LuaCellValue::Error(_)));
+        // Invalid coords return error value (not Err — the LuaCellValue::Error variant)
+        assert!(matches!(sink.get_value(0, 1).unwrap(), LuaCellValue::Error(_)));
     }
 
     #[test]
@@ -912,8 +1047,8 @@ mod tests {
         let reader = MockReader::new();
         let mut sink = DynOpSink::new(Box::new(reader));
 
-        sink.set_value(1, 1, LuaCellValue::Number(100.0));
-        assert_eq!(sink.get_value(1, 1), LuaCellValue::Number(100.0));
+        sink.set_value(1, 1, LuaCellValue::Number(100.0)).unwrap();
+        assert_eq!(sink.get_value(1, 1).unwrap(), LuaCellValue::Number(100.0));
 
         // Check ops were recorded (0-indexed internally)
         let ops = sink.take_ops();

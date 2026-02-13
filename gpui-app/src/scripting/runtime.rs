@@ -56,6 +56,8 @@ pub struct LuaEvalResult {
     pub cancelled: bool,
     /// Whether execution was stopped due to wall-clock timeout
     pub timed_out: bool,
+    /// Number of cells read during execution (for run records)
+    pub cells_read: usize,
 }
 
 impl LuaEvalResult {
@@ -70,10 +72,11 @@ impl LuaEvalResult {
             instruction_limit_exceeded: false,
             cancelled: false,
             timed_out: false,
+            cells_read: 0,
         }
     }
 
-    fn success_with_ops(output: Vec<String>, returned: Option<String>, ops: Vec<LuaOp>, mutations: usize, truncated: bool) -> Self {
+    fn success_with_ops(output: Vec<String>, returned: Option<String>, ops: Vec<LuaOp>, mutations: usize, truncated: bool, cells_read: usize) -> Self {
         Self {
             output,
             returned,
@@ -84,6 +87,7 @@ impl LuaEvalResult {
             instruction_limit_exceeded: false,
             cancelled: false,
             timed_out: false,
+            cells_read,
         }
     }
 
@@ -98,6 +102,7 @@ impl LuaEvalResult {
             instruction_limit_exceeded: false,
             cancelled: false,
             timed_out: false,
+            cells_read: 0,
         }
     }
 
@@ -112,6 +117,7 @@ impl LuaEvalResult {
             instruction_limit_exceeded: true,
             cancelled: false,
             timed_out: false,
+            cells_read: 0,
         }
     }
 
@@ -126,6 +132,7 @@ impl LuaEvalResult {
             instruction_limit_exceeded: false,
             cancelled: true,
             timed_out: false,
+            cells_read: 0,
         }
     }
 
@@ -140,6 +147,7 @@ impl LuaEvalResult {
             instruction_limit_exceeded: false,
             cancelled: false,
             timed_out: true,
+            cells_read: 0,
         }
     }
 
@@ -397,13 +405,14 @@ impl LuaRuntime {
         }
 
         // Extract ops from sink
-        let (ops, mutations) = if let Some(sink) = sink {
+        let (ops, mutations, cells_read) = if let Some(sink) = sink {
             let mut borrowed = sink.borrow_mut();
             let mutations = borrowed.mutations();
+            let cells_read = borrowed.cells_read_count();
             let ops = borrowed.take_ops();
-            (ops, mutations)
+            (ops, mutations, cells_read)
         } else {
-            (Vec::new(), 0)
+            (Vec::new(), 0, 0)
         };
 
         // Check if instruction limit, cancellation, or timeout was hit
@@ -429,7 +438,7 @@ impl LuaRuntime {
                 } else {
                     None
                 };
-                LuaEvalResult::success_with_ops(output, returned, ops, mutations, truncated)
+                LuaEvalResult::success_with_ops(output, returned, ops, mutations, truncated, cells_read)
             }
             Err(e) => {
                 // On error, check if it was instruction limit, cancellation, or timeout
@@ -445,6 +454,7 @@ impl LuaRuntime {
                 };
                 result.ops = ops;
                 result.mutations = mutations;
+                result.cells_read = cells_read;
                 result
             }
         }

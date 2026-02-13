@@ -25,6 +25,7 @@ which = "6"
 # Provenance replay (Phase 9B)
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 blake3 = "1"
+sha2 = { workspace = true }
 
 # TUI viewer (peek command)
 ratatui = "0.29"
@@ -36,7 +37,7 @@ atty = "0.2"
 
 # Session client
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 dirs = "6"
 
 [target.'cfg(unix)'.dependencies]

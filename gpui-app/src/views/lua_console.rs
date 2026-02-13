@@ -878,6 +878,9 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
         anchor_col.max(end_col),
     );
 
+    // Compute fingerprint before execution (for run records)
+    let fingerprint_before = visigrid_io::native::compute_semantic_fingerprint(app.wb(cx));
+
     // Time the execution
     let start = Instant::now();
 
@@ -902,8 +905,17 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
     // Apply operations if any (single undo entry for all)
     if result.has_mutations() {
         let (changes, format_patches) = apply_lua_ops(app, sheet_index, &result.ops, cx);
+        let cells_modified = changes.len() as i64;
         let has_values = !changes.is_empty();
         let has_formats = !format_patches.is_empty();
+
+        // Build run record for ad-hoc console writes (provenance tracking)
+        if has_values {
+            build_console_run_record(
+                app, cx, &code, &fingerprint_before, &changes,
+                sheet_index, result.ops.len() as i64, elapsed, result.cells_read,
+            );
+        }
 
         if has_values && has_formats {
             use crate::history::{UndoAction, FormatActionKind};
@@ -946,6 +958,83 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
 
     // Show cycle banner if Lua script introduced circular references
     app.maybe_show_cycle_banner(cx);
+}
+
+/// Build a run record for an ad-hoc console execution that produced mutations.
+/// This provides provenance tracking even for one-liner console commands.
+fn build_console_run_record(
+    app: &mut Spreadsheet,
+    cx: &mut gpui::Context<Spreadsheet>,
+    code: &str,
+    fingerprint_before: &str,
+    changes: &[crate::history::CellChange],
+    sheet_index: usize,
+    ops_count: i64,
+    elapsed: std::time::Duration,
+    cells_read: usize,
+) {
+    use visigrid_io::scripting::{
+        RunRecord, PatchLine, compute_script_hash, compute_diff_hash,
+        build_diff_summary, compute_run_fingerprint, canonicalize_source,
+    };
+
+    let fingerprint_after = visigrid_io::native::compute_semantic_fingerprint(app.wb(cx));
+
+    // Build PatchLines from CellChanges
+    let mut patch_lines: Vec<PatchLine> = changes.iter().map(|c| {
+        PatchLine {
+            t: "cell".to_string(),
+            sheet: sheet_index,
+            r: c.row as u32,
+            c: c.col as u32,
+            k: if c.new_value.starts_with('=') { "formula".to_string() } else { "value".to_string() },
+            old: if c.old_value.is_empty() { None } else { Some(c.old_value.clone()) },
+            new: if c.new_value.is_empty() { None } else { Some(c.new_value.clone()) },
+        }
+    }).collect();
+
+    // Sort for deterministic hashing
+    patch_lines.sort_by(|a, b| {
+        a.t.cmp(&b.t)
+            .then(a.sheet.cmp(&b.sheet))
+            .then(a.r.cmp(&b.r))
+            .then(a.c.cmp(&b.c))
+            .then(a.k.cmp(&b.k))
+    });
+
+    let diff_hash = if patch_lines.is_empty() { None } else { Some(compute_diff_hash(&patch_lines)) };
+
+    let sheet_names: Vec<String> = app.wb(cx).sheet_names().iter().map(|s| s.to_string()).collect();
+    let diff_summary = build_diff_summary(&patch_lines, &sheet_names);
+
+    let canonical = canonicalize_source(code);
+    let script_hash = compute_script_hash(code);
+
+    let mut record = RunRecord {
+        run_id: uuid::Uuid::new_v4().to_string(),
+        run_fingerprint: String::new(), // computed below
+        script_name: "(console)".to_string(),
+        script_hash,
+        script_source: canonical,
+        script_origin: r#"{"kind":"Console"}"#.to_string(),
+        capabilities_used: "SheetRead,SheetWriteValues,SheetWriteFormulas".to_string(),
+        params: None,
+        fingerprint_before: fingerprint_before.to_string(),
+        fingerprint_after,
+        diff_hash,
+        diff_summary,
+        cells_read: cells_read as i64,
+        cells_modified: changes.len() as i64,
+        ops_count,
+        duration_ms: elapsed.as_millis() as i64,
+        ran_at: chrono::Utc::now().to_rfc3339(),
+        ran_by: None,
+        status: "ok".to_string(),
+        error: None,
+    };
+
+    record.run_fingerprint = compute_run_fingerprint(&record);
+    app.pending_run_records.push(record);
 }
 
 /// Apply Lua operations to the sheet and return undo changes.

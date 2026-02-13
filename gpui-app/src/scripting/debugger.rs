@@ -781,6 +781,7 @@ fn debug_thread_main(
                 instruction_limit_exceeded: false,
                 cancelled: false,
                 timed_out: false,
+                cells_read: 0,
             }),
         });
         return;
@@ -872,6 +873,7 @@ fn debug_thread_main(
                 instruction_limit_exceeded: false,
                 cancelled: false,
                 timed_out: false,
+                cells_read: 0,
             }
         }
         Err(e) => {
@@ -886,6 +888,7 @@ fn debug_thread_main(
                     instruction_limit_exceeded: false,
                     cancelled: true,
                     timed_out: false,
+                    cells_read: 0,
                 }
             } else if timed_out {
                 LuaEvalResult {
@@ -901,6 +904,7 @@ fn debug_thread_main(
                     instruction_limit_exceeded: false,
                     cancelled: false,
                     timed_out: true,
+                    cells_read: 0,
                 }
             } else if instruction_limit_exceeded {
                 LuaEvalResult {
@@ -913,6 +917,7 @@ fn debug_thread_main(
                     instruction_limit_exceeded: true,
                     cancelled: false,
                     timed_out: false,
+                    cells_read: 0,
                 }
             } else {
                 LuaEvalResult {
@@ -925,6 +930,7 @@ fn debug_thread_main(
                     instruction_limit_exceeded: false,
                     cancelled: false,
                     timed_out: false,
+                    cells_read: 0,
                 }
             }
         }

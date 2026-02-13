@@ -5,6 +5,7 @@ mod exit_codes;
 mod fill;
 mod hub;
 mod replay;
+mod scripts;
 mod session;
 mod sheet_ops;
 mod tui;
@@ -647,6 +648,14 @@ Examples:
     /// End-to-end trust pipeline (inspect → import → verify → publish)
     #[command(subcommand)]
     Pipeline(PipelineCommands),
+
+    /// List, preview, and run Lua scripts with capability enforcement
+    #[command(subcommand)]
+    Scripts(ScriptsCommands),
+
+    /// Verify provenance, inspect run records, audit script history
+    #[command(subcommand)]
+    Runs(RunsCommands),
 }
 
 #[derive(Clone, ValueEnum)]
@@ -1007,6 +1016,123 @@ enum AiCommands {
         /// Test provider connectivity (requires network)
         #[arg(long)]
         test: bool,
+    },
+}
+
+/// Scripts subcommands for listing and running Lua scripts.
+#[derive(Subcommand)]
+enum ScriptsCommands {
+    /// List available scripts (attached, project, global)
+    #[command(after_help = "\
+Examples:
+  vgrid scripts list
+  vgrid scripts list --file model.sheet
+  vgrid scripts list --json")]
+    List {
+        /// .sheet file to check for attached scripts
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run a script: --plan previews the patch, --apply writes it with a run record
+    #[command(after_help = "\
+Scripts never auto-execute. --plan shows the exact patch without touching the file. \
+--apply writes the patch and creates a run record with before/after fingerprints \
+and a content-addressed diff hash.
+
+Examples:
+  vgrid scripts run sum_columns model.sheet --plan
+  vgrid scripts run sum_columns model.sheet --apply
+  vgrid scripts run sum_columns model.sheet --apply --json")]
+    Run {
+        /// Script name (resolved: attached → project → global)
+        name: String,
+
+        /// .sheet file to operate on
+        file: PathBuf,
+
+        /// Preview the patch without modifying the file
+        #[arg(long)]
+        plan: bool,
+
+        /// Apply the patch and create a provenance run record
+        #[arg(long)]
+        apply: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Audit script execution history. Every script run produces a run record with
+/// content-addressed hashes. Use `verify` to prove records haven't been tampered with.
+#[derive(Subcommand)]
+enum RunsCommands {
+    /// List run records from a .sheet file (most recent first)
+    #[command(after_help = "\
+Examples:
+  vgrid runs list model.sheet
+  vgrid runs list model.sheet --json
+  vgrid runs list model.sheet --limit 10 --offset 50")]
+    List {
+        /// .sheet file to read run records from
+        file: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Maximum number of records to show (default: 50, most recent first)
+        #[arg(long, default_value = "50")]
+        limit: usize,
+
+        /// Skip this many records before returning results
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
+
+    /// Recompute script hashes and run fingerprints; prove nothing was tampered
+    #[command(after_help = "\
+Recomputes script_hash from stored source and run_fingerprint from stored fields. \
+Reports OK or MISMATCH for each record. Exit code 0 = all verified, 1 = tampered.
+
+Examples:
+  vgrid runs verify model.sheet
+  vgrid runs verify model.sheet --json
+  vgrid runs verify model.sheet --run abc123")]
+    Verify {
+        /// .sheet file to verify
+        file: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Verify a specific run record (ID or prefix)
+        #[arg(long)]
+        run: Option<String>,
+    },
+
+    /// Show details of a specific run record
+    #[command(after_help = "\
+Examples:
+  vgrid runs show abc123 model.sheet
+  vgrid runs show abc123 model.sheet --json")]
+    Show {
+        /// Run ID (or prefix)
+        run_id: String,
+
+        /// .sheet file to read run records from
+        file: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1562,6 +1688,25 @@ fn main() -> ExitCode {
                     source, repo, headers, formulas, stamp, checks_calc, checks_file,
                     delimiter, sheet, message, notes, out, json, dry_run, no_wait, timeout,
                 )
+            }
+        }
+        Some(Commands::Scripts(scripts_cmd)) => match scripts_cmd {
+            ScriptsCommands::List { file, json } => {
+                scripts::cmd_scripts_list(file, json)
+            }
+            ScriptsCommands::Run { name, file, plan, apply, json } => {
+                scripts::cmd_scripts_run(name, file, plan, apply, json)
+            }
+        }
+        Some(Commands::Runs(runs_cmd)) => match runs_cmd {
+            RunsCommands::List { file, json, limit, offset } => {
+                scripts::cmd_runs_list(file, json, limit, offset)
+            }
+            RunsCommands::Show { run_id, file, json } => {
+                scripts::cmd_runs_show(run_id, file, json)
+            }
+            RunsCommands::Verify { file, json, run } => {
+                scripts::cmd_runs_verify(file, json, run)
             }
         }
     };

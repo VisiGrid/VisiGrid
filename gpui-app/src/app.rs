@@ -1868,6 +1868,14 @@ pub struct Spreadsheet {
     /// Role -> style mapping (singleton, could become per-doc)
     pub role_style_map: crate::role_styles::RoleStyleMap,
 
+    // Lua script invariants
+    /// Scripts attached to this workbook (persisted in .sheet file).
+    pub attached_scripts: Vec<visigrid_io::scripting::ScriptMeta>,
+    /// Run records created since last save (not yet persisted).
+    pub pending_run_records: Vec<visigrid_io::scripting::RunRecord>,
+    /// Run records loaded from .sheet file (already persisted).
+    pub loaded_run_records: Vec<visigrid_io::scripting::RunRecord>,
+
     // Row view layer (for sort/filter)
     // Maps view rows to data rows, handles visibility
     pub row_view: RowView,
@@ -2731,6 +2739,10 @@ impl Spreadsheet {
             lua_console: crate::scripting::ConsoleState::default(),
             script: crate::scripting::ScriptState::default(),
             custom_fn_registry: crate::scripting::CustomFunctionRegistry::empty(),
+
+            attached_scripts: Vec::new(),
+            pending_run_records: Vec::new(),
+            loaded_run_records: Vec::new(),
 
             license_input: String::new(),
             license_error: None,
