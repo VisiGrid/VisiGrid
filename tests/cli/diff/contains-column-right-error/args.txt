@@ -1,0 +1,12 @@
+diff
+{DIR}/left.csv
+{DIR}/right.csv
+--key
+Invoice
+--match
+contains
+--contains-column
+DOES_NOT_EXIST
+--no-fail
+--out
+json

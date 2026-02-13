@@ -1,0 +1,12 @@
+diff
+{DIR}/left.csv
+{DIR}/right.csv
+--key
+Invoice
+--no-fail
+--out
+json
+--summary
+none
+--export
+only_left:{DIR}/actual_unmatched.csv

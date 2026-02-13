@@ -1,0 +1,9 @@
+convert
+{DIR}/input.csv
+--headers
+--rename
+order_number:Invoice,amount:Amount
+--select
+Invoice,Amount
+-t
+csv

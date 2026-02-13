@@ -129,6 +129,11 @@ Examples:
         #[arg(long, value_name = "COLS")]
         select: Vec<String>,
 
+        /// Rename columns (requires --headers). Comma-separated old:new pairs.
+        /// Example: --rename 'order_number:Invoice,amount:Amount'
+        #[arg(long, value_name = "OLD:NEW,...")]
+        rename: Option<String>,
+
         /// Suppress stderr notes (e.g. skipped-row counts)
         #[arg(long, short = 'q')]
         quiet: bool,
@@ -279,6 +284,14 @@ Examples:
         /// Parse errors and usage errors still exit non-zero.
         #[arg(long)]
         no_fail: bool,
+
+        /// Export rows by status to CSV (repeatable: --export only_left:/tmp/unmatched.csv)
+        #[arg(long, value_name = "STATUS:PATH")]
+        export: Vec<String>,
+
+        /// Which side's columns to include in exports (default: left)
+        #[arg(long, default_value = "left")]
+        export_side: ExportSide,
     },
 
     /// List running VisiGrid sessions
@@ -1214,6 +1227,13 @@ enum DiffSummaryMode {
     Json,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum ExportSide {
+    Left,
+    Right,
+    Both,
+}
+
 // ============================================================================
 // --where filtering types and helpers
 // ============================================================================
@@ -1459,6 +1479,28 @@ fn check_ambiguous_headers(canonical_headers: &[String]) -> Result<(), CliError>
     Ok(())
 }
 
+fn parse_rename_specs(spec: &str) -> Result<Vec<(String, String)>, CliError> {
+    let mut result = Vec::new();
+    for pair in spec.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let colon_pos = pair.find(':').ok_or_else(|| {
+            CliError::args(format!("invalid --rename spec {:?}: expected OLD:NEW", pair))
+                .with_hint("example: --rename 'order_number:Invoice,amount:Amount'")
+        })?;
+        let old_name = pair[..colon_pos].trim().to_string();
+        let new_name = pair[colon_pos + 1..].trim().to_string();
+        if old_name.is_empty() || new_name.is_empty() {
+            return Err(CliError::args(format!("invalid --rename spec {:?}: both names required", pair))
+                .with_hint("example: --rename 'order_number:Invoice'"));
+        }
+        result.push((old_name, new_name));
+    }
+    Ok(result)
+}
+
 fn parse_select_args(select_args: &[String]) -> Vec<String> {
     select_args
         .iter()
@@ -1560,8 +1602,9 @@ fn main() -> ExitCode {
             headers,
             r#where: where_clauses,
             select: select_args,
+            rename,
             quiet,
-        }) => cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, quiet),
+        }) => cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, rename, quiet),
         Some(Commands::Calc {
             formula,
             from,
@@ -1604,10 +1647,13 @@ fn main() -> ExitCode {
             save_ambiguous,
             contains_column,
             no_fail,
+            export,
+            export_side,
         }) => cmd_diff(
             left, right, key, r#match, key_transform, compare, tolerance,
             on_ambiguous, out, output, summary, no_headers, header_row, delimiter,
             stdin_format, strict_exit, quiet, save_ambiguous, contains_column, no_fail,
+            export, export_side,
         ),
         Some(Commands::Sessions { json }) => cmd_sessions(json),
         Some(Commands::Attach { session }) => cmd_attach(session),
@@ -1815,6 +1861,7 @@ fn cmd_convert(
     headers: bool,
     where_clauses: Vec<String>,
     select_args: Vec<String>,
+    rename: Option<String>,
     quiet: bool,
 ) -> Result<(), CliError> {
 
@@ -1829,6 +1876,18 @@ fn cmd_convert(
         return Err(CliError::args("--select requires --headers")
             .with_hint("add --headers so column names can be resolved"));
     }
+
+    // Validate --rename requires --headers
+    if rename.is_some() && !headers {
+        return Err(CliError::args("--rename requires --headers")
+            .with_hint("add --headers so column names can be resolved"));
+    }
+
+    // Parse rename specs early (fail fast)
+    let rename_specs = match &rename {
+        Some(spec) => parse_rename_specs(spec)?,
+        None => vec![],
+    };
 
     // Determine input format
     let input_format = match (&input, from) {
@@ -1846,7 +1905,7 @@ fn cmd_convert(
     }
 
     // Read input into sheet (convert always starts at A1)
-    let sheet = match &input {
+    let mut sheet = match &input {
         Some(path) => read_file(path, input_format, delimiter, sheet_arg.as_deref())?,
         None => read_stdin(input_format, delimiter, 0, 0)?,
     };
@@ -1859,6 +1918,29 @@ fn cmd_convert(
     } else {
         0
     };
+
+    // Apply --rename to header cells (before canonical_headers, so renames flow through)
+    if !rename_specs.is_empty() && headers && bounds_cols > 0 {
+        for (old_name, new_name) in &rename_specs {
+            let old_lower = old_name.to_lowercase();
+            let mut found = false;
+            for c in 0..bounds_cols {
+                let cell_val = sheet.get_display(header_row, c);
+                if cell_val.trim().to_lowercase() == old_lower {
+                    sheet.set_value(header_row, c, new_name);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                let available: Vec<String> = (0..bounds_cols)
+                    .map(|c| sheet.get_display(header_row, c).trim().to_string())
+                    .collect();
+                return Err(CliError::args(format!("rename: column {:?} not found", old_name))
+                    .with_hint(format!("available columns: {}", available.join(", "))));
+            }
+        }
+    }
 
     // Build canonical headers list once
     let canonical_headers: Vec<String> = if headers && bounds_cols > 0 {
@@ -2742,6 +2824,8 @@ fn cmd_diff(
     save_ambiguous: Option<PathBuf>,
     contains_column: Option<String>,
     no_fail: bool,
+    export_specs_raw: Vec<String>,
+    export_side: ExportSide,
 ) -> Result<(), CliError> {
     let left_is_stdin = left_arg == "-";
     let right_is_stdin = right_arg == "-";
@@ -2750,6 +2834,9 @@ fn cmd_diff(
         return Err(CliError::args("cannot read both sides from stdin")
             .with_hint("provide at least one file path: visigrid diff - file.csv --key id"));
     }
+
+    // Parse export specs early so invalid specs fail fast
+    let export_specs = parse_export_specs(&export_specs_raw)?;
 
     // Resolve formats
     let left_path = if left_is_stdin { None } else { Some(PathBuf::from(&left_arg)) };
@@ -2822,7 +2909,20 @@ fn cmd_diff(
         (0..max_cols).map(|c| col_letter(c)).collect()
     };
 
-    // Resolve key column
+    // Extract per-side headers (for column validation when real headers exist)
+    let left_headers: Vec<String> = if let Some(hr) = hdr_row {
+        (0..left_bounds_cols).map(|c| left_sheet.get_display(hr, c)).collect()
+    } else {
+        (0..left_bounds_cols).map(|c| col_letter(c)).collect()
+    };
+    let right_headers: Vec<String> = if let Some(hr) = hdr_row {
+        (0..right_bounds_cols).map(|c| right_sheet.get_display(hr, c)).collect()
+    } else {
+        (0..right_bounds_cols).map(|c| col_letter(c)).collect()
+    };
+
+    // Resolve key column (against merged headers — key mismatches are self-correcting
+    // because nothing matches, producing visible only_left/only_right results)
     let key_col = resolve_column(&key, &headers)?;
 
     // Resolve compare columns
@@ -2832,6 +2932,10 @@ fn cmd_diff(
             for part in spec.split(',') {
                 let part = part.trim();
                 cols.push(resolve_column(part, &headers)?);
+                // When real headers exist, verify column name is on both sides
+                if hdr_row.is_some() {
+                    check_column_both_sides(part, &left_headers, &right_headers)?;
+                }
             }
             Some(cols)
         }
@@ -2856,13 +2960,13 @@ fn cmd_diff(
         DiffAmbiguousPolicy::Report => diff::AmbiguityPolicy::Report,
     };
 
-    // Resolve --contains-column (only valid with --match contains)
+    // Resolve --contains-column against right-side headers (that's the side it searches)
     let contains_col = match contains_column {
         Some(ref spec) => {
             if mode != diff::MatchMode::Contains {
                 return Err(CliError::args("--contains-column requires --match contains"));
             }
-            Some(resolve_column(spec, &headers)?)
+            Some(resolve_column_on_side(spec, &right_headers, "right")?)
         }
         None => None,
     };
@@ -2910,6 +3014,17 @@ fn cmd_diff(
             if !quiet {
                 eprintln!("ambiguous matches exported to: {}", amb_path.display());
             }
+        }
+    }
+
+    // Write --export CSVs
+    for (status, path) in &export_specs {
+        let filtered: Vec<&diff::DiffRow> = result.results.iter()
+            .filter(|r| r.status == *status)
+            .collect();
+        write_export_csv(path, &filtered, &headers, export_side, &right_rows)?;
+        if !quiet {
+            eprintln!("exported {} {} rows to: {}", filtered.len(), status.as_str(), path.display());
         }
     }
 
@@ -3013,6 +3128,68 @@ fn resolve_column(spec: &str, headers: &[String]) -> Result<usize, CliError> {
     let available: Vec<&str> = headers.iter().map(|h| h.as_str()).collect();
     Err(CliError::args(format!("unknown column: {:?}", spec))
         .with_hint(format!("available columns: {}", available.join(", "))))
+}
+
+/// Like `resolve_column` but error messages name the side (e.g. "unknown right column").
+fn resolve_column_on_side(spec: &str, headers: &[String], side: &str) -> Result<usize, CliError> {
+    let spec_lower = spec.to_lowercase();
+    for (i, h) in headers.iter().enumerate() {
+        if h.to_lowercase() == spec_lower {
+            return Ok(i);
+        }
+    }
+    if spec.chars().all(|c| c.is_ascii_alphabetic()) {
+        let upper = spec.to_uppercase();
+        let mut col: usize = 0;
+        for c in upper.chars() {
+            col = col * 26 + (c as usize - 'A' as usize + 1);
+        }
+        let idx = col - 1;
+        if idx < headers.len() {
+            return Ok(idx);
+        }
+    }
+    if let Ok(n) = spec.parse::<usize>() {
+        if n >= 1 && n <= headers.len() {
+            return Ok(n - 1);
+        }
+    }
+    let available: Vec<&str> = headers.iter().map(|h| h.as_str()).collect();
+    Err(CliError::args(format!("unknown {} column: {:?}", side, spec))
+        .with_hint(format!("available {} columns: {}", side, available.join(", "))))
+}
+
+/// When headers are present, verify a named column exists on both sides.
+/// Positional specs (letters, numbers) skip this check.
+fn check_column_both_sides(
+    spec: &str,
+    left_headers: &[String],
+    right_headers: &[String],
+) -> Result<(), CliError> {
+    let spec_lower = spec.to_lowercase();
+    let in_left = left_headers.iter().any(|h| h.to_lowercase() == spec_lower);
+    let in_right = right_headers.iter().any(|h| h.to_lowercase() == spec_lower);
+
+    if in_left && !in_right {
+        let available: Vec<&str> = right_headers.iter().map(|h| h.as_str()).collect();
+        return Err(CliError::args(format!("column {:?} not found in right file", spec))
+            .with_hint(format!(
+                "available right columns: {}\n       fix: vgrid convert right.csv --headers --rename 'RIGHT_COL:{}' -t csv -o fixed.csv",
+                available.join(", "),
+                spec,
+            )));
+    }
+    if !in_left && in_right {
+        let available: Vec<&str> = left_headers.iter().map(|h| h.as_str()).collect();
+        return Err(CliError::args(format!("column {:?} not found in left file", spec))
+            .with_hint(format!(
+                "available left columns: {}\n       fix: vgrid convert left.csv --headers --rename 'LEFT_COL:{}' -t csv -o fixed.csv",
+                available.join(", "),
+                spec,
+            )));
+    }
+    // If in both or in neither (positional/letter spec), OK
+    Ok(())
 }
 
 fn col_letter(col: usize) -> String {
@@ -3252,6 +3429,192 @@ fn write_ambiguous_csv(path: &PathBuf, ambiguous_keys: &[diff::AmbiguousKey]) ->
             &ak.candidates.len().to_string(),
             &candidate_keys.join("|"),
         ]).map_err(|e| CliError::io(e.to_string()))?;
+    }
+
+    let bytes = writer.into_inner().map_err(|e| CliError::io(e.to_string()))?;
+    std::fs::write(path, &bytes)
+        .map_err(|e| CliError::io(format!("{}: {}", path.display(), e)))?;
+
+    Ok(())
+}
+
+// ============================================================================
+// --export helpers
+// ============================================================================
+
+fn parse_export_specs(specs: &[String]) -> Result<Vec<(diff::RowStatus, PathBuf)>, CliError> {
+    let mut result = Vec::new();
+    for spec in specs {
+        let colon_pos = spec.find(':').ok_or_else(|| {
+            CliError::args(format!("invalid --export spec {:?}: expected STATUS:PATH", spec))
+                .with_hint("example: --export only_left:/tmp/unmatched.csv")
+        })?;
+        let status_str = &spec[..colon_pos];
+        let path_str = &spec[colon_pos + 1..];
+        if path_str.is_empty() {
+            return Err(CliError::args(format!("invalid --export spec {:?}: path is empty", spec))
+                .with_hint("example: --export only_left:/tmp/unmatched.csv"));
+        }
+        let status = match status_str.to_lowercase().as_str() {
+            "only_left" => diff::RowStatus::OnlyLeft,
+            "only_right" => diff::RowStatus::OnlyRight,
+            "matched" => diff::RowStatus::Matched,
+            "diff" => diff::RowStatus::Diff,
+            "ambiguous" => diff::RowStatus::Ambiguous,
+            other => {
+                return Err(CliError::args(format!("unknown export status {:?}", other))
+                    .with_hint("valid statuses: only_left, only_right, matched, diff, ambiguous"));
+            }
+        };
+        result.push((status, PathBuf::from(path_str)));
+    }
+    Ok(result)
+}
+
+fn write_export_csv(
+    path: &std::path::Path,
+    rows: &[&diff::DiffRow],
+    headers: &[String],
+    side: ExportSide,
+    right_data_rows: &[diff::DataRow],
+) -> Result<(), CliError> {
+    let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
+
+    match side {
+        ExportSide::Left | ExportSide::Right => {
+            // Header: just the original column names
+            writer.write_record(headers).map_err(|e| CliError::io(e.to_string()))?;
+
+            for row in rows {
+                // Determine which side's data to emit
+                let values = match (row.status, side) {
+                    // only_left always emits left data
+                    (diff::RowStatus::OnlyLeft, _) => row.left.as_ref(),
+                    // only_right always emits right data
+                    (diff::RowStatus::OnlyRight, _) => row.right.as_ref(),
+                    // For matched/diff/ambiguous: follow the requested side
+                    (_, ExportSide::Left) => row.left.as_ref(),
+                    (_, ExportSide::Right) => row.right.as_ref(),
+                    _ => unreachable!(),
+                };
+
+                // For ambiguous in left/right mode: one row per left key (not per candidate)
+                if row.status == diff::RowStatus::Ambiguous && matches!(side, ExportSide::Right) {
+                    // Right side for ambiguous: skip (no single right match)
+                    // Write left data instead as fallback
+                    if let Some(vals) = row.left.as_ref() {
+                        let record: Vec<&str> = headers.iter()
+                            .map(|h| vals.get(h).map(|s| s.as_str()).unwrap_or(""))
+                            .collect();
+                        writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+                    }
+                    continue;
+                }
+
+                if let Some(vals) = values {
+                    let record: Vec<&str> = headers.iter()
+                        .map(|h| vals.get(h).map(|s| s.as_str()).unwrap_or(""))
+                        .collect();
+                    writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+                }
+            }
+        }
+        ExportSide::Both => {
+            // Header: metadata + left headers + right_ prefixed headers
+            let mut header_record: Vec<String> = vec![
+                "_status".to_string(),
+                "_key".to_string(),
+                "_left_key_raw".to_string(),
+                "_right_key".to_string(),
+                "_candidate_count".to_string(),
+                "_candidate_index".to_string(),
+            ];
+            for h in headers {
+                header_record.push(h.clone());
+            }
+            for h in headers {
+                header_record.push(format!("right_{}", h));
+            }
+            writer.write_record(&header_record).map_err(|e| CliError::io(e.to_string()))?;
+
+            for row in rows {
+                if row.status == diff::RowStatus::Ambiguous {
+                    // One row per candidate
+                    if let Some(ref candidates) = row.candidates {
+                        let candidate_count = candidates.len().to_string();
+                        for (ci, candidate) in candidates.iter().enumerate() {
+                            let mut record: Vec<String> = Vec::new();
+                            // Metadata
+                            record.push(row.status.as_str().to_string());
+                            record.push(row.key.clone());
+                            // _left_key_raw
+                            let left_key_raw = row.match_explain.as_ref()
+                                .map(|e| e.left_key_raw.as_str())
+                                .unwrap_or(&row.key);
+                            record.push(left_key_raw.to_string());
+                            // _right_key from candidate
+                            record.push(candidate.right_key_raw.clone());
+                            record.push(candidate_count.clone());
+                            record.push(ci.to_string());
+                            // Left columns
+                            if let Some(ref vals) = row.left {
+                                for h in headers {
+                                    record.push(vals.get(h).cloned().unwrap_or_default());
+                                }
+                            } else {
+                                for _ in headers { record.push(String::new()); }
+                            }
+                            // Right columns from the right data rows
+                            let right_vals = &right_data_rows[candidate.right_row_index].values;
+                            for h in headers {
+                                record.push(right_vals.get(h).cloned().unwrap_or_default());
+                            }
+                            writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+                        }
+                    }
+                } else {
+                    let mut record: Vec<String> = Vec::new();
+                    // Metadata
+                    record.push(row.status.as_str().to_string());
+                    record.push(row.key.clone());
+                    // _left_key_raw
+                    let left_key_raw = row.match_explain.as_ref()
+                        .map(|e| e.left_key_raw.as_str())
+                        .unwrap_or(&row.key);
+                    record.push(left_key_raw.to_string());
+                    // _right_key
+                    let right_key = row.match_explain.as_ref()
+                        .map(|e| e.right_key_raw.as_str())
+                        .unwrap_or(if row.right.is_some() { &row.key } else { "" });
+                    record.push(right_key.to_string());
+                    // _candidate_count
+                    let ccount = match row.status {
+                        diff::RowStatus::Matched | diff::RowStatus::Diff => "1".to_string(),
+                        _ => String::new(),
+                    };
+                    record.push(ccount);
+                    // _candidate_index (empty for non-ambiguous)
+                    record.push(String::new());
+                    // Left columns
+                    if let Some(ref vals) = row.left {
+                        for h in headers {
+                            record.push(vals.get(h).cloned().unwrap_or_default());
+                        }
+                    } else {
+                        for _ in headers { record.push(String::new()); }
+                    }
+                    // Right columns
+                    if let Some(ref vals) = row.right {
+                        for h in headers {
+                            record.push(vals.get(h).cloned().unwrap_or_default());
+                        }
+                    } else {
+                        for _ in headers { record.push(String::new()); }
+                    }
+                    writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
+                }
+            }
+        }
     }
 
     let bytes = writer.into_inner().map_err(|e| CliError::io(e.to_string()))?;

@@ -1,0 +1,12 @@
+diff
+{DIR}/left.csv
+{DIR}/right.csv
+--key
+A
+--no-headers
+--compare
+B
+--out
+json
+--summary
+none

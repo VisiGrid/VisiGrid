@@ -1,0 +1,7 @@
+diff
+{DIR}/left.csv
+{DIR}/right.csv
+--key
+Invoice
+--compare
+Amount

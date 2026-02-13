@@ -1,0 +1,3 @@
+error: column "Amount" not found in right file
+hint:  available right columns: Invoice, description
+       fix: vgrid convert right.csv --headers --rename 'RIGHT_COL:Amount' -t csv -o fixed.csv

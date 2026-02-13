@@ -1,0 +1,2 @@
+error: rename: column "NOPE" not found
+hint:  available columns: Invoice, Amount

@@ -1,0 +1,7 @@
+convert
+{DIR}/input.csv
+--headers
+--rename
+NOPE:Invoice
+-t
+csv

@@ -1,0 +1,4 @@
+_status,_key,_left_key_raw,_right_key,_candidate_count,_candidate_index,Invoice,Amount,right_Invoice,right_Amount
+ambiguous,16,16,Item 16 - Widget,3,0,16,500,Item 16 - Widget,500
+ambiguous,16,16,Line 16 monthly,3,1,16,500,Line 16 monthly,350
+ambiguous,16,16,PO-1600 service,3,2,16,500,PO-1600 service,475

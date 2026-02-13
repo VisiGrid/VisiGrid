@@ -1,0 +1,2 @@
+error: unknown right column: "DOES_NOT_EXIST"
+hint:  available right columns: order_number, amount, description
