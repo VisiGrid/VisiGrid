@@ -10,13 +10,40 @@ pub(crate) fn bind(
     el
         // Clipboard actions
         .on_action(cx.listener(|this, _: &Copy, _, cx| {
+            if this.lua_console.visible {
+                let input = &this.lua_console.input;
+                if !input.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(input.clone()));
+                }
+                return;
+            }
             this.copy(cx);
         }))
         .on_action(cx.listener(|this, _: &Cut, window, cx| {
+            if this.lua_console.visible {
+                let input = &this.lua_console.input;
+                if !input.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(input.clone()));
+                    this.lua_console.input.clear();
+                    this.lua_console.cursor = 0;
+                    cx.notify();
+                }
+                return;
+            }
             this.cut(cx);
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &Paste, window, cx| {
+            // Lua console: paste into console input
+            if this.lua_console.visible {
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        this.lua_console.insert(&text);
+                    }
+                }
+                cx.notify();
+                return;
+            }
             // AI dialogs handle their own paste
             if this.mode == Mode::AISettings {
                 this.ai_settings_paste(cx);

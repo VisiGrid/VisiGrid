@@ -208,11 +208,18 @@ fn render_input_bar(
     accent: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
+    let line_count = app.lua_console.input.lines().count().max(1);
+    let line_height = 16.0_f32;
+    let padding = 12.0_f32;
+    let max_lines = 8;
+    let bar_height = (line_count.min(max_lines) as f32) * line_height + padding;
+
     div()
-        .h(px(28.0))
+        .h(px(bar_height))
         .px_2()
         .flex()
-        .items_center()
+        .items_start()
+        .pt(px(padding / 2.0))
         .gap_2()
         .border_t_1()
         .border_color(panel_border)
@@ -221,10 +228,13 @@ fn render_input_bar(
             div()
                 .text_size(px(11.0))
                 .text_color(accent)
+                .h(px(line_height))
+                .flex()
+                .items_center()
                 .child(">")
         )
         .child(
-            render_input_area(app, editor_bg, text_primary, accent, cx)
+            render_input_area(app, editor_bg, text_primary, accent, line_height, max_lines, cx)
         )
 }
 
@@ -457,36 +467,69 @@ fn render_input_area(
     _editor_bg: Hsla,
     text_primary: Hsla,
     accent: Hsla,
+    line_height: f32,
+    max_lines: usize,
     _cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let console = &app.lua_console;
     let input = &console.input;
     let cursor = console.cursor;
 
-    // Split input at cursor for rendering
-    let before = &input[..cursor];
-    let after = &input[cursor..];
+    // Determine which line the cursor is on
+    let cursor_line = input[..cursor].matches('\n').count();
+    let lines: Vec<&str> = input.split('\n').collect();
 
-    div()
+    let mut container = div()
         .id("lua-input")
         .flex_1()
-        .h_full()
+        .overflow_hidden()
         .px_1()
         .rounded_sm()
         .flex()
-        .items_center()
+        .flex_col()
         .text_size(px(11.0))
         .font_family("monospace")
         .text_color(text_primary)
-        .child(before.to_string())
-        .child(
-            // Cursor
+        .max_h(px(max_lines as f32 * line_height));
+
+    // Render each line, with cursor on the correct line
+    let mut char_offset = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let line_start = char_offset;
+        let line_end = char_offset + line.len();
+
+        let line_el = if i == cursor_line {
+            // This line contains the cursor
+            let cursor_in_line = cursor - line_start;
+            let before_cursor = &line[..cursor_in_line];
+            let after_cursor = &line[cursor_in_line..];
             div()
-                .w(px(1.0))
-                .h(px(12.0))
-                .bg(accent)
-        )
-        .child(after.to_string())
+                .h(px(line_height))
+                .flex()
+                .items_center()
+                .child(before_cursor.to_string())
+                .child(
+                    div()
+                        .w(px(1.0))
+                        .h(px(12.0))
+                        .bg(accent)
+                )
+                .child(after_cursor.to_string())
+        } else {
+            div()
+                .h(px(line_height))
+                .flex()
+                .items_center()
+                .child(line.to_string())
+        };
+
+        container = container.child(line_el);
+
+        // +1 for the newline character
+        char_offset = line_end + 1;
+    }
+
+    container
 }
 
 /// Handle keyboard input in the console (called from main key handler)
