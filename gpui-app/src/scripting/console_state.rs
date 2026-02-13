@@ -9,6 +9,7 @@
 //! performance issues with very long outputs (scripts can print thousands of lines).
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
@@ -16,6 +17,7 @@ use super::debugger::{
     DebugAction, DebugCommand, DebugEvent, DebugSession, DebugSessionState, DebugSnapshot,
     SessionId, Variable, VarPathSegment,
 };
+use super::lua_tokenizer::{tokenize_lua, LuaTokenType};
 
 /// Default number of visible lines in the console output
 pub const VIEW_LEN: usize = 200;
@@ -194,6 +196,19 @@ pub struct ConsoleState {
 
     /// Last known visible line count in source pane (updated by render)
     pub debug_source_viewport_lines: usize,
+
+    // ========================================================================
+    // Input area highlighting & scroll
+    // ========================================================================
+
+    /// First visible line in the input area (0-based)
+    pub input_scroll_offset: usize,
+
+    /// Cached input string at last tokenize (clone-on-change)
+    pub cached_input_snapshot: String,
+
+    /// Cached tokens from last tokenize
+    pub cached_tokens: Vec<(Range<usize>, LuaTokenType)>,
 }
 
 /// Ring buffer cap for debug_output (prevent unbounded memory growth)
@@ -240,6 +255,9 @@ impl ConsoleState {
             expanded_vars: HashMap::new(),
             debug_source_scroll: 0,
             debug_source_viewport_lines: 20,
+            input_scroll_offset: 0,
+            cached_input_snapshot: String::new(),
+            cached_tokens: Vec::new(),
         }
     }
 
@@ -468,10 +486,31 @@ impl ConsoleState {
         key
     }
 
+    /// Adjust `input_scroll_offset` so the cursor line is visible within
+    /// the given number of max visible lines.
+    pub fn ensure_input_cursor_visible(&mut self, max_visible_lines: usize) {
+        let cursor_line = self.input[..self.cursor].matches('\n').count();
+        if cursor_line < self.input_scroll_offset {
+            self.input_scroll_offset = cursor_line;
+        } else if cursor_line >= self.input_scroll_offset + max_visible_lines {
+            self.input_scroll_offset = cursor_line + 1 - max_visible_lines;
+        }
+    }
+
+    /// Return cached tokens for the current input, re-tokenizing only when input changes.
+    pub fn tokens(&mut self) -> &[(Range<usize>, LuaTokenType)] {
+        if self.input != self.cached_input_snapshot {
+            self.cached_input_snapshot = self.input.clone();
+            self.cached_tokens = tokenize_lua(&self.input);
+        }
+        &self.cached_tokens
+    }
+
     /// Get current input, consuming it and adding to history
     pub fn consume_input(&mut self) -> String {
         let input = std::mem::take(&mut self.input);
         self.cursor = 0;
+        self.input_scroll_offset = 0;
 
         // Add to history if non-empty and different from last entry
         if !input.trim().is_empty() {
@@ -510,6 +549,7 @@ impl ConsoleState {
             }
         }
         self.cursor = self.input.len();
+        self.ensure_input_cursor_visible(12);
     }
 
     /// Navigate to next history entry (down arrow)
@@ -533,12 +573,14 @@ impl ConsoleState {
             }
         }
         self.cursor = self.input.len();
+        self.ensure_input_cursor_visible(12);
     }
 
     /// Insert text at cursor
     pub fn insert(&mut self, text: &str) {
         self.input.insert_str(self.cursor, text);
         self.cursor += text.len();
+        self.ensure_input_cursor_visible(12);
     }
 
     /// Delete character before cursor (backspace)
@@ -552,6 +594,7 @@ impl ConsoleState {
                 .unwrap_or(0);
             self.input.replace_range(prev..self.cursor, "");
             self.cursor = prev;
+            self.ensure_input_cursor_visible(12);
         }
     }
 
@@ -565,6 +608,7 @@ impl ConsoleState {
                 .map(|(i, _)| self.cursor + i)
                 .unwrap_or(self.input.len());
             self.input.replace_range(self.cursor..next, "");
+            self.ensure_input_cursor_visible(12);
         }
     }
 
@@ -576,6 +620,7 @@ impl ConsoleState {
                 .last()
                 .map(|(i, _)| i)
                 .unwrap_or(0);
+            self.ensure_input_cursor_visible(12);
         }
     }
 
@@ -587,17 +632,20 @@ impl ConsoleState {
                 .nth(1)
                 .map(|(i, _)| self.cursor + i)
                 .unwrap_or(self.input.len());
+            self.ensure_input_cursor_visible(12);
         }
     }
 
     /// Move cursor to start
     pub fn cursor_home(&mut self) {
         self.cursor = 0;
+        self.ensure_input_cursor_visible(12);
     }
 
     /// Move cursor to end
     pub fn cursor_end(&mut self) {
         self.cursor = self.input.len();
+        self.ensure_input_cursor_visible(12);
     }
 }
 

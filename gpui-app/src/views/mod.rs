@@ -486,6 +486,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         // Lua console panel (above status bar)
         .child({
             lua_console::pump_debug_events(app, cx);
+            lua_console::refresh_input_tokens(app);
             lua_console::render_lua_console(app, cx)
         })
         .when(!zen_mode, |div| {

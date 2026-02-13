@@ -28,6 +28,7 @@ mod console_state;
 pub mod custom_functions;
 pub mod debugger;
 pub mod examples;
+pub mod lua_tokenizer;
 mod ops;
 mod runtime;
 mod sheet_api;
@@ -37,6 +38,7 @@ pub use ops::{CellKey, LuaCellValue, LuaOp, LuaOpSink, PendingCell, SheetReader,
 pub use runtime::{LuaEvalResult, LuaRuntime, CancelToken, INSTRUCTION_LIMIT, INSTRUCTION_HOOK_INTERVAL, DEFAULT_TIMEOUT};
 pub use sheet_api::{DynOpSink, SheetUserData, SheetSnapshot, register_sheet_global, MAX_OPS, MAX_OUTPUT_LINES};
 pub use custom_functions::{CustomFunctionRegistry, CustomFunction, MemoCache};
+pub use lua_tokenizer::LuaTokenType;
 pub use debugger::{
     SessionId, DebugCommand, DebugAction, DebugEvent, DebugEventPayload,
     DebugSnapshot, DebugSession, DebugSessionState, DebugConfig,
