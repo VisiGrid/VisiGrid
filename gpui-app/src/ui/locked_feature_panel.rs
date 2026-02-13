@@ -15,6 +15,7 @@ pub fn render_locked_feature_panel(
     title: &str,
     description: &str,
     preview: AnyElement,
+    dismissed: bool,
     panel_border: Hsla,
     text_primary: Hsla,
     text_muted: Hsla,
@@ -22,8 +23,7 @@ pub fn render_locked_feature_panel(
     text_inverse: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> Option<AnyElement> {
-    // Session dismiss: user clicked "×" on any locked panel
-    if cx.entity().read(cx).locked_panels_dismissed {
+    if dismissed {
         return None;
     }
 

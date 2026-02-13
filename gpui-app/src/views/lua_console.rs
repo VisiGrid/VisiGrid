@@ -1183,6 +1183,7 @@ fn render_debug_tab_content(
             "Lua Debugger",
             "Set breakpoints, step through code, inspect variables, and trace execution in your Lua scripts.",
             preview,
+            app.locked_panels_dismissed,
             panel_border, text_primary, text_muted, accent, text_inverse,
             cx,
         ) {

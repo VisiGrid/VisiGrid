@@ -1038,6 +1038,7 @@ fn render_inspector_tab(
             "Dependency Graph & Impact",
             "Visualize cross-sheet dependencies, trace upstream and downstream impact, and see verification certificates proving correct evaluation order.",
             render_inspector_skeleton_preview(text_muted),
+            app.locked_panels_dismissed,
             panel_border,
             text_primary,
             text_muted,
@@ -1629,6 +1630,7 @@ fn render_names_tab(
             "Named Range Detail",
             "View value previews, formula depth, and verification status for each named range.",
             render_names_skeleton_preview(text_muted),
+            app.locked_panels_dismissed,
             panel_border,
             text_primary,
             text_muted,
@@ -3712,6 +3714,8 @@ fn render_history_tab(
     let selected_id = app.selected_history_id;
     let view_start = app.history_view_start;
     let is_pro = visigrid_license::is_feature_enabled("inspector");
+    let locked_dismissed = app.locked_panels_dismissed;
+    let text_inverse = app.token(TokenKey::TextInverse);
 
     // Filter entries by mode first
     let mode_filtered: Vec<HistoryDisplayEntry> = all_entries
@@ -4078,7 +4082,7 @@ fn render_history_tab(
         // Detail panel for selected entry
         .when(selected_entry.is_some(), |el| {
             let entry = selected_entry.unwrap();
-            el.child(render_history_detail(&entry, is_pro, text_primary, text_muted, accent, panel_border, cx))
+            el.child(render_history_detail(&entry, is_pro, locked_dismissed, text_primary, text_muted, accent, text_inverse, panel_border, cx))
         })
 }
 
@@ -4243,9 +4247,11 @@ fn render_history_entry(
 fn render_history_detail(
     entry: &crate::history::HistoryDisplayEntry,
     is_pro: bool,
+    locked_dismissed: bool,
     text_primary: Hsla,
     text_muted: Hsla,
     accent: Hsla,
+    text_inverse: Hsla,
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
@@ -4258,11 +4264,11 @@ fn render_history_detail(
 
     // Pre-build locked Lua panel for Free users (needs &mut cx, can't go inside .when())
     let lua_locked_panel: Option<AnyElement> = if !is_pro && (lua_code.is_some() || generated_lua.is_some()) {
-        let text_inverse = cx.entity().read(cx).token(TokenKey::TextInverse);
         render_locked_feature_panel(
             "Lua Provenance",
             "View the Lua script that produced this change, with full source and execution context.",
             render_code_skeleton_preview(text_muted),
+            locked_dismissed,
             panel_border,
             text_primary,
             text_muted,
