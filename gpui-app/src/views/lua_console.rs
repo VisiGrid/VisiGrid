@@ -220,7 +220,7 @@ fn render_input_bar(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let text_muted = app.token(TokenKey::TextMuted);
-    let line_count = app.lua_console.input.lines().count().max(1);
+    let line_count = app.lua_console.input_buffer.text.lines().count().max(1);
     let line_height = 16.0_f32;
     let padding = 12.0_f32;
     let max_lines = 12;
@@ -294,6 +294,28 @@ fn render_console_tab_bar(
                 .items_center()
                 .gap(px(2.0))
                 .pr_1()
+                .child(
+                    console_toolbar_btn(
+                        "console-expand-btn",
+                        "\u{2197}",  // ↗ expand arrow
+                        true,
+                        text_muted, text_primary, panel_border,
+                        cx,
+                        |this, cx| {
+                            this.script.open = true;
+                            this.script.opened_from_console = true;
+                            // Copy REPL input if script is empty and input is worth expanding
+                            if this.script.buffer.is_empty()
+                                && !this.lua_console.input_buffer.text.is_empty()
+                                && (this.lua_console.input_buffer.text.contains('\n')
+                                    || this.lua_console.input_buffer.text.len() > 80)
+                            {
+                                this.script.buffer.set_text(this.lua_console.input_buffer.text.clone());
+                            }
+                            cx.notify();
+                        },
+                    )
+                )
                 .child(
                     console_toolbar_btn(
                         "console-clear-btn",
@@ -565,9 +587,9 @@ fn render_input_area(
     _cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let console = &app.lua_console;
-    let input = &console.input;
-    let cursor = console.cursor;
-    let scroll_offset = console.input_scroll_offset;
+    let input = &console.input_buffer.text;
+    let cursor = console.input_buffer.cursor;
+    let scroll_offset = console.input_buffer.scroll_offset;
 
     // Color map for token types
     let color_keyword = app.token(TokenKey::FormulaFunction);  // violet
@@ -589,21 +611,9 @@ fn render_input_area(
         }
     };
 
-    // Get cached tokens (we need a mutable borrow here; work around by reading from cached directly
-    // since render is called after any mutation that would invalidate the cache)
-    let tokens = &console.cached_tokens;
-
-    // Compute line byte offsets
-    let mut line_offsets: Vec<(usize, usize)> = Vec::new();
-    let mut start = 0;
-    for line in input.split('\n') {
-        let end = start + line.len();
-        line_offsets.push((start, end));
-        start = end + 1; // +1 for '\n'
-    }
-    if line_offsets.is_empty() {
-        line_offsets.push((0, 0));
-    }
+    // Get cached tokens and line offsets (primed by earlier tokens() call)
+    let tokens = console.input_buffer.cached_tokens();
+    let line_offsets = console.input_buffer.cached_line_offsets();
 
     let cursor_line = input[..cursor].matches('\n').count();
     let total_lines = line_offsets.len();
@@ -635,165 +645,19 @@ fn render_input_area(
             None
         };
 
-        let line_el = div()
-            .h(px(line_height))
-            .flex()
-            .items_center()
-            .when(is_cursor_line, |d| d.bg(accent.opacity(0.10)))
-            // Gutter: line number
-            .child(
-                div()
-                    .w(px(gutter_width))
-                    .flex_shrink_0()
-                    .flex()
-                    .justify_end()
-                    .pr(px(6.0))
-                    .text_size(px(9.0))
-                    .text_color(text_muted.opacity(0.55))
-                    .border_r_1()
-                    .border_color(text_muted.opacity(0.18))
-                    .h_full()
-                    .items_center()
-                    .child(format!("{}", line_num))
-            )
-            // Code area
-            .child(
-                render_highlighted_line(
-                    line_text, line_start, line_end,
-                    tokens, cursor_in_line,
-                    &token_color, text_primary, accent,
-                )
-            );
+        let line_el = super::code_render::render_code_line(
+            line_text, line_start, line_end,
+            tokens, cursor_in_line,
+            line_num, is_cursor_line,
+            gutter_width, line_height,
+            text_primary, text_muted, accent,
+            &token_color,
+        );
 
         container = container.child(line_el);
     }
 
     container
-}
-
-/// Render a single line with syntax-highlighted spans and optional cursor.
-fn render_highlighted_line(
-    line_text: &str,
-    line_start: usize,
-    line_end: usize,
-    tokens: &[(std::ops::Range<usize>, LuaTokenType)],
-    cursor_in_line: Option<usize>,
-    token_color: &dyn Fn(LuaTokenType) -> Hsla,
-    text_primary: Hsla,
-    accent: Hsla,
-) -> Div {
-    let mut row = div()
-        .flex_1()
-        .pl(px(6.0))
-        .flex()
-        .items_center()
-        .overflow_hidden();
-
-    // Collect spans for this line: iterate tokens that overlap [line_start, line_end)
-    struct Span {
-        start: usize, // relative to line_start
-        end: usize,   // relative to line_start
-        color: Hsla,
-    }
-
-    let mut spans: Vec<Span> = Vec::new();
-
-    for (range, tt) in tokens {
-        // Skip tokens entirely before or after this line
-        if range.end <= line_start || range.start >= line_end {
-            continue;
-        }
-        // Clip to line bounds
-        let clipped_start = range.start.max(line_start) - line_start;
-        let clipped_end = range.end.min(line_end) - line_start;
-        if clipped_start < clipped_end {
-            spans.push(Span {
-                start: clipped_start,
-                end: clipped_end,
-                color: token_color(*tt),
-            });
-        }
-    }
-
-    // Build the final span list including gap fills
-    let mut pos = 0;
-    let mut all_spans: Vec<(usize, usize, Hsla)> = Vec::new();
-
-    for span in &spans {
-        if span.start > pos {
-            // Gap before this span
-            all_spans.push((pos, span.start, text_primary));
-        }
-        all_spans.push((span.start, span.end, span.color));
-        pos = span.end;
-    }
-    // Trailing gap
-    let line_len = line_text.len();
-    if pos < line_len {
-        all_spans.push((pos, line_len, text_primary));
-    }
-
-    // If no spans at all (empty line), still need to show cursor
-    if all_spans.is_empty() && cursor_in_line.is_some() {
-        row = row.child(
-            div()
-                .w(px(1.5))
-                .h(px(12.0))
-                .bg(accent)
-                .flex_shrink_0()
-        );
-        return row;
-    }
-
-    // Render spans, splitting at cursor position if needed
-    for (s_start, s_end, color) in &all_spans {
-        if let Some(cur) = cursor_in_line {
-            if cur >= *s_start && cur < *s_end {
-                // Cursor is inside this span: split it
-                let before = &line_text[*s_start..cur];
-                let after = &line_text[cur..*s_end];
-                if !before.is_empty() {
-                    row = row.child(
-                        div().text_color(*color).child(before.to_string())
-                    );
-                }
-                row = row.child(
-                    div()
-                        .w(px(1.5))
-                        .h(px(12.0))
-                        .bg(accent)
-                        .flex_shrink_0()
-                );
-                if !after.is_empty() {
-                    row = row.child(
-                        div().text_color(*color).child(after.to_string())
-                    );
-                }
-                continue;
-            }
-        }
-        let text = &line_text[*s_start..*s_end];
-        if !text.is_empty() {
-            row = row.child(
-                div().text_color(*color).child(text.to_string())
-            );
-        }
-    }
-
-    // Cursor at end of line (past all spans)
-    if let Some(cur) = cursor_in_line {
-        if cur >= line_len {
-            row = row.child(
-                div()
-                    .w(px(1.5))
-                    .h(px(12.0))
-                    .bg(accent)
-                    .flex_shrink_0()
-            );
-        }
-    }
-
-    row
 }
 
 /// Handle keyboard input in the console (called from main key handler)
@@ -839,16 +703,18 @@ pub fn handle_console_key_from_main(app: &mut Spreadsheet, event: &KeyDownEvent,
         }
         "home" => {
             if ctrl {
-                // Ctrl+Home: scroll to top of output
+                // Ctrl+Home: scroll output to top + cursor to buffer start
                 app.lua_console.scroll_to_start();
+                app.lua_console.cursor_buffer_home();
             } else {
                 app.lua_console.cursor_home();
             }
         }
         "end" => {
             if ctrl {
-                // Ctrl+End: scroll to bottom of output
+                // Ctrl+End: scroll output to bottom + cursor to buffer end
                 app.lua_console.scroll_to_end();
+                app.lua_console.cursor_buffer_end();
             } else {
                 app.lua_console.cursor_end();
             }
@@ -904,7 +770,7 @@ pub fn execute_console(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
 }
 
 /// Inner body — all early returns are safe because the caller manages the group.
-fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mut Context<Spreadsheet>) {
+pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mut Context<Spreadsheet>) {
     use std::time::Instant;
 
     let trimmed = input.trim();
@@ -1198,7 +1064,7 @@ fn lua_cell_value_to_string(value: &LuaCellValue) -> String {
 /// is driven by rendering, not by debug event pumping.
 pub fn refresh_input_tokens(app: &mut Spreadsheet) {
     if app.lua_console.visible && app.lua_console.active_tab == ConsoleTab::Run {
-        app.lua_console.tokens();
+        app.lua_console.input_buffer.tokens();
     }
 }
 
@@ -1266,7 +1132,7 @@ pub fn pump_debug_events(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
             DebugEventPayload::Paused(snapshot) => {
                 // Normalize 1-indexed Lua line to 0-indexed at the boundary
                 let paused_line_0 = snapshot.line.saturating_sub(1);
-                let total_lines = app.lua_console.input.lines().count();
+                let total_lines = app.lua_console.input_buffer.text.lines().count();
                 app.lua_console.on_debug_paused(paused_line_0, total_lines);
 
                 if let Some(ref mut s) = app.lua_console.debug_session {
@@ -1388,7 +1254,7 @@ fn handle_debug_completed(
 
 /// Start a debug session from the current console input.
 pub fn start_debug_session(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
-    let input = app.lua_console.input.clone(); // Don't consume — keep for re-debug
+    let input = app.lua_console.input_buffer.text.clone(); // Don't consume — keep for re-debug
     if input.trim().is_empty() {
         return;
     }
@@ -1866,7 +1732,7 @@ mod debug_ui {
         panel_border: Hsla,
         cx: &mut Context<Spreadsheet>,
     ) -> impl IntoElement {
-        let source = &app.lua_console.input;
+        let source = &app.lua_console.input_buffer.text;
         let lines: Vec<&str> = source.lines().collect();
         let total_lines = lines.len().max(1);
         let scroll = app.lua_console.debug_source_scroll;

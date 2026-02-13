@@ -10,8 +10,16 @@ pub(crate) fn bind(
     el
         // Clipboard actions
         .on_action(cx.listener(|this, _: &Copy, _, cx| {
+            // Script view: copy script content
+            if this.script.open {
+                let text = &this.script.buffer.text;
+                if !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                }
+                return;
+            }
             if this.lua_console.visible {
-                let input = &this.lua_console.input;
+                let input = &this.lua_console.input_buffer.text;
                 if !input.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(input.clone()));
                 }
@@ -20,12 +28,21 @@ pub(crate) fn bind(
             this.copy(cx);
         }))
         .on_action(cx.listener(|this, _: &Cut, window, cx| {
+            // Script view: cut script content
+            if this.script.open {
+                let text = &this.script.buffer.text;
+                if !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                    this.script.buffer.clear();
+                    cx.notify();
+                }
+                return;
+            }
             if this.lua_console.visible {
-                let input = &this.lua_console.input;
+                let input = &this.lua_console.input_buffer.text;
                 if !input.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(input.clone()));
-                    this.lua_console.input.clear();
-                    this.lua_console.cursor = 0;
+                    this.lua_console.input_buffer.clear();
                     cx.notify();
                 }
                 return;
@@ -34,6 +51,17 @@ pub(crate) fn bind(
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &Paste, window, cx| {
+            // Script view: paste into script buffer
+            if this.script.open {
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        this.script.buffer.insert(&text);
+                        this.script.buffer.ensure_cursor_visible(40);
+                    }
+                }
+                cx.notify();
+                return;
+            }
             // Lua console: paste into console input
             if this.lua_console.visible {
                 if let Some(item) = cx.read_from_clipboard() {

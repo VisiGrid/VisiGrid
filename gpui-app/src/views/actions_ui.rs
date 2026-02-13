@@ -95,7 +95,7 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &InsertFormula, _, cx| {
             this.show_ask_ai(cx);
         }))
-        // Analyze with AI (Ctrl+Shift+E)
+        // Analyze with AI (no longer bound to Ctrl+Shift+E — accessible via command palette)
         .on_action(cx.listener(|this, _: &Analyze, _, cx| {
             this.show_analyze(cx);
         }))
@@ -237,6 +237,29 @@ pub(crate) fn bind(
             this.lua_console.toggle();
             if this.lua_console.visible {
                 window.focus(&this.console_focus_handle, cx);
+            }
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &ToggleScriptView, window, cx| {
+            this.script.open = !this.script.open;
+            if this.script.open {
+                this.script.opened_from_console = false; // keybinding path, not console Expand
+                // Copy REPL input if script is empty and input is "worth expanding"
+                if this.script.buffer.is_empty()
+                    && !this.lua_console.input_buffer.text.is_empty()
+                    && (this.lua_console.input_buffer.text.contains('\n')
+                        || this.lua_console.input_buffer.text.len() > 80)
+                {
+                    this.script.buffer.set_text(this.lua_console.input_buffer.text.clone());
+                }
+                window.focus(&this.script_view_focus_handle, cx);
+            } else {
+                // Return focus to where user came from
+                if this.script.opened_from_console {
+                    window.focus(&this.console_focus_handle, cx);
+                } else {
+                    window.focus(&this.focus_handle, cx);
+                }
             }
             cx.notify();
         }))

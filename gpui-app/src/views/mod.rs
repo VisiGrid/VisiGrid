@@ -21,7 +21,9 @@ mod import_report_dialog;
 pub mod inspector_panel;
 pub mod profiler_panel;
 mod keytips_overlay;
+mod code_render;
 mod lua_console;
+pub(crate) mod script_view;
 pub mod license_dialog;
 pub mod minimap;
 mod paste_special_dialog;
@@ -467,21 +469,26 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         // Split view: render two grids side-by-side, or single grid
         // Wrapped in flex-row to accommodate optional minimap strip on the right
         .child({
-            let show_minimap = app.minimap_visible && !zen_mode;
-            let grid_element = if app.is_split() {
-                render_split_grids(app, window, cx).into_any_element()
+            if app.script.open {
+                script_view::render_script_view(app, window, cx).into_any_element()
             } else {
-                grid::render_grid(app, window, cx, None).into_any_element()
-            };
-            div()
-                .flex()
-                .flex_row()
-                .flex_1()
-                .min_h(px(0.0))  // Allow grid to shrink below content size for console panel
-                .child(grid_element)
-                .when(show_minimap, |d| {
-                    d.child(minimap::render_minimap(app, window, cx))
-                })
+                let show_minimap = app.minimap_visible && !zen_mode;
+                let grid_element = if app.is_split() {
+                    render_split_grids(app, window, cx).into_any_element()
+                } else {
+                    grid::render_grid(app, window, cx, None).into_any_element()
+                };
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(0.0))  // Allow grid to shrink below content size for console panel
+                    .child(grid_element)
+                    .when(show_minimap, |d| {
+                        d.child(minimap::render_minimap(app, window, cx))
+                    })
+                    .into_any_element()
+            }
         })
         // Lua console panel (above status bar)
         .child({

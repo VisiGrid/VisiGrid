@@ -1962,6 +1962,7 @@ pub struct Spreadsheet {
     // UI state
     pub focus_handle: FocusHandle,
     pub console_focus_handle: FocusHandle,
+    pub script_view_focus_handle: FocusHandle,
     pub status_message: Option<String>,
     pub window_size: Size<Pixels>,
     pub cached_window_bounds: Option<WindowBounds>,  // Cached for session snapshot
@@ -2268,6 +2269,7 @@ pub struct Spreadsheet {
     // Lua scripting state
     pub lua_runtime: crate::scripting::LuaRuntime,
     pub lua_console: crate::scripting::ConsoleState,
+    pub script: crate::scripting::ScriptState,
     pub custom_fn_registry: crate::scripting::CustomFunctionRegistry,
 
     // License dialog state
@@ -2418,6 +2420,7 @@ impl Spreadsheet {
 
         let focus_handle = cx.focus_handle();
         let console_focus_handle = cx.focus_handle();
+        let script_view_focus_handle = cx.focus_handle();
         let font_picker_focus = cx.focus_handle();
         let ui = UiState {
             color_picker: crate::color_palette::ColorPickerState::new(cx.focus_handle()),
@@ -2539,6 +2542,7 @@ impl Spreadsheet {
             pending_title_refresh: false,
             focus_handle,
             console_focus_handle,
+            script_view_focus_handle,
             font_picker_focus,
             ui,
             status_message: None,
@@ -2725,6 +2729,7 @@ impl Spreadsheet {
 
             lua_runtime: crate::scripting::LuaRuntime::default(),
             lua_console: crate::scripting::ConsoleState::default(),
+            script: crate::scripting::ScriptState::default(),
             custom_fn_registry: crate::scripting::CustomFunctionRegistry::empty(),
 
             license_input: String::new(),

@@ -284,6 +284,11 @@ actions!(ai, [
     Analyze,             // Ctrl+Shift+E - Analyze with AI (read-only)
 ]);
 
+// Script editor actions
+actions!(scripting, [
+    ToggleScriptView,    // Ctrl+Shift+E / Cmd+Shift+E - Open/close script editor
+]);
+
 // Command palette actions
 actions!(palette, [
     PaletteUp,

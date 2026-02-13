@@ -17,7 +17,8 @@ use super::debugger::{
     DebugAction, DebugCommand, DebugEvent, DebugSession, DebugSessionState, DebugSnapshot,
     SessionId, Variable, VarPathSegment,
 };
-use super::lua_tokenizer::{tokenize_lua, LuaTokenType};
+use super::lua_tokenizer::LuaTokenType;
+pub use super::text_buffer::TextBuffer;
 
 /// Default number of visible lines in the console output
 pub const VIEW_LEN: usize = 200;
@@ -108,11 +109,8 @@ pub struct ConsoleState {
     /// Whether the console panel is visible
     pub visible: bool,
 
-    /// Current input text
-    pub input: String,
-
-    /// Cursor position in input (byte offset)
-    pub cursor: usize,
+    /// REPL input buffer (text, cursor, scroll, tokens)
+    pub input_buffer: TextBuffer,
 
     /// Output log (scrollable history of inputs, outputs, errors)
     pub output: Vec<OutputEntry>,
@@ -191,19 +189,6 @@ pub struct ConsoleState {
     pub debug_source_viewport_lines: usize,
 
     // ========================================================================
-    // Input area highlighting & scroll
-    // ========================================================================
-
-    /// First visible line in the input area (0-based)
-    pub input_scroll_offset: usize,
-
-    /// Cached input string at last tokenize (clone-on-change)
-    pub cached_input_snapshot: String,
-
-    /// Cached tokens from last tokenize
-    pub cached_tokens: Vec<(Range<usize>, LuaTokenType)>,
-
-    // ========================================================================
     // Output grouping
     // ========================================================================
 
@@ -232,8 +217,7 @@ impl ConsoleState {
     pub fn new() -> Self {
         Self {
             visible: false,
-            input: String::new(),
-            cursor: 0,
+            input_buffer: TextBuffer::new(),
             output: Vec::new(),
             view_start: 0,
             view_pinned_to_bottom: true,
@@ -258,9 +242,6 @@ impl ConsoleState {
             expanded_vars: HashMap::new(),
             debug_source_scroll: 0,
             debug_source_viewport_lines: 20,
-            input_scroll_offset: 0,
-            cached_input_snapshot: String::new(),
-            cached_tokens: Vec::new(),
             next_group_id: 0,
             current_group_id: 0,
         }
@@ -282,8 +263,7 @@ impl ConsoleState {
         // On first open, insert welcome hint
         if self.first_open {
             self.first_open = false;
-            self.input = "examples".to_string();
-            self.cursor = self.input.len();
+            self.input_buffer.set_text("examples".to_string());
         }
     }
 
@@ -528,31 +508,19 @@ impl ConsoleState {
         key
     }
 
-    /// Adjust `input_scroll_offset` so the cursor line is visible within
-    /// the given number of max visible lines.
+    /// Adjust scroll so the cursor line is visible within max visible lines.
     pub fn ensure_input_cursor_visible(&mut self, max_visible_lines: usize) {
-        let cursor_line = self.input[..self.cursor].matches('\n').count();
-        if cursor_line < self.input_scroll_offset {
-            self.input_scroll_offset = cursor_line;
-        } else if cursor_line >= self.input_scroll_offset + max_visible_lines {
-            self.input_scroll_offset = cursor_line + 1 - max_visible_lines;
-        }
+        self.input_buffer.ensure_cursor_visible(max_visible_lines);
     }
 
-    /// Return cached tokens for the current input, re-tokenizing only when input changes.
+    /// Return cached tokens for the current input.
     pub fn tokens(&mut self) -> &[(Range<usize>, LuaTokenType)] {
-        if self.input != self.cached_input_snapshot {
-            self.cached_input_snapshot = self.input.clone();
-            self.cached_tokens = tokenize_lua(&self.input);
-        }
-        &self.cached_tokens
+        self.input_buffer.tokens()
     }
 
     /// Get current input, consuming it and adding to history
     pub fn consume_input(&mut self) -> String {
-        let input = std::mem::take(&mut self.input);
-        self.cursor = 0;
-        self.input_scroll_offset = 0;
+        let input = self.input_buffer.consume();
 
         // Add to history if non-empty and different from last entry
         if !input.trim().is_empty() {
@@ -577,20 +545,19 @@ impl ConsoleState {
         match self.history_index {
             None => {
                 // Start browsing - save current input
-                self.saved_input = Some(self.input.clone());
+                self.saved_input = Some(self.input_buffer.text.clone());
                 self.history_index = Some(self.history.len() - 1);
-                self.input = self.history[self.history.len() - 1].clone();
+                self.input_buffer.set_text(self.history[self.history.len() - 1].clone());
             }
             Some(idx) if idx > 0 => {
                 // Go further back
                 self.history_index = Some(idx - 1);
-                self.input = self.history[idx - 1].clone();
+                self.input_buffer.set_text(self.history[idx - 1].clone());
             }
             Some(_) => {
                 // Already at oldest entry
             }
         }
-        self.cursor = self.input.len();
         self.ensure_input_cursor_visible(12);
     }
 
@@ -604,90 +571,71 @@ impl ConsoleState {
                 if idx + 1 < self.history.len() {
                     // Go forward in history
                     self.history_index = Some(idx + 1);
-                    self.input = self.history[idx + 1].clone();
+                    self.input_buffer.set_text(self.history[idx + 1].clone());
                 } else {
                     // Return to saved input
                     self.history_index = None;
                     if let Some(saved) = self.saved_input.take() {
-                        self.input = saved;
+                        self.input_buffer.set_text(saved);
                     }
                 }
             }
         }
-        self.cursor = self.input.len();
         self.ensure_input_cursor_visible(12);
     }
 
-    /// Insert text at cursor
+    /// Insert text at cursor (delegates to input_buffer).
     pub fn insert(&mut self, text: &str) {
-        self.input.insert_str(self.cursor, text);
-        self.cursor += text.len();
-        self.ensure_input_cursor_visible(12);
+        self.input_buffer.insert(text);
+        self.input_buffer.ensure_cursor_visible(12);
     }
 
-    /// Delete character before cursor (backspace)
+    /// Delete character before cursor (delegates to input_buffer).
     pub fn backspace(&mut self) {
-        if self.cursor > 0 {
-            // Find the previous character boundary
-            let prev = self.input[..self.cursor]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.input.replace_range(prev..self.cursor, "");
-            self.cursor = prev;
-            self.ensure_input_cursor_visible(12);
-        }
+        self.input_buffer.backspace();
+        self.input_buffer.ensure_cursor_visible(12);
     }
 
-    /// Delete character at cursor (delete)
+    /// Delete character at cursor (delegates to input_buffer).
     pub fn delete(&mut self) {
-        if self.cursor < self.input.len() {
-            // Find the next character boundary
-            let next = self.input[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(self.input.len());
-            self.input.replace_range(self.cursor..next, "");
-            self.ensure_input_cursor_visible(12);
-        }
+        self.input_buffer.delete();
+        self.input_buffer.ensure_cursor_visible(12);
     }
 
-    /// Move cursor left
+    /// Move cursor left (delegates to input_buffer).
     pub fn cursor_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor = self.input[..self.cursor]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.ensure_input_cursor_visible(12);
-        }
+        self.input_buffer.cursor_left();
+        self.input_buffer.ensure_cursor_visible(12);
     }
 
-    /// Move cursor right
+    /// Move cursor right (delegates to input_buffer).
     pub fn cursor_right(&mut self) {
-        if self.cursor < self.input.len() {
-            self.cursor = self.input[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(self.input.len());
-            self.ensure_input_cursor_visible(12);
-        }
+        self.input_buffer.cursor_right();
+        self.input_buffer.ensure_cursor_visible(12);
     }
 
-    /// Move cursor to start
+    /// Move cursor to start of current line.
     pub fn cursor_home(&mut self) {
-        self.cursor = 0;
-        self.ensure_input_cursor_visible(12);
+        self.input_buffer.cursor_home();
+        self.input_buffer.ensure_cursor_visible(12);
     }
 
-    /// Move cursor to end
+    /// Move cursor to end of current line.
     pub fn cursor_end(&mut self) {
-        self.cursor = self.input.len();
-        self.ensure_input_cursor_visible(12);
+        self.input_buffer.cursor_end();
+        self.input_buffer.ensure_cursor_visible(12);
+    }
+
+    /// Move cursor to start of buffer.
+    pub fn cursor_buffer_home(&mut self) {
+        self.input_buffer.cursor_buffer_home();
+        self.input_buffer.ensure_cursor_visible(12);
+    }
+
+    /// Move cursor to end of buffer.
+    pub fn cursor_buffer_end(&mut self) {
+        self.input_buffer.cursor_buffer_end();
+        self.input_buffer.ensure_cursor_visible(12);
     }
 
     /// RAII guard: begin a group that ends when the guard is dropped.
@@ -725,35 +673,35 @@ mod tests {
         let mut state = ConsoleState::new();
 
         // Add some history
-        state.input = "first".to_string();
+        state.input_buffer.set_text("first".to_string());
         state.consume_input();
-        state.input = "second".to_string();
+        state.input_buffer.set_text("second".to_string());
         state.consume_input();
-        state.input = "third".to_string();
+        state.input_buffer.set_text("third".to_string());
         state.consume_input();
 
         assert_eq!(state.history, vec!["first", "second", "third"]);
 
         // Type something new
-        state.input = "current".to_string();
+        state.input_buffer.set_text("current".to_string());
 
         // Go back in history
         state.history_prev();
-        assert_eq!(state.input, "third");
+        assert_eq!(state.input_buffer.text, "third");
         assert_eq!(state.history_index, Some(2));
 
         state.history_prev();
-        assert_eq!(state.input, "second");
+        assert_eq!(state.input_buffer.text, "second");
         assert_eq!(state.history_index, Some(1));
 
         // Go forward
         state.history_next();
-        assert_eq!(state.input, "third");
+        assert_eq!(state.input_buffer.text, "third");
         assert_eq!(state.history_index, Some(2));
 
         // Go past end returns to saved input
         state.history_next();
-        assert_eq!(state.input, "current");
+        assert_eq!(state.input_buffer.text, "current");
         assert_eq!(state.history_index, None);
     }
 
@@ -761,11 +709,11 @@ mod tests {
     fn test_duplicate_history_prevention() {
         let mut state = ConsoleState::new();
 
-        state.input = "same".to_string();
+        state.input_buffer.set_text("same".to_string());
         state.consume_input();
-        state.input = "same".to_string();
+        state.input_buffer.set_text("same".to_string());
         state.consume_input();
-        state.input = "same".to_string();
+        state.input_buffer.set_text("same".to_string());
         state.consume_input();
 
         // Should only have one entry
@@ -775,16 +723,15 @@ mod tests {
     #[test]
     fn test_cursor_movement() {
         let mut state = ConsoleState::new();
-        state.input = "hello".to_string();
-        state.cursor = 5;
+        state.input_buffer.set_text("hello".to_string());
 
         state.cursor_left();
-        assert_eq!(state.cursor, 4);
+        assert_eq!(state.input_buffer.cursor, 4);
 
         state.cursor_home();
-        assert_eq!(state.cursor, 0);
+        assert_eq!(state.input_buffer.cursor, 0);
 
         state.cursor_end();
-        assert_eq!(state.cursor, 5);
+        assert_eq!(state.input_buffer.cursor, 5);
     }
 }

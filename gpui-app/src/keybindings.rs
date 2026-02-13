@@ -113,7 +113,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
 
         // AI
         KeyBinding::new(&kb_shift(m, "a"), InsertFormula, Some("Spreadsheet")),
-        KeyBinding::new(&kb_shift(m, "e"), Analyze, Some("Spreadsheet")),
+
+        // Script editor (replaces Analyze on Ctrl+Shift+E / Cmd+Shift+E)
+        KeyBinding::new(&kb_shift(m, "e"), ToggleScriptView, Some("Spreadsheet")),
 
         // Selection
         KeyBinding::new(&kb(m, "a"), SelectAll, Some("Spreadsheet")),
