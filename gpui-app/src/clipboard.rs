@@ -1024,7 +1024,12 @@ impl Spreadsheet {
             return Value::Boolean(false);
         }
 
-        // Try to parse as number
+        // Try to parse as formatted number (commas, currency, parens)
+        if let Some(n) = visigrid_engine::cell::try_parse_number(trimmed) {
+            return Value::Number(n);
+        }
+
+        // Try to parse as plain number
         if let Ok(n) = trimmed.parse::<f64>() {
             return Value::Number(n);
         }

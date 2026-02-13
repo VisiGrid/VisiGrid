@@ -206,11 +206,16 @@ pub(crate) fn bind(
             this.update_title_if_needed(window, cx);
         }))
         // Editing actions
-        // F2: Start edit (Navigation) or toggle Caret/Point mode (Formula)
+        // F2: Toggle Navigation ↔ Edit, or toggle Caret/Point in Formula mode
         .on_action(cx.listener(|this, _: &StartEdit, window, cx| {
             if this.mode.is_formula() {
                 // In Formula mode: F2 toggles between Caret and Point submode
                 this.toggle_formula_nav_mode(cx);
+                return;
+            }
+            if this.mode.is_editing() {
+                // Edit → Navigation: cancel without committing (same as Escape)
+                this.cancel_edit(cx);
                 return;
             }
             this.start_edit(cx);
@@ -571,8 +576,27 @@ pub(crate) fn bind(
             } else if this.mode.is_editing() {
                 this.backspace(cx);
                 this.update_edit_scroll(window);
+            } else if this.mode == Mode::Navigation {
+                // Single text cell: enter edit mode and delete last char
+                let is_single_cell = this.view_state.selection_end.is_none()
+                    || this.view_state.selection_end == Some(this.view_state.selected);
+                let is_text = {
+                    use visigrid_engine::cell::CellValue;
+                    let (row, col) = this.view_state.selected;
+                    matches!(this.sheet(cx).get_cell(row, col).value, CellValue::Text(_))
+                };
+
+                if is_single_cell && is_text {
+                    this.start_edit(cx);
+                    if !this.edit_value.is_empty() {
+                        this.backspace(cx);
+                    }
+                    this.update_edit_scroll(window);
+                } else {
+                    this.delete_selection(cx);
+                    this.update_title_if_needed(window, cx);
+                }
             } else {
-                // Navigation mode: backspace clears selected cells (like Delete key)
                 this.delete_selection(cx);
                 this.update_title_if_needed(window, cx);
             }

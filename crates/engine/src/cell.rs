@@ -916,6 +916,123 @@ pub fn parse_date(input: &str) -> Option<f64> {
     None
 }
 
+/// Parse a string that looks like a formatted number with commas, optional currency
+/// symbol, optional negative sign or parenthesized negative.
+///
+/// Accepts: `1,234` · `5,369.89` · `$1,234.56` · `-17,616.16` · `(500)` · `($1,234.56)`
+/// Rejects: `ACME, Inc.` · `1,23` (bad grouping) · letters · European format
+pub fn try_parse_number(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    let mut chars = s.as_bytes();
+    let mut negative = false;
+
+    // Detect parenthesized negative: (...)
+    let parens = chars.first() == Some(&b'(') && chars.last() == Some(&b')');
+    if parens {
+        chars = &chars[1..chars.len() - 1];
+        if chars.is_empty() {
+            return None;
+        }
+        negative = true;
+    }
+
+    // Strip leading '$'
+    if chars.first() == Some(&b'$') {
+        chars = &chars[1..];
+        if chars.is_empty() {
+            return None;
+        }
+    }
+
+    // Detect leading '-'
+    if chars.first() == Some(&b'-') {
+        if negative {
+            return None; // both parens and minus
+        }
+        negative = true;
+        chars = &chars[1..];
+        if chars.is_empty() {
+            return None;
+        }
+    }
+
+    // Strip '$' after '-' (handle -$1,234)
+    if chars.first() == Some(&b'$') {
+        chars = &chars[1..];
+        if chars.is_empty() {
+            return None;
+        }
+    }
+
+    // Split on '.' — 0 or 1 dots allowed
+    let s = std::str::from_utf8(chars).ok()?;
+    let mut dot_parts = s.splitn(3, '.');
+    let int_part = dot_parts.next()?;
+    let frac_part = dot_parts.next(); // None or Some
+    if dot_parts.next().is_some() {
+        return None; // more than one dot
+    }
+
+    // Validate integer part
+    if int_part.is_empty() {
+        return None;
+    }
+    let has_commas = int_part.contains(',');
+    if has_commas {
+        let groups: Vec<&str> = int_part.split(',').collect();
+        // First group: 1–3 digits
+        let first = groups[0];
+        if first.is_empty() || first.len() > 3 {
+            return None;
+        }
+        if !first.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        // Subsequent groups: exactly 3 digits each
+        for group in &groups[1..] {
+            if group.len() != 3 {
+                return None;
+            }
+            if !group.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+        }
+    } else {
+        if !int_part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+    }
+
+    // Validate fractional part
+    if let Some(frac) = frac_part {
+        if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+    }
+
+    // Build clean number string and parse
+    let mut clean = String::with_capacity(s.len());
+    for &b in int_part.as_bytes() {
+        if b != b',' {
+            clean.push(b as char);
+        }
+    }
+    if let Some(frac) = frac_part {
+        clean.push('.');
+        clean.push_str(frac);
+    }
+
+    let mut n: f64 = clean.parse().ok()?;
+    if negative {
+        n = -n;
+    }
+    Some(n)
+}
+
 impl CellValue {
     pub fn from_input(input: &str) -> Self {
         let trimmed = input.trim();
@@ -940,6 +1057,11 @@ impl CellValue {
             if let Ok(n) = pct_clean.parse::<f64>() {
                 return CellValue::Number(n / 100.0);
             }
+        }
+
+        // Formatted numbers with commas/currency: "5,369.89", "$1,234.56", "(500)"
+        if let Some(n) = try_parse_number(trimmed) {
+            return CellValue::Number(n);
         }
 
         if let Ok(num) = trimmed.parse::<f64>() {
@@ -1840,5 +1962,49 @@ mod tests {
             CellValue::Text(s) => assert_eq!(s, "abc%"),
             other => panic!("expected Text, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_try_parse_number() {
+        // Basic thousands
+        assert_eq!(try_parse_number("1,234"), Some(1234.0));
+        assert_eq!(try_parse_number("1,000"), Some(1000.0));
+        assert_eq!(try_parse_number("5,369.89"), Some(5369.89));
+        assert_eq!(try_parse_number("1,234,567.89"), Some(1234567.89));
+
+        // Currency
+        assert_eq!(try_parse_number("$1,234.56"), Some(1234.56));
+        assert_eq!(try_parse_number("($1,234.56)"), Some(-1234.56));
+
+        // Negative
+        assert_eq!(try_parse_number("-17,616.16"), Some(-17616.16));
+        assert_eq!(try_parse_number("(500)"), Some(-500.0));
+
+        // Plain numbers still work
+        assert_eq!(try_parse_number("0"), Some(0.0));
+        assert_eq!(try_parse_number("42"), Some(42.0));
+        assert_eq!(try_parse_number("3.14"), Some(3.14));
+
+        // Rejects
+        assert_eq!(try_parse_number("ACME, Inc."), None);
+        assert_eq!(try_parse_number("1,23"), None);       // Bad grouping
+        assert_eq!(try_parse_number("1,00"), None);        // Bad grouping
+        assert_eq!(try_parse_number("1,234.5.6"), None);   // Multiple decimals
+        assert_eq!(try_parse_number(""), None);
+        assert_eq!(try_parse_number("$"), None);
+        assert_eq!(try_parse_number("()"), None);
+    }
+
+    #[test]
+    fn test_from_input_thousands() {
+        match CellValue::from_input("5,369.89") {
+            CellValue::Number(n) => assert!((n - 5369.89).abs() < 1e-10),
+            other => panic!("expected Number(5369.89), got {:?}", other),
+        }
+        match CellValue::from_input("$1,234.56") {
+            CellValue::Number(n) => assert!((n - 1234.56).abs() < 1e-10),
+            other => panic!("expected Number(1234.56), got {:?}", other),
+        }
+        assert!(matches!(CellValue::from_input("ACME, Inc."), CellValue::Text(_)));
     }
 }
