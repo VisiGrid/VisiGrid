@@ -10,6 +10,16 @@ AUR_DIR="$HOME/Code/visigrid-bin"
 GITHUB_REPO="VisiGrid/VisiGrid"
 HOMEBREW_REPO="VisiGrid/homebrew-visigrid"
 
+# --- Platform detection ---
+
+IS_MACOS=false
+IS_LINUX=false
+case "$(uname -s)" in
+    Darwin) IS_MACOS=true ;;
+    Linux)  IS_LINUX=true ;;
+    *)      echo "Warning: unknown platform $(uname -s), assuming Linux-like." ; IS_LINUX=true ;;
+esac
+
 # --- Helpers ---
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -27,6 +37,26 @@ run() {
     fi
 }
 
+# Portable SHA-256: prefer sha256sum, fall back to shasum -a 256 (macOS)
+sha256() {
+    if command -v sha256sum &>/dev/null; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum &>/dev/null; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        die "No sha256sum or shasum found."
+    fi
+}
+
+# Portable sed -i: macOS sed requires '' after -i, GNU sed does not.
+sed_i() {
+    if $IS_MACOS; then
+        sed -i '' "$@"
+    else
+        sed -i "$@"
+    fi
+}
+
 # --- Phase 1: Pre-flight checks ---
 
 bold "=== Phase 1: Pre-flight checks ==="
@@ -35,10 +65,17 @@ bold "=== Phase 1: Pre-flight checks ==="
 [[ -z "$VERSION" ]] && die "Usage: $0 <version> [--dry-run]"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Version must be semver (e.g. 0.6.6), got: $VERSION"
 
-# Required tools
-for cmd in gh cargo git sed sha256sum makepkg; do
+# Required tools (all platforms)
+for cmd in gh cargo git sed curl jq; do
     command -v "$cmd" &>/dev/null || die "Required tool not found: $cmd"
 done
+
+# Linux-only tools (AUR)
+if $IS_LINUX; then
+    for cmd in makepkg; do
+        command -v "$cmd" &>/dev/null || die "Required tool not found: $cmd (needed for AUR on Linux)"
+    done
+fi
 
 cd "$REPO_ROOT"
 
@@ -46,9 +83,9 @@ cd "$REPO_ROOT"
 BRANCH="$(git branch --show-current)"
 [[ "$BRANCH" == "main" ]] || die "Must be on main branch (currently on: $BRANCH)"
 
-# Clean working tree
-git diff --exit-code --quiet || die "Unstaged changes exist. Commit or stash them first."
-git diff --cached --exit-code --quiet || die "Staged uncommitted changes exist. Commit or stash them first."
+# Clean working tree (ignore submodule changes with --ignore-submodules)
+git diff --exit-code --quiet --ignore-submodules || die "Unstaged changes exist. Commit or stash them first."
+git diff --cached --exit-code --quiet --ignore-submodules || die "Staged uncommitted changes exist. Commit or stash them first."
 
 # Check for untracked .rs files (catches forgotten module files)
 UNTRACKED_RS="$(git ls-files --others --exclude-standard -- '*.rs')"
@@ -84,7 +121,7 @@ if [[ "$CURRENT_VERSION" == "$VERSION" ]]; then
     yellow "Cargo.toml already at version $VERSION, skipping bump."
 else
     bold "Bumping version: $CURRENT_VERSION -> $VERSION"
-    run sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$VERSION\"/" "$REPO_ROOT/Cargo.toml"
+    run sed_i "s/^version = \"$CURRENT_VERSION\"/version = \"$VERSION\"/" "$REPO_ROOT/Cargo.toml"
     bold "Updating Cargo.lock..."
     run cargo generate-lockfile
     run git add Cargo.toml Cargo.lock
@@ -157,60 +194,62 @@ run gh release edit "v$VERSION" --draft=false
 
 green "Release v$VERSION published. Homebrew and Winget workflows triggered."
 
-# --- Phase 5: Update AUR ---
+# --- Phase 5: Update AUR (Linux only) ---
 
-bold "=== Phase 5: Update AUR ==="
+if $IS_LINUX; then
+    bold "=== Phase 5: Update AUR ==="
 
-if [[ ! -d "$AUR_DIR" ]]; then
-    die "AUR directory not found: $AUR_DIR"
-fi
+    if [[ ! -d "$AUR_DIR" ]]; then
+        die "AUR directory not found: $AUR_DIR"
+    fi
 
-if $DRY_RUN; then
-    yellow "[dry-run] Would download tarball, compute SHA, update PKGBUILD, push to AUR."
+    if $DRY_RUN; then
+        yellow "[dry-run] Would download tarball, compute SHA, update PKGBUILD, push to AUR."
+    else
+        bold "Downloading Linux tarball for SHA256..."
+        TARBALL_URL="https://github.com/$GITHUB_REPO/releases/download/v$VERSION/VisiGrid-linux-x86_64.tar.gz"
+
+        # Wait a moment for the release assets to be available
+        sleep 5
+
+        TMPFILE="$(mktemp)"
+        trap "rm -f '$TMPFILE'" EXIT
+
+        # Retry download a few times (assets may take a moment to propagate)
+        for attempt in 1 2 3 4 5; do
+            if curl -sL -o "$TMPFILE" -w '%{http_code}' "$TARBALL_URL" | grep -q '^200$'; then
+                break
+            fi
+            if (( attempt == 5 )); then
+                die "Failed to download tarball after 5 attempts: $TARBALL_URL"
+            fi
+            echo "Download attempt $attempt failed, retrying in 10s..."
+            sleep 10
+        done
+
+        SHA256="$(sha256 "$TMPFILE")"
+        bold "SHA256: $SHA256"
+
+        cd "$AUR_DIR"
+
+        sed_i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
+        sed_i "s/^sha256sums=.*/sha256sums=('$SHA256')/" PKGBUILD
+
+        bold "Generating .SRCINFO..."
+        makepkg --printsrcinfo > .SRCINFO
+
+        git add PKGBUILD .SRCINFO
+        git commit -m "Bump to v$VERSION"
+        git push
+
+        cd "$REPO_ROOT"
+    fi
+
+    green "AUR updated."
 else
-    bold "Downloading Linux tarball for SHA256..."
-    TARBALL_URL="https://github.com/$GITHUB_REPO/releases/download/v$VERSION/VisiGrid-linux-x86_64.tar.gz"
-
-    # Wait a moment for the release assets to be available
-    sleep 5
-
-    TMPFILE="$(mktemp)"
-    trap "rm -f '$TMPFILE'" EXIT
-
-    # Retry download a few times (assets may take a moment to propagate)
-    for attempt in 1 2 3 4 5; do
-        if curl -sL -o "$TMPFILE" -w '%{http_code}' "$TARBALL_URL" | grep -q '^200$'; then
-            break
-        fi
-        if (( attempt == 5 )); then
-            die "Failed to download tarball after 5 attempts: $TARBALL_URL"
-        fi
-        echo "Download attempt $attempt failed, retrying in 10s..."
-        sleep 10
-    done
-
-    SHA256="$(sha256sum "$TMPFILE" | awk '{print $1}')"
-    bold "SHA256: $SHA256"
-
-    cd "$AUR_DIR"
-
-    OLD_SHA="$(grep "^sha256sums=" PKGBUILD | sed "s/sha256sums=('\\(.*\\)')/\\1/")"
-    OLD_VER="$(grep "^pkgver=" PKGBUILD | sed 's/pkgver=//')"
-
-    sed -i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
-    sed -i "s/^sha256sums=.*/sha256sums=('$SHA256')/" PKGBUILD
-
-    bold "Generating .SRCINFO..."
-    makepkg --printsrcinfo > .SRCINFO
-
-    git add PKGBUILD .SRCINFO
-    git commit -m "Bump to v$VERSION"
-    git push
-
-    cd "$REPO_ROOT"
+    bold "=== Phase 5: Update AUR (skipped — not on Linux) ==="
+    yellow "Run this script on Linux to update AUR, or update manually."
 fi
-
-green "AUR updated."
 
 # --- Phase 6: Verify ---
 
@@ -224,9 +263,11 @@ else
     BREW_STATUS="$(gh run list --repo "$HOMEBREW_REPO" --limit=1 --json status,conclusion --jq '.[0].conclusion' 2>/dev/null || echo "unknown")"
     echo "Homebrew workflow conclusion: $BREW_STATUS"
 
-    bold "Checking AUR..."
-    AUR_VER="$(curl -s "https://aur.archlinux.org/rpc/v5/info?arg[]=visigrid-bin" | jq -r '.results[0].Version' 2>/dev/null || echo "unknown")"
-    echo "AUR version: $AUR_VER"
+    if $IS_LINUX; then
+        bold "Checking AUR..."
+        AUR_VER="$(curl -s "https://aur.archlinux.org/rpc/v5/info?arg[]=visigrid-bin" | jq -r '.results[0].Version' 2>/dev/null || echo "unknown")"
+        echo "AUR version: $AUR_VER"
+    fi
 fi
 
 echo ""
@@ -234,5 +275,8 @@ bold "=== Release Summary ==="
 green "Version:     $VERSION"
 green "Tag:         v$VERSION"
 green "Release:     https://github.com/$GITHUB_REPO/releases/tag/v$VERSION"
+if $IS_MACOS; then
+    yellow "AUR:         skipped (run on Linux to update)"
+fi
 echo ""
 bold "Done!"
