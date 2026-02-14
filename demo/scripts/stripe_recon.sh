@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# stripe_recon.sh — Fetch from Stripe, compile into a deterministic sheet,
-#                    publish a signed proof. If the invariant breaks, CI fails.
+# stripe_recon.sh — Fetch Stripe → fill recon template → publish signed proof
 #
 # Usage:
-#   ./demo/scripts/stripe_recon.sh \
-#     --from 2026-02-01 --to 2026-02-02 \
-#     --repo ORG/REPO --dataset ledger-recon
+#   ./demo/scripts/stripe_recon.sh --repo ORG/REPO
+#   ./demo/scripts/stripe_recon.sh --repo ORG/REPO --from 2026-01-01 --to 2026-02-01
+#   ./demo/scripts/stripe_recon.sh --repo ORG/REPO --mode break
 #
 # Prerequisites:
 #   - vgrid on PATH
@@ -18,15 +17,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEMO_DIR="$(dirname "$SCRIPT_DIR")"
 TEMPLATE="$DEMO_DIR/templates/recon-template.sheet"
 
-# ── Parse flags ──────────────────────────────────────────────────────
-
-FROM=""
-TO=""
+# ── Defaults ───────────────────────────────────────────────────────
+FROM="$(date -d '45 days ago' +%Y-%m-%d)"
+TO="$(date +%Y-%m-%d)"
 REPO=""
 DATASET="ledger-recon"
 API_KEY=""
 TOLERANCE="0"
+MODE="baseline"
 
+# ── Parse flags ────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --from)      FROM="$2";      shift 2 ;;
@@ -35,29 +35,45 @@ while [[ $# -gt 0 ]]; do
         --dataset)   DATASET="$2";   shift 2 ;;
         --api-key)   API_KEY="$2";   shift 2 ;;
         --tolerance) TOLERANCE="$2"; shift 2 ;;
+        --mode)      MODE="$2";      shift 2 ;;
         *) echo "error: unknown flag $1" >&2; exit 2 ;;
     esac
 done
 
-[[ -z "$FROM" ]] && { echo "error: --from required" >&2; exit 2; }
-[[ -z "$TO" ]]   && { echo "error: --to required" >&2; exit 2; }
 [[ -z "$REPO" ]] && { echo "error: --repo required" >&2; exit 2; }
+
+case "$MODE" in
+    baseline|assert-zero|break) ;;
+    *) echo "error: --mode must be baseline, assert-zero, or break" >&2; exit 2 ;;
+esac
 
 STRIPE_CSV=$(mktemp --suffix=.csv)
 RECON_SHEET=$(mktemp --suffix=.sheet)
 trap 'rm -f "$STRIPE_CSV" "$RECON_SHEET"' EXIT
 
-# ── Step 1: Fetch ────────────────────────────────────────────────────
+echo "=== Stripe Reconciliation ($MODE) ==="
+echo "Window:  $FROM to $TO"
+echo "Repo:    $REPO"
+echo "Dataset: $DATASET"
+echo ""
 
-echo "--- Fetch Stripe transactions ($FROM to $TO) ---"
-FETCH_ARGS=(fetch stripe --from "$FROM" --to "$TO" --out "$STRIPE_CSV")
-[[ -n "$API_KEY" ]] && FETCH_ARGS+=(--api-key "$API_KEY")
-vgrid "${FETCH_ARGS[@]}"
+# ── Step 1: Fetch ──────────────────────────────────────────────────
 
-ROW_COUNT=$(tail -n +2 "$STRIPE_CSV" | wc -l)
+if [[ "$MODE" == "break" ]]; then
+    echo "--- Using fixture data (intentional invariant violation) ---"
+    cp "$DEMO_DIR/data/ledger-bad-undistributed.csv" "$STRIPE_CSV"
+else
+    echo "--- Fetch Stripe transactions ---"
+    FETCH_ARGS=(fetch stripe --from "$FROM" --to "$TO" --out "$STRIPE_CSV")
+    [[ -n "$API_KEY" ]] && FETCH_ARGS+=(--api-key "$API_KEY")
+    vgrid "${FETCH_ARGS[@]}"
+fi
+
+ROW_COUNT=$(tail -n +2 "$STRIPE_CSV" | grep -c . || true)
 echo "  $ROW_COUNT transactions"
+echo ""
 
-# ── Step 2: Fill template ────────────────────────────────────────────
+# ── Step 2: Fill template ──────────────────────────────────────────
 
 echo "--- Fill recon template ---"
 vgrid fill "$TEMPLATE" \
@@ -66,17 +82,48 @@ vgrid fill "$TEMPLATE" \
     --out "$RECON_SHEET" --json
 echo ""
 
-# ── Step 3: Publish with invariant assertion ─────────────────────────
+# ── Read B7 ────────────────────────────────────────────────────────
 
-echo "--- Publish with assertion (summary!B7 = 0 ± $TOLERANCE) ---"
-vgrid publish "$RECON_SHEET" \
-    --repo "$REPO" \
-    --dataset "$DATASET" \
-    --source-type stripe \
-    --wait \
-    --assert-cell "summary!B7:0:$TOLERANCE" \
-    --output json
+B7=$(vgrid sheet inspect "$RECON_SHEET" --sheet summary B7 --json \
+    | grep -o '"display":"[^"]*"' | head -1 | sed 's/"display":"//;s/"$//')
+
+echo "Computed undistributed balance: $B7 (minor units)"
 echo ""
 
+# ── Step 3: Publish ────────────────────────────────────────────────
+
+case "$MODE" in
+    baseline)
+        echo "--- Publish (baseline — no assertion) ---"
+        vgrid publish "$RECON_SHEET" \
+            --repo "$REPO" \
+            --dataset "$DATASET" \
+            --source-type stripe \
+            --wait \
+            --output json
+        ;;
+    assert-zero)
+        echo "--- Publish with assertion (summary!B7 = 0 ± $TOLERANCE) ---"
+        vgrid publish "$RECON_SHEET" \
+            --repo "$REPO" \
+            --dataset "$DATASET" \
+            --source-type stripe \
+            --wait \
+            --assert-cell "summary!B7:0:$TOLERANCE" \
+            --output json
+        ;;
+    break)
+        echo "--- Publish with assertion (expecting failure) ---"
+        vgrid publish "$RECON_SHEET" \
+            --repo "$REPO" \
+            --dataset "$DATASET" \
+            --source-type stripe \
+            --wait \
+            --assert-cell "summary!B7:0:0" \
+            --output json || true
+        ;;
+esac
+
+echo ""
 echo "=== Done ==="
 echo "View results: https://visihub.app/$REPO"
