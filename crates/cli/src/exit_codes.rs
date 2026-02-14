@@ -14,6 +14,8 @@
 //! | 10-19   | ai               | AI provider/keychain codes               |
 //! | 20-29   | session          | Session server codes                     |
 //! | 30-39   | replay           | Provenance replay codes                  |
+//! | 40-49   | hub              | VisiHub publish/verify codes              |
+//! | 50-59   | fetch            | External data source connectors           |
 //!
 //! # Adding New Exit Codes
 //!
@@ -122,6 +124,25 @@ pub const EXIT_HUB_VALIDATION: u8 = 43;
 
 /// Timeout waiting for import to complete.
 pub const EXIT_HUB_TIMEOUT: u8 = 44;
+
+// =============================================================================
+// Fetch / adapter (50-59) — external data source connectors
+// =============================================================================
+
+/// No API key provided (neither flag nor env var).
+pub const EXIT_FETCH_NOT_AUTH: u8 = 50;
+
+/// Auth rejected by upstream (401/403).
+pub const EXIT_FETCH_AUTH: u8 = 51;
+
+/// Bad request rejected by upstream (400).
+pub const EXIT_FETCH_VALIDATION: u8 = 52;
+
+/// Rate limited after retries (429).
+pub const EXIT_FETCH_RATE_LIMIT: u8 = 53;
+
+/// Upstream error (5xx) or network failure after retries.
+pub const EXIT_FETCH_UPSTREAM: u8 = 54;
 
 // =============================================================================
 // Session Error Types

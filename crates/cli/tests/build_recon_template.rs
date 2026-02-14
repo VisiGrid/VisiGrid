@@ -1,18 +1,21 @@
-// Build the recon-template.sheet for abuse testing.
+// Build the recon-template.sheet for abuse testing and the demo pipeline.
 // Run with: cargo test -p visigrid-cli --test build_recon_template -- --ignored --nocapture
 //
 // Creates a 2-sheet workbook:
-//   Sheet1 (tx): headers in row 1, data target is Sheet1!A2
-//   summary:     SUMIF formulas, variance check at B7
+//   tx:      headers in row 1, data target is tx!A1 (with --headers, data lands at A2+)
+//   summary: SUMIF formulas, variance check at B7
 
 use visigrid_engine::workbook::Workbook;
+use std::path::Path;
 
-#[test]
-#[ignore] // Run explicitly to build the template
-fn build_recon_template() {
+fn build_template(out_path: &Path) {
     let mut wb = Workbook::new();
 
-    // Sheet1 (index 0) = transaction data sheet
+    // Rename default Sheet1 → tx
+    let renamed = wb.rename_sheet(0, "tx");
+    assert!(renamed, "rename_sheet(0, 'tx') failed");
+
+    // tx (index 0) = transaction data sheet
     wb.set_cell_value_tracked(0, 0, 0, "effective_date"); // A1
     wb.set_cell_value_tracked(0, 0, 1, "posted_date");    // B1
     wb.set_cell_value_tracked(0, 0, 2, "amount_minor");   // C1
@@ -22,9 +25,8 @@ fn build_recon_template() {
     wb.set_cell_value_tracked(0, 0, 6, "source_id");      // G1
     wb.set_cell_value_tracked(0, 0, 7, "group_id");       // H1
     wb.set_cell_value_tracked(0, 0, 8, "description");    // I1
-    wb.set_cell_value_tracked(0, 0, 9, "amount");         // J1
 
-    // Sheet2 (index 1) = summary sheet
+    // summary (index 1) = invariant formulas
     let si = wb.add_sheet_named("summary").expect("add summary sheet");
 
     wb.set_cell_value_tracked(si, 0, 0, "Category");
@@ -38,12 +40,11 @@ fn build_recon_template() {
     wb.set_cell_value_tracked(si, 6, 0, "Variance");
 
     // SUMIF: sum amount_minor (C) where type (E) matches
-    // Use bounded ranges (E2:E1000) — full-column cross-sheet refs may not recompute after reload
-    wb.set_cell_value_tracked(si, 1, 1, "=SUMIF(Sheet1!E2:E1000,\"charge\",Sheet1!C2:C1000)");
-    wb.set_cell_value_tracked(si, 2, 1, "=SUMIF(Sheet1!E2:E1000,\"payout\",Sheet1!C2:C1000)");
-    wb.set_cell_value_tracked(si, 3, 1, "=SUMIF(Sheet1!E2:E1000,\"fee\",Sheet1!C2:C1000)");
-    wb.set_cell_value_tracked(si, 4, 1, "=SUMIF(Sheet1!E2:E1000,\"refund\",Sheet1!C2:C1000)");
-    wb.set_cell_value_tracked(si, 5, 1, "=SUMIF(Sheet1!E2:E1000,\"adjustment\",Sheet1!C2:C1000)");
+    wb.set_cell_value_tracked(si, 1, 1, "=SUMIF(tx!E2:E1000,\"charge\",tx!C2:C1000)");
+    wb.set_cell_value_tracked(si, 2, 1, "=SUMIF(tx!E2:E1000,\"payout\",tx!C2:C1000)");
+    wb.set_cell_value_tracked(si, 3, 1, "=SUMIF(tx!E2:E1000,\"fee\",tx!C2:C1000)");
+    wb.set_cell_value_tracked(si, 4, 1, "=SUMIF(tx!E2:E1000,\"refund\",tx!C2:C1000)");
+    wb.set_cell_value_tracked(si, 5, 1, "=SUMIF(tx!E2:E1000,\"adjustment\",tx!C2:C1000)");
 
     // Variance = sum all categories (should be 0 for balanced books)
     wb.set_cell_value_tracked(si, 6, 1, "=B2+B3+B4+B5+B6");
@@ -63,13 +64,12 @@ fn build_recon_template() {
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
 
-    let out_dir = std::path::Path::new("tests/abuse/templates");
-    std::fs::create_dir_all(out_dir).expect("create output dir");
-    let path = out_dir.join("recon-template.sheet");
-    visigrid_io::native::save_workbook(&wb, &path).expect("save template");
+    let parent = out_path.parent().unwrap();
+    std::fs::create_dir_all(parent).expect("create output dir");
+    visigrid_io::native::save_workbook(&wb, out_path).expect("save template");
 
     let fp = visigrid_io::native::compute_semantic_fingerprint(&wb);
-    eprintln!("Template built: {}", path.display());
+    eprintln!("Template built: {}", out_path.display());
     eprintln!("Fingerprint:    {}", fp);
     eprintln!("Sheets:         {}", wb.sheet_count());
 
@@ -77,4 +77,14 @@ fn build_recon_template() {
     let summary = wb.sheet(si).unwrap();
     let var = summary.get_computed_value(6, 1);
     eprintln!("Variance (B7):  {:?}", var);
+}
+
+#[test]
+#[ignore] // Run explicitly to build the template
+fn build_recon_template() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Build into tests/abuse/templates (used by abuse_tests)
+    build_template(&manifest_dir.join("tests/abuse/templates/recon-template.sheet"));
+    // Build into ../../demo/templates (used by demo scripts — relative to app/crates/cli)
+    build_template(&manifest_dir.join("../../demo/templates/recon-template.sheet"));
 }

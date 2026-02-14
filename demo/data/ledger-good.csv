@@ -1,5 +1,5 @@
-effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,description,amount
-2026-01-15,2026-01-15,100000,USD,charge,stripe,ch_001,po_001,Widget sale,1000.00
-2026-01-15,2026-01-15,50000,USD,charge,stripe,ch_002,po_001,Gadget sale,500.00
-2026-01-15,2026-01-15,-4350,USD,fee,stripe,fee_001,po_001,Processing fee,-43.50
-2026-01-15,2026-01-16,-145650,USD,payout,stripe,po_001,po_001,Weekly payout,-1456.50
+effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,description
+2026-01-15,2026-01-15,100000,USD,charge,stripe,ch_001,po_001,Widget sale
+2026-01-15,2026-01-15,50000,USD,charge,stripe,ch_002,po_001,Gadget sale
+2026-01-15,2026-01-15,-4350,USD,fee,stripe,fee_001,po_001,Processing fee
+2026-01-15,2026-01-16,-145650,USD,payout,stripe,po_001,po_001,Weekly payout

@@ -2,6 +2,7 @@
 // See docs/cli-v1.md for specification
 
 mod exit_codes;
+mod fetch;
 mod fill;
 mod hub;
 mod replay;
@@ -661,6 +662,10 @@ Examples:
     /// End-to-end trust pipeline (inspect → import → verify → publish)
     #[command(subcommand)]
     Pipeline(PipelineCommands),
+
+    /// Fetch data from external sources (Stripe, etc.)
+    #[command(subcommand)]
+    Fetch(fetch::FetchCommands),
 
     /// List, preview, and run Lua scripts with capability enforcement
     #[command(subcommand)]
@@ -1736,6 +1741,7 @@ fn main() -> ExitCode {
                 )
             }
         }
+        Some(Commands::Fetch(fetch_cmd)) => fetch::cmd_fetch(fetch_cmd),
         Some(Commands::Scripts(scripts_cmd)) => match scripts_cmd {
             ScriptsCommands::List { file, json } => {
                 scripts::cmd_scripts_list(file, json)

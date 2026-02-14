@@ -31,7 +31,7 @@ FILLED=$(mktemp --suffix=.sheet)
 echo "--- Fill template ---"
 vgrid fill "$TEMPLATE" \
   --csv "$GOOD_CSV" \
-  --target "Sheet1!A2" \
+  --target "tx!A1" \
   --headers --clear \
   --out "$FILLED" --json
 echo ""

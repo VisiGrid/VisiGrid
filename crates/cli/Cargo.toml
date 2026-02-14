@@ -32,6 +32,9 @@ ratatui = "0.29"
 crossterm = "0.28"
 unicode-width = "0.2"
 
+# Fetch adapters (Stripe, etc.)
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
+
 # VisiHub publish
 atty = "0.2"
 
@@ -49,3 +52,4 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
+httpmock = "0.8"
