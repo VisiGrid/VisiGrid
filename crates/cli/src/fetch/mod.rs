@@ -1,5 +1,7 @@
 //! `vgrid fetch` — pull data from external sources into canonical CSV.
 
+mod common;
+mod mercury;
 mod stripe;
 
 use std::path::PathBuf;
@@ -42,6 +44,39 @@ Examples:
         #[arg(long, short = 'q')]
         quiet: bool,
     },
+
+    /// Fetch bank transactions from Mercury
+    #[command(after_help = "\
+Examples:
+  vgrid fetch mercury --from 2026-01-01 --to 2026-01-31
+  vgrid fetch mercury --from 2026-01-01 --to 2026-01-31 --out mercury.csv
+  vgrid fetch mercury --from 2026-01-01 --to 2026-01-31 --api-key secret-token:mercury_...
+  MERCURY_API_KEY=secret-token:mercury_... vgrid fetch mercury --from 2026-01-01 --to 2026-01-31")]
+    Mercury {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// Mercury API token (default: MERCURY_API_KEY env)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Mercury account ID (acc_...)
+        #[arg(long)]
+        account: Option<String>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
 }
 
 pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
@@ -54,5 +89,13 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             account,
             quiet,
         } => stripe::cmd_fetch_stripe(from, to, api_key, out, account, quiet),
+        FetchCommands::Mercury {
+            from,
+            to,
+            api_key,
+            out,
+            account,
+            quiet,
+        } => mercury::cmd_fetch_mercury(from, to, api_key, out, account, quiet),
     }
 }

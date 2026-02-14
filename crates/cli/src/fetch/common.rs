@@ -1,0 +1,387 @@
+//! Shared infrastructure for `vgrid fetch` adapters.
+//!
+//! Each adapter (stripe, mercury, …) reuses:
+//! - `FetchClient` — HTTP client with retry / backoff / error classification
+//! - `CanonicalRow` — the 9-column CSV schema all adapters emit
+//! - `resolve_api_key` — flag > env > error
+//! - `parse_date_range` — parse + validate `--from` / `--to`
+//! - `write_csv` — open output, write header + rows, flush
+
+use std::io::Write;
+use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
+
+use chrono::NaiveDate;
+use serde::Serialize;
+
+use crate::exit_codes;
+use crate::CliError;
+
+// ── Constants ───────────────────────────────────────────────────────
+
+pub(super) const MAX_RETRIES: u32 = 3;
+pub(super) const USER_AGENT: &str = concat!("vgrid/", env!("CARGO_PKG_VERSION"));
+
+// ── Canonical CSV row ───────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(super) struct CanonicalRow {
+    pub effective_date: String,
+    pub posted_date: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub r#type: String,
+    pub source: String,
+    pub source_id: String,
+    pub group_id: String,
+    pub description: String,
+}
+
+// ── FetchClient ─────────────────────────────────────────────────────
+
+/// Shared HTTP client that handles retry, backoff, and error classification.
+///
+/// Adapters own their API key, base URL, and auth method. They pass a
+/// request-building closure to [`request_with_retry`] which handles
+/// the retry loop and maps HTTP status codes to the standard exit codes.
+pub(super) struct FetchClient {
+    pub(super) http: reqwest::blocking::Client,
+    source_name: String,
+    error_extractor: fn(&serde_json::Value, u16) -> String,
+}
+
+impl FetchClient {
+    pub(super) fn new(
+        source_name: &str,
+        error_extractor: fn(&serde_json::Value, u16) -> String,
+    ) -> Self {
+        let http = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent(USER_AGENT)
+            .build()
+            .expect("failed to build HTTP client");
+
+        Self {
+            http,
+            source_name: source_name.to_string(),
+            error_extractor,
+        }
+    }
+
+    /// Make a GET request with retry + exponential backoff.
+    ///
+    /// `build_request` is called once per attempt. It receives the
+    /// underlying `reqwest::blocking::Client` and must return a fully
+    /// configured `RequestBuilder` (URL, auth, headers, query params).
+    pub(super) fn request_with_retry(
+        &self,
+        build_request: impl Fn(&reqwest::blocking::Client) -> reqwest::blocking::RequestBuilder,
+    ) -> Result<serde_json::Value, CliError> {
+        let mut backoff_secs = 1u64;
+
+        for attempt in 0..=MAX_RETRIES {
+            let req = build_request(&self.http);
+            let result = req.send();
+
+            match result {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+
+                    // Auth errors: fail immediately
+                    if status == 401 || status == 403 {
+                        let body: serde_json::Value =
+                            resp.json().unwrap_or(serde_json::Value::Null);
+                        let msg = (self.error_extractor)(&body, status);
+                        return Err(CliError {
+                            code: exit_codes::EXIT_FETCH_AUTH,
+                            message: format!(
+                                "{} auth failed ({}): {}",
+                                self.source_name, status, msg,
+                            ),
+                            hint: None,
+                        });
+                    }
+
+                    // Bad request: fail immediately
+                    if status == 400 {
+                        let body: serde_json::Value =
+                            resp.json().unwrap_or(serde_json::Value::Null);
+                        let msg = (self.error_extractor)(&body, status);
+                        return Err(CliError {
+                            code: exit_codes::EXIT_FETCH_VALIDATION,
+                            message: format!(
+                                "{} request rejected ({}): {}",
+                                self.source_name, status, msg,
+                            ),
+                            hint: None,
+                        });
+                    }
+
+                    // Other 4xx (not 429): fail immediately
+                    if status >= 400 && status < 500 && status != 429 {
+                        let body: serde_json::Value =
+                            resp.json().unwrap_or(serde_json::Value::Null);
+                        let msg = (self.error_extractor)(&body, status);
+                        return Err(CliError {
+                            code: exit_codes::EXIT_FETCH_UPSTREAM,
+                            message: format!(
+                                "{} error ({}): {}",
+                                self.source_name, status, msg,
+                            ),
+                            hint: None,
+                        });
+                    }
+
+                    // Retryable: 429, 5xx
+                    if status == 429 || status >= 500 {
+                        if attempt == MAX_RETRIES {
+                            let exit_code = if status == 429 {
+                                exit_codes::EXIT_FETCH_RATE_LIMIT
+                            } else {
+                                exit_codes::EXIT_FETCH_UPSTREAM
+                            };
+                            return Err(CliError {
+                                code: exit_code,
+                                message: format!(
+                                    "{} {} after {} attempts ({})",
+                                    self.source_name,
+                                    if status == 429 {
+                                        "rate limited"
+                                    } else {
+                                        "upstream error"
+                                    },
+                                    MAX_RETRIES,
+                                    status,
+                                ),
+                                hint: None,
+                            });
+                        }
+
+                        // Respect Retry-After header for 429
+                        let wait = if status == 429 {
+                            resp.headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .unwrap_or(backoff_secs)
+                        } else {
+                            backoff_secs
+                        };
+
+                        eprintln!(
+                            "warning: retry {}/{} in {}s (HTTP {})",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            wait,
+                            status,
+                        );
+                        thread::sleep(Duration::from_secs(wait));
+                        backoff_secs *= 2;
+                        continue;
+                    }
+
+                    // Success: parse JSON
+                    let body: serde_json::Value = resp.json().map_err(|e| CliError {
+                        code: exit_codes::EXIT_FETCH_UPSTREAM,
+                        message: format!(
+                            "failed to parse {} JSON response: {}",
+                            self.source_name, e,
+                        ),
+                        hint: None,
+                    })?;
+
+                    return Ok(body);
+                }
+                Err(e) => {
+                    // Network/timeout errors: retry
+                    if attempt == MAX_RETRIES {
+                        return Err(CliError {
+                            code: exit_codes::EXIT_FETCH_UPSTREAM,
+                            message: format!(
+                                "{} upstream error after {} attempts: {}",
+                                self.source_name, MAX_RETRIES, e,
+                            ),
+                            hint: None,
+                        });
+                    }
+
+                    eprintln!(
+                        "warning: retry {}/{} in {}s ({})",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        backoff_secs,
+                        e,
+                    );
+                    thread::sleep(Duration::from_secs(backoff_secs));
+                    backoff_secs *= 2;
+                }
+            }
+        }
+
+        unreachable!()
+    }
+}
+
+// ── Shared helpers ──────────────────────────────────────────────────
+
+/// Resolve an API key: flag value > environment variable > error.
+pub(super) fn resolve_api_key(
+    flag: Option<String>,
+    source_name: &str,
+    env_var: &str,
+) -> Result<String, CliError> {
+    if let Some(key) = flag {
+        let trimmed = key.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(CliError {
+                code: exit_codes::EXIT_FETCH_NOT_AUTH,
+                message: format!(
+                    "missing {} API key (use --api-key or set {})",
+                    source_name, env_var,
+                ),
+                hint: None,
+            });
+        }
+        return Ok(trimmed);
+    }
+
+    if let Ok(key) = std::env::var(env_var) {
+        let trimmed = key.trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+
+    Err(CliError {
+        code: exit_codes::EXIT_FETCH_NOT_AUTH,
+        message: format!(
+            "missing {} API key (use --api-key or set {})",
+            source_name, env_var,
+        ),
+        hint: None,
+    })
+}
+
+/// Parse and validate `--from` / `--to` date strings.
+pub(super) fn parse_date_range(
+    from: &str,
+    to: &str,
+) -> Result<(NaiveDate, NaiveDate), CliError> {
+    let from_date = NaiveDate::parse_from_str(from, "%Y-%m-%d").map_err(|e| {
+        CliError::args(format!("invalid --from date {:?}: {}", from, e))
+    })?;
+    let to_date = NaiveDate::parse_from_str(to, "%Y-%m-%d").map_err(|e| {
+        CliError::args(format!("invalid --to date {:?}: {}", to, e))
+    })?;
+
+    if from_date >= to_date {
+        return Err(CliError::args(format!(
+            "--from ({}) must be before --to ({})",
+            from_date, to_date,
+        )));
+    }
+
+    Ok((from_date, to_date))
+}
+
+/// Write canonical rows to CSV (file or stdout). Returns the output label
+/// for use in progress messages.
+pub(super) fn write_csv(
+    rows: &[CanonicalRow],
+    out: &Option<PathBuf>,
+) -> Result<String, CliError> {
+    let out_label = out
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "stdout".to_string());
+
+    let writer: Box<dyn Write> = match out {
+        Some(path) => {
+            let f = std::fs::File::create(path).map_err(|e| {
+                CliError::io(format!("cannot create {}: {}", path.display(), e))
+            })?;
+            Box::new(std::io::BufWriter::new(f))
+        }
+        None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
+    };
+
+    let mut csv_writer = csv::WriterBuilder::new()
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(writer);
+
+    // Always write header, even with zero rows
+    if rows.is_empty() {
+        csv_writer
+            .write_record([
+                "effective_date",
+                "posted_date",
+                "amount_minor",
+                "currency",
+                "type",
+                "source",
+                "source_id",
+                "group_id",
+                "description",
+            ])
+            .map_err(|e| CliError::io(format!("CSV write error: {}", e)))?;
+    }
+
+    for row in rows {
+        csv_writer
+            .serialize(row)
+            .map_err(|e| CliError::io(format!("CSV write error: {}", e)))?;
+    }
+
+    csv_writer
+        .flush()
+        .map_err(|e| CliError::io(format!("CSV flush error: {}", e)))?;
+
+    Ok(out_label)
+}
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_api_key_flag_priority() {
+        let key = resolve_api_key(Some("  token_123  ".into()), "Test", "TEST_KEY").unwrap();
+        assert_eq!(key, "token_123");
+    }
+
+    #[test]
+    fn test_resolve_api_key_empty_flag() {
+        let err = resolve_api_key(Some("  ".into()), "Test", "TEST_KEY").unwrap_err();
+        assert_eq!(err.code, exit_codes::EXIT_FETCH_NOT_AUTH);
+        assert!(err.message.contains("missing Test API key"));
+    }
+
+    #[test]
+    fn test_resolve_api_key_missing() {
+        std::env::remove_var("__VGRID_TEST_KEY_MISSING");
+        let err = resolve_api_key(None, "Test", "__VGRID_TEST_KEY_MISSING").unwrap_err();
+        assert_eq!(err.code, exit_codes::EXIT_FETCH_NOT_AUTH);
+    }
+
+    #[test]
+    fn test_parse_date_range_valid() {
+        let (from, to) = parse_date_range("2026-01-01", "2026-01-31").unwrap();
+        assert_eq!(from.to_string(), "2026-01-01");
+        assert_eq!(to.to_string(), "2026-01-31");
+    }
+
+    #[test]
+    fn test_parse_date_range_invalid_order() {
+        let err = parse_date_range("2026-01-31", "2026-01-01").unwrap_err();
+        assert!(err.message.contains("--from"));
+    }
+
+    #[test]
+    fn test_parse_date_range_bad_format() {
+        let err = parse_date_range("not-a-date", "2026-01-31").unwrap_err();
+        assert!(err.message.contains("invalid --from date"));
+    }
+}

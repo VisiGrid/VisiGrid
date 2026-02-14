@@ -1,37 +1,20 @@
 //! `vgrid fetch stripe` — fetch Stripe balance transactions into canonical CSV.
 
-use std::io::Write;
 use std::path::PathBuf;
-use std::thread;
-use std::time::Duration;
 
 use chrono::NaiveDate;
-use serde::Serialize;
 
 use crate::exit_codes;
 use crate::CliError;
+
+use super::common::{self, CanonicalRow, FetchClient};
 
 // ── Constants ───────────────────────────────────────────────────────
 
 const STRIPE_API_BASE: &str = "https://api.stripe.com";
 const PAGE_LIMIT: u32 = 100;
-const MAX_RETRIES: u32 = 3;
-const USER_AGENT: &str = concat!("vgrid/", env!("CARGO_PKG_VERSION"));
 
-// ── Canonical CSV row ───────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-struct CanonicalRow {
-    effective_date: String,
-    posted_date: String,
-    amount_minor: i64,
-    currency: String,
-    r#type: String,
-    source: String,
-    source_id: String,
-    group_id: String,
-    description: String,
-}
+// ── Internal transaction representation ─────────────────────────────
 
 /// Internal representation with epoch for sorting.
 #[derive(Debug)]
@@ -76,7 +59,7 @@ fn date_to_epoch(date: &NaiveDate) -> i64 {
 // ── Stripe client ───────────────────────────────────────────────────
 
 pub struct StripeClient {
-    http: reqwest::blocking::Client,
+    client: FetchClient,
     api_key: String,
     account: Option<String>,
     base_url: String,
@@ -88,13 +71,12 @@ impl StripeClient {
     }
 
     pub fn with_base_url(api_key: String, account: Option<String>, base_url: String) -> Self {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .user_agent(USER_AGENT)
-            .build()
-            .expect("failed to build HTTP client");
-
-        Self { http, api_key, account, base_url }
+        Self {
+            client: FetchClient::new("Stripe", extract_stripe_error),
+            api_key,
+            account,
+            base_url,
+        }
     }
 
     /// Fetch all balance transactions in the given epoch range.
@@ -121,7 +103,20 @@ impl StripeClient {
                 params.push(("starting_after".to_string(), after.clone()));
             }
 
-            let body = self.request_with_retry(&params)?;
+            let url = format!("{}/v1/balance_transactions", self.base_url);
+            let api_key = self.api_key.clone();
+            let account = self.account.clone();
+
+            let body = self.client.request_with_retry(|http| {
+                let mut req = http
+                    .get(&url)
+                    .basic_auth(&api_key, Some(""))
+                    .query(&params);
+                if let Some(ref acct) = account {
+                    req = req.header("Stripe-Account", acct);
+                }
+                req
+            })?;
 
             let data = body["data"]
                 .as_array()
@@ -137,7 +132,8 @@ impl StripeClient {
             if has_more && data.is_empty() {
                 return Err(CliError {
                     code: exit_codes::EXIT_FETCH_UPSTREAM,
-                    message: "Stripe returned has_more=true with empty data (malformed response)".into(),
+                    message: "Stripe returned has_more=true with empty data (malformed response)"
+                        .into(),
                     hint: None,
                 });
             }
@@ -182,148 +178,6 @@ impl StripeClient {
 
         Ok(all_txns)
     }
-
-    /// Make a single API request with retry + exponential backoff.
-    fn request_with_retry(
-        &self,
-        params: &[(String, String)],
-    ) -> Result<serde_json::Value, CliError> {
-        let url = format!("{}/v1/balance_transactions", self.base_url);
-        let mut backoff_secs = 1u64;
-
-        for attempt in 0..=MAX_RETRIES {
-            let mut req = self
-                .http
-                .get(&url)
-                .basic_auth(&self.api_key, Some(""))
-                .query(params);
-
-            if let Some(ref acct) = self.account {
-                req = req.header("Stripe-Account", acct);
-            }
-
-            let result = req.send();
-
-            match result {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-
-                    // Auth errors: fail immediately
-                    if status == 401 || status == 403 {
-                        let body: serde_json::Value =
-                            resp.json().unwrap_or(serde_json::Value::Null);
-                        let msg = extract_stripe_error(&body, status);
-                        return Err(CliError {
-                            code: exit_codes::EXIT_FETCH_AUTH,
-                            message: format!("Stripe auth failed ({}): {}", status, msg),
-                            hint: None,
-                        });
-                    }
-
-                    // Bad request: fail immediately
-                    if status == 400 {
-                        let body: serde_json::Value =
-                            resp.json().unwrap_or(serde_json::Value::Null);
-                        let msg = extract_stripe_error(&body, status);
-                        return Err(CliError {
-                            code: exit_codes::EXIT_FETCH_VALIDATION,
-                            message: format!("Stripe request rejected ({}): {}", status, msg),
-                            hint: None,
-                        });
-                    }
-
-                    // Other 4xx (not 429): fail immediately
-                    if status >= 400 && status < 500 && status != 429 {
-                        let body: serde_json::Value =
-                            resp.json().unwrap_or(serde_json::Value::Null);
-                        let msg = extract_stripe_error(&body, status);
-                        return Err(CliError {
-                            code: exit_codes::EXIT_FETCH_UPSTREAM,
-                            message: format!("Stripe error ({}): {}", status, msg),
-                            hint: None,
-                        });
-                    }
-
-                    // Retryable: 429, 5xx
-                    if status == 429 || status >= 500 {
-                        if attempt == MAX_RETRIES {
-                            let exit_code = if status == 429 {
-                                exit_codes::EXIT_FETCH_RATE_LIMIT
-                            } else {
-                                exit_codes::EXIT_FETCH_UPSTREAM
-                            };
-                            return Err(CliError {
-                                code: exit_code,
-                                message: format!(
-                                    "Stripe {} after {} attempts ({})",
-                                    if status == 429 { "rate limited" } else { "upstream error" },
-                                    MAX_RETRIES,
-                                    status,
-                                ),
-                                hint: None,
-                            });
-                        }
-
-                        // Respect Retry-After header for 429
-                        let wait = if status == 429 {
-                            resp.headers()
-                                .get("retry-after")
-                                .and_then(|v| v.to_str().ok())
-                                .and_then(|v| v.parse::<u64>().ok())
-                                .unwrap_or(backoff_secs)
-                        } else {
-                            backoff_secs
-                        };
-
-                        eprintln!(
-                            "warning: retry {}/{} in {}s (HTTP {})",
-                            attempt + 1,
-                            MAX_RETRIES,
-                            wait,
-                            status,
-                        );
-                        thread::sleep(Duration::from_secs(wait));
-                        backoff_secs *= 2;
-                        continue;
-                    }
-
-                    // Success: parse JSON
-                    let body: serde_json::Value = resp.json().map_err(|e| CliError {
-                        code: exit_codes::EXIT_FETCH_UPSTREAM,
-                        message: format!("failed to parse Stripe JSON response: {}", e),
-                        hint: None,
-                    })?;
-
-                    return Ok(body);
-                }
-                Err(e) => {
-                    // Network/timeout errors: retry
-                    if attempt == MAX_RETRIES {
-                        return Err(CliError {
-                            code: exit_codes::EXIT_FETCH_UPSTREAM,
-                            message: format!(
-                                "Stripe upstream error after {} attempts: {}",
-                                MAX_RETRIES, e,
-                            ),
-                            hint: None,
-                        });
-                    }
-
-                    eprintln!(
-                        "warning: retry {}/{} in {}s ({})",
-                        attempt + 1,
-                        MAX_RETRIES,
-                        backoff_secs,
-                        e,
-                    );
-                    thread::sleep(Duration::from_secs(backoff_secs));
-                    backoff_secs *= 2;
-                }
-            }
-        }
-
-        unreachable!()
-    }
 }
 
 // ── Parse a single Stripe transaction ───────────────────────────────
@@ -355,15 +209,9 @@ fn parse_transaction(item: &serde_json::Value) -> Result<RawTransaction, CliErro
     let raw_type = item["type"].as_str().unwrap_or("unknown");
     let canonical_type = map_stripe_type(raw_type).to_string();
 
-    let source_id = item["id"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let source_id = item["id"].as_str().unwrap_or("").to_string();
 
-    let raw_description = item["description"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let raw_description = item["description"].as_str().unwrap_or("").to_string();
 
     // Annotate description for unknown types
     let description = if canonical_type == "adjustment" && raw_type != "adjustment" {
@@ -417,26 +265,13 @@ pub fn cmd_fetch_stripe(
     // 1. Resolve API key
     let key = resolve_api_key(api_key)?;
 
-    // 2. Parse dates
-    let from_date = NaiveDate::parse_from_str(&from, "%Y-%m-%d").map_err(|e| {
-        CliError::args(format!("invalid --from date {:?}: {}", from, e))
-    })?;
-    let to_date = NaiveDate::parse_from_str(&to, "%Y-%m-%d").map_err(|e| {
-        CliError::args(format!("invalid --to date {:?}: {}", to, e))
-    })?;
-
-    // 3. Validate range
-    if from_date >= to_date {
-        return Err(CliError::args(format!(
-            "--from ({}) must be before --to ({})",
-            from_date, to_date,
-        )));
-    }
+    // 2. Parse and validate dates
+    let (from_date, to_date) = common::parse_date_range(&from, &to)?;
 
     let from_epoch = date_to_epoch(&from_date);
     let to_epoch = date_to_epoch(&to_date);
 
-    // 4. Fetch
+    // 3. Fetch
     let stderr_tty = atty::is(atty::Stream::Stderr);
     let show_progress = !quiet && stderr_tty;
 
@@ -450,52 +285,17 @@ pub fn cmd_fetch_stripe(
     let client = StripeClient::new(key, account);
     let mut txns = client.fetch_balance_transactions(from_epoch, to_epoch, quiet)?;
 
-    // 5. Sort: (created_epoch ASC, source_id ASC)
+    // 4. Sort: (created_epoch ASC, source_id ASC)
     txns.sort_by(|a, b| {
         a.created_epoch
             .cmp(&b.created_epoch)
             .then_with(|| a.source_id.cmp(&b.source_id))
     });
 
-    // 6. Write CSV
-    let out_label = out
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "stdout".to_string());
-
-    let writer: Box<dyn Write> = match &out {
-        Some(path) => {
-            let f = std::fs::File::create(path).map_err(|e| {
-                CliError::io(format!("cannot create {}: {}", path.display(), e))
-            })?;
-            Box::new(std::io::BufWriter::new(f))
-        }
-        None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
-    };
-
-    let mut csv_writer = csv::WriterBuilder::new()
-        .terminator(csv::Terminator::Any(b'\n'))
-        .from_writer(writer);
-
-    // Always write header, even with zero rows
-    if txns.is_empty() {
-        csv_writer
-            .write_record([
-                "effective_date",
-                "posted_date",
-                "amount_minor",
-                "currency",
-                "type",
-                "source",
-                "source_id",
-                "group_id",
-                "description",
-            ])
-            .map_err(|e| CliError::io(format!("CSV write error: {}", e)))?;
-    }
-
-    for txn in &txns {
-        let row = CanonicalRow {
+    // 5. Build canonical rows
+    let rows: Vec<CanonicalRow> = txns
+        .iter()
+        .map(|txn| CanonicalRow {
             effective_date: epoch_to_date(txn.created_epoch),
             posted_date: epoch_to_date(txn.available_on_epoch),
             amount_minor: txn.amount_minor,
@@ -505,50 +305,21 @@ pub fn cmd_fetch_stripe(
             source_id: txn.source_id.clone(),
             group_id: txn.group_id.clone(),
             description: txn.description.clone(),
-        };
-        csv_writer.serialize(&row).map_err(|e| {
-            CliError::io(format!("CSV write error: {}", e))
-        })?;
-    }
+        })
+        .collect();
 
-    csv_writer.flush().map_err(|e| {
-        CliError::io(format!("CSV flush error: {}", e))
-    })?;
+    // 6. Write CSV
+    let out_label = common::write_csv(&rows, &out)?;
 
     if show_progress {
-        eprintln!("Done: {} transactions written to {}", txns.len(), out_label);
+        eprintln!("Done: {} transactions written to {}", rows.len(), out_label);
     }
 
     Ok(())
 }
 
 fn resolve_api_key(flag: Option<String>) -> Result<String, CliError> {
-    // Flag takes priority
-    if let Some(key) = flag {
-        let trimmed = key.trim().to_string();
-        if trimmed.is_empty() {
-            return Err(CliError {
-                code: exit_codes::EXIT_FETCH_NOT_AUTH,
-                message: "missing Stripe API key (use --api-key or set STRIPE_API_KEY)".into(),
-                hint: None,
-            });
-        }
-        return Ok(trimmed);
-    }
-
-    // Fall back to env
-    if let Ok(key) = std::env::var("STRIPE_API_KEY") {
-        let trimmed = key.trim().to_string();
-        if !trimmed.is_empty() {
-            return Ok(trimmed);
-        }
-    }
-
-    Err(CliError {
-        code: exit_codes::EXIT_FETCH_NOT_AUTH,
-        message: "missing Stripe API key (use --api-key or set STRIPE_API_KEY)".into(),
-        hint: None,
-    })
+    common::resolve_api_key(flag, "Stripe", "STRIPE_API_KEY")
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
