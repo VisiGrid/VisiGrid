@@ -828,6 +828,21 @@ pub(crate) fn handle_key_down(
         if event.keystroke.key == "escape" {
             this.hide_find(cx);
             return;
+        } else if event.keystroke.key == "enter" {
+            if event.keystroke.modifiers.shift {
+                this.find_prev(cx);
+            } else if this.find_replace_mode && this.find_focus_replace {
+                // Replace field focused
+                if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
+                    this.replace_all(cx);
+                } else {
+                    this.replace_next(cx);
+                }
+            } else {
+                // Find-only mode or find field focused → find next
+                this.find_next(cx);
+            }
+            return;
         } else if event.keystroke.key == "backspace" {
             this.find_backspace(cx);
             return;

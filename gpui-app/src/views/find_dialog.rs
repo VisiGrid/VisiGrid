@@ -38,7 +38,7 @@ pub fn render_find_dialog(app: &Spreadsheet) -> impl IntoElement {
     let instructions = if app.find_replace_mode {
         "Tab switch, Enter replace, Ctrl+Enter all, Esc close"
     } else {
-        "F3 next, Shift+F3 prev, Escape to close"
+        "Enter/F3 next, Shift+Enter/F3 prev, Esc close"
     };
 
     div()

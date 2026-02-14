@@ -27,8 +27,8 @@ pub struct MatchHit {
     pub row: usize,
     /// Column index
     pub col: usize,
-    /// What kind of cell this is
-    pub kind: MatchKind,
+    /// What kind of cell this is. None = display-only (numbers, etc.), not replaceable.
+    pub kind: Option<MatchKind>,
     /// Byte offset of match start in the raw string
     pub start: usize,
     /// Byte offset of match end in the raw string
@@ -205,8 +205,41 @@ impl Spreadsheet {
         i == chars.len() || !chars[i].is_alphanumeric()
     }
 
+    /// Strip formatting chars (,  $  %) and lowercase for fuzzy-numeric matching.
+    /// Returns (normalized_chars, byte_map) where byte_map[i] is the byte
+    /// offset in the **original** string for normalized char i. byte_map has
+    /// length normalized_chars.len() + 1; the sentinel entry is the byte
+    /// position past the last included original char.
+    ///
+    /// Lowercasing is folded in so byte_map always tracks the original string's
+    /// byte boundaries — never an intermediate lowercased copy.
+    fn normalize_for_find(s: &str) -> (Vec<char>, Vec<usize>) {
+        let mut chars = Vec::with_capacity(s.len());
+        let mut byte_map = Vec::with_capacity(s.len() + 1);
+        let mut last_included_end = 0;
+
+        for (byte_idx, ch) in s.char_indices() {
+            if !matches!(ch, ',' | '$' | '%') {
+                // Lowercase char-by-char; each lowercased char maps back
+                // to the same original byte position.
+                for lc in ch.to_lowercase() {
+                    chars.push(lc);
+                    byte_map.push(byte_idx);
+                }
+                last_included_end = byte_idx + ch.len_utf8();
+            }
+        }
+
+        // Sentinel: byte position past the last included original char
+        byte_map.push(last_included_end);
+
+        (chars, byte_map)
+    }
+
     /// Perform search and populate find_results with MatchHit entries.
-    /// Only searches in Text and Formula cells (not numbers/dates).
+    /// Searches Text, Formula, and display values (numbers, etc.).
+    /// Numeric normalization (stripping , $ %) is applied only when the
+    /// query contains at least one digit.
     pub(crate) fn perform_find(&mut self, cx: &mut Context<Self>) {
         use visigrid_engine::cell::CellValue;
 
@@ -220,45 +253,109 @@ impl Spreadsheet {
         }
 
         let query = self.find_input.to_lowercase();
+        let numeric_query = query.chars().any(|c| c.is_ascii_digit());
         let sheet_idx = self.wb(cx).active_sheet_index();
 
-        // Collect cell data to search
-        let cells_to_search: Vec<_> = self.sheet(cx).cells_iter()
-            .filter_map(|(&(row, col), cell)| {
-                match &cell.value {
-                    CellValue::Text(text) => Some((row, col, MatchKind::Text, text.clone())),
-                    CellValue::Formula { source, .. } => Some((row, col, MatchKind::Formula, source.clone())),
-                    _ => None,  // Skip Empty, Number - they're not replaceable
+        // Phase 1: collect text/formula cells directly from iterator
+        let mut cells_to_search: Vec<(usize, usize, Option<MatchKind>, String)> = Vec::new();
+        let mut display_cells: Vec<(usize, usize)> = Vec::new();
+
+        for (&(row, col), cell) in self.sheet(cx).cells_iter() {
+            match &cell.value {
+                CellValue::Empty => {}
+                CellValue::Text(text) => {
+                    cells_to_search.push((row, col, Some(MatchKind::Text), text.clone()));
                 }
-            })
-            .collect();
+                CellValue::Formula { source, .. } => {
+                    cells_to_search.push((row, col, Some(MatchKind::Formula), source.clone()));
+                }
+                _ => {
+                    display_cells.push((row, col));
+                }
+            }
+        }
+
+        // Phase 2: get display values for remaining cells (numbers, etc.)
+        for (row, col) in display_cells {
+            let display = self.sheet(cx).get_display(row, col);
+            if !display.is_empty() {
+                cells_to_search.push((row, col, None, display));
+            }
+        }
+
+        // Prepare normalized query chars for numeric matching.
+        // Query is already lowercased; normalize_for_find lowercases too (idempotent).
+        let norm_query_chars: Vec<char> = if numeric_query {
+            let (chars, _) = Self::normalize_for_find(&query);
+            chars
+        } else {
+            Vec::new()
+        };
 
         // Find all matches
         for (row, col, kind, raw_text) in cells_to_search {
-            let raw_lower = raw_text.to_lowercase();
+            if numeric_query {
+                // Normalized char-index matching (strips , $ %, lowercases).
+                // Pass raw_text so byte_map tracks original byte boundaries.
+                let (norm_chars, byte_map) = Self::normalize_for_find(&raw_text);
+                let qlen = norm_query_chars.len();
 
-            // Find all occurrences within this cell
-            let mut search_start = 0;
-            while let Some(rel_pos) = raw_lower[search_start..].find(&query) {
-                let start = search_start + rel_pos;
-                let end = start + query.len();
+                if qlen > 0 && norm_chars.len() >= qlen {
+                    let mut i = 0;
+                    while i + qlen <= norm_chars.len() {
+                        if norm_chars[i..i + qlen] == norm_query_chars[..] {
+                            let orig_start = byte_map[i];
+                            let orig_end = byte_map[i + qlen];
 
-                // For formulas, skip matches inside string literals
-                if kind == MatchKind::Formula && Self::is_inside_string_literal(&raw_text, start) {
-                    search_start = end;
-                    continue;
+                            // For formulas, skip matches inside string literals
+                            if kind == Some(MatchKind::Formula)
+                                && Self::is_inside_string_literal(&raw_text, orig_start)
+                            {
+                                i += 1;
+                                continue;
+                            }
+
+                            self.find_results.push(MatchHit {
+                                sheet: sheet_idx,
+                                row,
+                                col,
+                                kind,
+                                start: orig_start,
+                                end: orig_end,
+                            });
+                            i += qlen;
+                        } else {
+                            i += 1;
+                        }
+                    }
                 }
+            } else {
+                // Plain case-insensitive matching (no normalization)
+                let lower = raw_text.to_lowercase();
+                let mut search_start = 0;
+                while let Some(rel_pos) = lower[search_start..].find(&query) {
+                    let start = search_start + rel_pos;
+                    let end = start + query.len();
 
-                self.find_results.push(MatchHit {
-                    sheet: sheet_idx,
-                    row,
-                    col,
-                    kind,
-                    start,
-                    end,
-                });
+                    // For formulas, skip matches inside string literals
+                    if kind == Some(MatchKind::Formula)
+                        && Self::is_inside_string_literal(&raw_text, start)
+                    {
+                        search_start = end;
+                        continue;
+                    }
 
-                search_start = end;
+                    self.find_results.push(MatchHit {
+                        sheet: sheet_idx,
+                        row,
+                        col,
+                        kind,
+                        start,
+                        end,
+                    });
+
+                    search_start = end;
+                }
             }
         }
 
@@ -349,11 +446,22 @@ impl Spreadsheet {
             None => return,
         };
 
+        // Display-only match (numbers, etc.) — cannot replace
+        if hit.kind.is_none() {
+            if self.find_results.iter().any(|h| h.kind.is_some()) {
+                self.find_next(cx);
+            } else {
+                self.status_message = Some("No replaceable matches".to_string());
+                cx.notify();
+            }
+            return;
+        }
+
         // Get the raw value
         let raw_value = self.sheet(cx).get_raw(hit.row, hit.col);
 
         // Perform the replacement
-        let new_value = if hit.kind == MatchKind::Formula && Self::is_ref_like(&self.find_input) {
+        let new_value = if hit.kind == Some(MatchKind::Formula) && Self::is_ref_like(&self.find_input) {
             // Token-aware replacement for ref-like patterns
             self.replace_in_formula_token_aware(&raw_value, &self.find_input, &self.replace_input)
         } else {
@@ -388,8 +496,17 @@ impl Spreadsheet {
 
         if self.block_if_merged("replace all", cx) { return; }
 
-        // Take a snapshot of matches before mutation
-        let hits: Vec<MatchHit> = self.find_results.clone();
+        // Filter to replaceable hits only (skip display-only like numbers)
+        let hits: Vec<MatchHit> = self.find_results.iter()
+            .filter(|h| h.kind.is_some())
+            .cloned()
+            .collect();
+
+        if hits.is_empty() {
+            self.status_message = Some("No replaceable matches".to_string());
+            cx.notify();
+            return;
+        }
         let total = hits.len();
 
         // Group hits by cell (row, col) for batch replacement
@@ -418,7 +535,7 @@ impl Spreadsheet {
             // Apply replacements in reverse order
             for hit in cell_hits {
                 let kind = hit.kind;
-                if kind == MatchKind::Formula && Self::is_ref_like(&self.find_input) {
+                if kind == Some(MatchKind::Formula) && Self::is_ref_like(&self.find_input) {
                     // For ref-like patterns in formulas, use token-aware replacement
                     new_value = self.replace_in_formula_token_aware(
                         &new_value,
