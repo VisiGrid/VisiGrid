@@ -1,0 +1,8 @@
+effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,description
+2026-01-15,2026-01-15,-152000,USD,withdrawal,mercury,mtx_101,,GUSTO PAYROLL
+2026-01-15,2026-01-15,-28400,USD,withdrawal,mercury,mtx_102,,GUSTO TAX PAYMENT
+2026-01-15,2026-01-15,-1500,USD,withdrawal,mercury,mtx_103,,GUSTO FEE
+2026-01-31,2026-01-31,-155000,USD,withdrawal,mercury,mtx_104,,GUSTO PAYROLL
+2026-01-31,2026-01-31,-29000,USD,withdrawal,mercury,mtx_105,,GUSTO TAX PAYMENT
+2026-01-31,2026-01-31,-1500,USD,withdrawal,mercury,mtx_106,,GUSTO FEE
+2026-01-20,2026-01-20,-5000,USD,expense,mercury,mtx_107,,OFFICE SUPPLIES

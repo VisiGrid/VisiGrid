@@ -1,6 +1,7 @@
 //! `vgrid fetch` — pull data from external sources into canonical CSV.
 
 mod common;
+mod gusto;
 mod mercury;
 mod stripe;
 
@@ -45,6 +46,42 @@ Examples:
         quiet: bool,
     },
 
+    /// Fetch payroll data from Gusto
+    #[command(after_help = "\
+Examples:
+  vgrid fetch gusto --credentials ~/.config/vgrid/gusto.json --from 2026-01-01 --to 2026-01-31
+  vgrid fetch gusto --credentials ~/gusto.json --from 2026-01-01 --to 2026-01-31 --out gusto.csv
+  vgrid fetch gusto --access-token gp_... --company-uuid abc-123 --from 2026-01-01 --to 2026-01-31")]
+    Gusto {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// Path to Gusto OAuth2 credentials JSON file
+        #[arg(long)]
+        credentials: Option<PathBuf>,
+
+        /// Gusto access token (skips refresh, requires --company-uuid)
+        #[arg(long)]
+        access_token: Option<String>,
+
+        /// Gusto company UUID (required with --access-token)
+        #[arg(long)]
+        company_uuid: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
+
     /// Fetch bank transactions from Mercury
     #[command(after_help = "\
 Examples:
@@ -81,6 +118,23 @@ Examples:
 
 pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
     match command {
+        FetchCommands::Gusto {
+            from,
+            to,
+            credentials,
+            access_token,
+            company_uuid,
+            out,
+            quiet,
+        } => gusto::cmd_fetch_gusto(
+            from,
+            to,
+            credentials,
+            access_token,
+            company_uuid,
+            out,
+            quiet,
+        ),
         FetchCommands::Stripe {
             from,
             to,
