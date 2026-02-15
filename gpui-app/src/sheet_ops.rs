@@ -415,6 +415,13 @@ impl Spreadsheet {
         // Keep current_file in sync (legacy)
         self.current_file = Some(path.to_path_buf());
 
+        // Update terminal workspace root for the new workbook
+        let root = crate::terminal::resolve_workspace_root(Some(path));
+        self.terminal.set_workspace_root(root);
+        if self.terminal.visible {
+            self.terminal.ensure_cwd();
+        }
+
         // CRITICAL: Set save point AFTER load completes
         // This ensures the document starts "clean" (not dirty)
         self.history.mark_saved();
@@ -439,6 +446,13 @@ impl Spreadsheet {
         // Keep legacy fields in sync
         self.current_file = Some(path.to_path_buf());
         self.is_modified = false;
+
+        // Update terminal workspace root after Save As to a new location
+        let root = crate::terminal::resolve_workspace_root(Some(path));
+        self.terminal.set_workspace_root(root);
+        if self.terminal.visible {
+            self.terminal.ensure_cwd();
+        }
     }
 
     // =========================================================================

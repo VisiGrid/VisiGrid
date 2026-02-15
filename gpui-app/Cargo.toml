@@ -65,6 +65,9 @@ blake3 = "1"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 sha2 = { workspace = true }
 
+# Terminal emulator (PTY + ANSI grid)
+alacritty_terminal = "0.25"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

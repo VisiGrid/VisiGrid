@@ -164,7 +164,8 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("f9", Recalculate, Some("Spreadsheet")),  // Excel: force recalculate
         KeyBinding::new("alt-f11", ToggleLuaConsole, Some("Spreadsheet")),
         KeyBinding::new(&format!("{}-alt-p", primary_mod(m)), ToggleProfiler, Some("Spreadsheet")),
-        KeyBinding::new(&kb(m, "`"), ToggleFormulaView, Some("Spreadsheet")),
+        KeyBinding::new(&kb(m, "`"), ToggleTerminal, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "="), ToggleFormulaView, Some("Spreadsheet")),
 
         // Zoom (Ctrl+Alt+Plus/Minus/0, safe — avoids collision with insert/delete rows)
         KeyBinding::new(&format!("{}-alt-=", primary_mod(m)), ZoomIn, Some("Spreadsheet")),
@@ -189,11 +190,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Split view
         KeyBinding::new(&kb(m, "\\"), SplitRight, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "\\"), CloseSplit, Some("Spreadsheet")),
-        // Split pane focus: Cmd+] on macOS, Ctrl+\ on Windows/Linux (to avoid Ctrl+] Excel conflict)
+        // Split pane focus: Cmd+] on macOS (Ctrl+` taken by terminal on Linux/Windows, use F6)
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-]", FocusOtherPane, Some("Spreadsheet")),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-`", FocusOtherPane, Some("Spreadsheet")),
 
         // Dependency tracing
         // Toggle: Alt+T (Option+T on macOS) - universal
@@ -314,9 +313,6 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
 
         // Quit shortcut (Ctrl+Q on Windows/Linux)
         bindings.push(KeyBinding::new("ctrl-q", Quit, Some("Spreadsheet")));
-
-        // Window switcher: Ctrl+` (backtick)
-        bindings.push(KeyBinding::new("ctrl-`", SwitchWindow, Some("Spreadsheet")));
 
         // Direct window cycling: Ctrl+Tab / Ctrl+Shift+Tab
         bindings.push(KeyBinding::new("ctrl-tab", NextWindow, Some("Spreadsheet")));

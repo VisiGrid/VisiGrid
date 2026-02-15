@@ -30,6 +30,13 @@ impl Spreadsheet {
         self.cycle_banner.reset_for_new_file();
         self.current_file = None;
         self.is_modified = false;
+
+        // Reset terminal workspace to fallback (unsaved workbook)
+        let root = crate::terminal::resolve_workspace_root(None);
+        self.terminal.set_workspace_root(root);
+        if self.terminal.visible {
+            self.terminal.ensure_cwd();
+        }
         self.doc_settings = DocumentSettings::default();  // Reset doc settings
         self.view_state.selected = (0, 0);
         self.view_state.selection_end = None;

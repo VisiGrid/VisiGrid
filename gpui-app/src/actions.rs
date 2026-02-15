@@ -145,6 +145,7 @@ actions!(view, [
     ToggleProblems,
     ToggleZenMode,
     ToggleLuaConsole, // Alt+F11 - Lua scripting REPL (matches Excel VBA Editor)
+    ToggleTerminal,   // Ctrl+` - PTY terminal panel
     ToggleFormatBar,
     ToggleFormulaView,
     ToggleMinimap,
@@ -276,6 +277,7 @@ actions!(data, [
     OpenValidationDropdown,  // Alt+Down - open validation dropdown for current cell
     ExcludeFromValidation,   // Exclude selection from validation
     ClearValidationExclusions, // Clear exclusions in selection
+    OpenDiffResults,         // Open newest diff-*.json as a Diff Results sheet
 ]);
 
 // AI actions

@@ -427,6 +427,14 @@ pub enum CreateNameFocus {
     Description, // Description input field
 }
 
+/// Which tab is active in the bottom panel (Lua console / Terminal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BottomPanelTab {
+    #[default]
+    Lua,
+    Terminal,
+}
+
 /// Which editor surface is active (for popup anchoring and input routing)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EditorSurface {
@@ -2274,6 +2282,14 @@ pub struct Spreadsheet {
     // Keyboard hints state (Vimium-style jump)
     pub hint_state: crate::hints::HintState,
 
+    // Bottom panel (shared area for Lua console + Terminal)
+    pub bottom_panel_visible: bool,
+    pub bottom_panel_tab: BottomPanelTab,
+
+    // Terminal panel state
+    pub terminal: crate::terminal::TerminalState,
+    pub terminal_focus_handle: FocusHandle,
+
     // Lua scripting state
     pub lua_runtime: crate::scripting::LuaRuntime,
     pub lua_console: crate::scripting::ConsoleState,
@@ -2428,6 +2444,7 @@ impl Spreadsheet {
 
         let focus_handle = cx.focus_handle();
         let console_focus_handle = cx.focus_handle();
+        let terminal_focus_handle = cx.focus_handle();
         let script_view_focus_handle = cx.focus_handle();
         let font_picker_focus = cx.focus_handle();
         let ui = UiState {
@@ -2550,6 +2567,7 @@ impl Spreadsheet {
             pending_title_refresh: false,
             focus_handle,
             console_focus_handle,
+            terminal_focus_handle,
             script_view_focus_handle,
             font_picker_focus,
             ui,
@@ -2735,6 +2753,11 @@ impl Spreadsheet {
             nav_perf: crate::perf::NavLatencyTracker::default(),
             link_open_in_flight: false,
 
+            bottom_panel_visible: false,
+            bottom_panel_tab: BottomPanelTab::default(),
+
+            terminal: crate::terminal::TerminalState::default(),
+
             lua_runtime: crate::scripting::LuaRuntime::default(),
             lua_console: crate::scripting::ConsoleState::default(),
             script: crate::scripting::ScriptState::default(),
@@ -2831,6 +2854,101 @@ impl Spreadsheet {
         }
 
         app
+    }
+
+    // ========================================================================
+    // Terminal Panel
+    // ========================================================================
+
+    /// Spawn a new PTY terminal session.
+    pub fn spawn_terminal(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        use crate::terminal::pty::{TerminalEventProxy, spawn_pty};
+        use crate::terminal::resolve_workspace_root;
+        use alacritty_terminal::event::Event as TermEvent;
+
+        // Resolve workspace root and use it as CWD
+        let root = resolve_workspace_root(self.current_file.as_deref());
+        self.terminal.set_workspace_root(root.clone());
+        self.terminal.last_sent_cwd = Some(root.clone());
+        let cwd = Some(root);
+
+        self.terminal.cwd = cwd.clone();
+
+        // Compute initial cols/rows from panel size
+        let cols = 80u16;
+        let rows = ((self.terminal.height - 32.0) / 18.0).max(2.0) as u16; // 32px for header+padding
+
+        // Create event channel
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let proxy = TerminalEventProxy::new(event_tx);
+
+        match spawn_pty(cwd, cols, rows, proxy) {
+            Ok((term, sender, _join_handle)) => {
+                self.terminal.term = Some(term);
+                self.terminal.event_loop_sender = Some(sender);
+                self.terminal.exited = false;
+                self.terminal.exit_code = None;
+
+                // Spawn async task to drain events from the PTY
+                cx.spawn(async move |this, cx| {
+                    loop {
+                        // Batch-drain all pending events
+                        let event = match event_rx.recv() {
+                            Ok(e) => e,
+                            Err(_) => break, // Channel closed
+                        };
+
+                        let mut should_notify = false;
+                        let mut exit_code = None;
+
+                        // Process this event and drain any additional pending events
+                        let mut process = |event: TermEvent| {
+                            match event {
+                                TermEvent::Wakeup => {
+                                    should_notify = true;
+                                }
+                                TermEvent::ChildExit(code) => {
+                                    exit_code = Some(code);
+                                    should_notify = true;
+                                }
+                                TermEvent::Exit => {
+                                    exit_code = Some(0);
+                                    should_notify = true;
+                                }
+                                _ => {}
+                            }
+                        };
+
+                        process(event);
+                        while let Ok(e) = event_rx.try_recv() {
+                            process(e);
+                        }
+
+                        if let Some(code) = exit_code {
+                            let _ = this.update(cx, |app, cx| {
+                                app.terminal.exited = true;
+                                app.terminal.exit_code = Some(code);
+                                app.terminal.event_loop_sender = None;
+                                app.terminal.term = None;
+                                cx.notify();
+                            });
+                            break;
+                        }
+
+                        if should_notify {
+                            let _ = this.update(cx, |_, cx| {
+                                cx.notify();
+                            });
+                        }
+                    }
+                }).detach();
+            }
+            Err(e) => {
+                self.terminal.exited = true;
+                self.status_message = Some(format!("Failed to spawn terminal: {}", e));
+                cx.notify();
+            }
+        }
     }
 
     // ========================================================================
@@ -4114,6 +4232,7 @@ impl Spreadsheet {
             CommandId::ClearValidationExclusions => self.clear_validation_exclusions(cx),
             CommandId::CircleInvalidData => self.circle_invalid_data(cx),
             CommandId::ClearInvalidCircles => self.clear_invalid_circles(cx),
+            CommandId::OpenDiffResults => self.open_diff_results(window, cx),
 
             // VisiHub sync
             CommandId::HubCheckStatus => self.hub_check_status(cx),
@@ -4130,6 +4249,60 @@ impl Spreadsheet {
         // Ensure title reflects any state changes from this command.
         // The flag + cache debounce makes this cheap for non-state-changing commands.
         self.request_title_refresh(cx);
+    }
+
+    /// Open the newest diff-*.json in the workspace as a "Diff Results" sheet.
+    pub fn open_diff_results(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = match self.terminal.workspace_root.as_ref() {
+            Some(ws) => ws.clone(),
+            None => {
+                self.status_message = Some(
+                    "No workspace root set. Open a file or start the terminal first.".to_string(),
+                );
+                cx.notify();
+                return;
+            }
+        };
+
+        let diff_path = match crate::diff_view::find_latest_diff_file(&workspace) {
+            Some(p) => p,
+            None => {
+                self.status_message = Some(format!(
+                    "No diff results found in {}. Run vgrid diff with --output first.",
+                    workspace.display(),
+                ));
+                cx.notify();
+                return;
+            }
+        };
+
+        let bytes = match std::fs::read(&diff_path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status_message = Some(format!(
+                    "Could not read {}: {}",
+                    diff_path.display(),
+                    e,
+                ));
+                cx.notify();
+                return;
+            }
+        };
+
+        let parsed = match crate::diff_view::parse_diff_json(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status_message = Some(format!(
+                    "Error parsing {}: {}",
+                    diff_path.display(),
+                    e,
+                ));
+                cx.notify();
+                return;
+            }
+        };
+
+        crate::diff_view::populate_diff_sheet(self, parsed, &diff_path, &workspace, cx);
     }
 
     // Menu methods
@@ -4714,7 +4887,7 @@ impl Spreadsheet {
     /// 3. For text-input modals, also add cursor handling in MoveLeft/MoveRight handlers
     #[inline]
     pub fn should_block_grid_navigation(&self) -> bool {
-        self.mode.is_overlay() || self.lua_console.visible
+        self.mode.is_overlay() || self.bottom_panel_visible
     }
 
     // =========================================================================
@@ -6121,8 +6294,8 @@ impl Render for Spreadsheet {
         // If this fires, either lua_console.visible is true without matching mode, or
         // you added a new modal that needs to be included in should_block_grid_navigation().
         debug_assert!(
-            !self.lua_console.visible || self.should_block_grid_navigation(),
-            "Lua console visible but grid navigation not blocked - mode is {:?}",
+            !self.bottom_panel_visible || self.should_block_grid_navigation(),
+            "Bottom panel visible but grid navigation not blocked - mode is {:?}",
             self.mode
         );
 

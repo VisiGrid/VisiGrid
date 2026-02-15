@@ -219,6 +219,7 @@ pub enum CommandId {
     ClearValidationExclusions,
     CircleInvalidData,
     ClearInvalidCircles,
+    OpenDiffResults,
 
     // Transforms
     TransformUppercase,
@@ -364,6 +365,7 @@ impl CommandId {
             Self::ClearValidationExclusions => "Clear Validation Exclusions",
             Self::CircleInvalidData => "Circle Invalid Data",
             Self::ClearInvalidCircles => "Clear Invalid Circles",
+            Self::OpenDiffResults => "Open Diff Results",
             Self::HubCheckStatus => "VisiHub: Check Status",
             Self::HubPull => "VisiHub: Update from Remote",
             Self::HubPublish => "VisiHub: Publish",
@@ -563,6 +565,7 @@ impl CommandId {
             Self::ClearValidationExclusions => "validate exclusions clear remove",
             Self::CircleInvalidData => "validate invalid circle mark highlight",
             Self::ClearInvalidCircles => "validate invalid circle clear remove",
+            Self::OpenDiffResults => "diff results reconcile compare open",
             Self::HubCheckStatus => "visihub cloud sync status check refresh",
             Self::HubPull => "visihub cloud sync update pull",
             Self::HubPublish => "visihub cloud sync publish upload push commit",
@@ -711,6 +714,7 @@ impl CommandId {
             Self::ClearValidationExclusions,
             Self::CircleInvalidData,
             Self::ClearInvalidCircles,
+            Self::OpenDiffResults,
             Self::HubCheckStatus,
             Self::HubPull,
             Self::HubPublish,
@@ -858,7 +862,8 @@ impl CommandId {
             | Self::ExcludeFromValidation
             | Self::ClearValidationExclusions
             | Self::CircleInvalidData
-            | Self::ClearInvalidCircles => Some(MenuCategory::Data),
+            | Self::ClearInvalidCircles
+            | Self::OpenDiffResults => Some(MenuCategory::Data),
 
             // Help menu
             Self::ShowShortcuts

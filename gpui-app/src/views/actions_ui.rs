@@ -85,6 +85,10 @@ pub(crate) fn bind(
             this.clear_sort(cx);
             this.update_title_if_needed(window, cx);
         }))
+        // Diff results
+        .on_action(cx.listener(|this, _: &OpenDiffResults, window, cx| {
+            this.open_diff_results(window, cx);
+        }))
         // Data validation
         .on_action(cx.listener(|this, _: &ShowDataValidation, _, cx| {
             // TODO: Show data validation dialog
@@ -234,9 +238,45 @@ pub(crate) fn bind(
             this.return_to_trace_source(cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleLuaConsole, window, cx| {
-            this.lua_console.toggle();
-            if this.lua_console.visible {
+            use crate::app::BottomPanelTab;
+            if this.bottom_panel_visible && this.bottom_panel_tab == BottomPanelTab::Lua {
+                // Already showing Lua tab — close the panel
+                this.bottom_panel_visible = false;
+                this.lua_console.visible = false;
+                this.terminal.visible = false;
+            } else {
+                // Open panel and switch to Lua tab
+                this.bottom_panel_visible = true;
+                this.bottom_panel_tab = BottomPanelTab::Lua;
+                this.lua_console.visible = true;
+                this.terminal.visible = false;
+                if this.lua_console.first_open {
+                    this.lua_console.show(); // Triggers first_open hint
+                }
                 window.focus(&this.console_focus_handle, cx);
+            }
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+            use crate::app::BottomPanelTab;
+            if this.bottom_panel_visible && this.bottom_panel_tab == BottomPanelTab::Terminal {
+                // Already showing Terminal tab — close the panel
+                this.bottom_panel_visible = false;
+                this.lua_console.visible = false;
+                this.terminal.visible = false;
+            } else {
+                // Open panel and switch to Terminal tab
+                this.bottom_panel_visible = true;
+                this.bottom_panel_tab = BottomPanelTab::Terminal;
+                this.lua_console.visible = false;
+                this.terminal.visible = true;
+                if this.terminal.term.is_none() && !this.terminal.exited {
+                    this.spawn_terminal(window, cx);
+                } else {
+                    // Terminal already running — ensure CWD matches current workspace
+                    this.terminal.ensure_cwd();
+                }
+                window.focus(&this.terminal_focus_handle, cx);
             }
             cx.notify();
         }))

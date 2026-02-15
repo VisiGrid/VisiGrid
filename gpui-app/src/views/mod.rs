@@ -24,6 +24,7 @@ mod keytips_overlay;
 mod code_render;
 mod lua_console;
 pub(crate) mod script_view;
+mod terminal_panel;
 pub mod license_dialog;
 pub mod minimap;
 mod paste_special_dialog;
@@ -170,6 +171,15 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 cx.notify();
                 return; // Don't process other drags while resizing console
             }
+            // Handle Terminal resize drag
+            if this.terminal.resizing {
+                let y: f32 = event.position.y.into();
+                let delta = this.terminal.resize_start_y - y; // Inverted: dragging up increases height
+                let new_height = this.terminal.resize_start_height + delta;
+                this.terminal.set_height_from_drag(new_height);
+                cx.notify();
+                return;
+            }
             // Handle column resize drag
             if let Some(col) = this.resizing_col {
                 let x: f32 = event.position.x.into();
@@ -206,6 +216,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             // End Lua console resize
             if this.lua_console.resizing {
                 this.lua_console.resizing = false;
+                cx.notify();
+            }
+            // End Terminal resize
+            if this.terminal.resizing {
+                this.terminal.resizing = false;
                 cx.notify();
             }
             // End column/row resize and record to history (coalescing)
@@ -490,11 +505,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     .into_any_element()
             }
         })
-        // Lua console panel (above status bar)
+        // Bottom panel: tabbed container for Lua console + Terminal
         .child({
+            // Always pump Lua debug events even when panel is hidden
             lua_console::pump_debug_events(app, cx);
             lua_console::refresh_input_tokens(app);
-            lua_console::render_lua_console(app, cx)
+            render_bottom_panel(app, window, cx)
         })
         .when(!zen_mode, |div| {
             div.child(status_bar::render_status_bar(app, editing, cx))
@@ -1480,6 +1496,128 @@ fn render_approval_drift_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
                         )
                 )
         )
+}
+
+/// Render the bottom panel with tab bar (Lua console / Terminal).
+///
+/// Both panels share a single bottom panel area. The tab bar lets users switch
+/// between them. Each shortcut (`Alt+F11` for Lua, `Ctrl+`` for Terminal) opens
+/// its tab or toggles the panel closed if that tab is already active.
+fn render_bottom_panel(
+    app: &Spreadsheet,
+    window: &mut Window,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    use crate::app::BottomPanelTab;
+
+    if !app.bottom_panel_visible {
+        return div().into_any_element();
+    }
+
+    let panel_bg = app.token(TokenKey::PanelBg);
+    let panel_border = app.token(TokenKey::PanelBorder);
+    let text_primary = app.token(TokenKey::TextPrimary);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
+    let active_tab = app.bottom_panel_tab;
+
+    // Tab bar
+    let tab_bar = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+        .px(px(8.0))
+        .h(px(26.0))
+        .bg(panel_bg)
+        .border_b_1()
+        .border_color(panel_border)
+        .child(render_panel_tab(
+            "bottom-tab-lua",
+            "Lua",
+            active_tab == BottomPanelTab::Lua,
+            accent, text_primary, text_muted, panel_border,
+            cx.listener(|this, _, window, cx| {
+                use crate::app::BottomPanelTab;
+                this.bottom_panel_tab = BottomPanelTab::Lua;
+                this.lua_console.visible = true;
+                this.terminal.visible = false;
+                if this.lua_console.first_open {
+                    this.lua_console.show();
+                }
+                window.focus(&this.console_focus_handle, cx);
+                cx.notify();
+            }),
+        ))
+        .child(render_panel_tab(
+            "bottom-tab-terminal",
+            "Terminal",
+            active_tab == BottomPanelTab::Terminal,
+            accent, text_primary, text_muted, panel_border,
+            cx.listener(|this, _, window, cx| {
+                use crate::app::BottomPanelTab;
+                this.bottom_panel_tab = BottomPanelTab::Terminal;
+                this.lua_console.visible = false;
+                this.terminal.visible = true;
+                if this.terminal.term.is_none() && !this.terminal.exited {
+                    this.spawn_terminal(window, cx);
+                } else {
+                    this.terminal.ensure_cwd();
+                }
+                window.focus(&this.terminal_focus_handle, cx);
+                cx.notify();
+            }),
+        ));
+
+    // Panel content (only one is visible at a time)
+    let content = match active_tab {
+        BottomPanelTab::Lua => {
+            lua_console::render_lua_console(app, cx).into_any_element()
+        }
+        BottomPanelTab::Terminal => {
+            terminal_panel::render_terminal_panel(app, window, cx).into_any_element()
+        }
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .child(tab_bar)
+        .child(content)
+        .into_any_element()
+}
+
+/// Render a single tab button for the bottom panel tab bar.
+fn render_panel_tab(
+    id: &'static str,
+    label: &'static str,
+    is_active: bool,
+    accent: Hsla,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    border_color: Hsla,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .px(px(10.0))
+        .py(px(4.0))
+        .text_size(px(11.0))
+        .rounded_t(px(3.0))
+        .when(is_active, |d| {
+            d.text_color(text_primary)
+                .font_weight(FontWeight::SEMIBOLD)
+                .border_b_2()
+                .border_color(accent)
+        })
+        .when(!is_active, |d| {
+            d.text_color(text_muted)
+                .hover(|s| s.text_color(text_primary))
+        })
+        .child(label)
+        .on_click(on_click)
 }
 
 /// Render split view with two grids side-by-side (50/50)
