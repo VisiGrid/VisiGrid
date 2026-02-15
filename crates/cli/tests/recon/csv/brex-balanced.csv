@@ -1,0 +1,5 @@
+effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,description
+2026-01-09,2026-01-09,77750,USD,deposit,brex,txn_cash_001,,STRIPE TRANSFER
+2026-01-21,2026-01-21,97100,USD,deposit,brex,txn_cash_002,,STRIPE TRANSFER
+2026-01-15,2026-01-15,-5000,USD,expense,brex,txn_cash_003,,OFFICE SUPPLIES
+2026-01-25,2026-01-25,200000,USD,deposit,brex,txn_cash_004,,CLIENT WIRE PAYMENT

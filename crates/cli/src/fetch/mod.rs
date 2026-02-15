@@ -1,5 +1,6 @@
 //! `vgrid fetch` — pull data from external sources into canonical CSV.
 
+mod brex;
 mod common;
 mod gusto;
 mod mercury;
@@ -82,6 +83,69 @@ Examples:
         quiet: bool,
     },
 
+    /// Fetch card transactions from Brex
+    #[command(name = "brex-card", after_help = "\
+Examples:
+  vgrid fetch brex-card --from 2026-01-01 --to 2026-01-31
+  vgrid fetch brex-card --from 2026-01-01 --to 2026-01-31 --out brex-card.csv
+  vgrid fetch brex-card --from 2026-01-01 --to 2026-01-31 --api-key brex_token_...
+  BREX_API_KEY=brex_token_... vgrid fetch brex-card --from 2026-01-01 --to 2026-01-31")]
+    BrexCard {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// Brex API token (default: BREX_API_KEY env)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
+
+    /// Fetch bank (cash account) transactions from Brex
+    #[command(name = "brex-bank", after_help = "\
+Examples:
+  vgrid fetch brex-bank --from 2026-01-01 --to 2026-01-31
+  vgrid fetch brex-bank --from 2026-01-01 --to 2026-01-31 --out brex-bank.csv
+  vgrid fetch brex-bank --from 2026-01-01 --to 2026-01-31 --api-key brex_token_...
+  vgrid fetch brex-bank --from 2026-01-01 --to 2026-01-31 --account cash_abc123
+  BREX_API_KEY=brex_token_... vgrid fetch brex-bank --from 2026-01-01 --to 2026-01-31")]
+    BrexBank {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// Brex API token (default: BREX_API_KEY env)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Brex cash account ID (auto-detected if only one)
+        #[arg(long)]
+        account: Option<String>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
+
     /// Fetch bank transactions from Mercury
     #[command(after_help = "\
 Examples:
@@ -135,6 +199,21 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             out,
             quiet,
         ),
+        FetchCommands::BrexCard {
+            from,
+            to,
+            api_key,
+            out,
+            quiet,
+        } => brex::card::cmd_fetch_brex_card(from, to, api_key, out, quiet),
+        FetchCommands::BrexBank {
+            from,
+            to,
+            api_key,
+            out,
+            account,
+            quiet,
+        } => brex::bank::cmd_fetch_brex_bank(from, to, api_key, out, account, quiet),
         FetchCommands::Stripe {
             from,
             to,

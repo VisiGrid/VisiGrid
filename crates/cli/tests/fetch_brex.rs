@@ -1,0 +1,148 @@
+// Integration tests for `vgrid fetch brex-card` and `vgrid fetch brex-bank`.
+// Run with: cargo test -p visigrid-cli --test fetch_brex
+
+use std::process::Command;
+
+fn vgrid() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vgrid"));
+    cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
+    // Clear env to avoid leaking a real key into tests
+    cmd.env_remove("BREX_API_KEY");
+    cmd
+}
+
+// ── brex-card tests ─────────────────────────────────────────────────
+
+#[test]
+fn card_missing_api_key_exits_50() {
+    let output = vgrid()
+        .args(["fetch", "brex-card", "--from", "2026-01-01", "--to", "2026-01-31", "--quiet"])
+        .output()
+        .expect("failed to run vgrid");
+
+    assert_eq!(
+        output.status.code(),
+        Some(50),
+        "expected exit 50, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing Brex API key"),
+        "stderr: {}",
+        stderr,
+    );
+}
+
+#[test]
+fn card_invalid_date_range_exits_2() {
+    let output = vgrid()
+        .args([
+            "fetch", "brex-card",
+            "--from", "2026-01-31",
+            "--to", "2026-01-01",
+            "--api-key", "brex_test_fake",
+            "--quiet",
+        ])
+        .output()
+        .expect("failed to run vgrid");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit 2, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn card_bad_date_format_exits_2() {
+    let output = vgrid()
+        .args([
+            "fetch", "brex-card",
+            "--from", "not-a-date",
+            "--to", "2026-01-31",
+            "--api-key", "brex_test_fake",
+            "--quiet",
+        ])
+        .output()
+        .expect("failed to run vgrid");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit 2, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+// ── brex-bank tests ─────────────────────────────────────────────────
+
+#[test]
+fn bank_missing_api_key_exits_50() {
+    let output = vgrid()
+        .args(["fetch", "brex-bank", "--from", "2026-01-01", "--to", "2026-01-31", "--quiet"])
+        .output()
+        .expect("failed to run vgrid");
+
+    assert_eq!(
+        output.status.code(),
+        Some(50),
+        "expected exit 50, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing Brex API key"),
+        "stderr: {}",
+        stderr,
+    );
+}
+
+#[test]
+fn bank_invalid_date_range_exits_2() {
+    let output = vgrid()
+        .args([
+            "fetch", "brex-bank",
+            "--from", "2026-01-31",
+            "--to", "2026-01-01",
+            "--api-key", "brex_test_fake",
+            "--quiet",
+        ])
+        .output()
+        .expect("failed to run vgrid");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit 2, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn bank_bad_date_format_exits_2() {
+    let output = vgrid()
+        .args([
+            "fetch", "brex-bank",
+            "--from", "not-a-date",
+            "--to", "2026-01-31",
+            "--api-key", "brex_test_fake",
+            "--quiet",
+        ])
+        .output()
+        .expect("failed to run vgrid");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit 2, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
