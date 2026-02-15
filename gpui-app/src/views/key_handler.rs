@@ -8,6 +8,11 @@ pub(crate) fn handle_key_down(
     window: &mut Window,
     cx: &mut Context<Spreadsheet>,
 ) {
+    // Terminal owns focus: don't route keys to the grid
+    if this.terminal_has_focus(window) {
+        return;
+    }
+
     // Format bar owns focus: don't route keys to the grid
     if this.ui.format_bar.is_active(window) {
         return;

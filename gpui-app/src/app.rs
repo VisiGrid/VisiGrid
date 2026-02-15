@@ -2860,6 +2860,12 @@ impl Spreadsheet {
     // Terminal Panel
     // ========================================================================
 
+    /// Returns true if the terminal panel currently has keyboard focus.
+    /// Used by action handlers to bail out so keys go to the PTY instead.
+    pub fn terminal_has_focus(&self, window: &Window) -> bool {
+        self.terminal_focus_handle.is_focused(window)
+    }
+
     /// Spawn a new PTY terminal session.
     pub fn spawn_terminal(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         use crate::terminal::pty::{TerminalEventProxy, spawn_pty};
@@ -2878,7 +2884,7 @@ impl Spreadsheet {
         let cols = 80u16;
         let rows = ((self.terminal.height - 32.0) / 18.0).max(2.0) as u16; // 32px for header+padding
 
-        // Create event channel
+        // Create event channel — std::sync::mpsc for the PTY proxy (requires Sync sender)
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let proxy = TerminalEventProxy::new(event_tx);
 
@@ -2889,11 +2895,29 @@ impl Spreadsheet {
                 self.terminal.exited = false;
                 self.terminal.exit_code = None;
 
-                // Spawn async task to drain events from the PTY
+                // Bridge: blocking std::sync::mpsc → async smol::channel
+                // The PTY I/O thread sends events via std::sync::mpsc.
+                // We cannot call blocking recv() in a GPUI async task (it blocks the UI thread).
+                // Instead, a dedicated bridge thread drains the blocking receiver and forwards
+                // events to an async-compatible smol channel.
+                let (async_tx, async_rx) = smol::channel::unbounded();
+
+                std::thread::Builder::new()
+                    .name("terminal-event-bridge".to_string())
+                    .spawn(move || {
+                        while let Ok(event) = event_rx.recv() {
+                            if async_tx.send_blocking(event).is_err() {
+                                break; // async receiver dropped
+                            }
+                        }
+                    })
+                    .expect("failed to spawn terminal event bridge thread");
+
+                // Async task drains the smol channel without blocking the UI
                 cx.spawn(async move |this, cx| {
                     loop {
-                        // Batch-drain all pending events
-                        let event = match event_rx.recv() {
+                        // Await next event — non-blocking on the executor
+                        let event = match async_rx.recv().await {
                             Ok(e) => e,
                             Err(_) => break, // Channel closed
                         };
@@ -2920,7 +2944,7 @@ impl Spreadsheet {
                         };
 
                         process(event);
-                        while let Ok(e) = event_rx.try_recv() {
+                        while let Ok(e) = async_rx.try_recv() {
                             process(e);
                         }
 

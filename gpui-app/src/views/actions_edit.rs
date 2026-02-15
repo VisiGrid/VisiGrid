@@ -163,6 +163,7 @@ pub(crate) fn bind(
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &DeleteCell, window, cx| {
+            if this.terminal_has_focus(window) { cx.propagate(); return; }
             // Format bar editing consumes actions before Spreadsheet editing.
             if this.ui.format_bar.size_editing { return; }
             if !this.mode.is_editing() {
@@ -208,6 +209,7 @@ pub(crate) fn bind(
         // Editing actions
         // F2: Toggle Navigation ↔ Edit, or toggle Caret/Point in Formula mode
         .on_action(cx.listener(|this, _: &StartEdit, window, cx| {
+            if this.terminal_has_focus(window) { cx.propagate(); return; }
             if this.mode.is_formula() {
                 // In Formula mode: F2 toggles between Caret and Point submode
                 this.toggle_formula_nav_mode(cx);
@@ -224,6 +226,7 @@ pub(crate) fn bind(
             this.maybe_show_f2_tip(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
+            if this.terminal_has_focus(window) { cx.propagate(); return; }
             // Close-confirm dialog: Enter activates focused button
             if this.close_confirm_visible {
                 match this.close_confirm_focused {
@@ -315,6 +318,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &ConfirmEditUp, window, cx| {
+            if this.terminal_has_focus(window) { cx.propagate(); return; }
             // Lua console handles its own Shift+Enter (insert newline)
             if this.lua_console.visible {
                 this.lua_console.insert("\n");
@@ -333,6 +337,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &CancelEdit, window, cx| {
+            if this.terminal_has_focus(window) { cx.propagate(); return; }
             // Close-confirm dialog: Escape dismisses
             if this.close_confirm_visible {
                 this.close_confirm_visible = false;
@@ -450,6 +455,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &TabNext, window, cx| {
+            if this.terminal_has_focus(window) { cx.propagate(); return; }
             // Close-confirm dialog traps Tab
             if this.close_confirm_visible {
                 this.close_confirm_focused = (this.close_confirm_focused + 1) % 3;
@@ -490,6 +496,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &TabPrev, window, cx| {
+            if this.terminal_has_focus(window) { cx.propagate(); return; }
             // Close-confirm dialog traps Shift+Tab
             if this.close_confirm_visible {
                 this.close_confirm_focused = if this.close_confirm_focused == 0 { 2 } else { this.close_confirm_focused - 1 };
@@ -512,6 +519,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &BackspaceChar, window, cx| {
+            if this.terminal_has_focus(window) { cx.propagate(); return; }
             // Format bar editing consumes actions before Spreadsheet editing.
             // See ConfirmEdit guard above for rationale.
             if this.ui.format_bar.size_editing {
@@ -602,6 +610,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &DeleteChar, window, cx| {
+            if this.terminal_has_focus(window) { cx.propagate(); return; }
             // Format bar editing consumes actions before Spreadsheet editing.
             if this.ui.format_bar.size_editing { return; }
             // Let AI dialogs handle their own keys

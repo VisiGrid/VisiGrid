@@ -40,9 +40,10 @@ fn format_cwd_display(path: &std::path::Path) -> String {
 }
 
 /// Font metrics for the terminal grid.
-const TERM_FONT_SIZE: f32 = 13.0;
-const TERM_CELL_WIDTH: f32 = 7.8;   // Monospace approximate
-const TERM_CELL_HEIGHT: f32 = 18.0;  // Line height
+const TERM_FONT_SIZE: f32 = 15.0;
+const TERM_CELL_WIDTH: f32 = 9.0;   // Monospace approximate at 15px
+const TERM_CELL_HEIGHT: f32 = 20.0;  // Line height
+pub const TERM_FONT_FAMILY: &str = "CaskaydiaMono Nerd Font";
 
 /// Render the terminal panel (if visible).
 pub fn render_terminal_panel(
@@ -120,6 +121,7 @@ pub fn render_terminal_panel(
         for (line_idx, cells) in row_data.iter().enumerate() {
             let mut spans: Vec<AnyElement> = Vec::new();
             let mut run_start = 0;
+            let is_cursor_line = show_cursor && line_idx == cursor_line;
 
             while run_start < cells.len() {
                 let (_, fg, bg, flags) = cells[run_start];
@@ -134,85 +136,69 @@ pub fn render_terminal_panel(
                     run_end += 1;
                 }
 
-                // Build text for this run
-                let text: String = cells[run_start..run_end]
-                    .iter()
-                    .map(|(c, _, _, f)| {
-                        if f.contains(CellFlags::WIDE_CHAR_SPACER)
-                            || f.contains(CellFlags::LEADING_WIDE_CHAR_SPACER)
-                        {
-                            ' '  // Skip spacer cells
-                        } else if f.contains(CellFlags::HIDDEN) {
-                            ' '
-                        } else {
-                            *c
-                        }
-                    })
-                    .collect();
+                // If the cursor falls inside this run, split the run at cursor_col
+                // so the cursor element is rendered inline at the correct position.
+                if is_cursor_line && cursor_col >= run_start && cursor_col < run_end {
+                    // Part before cursor
+                    if cursor_col > run_start {
+                        let text: String = cells[run_start..cursor_col]
+                            .iter()
+                            .map(|(c, _, _, f)| cell_char(*c, *f))
+                            .collect();
+                        spans.push(make_span(text, fg, bg, flags, text_primary, editor_bg).into_any_element());
+                    }
 
-                // Resolve colors
-                let (effective_fg, effective_bg) = if flags.contains(CellFlags::INVERSE) {
-                    (bg, fg)
+                    // Cursor cell — rendered inline with inverted colors
+                    let cursor_char = cell_char(cells[cursor_col].0, cells[cursor_col].3);
+                    spans.push(
+                        div()
+                            .font_family(TERM_FONT_FAMILY)
+                            .bg(text_primary.opacity(0.7))
+                            .text_color(editor_bg)
+                            .text_size(px(TERM_FONT_SIZE))
+                            .child(cursor_char.to_string())
+                            .into_any_element()
+                    );
+
+                    // Part after cursor
+                    if cursor_col + 1 < run_end {
+                        let text: String = cells[cursor_col + 1..run_end]
+                            .iter()
+                            .map(|(c, _, _, f)| cell_char(*c, *f))
+                            .collect();
+                        spans.push(make_span(text, fg, bg, flags, text_primary, editor_bg).into_any_element());
+                    }
                 } else {
-                    (fg, bg)
-                };
-
-                let fg_hsla = ansi_to_hsla(effective_fg, text_primary, editor_bg);
-                let bg_hsla = ansi_to_hsla(effective_bg, text_primary, editor_bg);
-
-                let mut span = div()
-                    .text_color(fg_hsla)
-                    .text_size(px(TERM_FONT_SIZE));
-
-                // Apply background only if non-default
-                if !is_default_bg(effective_bg) {
-                    span = span.bg(bg_hsla);
+                    // Normal run — no cursor intersection
+                    let text: String = cells[run_start..run_end]
+                        .iter()
+                        .map(|(c, _, _, f)| cell_char(*c, *f))
+                        .collect();
+                    spans.push(make_span(text, fg, bg, flags, text_primary, editor_bg).into_any_element());
                 }
 
-                if flags.contains(CellFlags::BOLD) {
-                    span = span.font_weight(FontWeight::BOLD);
-                }
-                if flags.contains(CellFlags::ITALIC) {
-                    span = span.italic();
-                }
-                if flags.contains(CellFlags::UNDERLINE) || flags.contains(CellFlags::DOUBLE_UNDERLINE) {
-                    span = span.underline();
-                }
-                if flags.contains(CellFlags::STRIKEOUT) {
-                    span = span.line_through();
-                }
-
-                spans.push(span.child(text).into_any_element());
                 run_start = run_end;
             }
 
-            // Cursor overlay: highlight cursor cell
-            let is_cursor_line = show_cursor && line_idx == cursor_line;
+            // If cursor is past all cells on this line, append cursor at end
+            if is_cursor_line && cursor_col >= cells.len() {
+                spans.push(
+                    div()
+                        .font_family(TERM_FONT_FAMILY)
+                        .bg(text_primary.opacity(0.7))
+                        .text_color(editor_bg)
+                        .text_size(px(TERM_FONT_SIZE))
+                        .child(" ")
+                        .into_any_element()
+                );
+            }
 
-            let mut row_el = div()
+            let row_el = div()
                 .flex()
                 .flex_row()
                 .h(px(TERM_CELL_HEIGHT))
                 .w_full()
                 .children(spans);
-
-            // Render block cursor as an overlay
-            if is_cursor_line && cursor_col < cells.len() {
-                let cursor_x = cursor_col as f32 * TERM_CELL_WIDTH;
-                let cursor_char = cells[cursor_col].0;
-                row_el = row_el.child(
-                    div()
-                        .absolute()
-                        .left(px(cursor_x))
-                        .top_0()
-                        .w(px(TERM_CELL_WIDTH))
-                        .h(px(TERM_CELL_HEIGHT))
-                        .bg(text_primary.opacity(0.7))
-                        .text_color(editor_bg)
-                        .text_size(px(TERM_FONT_SIZE))
-                        .child(cursor_char.to_string())
-                );
-            }
 
             rows_el = rows_el.child(row_el);
         }
@@ -418,7 +404,7 @@ pub fn render_terminal_panel(
                 .overflow_hidden()
                 .bg(editor_bg)
                 .p(px(4.0))
-                .font_family("monospace")
+                .font_family(TERM_FONT_FAMILY)
                 .child(grid_content)
         )
         .into_any_element()
@@ -843,6 +829,60 @@ fn ansi_to_hsla(color: AnsiColor, default_fg: Hsla, default_bg: Hsla) -> Hsla {
     }
 }
 
+/// Resolve a cell's display character, handling spacers and hidden cells.
+fn cell_char(c: char, flags: CellFlags) -> char {
+    if flags.contains(CellFlags::WIDE_CHAR_SPACER)
+        || flags.contains(CellFlags::LEADING_WIDE_CHAR_SPACER)
+        || flags.contains(CellFlags::HIDDEN)
+    {
+        ' '
+    } else {
+        c
+    }
+}
+
+/// Build a styled text span for a terminal run.
+fn make_span(
+    text: String,
+    fg: AnsiColor,
+    bg: AnsiColor,
+    flags: CellFlags,
+    text_primary: Hsla,
+    editor_bg: Hsla,
+) -> gpui::Div {
+    let (effective_fg, effective_bg) = if flags.contains(CellFlags::INVERSE) {
+        (bg, fg)
+    } else {
+        (fg, bg)
+    };
+
+    let fg_hsla = ansi_to_hsla(effective_fg, text_primary, editor_bg);
+    let bg_hsla = ansi_to_hsla(effective_bg, text_primary, editor_bg);
+
+    let mut span = div()
+        .font_family(TERM_FONT_FAMILY)
+        .text_color(fg_hsla)
+        .text_size(px(TERM_FONT_SIZE));
+
+    if !is_default_bg(effective_bg) {
+        span = span.bg(bg_hsla);
+    }
+    if flags.contains(CellFlags::BOLD) {
+        span = span.font_weight(FontWeight::BOLD);
+    }
+    if flags.contains(CellFlags::ITALIC) {
+        span = span.italic();
+    }
+    if flags.contains(CellFlags::UNDERLINE) || flags.contains(CellFlags::DOUBLE_UNDERLINE) {
+        span = span.underline();
+    }
+    if flags.contains(CellFlags::STRIKEOUT) {
+        span = span.line_through();
+    }
+
+    span.child(text)
+}
+
 /// Check if a color is the default background.
 fn is_default_bg(color: AnsiColor) -> bool {
     matches!(color, AnsiColor::Named(NamedColor::Background))
@@ -854,20 +894,20 @@ fn named_color_to_hsla(color: NamedColor, default_fg: Hsla, default_bg: Hsla) ->
         // Standard colors
         NamedColor::Black => rgb_to_hsla(0.0, 0.0, 0.0),
         NamedColor::Red => rgb_to_hsla(0.8, 0.0, 0.0),
-        NamedColor::Green => rgb_to_hsla(0.0, 0.8, 0.0),
-        NamedColor::Yellow => rgb_to_hsla(0.8, 0.8, 0.0),
-        NamedColor::Blue => rgb_to_hsla(0.0, 0.0, 0.8),
-        NamedColor::Magenta => rgb_to_hsla(0.8, 0.0, 0.8),
-        NamedColor::Cyan => rgb_to_hsla(0.0, 0.8, 0.8),
+        NamedColor::Green => rgb_to_hsla(0.18, 0.65, 0.18),
+        NamedColor::Yellow => rgb_to_hsla(0.75, 0.65, 0.0),
+        NamedColor::Blue => rgb_to_hsla(0.2, 0.4, 0.9),
+        NamedColor::Magenta => rgb_to_hsla(0.7, 0.2, 0.7),
+        NamedColor::Cyan => rgb_to_hsla(0.0, 0.65, 0.65),
         NamedColor::White => rgb_to_hsla(0.75, 0.75, 0.75),
         // Bright colors
         NamedColor::BrightBlack => rgb_to_hsla(0.5, 0.5, 0.5),
         NamedColor::BrightRed => rgb_to_hsla(1.0, 0.33, 0.33),
-        NamedColor::BrightGreen => rgb_to_hsla(0.33, 1.0, 0.33),
-        NamedColor::BrightYellow => rgb_to_hsla(1.0, 1.0, 0.33),
-        NamedColor::BrightBlue => rgb_to_hsla(0.33, 0.33, 1.0),
-        NamedColor::BrightMagenta => rgb_to_hsla(1.0, 0.33, 1.0),
-        NamedColor::BrightCyan => rgb_to_hsla(0.33, 1.0, 1.0),
+        NamedColor::BrightGreen => rgb_to_hsla(0.3, 0.8, 0.3),
+        NamedColor::BrightYellow => rgb_to_hsla(0.85, 0.75, 0.1),
+        NamedColor::BrightBlue => rgb_to_hsla(0.4, 0.55, 1.0),
+        NamedColor::BrightMagenta => rgb_to_hsla(0.85, 0.4, 0.85),
+        NamedColor::BrightCyan => rgb_to_hsla(0.2, 0.8, 0.8),
         NamedColor::BrightWhite => rgb_to_hsla(1.0, 1.0, 1.0),
         // Dim colors
         NamedColor::DimBlack => rgb_to_hsla(0.0, 0.0, 0.0),
@@ -888,23 +928,23 @@ fn named_color_to_hsla(color: NamedColor, default_fg: Hsla, default_bg: Hsla) ->
 /// Map a 256-color index to Hsla.
 fn indexed_color_to_hsla(idx: u8) -> Hsla {
     match idx {
-        // Standard colors (0-7)
+        // Standard colors (0-7) — match named_color_to_hsla
         0 => rgb_to_hsla(0.0, 0.0, 0.0),
         1 => rgb_to_hsla(0.8, 0.0, 0.0),
-        2 => rgb_to_hsla(0.0, 0.8, 0.0),
-        3 => rgb_to_hsla(0.8, 0.8, 0.0),
-        4 => rgb_to_hsla(0.0, 0.0, 0.8),
-        5 => rgb_to_hsla(0.8, 0.0, 0.8),
-        6 => rgb_to_hsla(0.0, 0.8, 0.8),
+        2 => rgb_to_hsla(0.18, 0.65, 0.18),
+        3 => rgb_to_hsla(0.75, 0.65, 0.0),
+        4 => rgb_to_hsla(0.2, 0.4, 0.9),
+        5 => rgb_to_hsla(0.7, 0.2, 0.7),
+        6 => rgb_to_hsla(0.0, 0.65, 0.65),
         7 => rgb_to_hsla(0.75, 0.75, 0.75),
         // Bright colors (8-15)
         8 => rgb_to_hsla(0.5, 0.5, 0.5),
         9 => rgb_to_hsla(1.0, 0.33, 0.33),
-        10 => rgb_to_hsla(0.33, 1.0, 0.33),
-        11 => rgb_to_hsla(1.0, 1.0, 0.33),
-        12 => rgb_to_hsla(0.33, 0.33, 1.0),
-        13 => rgb_to_hsla(1.0, 0.33, 1.0),
-        14 => rgb_to_hsla(0.33, 1.0, 1.0),
+        10 => rgb_to_hsla(0.3, 0.8, 0.3),
+        11 => rgb_to_hsla(0.85, 0.75, 0.1),
+        12 => rgb_to_hsla(0.4, 0.55, 1.0),
+        13 => rgb_to_hsla(0.85, 0.4, 0.85),
+        14 => rgb_to_hsla(0.2, 0.8, 0.8),
         15 => rgb_to_hsla(1.0, 1.0, 1.0),
         // 6x6x6 color cube (16-231)
         16..=231 => {

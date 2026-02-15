@@ -280,6 +280,11 @@ actions!(data, [
     OpenDiffResults,         // Open newest diff-*.json as a Diff Results sheet
 ]);
 
+// Terminal actions — consume keys in Terminal context to prevent bubbling to Spreadsheet
+actions!(terminal, [
+    TerminalInput,  // No-op action that absorbs keys when terminal is focused
+]);
+
 // AI actions
 actions!(ai, [
     InsertFormula,       // Ctrl+Shift+A - Insert Formula with AI

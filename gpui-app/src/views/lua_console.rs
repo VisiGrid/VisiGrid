@@ -379,7 +379,7 @@ where
         .id(id)
         .px_3()
         .py(px(6.0))
-        .text_size(px(12.0))
+        .text_size(px(14.0))
         .text_color(if is_active { text_primary } else { text_muted })
         .font_weight(if is_active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
         .bg(if is_active { selection_bg.opacity(0.3) } else { gpui::transparent_black() })
@@ -412,7 +412,7 @@ where
         .px(px(6.0))
         .py(px(3.0))
         .rounded(px(3.0))
-        .text_size(px(10.0));
+        .text_size(px(14.0));
 
     if enabled {
         btn
@@ -451,7 +451,7 @@ fn render_output_entry(
     div()
         .id(ElementId::Name(format!("lua-{}-output-{}", tab, index).into()))
         .text_xs()
-        .font_family("monospace")
+        .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
         .text_color(color)
         .child(format!("{}{}", prefix, entry.text))
 }
@@ -481,7 +481,7 @@ fn render_output_entry_grouped(
                 .pl(px(8.0))
                 .py(px(2.0))
                 .text_xs()
-                .font_family("monospace")
+                .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
                 .text_color(text_muted);
 
             for line in entry.text.split('\n') {
@@ -503,7 +503,7 @@ fn render_output_entry_grouped(
             let mut wrapper = div()
                 .id(id)
                 .text_xs()
-                .font_family("monospace")
+                .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
                 .text_color(text_muted.opacity(0.45))
                 .child(entry.text.clone());
 
@@ -529,7 +529,7 @@ fn render_output_entry_grouped(
             let mut wrapper = div()
                 .id(id)
                 .text_xs()
-                .font_family("monospace")
+                .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
                 .text_color(color)
                 .child(format!("{}{}", prefix, entry.text));
 
@@ -630,8 +630,8 @@ fn render_input_area(
         .pb(px(7.0))
         .flex()
         .flex_col()
-        .text_size(px(11.0))
-        .font_family("monospace")
+        .text_size(px(13.0))
+        .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
         .max_h(px(max_lines as f32 * line_height));
 
     for line_idx in visible_start..visible_end {
@@ -1580,7 +1580,7 @@ where
         .px(px(6.0))
         .py(px(2.0))
         .rounded(px(3.0))
-        .text_size(px(10.0))
+        .text_size(px(14.0))
         .border_1()
         .border_color(panel_border);
 
@@ -1630,13 +1630,13 @@ mod debug_ui {
                         .bg(kbd_bg)
                         .border_1()
                         .border_color(kbd_border)
-                        .text_size(px(10.0))
+                        .text_size(px(14.0))
                         .font_weight(FontWeight::MEDIUM)
                         .child(key)
                 )
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(14.0))
                         .text_color(text_muted.opacity(0.6))
                         .child(label)
                 )
@@ -1651,7 +1651,7 @@ mod debug_ui {
             .text_color(text_muted.opacity(0.7))
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(13.0))
                     .child("Enter a script in the Run tab, then press F5 or Shift+Enter to debug.")
             )
             .child(
@@ -1753,7 +1753,7 @@ mod debug_ui {
             // Left: status
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(px(14.0))
                     .text_color(status_color)
                     .child(status_text)
             )
@@ -1842,8 +1842,8 @@ mod debug_ui {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .font_family("monospace")
-            .text_size(px(11.0))
+            .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
+            .text_size(px(13.0))
             .children((start..end).map(|line_idx| {
                 let line_num = line_idx + 1; // 1-indexed for display + breakpoint matching
                 let line_text = lines.get(line_idx).copied().unwrap_or("");
@@ -1981,8 +1981,8 @@ mod debug_ui {
                             .flex()
                             .items_center()
                             .gap(px(4.0))
-                            .text_size(px(10.0))
-                            .font_family("monospace")
+                            .text_size(px(14.0))
+                            .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
                             .cursor_pointer()
                             .when(is_selected, |d| d.bg(accent.opacity(0.15)))
                             .hover(|s| s.bg(accent.opacity(0.08)))
@@ -2050,7 +2050,7 @@ mod debug_ui {
             rows.push(
                 div()
                     .px_1()
-                    .text_size(px(10.0))
+                    .text_size(px(14.0))
                     .text_color(text_muted)
                     .italic()
                     .child(format!("Loading frame {} vars\u{2026}", selected_frame))
@@ -2154,8 +2154,8 @@ mod debug_ui {
                 .py(px(1.0))
                 .flex()
                 .items_center()
-                .text_size(px(10.0))
-                .font_family("monospace")
+                .text_size(px(14.0))
+                .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
                 .when(expandable, |d| {
                     d.cursor_pointer()
                         .hover(|s| s.bg(accent.opacity(0.06)))
@@ -2218,8 +2218,8 @@ mod debug_ui {
                         div()
                             .pl(px(more_indent + 4.0))
                             .py(px(1.0))
-                            .text_size(px(10.0))
-                            .font_family("monospace")
+                            .text_size(px(14.0))
+                            .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
                             .text_color(text_muted.opacity(0.5))
                             .italic()
                             .child(format!("... +{} more", remaining))
@@ -2265,7 +2265,7 @@ mod debug_ui {
                     div()
                         .id(ElementId::Name(format!("dbg-out-{}", start + i).into()))
                         .text_size(px(9.0))
-                        .font_family("monospace")
+                        .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
                         .text_color(color)
                         .child(entry.text.clone())
                 })
