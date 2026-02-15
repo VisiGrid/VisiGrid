@@ -1,0 +1,8 @@
+effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,description
+2026-01-05,2026-01-06,50000,USD,charge,stripe,ch_001,po_001,Customer A
+2026-01-06,2026-01-07,30000,USD,charge,stripe,ch_002,po_001,Customer B
+2026-01-05,2026-01-06,-2250,USD,fee,stripe,fee_001,po_001,Stripe fee
+2026-01-08,2026-01-09,-77750,USD,payout,stripe,po_001,po_001,STRIPE PAYOUT
+2026-01-15,2026-01-16,100000,USD,charge,stripe,ch_003,po_002,Customer C
+2026-01-15,2026-01-16,-2900,USD,fee,stripe,fee_002,po_002,Stripe fee
+2026-01-20,2026-01-21,-97100,USD,payout,stripe,po_002,po_002,STRIPE PAYOUT
