@@ -19,6 +19,7 @@ const PAGE_LIMIT: u32 = 100;
 /// Internal representation with epoch for sorting.
 #[derive(Debug)]
 struct RawTransaction {
+    btxn_id: String,
     created_epoch: i64,
     available_on_epoch: i64,
     amount_minor: i64,
@@ -77,6 +78,81 @@ impl StripeClient {
             account,
             base_url,
         }
+    }
+
+    /// Fetch the balance transaction IDs that belong to a specific payout.
+    ///
+    /// Uses `/v1/balance_transactions?payout=po_xxx` — the only reliable way
+    /// to associate btxns with their payout, since the Balance Transaction
+    /// object does not carry a `payout` field.
+    fn fetch_payout_member_ids(
+        &self,
+        payout_id: &str,
+        quiet: bool,
+    ) -> Result<Vec<String>, CliError> {
+        let mut btxn_ids = Vec::new();
+        let mut starting_after: Option<String> = None;
+
+        loop {
+            let mut params = vec![
+                ("payout".to_string(), payout_id.to_string()),
+                ("limit".to_string(), PAGE_LIMIT.to_string()),
+            ];
+            if let Some(ref after) = starting_after {
+                params.push(("starting_after".to_string(), after.clone()));
+            }
+
+            let url = format!("{}/v1/balance_transactions", self.base_url);
+            let api_key = self.api_key.clone();
+            let account = self.account.clone();
+
+            let body = self.client.request_with_retry(|http| {
+                let mut req = http
+                    .get(&url)
+                    .basic_auth(&api_key, Some(""))
+                    .query(&params);
+                if let Some(ref acct) = account {
+                    req = req.header("Stripe-Account", acct);
+                }
+                req
+            })?;
+
+            let data = body["data"]
+                .as_array()
+                .ok_or_else(|| CliError {
+                    code: exit_codes::EXIT_FETCH_UPSTREAM,
+                    message: "Stripe response missing 'data' array".into(),
+                    hint: None,
+                })?;
+
+            let has_more = body["has_more"].as_bool().unwrap_or(false);
+
+            for item in data {
+                if let Some(id) = item["id"].as_str() {
+                    btxn_ids.push(id.to_string());
+                }
+            }
+
+            if !has_more || data.is_empty() {
+                break;
+            }
+
+            let last_id = data
+                .last()
+                .and_then(|item| item["id"].as_str())
+                .map(|s| s.to_string());
+
+            if last_id == starting_after.as_deref().map(|s| s.to_string()) {
+                break; // stuck pagination
+            }
+            starting_after = last_id;
+        }
+
+        if !quiet && atty::is(atty::Stream::Stderr) {
+            eprintln!("  payout {}: {} members", payout_id, btxn_ids.len());
+        }
+
+        Ok(btxn_ids)
     }
 
     /// Fetch all balance transactions in the given epoch range.
@@ -183,6 +259,11 @@ impl StripeClient {
 // ── Parse a single Stripe transaction ───────────────────────────────
 
 fn parse_transaction(item: &serde_json::Value) -> Result<Vec<RawTransaction>, CliError> {
+    let btxn_id = item["id"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
     let created = item["created"].as_i64().ok_or_else(|| CliError {
         code: exit_codes::EXIT_FETCH_UPSTREAM,
         message: "Stripe transaction missing 'created' field".into(),
@@ -234,16 +315,17 @@ fn parse_transaction(item: &serde_json::Value) -> Result<Vec<RawTransaction>, Cl
         raw_description
     };
 
-    // group_id extraction
-    let group_id = if let Some(payout_id) = item["payout"].as_str() {
-        payout_id.to_string()
-    } else if canonical_type == "payout" {
+    // group_id: payout btxns self-group via source_id (po_xxx).
+    // All other btxns get group_id populated later via per-payout API calls,
+    // since the Balance Transaction object does NOT carry a `payout` field.
+    let group_id = if canonical_type == "payout" {
         source_id.clone()
     } else {
         String::new()
     };
 
     let mut rows = vec![RawTransaction {
+        btxn_id: btxn_id.clone(),
         created_epoch: created,
         available_on_epoch: available_on,
         amount_minor: amount,
@@ -261,6 +343,7 @@ fn parse_transaction(item: &serde_json::Value) -> Result<Vec<RawTransaction>, Cl
     // that are already fee-typed to avoid double-counting.
     if fee != 0 && canonical_type != "fee" {
         rows.push(RawTransaction {
+            btxn_id: String::new(), // synthetic — no Stripe ID
             created_epoch: created,
             available_on_epoch: available_on,
             amount_minor: -fee,
@@ -315,14 +398,65 @@ pub fn cmd_fetch_stripe(
     let client = StripeClient::new(key, account);
     let mut txns = client.fetch_balance_transactions(from_epoch, to_epoch, quiet)?;
 
-    // 4. Sort: (created_epoch ASC, source_id ASC)
+    // 4. Populate group_id via per-payout API calls.
+    //    The Balance Transaction object does NOT carry a `payout` field, so we
+    //    must ask Stripe which btxns belong to each payout.
+    let payout_ids: Vec<String> = txns
+        .iter()
+        .filter(|t| t.canonical_type == "payout")
+        .map(|t| t.source_id.clone())
+        .collect();
+
+    if !payout_ids.is_empty() {
+        if show_progress {
+            eprintln!("Resolving payout membership for {} payouts...", payout_ids.len());
+        }
+
+        // Build btxn_id → payout_id map
+        let mut btxn_to_payout = std::collections::HashMap::new();
+        for payout_id in &payout_ids {
+            let member_ids = client.fetch_payout_member_ids(payout_id, quiet)?;
+            for btxn_id in member_ids {
+                btxn_to_payout.insert(btxn_id, payout_id.clone());
+            }
+        }
+
+        // Tag real btxns with their payout group
+        for txn in &mut txns {
+            if txn.group_id.is_empty() && !txn.btxn_id.is_empty() {
+                if let Some(payout_id) = btxn_to_payout.get(&txn.btxn_id) {
+                    txn.group_id = payout_id.clone();
+                }
+            }
+        }
+
+        // Propagate group_id to synthetic fee rows: their source_id is
+        // "{parent_source_id}_fee", so strip the suffix and look up the parent.
+        let source_to_group: std::collections::HashMap<String, String> = txns
+            .iter()
+            .filter(|t| !t.group_id.is_empty() && !t.btxn_id.is_empty())
+            .map(|t| (t.source_id.clone(), t.group_id.clone()))
+            .collect();
+
+        for txn in &mut txns {
+            if txn.group_id.is_empty() && txn.btxn_id.is_empty() {
+                if let Some(parent_source) = txn.source_id.strip_suffix("_fee") {
+                    if let Some(payout_id) = source_to_group.get(parent_source) {
+                        txn.group_id = payout_id.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Sort: (created_epoch ASC, source_id ASC)
     txns.sort_by(|a, b| {
         a.created_epoch
             .cmp(&b.created_epoch)
             .then_with(|| a.source_id.cmp(&b.source_id))
     });
 
-    // 5. Build canonical rows
+    // 6. Build canonical rows
     let rows: Vec<CanonicalRow> = txns
         .iter()
         .map(|txn| CanonicalRow {
@@ -338,7 +472,7 @@ pub fn cmd_fetch_stripe(
         })
         .collect();
 
-    // 6. Write CSV
+    // 7. Write CSV
     let out_label = common::write_csv(&rows, &out)?;
 
     if show_progress {
@@ -384,6 +518,8 @@ mod tests {
 
     #[test]
     fn test_parse_transaction_charge() {
+        // parse_transaction does NOT set group_id for charges — that's done
+        // later via per-payout API calls in cmd_fetch_stripe.
         let item = serde_json::json!({
             "id": "txn_123",
             "source": "ch_123",
@@ -393,24 +529,25 @@ mod tests {
             "fee": 175,
             "currency": "usd",
             "type": "charge",
-            "description": "Payment from customer",
-            "payout": "po_abc"
+            "description": "Payment from customer"
         });
         let rows = parse_transaction(&item).unwrap();
         assert_eq!(rows.len(), 2, "charge with fee should emit charge + synthetic fee row");
 
         let txn = &rows[0];
+        assert_eq!(txn.btxn_id, "txn_123");
         assert_eq!(txn.canonical_type, "charge");
         assert_eq!(txn.amount_minor, 5000);
         assert_eq!(txn.currency, "USD");
         assert_eq!(txn.source_id, "ch_123");
-        assert_eq!(txn.group_id, "po_abc");
+        assert_eq!(txn.group_id, "", "group_id populated later via payout membership API");
         assert_eq!(txn.description, "Payment from customer");
 
         let fee_row = &rows[1];
+        assert_eq!(fee_row.btxn_id, "", "synthetic fee has no Stripe ID");
         assert_eq!(fee_row.canonical_type, "fee");
         assert_eq!(fee_row.amount_minor, -175);
-        assert_eq!(fee_row.group_id, "po_abc");
+        assert_eq!(fee_row.group_id, "", "propagated from parent later");
         assert_eq!(fee_row.source_id, "ch_123_fee");
     }
 
@@ -425,8 +562,7 @@ mod tests {
             "fee": 0,
             "currency": "usd",
             "type": "charge",
-            "description": "Zero-fee charge",
-            "payout": "po_abc"
+            "description": "Zero-fee charge"
         });
         let rows = parse_transaction(&item).unwrap();
         assert_eq!(rows.len(), 1, "charge with fee=0 should not emit synthetic fee row");
@@ -454,11 +590,7 @@ mod tests {
 
     #[test]
     fn test_parse_transaction_payout_self_groups() {
-        // In Stripe's API the payout balance transaction has:
-        //   id = txn_xxx (balance transaction ID)
-        //   source = po_xxx (payout object ID)
-        // Charges reference po_xxx via item["payout"], so the payout's
-        // group_id must also be po_xxx for rollup sums to work.
+        // Payout btxns self-group via their source_id (po_xxx).
         let item = serde_json::json!({
             "id": "txn_po_456",
             "source": "po_456",
@@ -468,11 +600,11 @@ mod tests {
             "fee": 0,
             "currency": "usd",
             "type": "payout",
-            "description": "STRIPE PAYOUT",
-            "payout": serde_json::Value::Null
+            "description": "STRIPE PAYOUT"
         });
         let rows = parse_transaction(&item).unwrap();
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].btxn_id, "txn_po_456");
         assert_eq!(rows[0].canonical_type, "payout");
         assert_eq!(rows[0].source_id, "po_456");
         assert_eq!(rows[0].group_id, "po_456");
@@ -507,8 +639,7 @@ mod tests {
             "amount": amount,
             "currency": "usd",
             "type": txn_type,
-            "description": format!("Txn {}", id),
-            "payout": serde_json::Value::Null
+            "description": format!("Txn {}", id)
         })
     }
 
@@ -827,5 +958,107 @@ mod tests {
             "message: {}",
             err.message,
         );
+    }
+
+    // ── Test 8: Payout membership resolution ─────────────────────
+
+    #[test]
+    fn test_fetch_payout_member_ids() {
+        let server = MockServer::start();
+
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/v1/balance_transactions")
+                .query_param("payout", "po_test");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(stripe_list_response(
+                    vec![
+                        mock_txn("txn_ch1", 1000, 5000, "charge"),
+                        mock_txn("txn_fee1", 1000, -145, "stripe_fee"),
+                        mock_txn("txn_po", 1001, -4855, "payout"),
+                    ],
+                    false,
+                ));
+        });
+
+        let client = StripeClient::with_base_url(
+            "sk_test_key".into(),
+            None,
+            server.base_url(),
+        );
+
+        let ids = client.fetch_payout_member_ids("po_test", true).unwrap();
+        assert_eq!(ids, vec!["txn_ch1", "txn_fee1", "txn_po"]);
+    }
+
+    // ── Test 9: Group ID propagation to synthetic fees ───────────
+
+    #[test]
+    fn test_group_id_propagation() {
+        // Simulate the post-fetch group_id population logic
+        let mut txns = vec![
+            RawTransaction {
+                btxn_id: "txn_ch1".into(),
+                created_epoch: 1000, available_on_epoch: 2000,
+                amount_minor: 5000, currency: "USD".into(),
+                canonical_type: "charge".into(), source_id: "ch_001".into(),
+                group_id: String::new(), description: "Charge".into(),
+            },
+            RawTransaction {
+                btxn_id: String::new(), // synthetic
+                created_epoch: 1000, available_on_epoch: 2000,
+                amount_minor: -145, currency: "USD".into(),
+                canonical_type: "fee".into(), source_id: "ch_001_fee".into(),
+                group_id: String::new(), description: "Stripe processing fee".into(),
+            },
+            RawTransaction {
+                btxn_id: "txn_po1".into(),
+                created_epoch: 1001, available_on_epoch: 2001,
+                amount_minor: -4855, currency: "USD".into(),
+                canonical_type: "payout".into(), source_id: "po_001".into(),
+                group_id: "po_001".into(), description: "STRIPE PAYOUT".into(),
+            },
+        ];
+
+        // Simulate btxn→payout mapping from API
+        let mut btxn_to_payout = std::collections::HashMap::new();
+        btxn_to_payout.insert("txn_ch1".to_string(), "po_001".to_string());
+        btxn_to_payout.insert("txn_po1".to_string(), "po_001".to_string());
+
+        // Tag real btxns
+        for txn in &mut txns {
+            if txn.group_id.is_empty() && !txn.btxn_id.is_empty() {
+                if let Some(payout_id) = btxn_to_payout.get(&txn.btxn_id) {
+                    txn.group_id = payout_id.clone();
+                }
+            }
+        }
+
+        // Propagate to synthetic fees
+        let source_to_group: std::collections::HashMap<String, String> = txns
+            .iter()
+            .filter(|t| !t.group_id.is_empty() && !t.btxn_id.is_empty())
+            .map(|t| (t.source_id.clone(), t.group_id.clone()))
+            .collect();
+
+        for txn in &mut txns {
+            if txn.group_id.is_empty() && txn.btxn_id.is_empty() {
+                if let Some(parent_source) = txn.source_id.strip_suffix("_fee") {
+                    if let Some(payout_id) = source_to_group.get(parent_source) {
+                        txn.group_id = payout_id.clone();
+                    }
+                }
+            }
+        }
+
+        // All should now have group_id = "po_001"
+        assert_eq!(txns[0].group_id, "po_001", "charge should get group_id from payout membership");
+        assert_eq!(txns[1].group_id, "po_001", "synthetic fee should inherit from parent charge");
+        assert_eq!(txns[2].group_id, "po_001", "payout self-groups");
+
+        // Verify rollup: charges + fees + payout = 0
+        let sum: i64 = txns.iter().map(|t| t.amount_minor).sum();
+        assert_eq!(sum, 0, "payout group must balance");
     }
 }
