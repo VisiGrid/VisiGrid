@@ -79,8 +79,13 @@ impl AiCli {
     }
 }
 
-/// Check PATH for known AI CLIs using the `which` crate.
+/// Check PATH for known AI CLIs.
 /// Respects user preference; falls back to auto-detect (Claude → Codex → Gemini).
+///
+/// When launched from a desktop entry the process PATH may not include
+/// directories added by node version managers (nvm, fnm, volta, etc.).
+/// We augment the search with common locations so detection works
+/// regardless of how the app was started.
 fn detect_ai_cli(pref: crate::settings::PreferredAiCli) -> Option<AiCli> {
     use crate::settings::PreferredAiCli;
 
@@ -92,22 +97,69 @@ fn detect_ai_cli(pref: crate::settings::PreferredAiCli) -> Option<AiCli> {
         PreferredAiCli::Gemini => Some(AiCli::Gemini),
     };
     if let Some(cli) = preferred {
-        if which::which(cli.binary()).is_ok() {
+        if find_ai_binary(cli.binary()).is_some() {
             return Some(cli);
         }
     }
 
     // Auto-detect fallback
-    if which::which("claude").is_ok() {
+    if find_ai_binary("claude").is_some() {
         return Some(AiCli::Claude);
     }
-    if which::which("codex").is_ok() {
+    if find_ai_binary("codex").is_some() {
         return Some(AiCli::Codex);
     }
-    if which::which("gemini").is_ok() {
+    if find_ai_binary("gemini").is_some() {
         return Some(AiCli::Gemini);
     }
     None
+}
+
+/// Find an AI CLI binary on PATH or in common node-manager locations.
+fn find_ai_binary(name: &str) -> Option<std::path::PathBuf> {
+    // Fast path: already on PATH
+    if let Ok(p) = which::which(name) {
+        return Some(p);
+    }
+
+    // Check common node version manager bin dirs
+    if let Some(home) = dirs::home_dir() {
+        let candidates: Vec<Option<std::path::PathBuf>> = vec![
+            // nvm: ~/.nvm/versions/node/*/bin/
+            glob_first(&home.join(".nvm/versions/node"), name),
+            // fnm: ~/.local/share/fnm/node-versions/*/installation/bin/
+            glob_first(&home.join(".local/share/fnm/node-versions"), name),
+            // volta: ~/.volta/bin/
+            Some(home.join(".volta/bin").join(name)),
+            // global npm/yarn: ~/.local/bin/
+            Some(home.join(".local/bin").join(name)),
+            // Homebrew (macOS/Linux): /opt/homebrew/bin/, /home/linuxbrew/.linuxbrew/bin/
+            Some(std::path::PathBuf::from("/opt/homebrew/bin").join(name)),
+            Some(std::path::PathBuf::from("/home/linuxbrew/.linuxbrew/bin").join(name)),
+        ];
+        for candidate in candidates.into_iter().flatten() {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Find the latest node version dir containing `bin/<name>`.
+fn glob_first(versions_dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let rd = std::fs::read_dir(versions_dir).ok()?;
+    let mut best: Option<std::path::PathBuf> = None;
+    for entry in rd.flatten() {
+        let bin = entry.path().join("bin").join(name);
+        if bin.is_file() {
+            // Take the lexicographically last (highest version)
+            if best.as_ref().is_none_or(|b| entry.path() > *b) {
+                best = Some(bin);
+            }
+        }
+    }
+    best
 }
 
 /// Default content for the system-level AI context file (~/.config/visigrid/ai/).
