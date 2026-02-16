@@ -246,6 +246,17 @@ pub enum CommandId {
     OpenTerminal,
     VerifyIntegrity,
     Convert,
+
+    // AI in Terminal
+    LaunchAI,
+    PasteSelectionToTerminal,
+    PasteHeadersToTerminal,
+    PasteFilePathToTerminal,
+    PasteVisiGridContext,
+    GenerateAiContextFiles,
+    OpenAiContextFolder,
+    AiExplainSelection,
+    OpenAiMetrics,
 }
 
 impl CommandId {
@@ -391,6 +402,15 @@ impl CommandId {
             Self::OpenTerminal => "Open Terminal",
             Self::VerifyIntegrity => "Verify Integrity",
             Self::Convert => "Convert",
+            Self::LaunchAI => "Launch AI in Terminal",
+            Self::PasteSelectionToTerminal => "Paste Selection to Terminal",
+            Self::PasteHeadersToTerminal => "Paste Headers to Terminal",
+            Self::PasteFilePathToTerminal => "Paste File Path to Terminal",
+            Self::PasteVisiGridContext => "Paste VisiGrid Context to Terminal",
+            Self::GenerateAiContextFiles => "Generate AI Context Files",
+            Self::OpenAiContextFolder => "Open AI Context Folder",
+            Self::AiExplainSelection => "AI: Explain Selection",
+            Self::OpenAiMetrics => "Open AI Metrics",
         }
     }
 
@@ -598,6 +618,15 @@ impl CommandId {
             Self::OpenTerminal => "terminal shell console pty bash",
             Self::VerifyIntegrity => "verify integrity fingerprint check audit trust",
             Self::Convert => "convert export csv tsv json xlsx format",
+            Self::LaunchAI => "ai claude codex gemini launch terminal agent llm",
+            Self::PasteSelectionToTerminal => "paste selection context terminal ai",
+            Self::PasteHeadersToTerminal => "paste headers columns schema terminal ai",
+            Self::PasteFilePathToTerminal => "paste file path terminal ai",
+            Self::PasteVisiGridContext => "paste context everything all terminal ai data headers selection",
+            Self::GenerateAiContextFiles => "ai context files generate create claude agents gemini md memory instructions",
+            Self::OpenAiContextFolder => "ai context folder open edit claude agents gemini md instructions",
+            Self::AiExplainSelection => "ai explain selection analyze summarize anomalies outliers describe table data",
+            Self::OpenAiMetrics => "ai metrics usage stats log telemetry open",
             Self::SplitRight => "split view pane side by side divide window",
             Self::CloseSplit => "split close merge unsplit single pane",
             Self::ToggleTrace => "trace precedents dependents dependency audit formula inputs outputs",
@@ -755,6 +784,15 @@ impl CommandId {
             Self::VerifyIntegrity,
             Self::Convert,
             Self::NavPerfReport,
+            Self::LaunchAI,
+            Self::PasteSelectionToTerminal,
+            Self::PasteHeadersToTerminal,
+            Self::PasteFilePathToTerminal,
+            Self::PasteVisiGridContext,
+            Self::GenerateAiContextFiles,
+            Self::OpenAiContextFolder,
+            Self::AiExplainSelection,
+            Self::OpenAiMetrics,
         ]
     }
 
@@ -900,7 +938,16 @@ impl CommandId {
             | Self::RerunDiffRun
             | Self::OpenThisDiffFile
             | Self::RefreshDiffResults
-            | Self::Convert => Some(MenuCategory::Data),
+            | Self::Convert
+            | Self::LaunchAI
+            | Self::PasteSelectionToTerminal
+            | Self::PasteHeadersToTerminal
+            | Self::PasteFilePathToTerminal
+            | Self::PasteVisiGridContext
+            | Self::GenerateAiContextFiles
+            | Self::OpenAiContextFolder
+            | Self::AiExplainSelection
+            | Self::OpenAiMetrics => Some(MenuCategory::Data),
 
             // Help menu
             Self::ShowShortcuts

@@ -10,8 +10,16 @@ pub(crate) fn handle_key_down(
 ) {
     // Terminal owns focus: don't route keys to the grid
     if this.terminal_has_focus(window) {
+        #[cfg(debug_assertions)]
+        log::trace!("key_handler: terminal has focus, skipping grid key dispatch");
         return;
     }
+
+    // Advance input seq for this key event. With seq-stamping, grid key events
+    // get a different seq than terminal key events, so action handler assertions
+    // only fire on genuine dual-dispatch (same seq), not stale state.
+    #[cfg(debug_assertions)]
+    crate::views::terminal_panel::advance_input_seq();
 
     // Format bar owns focus: don't route keys to the grid
     if this.ui.format_bar.is_active(window) {

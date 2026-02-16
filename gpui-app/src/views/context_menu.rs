@@ -30,7 +30,7 @@ pub fn render_context_menu(
     // Estimate menu height for clamping.
     // Items: ~24px each (py(5) + ~14px text). Separators: ~9px (1px + my_1 = 4+1+4).
     let (n_items, n_seps) = match state.kind {
-        ContextMenuKind::Cell => (13, 5),
+        ContextMenuKind::Cell => (14, 6),
         ContextMenuKind::RowHeader => (4, 1),
         ContextMenuKind::ColHeader => (8, 3),
     };
@@ -65,7 +65,7 @@ fn menu_item(
     text_muted: Hsla,
     selection_bg: Hsla,
     cx: &mut Context<Spreadsheet>,
-    on_click: impl Fn(&mut Spreadsheet, &mut Context<Spreadsheet>) + 'static,
+    on_click: impl Fn(&mut Spreadsheet, &mut Window, &mut Context<Spreadsheet>) + 'static,
 ) -> AnyElement {
     let el = div()
         .id(id)
@@ -90,9 +90,9 @@ fn menu_item(
                         .child(hint)
                 )
             })
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
                 this.hide_context_menu(cx);
-                on_click(this, cx);
+                on_click(this, window, cx);
             }))
             .into_any_element()
     } else {
@@ -149,41 +149,41 @@ fn build_cell_menu(
 
     vec![
         menu_item("ctx-cut", "Cut", Some(cut_hint), true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.cut(cx),
+            |this, _, cx| this.cut(cx),
         ),
         menu_item("ctx-copy", "Copy", Some(copy_hint), true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.copy(cx),
+            |this, _, cx| this.copy(cx),
         ),
         menu_item("ctx-paste", "Paste", Some(paste_hint), has_clipboard, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.paste(cx),
+            |this, _, cx| this.paste(cx),
         ),
         menu_item("ctx-paste-values", "Paste Values", Some(paste_v_hint), has_clipboard, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.paste_values(cx),
+            |this, _, cx| this.paste_values(cx),
         ),
         separator(panel_border),
         menu_item("ctx-insert-row", "Insert Row", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| {
+            |this, _, cx| {
                 let ((min_row, _), (max_row, _)) = this.selection_range();
                 let count = max_row - min_row + 1;
                 this.insert_rows(min_row, count, cx);
             },
         ),
         menu_item("ctx-insert-col", "Insert Column", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| {
+            |this, _, cx| {
                 let ((_, min_col), (_, max_col)) = this.selection_range();
                 let count = max_col - min_col + 1;
                 this.insert_cols(min_col, count, cx);
             },
         ),
         menu_item("ctx-delete-row", "Delete Row", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| {
+            |this, _, cx| {
                 let ((min_row, _), (max_row, _)) = this.selection_range();
                 let count = max_row - min_row + 1;
                 this.delete_rows(min_row, count, cx);
             },
         ),
         menu_item("ctx-delete-col", "Delete Column", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| {
+            |this, _, cx| {
                 let ((_, min_col), (_, max_col)) = this.selection_range();
                 let count = max_col - min_col + 1;
                 this.delete_cols(min_col, count, cx);
@@ -191,21 +191,25 @@ fn build_cell_menu(
         ),
         separator(panel_border),
         menu_item("ctx-clear-contents", "Clear Contents", Some("Del"), true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.delete_selection(cx),
+            |this, _, cx| this.delete_selection(cx),
         ),
         menu_item("ctx-clear-formats", "Clear Formats", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.clear_formatting_selection(cx),
+            |this, _, cx| this.clear_formatting_selection(cx),
         ),
         separator(panel_border),
         menu_item("ctx-format-cells", "Format Cells...", Some(format_hint), true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| {
+            |this, _, cx| {
                 this.inspector_visible = true;
                 this.inspector_tab = crate::mode::InspectorTab::Format;
                 cx.notify();
             },
         ),
         menu_item("ctx-inspect", "Cell Inspector", Some(inspect_hint), true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| { this.inspector_visible = !this.inspector_visible; cx.notify(); },
+            |this, _, cx| { this.inspector_visible = !this.inspector_visible; cx.notify(); },
+        ),
+        separator(panel_border),
+        menu_item("ctx-explain-ai", "Explain with AI", None, true, text_primary, text_muted, selection_bg, cx,
+            |this, window, cx| this.ai_explain_selection(window, cx),
         ),
     ]
 }
@@ -222,17 +226,17 @@ fn build_row_header_menu(
 
     vec![
         menu_item("ctx-insert-row", "Insert Row", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.insert_rows_or_cols(cx),
+            |this, _, cx| this.insert_rows_or_cols(cx),
         ),
         menu_item("ctx-delete-row", "Delete Row", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.delete_rows_or_cols(cx),
+            |this, _, cx| this.delete_rows_or_cols(cx),
         ),
         separator(panel_border),
         menu_item("ctx-clear-contents", "Clear Contents", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.delete_selection(cx),
+            |this, _, cx| this.delete_selection(cx),
         ),
         menu_item("ctx-clear-formats", "Clear Formats", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.clear_formatting_selection(cx),
+            |this, _, cx| this.clear_formatting_selection(cx),
         ),
     ]
 }
@@ -257,6 +261,8 @@ pub fn cell_context_menu_item_ids() -> &'static [&'static str] {
         // separator
         "ctx-format-cells",
         "ctx-inspect",
+        // separator
+        "ctx-explain-ai",
     ]
 }
 
@@ -273,27 +279,27 @@ fn build_col_header_menu(
 
     vec![
         menu_item("ctx-insert-col", "Insert Column", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.insert_rows_or_cols(cx),
+            |this, _, cx| this.insert_rows_or_cols(cx),
         ),
         menu_item("ctx-delete-col", "Delete Column", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.delete_rows_or_cols(cx),
+            |this, _, cx| this.delete_rows_or_cols(cx),
         ),
         separator(panel_border),
         menu_item("ctx-clear-contents", "Clear Contents", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.delete_selection(cx),
+            |this, _, cx| this.delete_selection(cx),
         ),
         menu_item("ctx-clear-formats", "Clear Formats", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, cx| this.clear_formatting_selection(cx),
+            |this, _, cx| this.clear_formatting_selection(cx),
         ),
         separator(panel_border),
         menu_item("ctx-sort-asc", "Sort A\u{2192}Z", None, is_col_sel, text_primary, text_muted, selection_bg, cx,
-            |this, cx| {
+            |this, _, cx| {
                 use visigrid_engine::filter::SortDirection;
                 this.sort_by_current_column(SortDirection::Ascending, cx);
             },
         ),
         menu_item("ctx-sort-desc", "Sort Z\u{2192}A", None, is_col_sel, text_primary, text_muted, selection_bg, cx,
-            |this, cx| {
+            |this, _, cx| {
                 use visigrid_engine::filter::SortDirection;
                 this.sort_by_current_column(SortDirection::Descending, cx);
             },

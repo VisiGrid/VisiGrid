@@ -24,7 +24,7 @@ mod keytips_overlay;
 mod code_render;
 mod lua_console;
 pub(crate) mod script_view;
-mod terminal_panel;
+pub(crate) mod terminal_panel;
 pub mod license_dialog;
 pub mod minimap;
 mod paste_special_dialog;
@@ -128,6 +128,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         // - Space hold-to-peek: exit preview when Space is released
         // - Option double-tap: KeyTips detection (macOS only)
         .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
+            // Clear focus invariant marker on key_up to prevent stale state
+            // across event boundaries (IME, key repeat, composition).
+            #[cfg(debug_assertions)]
+            crate::views::terminal_panel::clear_terminal_key_handled();
+
             if event.keystroke.key == "f1" && this.f1_help_visible {
                 this.f1_help_visible = false;
                 cx.notify();

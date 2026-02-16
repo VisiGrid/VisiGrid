@@ -303,6 +303,7 @@ mod tests {
                 modifier_style: Setting::Inherit,
                 alt_accelerators: Setting::Inherit,
             },
+            terminal: Default::default(),
             tips: Default::default(),
         };
 

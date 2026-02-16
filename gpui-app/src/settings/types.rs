@@ -135,6 +135,26 @@ pub enum AltAccelerators {
 }
 
 // ============================================================================
+// AI CLI preference
+// ============================================================================
+
+/// Which AI CLI to prefer when multiple are installed.
+/// "Auto" uses the first found (Claude → Codex → Gemini).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PreferredAiCli {
+    /// Auto-detect: use first found (Claude → Codex → Gemini)
+    #[default]
+    Auto,
+    /// Prefer Claude Code (`claude`)
+    Claude,
+    /// Prefer Codex CLI (`codex`)
+    Codex,
+    /// Prefer Gemini CLI (`gemini`)
+    Gemini,
+}
+
+// ============================================================================
 // Editing behavior types
 // ============================================================================
 
@@ -186,6 +206,12 @@ pub enum TipId {
     WindowSwitcher,
     /// Fill handle usage tip (shown on first drag)
     FillHandle,
+    /// AI terminal tip (shown when terminal first opens)
+    AiTerminal,
+    /// AI paste shortcut tip (shown on first Ctrl+Shift+S/H/P use)
+    AiPasteShortcut,
+    /// AI explain selection tip (shown when launch fails with no CLI)
+    AiExplainHint,
 }
 
 /// Collection of dismissed tips

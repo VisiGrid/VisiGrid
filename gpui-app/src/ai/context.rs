@@ -247,7 +247,7 @@ pub fn find_used_range(sheet: &Sheet) -> (usize, usize, usize, usize) {
 }
 
 /// Check if a row looks like headers (contains mostly text, no numbers)
-fn looks_like_header_row(row: &[String]) -> bool {
+pub fn looks_like_header_row(row: &[String]) -> bool {
     if row.is_empty() {
         return false;
     }

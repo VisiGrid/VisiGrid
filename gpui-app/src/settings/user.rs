@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::types::{AltAccelerators, DismissedTips, EnterBehavior, ModifierStyle, Setting};
+use super::types::{AltAccelerators, DismissedTips, EnterBehavior, ModifierStyle, PreferredAiCli, Setting};
 
 /// User-level settings (global, persistent)
 ///
@@ -24,6 +24,10 @@ pub struct UserSettings {
     /// Keyboard navigation preferences
     #[serde(default)]
     pub navigation: NavigationSettings,
+
+    /// Terminal behavior
+    #[serde(default)]
+    pub terminal: TerminalSettings,
 
     /// Tips and onboarding state
     #[serde(default)]
@@ -155,6 +159,40 @@ impl Default for NavigationSettings {
             vim_mode: Setting::Value(false),
             modifier_style: Setting::Value(ModifierStyle::Platform),
             alt_accelerators: Setting::Inherit,  // Disabled by default
+        }
+    }
+}
+
+// ============================================================================
+// Terminal settings
+// ============================================================================
+
+/// Terminal behavior preferences
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalSettings {
+    /// Use bracketed paste mode when injecting context into the terminal.
+    /// When ON (default), pasted text is wrapped in escape sequences that
+    /// prevent shells from executing newlines as commands.
+    /// Turn OFF if your terminal shows garbage characters from the escapes.
+    #[serde(default = "default_bracketed_paste", skip_serializing_if = "Setting::is_inherit")]
+    pub bracketed_paste: Setting<bool>,
+
+    /// Preferred AI CLI when multiple are installed.
+    /// "auto" = first found (Claude → Codex → Gemini).
+    /// Set to "claude", "codex", or "gemini" to override.
+    #[serde(default)]
+    pub preferred_ai_cli: PreferredAiCli,
+}
+
+fn default_bracketed_paste() -> Setting<bool> {
+    Setting::Value(true)
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self {
+            bracketed_paste: Setting::Value(true),
+            preferred_ai_cli: PreferredAiCli::Auto,
         }
     }
 }

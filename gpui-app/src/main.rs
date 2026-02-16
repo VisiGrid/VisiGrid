@@ -3,6 +3,7 @@
 
 mod actions;
 mod ai;
+mod ai_metrics;
 mod app;
 mod autocomplete;
 mod clipboard;
@@ -874,4 +875,7 @@ fn main() {
             }).detach();
         }
     });
+
+    // Flush any buffered AI metrics before exit
+    ai_metrics::flush();
 }

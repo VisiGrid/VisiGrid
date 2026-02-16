@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use alacritty_terminal::event::WindowSize;
 use alacritty_terminal::event_loop::{EventLoopSender, Msg};
@@ -43,6 +44,10 @@ pub struct TerminalState {
     // Workspace (Phase 2)
     pub workspace_root: Option<PathBuf>,
     pub last_sent_cwd: Option<PathBuf>,
+
+    // Output epoch: incremented on every Wakeup event (new PTY output).
+    // Used for O(1) readiness checks instead of scanning the grid.
+    pub output_epoch: AtomicU64,
 }
 
 impl Default for TerminalState {
@@ -62,6 +67,7 @@ impl Default for TerminalState {
             cwd: None,
             workspace_root: None,
             last_sent_cwd: None,
+            output_epoch: AtomicU64::new(0),
         }
     }
 }
@@ -99,6 +105,17 @@ impl TerminalState {
     pub fn set_height_from_drag(&mut self, new_height: f32) {
         self.height = new_height.max(MIN_TERMINAL_HEIGHT).min(MAX_TERMINAL_HEIGHT);
         self.is_maximized = false;
+    }
+
+    /// Get the current output epoch. Incremented on every PTY Wakeup event.
+    /// Compare snapshots to detect new output without locking the grid.
+    pub fn output_epoch(&self) -> u64 {
+        self.output_epoch.load(Ordering::Relaxed)
+    }
+
+    /// Bump the output epoch. Called from the event bridge on TermEvent::Wakeup.
+    pub fn bump_output_epoch(&self) {
+        self.output_epoch.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Write bytes to the PTY.

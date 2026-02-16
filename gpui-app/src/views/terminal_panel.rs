@@ -5,6 +5,67 @@
 
 use std::path::{Path, PathBuf};
 
+// =============================================================================
+// Focus invariant: seq-stamped proof that terminal and grid never both handle
+// the same key event.  Debug-only — zero cost in release.
+//
+// How it works:
+//   - Every on_key_down increments a global input_seq counter.
+//   - Terminal's handler stamps the marker with that seq.
+//   - Grid action handlers assert marker_seq != current_seq.
+//   - Menu/palette/mouse actions (no key event) always have a different seq,
+//     so they never false-positive.
+//   - key_up clears the marker as belt-and-suspenders.
+// =============================================================================
+#[cfg(debug_assertions)]
+thread_local! {
+    /// Monotonically increasing input event counter.
+    static INPUT_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The seq at which the terminal last handled a key. 0 = never.
+    static TERMINAL_HANDLED_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Increment the input sequence counter.  Call at the start of every on_key_down
+/// (both terminal and grid) so each key press gets a unique seq.
+#[cfg(debug_assertions)]
+pub fn advance_input_seq() {
+    INPUT_SEQ.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
+/// Mark that the terminal handled the current input event.
+#[cfg(debug_assertions)]
+pub fn mark_terminal_key_handled() {
+    TERMINAL_HANDLED_SEQ.with(|t| {
+        INPUT_SEQ.with(|s| t.set(s.get()));
+    });
+}
+
+/// Clear the terminal-handled marker.  Call on key_up to avoid stale state
+/// across event boundaries (IME, key repeat, composition).
+#[cfg(debug_assertions)]
+pub fn clear_terminal_key_handled() {
+    TERMINAL_HANDLED_SEQ.with(|t| t.set(0));
+}
+
+/// Assert that the terminal did NOT handle this same key event.
+/// Safe to call from any action handler — only fires when the seq matches,
+/// so menu clicks / palette executions / mouse actions never false-positive.
+#[cfg(debug_assertions)]
+pub fn assert_grid_not_conflicting(action_name: &str) {
+    INPUT_SEQ.with(|s| {
+        TERMINAL_HANDLED_SEQ.with(|t| {
+            let current = s.get();
+            let handled = t.get();
+            debug_assert!(
+                handled != current || current == 0,
+                "Focus invariant violated: grid action '{}' fired on input seq {} \
+                 which terminal already handled",
+                action_name, current
+            );
+        });
+    });
+}
+
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 
@@ -380,6 +441,11 @@ pub fn render_terminal_panel(
             cx.notify();
         }))
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            #[cfg(debug_assertions)]
+            {
+                advance_input_seq();
+                mark_terminal_key_handled();
+            }
             handle_terminal_key(this, event, window, cx);
             cx.stop_propagation();
         }))
@@ -452,8 +518,29 @@ fn handle_terminal_key(
                 }
                 return;
             }
+            // Ctrl+Shift+S: paste selection context into terminal
+            "s" | "S" => {
+                app.paste_selection_context(window, cx);
+                return;
+            }
+            // Ctrl+Shift+H: paste headers context into terminal
+            "h" | "H" => {
+                app.paste_headers_context(window, cx);
+                return;
+            }
+            // Ctrl+Shift+P: paste file path context into terminal
+            "p" | "P" => {
+                app.paste_file_path_context(window, cx);
+                return;
+            }
             _ => {}
         }
+    }
+
+    // Ctrl+K: open palette (global escape hatch — works even inside terminal)
+    if mods.control && !mods.shift && !mods.alt && (key == "k" || key == "K") {
+        app.show_palette(cx);
+        return;
     }
 
     // Control characters (Ctrl+letter) — Ctrl+C sends SIGINT here

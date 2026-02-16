@@ -3504,7 +3504,8 @@ fn test_cell_context_menu_ordering() {
     assert!(ids.contains(&"ctx-format-cells"), "Must include Format Cells");
 
     // Total count sanity
-    assert_eq!(ids.len(), 12, "Cell context menu should have 12 items (excluding separators)");
+    assert!(ids.contains(&"ctx-explain-ai"), "Must include Explain with AI");
+    assert_eq!(ids.len(), 13, "Cell context menu should have 13 items (excluding separators)");
 }
 
 /// Ctrl+Shift+* should find the contiguous region around the active cell.

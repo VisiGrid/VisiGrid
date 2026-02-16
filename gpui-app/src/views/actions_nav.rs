@@ -10,7 +10,7 @@ pub(crate) fn bind(
     el
         // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, window, cx| {
-            if this.terminal_has_focus(window) { cx.propagate(); return; }
+            if this.guard_terminal_focus(window, cx, "MoveUp") { return; }
             if this.open_menu.is_some() {
                 this.menu_highlight_prev(cx);
                 return;
@@ -75,7 +75,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &MoveDown, window, cx| {
-            if this.terminal_has_focus(window) { cx.propagate(); return; }
+            if this.guard_terminal_focus(window, cx, "MoveDown") { return; }
             if this.open_menu.is_some() {
                 this.menu_highlight_next(cx);
                 return;
@@ -139,7 +139,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &MoveLeft, window, cx| {
-            if this.terminal_has_focus(window) { cx.propagate(); return; }
+            if this.guard_terminal_focus(window, cx, "MoveLeft") { return; }
             if this.open_menu.is_some() {
                 this.menu_switch_prev(cx);
                 return;
@@ -192,7 +192,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &MoveRight, window, cx| {
-            if this.terminal_has_focus(window) { cx.propagate(); return; }
+            if this.guard_terminal_focus(window, cx, "MoveRight") { return; }
             if this.open_menu.is_some() {
                 this.menu_switch_next(cx);
                 return;
@@ -305,7 +305,7 @@ pub(crate) fn bind(
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &PageUp, window, cx| {
-            if this.terminal_has_focus(window) { cx.propagate(); return; }
+            if this.guard_terminal_focus(window, cx, "PageUp") { return; }
             // Validation dropdown takes priority
             if this.is_validation_dropdown_open() {
                 if let Some(state) = this.validation_dropdown.as_open_mut() {
@@ -317,7 +317,7 @@ pub(crate) fn bind(
             this.page_up(cx);
         }))
         .on_action(cx.listener(|this, _: &PageDown, window, cx| {
-            if this.terminal_has_focus(window) { cx.propagate(); return; }
+            if this.guard_terminal_focus(window, cx, "PageDown") { return; }
             // Validation dropdown takes priority
             if this.is_validation_dropdown_open() {
                 if let Some(state) = this.validation_dropdown.as_open_mut() {

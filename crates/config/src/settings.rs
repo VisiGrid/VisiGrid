@@ -269,10 +269,16 @@ pub struct Settings {
     #[serde(rename = "keyboard.modifierStyle")]
     pub modifier_style: ModifierStyle,
 
+    // Terminal
+    #[serde(rename = "terminal.bracketedPaste", default = "default_true")]
+    pub terminal_bracketed_paste: bool,
+
     // AI
     #[serde(rename = "ai", default)]
     pub ai: AISettings,
 }
+
+fn default_true() -> bool { true }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -300,6 +306,8 @@ impl Default for Settings {
             theme_source: ThemeSource::Auto,
             // Keyboard
             modifier_style: ModifierStyle::default(),
+            // Terminal
+            terminal_bracketed_paste: true,
             // AI
             ai: AISettings::default(),
         }

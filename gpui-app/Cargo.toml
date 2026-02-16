@@ -68,6 +68,9 @@ sha2 = { workspace = true }
 # Terminal emulator (PTY + ANSI grid)
 alacritty_terminal = "0.25"
 
+# AI CLI detection
+which = "7"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

@@ -33,6 +33,129 @@ pub use crate::formula_refs::{RefKey, FormulaRef, REF_COLORS};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 
+// ============================================================================
+// AI CLI detection
+// ============================================================================
+
+/// Detected AI CLI runtime.
+enum AiCli {
+    Claude, // `claude` — Anthropic Claude Code
+    Codex,  // `codex` — OpenAI Codex CLI
+    Gemini, // `gemini` — Google Gemini CLI
+}
+
+/// All known AI CLI variants, for iterating when generating context files.
+const ALL_AI_CLIS: &[AiCli] = &[AiCli::Claude, AiCli::Codex, AiCli::Gemini];
+
+impl AiCli {
+    fn binary(&self) -> &'static str {
+        match self {
+            AiCli::Claude => "claude",
+            AiCli::Codex => "codex",
+            AiCli::Gemini => "gemini",
+        }
+    }
+    fn display_name(&self) -> &'static str {
+        match self {
+            AiCli::Claude => "Claude Code",
+            AiCli::Codex => "Codex CLI",
+            AiCli::Gemini => "Gemini CLI",
+        }
+    }
+    fn install_hint(&self) -> &'static str {
+        match self {
+            AiCli::Claude => "npm i -g @anthropic-ai/claude-code",
+            AiCli::Codex => "npm i -g @openai/codex",
+            AiCli::Gemini => "npm i -g @google/gemini-cli",
+        }
+    }
+    /// The filename each CLI natively discovers for project context.
+    fn context_filename(&self) -> &'static str {
+        match self {
+            AiCli::Claude => "CLAUDE.md",
+            AiCli::Codex => "AGENTS.md",
+            AiCli::Gemini => "GEMINI.md",
+        }
+    }
+}
+
+/// Check PATH for known AI CLIs using the `which` crate.
+/// Respects user preference; falls back to auto-detect (Claude → Codex → Gemini).
+fn detect_ai_cli(pref: crate::settings::PreferredAiCli) -> Option<AiCli> {
+    use crate::settings::PreferredAiCli;
+
+    // If user has a preference, try that first
+    let preferred = match pref {
+        PreferredAiCli::Auto => None,
+        PreferredAiCli::Claude => Some(AiCli::Claude),
+        PreferredAiCli::Codex => Some(AiCli::Codex),
+        PreferredAiCli::Gemini => Some(AiCli::Gemini),
+    };
+    if let Some(cli) = preferred {
+        if which::which(cli.binary()).is_ok() {
+            return Some(cli);
+        }
+    }
+
+    // Auto-detect fallback
+    if which::which("claude").is_ok() {
+        return Some(AiCli::Claude);
+    }
+    if which::which("codex").is_ok() {
+        return Some(AiCli::Codex);
+    }
+    if which::which("gemini").is_ok() {
+        return Some(AiCli::Gemini);
+    }
+    None
+}
+
+/// Default content for the system-level AI context file (~/.config/visigrid/ai/).
+fn system_ai_context() -> &'static str {
+    r#"# VisiGrid — AI Context (System)
+
+You are working with data from VisiGrid, a native GPU-accelerated spreadsheet.
+
+## Key facts
+- File formats: .xlsx, .csv, .tsv, .ods, .json (VisiGrid native)
+- Formulas use `=` prefix, Excel-compatible syntax (96+ functions)
+- Cell references: A1-style (e.g., A1, B2:D10, Sheet2!A1)
+- Row/column indices are 1-based in the UI, 0-based internally
+
+## When the user pastes data
+- TSV blocks from VisiGrid are tab-separated, one row per line
+- Headers are auto-detected and listed as comments above the data
+- "Truncated" means the selection was capped; ask about the full range if needed
+
+## Best practices
+- Prefer formulas over manual calculations when the user needs repeatability
+- When generating CSV/TSV output, match the column order from the headers
+- If you need more data than what was pasted, ask the user to select a larger range
+  and use Ctrl+Shift+S (or the palette command "Paste Selection to Terminal")
+"#
+}
+
+/// Default content for the project-level AI context file (<workbook_dir>/.visigrid/).
+fn project_ai_context_template(workbook_name: &str) -> String {
+    format!(
+        r#"# VisiGrid — AI Context (Project)
+
+## Workbook: {}
+
+<!-- Add project-specific instructions below. -->
+<!-- This file is read by AI CLIs when launched from VisiGrid. -->
+<!-- Examples: column meanings, business rules, expected output formats. -->
+"#,
+        workbook_name
+    )
+}
+
+/// Shell-quote a string with single quotes (POSIX-safe).
+/// Handles embedded single quotes by ending the quote, escaping, and restarting.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Session-level counter for new workbook names.
 /// Increments each time a new workbook is created: Book1, Book2, Book3...
 static NEXT_BOOK_NUMBER: AtomicU32 = AtomicU32::new(1);
@@ -2870,6 +2993,27 @@ impl Spreadsheet {
         self.terminal_focus_handle.is_focused(window)
     }
 
+    /// Guard for grid actions: if terminal has focus, propagate and return true.
+    /// In debug builds, also asserts the seq-stamped focus invariant to catch
+    /// dual-dispatch bugs where both terminal and grid handle the same key event.
+    ///
+    /// Use: `if this.guard_terminal_focus(window, cx, "ActionName") { return; }`
+    #[inline]
+    pub fn guard_terminal_focus(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        _action_name: &str,
+    ) -> bool {
+        if self.terminal_has_focus(window) {
+            cx.propagate();
+            return true;
+        }
+        #[cfg(debug_assertions)]
+        crate::views::terminal_panel::assert_grid_not_conflicting(_action_name);
+        false
+    }
+
     /// Spawn a new PTY terminal session.
     pub fn spawn_terminal(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         use crate::terminal::pty::{TerminalEventProxy, spawn_pty};
@@ -2964,7 +3108,8 @@ impl Spreadsheet {
                         }
 
                         if should_notify {
-                            let _ = this.update(cx, |_, cx| {
+                            let _ = this.update(cx, |app, cx| {
+                                app.terminal.bump_output_epoch();
                                 cx.notify();
                             });
                         }
@@ -4281,11 +4426,757 @@ impl Spreadsheet {
             CommandId::OpenTerminal => self.open_terminal(window, cx),
             CommandId::VerifyIntegrity => self.verify_integrity(cx),
             CommandId::Convert => self.show_convert_picker(window, cx),
+
+            // AI in Terminal
+            CommandId::LaunchAI => self.launch_ai_terminal(window, cx),
+            CommandId::PasteSelectionToTerminal => {
+                crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::PasteContext);
+                self.paste_selection_context(window, cx);
+            }
+            CommandId::PasteHeadersToTerminal => {
+                crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::PasteContext);
+                self.paste_headers_context(window, cx);
+            }
+            CommandId::PasteFilePathToTerminal => {
+                crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::PasteContext);
+                self.paste_file_path_context(window, cx);
+            }
+            CommandId::PasteVisiGridContext => {
+                crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::PasteContext);
+                self.paste_full_context(window, cx);
+            }
+            CommandId::GenerateAiContextFiles => {
+                crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::GenerateContextFiles);
+                self.generate_ai_context_files(window, cx);
+            }
+            CommandId::OpenAiContextFolder => self.open_ai_context_folder(window, cx),
+            CommandId::AiExplainSelection => self.ai_explain_selection(window, cx),
+            CommandId::OpenAiMetrics => self.open_ai_metrics(window, cx),
         }
 
         // Ensure title reflects any state changes from this command.
         // The flag + cache debounce makes this cheap for non-state-changing commands.
         self.request_title_refresh(cx);
+    }
+
+    // =========================================================================
+    // AI in Terminal
+    // =========================================================================
+
+    /// Launch a detected AI CLI in the terminal panel.
+    pub fn launch_ai_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pref = crate::settings::user_settings(cx).terminal.preferred_ai_cli;
+        let Some(cli) = detect_ai_cli(pref) else {
+            let mut msg = "No AI CLI found. Install one: npm i -g @anthropic-ai/claude-code | @openai/codex | @google/gemini-cli".to_string();
+            crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::Error { category: "no_cli" });
+            // One-time extra hint
+            if !user_settings(cx).is_tip_dismissed(TipId::AiExplainHint) {
+                msg.push_str(" Then run \"Generate AI Context Files\" to set up persistent instructions.");
+                update_user_settings(cx, |s| s.dismiss_tip(TipId::AiExplainHint));
+            }
+            self.status_message = Some(msg);
+            cx.notify();
+            return;
+        };
+
+        self.open_terminal(window, cx);
+        self.terminal.write_to_pty(b"\x15"); // Ctrl+U clear line
+
+        // Inject contract: printf context header so the user (and their scrollback) knows
+        // what's available. This runs as shell commands before the AI CLI starts.
+        let wb = self.workbook.read(cx);
+        let sheet = wb.active_sheet();
+        let (_, _, end_row, end_col) = crate::ai::find_used_range(sheet);
+        let sheet_name = wb.active_sheet().name.clone();
+        drop(wb);
+
+        let file_hint = match &self.current_file {
+            Some(p) => p.display().to_string(),
+            None => "(unsaved)".to_string(),
+        };
+        let ((top, left), (bottom, right)) = self.selection_range();
+        let sel_rows = bottom - top + 1;
+        let sel_cols = right - left + 1;
+
+        // Use printf %s to avoid shell interpretation of file paths / sheet names
+        let contract = format!(
+            "printf '\\n─── VisiGrid \\u2192 %s ───\\nFile: %s  Sheet: %s  Used: {}x{}  Sel: {}x{}\\nCtrl+Shift+S = paste selection | H = headers | P = file path\\n\\n' {} {} {}\n",
+            end_row + 1, end_col + 1, sel_rows, sel_cols,
+            shell_quote(cli.display_name()),
+            shell_quote(&file_hint),
+            shell_quote(&sheet_name),
+        );
+        self.terminal.write_to_pty(contract.as_bytes());
+
+        // cd to workbook directory so the CLI discovers root context files
+        // (CLAUDE.md, AGENTS.md, GEMINI.md)
+        if let Some(ref p) = self.current_file {
+            if let Some(dir) = p.parent() {
+                let cd_cmd = format!("cd {} && ", shell_quote(&dir.display().to_string()));
+                self.terminal.write_to_pty(cd_cmd.as_bytes());
+            }
+        }
+        self.terminal.write_to_pty(cli.binary().as_bytes());
+        self.terminal.write_to_pty(b"\n");
+        crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::LaunchAi { cli: cli.binary() });
+        self.status_message = Some(format!(
+            "Starting {}… If it needs login, run: {} login",
+            cli.display_name(), cli.binary()
+        ));
+        cx.notify();
+    }
+
+    /// Write text to the terminal PTY, optionally wrapped in bracketed paste mode.
+    /// Bracketed paste prevents shells from executing newlines as commands.
+    /// Controlled by the `terminal.bracketed_paste` user setting (default ON).
+    fn write_to_pty_bracketed(&mut self, text: &str, cx: &Context<Self>) {
+        let use_bracketed = crate::settings::user_settings(cx)
+            .terminal
+            .bracketed_paste
+            .as_value()
+            .copied()
+            .unwrap_or(true);
+
+        if use_bracketed {
+            self.terminal.write_to_pty(b"\x1b[200~");
+        }
+        self.terminal.write_to_pty(text.as_bytes());
+        if use_bracketed {
+            self.terminal.write_to_pty(b"\x1b[201~");
+        }
+    }
+
+    /// Max rows/cols to paste into terminal to avoid UI freeze.
+    const PASTE_MAX_ROWS: usize = 200;
+    const PASTE_MAX_COLS: usize = 50;
+    const PASTE_MAX_CHARS: usize = 50_000;
+
+    /// Paste the current selection as delimited TSV into the terminal PTY.
+    pub fn paste_selection_context(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal.visible || self.terminal.term.is_none() {
+            self.status_message = Some("Open the terminal first.".into());
+            cx.notify();
+            return;
+        }
+
+        let wb = self.workbook.read(cx);
+        let sheet = wb.active_sheet();
+        let ((top_row, left_col), (bottom_row, right_col)) = self.selection_range();
+
+        let sel_rows = bottom_row - top_row + 1;
+        let sel_cols = right_col - left_col + 1;
+        let capped_rows = sel_rows.min(Self::PASTE_MAX_ROWS);
+        let capped_cols = sel_cols.min(Self::PASTE_MAX_COLS);
+        let truncated = capped_rows < sel_rows || capped_cols < sel_cols;
+
+        let mut lines = Vec::new();
+        let mut total_chars = 0usize;
+        let mut char_truncated = false;
+
+        for r in top_row..top_row + capped_rows {
+            let mut cells = Vec::new();
+            for c in left_col..left_col + capped_cols {
+                cells.push(sheet.get_display(r, c));
+            }
+            let line = cells.join("\t");
+            total_chars += line.len() + 1;
+            if total_chars > Self::PASTE_MAX_CHARS {
+                char_truncated = true;
+                break;
+            }
+            lines.push(line);
+        }
+        let tsv = lines.join("\n");
+
+        if tsv.trim().is_empty() {
+            self.status_message = Some("Selection is empty.".into());
+            cx.notify();
+            return;
+        }
+
+        // Build delimited block
+        let mut block = String::new();
+        block.push_str("# VisiGrid selection (TSV)\n");
+        if truncated || char_truncated {
+            block.push_str(&format!(
+                "# Truncated: showing {}×{} of {}×{} (cap: {}×{} or {}k chars)\n",
+                capped_rows.min(lines.len()), capped_cols,
+                sel_rows, sel_cols,
+                Self::PASTE_MAX_ROWS, Self::PASTE_MAX_COLS, Self::PASTE_MAX_CHARS / 1000
+            ));
+            block.push_str("# Tip: export to file with vgrid export, then paste the path.\n");
+        }
+        block.push_str(&tsv);
+        block.push('\n');
+
+        self.write_to_pty_bracketed(&block, cx);
+        let actual_rows = lines.len();
+        let mut msg = format!(
+            "Pasted {}×{} selection into terminal.{}",
+            actual_rows, capped_cols,
+            if truncated || char_truncated { " (truncated)" } else { "" }
+        );
+        self.maybe_append_ai_paste_tip(&mut msg, cx);
+        self.status_message = Some(msg);
+        cx.notify();
+    }
+
+    /// Paste detected header row into the terminal PTY.
+    pub fn paste_headers_context(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal.visible || self.terminal.term.is_none() {
+            self.status_message = Some("Open the terminal first.".into());
+            cx.notify();
+            return;
+        }
+
+        let wb = self.workbook.read(cx);
+        let sheet = wb.active_sheet();
+        let (start_row, start_col, end_row, end_col) = crate::ai::find_used_range(sheet);
+
+        // Find the header row: start from top of used range, scan down up to 20 rows
+        let mut header_row = start_row;
+        for r in start_row..(start_row + 20).min(end_row + 1) {
+            let row_vals: Vec<String> = (start_col..=end_col)
+                .map(|c| sheet.get_display(r, c))
+                .collect();
+            if crate::ai::looks_like_header_row(&row_vals) {
+                header_row = r;
+                break;
+            }
+        }
+
+        let headers: Vec<String> = (start_col..=end_col)
+            .map(|c| sheet.get_display(header_row, c))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if headers.is_empty() {
+            self.status_message = Some("No headers found.".into());
+            cx.notify();
+            return;
+        }
+
+        let block = format!(
+            "# VisiGrid headers (row {})\n{}\n",
+            header_row + 1, // 1-indexed for display
+            headers.join(", ")
+        );
+        self.write_to_pty_bracketed(&block, cx);
+        let mut msg = format!(
+            "Pasted {} headers (row {}) into terminal.",
+            headers.len(), header_row + 1
+        );
+        self.maybe_append_ai_paste_tip(&mut msg, cx);
+        self.status_message = Some(msg);
+        cx.notify();
+    }
+
+    /// Paste the current workbook file path into the terminal PTY.
+    pub fn paste_file_path_context(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal.visible || self.terminal.term.is_none() {
+            self.status_message = Some("Open the terminal first.".into());
+            cx.notify();
+            return;
+        }
+
+        let path = match &self.current_file {
+            Some(p) => p.display().to_string(),
+            None => {
+                self.status_message = Some("Workbook not saved yet — no file path.".into());
+                cx.notify();
+                return;
+            }
+        };
+
+        let block = format!("# VisiGrid workbook path\n{}\n", path);
+        self.write_to_pty_bracketed(&block, cx);
+        let mut msg = "Pasted file path into terminal.".to_string();
+        self.maybe_append_ai_paste_tip(&mut msg, cx);
+        self.status_message = Some(msg);
+        cx.notify();
+    }
+
+    /// Paste full VisiGrid context into the terminal in one shot:
+    /// file path, sheet name, selection shape, headers, and selection TSV (capped).
+    pub fn paste_full_context(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal.visible || self.terminal.term.is_none() {
+            self.status_message = Some("Open the terminal first.".into());
+            cx.notify();
+            return;
+        }
+
+        let wb = self.workbook.read(cx);
+        let sheet = wb.active_sheet();
+        let sheet_name = sheet.name.clone();
+        let (used_start_row, used_start_col, used_end_row, used_end_col) =
+            crate::ai::find_used_range(sheet);
+
+        // Detect headers
+        let mut header_row = used_start_row;
+        for r in used_start_row..(used_start_row + 20).min(used_end_row + 1) {
+            let row_vals: Vec<String> = (used_start_col..=used_end_col)
+                .map(|c| sheet.get_display(r, c))
+                .collect();
+            if crate::ai::looks_like_header_row(&row_vals) {
+                header_row = r;
+                break;
+            }
+        }
+        let headers: Vec<String> = (used_start_col..=used_end_col)
+            .map(|c| sheet.get_display(header_row, c))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Extract selection TSV (capped)
+        let ((top_row, left_col), (bottom_row, right_col)) = self.selection_range();
+        let sel_rows = bottom_row - top_row + 1;
+        let sel_cols = right_col - left_col + 1;
+        let capped_rows = sel_rows.min(Self::PASTE_MAX_ROWS);
+        let capped_cols = sel_cols.min(Self::PASTE_MAX_COLS);
+        let truncated = capped_rows < sel_rows || capped_cols < sel_cols;
+
+        let mut lines = Vec::new();
+        let mut total_chars = 0usize;
+        let mut char_truncated = false;
+        for r in top_row..top_row + capped_rows {
+            let mut cells = Vec::new();
+            for c in left_col..left_col + capped_cols {
+                cells.push(sheet.get_display(r, c));
+            }
+            let line = cells.join("\t");
+            total_chars += line.len() + 1;
+            if total_chars > Self::PASTE_MAX_CHARS {
+                char_truncated = true;
+                break;
+            }
+            lines.push(line);
+        }
+        drop(wb);
+
+        let tsv = lines.join("\n");
+        let actual_rows = lines.len();
+
+        // Build combined block
+        let mut block = String::new();
+        block.push_str("# VisiGrid context\n");
+
+        // File path
+        if let Some(p) = &self.current_file {
+            block.push_str(&format!("# File: {}\n", p.display()));
+        }
+
+        // Sheet + used range
+        block.push_str(&format!(
+            "# Sheet: \"{}\"  Used range: {}x{}\n",
+            sheet_name, used_end_row + 1, used_end_col + 1,
+        ));
+
+        // Headers
+        if !headers.is_empty() {
+            block.push_str(&format!(
+                "# Headers (row {}): {}\n",
+                header_row + 1,
+                headers.join(", ")
+            ));
+        }
+
+        // Selection info
+        block.push_str(&format!(
+            "# Selection: {}x{} starting at {}\n",
+            sel_rows, sel_cols,
+            crate::ai::cell_ref(top_row, left_col),
+        ));
+
+        if truncated || char_truncated {
+            block.push_str(&format!(
+                "# Truncated: showing {}x{} of {}x{} (cap: {}x{} or {}k chars)\n",
+                actual_rows, capped_cols,
+                sel_rows, sel_cols,
+                Self::PASTE_MAX_ROWS, Self::PASTE_MAX_COLS, Self::PASTE_MAX_CHARS / 1000
+            ));
+        }
+
+        // TSV data
+        if !tsv.trim().is_empty() {
+            block.push_str(&tsv);
+            block.push('\n');
+        }
+
+        self.write_to_pty_bracketed(&block, cx);
+        self.status_message = Some(format!(
+            "Pasted full context ({}x{}{}) into terminal.",
+            actual_rows, capped_cols,
+            if truncated || char_truncated { ", truncated" } else { "" }
+        ));
+        cx.notify();
+    }
+
+    /// Generate AI context files for all supported CLIs.
+    ///
+    /// Creates two layers:
+    /// - System: `~/.config/visigrid/ai/{CLAUDE.md, AGENTS.md, GEMINI.md}` (always)
+    /// - Project: `<workbook_dir>/.visigrid/{CLAUDE.md, AGENTS.md, GEMINI.md}` (if saved)
+    /// - Root stubs: `<workbook_dir>/{CLAUDE.md, AGENTS.md, GEMINI.md}` (if saved + writable)
+    pub fn generate_ai_context_files(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        use std::fs;
+
+        let mut created = Vec::new();
+        let mut skipped = 0u32;
+        let mut project_error: Option<String> = None;
+
+        // 1. System-level files (always created, workbook-independent)
+        let system_dir = Self::system_ai_config_dir();
+        if let Err(e) = fs::create_dir_all(&system_dir) {
+            self.status_message = Some(format!("Failed to create {}: {}", system_dir.display(), e));
+            cx.notify();
+            return;
+        }
+        let system_content = system_ai_context();
+        for cli in ALL_AI_CLIS {
+            let path = system_dir.join(cli.context_filename());
+            if !path.exists() {
+                if let Err(e) = fs::write(&path, system_content) {
+                    log::warn!("Failed to write {}: {}", path.display(), e);
+                } else {
+                    created.push(format!("~/.config/visigrid/ai/{}", cli.context_filename()));
+                }
+            } else {
+                skipped += 1;
+            }
+        }
+
+        // 2. Project-level files (only if workbook is saved)
+        if let Some(file_path) = &self.current_file.clone() {
+            if let Some(workbook_dir) = file_path.parent() {
+                let project_dir = workbook_dir.join(".visigrid");
+                match fs::create_dir_all(&project_dir) {
+                    Err(e) => {
+                        crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::Error { category: "permission_denied" });
+                        project_error = Some(format!(
+                            "Cannot write project context in {}: {}. Use Save As to move the workbook.",
+                            workbook_dir.display(), e
+                        ));
+                    }
+                    Ok(()) => {
+                        let wb_name = self.document_meta.display_name.clone();
+                        let project_content = project_ai_context_template(&wb_name);
+                        for cli in ALL_AI_CLIS {
+                            let path = project_dir.join(cli.context_filename());
+                            if !path.exists() {
+                                if let Err(e) = fs::write(&path, &project_content) {
+                                    log::warn!("Failed to write {}: {}", path.display(), e);
+                                    if project_error.is_none() {
+                                        project_error = Some(format!(
+                                            "Cannot write to {}: {} (permission denied?)",
+                                            project_dir.display(), e
+                                        ));
+                                    }
+                                } else {
+                                    created.push(format!(".visigrid/{}", cli.context_filename()));
+                                }
+                            } else {
+                                skipped += 1;
+                            }
+                        }
+
+                        // 3. Root stubs — tiny pointers so CLIs discover context at repo root
+                        for cli in ALL_AI_CLIS {
+                            let root_path = workbook_dir.join(cli.context_filename());
+                            if !root_path.exists() {
+                                let stub = format!(
+                                    "<!-- This is a stub generated by VisiGrid. Edit .visigrid/{f} instead. -->\n\
+                                     <!-- {name} reads this file for project context. -->\n\
+                                     <!-- Do not put secrets here — this file may be committed to version control. -->\n\n\
+                                     See [.visigrid/{f}](.visigrid/{f}) for project instructions.\n",
+                                    f = cli.context_filename(),
+                                    name = cli.display_name(),
+                                );
+                                if let Err(e) = fs::write(&root_path, &stub) {
+                                    log::warn!("Failed to write root stub {}: {}", root_path.display(), e);
+                                } else {
+                                    created.push(cli.context_filename().to_string());
+                                }
+                            } else {
+                                skipped += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Unsaved workbook: system files created, project files skipped with clear message
+            project_error = Some(
+                "Save the workbook first to create project-level context files.".into()
+            );
+        }
+
+        // Build status message
+        let mut msg = if !created.is_empty() {
+            format!(
+                "Created {}: {}",
+                if created.len() == 1 { "1 file".to_string() } else { format!("{} files", created.len()) },
+                created.join(", ")
+            )
+        } else if skipped > 0 {
+            "AI context files already exist.".into()
+        } else {
+            String::new()
+        };
+
+        if let Some(err) = project_error {
+            if !msg.is_empty() {
+                msg.push_str(". ");
+            }
+            msg.push_str(&err);
+        }
+
+        if msg.is_empty() {
+            msg = "No files created.".into();
+        }
+
+        self.status_message = Some(msg);
+        cx.notify();
+    }
+
+    /// Open the project-level AI context folder in the system file manager.
+    /// Falls back to the system-level folder if no workbook is saved.
+    /// If the file manager can't open, copies path to clipboard as fallback.
+    pub fn open_ai_context_folder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        use std::fs;
+
+        let folder = if let Some(file_path) = &self.current_file {
+            if let Some(workbook_dir) = file_path.parent() {
+                let project_dir = workbook_dir.join(".visigrid");
+                if !project_dir.exists() {
+                    let _ = fs::create_dir_all(&project_dir);
+                }
+                project_dir
+            } else {
+                Self::system_ai_config_dir()
+            }
+        } else {
+            Self::system_ai_config_dir()
+        };
+
+        // Use platform file manager
+        #[cfg(target_os = "linux")]
+        let cmd = "xdg-open";
+        #[cfg(target_os = "macos")]
+        let cmd = "open";
+        #[cfg(target_os = "windows")]
+        let cmd = "explorer";
+
+        match std::process::Command::new(cmd).arg(&folder).spawn() {
+            Ok(_) => {
+                self.status_message = Some(format!("Opened {}", folder.display()));
+            }
+            Err(_) => {
+                crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::Error { category: "open_folder_failed" });
+                // Fallback: copy path to clipboard
+                let path_str = folder.display().to_string();
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(path_str.clone()));
+                self.status_message = Some(format!(
+                    "Could not open file manager. Path copied to clipboard: {}", path_str
+                ));
+            }
+        }
+        cx.notify();
+    }
+
+    fn system_ai_config_dir() -> std::path::PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("visigrid")
+            .join("ai")
+    }
+
+    /// Open the AI metrics JSON file in the system file manager.
+    /// Falls back to copying the path to clipboard if the file manager fails.
+    pub fn open_ai_metrics(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // Flush any buffered metrics first so the file is up to date
+        crate::ai_metrics::flush();
+
+        let path = crate::ai_metrics::metrics_path();
+        if !path.exists() {
+            self.status_message = Some("No AI metrics recorded yet.".into());
+            cx.notify();
+            return;
+        }
+
+        #[cfg(target_os = "linux")]
+        let cmd = "xdg-open";
+        #[cfg(target_os = "macos")]
+        let cmd = "open";
+        #[cfg(target_os = "windows")]
+        let cmd = "explorer";
+
+        match std::process::Command::new(cmd).arg(&path).spawn() {
+            Ok(_) => {
+                self.status_message = Some(format!("Opened {}", path.display()));
+            }
+            Err(_) => {
+                let path_str = path.display().to_string();
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(path_str.clone()));
+                self.status_message = Some(format!(
+                    "Could not open file. Path copied to clipboard: {}", path_str
+                ));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Orchestration: launch AI CLI (if needed), paste full context, and append an analysis prompt.
+    ///
+    /// This is the "instant value" command — one keystroke from data to insight.
+    pub fn ai_explain_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pref = crate::settings::user_settings(cx).terminal.preferred_ai_cli;
+
+        // Check if AI CLI is available before doing anything
+        if detect_ai_cli(pref).is_none() {
+            crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::Error { category: "no_cli" });
+            self.status_message = Some(
+                "No AI CLI found. Install one: npm i -g @anthropic-ai/claude-code | @openai/codex | @google/gemini-cli".into()
+            );
+            cx.notify();
+            return;
+        }
+
+        // Check if we have a non-empty selection worth explaining
+        let wb = self.workbook.read(cx);
+        let sheet = wb.active_sheet();
+        let ((top, left), (bottom, right)) = self.selection_range();
+        let has_data = (top..=bottom).any(|r| {
+            (left..=right).any(|c| !sheet.get_display(r, c).is_empty())
+        });
+        drop(wb);
+
+        if !has_data {
+            self.status_message = Some("Select cells with data first.".into());
+            cx.notify();
+            return;
+        }
+
+        crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::ExplainSelection);
+
+        // Ensure AI is running in terminal (launches if not already)
+        let ai_already_running = self.terminal.visible && self.terminal.term.is_some();
+        if !ai_already_running {
+            // Snapshot the output epoch before launch so we can detect new output
+            let epoch_before = self.terminal.output_epoch();
+            self.launch_ai_terminal(window, cx);
+            // Wait for the CLI to produce output (detected via epoch change).
+            // O(1) check — no grid lock. Timeout after 3s.
+            let entity = cx.entity().downgrade();
+            cx.spawn(async move |_, cx| {
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(3);
+                let poll_interval = std::time::Duration::from_millis(100);
+
+                loop {
+                    smol::Timer::after(poll_interval).await;
+
+                    let ready = entity.update(cx, |this: &mut Self, _cx| {
+                        this.terminal.output_epoch() != epoch_before
+                    }).unwrap_or(false);
+
+                    if ready || start.elapsed() >= timeout {
+                        break;
+                    }
+                }
+
+                let _ = entity.update(cx, |this: &mut Self, cx| {
+                    this.paste_full_context_with_prompt(cx);
+                });
+            }).detach();
+        } else {
+            // Terminal already running — paste immediately
+            self.paste_full_context_with_prompt(cx);
+        }
+    }
+
+    /// Paste full VisiGrid context + analysis prompt into the terminal.
+    fn paste_full_context_with_prompt(&mut self, cx: &mut Context<Self>) {
+        if !self.terminal.visible || self.terminal.term.is_none() {
+            return;
+        }
+
+        // Build the context block (reuse paste_full_context logic inline)
+        let wb = self.workbook.read(cx);
+        let sheet = wb.active_sheet();
+        let sheet_name = sheet.name.clone();
+        let (used_start_row, used_start_col, used_end_row, used_end_col) =
+            crate::ai::find_used_range(sheet);
+
+        // Detect headers
+        let mut header_row = used_start_row;
+        for r in used_start_row..(used_start_row + 20).min(used_end_row + 1) {
+            let row_vals: Vec<String> = (used_start_col..=used_end_col)
+                .map(|c| sheet.get_display(r, c))
+                .collect();
+            if crate::ai::looks_like_header_row(&row_vals) {
+                header_row = r;
+                break;
+            }
+        }
+        let headers: Vec<String> = (used_start_col..=used_end_col)
+            .map(|c| sheet.get_display(header_row, c))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Selection TSV (capped)
+        let ((top_row, left_col), (bottom_row, right_col)) = self.selection_range();
+        let sel_rows = bottom_row - top_row + 1;
+        let sel_cols = right_col - left_col + 1;
+        let capped_rows = sel_rows.min(Self::PASTE_MAX_ROWS);
+        let capped_cols = sel_cols.min(Self::PASTE_MAX_COLS);
+
+        let mut lines = Vec::new();
+        let mut total_chars = 0usize;
+        for r in top_row..top_row + capped_rows {
+            let mut cells = Vec::new();
+            for c in left_col..left_col + capped_cols {
+                cells.push(sheet.get_display(r, c));
+            }
+            let line = cells.join("\t");
+            total_chars += line.len() + 1;
+            if total_chars > Self::PASTE_MAX_CHARS {
+                break;
+            }
+            lines.push(line);
+        }
+        drop(wb);
+
+        let tsv = lines.join("\n");
+
+        // Build combined block with analysis prompt
+        let mut block = String::new();
+        block.push_str("# VisiGrid context\n");
+        if let Some(p) = &self.current_file {
+            block.push_str(&format!("# File: {}\n", p.display()));
+        }
+        block.push_str(&format!(
+            "# Sheet: \"{}\"  Used range: {}x{}\n",
+            sheet_name, used_end_row + 1, used_end_col + 1,
+        ));
+        if !headers.is_empty() {
+            block.push_str(&format!(
+                "# Headers (row {}): {}\n",
+                header_row + 1, headers.join(", ")
+            ));
+        }
+        block.push_str(&format!(
+            "# Selection: {}x{} starting at {}\n",
+            sel_rows, sel_cols, crate::ai::cell_ref(top_row, left_col),
+        ));
+        if !tsv.trim().is_empty() {
+            block.push_str(&tsv);
+            block.push('\n');
+        }
+        block.push_str("\nSummarize what this data shows. Detect anomalies, outliers, or suspicious patterns. Suggest formulas or next steps to validate it.\n");
+
+        self.write_to_pty_bracketed(&block, cx);
+        self.status_message = Some("Sent selection to AI for analysis.".into());
+        cx.notify();
     }
 
     /// Open terminal panel (show + focus, never toggles/hides).
@@ -4298,6 +5189,13 @@ impl Spreadsheet {
             self.spawn_terminal(window, cx);
         } else {
             self.terminal.ensure_cwd();
+        }
+        // One-time tip: suggest AI features when terminal first opens
+        if !user_settings(cx).is_tip_dismissed(TipId::AiTerminal) {
+            self.status_message = Some(
+                "Tip: Ctrl+K \u{2192} \"AI: Explain Selection\" to analyze data with an AI CLI.".into()
+            );
+            update_user_settings(cx, |s| s.dismiss_tip(TipId::AiTerminal));
         }
         window.focus(&self.terminal_focus_handle, cx);
         cx.notify();
@@ -5402,7 +6300,7 @@ impl Spreadsheet {
     /// 3. For text-input modals, also add cursor handling in MoveLeft/MoveRight handlers
     #[inline]
     pub fn should_block_grid_navigation(&self) -> bool {
-        self.mode.is_overlay() || self.bottom_panel_visible
+        self.mode.is_overlay()
     }
 
     // =========================================================================
@@ -6131,6 +7029,15 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// One-time hint: "AI: Explain Selection auto-pastes everything."
+    /// Appended to the first paste status message, then dismissed.
+    fn maybe_append_ai_paste_tip(&self, msg: &mut String, cx: &mut Context<Self>) {
+        if !user_settings(cx).is_tip_dismissed(TipId::AiPasteShortcut) {
+            msg.push_str(" Tip: \"AI: Explain Selection\" auto-pastes everything.");
+            update_user_settings(cx, |s| s.dismiss_tip(TipId::AiPasteShortcut));
+        }
+    }
+
     /// Reset all tips (for Preferences UI)
     pub fn reset_all_tips(&mut self, cx: &mut Context<Self>) {
         update_user_settings(cx, |settings| {
@@ -6805,14 +7712,8 @@ impl Render for Spreadsheet {
         self.cached_window_bounds = Some(window.window_bounds());
 
         // Modal focus guard: when an overlay modal is open, grid navigation should be blocked.
-        // This assertion catches bugs where a modal is showing but mode isn't set correctly.
-        // If this fires, either lua_console.visible is true without matching mode, or
-        // you added a new modal that needs to be included in should_block_grid_navigation().
-        debug_assert!(
-            !self.bottom_panel_visible || self.should_block_grid_navigation(),
-            "Bottom panel visible but grid navigation not blocked - mode is {:?}",
-            self.mode
-        );
+        // Note: bottom_panel_visible no longer blocks grid nav — per-action terminal_has_focus()
+        // guards in actions_nav.rs and actions_edit.rs handle terminal focus routing.
 
         // Update grid layout cache for hit-testing.
         // top_chrome_height / bottom_chrome_height are the single source of truth;

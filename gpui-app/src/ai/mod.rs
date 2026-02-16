@@ -9,5 +9,6 @@ mod client;
 pub use context::{
     build_ai_context, cell_ref, range_ref,
     find_current_region, find_used_range,
+    looks_like_header_row,
 };
 pub use client::{ask_ai, analyze, AskError, AnalyzeResponse, ANALYZE_CONTRACT, INSERT_FORMULA_CONTRACT, DIFF_EXPLAIN_CONTRACT};
