@@ -2178,6 +2178,187 @@ pub fn save_workbook_full(
     Ok(())
 }
 
+// ============================================================================
+// Lightweight inspect — query SQLite directly without loading workbook
+// ============================================================================
+
+/// Sheet metadata returned by lightweight inspect.
+#[derive(Debug, serde::Serialize)]
+pub struct SheetMetadata {
+    pub sheet_idx: usize,
+    pub name: String,
+    pub non_empty_cells: usize,
+    pub max_row: usize,
+    pub max_col: usize,
+}
+
+/// A cell value returned by lightweight inspect (no formatting, no recomputation).
+#[derive(Debug)]
+pub struct LightweightCell {
+    pub row: usize,
+    pub col: usize,
+    pub value: String,
+    pub value_type: String,
+}
+
+/// Query sheet metadata directly from SQLite without loading cells into memory.
+/// Returns (sheet_idx, name, non_empty_cells, max_row, max_col) per sheet.
+pub fn inspect_sheets_lightweight(path: &Path) -> Result<Vec<SheetMetadata>, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Check if this is a multi-sheet format
+    let has_sheets_table = conn
+        .prepare("SELECT sheet_idx FROM sheets LIMIT 1")
+        .is_ok();
+
+    if !has_sheets_table {
+        // Legacy single-sheet format — query cells table directly
+        let mut stmt = conn.prepare(
+            "SELECT COUNT(*), COALESCE(MAX(row) + 1, 0), COALESCE(MAX(col) + 1, 0) \
+             FROM cells WHERE value_type != 0"
+        ).map_err(|e| e.to_string())?;
+
+        let (cnt, max_row, max_col): (usize, usize, usize) = stmt.query_row([], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, i64>(2)? as usize,
+            ))
+        }).map_err(|e| e.to_string())?;
+
+        return Ok(vec![SheetMetadata {
+            sheet_idx: 0,
+            name: "Sheet1".to_string(),
+            non_empty_cells: cnt,
+            max_row,
+            max_col,
+        }]);
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT s.sheet_idx, s.name, \
+                COALESCE(c.cnt, 0), \
+                COALESCE(c.max_row + 1, 0), \
+                COALESCE(c.max_col + 1, 0) \
+         FROM sheets s \
+         LEFT JOIN ( \
+             SELECT sheet_idx, COUNT(*) as cnt, MAX(row) as max_row, MAX(col) as max_col \
+             FROM cells WHERE value_type != 0 \
+             GROUP BY sheet_idx \
+         ) c ON s.sheet_idx = c.sheet_idx \
+         ORDER BY s.sheet_idx"
+    ).map_err(|e| e.to_string())?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(SheetMetadata {
+            sheet_idx: row.get::<_, i64>(0)? as usize,
+            name: row.get::<_, String>(1)?,
+            non_empty_cells: row.get::<_, i64>(2)? as usize,
+            max_row: row.get::<_, i64>(3)? as usize,
+            max_col: row.get::<_, i64>(4)? as usize,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(result)
+}
+
+/// Query cells in a range directly from SQLite without loading the full workbook.
+/// Returns raw cell values (no formula recomputation, no formatting).
+/// For formulas, uses the cached value_num/value_text from the last desktop save.
+pub fn inspect_range_lightweight(
+    path: &Path,
+    sheet_idx: usize,
+    start_row: usize,
+    start_col: usize,
+    end_row: usize,
+    end_col: usize,
+) -> Result<Vec<LightweightCell>, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare(
+        "SELECT row, col, value_type, value_num, value_text \
+         FROM cells \
+         WHERE sheet_idx = ?1 AND row BETWEEN ?2 AND ?3 AND col BETWEEN ?4 AND ?5 \
+         ORDER BY row, col"
+    ).map_err(|e| e.to_string())?;
+
+    let rows = stmt.query_map(
+        params![sheet_idx as i64, start_row as i64, end_row as i64, start_col as i64, end_col as i64],
+        |row| {
+            let r = row.get::<_, i64>(0)? as usize;
+            let c = row.get::<_, i64>(1)? as usize;
+            let vtype = row.get::<_, i32>(2)?;
+            let vnum = row.get::<_, Option<f64>>(3)?;
+            let vtext = row.get::<_, Option<String>>(4)?;
+
+            let (value, type_str) = match vtype {
+                TYPE_NUMBER => {
+                    let v = vnum.map(|n| {
+                        if n.fract() == 0.0 { (n as i64).to_string() } else { n.to_string() }
+                    }).unwrap_or_default();
+                    (v, "number")
+                }
+                TYPE_TEXT => (vtext.unwrap_or_default(), "text"),
+                TYPE_FORMULA => {
+                    // Use cached computed value: prefer value_num, fall back to value_text
+                    let v = if let Some(n) = vnum {
+                        if n.fract() == 0.0 { (n as i64).to_string() } else { n.to_string() }
+                    } else {
+                        vtext.unwrap_or_default()
+                    };
+                    (v, "formula")
+                }
+                _ => (String::new(), "empty"),
+            };
+
+            Ok(LightweightCell {
+                row: r,
+                col: c,
+                value,
+                value_type: type_str.to_string(),
+            })
+        }
+    ).map_err(|e| e.to_string())?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        let cell = row.map_err(|e| e.to_string())?;
+        if cell.value_type != "empty" {
+            result.push(cell);
+        }
+    }
+    Ok(result)
+}
+
+/// Query total cell count directly from SQLite without loading the workbook.
+/// Returns (sheet_count, total_non_empty_cells).
+pub fn inspect_workbook_lightweight(path: &Path) -> Result<(usize, usize), String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    let has_sheets_table = conn
+        .prepare("SELECT sheet_idx FROM sheets LIMIT 1")
+        .is_ok();
+
+    let sheet_count: usize = if has_sheets_table {
+        conn.query_row("SELECT COUNT(*) FROM sheets", [], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())? as usize
+    } else {
+        1
+    };
+
+    let cell_count: usize = conn.query_row(
+        "SELECT COUNT(*) FROM cells WHERE value_type != 0",
+        [],
+        |row| row.get::<_, i64>(0),
+    ).map_err(|e| e.to_string())? as usize;
+
+    Ok((sheet_count, cell_count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

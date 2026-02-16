@@ -19,7 +19,7 @@ use visigrid_cli::diff;
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -837,6 +837,12 @@ Formula evaluation (--calc):
         /// Output is always JSON. Exit 1 if any formula errors.
         #[arg(long)]
         calc: Vec<String>,
+
+        /// Lightweight mode: query SQLite directly without loading the full workbook.
+        /// Ideal for server-side use. Skips formula recomputation and formatting.
+        /// Only works with .sheet files.
+        #[arg(long)]
+        lightweight: bool,
     },
 
     /// Verify a .sheet file's semantic fingerprint
@@ -1784,8 +1790,8 @@ fn main() -> ExitCode {
             SheetCommands::Apply { output, lua, verify, stamp, dry_run, json } => {
                 cmd_sheet_apply(output, lua, verify, stamp, dry_run, json)
             }
-            SheetCommands::Inspect { file, target, workbook, sheet, sheets, non_empty, include_style, value, json, ndjson, format, headers, delimiter, calc } => {
-                cmd_sheet_inspect(file, target, workbook, sheet, sheets, non_empty, include_style, value, json, ndjson, format, headers, delimiter, calc)
+            SheetCommands::Inspect { file, target, workbook, sheet, sheets, non_empty, include_style, value, json, ndjson, format, headers, delimiter, calc, lightweight } => {
+                cmd_sheet_inspect(file, target, workbook, sheet, sheets, non_empty, include_style, value, json, ndjson, format, headers, delimiter, calc, lightweight)
             }
             SheetCommands::Verify { file, fingerprint } => {
                 cmd_sheet_verify(file, fingerprint)
@@ -5176,6 +5182,192 @@ fn resolve_sheet<'a>(
     }
 }
 
+// ── Lightweight inspect helpers ─────────────────────────────────────────
+
+fn cmd_sheet_inspect_sheets_lightweight(file: &Path, json: bool, ndjson: bool) -> Result<(), CliError> {
+    let sheets = visigrid_io::native::inspect_sheets_lightweight(file)
+        .map_err(|e| CliError::io(format!("failed to inspect {}: {}", file.display(), e)))?;
+
+    if ndjson {
+        for s in &sheets {
+            let entry = sheet_ops::SheetListEntry {
+                index: s.sheet_idx,
+                name: s.name.clone(),
+                non_empty_cells: s.non_empty_cells,
+                max_row: s.max_row,
+                max_col: s.max_col,
+            };
+            println!("{}", serde_json::to_string(&entry).unwrap());
+        }
+    } else if json {
+        let entries: Vec<sheet_ops::SheetListEntry> = sheets.iter().map(|s| {
+            sheet_ops::SheetListEntry {
+                index: s.sheet_idx,
+                name: s.name.clone(),
+                non_empty_cells: s.non_empty_cells,
+                max_row: s.max_row,
+                max_col: s.max_col,
+            }
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+    } else {
+        println!("File: {}", file.display());
+        println!("Sheets: {}", sheets.len());
+        for s in &sheets {
+            println!("  [{}] {:?}  ({} cells, {}x{})",
+                s.sheet_idx, s.name, s.non_empty_cells, s.max_row, s.max_col);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_sheet_inspect_range_lightweight(
+    file: &Path,
+    target_str: &str,
+    sheet_arg: Option<String>,
+    json: bool,
+    ndjson: bool,
+    non_empty: bool,
+    headers: bool,
+) -> Result<(), CliError> {
+    // Resolve sheet index (default 0)
+    let sheet_idx: usize = match sheet_arg {
+        None => 0,
+        Some(ref arg) => {
+            // Try as number first
+            if let Ok(idx) = arg.parse::<usize>() {
+                idx
+            } else {
+                // Look up by name via lightweight sheet list
+                let sheets = visigrid_io::native::inspect_sheets_lightweight(file)
+                    .map_err(|e| CliError::io(e))?;
+                let lower = arg.to_ascii_lowercase();
+                sheets.iter()
+                    .find(|s| s.name.to_ascii_lowercase() == lower)
+                    .map(|s| s.sheet_idx)
+                    .ok_or_else(|| CliError::args(format!("sheet not found: {}", arg)))?
+            }
+        }
+    };
+
+    // Parse range
+    let parsed = sheet_ops::parse_cell_ref(target_str)
+        .map(|(r, c)| (r, c, r, c))
+        .or_else(|| {
+            if let Some((start, end)) = target_str.split_once(':') {
+                let (sr, sc) = sheet_ops::parse_cell_ref(start)?;
+                let (er, ec) = sheet_ops::parse_cell_ref(end)?;
+                Some((sr, sc, er, ec))
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| CliError::args(format!("invalid target: {}", target_str)))?;
+
+    let (start_row, start_col, end_row, end_col) = parsed;
+
+    let cells = visigrid_io::native::inspect_range_lightweight(file, sheet_idx, start_row, start_col, end_row, end_col)
+        .map_err(|e| CliError::io(format!("failed to inspect {}: {}", file.display(), e)))?;
+
+    // Build header names if --headers (from row 0 cells)
+    let use_headers = headers && (json || ndjson);
+    let header_names: Option<HashMap<usize, String>> = if use_headers {
+        let row0_cells = visigrid_io::native::inspect_range_lightweight(file, sheet_idx, 0, start_col, 0, end_col)
+            .unwrap_or_default();
+        let map: HashMap<usize, String> = row0_cells.into_iter()
+            .filter(|c| !c.value.is_empty())
+            .map(|c| (c.col, c.value))
+            .collect();
+        if map.is_empty() { None } else { Some(map) }
+    } else {
+        None
+    };
+
+    let cell_results: Vec<sheet_ops::CellInspectResult> = cells.iter()
+        .filter(|c| !non_empty || !c.value.is_empty())
+        .map(|c| {
+            let (hdr, col_name) = if let Some(ref names) = header_names {
+                (
+                    if c.row == 0 { Some(true) } else { None },
+                    names.get(&c.col).cloned(),
+                )
+            } else {
+                (None, None)
+            };
+            sheet_ops::CellInspectResult {
+                cell: sheet_ops::format_cell_ref(c.row, c.col),
+                value: c.value.clone(),
+                formula: if c.value_type == "formula" { Some("(cached)".to_string()) } else { None },
+                value_type: c.value_type.clone(),
+                format: None,
+                header: hdr,
+                column_name: col_name,
+            }
+        })
+        .collect();
+
+    if ndjson {
+        for cell in &cell_results {
+            println!("{}", serde_json::to_string(cell).unwrap());
+        }
+    } else if json {
+        // Get sheet name for JSON output
+        let sheets = visigrid_io::native::inspect_sheets_lightweight(file)
+            .unwrap_or_default();
+        let sheet_name = sheets.iter()
+            .find(|s| s.sheet_idx == sheet_idx)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("Sheet{}", sheet_idx + 1));
+
+        let result = sheet_ops::SparseInspectResult {
+            sheet_index: sheet_idx,
+            sheet_name,
+            range: Some(target_str.to_uppercase()),
+            cells: cell_results,
+        };
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    } else {
+        let sheets = visigrid_io::native::inspect_sheets_lightweight(file)
+            .unwrap_or_default();
+        let sheet_name = sheets.iter()
+            .find(|s| s.sheet_idx == sheet_idx)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("Sheet{}", sheet_idx + 1));
+
+        println!("Sheet [{}] {:?}  range {}  ({} cells)",
+            sheet_idx, sheet_name, target_str.to_uppercase(), cell_results.len());
+        for cell in &cell_results {
+            let formula_marker = if cell.formula.is_some() { " [f]" } else { "" };
+            println!("  {} = {}{}", cell.cell, cell.value, formula_marker);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_sheet_inspect_workbook_lightweight(file: &Path, json: bool) -> Result<(), CliError> {
+    let (sheet_count, cell_count) = visigrid_io::native::inspect_workbook_lightweight(file)
+        .map_err(|e| CliError::io(format!("failed to inspect {}: {}", file.display(), e)))?;
+
+    let result = sheet_ops::WorkbookInspectResult {
+        fingerprint: None,
+        sheet_count,
+        cell_count,
+        format: None,
+        path: Some(file.display().to_string()),
+        import_notes: Some(vec!["lightweight mode: fingerprint skipped".to_string()]),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    } else {
+        println!("File:        {}", file.display());
+        println!("Sheets:      {}", result.sheet_count);
+        println!("Cells:       {}", result.cell_count);
+        println!("Note:        lightweight mode (fingerprint skipped)");
+    }
+    Ok(())
+}
+
 /// Inspect cells/ranges in a spreadsheet file.
 fn cmd_sheet_inspect(
     file: PathBuf,
@@ -5192,6 +5384,7 @@ fn cmd_sheet_inspect(
     headers: bool,
     delimiter: Option<String>,
     calc: Vec<String>,
+    lightweight: bool,
 ) -> Result<(), CliError> {
     // Phase A: Resolve format & validate
     let fmt = match format_override {
@@ -5231,13 +5424,36 @@ fn cmd_sheet_inspect(
         }
     }
 
+    // Lightweight mode: query SQLite directly, skip full workbook load
+    if lightweight {
+        if !matches!(fmt, InspectFormat::Sheet) {
+            return Err(CliError::args("--lightweight only works with .sheet files"));
+        }
+        if !calc.is_empty() {
+            return Err(CliError::args("--lightweight cannot be used with --calc"));
+        }
+        if include_style {
+            return Err(CliError::args("--lightweight cannot be used with --include-style"));
+        }
+        if value_only {
+            return Err(CliError::args("--lightweight cannot be used with --value"));
+        }
+        if sheets_mode {
+            return cmd_sheet_inspect_sheets_lightweight(&file, json, ndjson);
+        }
+        if let Some(ref target_str) = target {
+            return cmd_sheet_inspect_range_lightweight(&file, target_str, sheet_arg, json, ndjson, non_empty, headers);
+        }
+        // Workbook mode with --lightweight
+        return cmd_sheet_inspect_workbook_lightweight(&file, json);
+    }
+
     // Phase B: Load workbook by format
+    // Note: load_workbook() already calls rebuild_dep_graph() + recompute_full_ordered()
     let (workbook, is_native, import_notes, formula_map) = match fmt {
         InspectFormat::Sheet => {
-            let mut wb = visigrid_io::native::load_workbook(&file)
+            let wb = visigrid_io::native::load_workbook(&file)
                 .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
-            wb.rebuild_dep_graph();
-            wb.recompute_full_ordered();
             (wb, true, vec![], HashMap::new())
         }
         InspectFormat::Xlsx => {
