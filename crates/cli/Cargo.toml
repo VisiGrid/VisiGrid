@@ -15,7 +15,7 @@ visigrid-io = { path = "../io" }
 visigrid-config = { path = "../config" }
 visigrid-protocol = { path = "../protocol" }
 visigrid-hub-client = { path = "../hub_client" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 csv = "1"
@@ -26,6 +26,11 @@ which = "6"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 blake3 = "1"
 sha2 = { workspace = true }
+
+# Proof signing (verify --sign)
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
+rand = "0.8"
 
 # TUI viewer (peek command)
 ratatui = "0.29"

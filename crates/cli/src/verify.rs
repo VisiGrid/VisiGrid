@@ -7,11 +7,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::Subcommand;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use visigrid_io::truth::{
-    hash_raw_row, parse_amount, read_daily_totals_csv, DailyTotals,
-};
+use visigrid_io::truth::{hash_raw_row, read_daily_totals_csv, DailyTotals};
 
 use crate::exit_codes;
 use crate::CliError;
@@ -33,7 +31,8 @@ Examples:
   vgrid verify totals truth_daily_totals.csv warehouse_daily_totals.csv
   vgrid verify totals truth.csv warehouse.csv --tolerance 0.01
   vgrid verify totals truth.csv warehouse.csv --output verify.json
-  vgrid verify totals truth.csv warehouse.csv --diff diffs.csv")]
+  vgrid verify totals truth.csv warehouse.csv --diff diffs.csv
+  vgrid verify totals truth.csv warehouse.csv --sign --proof proof.json")]
     Totals {
         /// Truth daily totals CSV (the external source of truth)
         truth: PathBuf,
@@ -60,6 +59,18 @@ Examples:
         /// Quiet mode: only exit code, no stderr output
         #[arg(long, short = 'q')]
         quiet: bool,
+
+        /// Sign the verification result with Ed25519
+        #[arg(long)]
+        sign: bool,
+
+        /// Output signed proof JSON to file (implies --sign)
+        #[arg(long)]
+        proof: Option<PathBuf>,
+
+        /// Path to signing key (default: ~/.config/vgrid/proof_key.json, or VGRID_SIGNING_KEY_PATH env)
+        #[arg(long, env = "VGRID_SIGNING_KEY_PATH")]
+        signing_key: Option<PathBuf>,
     },
 }
 
@@ -73,6 +84,9 @@ pub fn cmd_verify(cmd: VerifyCommands) -> Result<(), CliError> {
             output,
             diff,
             quiet,
+            sign,
+            proof,
+            signing_key,
         } => cmd_verify_totals(
             truth,
             warehouse,
@@ -81,6 +95,9 @@ pub fn cmd_verify(cmd: VerifyCommands) -> Result<(), CliError> {
             output,
             diff,
             quiet,
+            sign || proof.is_some(),
+            proof,
+            signing_key,
         ),
     }
 }
@@ -154,6 +171,9 @@ fn cmd_verify_totals(
     output_path: Option<PathBuf>,
     diff_path: Option<PathBuf>,
     quiet: bool,
+    sign: bool,
+    proof_path: Option<PathBuf>,
+    signing_key_path: Option<PathBuf>,
 ) -> Result<(), CliError> {
     // Convert tolerance from currency units to micro-units
     let tolerance_micro = (tolerance * 1_000_000.0).round() as i64;
@@ -171,12 +191,10 @@ fn cmd_verify_totals(
     let warehouse_hash = hash_raw_row(&warehouse_bytes);
 
     // Parse CSVs
-    let truth = read_daily_totals_csv(truth_bytes.as_slice()).map_err(|e| {
-        CliError::parse(format!("truth file: {e}"))
-    })?;
-    let warehouse = read_daily_totals_csv(warehouse_bytes.as_slice()).map_err(|e| {
-        CliError::parse(format!("warehouse file: {e}"))
-    })?;
+    let truth = read_daily_totals_csv(truth_bytes.as_slice())
+        .map_err(|e| CliError::parse(format!("truth file: {e}")))?;
+    let warehouse = read_daily_totals_csv(warehouse_bytes.as_slice())
+        .map_err(|e| CliError::parse(format!("warehouse file: {e}")))?;
 
     // Build lookup by (date, currency, source_account)
     type Key = (String, String, String);
@@ -212,7 +230,6 @@ fn cmd_verify_totals(
             Some(w) => {
                 let mut row_ok = true;
 
-                // Net comparison
                 if (t.total_net - w.total_net).abs() > tolerance_micro {
                     mismatches.push(Mismatch {
                         date: key.0.clone(),
@@ -225,7 +242,6 @@ fn cmd_verify_totals(
                     row_ok = false;
                 }
 
-                // Gross comparison
                 if (t.total_gross - w.total_gross).abs() > tolerance_micro {
                     mismatches.push(Mismatch {
                         date: key.0.clone(),
@@ -238,7 +254,6 @@ fn cmd_verify_totals(
                     row_ok = false;
                 }
 
-                // Fee comparison
                 if (t.total_fee - w.total_fee).abs() > tolerance_micro {
                     mismatches.push(Mismatch {
                         date: key.0.clone(),
@@ -251,7 +266,6 @@ fn cmd_verify_totals(
                     row_ok = false;
                 }
 
-                // Count comparison
                 if t.transaction_count != w.transaction_count {
                     mismatches.push(Mismatch {
                         date: key.0.clone(),
@@ -327,7 +341,8 @@ fn cmd_verify_totals(
 
     // Output to stderr
     if !quiet {
-        eprintln!("verify: {} ({} rows truth, {} rows warehouse)",
+        eprintln!(
+            "verify: {} ({} rows truth, {} rows warehouse)",
             status.to_uppercase(),
             result.summary.truth_rows,
             result.summary.warehouse_rows,
@@ -340,7 +355,10 @@ fn cmd_verify_totals(
             eprintln!("  only in truth:      {}", result.summary.only_in_truth);
         }
         if result.summary.only_in_warehouse > 0 {
-            eprintln!("  only in warehouse:  {}", result.summary.only_in_warehouse);
+            eprintln!(
+                "  only in warehouse:  {}",
+                result.summary.only_in_warehouse
+            );
         }
         eprintln!("  truth hash:         {}", &result.truth_hash[..16]);
         eprintln!("  warehouse hash:     {}", &result.warehouse_hash[..16]);
@@ -348,12 +366,10 @@ fn cmd_verify_totals(
 
     // Write JSON output
     if let Some(path) = &output_path {
-        let json = serde_json::to_string_pretty(&result).map_err(|e| {
-            CliError::io(format!("JSON serialization error: {e}"))
-        })?;
-        std::fs::write(path, json).map_err(|e| {
-            CliError::io(format!("cannot write {}: {e}", path.display()))
-        })?;
+        let json = serde_json::to_string_pretty(&result)
+            .map_err(|e| CliError::io(format!("JSON serialization error: {e}")))?;
+        std::fs::write(path, json)
+            .map_err(|e| CliError::io(format!("cannot write {}: {e}", path.display())))?;
         if !quiet {
             eprintln!("  result written to:  {}", path.display());
         }
@@ -367,10 +383,32 @@ fn cmd_verify_totals(
         }
     }
 
+    // Sign and write proof
+    if sign {
+        let proof_out = proof_path.unwrap_or_else(|| PathBuf::from("proof.json"));
+        let sig_out = proof_out.with_extension("sig");
+
+        let signed = sign_proof(&result, &signing_key_path)?;
+
+        let proof_json = serde_json::to_string_pretty(&signed)
+            .map_err(|e| CliError::io(format!("proof JSON error: {e}")))?;
+        std::fs::write(&proof_out, &proof_json)
+            .map_err(|e| CliError::io(format!("cannot write {}: {e}", proof_out.display())))?;
+
+        std::fs::write(&sig_out, &signed.signature)
+            .map_err(|e| CliError::io(format!("cannot write {}: {e}", sig_out.display())))?;
+
+        if !quiet {
+            eprintln!("  proof written to:   {}", proof_out.display());
+            eprintln!("  signature:          {}", sig_out.display());
+            eprintln!("  public key:         {}", &signed.public_key[..16]);
+        }
+    }
+
     if has_material_mismatch {
         Err(CliError {
             code: exit_codes::EXIT_ERROR,
-            message: String::new(), // already printed above
+            message: String::new(),
             hint: None,
         })
     } else {
@@ -391,13 +429,15 @@ fn format_micro(micro_units: i64) -> String {
 }
 
 fn write_diff_csv(mismatches: &[Mismatch], path: &PathBuf) -> Result<(), CliError> {
-    let file = std::fs::File::create(path).map_err(|e| {
-        CliError::io(format!("cannot create {}: {e}", path.display()))
-    })?;
+    let file = std::fs::File::create(path)
+        .map_err(|e| CliError::io(format!("cannot create {}: {e}", path.display())))?;
     let mut writer = std::io::BufWriter::new(file);
 
-    writeln!(writer, "date,currency,source_account,kind,truth_value,warehouse_value")
-        .map_err(|e| CliError::io(format!("write error: {e}")))?;
+    writeln!(
+        writer,
+        "date,currency,source_account,kind,truth_value,warehouse_value"
+    )
+    .map_err(|e| CliError::io(format!("write error: {e}")))?;
 
     for m in mismatches {
         writeln!(
@@ -413,6 +453,174 @@ fn write_diff_csv(mismatches: &[Mismatch], path: &PathBuf) -> Result<(), CliErro
         .map_err(|e| CliError::io(format!("write error: {e}")))?;
     }
 
-    writer.flush().map_err(|e| CliError::io(format!("flush error: {e}")))?;
+    writer
+        .flush()
+        .map_err(|e| CliError::io(format!("flush error: {e}")))?;
     Ok(())
+}
+
+// ── Proof signing ───────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct SignedProof {
+    schema_version: u32,
+    payload: ProofPayload,
+    signature: String,
+    public_key: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProofPayload {
+    schema_version: u32,
+    verifier: ProofVerifier,
+    ran_at: String,
+    truth: ProofFileRef,
+    warehouse: ProofFileRef,
+    params: ProofParams,
+    result: ProofOutcome,
+}
+
+#[derive(Debug, Serialize)]
+struct ProofVerifier {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProofFileRef {
+    path: String,
+    blake3: String,
+    rows: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ProofParams {
+    tolerance_micro: i64,
+    fail_on_count_mismatch: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ProofOutcome {
+    status: String,
+    matched: usize,
+    mismatched: usize,
+    missing_in_warehouse: usize,
+    missing_in_truth: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredKeypair {
+    public_key: String,
+    secret_key: String,
+}
+
+fn sign_proof(
+    result: &VerifyResult,
+    signing_key_path: &Option<PathBuf>,
+) -> Result<SignedProof, CliError> {
+    use base64::Engine;
+    use ed25519_dalek::Signer;
+
+    let (signing_key, verifying_key) = load_or_generate_key(signing_key_path)?;
+
+    let payload = ProofPayload {
+        schema_version: 1,
+        verifier: ProofVerifier {
+            name: "vgrid".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        ran_at: chrono::Utc::now().to_rfc3339(),
+        truth: ProofFileRef {
+            path: result.truth_file.clone(),
+            blake3: result.truth_hash.clone(),
+            rows: result.summary.truth_rows,
+        },
+        warehouse: ProofFileRef {
+            path: result.warehouse_file.clone(),
+            blake3: result.warehouse_hash.clone(),
+            rows: result.summary.warehouse_rows,
+        },
+        params: ProofParams {
+            tolerance_micro: result.tolerance_micro,
+            fail_on_count_mismatch: result.fail_on_count_mismatch,
+        },
+        result: ProofOutcome {
+            status: result.status.to_string(),
+            matched: result.summary.matched,
+            mismatched: result.summary.mismatched,
+            missing_in_warehouse: result.summary.only_in_truth,
+            missing_in_truth: result.summary.only_in_warehouse,
+        },
+    };
+
+    // Compact JSON for deterministic signing
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| CliError::io(format!("proof serialization error: {e}")))?;
+
+    let signature = signing_key.sign(&payload_bytes);
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    Ok(SignedProof {
+        schema_version: 1,
+        payload,
+        signature: b64.encode(signature.to_bytes()),
+        public_key: b64.encode(verifying_key.to_bytes()),
+    })
+}
+
+fn load_or_generate_key(
+    key_path: &Option<PathBuf>,
+) -> Result<(ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey), CliError> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let path = match key_path {
+        Some(p) => p.clone(),
+        None => {
+            let config_dir = dirs::config_dir()
+                .ok_or_else(|| {
+                    CliError::io("cannot determine config directory".to_string())
+                })?
+                .join("vgrid");
+            config_dir.join("proof_key.json")
+        }
+    };
+
+    if path.exists() {
+        let data = std::fs::read_to_string(&path)
+            .map_err(|e| CliError::io(format!("cannot read {}: {e}", path.display())))?;
+        let stored: StoredKeypair = serde_json::from_str(&data)
+            .map_err(|e| CliError::parse(format!("invalid key file {}: {e}", path.display())))?;
+        let secret_bytes = b64
+            .decode(&stored.secret_key)
+            .map_err(|e| CliError::parse(format!("invalid secret key base64: {e}")))?;
+        let secret_array: [u8; 32] = secret_bytes
+            .try_into()
+            .map_err(|_| CliError::parse("secret key must be 32 bytes".to_string()))?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_array);
+        let verifying_key = signing_key.verifying_key();
+        Ok((signing_key, verifying_key))
+    } else {
+        let mut rng = rand::thread_rng();
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rng);
+        let verifying_key = signing_key.verifying_key();
+
+        let stored = StoredKeypair {
+            public_key: b64.encode(verifying_key.to_bytes()),
+            secret_key: b64.encode(signing_key.to_bytes()),
+        };
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CliError::io(format!("cannot create {}: {e}", parent.display())))?;
+        }
+
+        let json = serde_json::to_string_pretty(&stored)
+            .map_err(|e| CliError::io(format!("key serialization error: {e}")))?;
+        std::fs::write(&path, json)
+            .map_err(|e| CliError::io(format!("cannot write {}: {e}", path.display())))?;
+
+        eprintln!("  generated new signing key: {}", path.display());
+        Ok((signing_key, verifying_key))
+    }
 }
