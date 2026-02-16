@@ -2834,10 +2834,11 @@ fn no_untracked_cell_mutations() {
     // responsibility for manual dep-tracking correctness in that file.
     // PR reviewers: any addition here deserves scrutiny.
     let whitelist_files: &[(&str, &str)] = &[
-        ("tests.rs",         "Test code operates on raw Sheet (no live Entity<Workbook>)"),
-        ("sheet_ops.rs",     "Defines the tracked wrappers (set_cell_value, clear_cell_value)"),
-        ("history.rs",       "Preview replay on cloned (non-live) workbook — no recalc needed"),
-        ("workbook_view.rs", "SharedWorkbookView uses RefCell<Workbook> — separate architecture"),
+        ("tests.rs",              "Test code operates on raw Sheet (no live Entity<Workbook>)"),
+        ("sheet_ops.rs",          "Defines the tracked wrappers (set_cell_value, clear_cell_value)"),
+        ("history.rs",            "Preview replay on cloned (non-live) workbook — no recalc needed"),
+        ("workbook_view.rs",      "SharedWorkbookView uses RefCell<Workbook> — separate architecture"),
+        ("structured_results.rs", "Populates new sheets from parsed JSON — no existing deps to track"),
     ];
     let whitelist_dirs: &[(&str, &str)] = &[
         ("scripting", "Lua sink API records ops; apply_lua_ops batches them through tracked path"),
@@ -2845,7 +2846,7 @@ fn no_untracked_cell_mutations() {
 
     // ── Count gate ─────────────────────────────────────────────────────────
     // If these counts change, a conscious decision was made. Make it visible.
-    assert_eq!(whitelist_files.len(), 4,
+    assert_eq!(whitelist_files.len(), 5,
         "Whitelist file count changed! If you added an entry, document why.\n\
          Current whitelist:\n{}",
         whitelist_files.iter().map(|(f, r)| format!("  {} — {}", f, r)).collect::<Vec<_>>().join("\n")

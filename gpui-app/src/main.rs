@@ -51,6 +51,7 @@ mod series_fill;
 mod session;
 mod session_server;
 mod settings;
+mod structured_results;
 mod sheet_ops;
 mod sort_filter;
 mod split_view;

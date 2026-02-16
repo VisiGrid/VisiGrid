@@ -247,6 +247,12 @@ pub enum CommandId {
     VerifyIntegrity,
     Convert,
 
+    // Phase 5: Open Result in Grid
+    ImportTerminalOutput,
+    RunVgridPeekJson,
+    RunVgridDiffJson,
+    RunVgridCalcJson,
+
     // AI in Terminal
     LaunchAI,
     PasteSelectionToTerminal,
@@ -399,6 +405,10 @@ impl CommandId {
             Self::HubSignIn => "VisiHub: Sign In",
             Self::HubSignOut => "VisiHub: Sign Out",
             Self::HubLinkDialog => "VisiHub: Link to Dataset...",
+            Self::ImportTerminalOutput => "Import Terminal Output",
+            Self::RunVgridPeekJson => "Run: vgrid peek --json",
+            Self::RunVgridDiffJson => "Run: vgrid diff --json",
+            Self::RunVgridCalcJson => "Run: vgrid calc --json",
             Self::OpenTerminal => "Open Terminal",
             Self::VerifyIntegrity => "Verify Integrity",
             Self::Convert => "Convert",
@@ -615,6 +625,10 @@ impl CommandId {
             Self::HubSignIn => "visihub cloud sync sign in login authenticate token",
             Self::HubSignOut => "visihub cloud sync sign out logout disconnect",
             Self::HubLinkDialog => "visihub cloud sync link connect dataset repository",
+            Self::ImportTerminalOutput => "import terminal output json structured result parse extract",
+            Self::RunVgridPeekJson => "run vgrid peek json preview file data terminal",
+            Self::RunVgridDiffJson => "run vgrid diff json compare reconcile terminal",
+            Self::RunVgridCalcJson => "run vgrid calc json formula evaluate compute terminal",
             Self::OpenTerminal => "terminal shell console pty bash",
             Self::VerifyIntegrity => "verify integrity fingerprint check audit trust",
             Self::Convert => "convert export csv tsv json xlsx format",
@@ -780,6 +794,10 @@ impl CommandId {
             Self::HubSignIn,
             Self::HubSignOut,
             Self::HubLinkDialog,
+            Self::ImportTerminalOutput,
+            Self::RunVgridPeekJson,
+            Self::RunVgridDiffJson,
+            Self::RunVgridCalcJson,
             Self::OpenTerminal,
             Self::VerifyIntegrity,
             Self::Convert,
@@ -938,6 +956,10 @@ impl CommandId {
             | Self::RerunDiffRun
             | Self::OpenThisDiffFile
             | Self::RefreshDiffResults
+            | Self::ImportTerminalOutput
+            | Self::RunVgridPeekJson
+            | Self::RunVgridDiffJson
+            | Self::RunVgridCalcJson
             | Self::Convert
             | Self::LaunchAI
             | Self::PasteSelectionToTerminal

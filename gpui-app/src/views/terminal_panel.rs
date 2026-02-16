@@ -432,6 +432,11 @@ pub fn render_terminal_panel(
             cx.notify();
         }));
 
+    // Phase 5: Affordance bar when a structured result is pending
+    let has_result = app.terminal.pending_structured_result.is_some();
+    let result_description = app.terminal.pending_structured_result.as_ref()
+        .map(|r| r.description());
+
     div()
         .id("terminal-panel")
         .key_context("Terminal")
@@ -464,6 +469,80 @@ pub fn render_terminal_panel(
         .flex_col()
         .child(resize_handle)
         .child(header)
+        .when(has_result, |d| {
+            let description = result_description.unwrap_or_default();
+            let accent_bg = rgba(0x2d6a4f30); // subtle green-accent tint
+            d.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .border_b_1()
+                    .border_color(panel_border)
+                    .bg(accent_bg)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_color(accent)
+                                    .text_size(px(12.0))
+                                    .child("\u{2713}")
+                            )
+                            .child(
+                                div()
+                                    .text_color(text_primary)
+                                    .text_size(px(11.0))
+                                    .child(format!("Structured result \u{00b7} {}", description))
+                            )
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .id("result-open-in-grid")
+                                    .cursor_pointer()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(accent)
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(3.0))
+                                    .border_1()
+                                    .border_color(accent)
+                                    .hover(|s| s.bg(accent).text_color(editor_bg))
+                                    .child("Open in Grid")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_structured_result(window, cx);
+                                    }))
+                            )
+                            .child(
+                                div()
+                                    .id("result-dismiss")
+                                    .cursor_pointer()
+                                    .text_size(px(11.0))
+                                    .text_color(text_muted)
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .hover(|s| s.text_color(text_primary))
+                                    .child("Dismiss")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.dismiss_structured_result(cx);
+                                    }))
+                            )
+                    )
+            )
+        })
         .child(
             div()
                 .flex_1()

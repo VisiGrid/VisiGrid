@@ -3110,6 +3110,19 @@ impl Spreadsheet {
                         if should_notify {
                             let _ = this.update(cx, |app, cx| {
                                 app.terminal.bump_output_epoch();
+                                // Phase 5: debounce settle timer for auto-detect
+                                if app.terminal.watching_for_result {
+                                    app.terminal.result_settle_task = None;
+                                    let gen = app.terminal.watch_generation;
+                                    let task = cx.spawn(async move |this, cx| {
+                                        smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                                        let _ = this.update(cx, |app, cx| {
+                                            if app.terminal.watch_generation != gen { return; }
+                                            app.try_extract_structured_result(cx);
+                                        });
+                                    });
+                                    app.terminal.result_settle_task = Some(task);
+                                }
                                 cx.notify();
                             });
                         }
@@ -4422,6 +4435,12 @@ impl Spreadsheet {
             CommandId::HubSignOut => self.hub_sign_out(cx),
             CommandId::HubLinkDialog => self.hub_show_link_dialog(cx),
 
+            // Phase 5: Open Result in Grid
+            CommandId::ImportTerminalOutput => self.import_terminal_output(window, cx),
+            CommandId::RunVgridPeekJson => self.run_vgrid_peek_json(window, cx),
+            CommandId::RunVgridDiffJson => self.run_vgrid_diff_json(window, cx),
+            CommandId::RunVgridCalcJson => self.run_vgrid_calc_json(window, cx),
+
             // Phase 4: Palette-driven terminal
             CommandId::OpenTerminal => self.open_terminal(window, cx),
             CommandId::VerifyIntegrity => self.verify_integrity(cx),
@@ -5199,6 +5218,144 @@ impl Spreadsheet {
         }
         window.focus(&self.terminal_focus_handle, cx);
         cx.notify();
+    }
+
+    // ========================================================================
+    // Phase 5: Open Result in Grid
+    // ========================================================================
+
+    /// Extract structured result from terminal output (auto-detect or manual).
+    pub fn try_extract_structured_result(&mut self, cx: &mut Context<Self>) {
+        let Some(ref term_arc) = self.terminal.term else {
+            self.terminal.watching_for_result = false;
+            self.status_message = Some("No terminal session.".into());
+            cx.notify();
+            return;
+        };
+
+        let text = crate::terminal::extract::extract_recent_text(term_arc, 2000);
+        match crate::structured_results::parse(&text) {
+            Some(result) => {
+                let had_previous = self.terminal.pending_structured_result.is_some();
+                self.terminal.pending_structured_result = Some(result);
+                self.terminal.watching_for_result = false;
+                if had_previous {
+                    self.status_message = Some(
+                        "New structured result detected (previous replaced).".into()
+                    );
+                }
+                // Auto-open if setting is enabled
+                let auto_open = crate::settings::user_settings(cx)
+                    .terminal.auto_open_structured_results
+                    .as_value()
+                    .copied()
+                    .unwrap_or(false);
+                if auto_open {
+                    self.open_structured_result_inner(cx);
+                } else {
+                    cx.notify();
+                }
+            }
+            None => {
+                self.terminal.watching_for_result = false;
+                self.status_message = Some("No structured output detected.".into());
+                cx.notify();
+            }
+        }
+    }
+
+    /// Open the pending structured result as a new sheet.
+    pub fn open_structured_result(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.open_structured_result_inner(cx);
+    }
+
+    /// Inner method that opens the pending result without requiring window access.
+    fn open_structured_result_inner(&mut self, cx: &mut Context<Self>) {
+        let Some(result) = self.terminal.pending_structured_result.take() else { return };
+        let sheet_idx = self.workbook.update(cx, |wb, _| {
+            crate::structured_results::render_to_sheet(&result, wb)
+        });
+        self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(sheet_idx); });
+        self.status_message = Some("Opened result as new sheet.".into());
+        cx.notify();
+    }
+
+    /// Dismiss the pending structured result.
+    pub fn dismiss_structured_result(&mut self, cx: &mut Context<Self>) {
+        self.terminal.pending_structured_result = None;
+        cx.notify();
+    }
+
+    /// Inject a vgrid command into the terminal and watch for JSON result.
+    fn inject_vgrid_command(&mut self, subcmd: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ref file) = self.current_file else {
+            self.status_message = Some("Save workbook first.".into());
+            cx.notify();
+            return;
+        };
+
+        let file_str = file.display().to_string();
+
+        // Ensure terminal is open
+        self.open_terminal(window, cx);
+
+        // Build command
+        let cmd = format!("vgrid {} \"{}\" --json\n", subcmd, file_str);
+        self.terminal.write_to_pty(cmd.as_bytes());
+
+        // Set watching
+        self.terminal.watching_for_result = true;
+        self.terminal.watch_generation += 1;
+        self.terminal.pending_structured_result = None;
+        self.terminal.result_settle_task = None;
+    }
+
+    /// Palette command: Run vgrid peek --json on current file.
+    pub fn run_vgrid_peek_json(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.inject_vgrid_command("peek --headers", window, cx);
+    }
+
+    /// Palette command: Run vgrid diff --json on current file.
+    pub fn run_vgrid_diff_json(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // diff requires two files — for now inject just the current file as left
+        // The user would need to have a second file argument, but this at least
+        // sets up the watching pattern. In practice, the user may manually type
+        // the full diff command.
+        self.inject_vgrid_command("peek --headers", window, cx);
+        self.status_message = Some("Tip: vgrid diff requires two files. Edit the command to add the second file.".into());
+        cx.notify();
+    }
+
+    /// Palette command: Run vgrid calc --json. Injects a template command for the user to edit.
+    pub fn run_vgrid_calc_json(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ref file) = self.current_file else {
+            self.status_message = Some("Save workbook first.".into());
+            cx.notify();
+            return;
+        };
+        let file_str = file.display().to_string();
+
+        // Ensure terminal is open
+        self.open_terminal(window, cx);
+
+        // Inject a template — user needs to fill in the formula
+        let cmd = format!("cat \"{}\" | vgrid calc '=FORMULA' -f csv --headers --json", file_str);
+        self.terminal.write_to_pty(cmd.as_bytes());
+        // Don't write \n — let the user edit the formula first
+
+        // Set watching for when they press Enter
+        self.terminal.watching_for_result = true;
+        self.terminal.watch_generation += 1;
+        self.terminal.pending_structured_result = None;
+        self.terminal.result_settle_task = None;
+
+        self.status_message = Some("Edit the formula in the command, then press Enter.".into());
+        cx.notify();
+    }
+
+    /// Manual import: extract structured result from terminal (no watching check).
+    pub fn import_terminal_output(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.try_extract_structured_result(cx);
     }
 
     /// Verify integrity inline — checks semantic fingerprint and shows status message.

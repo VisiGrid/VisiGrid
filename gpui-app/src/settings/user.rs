@@ -182,6 +182,12 @@ pub struct TerminalSettings {
     /// Set to "claude", "codex", or "gemini" to override.
     #[serde(default)]
     pub preferred_ai_cli: PreferredAiCli,
+
+    /// When ON, structured results from vgrid --json commands are automatically
+    /// opened as new sheets without showing the affordance bar.
+    /// Default OFF — power users can flip it for a faster workflow.
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub auto_open_structured_results: Setting<bool>,
 }
 
 fn default_bracketed_paste() -> Setting<bool> {
@@ -193,6 +199,7 @@ impl Default for TerminalSettings {
         Self {
             bracketed_paste: Setting::Value(true),
             preferred_ai_cli: PreferredAiCli::Auto,
+            auto_open_structured_results: Setting::Inherit, // default OFF
         }
     }
 }

@@ -80,6 +80,10 @@ Examples:
         /// Output format for array results (csv or json)
         #[arg(long)]
         spill: Option<SpillFormat>,
+
+        /// Machine-readable alias: implies --spill json for arrays, JSON scalar for single values
+        #[arg(long)]
+        json: bool,
     },
 
     /// Convert between file formats
@@ -294,6 +298,10 @@ Examples:
         /// Which side's columns to include in exports (default: left)
         #[arg(long, default_value = "left")]
         export_side: ExportSide,
+
+        /// Machine-readable alias: force --out json, suppress non-JSON stderr
+        #[arg(long)]
+        json: bool,
     },
 
     /// List running VisiGrid sessions
@@ -485,8 +493,11 @@ Use --force to override.")]
         #[arg(long, conflicts_with = "tui")]
         no_tui: bool,
         /// Force interactive TUI; error if not possible
-        #[arg(long, conflicts_with_all = ["no_tui", "plain", "shape"])]
+        #[arg(long, conflicts_with_all = ["no_tui", "plain", "shape", "json"])]
         tui: bool,
+        /// Output as machine-readable JSON (columns + rows)
+        #[arg(long, conflicts_with_all = ["tui", "plain", "shape", "no_tui"])]
+        json: bool,
     },
 
     /// Authenticate with VisiHub
@@ -1638,7 +1649,12 @@ fn main() -> ExitCode {
             delimiter,
             headers,
             spill,
-        }) => cmd_calc(formula, from, into, delimiter, headers, spill),
+            json,
+        }) => {
+            // --json implies --spill json for array results
+            let effective_spill = if json && spill.is_none() { Some(SpillFormat::Json) } else { spill };
+            cmd_calc(formula, from, into, delimiter, headers, effective_spill, json)
+        }
         Some(Commands::Open { file }) => cmd_open(file),
         Some(Commands::Replay {
             script,
@@ -1675,12 +1691,18 @@ fn main() -> ExitCode {
             no_fail,
             export,
             export_side,
-        }) => cmd_diff(
-            left, right, key, r#match, key_transform, compare, tolerance,
-            on_ambiguous, out, output, summary, no_headers, header_row, delimiter,
-            stdin_format, strict_exit, quiet, save_ambiguous, contains_column, no_fail,
-            export, export_side,
-        ),
+            json,
+        }) => {
+            // --json forces --out json and --quiet (logs to stderr only)
+            let effective_out = if json { DiffOutputFormat::Json } else { out };
+            let effective_quiet = quiet || json;
+            cmd_diff(
+                left, right, key, r#match, key_transform, compare, tolerance,
+                on_ambiguous, effective_out, output, summary, no_headers, header_row, delimiter,
+                stdin_format, strict_exit, effective_quiet, save_ambiguous, contains_column, no_fail,
+                export, export_side,
+            )
+        }
         Some(Commands::Sessions { json }) => cmd_sessions(json),
         Some(Commands::Attach { session }) => cmd_attach(session),
         Some(Commands::Apply { ops, session, atomic, expected_revision, wait, wait_timeout }) => {
@@ -1694,24 +1716,28 @@ fn main() -> ExitCode {
         Some(Commands::Peek {
             file, headers, no_headers: _, sheet, max_rows,
             force, width_scan_rows, shape, plain, delimiter, recompute,
-            no_tui, tui: force_tui,
+            no_tui, tui: force_tui, json,
         }) => {
-            // TTY detection: interactive only when stdin+stdout are TTY and not --no-tui
-            let stdin_tty = atty::is(atty::Stream::Stdin);
-            let stdout_tty = atty::is(atty::Stream::Stdout);
-            if force_tui && (!stdin_tty || !stdout_tty) {
-                Err(CliError::args(
-                    "--tui requires an interactive terminal (stdin and stdout must be TTY)"
-                ))
+            if json {
+                cmd_peek_json(file, headers, sheet, max_rows, force, delimiter)
             } else {
-                let interactive = if no_tui || plain {
-                    false
-                } else if force_tui {
-                    true
+                // TTY detection: interactive only when stdin+stdout are TTY and not --no-tui
+                let stdin_tty = atty::is(atty::Stream::Stdin);
+                let stdout_tty = atty::is(atty::Stream::Stdout);
+                if force_tui && (!stdin_tty || !stdout_tty) {
+                    Err(CliError::args(
+                        "--tui requires an interactive terminal (stdin and stdout must be TTY)"
+                    ))
                 } else {
-                    stdin_tty && stdout_tty
-                };
-                cmd_peek(file, headers, sheet, max_rows, force, width_scan_rows, shape, interactive, delimiter, recompute)
+                    let interactive = if no_tui || plain {
+                        false
+                    } else if force_tui {
+                        true
+                    } else {
+                        stdin_tty && stdout_tty
+                    };
+                    cmd_peek(file, headers, sheet, max_rows, force, width_scan_rows, shape, interactive, delimiter, recompute)
+                }
             }
         }
         Some(Commands::Login { token, api_base }) => hub::cmd_login(token, api_base),
@@ -2537,6 +2563,7 @@ fn cmd_calc(
     delimiter: char,
     headers: bool,
     spill: Option<SpillFormat>,
+    json: bool,
 ) -> Result<(), CliError> {
     // Parse --into cell reference
     let (into_row, into_col) = parse_cell_ref(&into)
@@ -2611,7 +2638,13 @@ fn cmd_calc(
     }
 
     // Scalar result (or 1x1 array, which is treated as scalar)
-    println!("{}", format_output_value(&result));
+    if json {
+        // Machine mode: output JSON scalar value
+        let json_val = string_to_json_value(&result);
+        println!("{}", json_val);
+    } else {
+        println!("{}", format_output_value(&result));
+    }
 
     Ok(())
 }
@@ -4343,6 +4376,98 @@ const PEEK_FORCE_CAP: usize = 200_000;
 /// Parse a delimiter string: supports single chars and names (tab, comma, pipe, semicolon).
 fn parse_delimiter(s: &str) -> Result<u8, CliError> {
     util::parse_delimiter(s)
+}
+
+/// `vgrid peek --json`: machine-readable JSON output.
+/// Shape: `{"columns":["a","b"], "rows":[[1,2],[3,4]]}`
+/// Values are JSON scalars (numbers, strings, booleans), not formatted display strings.
+fn cmd_peek_json(
+    file: PathBuf,
+    headers: bool,
+    sheet: Option<String>,
+    max_rows: usize,
+    force: bool,
+    delimiter_override: Option<String>,
+) -> Result<(), CliError> {
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // .sheet files use a completely separate path
+    if ext == "sheet" {
+        let effective_max = if max_rows == 0 && !force { PEEK_FORCE_CAP + 1 } else { max_rows };
+        let sheets = tui::data::load_sheet(&file, effective_max, 0)
+            .map_err(|e| CliError::io(e))?;
+        // Select sheet
+        let data = if let Some(ref name) = sheet {
+            if let Ok(idx) = name.parse::<usize>() {
+                sheets.into_iter().nth(idx)
+            } else {
+                sheets.into_iter().find(|s| s.name == *name)
+            }
+        } else {
+            sheets.into_iter().next()
+        }.ok_or_else(|| CliError::args("sheet not found"))?;
+        return peek_json_output(&data.data);
+    }
+
+    // xlsx/ods use the workbook import path
+    if ext == "xlsx" || ext == "ods" {
+        let effective_max = if max_rows == 0 && !force { PEEK_FORCE_CAP + 1 } else { max_rows };
+        let sheets = tui::data::load_workbook_peek(&file, effective_max, 0, false, force)
+            .map_err(|e| CliError::io(e))?;
+        let data = if let Some(ref name) = sheet {
+            if let Ok(idx) = name.parse::<usize>() {
+                sheets.into_iter().nth(idx)
+            } else {
+                sheets.into_iter().find(|s| s.name == *name)
+            }
+        } else {
+            sheets.into_iter().next()
+        }.ok_or_else(|| CliError::args("sheet not found"))?;
+        return peek_json_output(&data.data);
+    }
+
+    let delimiter = if let Some(ref d) = delimiter_override {
+        parse_delimiter(d)?
+    } else {
+        match ext.as_str() {
+            "tsv" | "tab" => b'\t',
+            "csv" | "txt" | "" => b',',
+            other => {
+                return Err(CliError::args(format!(
+                    "unsupported file extension '.{}' for --json", other
+                )));
+            }
+        }
+    };
+
+    let effective_max = if max_rows == 0 && !force { PEEK_FORCE_CAP + 1 } else { max_rows };
+    let data = tui::data::load_csv(&file, delimiter, headers, effective_max, 0)
+        .map_err(|e| CliError::io(e))?;
+
+    if max_rows == 0 && !force && data.num_rows > PEEK_FORCE_CAP {
+        return Err(CliError::args(format!(
+            "file has >{}k rows; use --force to override", PEEK_FORCE_CAP / 1000,
+        )));
+    }
+
+    peek_json_output(&data)
+}
+
+/// Write PeekData as JSON to stdout: `{"columns":[...], "rows":[[...],...]}`
+fn peek_json_output(data: &tui::data::PeekData) -> Result<(), CliError> {
+    use serde_json::{json, Value};
+    let columns: Vec<Value> = data.col_names.iter().map(|s| Value::String(s.clone())).collect();
+    let rows: Vec<Value> = data.rows.iter().map(|row| {
+        let cells: Vec<Value> = row.iter().map(|s| string_to_json_value(s)).collect();
+        Value::Array(cells)
+    }).collect();
+    let output = json!({ "columns": columns, "rows": rows });
+    println!("{}", serde_json::to_string(&output).unwrap_or_default());
+    Ok(())
 }
 
 fn cmd_peek(

@@ -13,6 +13,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
 
 use super::pty::TerminalEventProxy;
+use crate::structured_results::StructuredResult;
 
 /// Default terminal panel height in pixels.
 pub const DEFAULT_TERMINAL_HEIGHT: f32 = 300.0;
@@ -48,6 +49,16 @@ pub struct TerminalState {
     // Output epoch: incremented on every Wakeup event (new PTY output).
     // Used for O(1) readiness checks instead of scanning the grid.
     pub output_epoch: AtomicU64,
+
+    // Phase 5: Structured result watching
+    /// True when VisiGrid injected a --json command and is waiting for output.
+    pub watching_for_result: bool,
+    /// Bumped on each new watch; stale timers no-op.
+    pub watch_generation: u64,
+    /// Stashed structured result awaiting user action (Open in Grid / Dismiss).
+    pub pending_structured_result: Option<StructuredResult>,
+    /// Debounce timer for auto-detect settle (500ms after last output).
+    pub result_settle_task: Option<gpui::Task<()>>,
 }
 
 impl Default for TerminalState {
@@ -68,6 +79,10 @@ impl Default for TerminalState {
             workspace_root: None,
             last_sent_cwd: None,
             output_epoch: AtomicU64::new(0),
+            watching_for_result: false,
+            watch_generation: 0,
+            pending_structured_result: None,
+            result_settle_task: None,
         }
     }
 }
