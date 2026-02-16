@@ -46,6 +46,15 @@ fn ensure_template() {
         wb.set_cell_value_tracked(0, 0, 10, "mercury_match");
         wb.set_cell_value_tracked(0, 0, 11, "match_status");
 
+        wb.set_cell_value_tracked(0, 0, 12, "rollup_sum");
+        wb.set_cell_value_tracked(0, 0, 13, "rollup_check");
+        wb.set_cell_value_tracked(0, 0, 14, "charge_total");
+        wb.set_cell_value_tracked(0, 0, 15, "fee_total");
+        wb.set_cell_value_tracked(0, 0, 16, "charge_count");
+        wb.set_cell_value_tracked(0, 0, 17, "expected_fee");
+        wb.set_cell_value_tracked(0, 0, 18, "fee_variance");
+        wb.set_cell_value_tracked(0, 0, 19, "fee_check");
+
         for r in 1..=1000 {
             let row1 = r + 1;
             wb.set_cell_value_tracked(0, r, 9,
@@ -54,6 +63,23 @@ fn ensure_template() {
                 &format!("=IF(J{row1}=\"\",\"\",IFERROR(XLOOKUP(J{row1},mercury!J$2:J$1001,mercury!G$2:G$1001,\"UNMATCHED\"),\"ERROR\"))"));
             wb.set_cell_value_tracked(0, r, 11,
                 &format!("=IF(J{row1}=\"\",\"\",IF(K{row1}=\"UNMATCHED\",\"UNMATCHED\",IF(K{row1}=\"ERROR\",\"ERROR\",\"MATCHED\")))"));
+
+            wb.set_cell_value_tracked(0, r, 12,
+                &format!("=IF(H{row1}=\"\",\"\",SUMIFS(C$2:C$1001,H$2:H$1001,H{row1}))"));
+            wb.set_cell_value_tracked(0, r, 13,
+                &format!("=IF(E{row1}=\"payout\",IF(M{row1}=0,\"OK\",\"FAIL\"),\"\")"));
+            wb.set_cell_value_tracked(0, r, 14,
+                &format!("=IF(E{row1}=\"payout\",SUMIFS(C$2:C$1001,H$2:H$1001,H{row1},E$2:E$1001,\"charge\"),\"\")"));
+            wb.set_cell_value_tracked(0, r, 15,
+                &format!("=IF(E{row1}=\"payout\",SUMIFS(C$2:C$1001,H$2:H$1001,H{row1},E$2:E$1001,\"fee\"),\"\")"));
+            wb.set_cell_value_tracked(0, r, 16,
+                &format!("=IF(E{row1}=\"payout\",COUNTIFS(H$2:H$1001,H{row1},E$2:E$1001,\"charge\"),\"\")"));
+            wb.set_cell_value_tracked(0, r, 17,
+                &format!("=IF(E{row1}=\"payout\",-(O{row1}*summary!B$32+Q{row1}*summary!B$33),\"\")"));
+            wb.set_cell_value_tracked(0, r, 18,
+                &format!("=IF(E{row1}=\"payout\",P{row1}-R{row1},\"\")"));
+            wb.set_cell_value_tracked(0, r, 19,
+                &format!("=IF(E{row1}=\"payout\",IF(ABS(S{row1})<=1,\"OK\",\"REVIEW\"),\"\")"));
         }
 
         // ── Sheet 1: mercury ──
@@ -132,6 +158,52 @@ fn ensure_template() {
         wb.set_cell_value_tracked(si, 22, 0, "Unmatched");
         wb.set_cell_value_tracked(si, 22, 1, "=COUNTIF(mercury!L$2:L$1001,\"UNMATCHED\")");
         wb.set_cell_value_tracked(si, 22, 2, "=SUMIF(mercury!L$2:L$1001,\"UNMATCHED\",mercury!C$2:C$1001)");
+
+        // Row 25: ROLLUP INTEGRITY (0-indexed row 24)
+        wb.set_cell_value_tracked(si, 24, 0, "ROLLUP INTEGRITY");
+        wb.set_cell_value_tracked(si, 24, 1, "Count");
+        wb.set_cell_value_tracked(si, 24, 2, "Status");
+
+        wb.set_cell_value_tracked(si, 25, 0, "Payouts Checked");
+        wb.set_cell_value_tracked(si, 25, 1, "=COUNTIF(stripe!N$2:N$1001,\"OK\")+COUNTIF(stripe!N$2:N$1001,\"FAIL\")");
+
+        wb.set_cell_value_tracked(si, 26, 0, "Passed");
+        wb.set_cell_value_tracked(si, 26, 1, "=COUNTIF(stripe!N$2:N$1001,\"OK\")");
+
+        wb.set_cell_value_tracked(si, 27, 0, "Failed");
+        wb.set_cell_value_tracked(si, 27, 1, "=COUNTIF(stripe!N$2:N$1001,\"FAIL\")");
+
+        wb.set_cell_value_tracked(si, 28, 0, "Rollup Status");
+        wb.set_cell_value_tracked(si, 28, 2, "=IF(B28=0,\"PASS\",\"FAIL\")");
+
+        // Row 31: FEE AUDIT (0-indexed row 30)
+        wb.set_cell_value_tracked(si, 30, 0, "FEE AUDIT");
+        wb.set_cell_value_tracked(si, 30, 1, "Amount");
+        wb.set_cell_value_tracked(si, 30, 2, "Status");
+
+        wb.set_cell_value_tracked(si, 31, 0, "Contract Rate (%)");
+        wb.set_cell_value_tracked(si, 31, 1, "0.029");
+
+        wb.set_cell_value_tracked(si, 32, 0, "Per-Txn Fee (¢)");
+        wb.set_cell_value_tracked(si, 32, 1, "30");
+
+        wb.set_cell_value_tracked(si, 33, 0, "Payouts Checked");
+        wb.set_cell_value_tracked(si, 33, 1, "=COUNTIF(stripe!T$2:T$1001,\"OK\")+COUNTIF(stripe!T$2:T$1001,\"REVIEW\")");
+
+        wb.set_cell_value_tracked(si, 34, 0, "Within Tolerance");
+        wb.set_cell_value_tracked(si, 34, 1, "=COUNTIF(stripe!T$2:T$1001,\"OK\")");
+
+        wb.set_cell_value_tracked(si, 35, 0, "Needs Review");
+        wb.set_cell_value_tracked(si, 35, 1, "=COUNTIF(stripe!T$2:T$1001,\"REVIEW\")");
+
+        wb.set_cell_value_tracked(si, 36, 0, "Fee Status");
+        wb.set_cell_value_tracked(si, 36, 2, "=IF(B36=0,\"OK\",\"REVIEW\")");
+
+        // Row 39: OVERALL VERDICT (0-indexed row 38)
+        wb.set_cell_value_tracked(si, 38, 0, "OVERALL VERDICT");
+        wb.set_cell_value_tracked(si, 38, 2, "Status");
+
+        wb.set_cell_value_tracked(si, 39, 2, "=IF(AND(C7=\"PASS\",C13=\"PASS\",C29=\"PASS\"),\"PASS\",\"FAIL\")");
 
         wb.rebuild_dep_graph();
         wb.recompute_full_ordered();
@@ -251,6 +323,21 @@ fn test_balanced_all_matched() {
     eprintln!("summary!B23 (Mercury Unmatched count) = {:?}", merc_unmatched);
     assert!(matches!(merc_unmatched, Value::Number(n) if n == 1.0), "got {:?}", merc_unmatched);
 
+    // Rollup: both payouts sum to 0 → PASS
+    let rollup_status = load_and_read_cell(p, "summary", 28, 2);
+    eprintln!("summary!C29 (Rollup Status) = {:?}", rollup_status);
+    assert!(matches!(rollup_status, Value::Text(ref s) if s == "PASS"), "got {:?}", rollup_status);
+
+    // Fee audit: payouts checked = 2
+    let fee_checked = load_and_read_cell(p, "summary", 33, 1);
+    eprintln!("summary!B34 (Fee Payouts Checked) = {:?}", fee_checked);
+    assert!(matches!(fee_checked, Value::Number(n) if n == 2.0), "got {:?}", fee_checked);
+
+    // Overall verdict = PASS (balance OK, settlement OK, rollup OK)
+    let verdict = load_and_read_cell(p, "summary", 39, 2);
+    eprintln!("summary!C40 (Overall Verdict) = {:?}", verdict);
+    assert!(matches!(verdict, Value::Text(ref s) if s == "PASS"), "got {:?}", verdict);
+
     eprintln!("TEST PASS: balanced_all_matched");
 }
 
@@ -282,6 +369,16 @@ fn test_missing_deposit_detected() {
     eprintln!("summary!B18 (Unmatched) = {:?}", unmatched);
     assert!(matches!(unmatched, Value::Number(n) if n == 1.0), "got {:?}", unmatched);
 
+    // Rollup: data integrity is fine (each payout's txns sum to 0)
+    let rollup_status = load_and_read_cell(p, "summary", 28, 2);
+    eprintln!("summary!C29 (Rollup Status) = {:?}", rollup_status);
+    assert!(matches!(rollup_status, Value::Text(ref s) if s == "PASS"), "got {:?}", rollup_status);
+
+    // Overall verdict = FAIL (settlement fails even though rollup passes)
+    let verdict = load_and_read_cell(p, "summary", 39, 2);
+    eprintln!("summary!C40 (Overall Verdict) = {:?}", verdict);
+    assert!(matches!(verdict, Value::Text(ref s) if s == "FAIL"), "got {:?}", verdict);
+
     eprintln!("TEST PASS: missing_deposit_detected");
 }
 
@@ -309,6 +406,16 @@ fn test_empty_data_zero_counts() {
     eprintln!("summary!B17 (Matched) = {:?}", matched);
     assert!(matches!(matched, Value::Number(n) if n == 0.0), "got {:?}", matched);
 
+    // Rollup: vacuously PASS (no payouts to check)
+    let rollup_status = load_and_read_cell(&p, "summary", 28, 2);
+    eprintln!("summary!C29 (Rollup Status) = {:?}", rollup_status);
+    assert!(matches!(rollup_status, Value::Text(ref s) if s == "PASS"), "got {:?}", rollup_status);
+
+    // Overall verdict = PASS (all zeros)
+    let verdict = load_and_read_cell(&p, "summary", 39, 2);
+    eprintln!("summary!C40 (Overall Verdict) = {:?}", verdict);
+    assert!(matches!(verdict, Value::Text(ref s) if s == "PASS"), "got {:?}", verdict);
+
     eprintln!("TEST PASS: empty_data_zero_counts");
 }
 
@@ -330,5 +437,48 @@ fn test_stripe_only_all_unmatched() {
     assert!(matches!(diff, Value::Number(n) if n == 174850.0),
         "Difference should be 174850, got {:?}", diff);
 
+    // Rollup: data integrity fine (each payout's txns sum to 0)
+    let rollup_status = load_and_read_cell(p, "summary", 28, 2);
+    eprintln!("summary!C29 (Rollup Status) = {:?}", rollup_status);
+    assert!(matches!(rollup_status, Value::Text(ref s) if s == "PASS"), "got {:?}", rollup_status);
+
+    // Overall verdict = FAIL (settlement fails)
+    let verdict = load_and_read_cell(p, "summary", 39, 2);
+    eprintln!("summary!C40 (Overall Verdict) = {:?}", verdict);
+    assert!(matches!(verdict, Value::Text(ref s) if s == "FAIL"), "got {:?}", verdict);
+
     eprintln!("TEST PASS: stripe_only_all_unmatched");
+}
+
+// ── Test 5: Unbalanced rollup detected ──
+
+#[test]
+fn test_unbalanced_rollup_detected() {
+    let out = fill_template("stripe-unbalanced-rollup.csv", "mercury-single-deposit.csv");
+    let p = out.path();
+
+    // Balance: 50000 + (-2250) + (-77750) = -30000 ≠ 0 → FAIL
+    let net = load_and_read_cell(p, "summary", 6, 1);
+    eprintln!("summary!B7 (Net) = {:?}", net);
+    assert!(matches!(net, Value::Number(n) if n == -30000.0), "Net should be -30000, got {:?}", net);
+
+    let net_status = load_and_read_cell(p, "summary", 6, 2);
+    eprintln!("summary!C7 (Net Status) = {:?}", net_status);
+    assert!(matches!(net_status, Value::Text(ref s) if s == "FAIL"), "got {:?}", net_status);
+
+    // Rollup: payout po_001 has txns summing to -30000 ≠ 0 → FAIL
+    let rollup_failed = load_and_read_cell(p, "summary", 27, 1);
+    eprintln!("summary!B28 (Rollup Failed) = {:?}", rollup_failed);
+    assert!(matches!(rollup_failed, Value::Number(n) if n == 1.0), "got {:?}", rollup_failed);
+
+    let rollup_status = load_and_read_cell(p, "summary", 28, 2);
+    eprintln!("summary!C29 (Rollup Status) = {:?}", rollup_status);
+    assert!(matches!(rollup_status, Value::Text(ref s) if s == "FAIL"), "got {:?}", rollup_status);
+
+    // Overall verdict = FAIL
+    let verdict = load_and_read_cell(p, "summary", 39, 2);
+    eprintln!("summary!C40 (Overall Verdict) = {:?}", verdict);
+    assert!(matches!(verdict, Value::Text(ref s) if s == "FAIL"), "got {:?}", verdict);
+
+    eprintln!("TEST PASS: unbalanced_rollup_detected");
 }

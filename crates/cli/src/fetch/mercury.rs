@@ -50,7 +50,11 @@ fn map_mercury_kind(kind: &str, amount: f64) -> &'static str {
         "check" => {
             if amount < 0.0 { "withdrawal" } else { "deposit" }
         }
-        _ => "other",
+        // Mercury returns "other" for ACH credits/debits (Stripe transfers,
+        // Forte deposits, etc.). Fall back to sign-based classification.
+        _ => {
+            if amount > 0.0 { "deposit" } else { "withdrawal" }
+        }
     }
 }
 
@@ -248,17 +252,7 @@ fn parse_transaction(item: &serde_json::Value) -> Result<Option<RawTransaction>,
     let counterparty_name = item["counterpartyName"].as_str().unwrap_or("");
     let note = item["note"].as_str().unwrap_or("");
 
-    let mut description = pick_description(bank_description, counterparty_name, note);
-
-    // Annotate description for unknown kinds
-    if canonical_type == "other" {
-        let annotation = format!("[mercury_kind: {}]", kind);
-        if description.is_empty() {
-            description = annotation;
-        } else {
-            description = format!("{} {}", description, annotation);
-        }
-    }
+    let description = pick_description(bank_description, counterparty_name, note);
 
     Ok(Some(RawTransaction {
         created_iso: created_at.to_string(),
@@ -417,9 +411,11 @@ mod tests {
         assert_eq!(map_mercury_kind("check", -50.0), "withdrawal");
         assert_eq!(map_mercury_kind("check", 50.0), "deposit");
 
-        // unknown → other
-        assert_eq!(map_mercury_kind("treasuryCredit", 100.0), "other");
-        assert_eq!(map_mercury_kind("somethingNew", -50.0), "other");
+        // unknown/other — sign-dependent fallback
+        assert_eq!(map_mercury_kind("other", 100.0), "deposit");
+        assert_eq!(map_mercury_kind("other", -50.0), "withdrawal");
+        assert_eq!(map_mercury_kind("treasuryCredit", 100.0), "deposit");
+        assert_eq!(map_mercury_kind("somethingNew", -50.0), "withdrawal");
     }
 
     #[test]
@@ -609,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_kind_annotated() {
+    fn test_unknown_kind_sign_fallback() {
         let server = MockServer::start();
 
         server.mock(|when, then| {
@@ -629,6 +625,17 @@ mod tests {
                             "bankDescription": "Treasury deposit",
                             "counterpartyName": "",
                             "note": ""
+                        },
+                        {
+                            "id": "txn_other_debit",
+                            "amount": -75.0,
+                            "kind": "other",
+                            "status": "sent",
+                            "createdAt": "2026-01-15T11:00:00Z",
+                            "postedAt": "2026-01-16T00:00:00Z",
+                            "bankDescription": "Some debit",
+                            "counterpartyName": "",
+                            "note": ""
                         }
                     ]
                 }));
@@ -643,13 +650,11 @@ mod tests {
         let to = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
         let txns = client.fetch_transactions("acc_123", &from, &to, true).unwrap();
 
-        assert_eq!(txns.len(), 1);
-        assert_eq!(txns[0].canonical_type, "other");
-        assert!(
-            txns[0].description.contains("[mercury_kind: treasuryCredit]"),
-            "description: {}",
-            txns[0].description,
-        );
+        assert_eq!(txns.len(), 2);
+        // Unknown positive → deposit
+        assert_eq!(txns[0].canonical_type, "deposit");
+        // "other" negative → withdrawal
+        assert_eq!(txns[1].canonical_type, "withdrawal");
     }
 
     #[test]

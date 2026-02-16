@@ -3,8 +3,10 @@
 //
 // Creates a 3-sheet workbook:
 //   stripe:  headers A1-L1, matching formulas in J-L for rows 2-1001
+//            + rollup cols M-N, fee audit cols O-T for rows 2-1001
 //   mercury: headers A1-L1, matching formulas in J-L for rows 2-1001
-//   summary: aggregate checks (balance, payout matching, counts)
+//   summary: aggregate checks (balance, payout matching, counts,
+//            rollup integrity, fee audit, overall verdict)
 
 use std::path::Path;
 use visigrid_engine::workbook::Workbook;
@@ -30,6 +32,16 @@ fn build_template(out_path: &Path) {
     wb.set_cell_value_tracked(0, 0, 10, "mercury_match");
     wb.set_cell_value_tracked(0, 0, 11, "match_status");
 
+    // Rollup + fee audit column headers (M1-T1)
+    wb.set_cell_value_tracked(0, 0, 12, "rollup_sum");
+    wb.set_cell_value_tracked(0, 0, 13, "rollup_check");
+    wb.set_cell_value_tracked(0, 0, 14, "charge_total");
+    wb.set_cell_value_tracked(0, 0, 15, "fee_total");
+    wb.set_cell_value_tracked(0, 0, 16, "charge_count");
+    wb.set_cell_value_tracked(0, 0, 17, "expected_fee");
+    wb.set_cell_value_tracked(0, 0, 18, "fee_variance");
+    wb.set_cell_value_tracked(0, 0, 19, "fee_check");
+
     // Formulas for rows 2-1001 (0-indexed rows 1-1000)
     for r in 1..=1000 {
         let row1 = r + 1; // 1-indexed row number for formula references
@@ -42,6 +54,31 @@ fn build_template(out_path: &Path) {
         // L: status label
         wb.set_cell_value_tracked(0, r, 11,
             &format!("=IF(J{row1}=\"\",\"\",IF(K{row1}=\"UNMATCHED\",\"UNMATCHED\",IF(K{row1}=\"ERROR\",\"ERROR\",\"MATCHED\")))"));
+
+        // M: rollup sum — sum all amounts in same group_id
+        wb.set_cell_value_tracked(0, r, 12,
+            &format!("=IF(H{row1}=\"\",\"\",SUMIFS(C$2:C$1001,H$2:H$1001,H{row1}))"));
+        // N: rollup check — payout rows only
+        wb.set_cell_value_tracked(0, r, 13,
+            &format!("=IF(E{row1}=\"payout\",IF(M{row1}=0,\"OK\",\"FAIL\"),\"\")"));
+        // O: charge total per payout
+        wb.set_cell_value_tracked(0, r, 14,
+            &format!("=IF(E{row1}=\"payout\",SUMIFS(C$2:C$1001,H$2:H$1001,H{row1},E$2:E$1001,\"charge\"),\"\")"));
+        // P: fee total per payout
+        wb.set_cell_value_tracked(0, r, 15,
+            &format!("=IF(E{row1}=\"payout\",SUMIFS(C$2:C$1001,H$2:H$1001,H{row1},E$2:E$1001,\"fee\"),\"\")"));
+        // Q: charge count per payout
+        wb.set_cell_value_tracked(0, r, 16,
+            &format!("=IF(E{row1}=\"payout\",COUNTIFS(H$2:H$1001,H{row1},E$2:E$1001,\"charge\"),\"\")"));
+        // R: expected fee (rate × charges + per-txn × count)
+        wb.set_cell_value_tracked(0, r, 17,
+            &format!("=IF(E{row1}=\"payout\",-(O{row1}*summary!B$32+Q{row1}*summary!B$33),\"\")"));
+        // S: fee variance (actual − expected)
+        wb.set_cell_value_tracked(0, r, 18,
+            &format!("=IF(E{row1}=\"payout\",P{row1}-R{row1},\"\")"));
+        // T: fee check (within 1¢ tolerance)
+        wb.set_cell_value_tracked(0, r, 19,
+            &format!("=IF(E{row1}=\"payout\",IF(ABS(S{row1})<=1,\"OK\",\"REVIEW\"),\"\")"));
     }
 
     // ── Sheet 1: mercury ──
@@ -153,6 +190,52 @@ fn build_template(out_path: &Path) {
     wb.set_cell_value_tracked(si, 22, 0, "Unmatched");
     wb.set_cell_value_tracked(si, 22, 1, "=COUNTIF(mercury!L$2:L$1001,\"UNMATCHED\")");
     wb.set_cell_value_tracked(si, 22, 2, "=SUMIF(mercury!L$2:L$1001,\"UNMATCHED\",mercury!C$2:C$1001)");
+
+    // Row 25: ROLLUP INTEGRITY header (0-indexed row 24)
+    wb.set_cell_value_tracked(si, 24, 0, "ROLLUP INTEGRITY");
+    wb.set_cell_value_tracked(si, 24, 1, "Count");
+    wb.set_cell_value_tracked(si, 24, 2, "Status");
+
+    wb.set_cell_value_tracked(si, 25, 0, "Payouts Checked");
+    wb.set_cell_value_tracked(si, 25, 1, "=COUNTIF(stripe!N$2:N$1001,\"OK\")+COUNTIF(stripe!N$2:N$1001,\"FAIL\")");
+
+    wb.set_cell_value_tracked(si, 26, 0, "Passed");
+    wb.set_cell_value_tracked(si, 26, 1, "=COUNTIF(stripe!N$2:N$1001,\"OK\")");
+
+    wb.set_cell_value_tracked(si, 27, 0, "Failed");
+    wb.set_cell_value_tracked(si, 27, 1, "=COUNTIF(stripe!N$2:N$1001,\"FAIL\")");
+
+    wb.set_cell_value_tracked(si, 28, 0, "Rollup Status");
+    wb.set_cell_value_tracked(si, 28, 2, "=IF(B28=0,\"PASS\",\"FAIL\")");
+
+    // Row 31: FEE AUDIT header (0-indexed row 30)
+    wb.set_cell_value_tracked(si, 30, 0, "FEE AUDIT");
+    wb.set_cell_value_tracked(si, 30, 1, "Amount");
+    wb.set_cell_value_tracked(si, 30, 2, "Status");
+
+    wb.set_cell_value_tracked(si, 31, 0, "Contract Rate (%)");
+    wb.set_cell_value_tracked(si, 31, 1, "0.029");
+
+    wb.set_cell_value_tracked(si, 32, 0, "Per-Txn Fee (¢)");
+    wb.set_cell_value_tracked(si, 32, 1, "30");
+
+    wb.set_cell_value_tracked(si, 33, 0, "Payouts Checked");
+    wb.set_cell_value_tracked(si, 33, 1, "=COUNTIF(stripe!T$2:T$1001,\"OK\")+COUNTIF(stripe!T$2:T$1001,\"REVIEW\")");
+
+    wb.set_cell_value_tracked(si, 34, 0, "Within Tolerance");
+    wb.set_cell_value_tracked(si, 34, 1, "=COUNTIF(stripe!T$2:T$1001,\"OK\")");
+
+    wb.set_cell_value_tracked(si, 35, 0, "Needs Review");
+    wb.set_cell_value_tracked(si, 35, 1, "=COUNTIF(stripe!T$2:T$1001,\"REVIEW\")");
+
+    wb.set_cell_value_tracked(si, 36, 0, "Fee Status");
+    wb.set_cell_value_tracked(si, 36, 2, "=IF(B36=0,\"OK\",\"REVIEW\")");
+
+    // Row 39: OVERALL VERDICT header (0-indexed row 38)
+    wb.set_cell_value_tracked(si, 38, 0, "OVERALL VERDICT");
+    wb.set_cell_value_tracked(si, 38, 2, "Status");
+
+    wb.set_cell_value_tracked(si, 39, 2, "=IF(AND(C7=\"PASS\",C13=\"PASS\",C29=\"PASS\"),\"PASS\",\"FAIL\")");
 
     // ── Build and save ──
     wb.rebuild_dep_graph();
