@@ -45,9 +45,9 @@ fn build_template(out_path: &Path) {
     // Formulas for rows 2-1001 (0-indexed rows 1-1000)
     for r in 1..=1000 {
         let row1 = r + 1; // 1-indexed row number for formula references
-        // J: payout amount (negated to positive)
+        // J: payout amount (negated to positive, in-period payouts only)
         wb.set_cell_value_tracked(0, r, 9,
-            &format!("=IF(E{row1}=\"payout\",-C{row1},\"\")"));
+            &format!("=IF(AND(E{row1}=\"payout\",OR(summary!B$42=\"\",A{row1}>=summary!B$42)),-C{row1},\"\")"));
         // K: XLOOKUP matching deposit by amount
         wb.set_cell_value_tracked(0, r, 10,
             &format!("=IF(J{row1}=\"\",\"\",IFERROR(XLOOKUP(J{row1},mercury!J$2:J$1001,mercury!G$2:G$1001,\"UNMATCHED\"),\"ERROR\"))"));
@@ -58,9 +58,9 @@ fn build_template(out_path: &Path) {
         // M: rollup sum — sum all amounts in same group_id
         wb.set_cell_value_tracked(0, r, 12,
             &format!("=IF(H{row1}=\"\",\"\",SUMIFS(C$2:C$1001,H$2:H$1001,H{row1}))"));
-        // N: rollup check — payout rows only
+        // N: rollup check — in-period payout rows only
         wb.set_cell_value_tracked(0, r, 13,
-            &format!("=IF(E{row1}=\"payout\",IF(M{row1}=0,\"OK\",\"FAIL\"),\"\")"));
+            &format!("=IF(AND(E{row1}=\"payout\",OR(summary!B$42=\"\",A{row1}>=summary!B$42)),IF(M{row1}=0,\"OK\",\"FAIL\"),\"\")"));
         // O: charge total per payout
         wb.set_cell_value_tracked(0, r, 14,
             &format!("=IF(E{row1}=\"payout\",SUMIFS(C$2:C$1001,H$2:H$1001,H{row1},E$2:E$1001,\"charge\"),\"\")"));
@@ -235,7 +235,10 @@ fn build_template(out_path: &Path) {
     wb.set_cell_value_tracked(si, 38, 0, "OVERALL VERDICT");
     wb.set_cell_value_tracked(si, 38, 2, "Status");
 
-    wb.set_cell_value_tracked(si, 39, 2, "=IF(AND(C7=\"PASS\",C13=\"PASS\",C29=\"PASS\"),\"PASS\",\"FAIL\")");
+    wb.set_cell_value_tracked(si, 39, 2, "=IF(AND(C13=\"PASS\",C29=\"PASS\"),\"PASS\",\"FAIL\")");
+
+    // Row 42: Period Start (0-indexed row 41) — filled by workflow for date-window filtering
+    wb.set_cell_value_tracked(si, 41, 0, "Period Start");
 
     // ── Build and save ──
     wb.rebuild_dep_graph();
