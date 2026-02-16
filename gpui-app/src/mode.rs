@@ -50,6 +50,7 @@ pub enum Mode {
     FormatPainter,     // Format Painter: next click applies captured format
     NumberFormatEditor, // Number format editor (Ctrl+1 when Format tab is open)
     TransformPreview,  // Transform diff preview dialog (Pro)
+    ConvertPicker,     // Convert format picker dialog (palette → Convert)
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -123,7 +124,7 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker | Mode::NumberFormatEditor | Mode::TransformPreview)
+        matches!(self, Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker | Mode::NumberFormatEditor | Mode::TransformPreview | Mode::ConvertPicker)
     }
 
     /// True if this mode has text input active (typing should work normally).

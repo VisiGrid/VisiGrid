@@ -28,6 +28,7 @@ mod terminal_panel;
 pub mod license_dialog;
 pub mod minimap;
 mod paste_special_dialog;
+mod convert_picker;
 mod preferences_panel;
 pub mod refactor_log;
 mod menu_bar;
@@ -92,6 +93,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_color_picker = app.mode == Mode::ColorPicker;
     let show_number_format_editor = app.mode == Mode::NumberFormatEditor;
     let show_transform_preview = app.mode == Mode::TransformPreview;
+    let show_convert_picker = app.mode == Mode::ConvertPicker;
     let show_keytips = app.keytips_active;
     let show_rewind_confirm = app.rewind_confirm.visible;
     let show_rewind_success = app.rewind_success.visible;
@@ -669,6 +671,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_paste_special, |div| {
             div.child(paste_special_dialog::render_paste_special_dialog(app, cx))
+        })
+        .when(show_convert_picker, |div| {
+            div.child(convert_picker::render_convert_picker(app, cx))
         })
         .when(show_transform_preview, |div| {
             div.child(transform_diff_dialog::render_transform_diff_dialog(app, cx))
