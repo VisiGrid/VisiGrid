@@ -209,25 +209,48 @@ if $IS_LINUX; then
         bold "Downloading Linux tarball for SHA256..."
         TARBALL_URL="https://github.com/$GITHUB_REPO/releases/download/v$VERSION/VisiGrid-linux-x86_64.tar.gz"
 
-        # Wait a moment for the release assets to be available
-        sleep 5
+        # Wait for CDN propagation before downloading.
+        # GitHub's CDN can serve stale/incomplete assets for up to 60s after
+        # a release is published. We download twice with a gap and compare
+        # checksums to ensure we have the final, stable asset.
+        bold "Waiting 30s for CDN propagation..."
+        sleep 30
 
         TMPFILE="$(mktemp)"
-        trap "rm -f '$TMPFILE'" EXIT
+        TMPFILE2="$(mktemp)"
+        trap "rm -f '$TMPFILE' '$TMPFILE2'" EXIT
 
-        # Retry download a few times (assets may take a moment to propagate)
-        for attempt in 1 2 3 4 5; do
-            if curl -sL -o "$TMPFILE" -w '%{http_code}' "$TARBALL_URL" | grep -q '^200$'; then
-                break
-            fi
-            if (( attempt == 5 )); then
-                die "Failed to download tarball after 5 attempts: $TARBALL_URL"
-            fi
-            echo "Download attempt $attempt failed, retrying in 10s..."
-            sleep 10
-        done
+        download_tarball() {
+            local dest="$1"
+            for attempt in 1 2 3 4 5; do
+                if curl -sL -o "$dest" -w '%{http_code}' "$TARBALL_URL" | grep -q '^200$'; then
+                    return 0
+                fi
+                if (( attempt == 5 )); then
+                    return 1
+                fi
+                echo "Download attempt $attempt failed, retrying in 10s..."
+                sleep 10
+            done
+        }
 
-        SHA256="$(sha256 "$TMPFILE")"
+        download_tarball "$TMPFILE" || die "Failed to download tarball after 5 attempts: $TARBALL_URL"
+        SHA_FIRST="$(sha256 "$TMPFILE")"
+
+        # Second download after a gap to confirm CDN consistency
+        bold "Verifying CDN consistency (second download in 15s)..."
+        sleep 15
+        download_tarball "$TMPFILE2" || die "Failed to download tarball (verification): $TARBALL_URL"
+        SHA_SECOND="$(sha256 "$TMPFILE2")"
+
+        if [[ "$SHA_FIRST" != "$SHA_SECOND" ]]; then
+            yellow "CDN returned different checksums — waiting 60s and retrying..."
+            sleep 60
+            download_tarball "$TMPFILE" || die "Failed to download tarball (final): $TARBALL_URL"
+            SHA_FIRST="$(sha256 "$TMPFILE")"
+        fi
+
+        SHA256="$SHA_FIRST"
         bold "SHA256: $SHA256"
 
         cd "$AUR_DIR"
