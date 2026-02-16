@@ -3,6 +3,7 @@
 
 mod ci;
 mod exit_codes;
+mod export;
 mod fetch;
 mod fill;
 mod hub;
@@ -12,6 +13,7 @@ mod session;
 mod sheet_ops;
 mod tui;
 mod util;
+mod verify;
 
 use visigrid_cli::diff;
 
@@ -686,6 +688,14 @@ Examples:
     /// Fetch data from external sources (Stripe, etc.)
     #[command(subcommand)]
     Fetch(fetch::FetchCommands),
+
+    /// Export canonical truth data (dbt seeds, manifests)
+    #[command(subcommand)]
+    Export(export::ExportCommands),
+
+    /// Verify financial data integrity (reconciliation)
+    #[command(subcommand)]
+    Verify(verify::VerifyCommands),
 
     /// List, preview, and run Lua scripts with capability enforcement
     #[command(subcommand)]
@@ -1804,6 +1814,8 @@ fn main() -> ExitCode {
             }
         }
         Some(Commands::Fetch(fetch_cmd)) => fetch::cmd_fetch(fetch_cmd),
+        Some(Commands::Export(export_cmd)) => export::cmd_export(export_cmd),
+        Some(Commands::Verify(verify_cmd)) => verify::cmd_verify(verify_cmd),
         Some(Commands::Scripts(scripts_cmd)) => match scripts_cmd {
             ScriptsCommands::List { file, json } => {
                 scripts::cmd_scripts_list(file, json)
