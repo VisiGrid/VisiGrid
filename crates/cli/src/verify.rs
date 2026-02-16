@@ -1,7 +1,8 @@
 //! `vgrid verify` — financial verification commands.
 //!
-//! Currently supports one subcommand:
+//! Subcommands:
 //! - `vgrid verify totals` — compare truth vs warehouse daily totals
+//! - `vgrid verify proof`  — validate a signed proof artifact
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -72,6 +73,38 @@ Examples:
         #[arg(long, env = "VGRID_SIGNING_KEY_PATH")]
         signing_key: Option<PathBuf>,
     },
+
+    /// Validate a signed proof artifact (signature, file hashes, schema)
+    #[command(after_help = "\
+Reads a proof.json produced by `vgrid verify totals --sign` and checks:
+  1. Ed25519 signature matches the embedded public key
+  2. Schema version is supported
+  3. Referenced files still have matching BLAKE3 hashes (with --check-files)
+
+Exit codes:
+  0   Proof is valid
+  1   Proof is invalid (bad signature, hash mismatch, etc.)
+
+Examples:
+  vgrid verify proof proof.json
+  vgrid verify proof proof.json --check-files
+  vgrid verify proof proof.json --json")]
+    Proof {
+        /// Path to the signed proof JSON file
+        proof_file: PathBuf,
+
+        /// Recompute BLAKE3 hashes of referenced files and verify they match
+        #[arg(long)]
+        check_files: bool,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Quiet mode: only exit code, no stderr output
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
 }
 
 pub fn cmd_verify(cmd: VerifyCommands) -> Result<(), CliError> {
@@ -99,6 +132,12 @@ pub fn cmd_verify(cmd: VerifyCommands) -> Result<(), CliError> {
             proof,
             signing_key,
         ),
+        VerifyCommands::Proof {
+            proof_file,
+            check_files,
+            json,
+            quiet,
+        } => cmd_verify_proof(proof_file, check_files, json, quiet),
     }
 }
 
@@ -461,7 +500,7 @@ fn write_diff_csv(mismatches: &[Mismatch], path: &PathBuf) -> Result<(), CliErro
 
 // ── Proof signing ───────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SignedProof {
     schema_version: u32,
     payload: ProofPayload,
@@ -469,7 +508,7 @@ struct SignedProof {
     public_key: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ProofPayload {
     schema_version: u32,
     verifier: ProofVerifier,
@@ -480,26 +519,26 @@ struct ProofPayload {
     result: ProofOutcome,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ProofVerifier {
     name: String,
     version: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ProofFileRef {
     path: String,
     blake3: String,
     rows: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ProofParams {
     tolerance_micro: i64,
     fail_on_count_mismatch: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ProofOutcome {
     status: String,
     matched: usize,
@@ -622,5 +661,201 @@ fn load_or_generate_key(
 
         eprintln!("  generated new signing key: {}", path.display());
         Ok((signing_key, verifying_key))
+    }
+}
+
+// ── Proof verification ──────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct ProofVerifyResult {
+    status: &'static str,
+    proof_file: String,
+    checks: Vec<ProofCheck>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProofCheck {
+    name: String,
+    status: &'static str,
+    detail: String,
+}
+
+fn cmd_verify_proof(
+    proof_path: PathBuf,
+    check_files: bool,
+    json_output: bool,
+    quiet: bool,
+) -> Result<(), CliError> {
+    use base64::Engine;
+    use ed25519_dalek::Verifier;
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    // Read and parse proof
+    let proof_bytes = std::fs::read(&proof_path).map_err(|e| {
+        CliError::io(format!("cannot read {}: {e}", proof_path.display()))
+    })?;
+    let signed: SignedProof = serde_json::from_slice(&proof_bytes).map_err(|e| {
+        CliError::parse(format!("invalid proof JSON: {e}"))
+    })?;
+
+    let mut checks = Vec::new();
+    let mut all_pass = true;
+
+    // Check 1: Schema version
+    let schema_ok = signed.schema_version == 1;
+    checks.push(ProofCheck {
+        name: "schema_version".to_string(),
+        status: if schema_ok { "pass" } else { "fail" },
+        detail: format!("v{}", signed.schema_version),
+    });
+    if !schema_ok {
+        all_pass = false;
+    }
+
+    // Check 2: Ed25519 signature
+    let sig_result = (|| -> Result<(), String> {
+        let pub_bytes = b64
+            .decode(&signed.public_key)
+            .map_err(|e| format!("invalid public key base64: {e}"))?;
+        let pub_array: [u8; 32] = pub_bytes
+            .try_into()
+            .map_err(|_| "public key must be 32 bytes".to_string())?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pub_array)
+            .map_err(|e| format!("invalid public key: {e}"))?;
+
+        let sig_bytes = b64
+            .decode(&signed.signature)
+            .map_err(|e| format!("invalid signature base64: {e}"))?;
+        let sig_array: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| "signature must be 64 bytes".to_string())?;
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
+
+        // Recompute compact JSON of payload (same as signing)
+        let payload_bytes = serde_json::to_vec(&signed.payload)
+            .map_err(|e| format!("payload serialization error: {e}"))?;
+
+        verifying_key
+            .verify(&payload_bytes, &signature)
+            .map_err(|e| format!("signature verification failed: {e}"))
+    })();
+
+    match &sig_result {
+        Ok(()) => {
+            checks.push(ProofCheck {
+                name: "signature".to_string(),
+                status: "pass",
+                detail: format!("ed25519 key={}", &signed.public_key[..16]),
+            });
+        }
+        Err(e) => {
+            checks.push(ProofCheck {
+                name: "signature".to_string(),
+                status: "fail",
+                detail: e.clone(),
+            });
+            all_pass = false;
+        }
+    }
+
+    // Check 3: File hashes (optional)
+    if check_files {
+        for (label, file_ref) in [
+            ("truth", &signed.payload.truth),
+            ("warehouse", &signed.payload.warehouse),
+        ] {
+            let path = std::path::Path::new(&file_ref.path);
+            if path.exists() {
+                let bytes = std::fs::read(path).map_err(|e| {
+                    CliError::io(format!("cannot read {}: {e}", path.display()))
+                })?;
+                let actual_hash = hash_raw_row(&bytes);
+                let hash_ok = actual_hash == file_ref.blake3;
+                checks.push(ProofCheck {
+                    name: format!("{}_hash", label),
+                    status: if hash_ok { "pass" } else { "fail" },
+                    detail: if hash_ok {
+                        format!("blake3:{}", &file_ref.blake3[..16])
+                    } else {
+                        format!(
+                            "MISMATCH expected={} actual={}",
+                            &file_ref.blake3[..16],
+                            &actual_hash[..16]
+                        )
+                    },
+                });
+                if !hash_ok {
+                    all_pass = false;
+                }
+            } else {
+                checks.push(ProofCheck {
+                    name: format!("{}_hash", label),
+                    status: "skip",
+                    detail: format!("file not found: {}", file_ref.path),
+                });
+            }
+        }
+    }
+
+    // Check 4: Verifier info
+    checks.push(ProofCheck {
+        name: "verifier".to_string(),
+        status: "info",
+        detail: format!(
+            "{} v{}",
+            signed.payload.verifier.name, signed.payload.verifier.version
+        ),
+    });
+
+    // Check 5: Original result
+    checks.push(ProofCheck {
+        name: "original_result".to_string(),
+        status: "info",
+        detail: format!(
+            "{} (matched={}, mismatched={})",
+            signed.payload.result.status,
+            signed.payload.result.matched,
+            signed.payload.result.mismatched,
+        ),
+    });
+
+    let status = if all_pass { "pass" } else { "fail" };
+
+    let verify_result = ProofVerifyResult {
+        status,
+        proof_file: proof_path.display().to_string(),
+        checks,
+    };
+
+    if json_output {
+        let json = serde_json::to_string_pretty(&verify_result)
+            .map_err(|e| CliError::io(format!("JSON error: {e}")))?;
+        println!("{json}");
+    } else if !quiet {
+        eprintln!(
+            "verify-proof: {} — {}",
+            status.to_uppercase(),
+            proof_path.display()
+        );
+        for check in &verify_result.checks {
+            let icon = match check.status {
+                "pass" => "  ✓",
+                "fail" => "  ✗",
+                "skip" => "  -",
+                _ => "  •",
+            };
+            eprintln!("{} {}: {}", icon, check.name, check.detail);
+        }
+    }
+
+    if all_pass {
+        Ok(())
+    } else {
+        Err(CliError {
+            code: exit_codes::EXIT_ERROR,
+            message: String::new(),
+            hint: None,
+        })
     }
 }
