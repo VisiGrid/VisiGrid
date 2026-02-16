@@ -220,6 +220,10 @@ pub enum CommandId {
     CircleInvalidData,
     ClearInvalidCircles,
     OpenDiffResults,
+    RerunDiff,
+    RerunDiffRun,
+    OpenThisDiffFile,
+    RefreshDiffResults,
 
     // Transforms
     TransformUppercase,
@@ -237,6 +241,11 @@ pub enum CommandId {
     HubSignIn,
     HubSignOut,
     HubLinkDialog,
+
+    // Phase 4: Palette-driven terminal
+    OpenTerminal,
+    VerifyIntegrity,
+    Convert,
 }
 
 impl CommandId {
@@ -366,6 +375,10 @@ impl CommandId {
             Self::CircleInvalidData => "Circle Invalid Data",
             Self::ClearInvalidCircles => "Clear Invalid Circles",
             Self::OpenDiffResults => "Open Diff Results",
+            Self::RerunDiff => "Re-run Diff",
+            Self::RerunDiffRun => "Re-run Diff (Run)",
+            Self::OpenThisDiffFile => "Open Diff Results (This Sheet)",
+            Self::RefreshDiffResults => "Refresh Diff Results",
             Self::HubCheckStatus => "VisiHub: Check Status",
             Self::HubPull => "VisiHub: Update from Remote",
             Self::HubPublish => "VisiHub: Publish",
@@ -375,6 +388,9 @@ impl CommandId {
             Self::HubSignIn => "VisiHub: Sign In",
             Self::HubSignOut => "VisiHub: Sign Out",
             Self::HubLinkDialog => "VisiHub: Link to Dataset...",
+            Self::OpenTerminal => "Open Terminal",
+            Self::VerifyIntegrity => "Verify Integrity",
+            Self::Convert => "Convert",
         }
     }
 
@@ -566,6 +582,10 @@ impl CommandId {
             Self::CircleInvalidData => "validate invalid circle mark highlight",
             Self::ClearInvalidCircles => "validate invalid circle clear remove",
             Self::OpenDiffResults => "diff results reconcile compare open",
+            Self::RerunDiff => "rerun diff reconcile repeat refresh",
+            Self::RerunDiffRun => "rerun diff run execute reconcile repeat refresh",
+            Self::OpenThisDiffFile => "open diff results this sheet reload reopen deterministic",
+            Self::RefreshDiffResults => "refresh diff results rerun reload reconcile update",
             Self::HubCheckStatus => "visihub cloud sync status check refresh",
             Self::HubPull => "visihub cloud sync update pull",
             Self::HubPublish => "visihub cloud sync publish upload push commit",
@@ -575,6 +595,9 @@ impl CommandId {
             Self::HubSignIn => "visihub cloud sync sign in login authenticate token",
             Self::HubSignOut => "visihub cloud sync sign out logout disconnect",
             Self::HubLinkDialog => "visihub cloud sync link connect dataset repository",
+            Self::OpenTerminal => "terminal shell console pty bash",
+            Self::VerifyIntegrity => "verify integrity fingerprint check audit trust",
+            Self::Convert => "convert export csv tsv json xlsx format",
             Self::SplitRight => "split view pane side by side divide window",
             Self::CloseSplit => "split close merge unsplit single pane",
             Self::ToggleTrace => "trace precedents dependents dependency audit formula inputs outputs",
@@ -715,6 +738,10 @@ impl CommandId {
             Self::CircleInvalidData,
             Self::ClearInvalidCircles,
             Self::OpenDiffResults,
+            Self::RerunDiff,
+            Self::RerunDiffRun,
+            Self::OpenThisDiffFile,
+            Self::RefreshDiffResults,
             Self::HubCheckStatus,
             Self::HubPull,
             Self::HubPublish,
@@ -724,6 +751,9 @@ impl CommandId {
             Self::HubSignIn,
             Self::HubSignOut,
             Self::HubLinkDialog,
+            Self::OpenTerminal,
+            Self::VerifyIntegrity,
+            Self::Convert,
             Self::NavPerfReport,
         ]
     }
@@ -784,7 +814,8 @@ impl CommandId {
             | Self::UnfreezePanes
             | Self::SplitRight
             | Self::CloseSplit
-            | Self::Recalculate => Some(MenuCategory::View),
+            | Self::Recalculate
+            | Self::OpenTerminal => Some(MenuCategory::View),
 
             // Tools menu (trace, explain, audit, AI)
             Self::ToggleTrace
@@ -799,7 +830,8 @@ impl CommandId {
             | Self::NavPerfReport
             | Self::ReloadCustomFunctions
             | Self::ProfileNextRecalc
-            | Self::ClearProfiler => Some(MenuCategory::Tools),
+            | Self::ClearProfiler
+            | Self::VerifyIntegrity => Some(MenuCategory::Tools),
 
             // Format menu
             Self::ToggleBold
@@ -863,7 +895,12 @@ impl CommandId {
             | Self::ClearValidationExclusions
             | Self::CircleInvalidData
             | Self::ClearInvalidCircles
-            | Self::OpenDiffResults => Some(MenuCategory::Data),
+            | Self::OpenDiffResults
+            | Self::RerunDiff
+            | Self::RerunDiffRun
+            | Self::OpenThisDiffFile
+            | Self::RefreshDiffResults
+            | Self::Convert => Some(MenuCategory::Data),
 
             // Help menu
             Self::ShowShortcuts

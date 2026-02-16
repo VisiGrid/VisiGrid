@@ -1194,18 +1194,38 @@ enum NullPolicy {
     Error,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
 enum DiffMatchMode {
     Exact,
     Contains,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+impl std::fmt::Display for DiffMatchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exact => write!(f, "exact"),
+            Self::Contains => write!(f, "contains"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
 enum DiffKeyTransform {
     None,
     Trim,
     Digits,
     Alnum,
+}
+
+impl std::fmt::Display for DiffKeyTransform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Trim => write!(f, "trim"),
+            Self::Digits => write!(f, "digits"),
+            Self::Alnum => write!(f, "alnum"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -3051,9 +3071,67 @@ fn cmd_diff(
         });
     }
 
+    // Build invocation string + structured args for JSON provenance
+    let invocation = {
+        let mut parts = vec![
+            "vgrid".to_string(),
+            "diff".to_string(),
+            shell_quote(&left_arg),
+            shell_quote(&right_arg),
+            "--key".to_string(),
+            shell_quote(&key),
+        ];
+        if match_mode != DiffMatchMode::Exact {
+            parts.push("--match".to_string());
+            parts.push(format!("{}", match_mode));
+        }
+        if key_transform != DiffKeyTransform::Trim {
+            parts.push("--key-transform".to_string());
+            parts.push(format!("{}", key_transform));
+        }
+        if let Some(ref cmp) = compare {
+            parts.push("--compare".to_string());
+            parts.push(shell_quote(cmp));
+        }
+        if tolerance != 0.0 {
+            parts.push("--tolerance".to_string());
+            parts.push(format!("{}", tolerance));
+        }
+        if let Some(ref path) = output {
+            parts.push("--output".to_string());
+            parts.push(shell_quote(&path.display().to_string()));
+        }
+        if no_headers {
+            parts.push("--no-headers".to_string());
+        }
+        if let Some(hr) = header_row {
+            parts.push("--header-row".to_string());
+            parts.push(format!("{}", hr));
+        }
+        if delimiter != ',' {
+            parts.push("--delimiter".to_string());
+            parts.push(shell_quote(&delimiter.to_string()));
+        }
+        if let Some(ref cc) = contains_column {
+            parts.push("--contains-column".to_string());
+            parts.push(shell_quote(cc));
+        }
+        parts.join(" ")
+    };
+
+    let invocation_args = serde_json::json!({
+        "left": left_arg,
+        "right": right_arg,
+        "key": key,
+        "output": output.as_ref().map(|p| p.display().to_string()),
+        "tolerance": tolerance,
+        "match": format!("{}", match_mode),
+        "key_transform": format!("{}", key_transform),
+    });
+
     // Format output
     let output_bytes = match out {
-        DiffOutputFormat::Json => format_diff_json(&result, &options, &headers, &summary_mode)?,
+        DiffOutputFormat::Json => format_diff_json(&result, &options, &headers, &summary_mode, &invocation, &invocation_args)?,
         DiffOutputFormat::Csv => format_diff_csv(&result, &options)?,
     };
 
@@ -3198,6 +3276,18 @@ fn check_column_both_sides(
     Ok(())
 }
 
+/// Quote a string for shell display if it contains spaces or special characters.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "\"\"".to_string();
+    }
+    if s.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '/' || c == '-' || c == '_') {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
 fn col_letter(col: usize) -> String {
     let mut result = String::new();
     let mut n = col;
@@ -3259,6 +3349,8 @@ fn format_diff_json(
     options: &diff::DiffOptions,
     headers: &[String],
     _summary_mode: &DiffSummaryMode,
+    invocation: &str,
+    invocation_args: &serde_json::Value,
 ) -> Result<Vec<u8>, CliError> {
     let key_name = headers.get(options.key_col).cloned().unwrap_or_default();
     let match_str = match options.match_mode {
@@ -3350,6 +3442,8 @@ fn format_diff_json(
 
     let top = serde_json::json!({
         "contract_version": DIFF_CONTRACT_VERSION,
+        "invocation": invocation,
+        "invocation_args": invocation_args,
         "summary": summary_json,
         "results": results_json,
     });

@@ -2357,6 +2357,9 @@ pub struct Spreadsheet {
     // Paste Special dialog state (Ctrl+Alt+V)
     pub paste_special_dialog: PasteSpecialDialogState,
 
+    // Convert picker dialog state (palette → Convert)
+    pub convert_picker_selected: u8,
+
     // Number Format Editor dialog state (Ctrl+1 escalation)
     pub number_format_editor: NumberFormatEditorState,
     /// Last selected paste type for session memory (remembered within session)
@@ -2809,6 +2812,7 @@ impl Spreadsheet {
             validation_dialog: ValidationDialogState::default(),
 
             paste_special_dialog: PasteSpecialDialogState::default(),
+            convert_picker_selected: 0,
             number_format_editor: NumberFormatEditorState::default(),
             last_paste_special_mode: PasteType::All,
 
@@ -4257,6 +4261,10 @@ impl Spreadsheet {
             CommandId::CircleInvalidData => self.circle_invalid_data(cx),
             CommandId::ClearInvalidCircles => self.clear_invalid_circles(cx),
             CommandId::OpenDiffResults => self.open_diff_results(window, cx),
+            CommandId::RerunDiff => self.rerun_diff(window, cx),
+            CommandId::RerunDiffRun => self.rerun_diff_run(window, cx),
+            CommandId::OpenThisDiffFile => self.open_this_diff_file(cx),
+            CommandId::RefreshDiffResults => self.refresh_diff_results(window, cx),
 
             // VisiHub sync
             CommandId::HubCheckStatus => self.hub_check_status(cx),
@@ -4268,11 +4276,162 @@ impl Spreadsheet {
             CommandId::HubSignIn => self.hub_sign_in(cx),
             CommandId::HubSignOut => self.hub_sign_out(cx),
             CommandId::HubLinkDialog => self.hub_show_link_dialog(cx),
+
+            // Phase 4: Palette-driven terminal
+            CommandId::OpenTerminal => self.open_terminal(window, cx),
+            CommandId::VerifyIntegrity => self.verify_integrity(cx),
+            CommandId::Convert => self.show_convert_picker(window, cx),
         }
 
         // Ensure title reflects any state changes from this command.
         // The flag + cache debounce makes this cheap for non-state-changing commands.
         self.request_title_refresh(cx);
+    }
+
+    /// Open terminal panel (show + focus, never toggles/hides).
+    pub fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.bottom_panel_visible = true;
+        self.bottom_panel_tab = BottomPanelTab::Terminal;
+        self.lua_console.visible = false;
+        self.terminal.visible = true;
+        if self.terminal.term.is_none() && !self.terminal.exited {
+            self.spawn_terminal(window, cx);
+        } else {
+            self.terminal.ensure_cwd();
+        }
+        window.focus(&self.terminal_focus_handle, cx);
+        cx.notify();
+    }
+
+    /// Verify integrity inline — checks semantic fingerprint and shows status message.
+    pub fn verify_integrity(&mut self, cx: &mut Context<Self>) {
+        if self.current_file.is_none() && self.document_meta.display_name.starts_with("Book") {
+            self.status_message = Some("No active file to verify.".to_string());
+            cx.notify();
+            return;
+        }
+
+        let status = self.verification_status(cx);
+        let sv = &self.semantic_verification;
+
+        let msg = match status {
+            VerificationStatus::Unverified => {
+                "No verification baseline. Use 'Approve Model' first.".to_string()
+            }
+            VerificationStatus::Verified => {
+                let mut m = "\u{2713} Verification passed".to_string();
+                if let Some(label) = &sv.label {
+                    m.push_str(&format!(" \u{2014} matches Approved: \"{}\"", label));
+                }
+                if let Some(ts) = &sv.timestamp {
+                    m.push_str(&format!(" ({})", ts));
+                }
+                m
+            }
+            VerificationStatus::Drifted => {
+                let mut m = "\u{2717} Verification failed \u{2014} drifted".to_string();
+                if let Some(label) = &sv.label {
+                    m.push_str(&format!(" from Approved: \"{}\"", label));
+                }
+                if let Some(ts) = &sv.timestamp {
+                    m.push_str(&format!(" ({})", ts));
+                }
+                m
+            }
+        };
+
+        self.status_message = Some(msg);
+        cx.notify();
+    }
+
+    /// Show the convert format picker dialog.
+    pub fn show_convert_picker(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // Validate: need an active file
+        if self.current_file.is_none() {
+            self.status_message = Some("No active workbook to convert.".to_string());
+            cx.notify();
+            return;
+        }
+        // Validate: must be saved (not dirty)
+        if self.history.is_dirty() {
+            self.status_message = Some("Save the file before converting.".to_string());
+            cx.notify();
+            return;
+        }
+
+        self.convert_picker_selected = 0;
+        self.mode = Mode::ConvertPicker;
+        cx.notify();
+    }
+
+    /// Cancel the convert picker dialog.
+    pub fn cancel_convert_picker(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        cx.notify();
+    }
+
+    /// Execute conversion: insert command into terminal.
+    pub fn execute_convert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let format_idx = self.convert_picker_selected;
+        self.mode = Mode::Navigation;
+
+        let (ext, format_flag) = match format_idx {
+            0 => ("csv", "csv"),
+            1 => ("tsv", "tsv"),
+            2 => ("json", "json"),
+            3 => ("xlsx", "xlsx"),
+            _ => ("csv", "csv"),
+        };
+
+        let file_path = match &self.current_file {
+            Some(p) => p.clone(),
+            None => {
+                self.status_message = Some("No active workbook to convert.".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        // Build input path: workspace-relative if possible, else quoted absolute
+        let input_str = if let Some(ws) = &self.terminal.workspace_root {
+            if let Ok(rel) = file_path.strip_prefix(ws) {
+                rel.display().to_string()
+            } else {
+                format!("\"{}\"", file_path.display())
+            }
+        } else {
+            format!("\"{}\"", file_path.display())
+        };
+
+        // Build output filename
+        let basename = file_path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let output_name = format!("{}.{}", basename, ext);
+
+        let command = format!(
+            "vgrid convert {} -t {} -o {}  # Output: ./{}",
+            input_str, format_flag, output_name, output_name
+        );
+
+        // Ensure terminal is open
+        self.bottom_panel_visible = true;
+        self.bottom_panel_tab = BottomPanelTab::Terminal;
+        self.lua_console.visible = false;
+        self.terminal.visible = true;
+        if self.terminal.term.is_none() && !self.terminal.exited {
+            self.spawn_terminal(window, cx);
+        } else {
+            self.terminal.ensure_cwd();
+        }
+
+        // Clear line (Ctrl+U) then insert command (no auto-run)
+        self.terminal.write_to_pty(b"\x15");
+        self.terminal.write_to_pty(command.as_bytes());
+
+        window.focus(&self.terminal_focus_handle, cx);
+        self.status_message = Some(format!("Convert command inserted \u{2014} press Enter to run."));
+        cx.notify();
     }
 
     /// Open the newest diff-*.json in the workspace as a "Diff Results" sheet.
@@ -4327,6 +4486,338 @@ impl Spreadsheet {
         };
 
         crate::diff_view::populate_diff_sheet(self, parsed, &diff_path, &workspace, cx);
+    }
+
+    /// Validate and extract the diff command from the active Diff Results sheet.
+    /// Returns `Some(command)` on success, or sets status_message and returns `None`.
+    fn extract_diff_command(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        use crate::diff_view::{ROW_TITLE, ROW_WORKSPACE, ROW_COMMAND};
+
+        let (is_diff_sheet, command) = {
+            let wb = self.workbook.read(cx);
+            let sheet = wb.active_sheet();
+            let is_diff = sheet.get_display(ROW_TITLE, 0) == "Diff Report"
+                && sheet.get_display(ROW_WORKSPACE, 0) == "Workspace";
+            let cmd = sheet.get_display(ROW_COMMAND, 1);
+            (is_diff, cmd)
+        };
+
+        if !is_diff_sheet {
+            self.status_message = Some("Switch to a Diff Results sheet first.".into());
+            cx.notify();
+            return None;
+        }
+
+        let command = command.trim().to_string();
+        if command.is_empty() {
+            self.status_message = Some(
+                "No command stored. This diff was created before Re-run support.".into()
+            );
+            cx.notify();
+            return None;
+        }
+
+        if !command.starts_with("vgrid diff") {
+            self.status_message = Some(
+                "Stored command isn't a vgrid diff invocation.".into()
+            );
+            cx.notify();
+            return None;
+        }
+
+        Some(command)
+    }
+
+    /// Re-run Diff: insert command into terminal (user presses Enter).
+    pub fn rerun_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(command) = self.extract_diff_command(cx) else { return };
+        self.open_terminal(window, cx);
+        self.terminal.write_to_pty(b"\x15");
+        self.terminal.write_to_pty(command.as_bytes());
+        self.status_message = Some("Diff command inserted \u{2014} press Enter to run.".into());
+        cx.notify();
+    }
+
+    /// Re-run Diff (Run): insert command into terminal and execute immediately.
+    pub fn rerun_diff_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(command) = self.extract_diff_command(cx) else { return };
+        self.open_terminal(window, cx);
+        self.terminal.write_to_pty(b"\x15");
+        self.terminal.write_to_pty(command.as_bytes());
+        self.terminal.write_to_pty(b"\n");
+        self.status_message = Some("Running diff\u{2026}".into());
+        cx.notify();
+    }
+
+    /// Open the exact diff file recorded in this Diff Results sheet (deterministic reload).
+    pub fn open_this_diff_file(&mut self, cx: &mut Context<Self>) {
+        use crate::diff_view::{ROW_TITLE, ROW_WORKSPACE, ROW_DIFF_FILE};
+
+        // 1. Verify we're on a Diff Results sheet
+        let (is_diff_sheet, diff_file_val, workspace_val) = {
+            let wb = self.workbook.read(cx);
+            let sheet = wb.active_sheet();
+            let is_diff = sheet.get_display(ROW_TITLE, 0) == "Diff Report"
+                && sheet.get_display(ROW_WORKSPACE, 0) == "Workspace";
+            let df = sheet.get_display(ROW_DIFF_FILE, 1);
+            let ws = sheet.get_display(ROW_WORKSPACE, 1);
+            (is_diff, df, ws)
+        };
+
+        if !is_diff_sheet {
+            self.status_message = Some("Switch to a Diff Results sheet first.".into());
+            cx.notify();
+            return;
+        }
+
+        let diff_file_str = diff_file_val.trim();
+        if diff_file_str.is_empty() {
+            self.status_message = Some(
+                "No diff file path stored. This sheet was created before file tracking.".into()
+            );
+            cx.notify();
+            return;
+        }
+
+        // 2. Resolve path (relative paths resolve against stored workspace)
+        let diff_path = {
+            let p = std::path::PathBuf::from(diff_file_str);
+            if p.is_absolute() {
+                p
+            } else {
+                let ws = workspace_val.trim();
+                if ws.is_empty() {
+                    p
+                } else {
+                    std::path::PathBuf::from(ws).join(p)
+                }
+            }
+        };
+
+        // 3. Read and parse
+        let bytes = match std::fs::read(&diff_path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status_message = Some(format!(
+                    "Could not read {}: {}",
+                    diff_path.display(), e,
+                ));
+                cx.notify();
+                return;
+            }
+        };
+
+        let parsed = match crate::diff_view::parse_diff_json(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status_message = Some(format!(
+                    "Error parsing {}: {}",
+                    diff_path.display(), e,
+                ));
+                cx.notify();
+                return;
+            }
+        };
+
+        // 4. Rebuild sheet from the exact file
+        let workspace = std::path::PathBuf::from(workspace_val.trim());
+        crate::diff_view::populate_diff_sheet(self, parsed, &diff_path, &workspace, cx);
+    }
+
+    /// Refresh Diff Results: re-run command, wait for output, rebuild sheet with summary delta.
+    pub fn refresh_diff_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::diff_view::{ROW_TITLE, ROW_WORKSPACE, ROW_COMMAND, ROW_DIFF_FILE, SUMMARY_START};
+
+        // 1. Validate diff sheet and extract all provenance
+        let (is_diff_sheet, command, workspace_str, diff_file_str, old_summary) = {
+            let wb = self.workbook.read(cx);
+            let sheet = wb.active_sheet();
+            let is_diff = sheet.get_display(ROW_TITLE, 0) == "Diff Report"
+                && sheet.get_display(ROW_WORKSPACE, 0) == "Workspace";
+            let cmd = sheet.get_display(ROW_COMMAND, 1);
+            let ws = sheet.get_display(ROW_WORKSPACE, 1);
+            let df = sheet.get_display(ROW_DIFF_FILE, 1);
+            // Capture old summary: Matched, Only left, Only right, Differences
+            let old = [
+                (sheet.get_display(SUMMARY_START + 2, 0), sheet.get_display(SUMMARY_START + 2, 1)),
+                (sheet.get_display(SUMMARY_START + 3, 0), sheet.get_display(SUMMARY_START + 3, 1)),
+                (sheet.get_display(SUMMARY_START + 4, 0), sheet.get_display(SUMMARY_START + 4, 1)),
+                (sheet.get_display(SUMMARY_START + 5, 0), sheet.get_display(SUMMARY_START + 5, 1)),
+            ];
+            (is_diff, cmd, ws, df, old)
+        };
+
+        if !is_diff_sheet {
+            self.status_message = Some("Switch to a Diff Results sheet first.".into());
+            cx.notify();
+            return;
+        }
+
+        let command = command.trim().to_string();
+        if command.is_empty() {
+            self.status_message = Some(
+                "No command stored. This diff was created before Re-run support.".into()
+            );
+            cx.notify();
+            return;
+        }
+        if !command.starts_with("vgrid diff") {
+            self.status_message = Some(
+                "Stored command isn't a vgrid diff invocation.".into()
+            );
+            cx.notify();
+            return;
+        }
+
+        let diff_file_str = diff_file_str.trim().to_string();
+        if diff_file_str.is_empty() {
+            self.status_message = Some(
+                "No diff file path stored. Use Re-run Diff (Run) instead.".into()
+            );
+            cx.notify();
+            return;
+        }
+
+        // 2. Resolve diff file path
+        let workspace_str = workspace_str.trim().to_string();
+        let diff_path = {
+            let p = std::path::PathBuf::from(&diff_file_str);
+            if p.is_absolute() {
+                p
+            } else if !workspace_str.is_empty() {
+                std::path::PathBuf::from(&workspace_str).join(p)
+            } else {
+                p
+            }
+        };
+
+        // 3. Record pre-run mtime (if file exists already)
+        let pre_mtime = std::fs::metadata(&diff_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+
+        // 4. Execute command in terminal
+        self.open_terminal(window, cx);
+        self.terminal.write_to_pty(b"\x15");
+        self.terminal.write_to_pty(command.as_bytes());
+        self.terminal.write_to_pty(b"\n");
+        self.status_message = Some("Refreshing diff\u{2026}".into());
+        cx.notify();
+
+        // 5. Spawn async poller: wait for file to settle, then rebuild
+        let workspace = std::path::PathBuf::from(&workspace_str);
+        cx.spawn(async move |this, cx| {
+            let poll_interval = std::time::Duration::from_millis(200);
+            let timeout = std::time::Duration::from_secs(10);
+            let start = std::time::Instant::now();
+            let mut last_size: Option<u64> = None;
+            let mut stable_count: u32 = 0;
+
+            loop {
+                cx.background_executor().timer(poll_interval).await;
+
+                if start.elapsed() > timeout {
+                    let _ = this.update(cx, |app, cx| {
+                        app.status_message = Some(
+                            "Diff still running. Use Open Diff Results (This Sheet) when done.".into()
+                        );
+                        cx.notify();
+                    });
+                    return;
+                }
+
+                // Check if file has been updated since we started
+                let meta = match std::fs::metadata(&diff_path) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let mtime = meta.modified().ok();
+
+                // File must have a newer mtime than before we ran the command
+                let is_newer = match (mtime, pre_mtime) {
+                    (Some(new), Some(old)) => new > old,
+                    (Some(_), None) => true, // File didn't exist before
+                    _ => false,
+                };
+                if !is_newer {
+                    continue;
+                }
+
+                // Check size stability (settled when size unchanged for 2 consecutive polls)
+                let size = meta.len();
+                if Some(size) == last_size && size > 0 {
+                    stable_count += 1;
+                    if stable_count >= 2 {
+                        break; // File is settled
+                    }
+                } else {
+                    stable_count = 0;
+                    last_size = Some(size);
+                }
+            }
+
+            // 6. File settled — read, parse, rebuild with delta
+            let _ = this.update(cx, |app, cx| {
+                let bytes = match std::fs::read(&diff_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        app.status_message = Some(format!(
+                            "Could not read {}: {}", diff_path.display(), e,
+                        ));
+                        cx.notify();
+                        return;
+                    }
+                };
+
+                let parsed = match crate::diff_view::parse_diff_json(&bytes) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        app.status_message = Some(format!(
+                            "Error parsing {}: {}", diff_path.display(), e,
+                        ));
+                        cx.notify();
+                        return;
+                    }
+                };
+
+                // Capture new summary values before populate overwrites them
+                let new_summary = [
+                    &parsed.summary.matched,
+                    &parsed.summary.only_left,
+                    &parsed.summary.only_right,
+                    &parsed.summary.diffs,
+                ];
+
+                // Build delta string
+                let delta_parts: Vec<String> = old_summary.iter()
+                    .zip(new_summary.iter())
+                    .filter_map(|((label, old_val), new_val)| {
+                        let old_n: i64 = old_val.trim().parse().unwrap_or(0);
+                        let new_n: i64 = new_val.trim().parse().unwrap_or(0);
+                        let diff = new_n - old_n;
+                        if diff == 0 {
+                            None
+                        } else {
+                            let sign = if diff > 0 { "+" } else { "" };
+                            Some(format!("{}: {} \u{2192} {} ({}{})", label, old_n, new_n, sign, diff))
+                        }
+                    })
+                    .collect();
+
+                crate::diff_view::populate_diff_sheet(app, parsed, &diff_path, &workspace, cx);
+
+                // Override the default status message with delta info
+                if delta_parts.is_empty() {
+                    app.status_message = Some("Diff refreshed \u{2014} no changes in summary.".into());
+                } else {
+                    app.status_message = Some(format!(
+                        "Diff refreshed \u{2014} {}",
+                        delta_parts.join(", "),
+                    ));
+                }
+                cx.notify();
+            });
+        }).detach();
     }
 
     // Menu methods

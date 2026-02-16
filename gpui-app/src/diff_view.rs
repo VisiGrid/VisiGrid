@@ -25,6 +25,7 @@ pub struct ParsedDiff {
     pub summary: ParsedSummary,
     pub details: Vec<ParsedDetailRow>,
     pub total_detail_count: usize,
+    pub invocation: Option<String>,
 }
 
 pub struct ParsedSummary {
@@ -144,7 +145,9 @@ pub fn parse_diff_json(bytes: &[u8]) -> Result<ParsedDiff, String> {
         }
     }
 
-    Ok(ParsedDiff { summary, details, total_detail_count })
+    let invocation = root.get("invocation").and_then(|v| v.as_str()).map(String::from);
+
+    Ok(ParsedDiff { summary, details, total_detail_count, invocation })
 }
 
 fn json_field_string(obj: &Value, key: &str) -> String {
@@ -326,10 +329,18 @@ fn days_to_date(days: i64) -> (i64, i64, i64) {
 // Sheet population
 // ============================================================================
 
+// Provenance header layout
+pub const ROW_TITLE: usize = 0;        // "Diff Report"
+pub const ROW_SOURCE: usize = 1;       // "Generated from" | "left vs right"
+pub const ROW_WORKSPACE: usize = 2;    // "Workspace" | "/path/..."
+pub const ROW_TIMESTAMP: usize = 3;    // "Generated at" | "2026-02-15 14:30"
+pub const ROW_COMMAND: usize = 4;      // "Command" | "vgrid diff ..."
+pub const ROW_DIFF_FILE: usize = 5;    // "Diff file" | "./diff-foo_vs_bar.json"
+
 /// Number of header/provenance rows before the summary section.
-const PROVENANCE_ROWS: usize = 4;
+const PROVENANCE_ROWS: usize = 6;
 /// Summary starts after provenance + 1 blank row.
-const SUMMARY_START: usize = PROVENANCE_ROWS + 1; // row 5
+pub const SUMMARY_START: usize = PROVENANCE_ROWS + 1; // row 7
 
 /// Create (or replace) a "Diff Results" sheet and populate it with parsed diff data.
 pub fn populate_diff_sheet(
@@ -390,6 +401,10 @@ pub fn populate_diff_sheet(
         format!("{} vs {}", left_source, right_source)
     };
     let workspace_display = workspace.display().to_string();
+    let diff_file_display = diff_path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| format!("./{}", n))
+        .unwrap_or_else(|| diff_path.display().to_string());
     let timestamp = now_timestamp();
 
     // Layout constants
@@ -401,31 +416,45 @@ pub fn populate_diff_sheet(
     app.workbook.update(cx, |wb, _| {
         let mut guard = wb.batch_guard();
 
-        // -- Provenance header (rows 0-3) --
-        guard.set_cell_value_tracked(sheet_idx, 0, 0, "Diff Report");
+        // -- Provenance header (rows 0-4) --
+        guard.set_cell_value_tracked(sheet_idx, ROW_TITLE, 0, "Diff Report");
         if let Some(sheet) = guard.sheet_mut(sheet_idx) {
-            sheet.toggle_bold(0, 0);
+            sheet.toggle_bold(ROW_TITLE, 0);
         }
 
-        guard.set_cell_value_tracked(sheet_idx, 1, 0, "Generated from");
-        guard.set_cell_value_tracked(sheet_idx, 1, 1, &source_line);
+        guard.set_cell_value_tracked(sheet_idx, ROW_SOURCE, 0, "Generated from");
+        guard.set_cell_value_tracked(sheet_idx, ROW_SOURCE, 1, &source_line);
         if let Some(sheet) = guard.sheet_mut(sheet_idx) {
-            sheet.toggle_bold(1, 0);
+            sheet.toggle_bold(ROW_SOURCE, 0);
         }
 
-        guard.set_cell_value_tracked(sheet_idx, 2, 0, "Workspace");
-        guard.set_cell_value_tracked(sheet_idx, 2, 1, &workspace_display);
+        guard.set_cell_value_tracked(sheet_idx, ROW_WORKSPACE, 0, "Workspace");
+        guard.set_cell_value_tracked(sheet_idx, ROW_WORKSPACE, 1, &workspace_display);
         if let Some(sheet) = guard.sheet_mut(sheet_idx) {
-            sheet.toggle_bold(2, 0);
+            sheet.toggle_bold(ROW_WORKSPACE, 0);
         }
 
-        guard.set_cell_value_tracked(sheet_idx, 3, 0, "Generated at");
-        guard.set_cell_value_tracked(sheet_idx, 3, 1, &timestamp);
+        guard.set_cell_value_tracked(sheet_idx, ROW_TIMESTAMP, 0, "Generated at");
+        guard.set_cell_value_tracked(sheet_idx, ROW_TIMESTAMP, 1, &timestamp);
         if let Some(sheet) = guard.sheet_mut(sheet_idx) {
-            sheet.toggle_bold(3, 0);
+            sheet.toggle_bold(ROW_TIMESTAMP, 0);
         }
 
-        // -- Summary section (rows 5-13) --
+        if let Some(ref cmd) = parsed.invocation {
+            guard.set_cell_value_tracked(sheet_idx, ROW_COMMAND, 0, "Command");
+            guard.set_cell_value_tracked(sheet_idx, ROW_COMMAND, 1, cmd);
+            if let Some(sheet) = guard.sheet_mut(sheet_idx) {
+                sheet.toggle_bold(ROW_COMMAND, 0);
+            }
+        }
+
+        guard.set_cell_value_tracked(sheet_idx, ROW_DIFF_FILE, 0, "Diff file");
+        guard.set_cell_value_tracked(sheet_idx, ROW_DIFF_FILE, 1, &diff_file_display);
+        if let Some(sheet) = guard.sheet_mut(sheet_idx) {
+            sheet.toggle_bold(ROW_DIFF_FILE, 0);
+        }
+
+        // -- Summary section --
         let labels = [
             (summary_start, "Left rows", &parsed.summary.left_rows),
             (summary_start + 1, "Right rows", &parsed.summary.right_rows),
