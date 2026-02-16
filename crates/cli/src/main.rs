@@ -755,6 +755,7 @@ Example Lua script:
     #[command(after_help = "\
 Examples:
   visigrid sheet inspect model.sheet A1
+  visigrid sheet inspect model.sheet --sheet summary C40 --value
   visigrid sheet inspect data.xlsx --sheets --json
   visigrid sheet inspect data.xlsx --sheet Invoices C2 --json
   visigrid sheet inspect data.csv --headers --non-empty --ndjson
@@ -797,6 +798,10 @@ Formula evaluation (--calc):
         /// Include style information
         #[arg(long)]
         include_style: bool,
+
+        /// Print only the cell's display value (single-cell target required)
+        #[arg(long)]
+        value: bool,
 
         /// Output as JSON
         #[arg(long)]
@@ -1769,8 +1774,8 @@ fn main() -> ExitCode {
             SheetCommands::Apply { output, lua, verify, stamp, dry_run, json } => {
                 cmd_sheet_apply(output, lua, verify, stamp, dry_run, json)
             }
-            SheetCommands::Inspect { file, target, workbook, sheet, sheets, non_empty, include_style, json, ndjson, format, headers, delimiter, calc } => {
-                cmd_sheet_inspect(file, target, workbook, sheet, sheets, non_empty, include_style, json, ndjson, format, headers, delimiter, calc)
+            SheetCommands::Inspect { file, target, workbook, sheet, sheets, non_empty, include_style, value, json, ndjson, format, headers, delimiter, calc } => {
+                cmd_sheet_inspect(file, target, workbook, sheet, sheets, non_empty, include_style, value, json, ndjson, format, headers, delimiter, calc)
             }
             SheetCommands::Verify { file, fingerprint } => {
                 cmd_sheet_verify(file, fingerprint)
@@ -5168,6 +5173,7 @@ fn cmd_sheet_inspect(
     sheets_mode: bool,
     non_empty: bool,
     include_style: bool,
+    value_only: bool,
     json: bool,
     ndjson: bool,
     format_override: Option<InspectFormat>,
@@ -5201,6 +5207,15 @@ fn cmd_sheet_inspect(
         }
         if ndjson {
             return Err(CliError::args("--calc cannot be used with --ndjson"));
+        }
+    }
+
+    if value_only {
+        if target.is_none() {
+            return Err(CliError::args("--value requires a single-cell target (e.g. A1)"));
+        }
+        if json || ndjson {
+            return Err(CliError::args("--value cannot be combined with --json or --ndjson"));
         }
     }
 
@@ -5633,6 +5648,11 @@ fn cmd_sheet_inspect(
             let raw = sheet.get_raw(start_row, start_col);
             let display = sheet.get_display(start_row, start_col);
 
+            if value_only {
+                println!("{}", display);
+                return Ok(());
+            }
+
             let value_type = if is_native {
                 classify_value_type(&raw, &display)
             } else {
@@ -5681,6 +5701,9 @@ fn cmd_sheet_inspect(
                 }
             }
         } else {
+            if value_only {
+                return Err(CliError::args("--value requires a single-cell target, not a range"));
+            }
             // Range (dense)
             let mut cells = Vec::new();
             for row in start_row..=end_row {

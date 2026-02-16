@@ -143,7 +143,7 @@ impl StripeClient {
             }
 
             for item in data {
-                all_txns.push(parse_transaction(item)?);
+                all_txns.extend(parse_transaction(item)?);
             }
 
             if !has_more {
@@ -182,7 +182,7 @@ impl StripeClient {
 
 // ── Parse a single Stripe transaction ───────────────────────────────
 
-fn parse_transaction(item: &serde_json::Value) -> Result<RawTransaction, CliError> {
+fn parse_transaction(item: &serde_json::Value) -> Result<Vec<RawTransaction>, CliError> {
     let created = item["created"].as_i64().ok_or_else(|| CliError {
         code: exit_codes::EXIT_FETCH_UPSTREAM,
         message: "Stripe transaction missing 'created' field".into(),
@@ -200,6 +200,8 @@ fn parse_transaction(item: &serde_json::Value) -> Result<RawTransaction, CliErro
         message: "Stripe transaction missing 'amount' field".into(),
         hint: None,
     })?;
+
+    let fee = item["fee"].as_i64().unwrap_or(0);
 
     let currency = item["currency"]
         .as_str()
@@ -233,16 +235,36 @@ fn parse_transaction(item: &serde_json::Value) -> Result<RawTransaction, CliErro
         String::new()
     };
 
-    Ok(RawTransaction {
+    let mut rows = vec![RawTransaction {
         created_epoch: created,
         available_on_epoch: available_on,
         amount_minor: amount,
-        currency,
-        canonical_type,
-        source_id,
-        group_id,
+        currency: currency.clone(),
+        canonical_type: canonical_type.clone(),
+        source_id: source_id.clone(),
+        group_id: group_id.clone(),
         description,
-    })
+    }];
+
+    // Emit a synthetic fee row when the balance transaction carries a non-zero
+    // fee.  Stripe embeds the processing fee as a field on the charge (not as a
+    // separate balance transaction), so without this the payout-group rollup
+    // (charges + fees + payout = 0) can never balance.  Skip for transactions
+    // that are already fee-typed to avoid double-counting.
+    if fee != 0 && canonical_type != "fee" {
+        rows.push(RawTransaction {
+            created_epoch: created,
+            available_on_epoch: available_on,
+            amount_minor: -fee,
+            currency,
+            canonical_type: "fee".to_string(),
+            source_id: format!("{}_fee", source_id),
+            group_id,
+            description: "Stripe processing fee".to_string(),
+        });
+    }
+
+    Ok(rows)
 }
 
 fn extract_stripe_error(body: &serde_json::Value, status: u16) -> String {
@@ -359,17 +381,61 @@ mod tests {
             "created": 1768435200,
             "available_on": 1768521600,
             "amount": 5000,
+            "fee": 175,
             "currency": "usd",
             "type": "charge",
             "description": "Payment from customer",
             "payout": "po_abc"
         });
-        let txn = parse_transaction(&item).unwrap();
+        let rows = parse_transaction(&item).unwrap();
+        assert_eq!(rows.len(), 2, "charge with fee should emit charge + synthetic fee row");
+
+        let txn = &rows[0];
         assert_eq!(txn.canonical_type, "charge");
         assert_eq!(txn.amount_minor, 5000);
         assert_eq!(txn.currency, "USD");
         assert_eq!(txn.group_id, "po_abc");
         assert_eq!(txn.description, "Payment from customer");
+
+        let fee_row = &rows[1];
+        assert_eq!(fee_row.canonical_type, "fee");
+        assert_eq!(fee_row.amount_minor, -175);
+        assert_eq!(fee_row.group_id, "po_abc");
+        assert_eq!(fee_row.source_id, "txn_123_fee");
+    }
+
+    #[test]
+    fn test_parse_transaction_charge_zero_fee() {
+        let item = serde_json::json!({
+            "id": "txn_nofee",
+            "created": 1768435200,
+            "available_on": 1768521600,
+            "amount": 5000,
+            "fee": 0,
+            "currency": "usd",
+            "type": "charge",
+            "description": "Zero-fee charge",
+            "payout": "po_abc"
+        });
+        let rows = parse_transaction(&item).unwrap();
+        assert_eq!(rows.len(), 1, "charge with fee=0 should not emit synthetic fee row");
+    }
+
+    #[test]
+    fn test_parse_transaction_stripe_fee_no_double_count() {
+        let item = serde_json::json!({
+            "id": "txn_sf",
+            "created": 1768435200,
+            "available_on": 1768521600,
+            "amount": -500,
+            "fee": 0,
+            "currency": "usd",
+            "type": "stripe_fee",
+            "description": "Stripe fee"
+        });
+        let rows = parse_transaction(&item).unwrap();
+        assert_eq!(rows.len(), 1, "stripe_fee type should not emit synthetic fee row");
+        assert_eq!(rows[0].canonical_type, "fee");
     }
 
     #[test]
@@ -379,14 +445,16 @@ mod tests {
             "created": 1768435200,
             "available_on": 1768521600,
             "amount": -10000,
+            "fee": 0,
             "currency": "usd",
             "type": "payout",
             "description": "STRIPE PAYOUT",
             "payout": serde_json::Value::Null
         });
-        let txn = parse_transaction(&item).unwrap();
-        assert_eq!(txn.canonical_type, "payout");
-        assert_eq!(txn.group_id, "txn_po_456");
+        let rows = parse_transaction(&item).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].canonical_type, "payout");
+        assert_eq!(rows[0].group_id, "txn_po_456");
     }
 
     #[test]
