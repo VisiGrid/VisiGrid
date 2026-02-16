@@ -145,7 +145,7 @@ fn build_template(out_path: &Path) {
 
     // Rows 10-13: payout matching
     wb.set_cell_value_tracked(si, 9, 0, "Stripe Payouts");
-    wb.set_cell_value_tracked(si, 9, 1, "=ABS(B5)");
+    wb.set_cell_value_tracked(si, 9, 1, "=SUM(stripe!J$2:J$1001)");
 
     wb.set_cell_value_tracked(si, 10, 0, "Matched Deposits");
     wb.set_cell_value_tracked(si, 10, 1, "=SUMIF(stripe!L$2:L$1001,\"MATCHED\",stripe!J$2:J$1001)");
