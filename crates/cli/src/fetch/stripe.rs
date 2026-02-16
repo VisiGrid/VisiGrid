@@ -211,7 +211,15 @@ fn parse_transaction(item: &serde_json::Value) -> Result<Vec<RawTransaction>, Cl
     let raw_type = item["type"].as_str().unwrap_or("unknown");
     let canonical_type = map_stripe_type(raw_type).to_string();
 
-    let source_id = item["id"].as_str().unwrap_or("").to_string();
+    // Prefer the source object ID (ch_xxx, po_xxx) over the balance
+    // transaction ID (txn_xxx).  The `source` field may be a string or an
+    // expanded object; fall back to `id` when absent.
+    let source_id = item["source"]
+        .as_str()
+        .or_else(|| item["source"]["id"].as_str())
+        .or_else(|| item["id"].as_str())
+        .unwrap_or("")
+        .to_string();
 
     let raw_description = item["description"].as_str().unwrap_or("").to_string();
 
@@ -378,6 +386,7 @@ mod tests {
     fn test_parse_transaction_charge() {
         let item = serde_json::json!({
             "id": "txn_123",
+            "source": "ch_123",
             "created": 1768435200,
             "available_on": 1768521600,
             "amount": 5000,
@@ -394,6 +403,7 @@ mod tests {
         assert_eq!(txn.canonical_type, "charge");
         assert_eq!(txn.amount_minor, 5000);
         assert_eq!(txn.currency, "USD");
+        assert_eq!(txn.source_id, "ch_123");
         assert_eq!(txn.group_id, "po_abc");
         assert_eq!(txn.description, "Payment from customer");
 
@@ -401,13 +411,14 @@ mod tests {
         assert_eq!(fee_row.canonical_type, "fee");
         assert_eq!(fee_row.amount_minor, -175);
         assert_eq!(fee_row.group_id, "po_abc");
-        assert_eq!(fee_row.source_id, "txn_123_fee");
+        assert_eq!(fee_row.source_id, "ch_123_fee");
     }
 
     #[test]
     fn test_parse_transaction_charge_zero_fee() {
         let item = serde_json::json!({
             "id": "txn_nofee",
+            "source": "ch_nofee",
             "created": 1768435200,
             "available_on": 1768521600,
             "amount": 5000,
@@ -419,12 +430,14 @@ mod tests {
         });
         let rows = parse_transaction(&item).unwrap();
         assert_eq!(rows.len(), 1, "charge with fee=0 should not emit synthetic fee row");
+        assert_eq!(rows[0].source_id, "ch_nofee");
     }
 
     #[test]
     fn test_parse_transaction_stripe_fee_no_double_count() {
         let item = serde_json::json!({
             "id": "txn_sf",
+            "source": "fee_sf",
             "created": 1768435200,
             "available_on": 1768521600,
             "amount": -500,
@@ -436,12 +449,19 @@ mod tests {
         let rows = parse_transaction(&item).unwrap();
         assert_eq!(rows.len(), 1, "stripe_fee type should not emit synthetic fee row");
         assert_eq!(rows[0].canonical_type, "fee");
+        assert_eq!(rows[0].source_id, "fee_sf");
     }
 
     #[test]
     fn test_parse_transaction_payout_self_groups() {
+        // In Stripe's API the payout balance transaction has:
+        //   id = txn_xxx (balance transaction ID)
+        //   source = po_xxx (payout object ID)
+        // Charges reference po_xxx via item["payout"], so the payout's
+        // group_id must also be po_xxx for rollup sums to work.
         let item = serde_json::json!({
             "id": "txn_po_456",
+            "source": "po_456",
             "created": 1768435200,
             "available_on": 1768521600,
             "amount": -10000,
@@ -454,7 +474,8 @@ mod tests {
         let rows = parse_transaction(&item).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].canonical_type, "payout");
-        assert_eq!(rows[0].group_id, "txn_po_456");
+        assert_eq!(rows[0].source_id, "po_456");
+        assert_eq!(rows[0].group_id, "po_456");
     }
 
     #[test]
