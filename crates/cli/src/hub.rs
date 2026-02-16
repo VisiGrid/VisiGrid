@@ -237,6 +237,11 @@ pub fn cmd_publish(
 
     // Step 3: Create revision
     if !json_output { eprint!("Creating revision... "); }
+    // Attach CI runner identity when running in a recognized CI environment
+    let source_metadata = crate::ci::get_runner_context().map(|runner| {
+        serde_json::json!({ "runner": runner })
+    });
+
     let opts = CreateRevisionOptions {
         source_type,
         source_identity,
@@ -245,7 +250,7 @@ pub fn cmd_publish(
         reset_baseline,
         check_policy,
         format: file_format.map(String::from),
-        source_metadata: None,
+        source_metadata,
         message: None,
     };
     let (revision_id, upload_url, upload_headers) = client
@@ -472,6 +477,9 @@ pub fn cmd_hub_publish(
     });
     if !trust_pipeline.is_empty() {
         source_metadata["trust_pipeline"] = serde_json::Value::Object(trust_pipeline);
+    }
+    if let Some(runner) = crate::ci::get_runner_context() {
+        source_metadata["runner"] = runner;
     }
 
     // 9. Dry-run exit
@@ -1097,6 +1105,9 @@ pub fn cmd_pipeline_publish(
     });
     if !trust_pipeline.is_empty() {
         source_metadata["trust_pipeline"] = serde_json::Value::Object(trust_pipeline);
+    }
+    if let Some(runner) = crate::ci::get_runner_context() {
+        source_metadata["runner"] = runner;
     }
 
     // ── 10. Dry-run exit ──────────────────────────────────────────────

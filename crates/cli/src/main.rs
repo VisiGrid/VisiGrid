@@ -1,6 +1,7 @@
 // VisiGrid CLI - headless spreadsheet operations
 // See docs/cli-v1.md for specification
 
+mod ci;
 mod exit_codes;
 mod fetch;
 mod fill;
