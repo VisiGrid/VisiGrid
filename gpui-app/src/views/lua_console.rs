@@ -1040,7 +1040,7 @@ fn build_console_run_record(
 /// Apply Lua operations to the sheet and return undo changes.
 /// Uses batched, tracked mutations so dependents recalculate once at the end.
 /// Returns (value_changes, format_patches) for separate undo tracking.
-fn apply_lua_ops(
+pub(crate) fn apply_lua_ops(
     app: &mut Spreadsheet,
     sheet_index: usize,
     ops: &[LuaOp],

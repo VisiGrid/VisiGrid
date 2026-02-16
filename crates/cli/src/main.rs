@@ -185,6 +185,14 @@ Examples:
         /// Quiet mode - only print errors
         #[arg(long, short = 'q')]
         quiet: bool,
+
+        /// Preview mode: dry-run the script and print summary (no output file)
+        #[arg(long)]
+        preview: bool,
+
+        /// Output preview as JSON (implies --preview, conflicts with --output)
+        #[arg(long, conflicts_with = "output")]
+        json: bool,
     },
 
     /// AI configuration and diagnostics
@@ -1663,7 +1671,9 @@ fn main() -> ExitCode {
             format,
             fingerprint,
             quiet,
-        }) => cmd_replay(script, verify, output, format, fingerprint, quiet),
+            preview,
+            json,
+        }) => cmd_replay(script, verify, output, format, fingerprint, quiet, preview, json),
         Some(Commands::Ai { command }) => match command {
             AiCommands::Doctor { json, test } => cmd_ai_doctor(json, test),
         },
@@ -3945,9 +3955,55 @@ fn cmd_replay(
     format: Option<String>,
     fingerprint_only: bool,
     quiet: bool,
+    preview: bool,
+    json_preview: bool,
 ) -> Result<(), CliError> {
+    // --json implies --preview
+    let preview = preview || json_preview;
+
     // Execute the script
     let result = replay::execute_script(&script)?;
+
+    // Handle --preview / --json flag
+    if preview {
+        let script_content = std::fs::read_to_string(&script)
+            .unwrap_or_default();
+        let script_hash = blake3::hash(script_content.as_bytes())
+            .to_hex()[..32]
+            .to_string();
+
+        // Determine sheets modified
+        let sheet_names: Vec<String> = result.workbook.sheet_names()
+            .iter().map(|s| s.to_string()).collect();
+
+        let fp_str = result.fingerprint.to_string();
+
+        if json_preview {
+            // In v1 replay always modifies (never creates) sheets — but both
+            // fields are in the contract so consumers don't need to version-check.
+            let json = serde_json::json!({
+                "contract_version": 1,
+                "preview": true,
+                "operations": result.operations,
+                "fingerprint": fp_str,
+                "script_hash": script_hash,
+                "has_nondeterministic": result.has_nondeterministic,
+                "sheets_created": serde_json::Value::Array(vec![]),
+                "sheets_modified": sheet_names,
+            });
+            println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+        } else {
+            eprintln!("Preview: {} operations", result.operations);
+            eprintln!("Fingerprint: {}", fp_str);
+            eprintln!("Script hash: {}", script_hash);
+            eprintln!("Sheets: {}", sheet_names.join(", "));
+            if result.has_nondeterministic {
+                eprintln!("Warning: nondeterministic functions: {}",
+                    result.nondeterministic_found.join(", "));
+            }
+        }
+        return Ok(());
+    }
 
     // Handle --fingerprint flag
     if fingerprint_only {

@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::scripting::LuaOp;
+
 use alacritty_terminal::event::WindowSize;
 use alacritty_terminal::event_loop::{EventLoopSender, Msg};
 use alacritty_terminal::sync::FairMutex;
@@ -14,6 +16,35 @@ use alacritty_terminal::term::Term;
 
 use super::pty::TerminalEventProxy;
 use crate::structured_results::StructuredResult;
+
+/// Data captured from an AI-generated Lua script preview (dry-run).
+pub struct LuaPreviewData {
+    /// Path where the script was saved on disk.
+    pub script_path: PathBuf,
+    /// Blake3 hash of the script (first 16 bytes, hex).
+    pub script_hash: String,
+    /// Operations collected from eval_with_sheet (no mutation applied yet).
+    pub ops: Vec<LuaOp>,
+    /// Number of unique cells that would be written.
+    pub cells_written: usize,
+    /// Number of non-empty cells that would be overwritten.
+    pub cells_overwritten: usize,
+    /// Sheet index the preview was computed against.
+    pub source_sheet_index: usize,
+    /// Cheap fingerprint of the source sheet at preview time (drift guard).
+    pub source_fingerprint: u64,
+    /// print() output captured during preview.
+    pub output: Vec<String>,
+    /// Lua evaluation error (if any).
+    pub error: Option<String>,
+}
+
+/// Unified pending result from terminal: either a structured JSON result
+/// (Phase 5) or a Lua script preview (Phase 6).
+pub enum PendingResult {
+    Structured(StructuredResult),
+    LuaPreview(LuaPreviewData),
+}
 
 /// Default terminal panel height in pixels.
 pub const DEFAULT_TERMINAL_HEIGHT: f32 = 300.0;
@@ -55,10 +86,12 @@ pub struct TerminalState {
     pub watching_for_result: bool,
     /// Bumped on each new watch; stale timers no-op.
     pub watch_generation: u64,
-    /// Stashed structured result awaiting user action (Open in Grid / Dismiss).
-    pub pending_structured_result: Option<StructuredResult>,
+    /// Stashed pending result awaiting user action (structured or Lua preview).
+    pub pending_result: Option<PendingResult>,
     /// Debounce timer for auto-detect settle (500ms after last output).
     pub result_settle_task: Option<gpui::Task<()>>,
+    /// The CLI command string that was last injected (for Run Log recording).
+    pub last_injected_command: Option<String>,
 }
 
 impl Default for TerminalState {
@@ -81,8 +114,9 @@ impl Default for TerminalState {
             output_epoch: AtomicU64::new(0),
             watching_for_result: false,
             watch_generation: 0,
-            pending_structured_result: None,
+            pending_result: None,
             result_settle_task: None,
+            last_injected_command: None,
         }
     }
 }

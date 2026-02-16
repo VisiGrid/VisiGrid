@@ -22,7 +22,7 @@ pub mod inspector_panel;
 pub mod profiler_panel;
 mod keytips_overlay;
 mod code_render;
-mod lua_console;
+pub(crate) mod lua_console;
 pub(crate) mod script_view;
 pub(crate) mod terminal_panel;
 pub mod license_dialog;

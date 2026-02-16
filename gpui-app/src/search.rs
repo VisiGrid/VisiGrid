@@ -253,6 +253,11 @@ pub enum CommandId {
     RunVgridDiffJson,
     RunVgridCalcJson,
 
+    // Phase 6: AI Lua capture
+    CaptureAiLua,
+    PreviewLastLua,
+    BuildModelWithLua,
+
     // AI in Terminal
     LaunchAI,
     PasteSelectionToTerminal,
@@ -412,6 +417,9 @@ impl CommandId {
             Self::OpenTerminal => "Open Terminal",
             Self::VerifyIntegrity => "Verify Integrity",
             Self::Convert => "Convert",
+            Self::CaptureAiLua => "AI: Capture Last Lua Block",
+            Self::PreviewLastLua => "AI: Preview last.lua",
+            Self::BuildModelWithLua => "AI: Build Model with Lua",
             Self::LaunchAI => "Launch AI in Terminal",
             Self::PasteSelectionToTerminal => "Paste Selection to Terminal",
             Self::PasteHeadersToTerminal => "Paste Headers to Terminal",
@@ -632,6 +640,9 @@ impl CommandId {
             Self::OpenTerminal => "terminal shell console pty bash",
             Self::VerifyIntegrity => "verify integrity fingerprint check audit trust",
             Self::Convert => "convert export csv tsv json xlsx format",
+            Self::CaptureAiLua => "ai capture lua block script model terminal generate",
+            Self::PreviewLastLua => "ai preview last lua reopen rerun script dismissed",
+            Self::BuildModelWithLua => "ai build model lua generate script create terminal agent amortization",
             Self::LaunchAI => "ai claude codex gemini launch terminal agent llm",
             Self::PasteSelectionToTerminal => "paste selection context terminal ai",
             Self::PasteHeadersToTerminal => "paste headers columns schema terminal ai",
@@ -802,6 +813,9 @@ impl CommandId {
             Self::VerifyIntegrity,
             Self::Convert,
             Self::NavPerfReport,
+            Self::CaptureAiLua,
+            Self::PreviewLastLua,
+            Self::BuildModelWithLua,
             Self::LaunchAI,
             Self::PasteSelectionToTerminal,
             Self::PasteHeadersToTerminal,
@@ -887,7 +901,10 @@ impl CommandId {
             | Self::ReloadCustomFunctions
             | Self::ProfileNextRecalc
             | Self::ClearProfiler
-            | Self::VerifyIntegrity => Some(MenuCategory::Tools),
+            | Self::VerifyIntegrity
+            | Self::CaptureAiLua
+            | Self::PreviewLastLua
+            | Self::BuildModelWithLua => Some(MenuCategory::Tools),
 
             // Format menu
             Self::ToggleBold

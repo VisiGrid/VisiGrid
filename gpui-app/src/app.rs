@@ -4446,6 +4446,11 @@ impl Spreadsheet {
             CommandId::VerifyIntegrity => self.verify_integrity(cx),
             CommandId::Convert => self.show_convert_picker(window, cx),
 
+            // Phase 6: AI Lua capture
+            CommandId::CaptureAiLua => self.capture_ai_lua(window, cx),
+            CommandId::PreviewLastLua => self.preview_last_lua(window, cx),
+            CommandId::BuildModelWithLua => self.build_model_with_lua(window, cx),
+
             // AI in Terminal
             CommandId::LaunchAI => self.launch_ai_terminal(window, cx),
             CommandId::PasteSelectionToTerminal => {
@@ -5236,8 +5241,10 @@ impl Spreadsheet {
         let text = crate::terminal::extract::extract_recent_text(term_arc, 2000);
         match crate::structured_results::parse(&text) {
             Some(result) => {
-                let had_previous = self.terminal.pending_structured_result.is_some();
-                self.terminal.pending_structured_result = Some(result);
+                let had_previous = self.terminal.pending_result.is_some();
+                self.terminal.pending_result = Some(
+                    crate::terminal::state::PendingResult::Structured(result)
+                );
                 self.terminal.watching_for_result = false;
                 if had_previous {
                     self.status_message = Some(
@@ -5271,19 +5278,157 @@ impl Spreadsheet {
 
     /// Inner method that opens the pending result without requiring window access.
     fn open_structured_result_inner(&mut self, cx: &mut Context<Self>) {
-        let Some(result) = self.terminal.pending_structured_result.take() else { return };
-        let sheet_idx = self.workbook.update(cx, |wb, _| {
-            crate::structured_results::render_to_sheet(&result, wb)
+        let result = match self.terminal.pending_result.take() {
+            Some(crate::terminal::state::PendingResult::Structured(r)) => r,
+            other => {
+                // Put it back if it's not a Structured result
+                self.terminal.pending_result = other;
+                return;
+            }
+        };
+        let source_file = self.current_file.as_ref().map(|p| p.display().to_string());
+        let command = self.terminal.last_injected_command.take();
+        let meta = self.workbook.update(cx, |wb, _| {
+            let meta = crate::structured_results::render_to_sheet(&result, wb);
+            crate::structured_results::append_run_log(wb, &meta, source_file.as_deref(), command.as_deref());
+            meta
         });
-        self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(sheet_idx); });
-        self.status_message = Some("Opened result as new sheet.".into());
+        self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(meta.sheet_idx); });
+        self.status_message = Some(format!("Opened {} as new sheet.", meta.sheet_name));
         cx.notify();
     }
 
     /// Dismiss the pending structured result.
     pub fn dismiss_structured_result(&mut self, cx: &mut Context<Self>) {
-        self.terminal.pending_structured_result = None;
+        self.terminal.pending_result = None;
         cx.notify();
+    }
+
+    /// Open the pending result as a sheet AND send it to the AI CLI for explanation.
+    pub fn explain_structured_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pref = crate::settings::user_settings(cx).terminal.preferred_ai_cli;
+        if detect_ai_cli(pref).is_none() {
+            self.status_message = Some(
+                "No AI CLI found. Install one: npm i -g @anthropic-ai/claude-code | @openai/codex | @google/gemini-cli".into()
+            );
+            cx.notify();
+            return;
+        }
+
+        // Build explanation prompt from the pending result before consuming it.
+        // Hard cap: 8000 chars to avoid blowing up the AI CLI.
+        const EXPLAIN_MAX_CHARS: usize = 8000;
+        const EXPLAIN_MAX_ROWS: usize = 20;
+
+        let result = match self.terminal.pending_result {
+            Some(crate::terminal::state::PendingResult::Structured(ref r)) => r,
+            _ => return,
+        };
+        let description = result.description();
+        let prompt = match result {
+            crate::structured_results::StructuredResult::Diff { raw } => {
+                let summary = raw.get("summary")
+                    .map(|s| serde_json::to_string_pretty(s).unwrap_or_default())
+                    .unwrap_or_default();
+                let results = raw.get("results").and_then(|r| r.as_array());
+                let n_results = results.map(|a| a.len()).unwrap_or(0);
+                // Include first N diff rows as compact JSON
+                let mut diff_sample = String::new();
+                if let Some(rows) = results {
+                    for row in rows.iter().take(EXPLAIN_MAX_ROWS) {
+                        let line = serde_json::to_string(row).unwrap_or_default();
+                        if diff_sample.len() + line.len() > EXPLAIN_MAX_CHARS / 2 { break; }
+                        diff_sample.push_str(&line);
+                        diff_sample.push('\n');
+                    }
+                    if n_results > EXPLAIN_MAX_ROWS {
+                        diff_sample.push_str(&format!("# ... {} more changes\n", n_results - EXPLAIN_MAX_ROWS));
+                    }
+                }
+                format!(
+                    "# VisiGrid structured result: {}\n\
+                     # Type: diff\n\
+                     # Summary: {}\n\
+                     # {} change(s) detected\n\n\
+                     {}\n\
+                     Explain this diff result. What changed and why might it matter? \
+                     Are there anomalies or patterns worth investigating?\n",
+                    description, summary.trim(), n_results, diff_sample
+                )
+            }
+            crate::structured_results::StructuredResult::Peek { columns, rows } => {
+                // Include column names + first N rows, capped by chars
+                let mut tsv = columns.join("\t");
+                tsv.push('\n');
+                for row in rows.iter().take(EXPLAIN_MAX_ROWS) {
+                    let cells: Vec<String> = row.iter()
+                        .map(|v| crate::structured_results::json_cell_value_pub(v))
+                        .collect();
+                    let line = cells.join("\t");
+                    if tsv.len() + line.len() > EXPLAIN_MAX_CHARS / 2 { break; }
+                    tsv.push_str(&line);
+                    tsv.push('\n');
+                }
+                if rows.len() > EXPLAIN_MAX_ROWS {
+                    tsv.push_str(&format!("# ... {} more rows\n", rows.len() - EXPLAIN_MAX_ROWS));
+                }
+                format!(
+                    "# VisiGrid structured result: {}\n\
+                     # Type: peek ({} cols x {} rows)\n\n\
+                     {}\n\
+                     Summarize what this data shows. Detect anomalies, outliers, or patterns. \
+                     Suggest formulas or next steps.\n",
+                    description, columns.len(), rows.len(), tsv
+                )
+            }
+            crate::structured_results::StructuredResult::Calc { value } => {
+                let mut display = serde_json::to_string_pretty(value).unwrap_or_default();
+                if display.len() > EXPLAIN_MAX_CHARS / 2 {
+                    display.truncate(EXPLAIN_MAX_CHARS / 2);
+                    display.push_str("\n# ... truncated");
+                }
+                format!(
+                    "# VisiGrid structured result: {}\n\
+                     # Type: calc\n\
+                     # Value:\n{}\n\n\
+                     Explain this calculation result. Is the value expected? \
+                     What does it mean in context?\n",
+                    description, display
+                )
+            }
+        };
+
+        // Open the result as a sheet
+        self.open_structured_result_inner(cx);
+
+        // Launch AI if not already running, then paste prompt
+        let ai_already_running = self.terminal.visible && self.terminal.term.is_some();
+        if !ai_already_running {
+            let epoch_before = self.terminal.output_epoch();
+            self.launch_ai_terminal(window, cx);
+            let entity = cx.entity().downgrade();
+            cx.spawn(async move |_, cx| {
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(3);
+                let poll_interval = std::time::Duration::from_millis(100);
+                loop {
+                    smol::Timer::after(poll_interval).await;
+                    let ready = entity.update(cx, |this: &mut Self, _cx| {
+                        this.terminal.output_epoch() != epoch_before
+                    }).unwrap_or(false);
+                    if ready || start.elapsed() >= timeout { break; }
+                }
+                let _ = entity.update(cx, |this: &mut Self, cx| {
+                    this.write_to_pty_bracketed(&prompt, cx);
+                    this.status_message = Some("Sent result to AI for explanation.".into());
+                    cx.notify();
+                });
+            }).detach();
+        } else {
+            self.write_to_pty_bracketed(&prompt, cx);
+            self.status_message = Some("Sent result to AI for explanation.".into());
+            cx.notify();
+        }
     }
 
     /// Inject a vgrid command into the terminal and watch for JSON result.
@@ -5306,8 +5451,9 @@ impl Spreadsheet {
         // Set watching
         self.terminal.watching_for_result = true;
         self.terminal.watch_generation += 1;
-        self.terminal.pending_structured_result = None;
+        self.terminal.pending_result = None;
         self.terminal.result_settle_task = None;
+        self.terminal.last_injected_command = Some(cmd.trim().to_string());
     }
 
     /// Palette command: Run vgrid peek --json on current file.
@@ -5315,15 +5461,57 @@ impl Spreadsheet {
         self.inject_vgrid_command("peek --headers", window, cx);
     }
 
-    /// Palette command: Run vgrid diff --json on current file.
+    /// Palette command: Run vgrid diff --json — prompts for the comparison file.
     pub fn run_vgrid_diff_json(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // diff requires two files — for now inject just the current file as left
-        // The user would need to have a second file argument, but this at least
-        // sets up the watching pattern. In practice, the user may manually type
-        // the full diff command.
-        self.inject_vgrid_command("peek --headers", window, cx);
-        self.status_message = Some("Tip: vgrid diff requires two files. Edit the command to add the second file.".into());
-        cx.notify();
+        let Some(ref current) = self.current_file else {
+            self.status_message = Some("Save workbook first.".into());
+            cx.notify();
+            return;
+        };
+        let left = current.display().to_string();
+
+        let options = PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select file to compare against".into()),
+        };
+        let future = cx.prompt_for_paths(options);
+
+        // Open terminal while the picker is up so it's ready when we get the path
+        self.open_terminal(window, cx);
+
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = future.await {
+                if let Some(right_path) = paths.first() {
+                    let right = right_path.display().to_string();
+                    let _ = this.update(cx, |this: &mut Self, cx| {
+                        // Build diff command
+                        let cmd = format!("vgrid diff \"{}\" \"{}\" --json\n", left, right);
+                        this.terminal.write_to_pty(cmd.as_bytes());
+
+                        this.terminal.watching_for_result = true;
+                        this.terminal.watch_generation += 1;
+                        this.terminal.pending_result = None;
+                        this.terminal.result_settle_task = None;
+                        this.terminal.last_injected_command = Some(cmd.trim().to_string());
+
+                        // Explicit Left/Right in status — no ambiguity
+                        let left_name = std::path::Path::new(&left)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| left.clone());
+                        let right_name = right_path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| right.clone());
+                        this.status_message = Some(format!(
+                            "Comparing: Left: {} | Right: {}", left_name, right_name
+                        ));
+                        cx.notify();
+                    });
+                }
+            }
+        }).detach();
     }
 
     /// Palette command: Run vgrid calc --json. Injects a template command for the user to edit.
@@ -5346,8 +5534,9 @@ impl Spreadsheet {
         // Set watching for when they press Enter
         self.terminal.watching_for_result = true;
         self.terminal.watch_generation += 1;
-        self.terminal.pending_structured_result = None;
+        self.terminal.pending_result = None;
         self.terminal.result_settle_task = None;
+        self.terminal.last_injected_command = Some(cmd.clone());
 
         self.status_message = Some("Edit the formula in the command, then press Enter.".into());
         cx.notify();
@@ -5356,6 +5545,449 @@ impl Spreadsheet {
     /// Manual import: extract structured result from terminal (no watching check).
     pub fn import_terminal_output(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.try_extract_structured_result(cx);
+    }
+
+    // ========================================================================
+    // Phase 6: AI → Lua → Preview → Apply
+    // ========================================================================
+
+    /// Orchestrator: launch AI CLI, paste full VisiGrid context, and instruct
+    /// the AI to output a Lua model in a fenced ```lua block.
+    ///
+    /// After the AI responds, the user runs "AI: Capture Last Lua Block" to preview.
+    pub fn build_model_with_lua(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Launch AI CLI (reuse existing logic — opens terminal, starts CLI)
+        let pref = crate::settings::user_settings(cx).terminal.preferred_ai_cli;
+        if detect_ai_cli(pref).is_none() {
+            self.status_message = Some(
+                "No AI CLI found. Install one: npm i -g @anthropic-ai/claude-code | @openai/codex | @google/gemini-cli".into()
+            );
+            cx.notify();
+            return;
+        }
+
+        // Snapshot epoch before launch so we can detect when the CLI produces output.
+        let epoch_before = self.terminal.output_epoch();
+        let ai_already_running = self.terminal.visible && self.terminal.term.is_some();
+
+        self.launch_ai_terminal(window, cx);
+
+        if ai_already_running {
+            // Terminal already running — paste context + contract immediately
+            self.paste_lua_build_context(cx);
+        } else {
+            // Wait for output epoch bump (CLI boot), then paste. Timeout 3s.
+            let entity = cx.entity().downgrade();
+            cx.spawn(async move |_, cx| {
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(3);
+                let poll_interval = std::time::Duration::from_millis(100);
+
+                loop {
+                    smol::Timer::after(poll_interval).await;
+                    let ready = entity.update(cx, |this: &mut Self, _cx| {
+                        this.terminal.output_epoch() != epoch_before
+                    }).unwrap_or(false);
+                    if ready || start.elapsed() >= timeout {
+                        break;
+                    }
+                }
+
+                let _ = entity.update(cx, |this: &mut Self, cx| {
+                    this.paste_lua_build_context(cx);
+                });
+            }).detach();
+        }
+
+        crate::ai_metrics::record(crate::ai_metrics::AiMetricEvent::LaunchAi {
+            cli: "build_model_lua",
+        });
+        self.status_message = Some(
+            "Building Lua model… AI will output a ```lua block. Then run \"AI: Capture Last Lua Block\".".into()
+        );
+        cx.notify();
+    }
+
+    /// Paste VisiGrid context + Lua contract into the terminal.
+    fn paste_lua_build_context(&mut self, cx: &mut Context<Self>) {
+        if !self.terminal.visible || self.terminal.term.is_none() {
+            return;
+        }
+
+        // Paste full VisiGrid context (selection, headers, file path)
+        self.paste_full_context_with_prompt(cx);
+
+        // Inject the Lua output contract — short, forceful constraints
+        let lua_contract = concat!(
+            "\n\nOutput ONLY a single ```lua fenced code block. No other code.\n",
+            "VisiGrid sheet API (1-indexed):\n",
+            "  sheet:set_value(row, col, value)\n",
+            "  sheet:set_formula(row, col, \"=...\")\n",
+            "  sheet:get_value(row, col) / sheet:rows() / sheet:cols()\n",
+            "Rules:\n",
+            "- Read inputs from the current sheet. Write outputs to new rows/columns.\n",
+            "- Do NOT delete or overwrite existing data.\n",
+            "- No os, io, file, or network operations.\n",
+            "- The user will preview your code before applying it.\n",
+        );
+        self.write_to_pty_bracketed(lua_contract, cx);
+    }
+
+    /// Capture the last ` ```lua ` block from terminal scrollback, preview it, and
+    /// store as a PendingResult::LuaPreview for the affordance bar.
+    pub fn capture_ai_lua(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        use crate::terminal::state::{LuaPreviewData, PendingResult};
+        use crate::scripting::SheetSnapshot;
+
+        // Guard: terminal must be running
+        let Some(ref term_arc) = self.terminal.term else {
+            self.status_message = Some("No terminal session.".into());
+            cx.notify();
+            return;
+        };
+
+        // Extract recent terminal text
+        let text = crate::terminal::extract::extract_recent_text(term_arc, 2000);
+
+        // Find last ```lua block
+        let Some(code) = extract_last_lua_block(&text) else {
+            // Check if last.lua exists for a helpful hint
+            let has_last = self.terminal.workspace_root.as_ref()
+                .map(|r| r.join("ai").join("generated").join("last.lua").exists())
+                .unwrap_or(false);
+            let hint = if has_last {
+                " Try \"AI: Preview last.lua\" to re-preview the previous script."
+            } else {
+                ""
+            };
+            self.status_message = Some(format!(
+                "No ```lua block found. Make sure the AI outputs a ```lua fenced block.{}",
+                hint
+            ));
+            cx.notify();
+            return;
+        };
+
+        // Save script to disk
+        let script_path = save_ai_lua_script(&code, &self.terminal.workspace_root);
+
+        // Compute blake3 hash (first 16 bytes hex = 32 hex chars)
+        let hash = blake3::hash(code.as_bytes());
+        let script_hash = hash.to_hex()[..32].to_string();
+
+        // Snapshot current sheet for preview
+        let sheet = self.sheet(cx);
+        let source_sheet_index = self.sheet_index(cx);
+        let source_fingerprint = sheet_fingerprint(sheet);
+        let snapshot = SheetSnapshot::from_sheet(sheet);
+
+        // Run Lua in sandboxed preview mode (no mutation)
+        let result = self.lua_runtime.eval_with_sheet(&code, Box::new(snapshot));
+
+        // Count overwrites
+        let cells_overwritten = self.workbook.read(cx).sheet(source_sheet_index)
+            .map(|s| count_lua_overwrites(&result.ops, s))
+            .unwrap_or(0);
+
+        // Handle replace-pending: if there's already a pending result, toast
+        if self.terminal.pending_result.is_some() {
+            self.status_message = Some("Previous pending result replaced.".into());
+        }
+
+        // Run Log: record LuaPreview entry
+        let source_sheet_name = self.workbook.read(cx)
+            .sheet_names()
+            .get(source_sheet_index)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        {
+            let sp = script_path.clone();
+            let sh = script_hash.clone();
+            let writes = result.mutations;
+            self.workbook.update(cx, |wb, _| {
+                let meta = crate::structured_results::ResultMeta {
+                    sheet_idx: source_sheet_index,
+                    sheet_name: source_sheet_name,
+                    result_type: "LuaPreview",
+                    row_count: writes,
+                    col_count: cells_overwritten,
+                };
+                crate::structured_results::append_run_log(
+                    wb, &meta,
+                    Some(sp.to_string_lossy().as_ref()),
+                    Some(&sh),
+                );
+            });
+        }
+
+        // Store preview
+        self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
+            script_path,
+            script_hash,
+            cells_written: result.mutations,
+            cells_overwritten,
+            ops: result.ops,
+            source_sheet_index,
+            source_fingerprint,
+            output: result.output,
+            error: result.error,
+        }));
+
+        cx.notify();
+    }
+
+    /// Re-preview last.lua from disk — recovers a dismissed preview or re-runs
+    /// the most recent AI-generated script.
+    pub fn preview_last_lua(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        use crate::terminal::state::{LuaPreviewData, PendingResult};
+        use crate::scripting::SheetSnapshot;
+
+        let last_path = self.terminal.workspace_root.as_ref()
+            .map(|r| r.join("ai").join("generated").join("last.lua"));
+
+        let Some(path) = last_path else {
+            self.status_message = Some("No workspace root — open or save a file first.".into());
+            cx.notify();
+            return;
+        };
+
+        let code = match std::fs::read_to_string(&path) {
+            Ok(c) if !c.trim().is_empty() => c,
+            _ => {
+                self.status_message = Some("No last.lua found. Run \"AI: Capture Last Lua Block\" first.".into());
+                cx.notify();
+                return;
+            }
+        };
+
+        // Same preview flow as capture_ai_lua but from file
+        let hash = blake3::hash(code.as_bytes());
+        let script_hash = hash.to_hex()[..32].to_string();
+
+        let sheet = self.sheet(cx);
+        let source_sheet_index = self.sheet_index(cx);
+        let source_fingerprint = sheet_fingerprint(sheet);
+        let snapshot = SheetSnapshot::from_sheet(sheet);
+
+        let result = self.lua_runtime.eval_with_sheet(&code, Box::new(snapshot));
+
+        let cells_overwritten = self.workbook.read(cx).sheet(source_sheet_index)
+            .map(|s| count_lua_overwrites(&result.ops, s))
+            .unwrap_or(0);
+
+        if self.terminal.pending_result.is_some() {
+            self.status_message = Some("Previous pending result replaced.".into());
+        }
+
+        self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
+            script_path: path,
+            script_hash,
+            cells_written: result.mutations,
+            cells_overwritten,
+            ops: result.ops,
+            source_sheet_index,
+            source_fingerprint,
+            output: result.output,
+            error: result.error,
+        }));
+
+        cx.notify();
+    }
+
+    /// Apply the pending Lua preview to a new sheet.
+    pub fn apply_lua_to_new_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        use crate::terminal::state::PendingResult;
+
+        let preview = match self.terminal.pending_result.take() {
+            Some(PendingResult::LuaPreview(data)) => data,
+            other => {
+                self.terminal.pending_result = other;
+                return;
+            }
+        };
+
+        // Refuse if preview had error
+        if preview.error.is_some() {
+            self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
+            self.status_message = Some("Cannot apply: Lua script had errors.".into());
+            cx.notify();
+            return;
+        }
+
+        let hash_prefix = if preview.script_hash.len() >= 8 {
+            &preview.script_hash[..8]
+        } else {
+            &preview.script_hash
+        };
+        let base_name = format!("AI Result - {}", hash_prefix);
+
+        // Create new sheet and apply ops
+        let (sheet_name, sheet_idx) = self.workbook.update(cx, |wb, _| {
+            let name = crate::structured_results::unique_sheet_name(wb, &base_name);
+            let idx = wb.add_sheet_named(&name).unwrap_or_else(|| wb.add_sheet());
+            (name, idx)
+        });
+
+        let (changes, format_patches) = crate::views::lua_console::apply_lua_ops(
+            self, sheet_idx, &preview.ops, cx,
+        );
+
+        // Record undo
+        let has_values = !changes.is_empty();
+        let has_formats = !format_patches.is_empty();
+        if has_values && has_formats {
+            use crate::history::{UndoAction, FormatActionKind};
+            let group = UndoAction::Group {
+                actions: vec![
+                    UndoAction::Values { sheet_index: sheet_idx, changes },
+                    UndoAction::Format {
+                        sheet_index: sheet_idx,
+                        patches: format_patches,
+                        kind: FormatActionKind::CellStyle,
+                        description: "AI Lua: set cell styles".into(),
+                    },
+                ],
+                description: "AI Lua apply".into(),
+            };
+            self.history.record_action_with_provenance(group, None);
+            self.is_modified = true;
+        } else if has_values {
+            self.history.record_batch(sheet_idx, changes);
+            self.is_modified = true;
+        } else if has_formats {
+            self.history.record_format(
+                sheet_idx,
+                format_patches,
+                crate::history::FormatActionKind::CellStyle,
+                "AI Lua: set cell styles".into(),
+            );
+            self.is_modified = true;
+        }
+
+        // Switch to new sheet
+        self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(sheet_idx); });
+
+        // Append Run Log entry
+        self.workbook.update(cx, |wb, _| {
+            let meta = crate::structured_results::ResultMeta {
+                sheet_idx,
+                sheet_name: sheet_name.clone(),
+                result_type: "LuaApply",
+                row_count: preview.cells_written,
+                col_count: 0,
+            };
+            crate::structured_results::append_run_log(
+                wb, &meta,
+                Some(preview.script_path.to_string_lossy().as_ref()),
+                Some(&preview.script_hash),
+            );
+        });
+
+        self.status_message = Some(format!(
+            "Applied AI Lua to new sheet '{}'.", sheet_name
+        ));
+        cx.notify();
+    }
+
+    /// Apply the pending Lua preview to the current (source) sheet.
+    pub fn apply_lua_to_current_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        use crate::terminal::state::PendingResult;
+
+        let preview = match self.terminal.pending_result.take() {
+            Some(PendingResult::LuaPreview(data)) => data,
+            other => {
+                self.terminal.pending_result = other;
+                return;
+            }
+        };
+
+        // Refuse if preview had error
+        if preview.error.is_some() {
+            self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
+            self.status_message = Some("Cannot apply: Lua script had errors.".into());
+            cx.notify();
+            return;
+        }
+
+        // Drift check: recompute fingerprint and compare
+        let current_fp = self.workbook.read(cx).sheet(preview.source_sheet_index)
+            .map(|s| sheet_fingerprint(s))
+            .unwrap_or(0);
+
+        if current_fp != preview.source_fingerprint {
+            // Drift detected — redirect to new sheet
+            self.status_message = Some(
+                "Sheet changed since preview. Applying to new sheet instead.".into()
+            );
+            // Re-store the preview and delegate to new-sheet path
+            self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
+            self.apply_lua_to_new_sheet(_window, cx);
+            return;
+        }
+
+        let sheet_idx = preview.source_sheet_index;
+
+        let (changes, format_patches) = crate::views::lua_console::apply_lua_ops(
+            self, sheet_idx, &preview.ops, cx,
+        );
+
+        // Record undo
+        let has_values = !changes.is_empty();
+        let has_formats = !format_patches.is_empty();
+        if has_values && has_formats {
+            use crate::history::{UndoAction, FormatActionKind};
+            let group = UndoAction::Group {
+                actions: vec![
+                    UndoAction::Values { sheet_index: sheet_idx, changes },
+                    UndoAction::Format {
+                        sheet_index: sheet_idx,
+                        patches: format_patches,
+                        kind: FormatActionKind::CellStyle,
+                        description: "AI Lua: set cell styles".into(),
+                    },
+                ],
+                description: "AI Lua apply".into(),
+            };
+            self.history.record_action_with_provenance(group, None);
+            self.is_modified = true;
+        } else if has_values {
+            self.history.record_batch(sheet_idx, changes);
+            self.is_modified = true;
+        } else if has_formats {
+            self.history.record_format(
+                sheet_idx,
+                format_patches,
+                crate::history::FormatActionKind::CellStyle,
+                "AI Lua: set cell styles".into(),
+            );
+            self.is_modified = true;
+        }
+
+        // Append Run Log entry
+        let sheet_name = self.workbook.read(cx)
+            .sheet_names()
+            .get(sheet_idx)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        self.workbook.update(cx, |wb, _| {
+            let meta = crate::structured_results::ResultMeta {
+                sheet_idx,
+                sheet_name: sheet_name.clone(),
+                result_type: "LuaApply",
+                row_count: preview.cells_written,
+                col_count: 0,
+            };
+            crate::structured_results::append_run_log(
+                wb, &meta,
+                Some(preview.script_path.to_string_lossy().as_ref()),
+                Some(&preview.script_hash),
+            );
+        });
+
+        self.status_message = Some(format!(
+            "Applied AI Lua to current sheet '{}'.", sheet_name
+        ));
+        cx.notify();
     }
 
     /// Verify integrity inline — checks semantic fingerprint and shows status message.
@@ -7936,6 +8568,171 @@ impl Render for Spreadsheet {
 
         views::render_spreadsheet(self, window, cx)
     }
+}
+
+// ============================================================================
+// Phase 6: Helpers for AI Lua capture/preview/apply
+// ============================================================================
+
+/// Extract the last ` ```lua ` ... ` ``` ` fenced code block from text.
+/// Case-insensitive on the language tag. Unclosed blocks are skipped.
+fn extract_last_lua_block(text: &str) -> Option<String> {
+    let mut last_block: Option<String> = None;
+    let mut in_block = false;
+    let mut current_lines: Vec<&str> = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !in_block {
+            // Check for opening fence: ```lua (case-insensitive on language tag)
+            if trimmed.starts_with("```") {
+                let after = trimmed[3..].trim();
+                if after.eq_ignore_ascii_case("lua") {
+                    in_block = true;
+                    current_lines.clear();
+                }
+            }
+        } else {
+            // Check for closing fence
+            if trimmed == "```" {
+                if !current_lines.is_empty() {
+                    last_block = Some(current_lines.join("\n"));
+                }
+                in_block = false;
+                current_lines.clear();
+            } else {
+                current_lines.push(line);
+            }
+        }
+    }
+
+    last_block
+}
+
+/// Save an AI-generated Lua script to `.visigrid/ai/generated/` and copy as `last.lua`.
+fn save_ai_lua_script(code: &str, workspace_root: &Option<std::path::PathBuf>) -> std::path::PathBuf {
+    let base = workspace_root.clone().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join(".visigrid")
+    });
+    let dir = base.join("ai").join("generated");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let filename = format!("model_{}.lua", epoch);
+    let path = dir.join(&filename);
+    let _ = std::fs::write(&path, code);
+
+    // Also write last.lua for easy re-run
+    let last_path = dir.join("last.lua");
+    let _ = std::fs::write(&last_path, code);
+
+    path
+}
+
+/// Fingerprint of sheet state for drift detection.
+///
+/// Samples deterministically across the full used range:
+/// - Sheet name + cell count + used range bounds
+/// - First 20 populated cells (head)
+/// - Last 20 populated cells (tail)
+/// - 88 evenly spaced cells across the middle (128 total samples)
+/// - Hashes raw values (value OR formula), not display strings
+pub(crate) fn sheet_fingerprint(sheet: &visigrid_engine::sheet::Sheet) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+    // Sheet identity + dimensions
+    sheet.name.hash(&mut hasher);
+
+    // Collect cell positions for sampling — cells_iter yields populated cells only
+    let cells: Vec<(&(usize, usize), &visigrid_engine::cell::Cell)> =
+        sheet.cells_iter().collect();
+    let count = cells.len();
+    count.hash(&mut hasher);
+
+    if count == 0 {
+        return hasher.finish();
+    }
+
+    // Used range bounds (min/max row/col across all populated cells)
+    let (mut min_r, mut min_c) = (usize::MAX, usize::MAX);
+    let (mut max_r, mut max_c) = (0usize, 0usize);
+    for (&(r, c), _) in &cells {
+        min_r = min_r.min(r);
+        min_c = min_c.min(c);
+        max_r = max_r.max(r);
+        max_c = max_c.max(c);
+    }
+    min_r.hash(&mut hasher);
+    min_c.hash(&mut hasher);
+    max_r.hash(&mut hasher);
+    max_c.hash(&mut hasher);
+
+    const HEAD: usize = 20;
+    const TAIL: usize = 20;
+    const TOTAL_SAMPLES: usize = 128;
+    let middle_budget = TOTAL_SAMPLES.saturating_sub(HEAD).saturating_sub(TAIL);
+
+    // Hash a cell's raw content (value + formula, not display)
+    let hash_cell = |h: &mut std::collections::hash_map::DefaultHasher,
+                     &(r, c): &(usize, usize),
+                     cell: &visigrid_engine::cell::Cell| {
+        r.hash(h);
+        c.hash(h);
+        cell.value.raw_display().hash(h);
+    };
+
+    if count <= TOTAL_SAMPLES {
+        // Small sheet: hash everything
+        for (&pos, cell) in &cells {
+            hash_cell(&mut hasher, &pos, cell);
+        }
+    } else {
+        // Head
+        for i in 0..HEAD {
+            let (&pos, cell) = cells[i];
+            hash_cell(&mut hasher, &pos, cell);
+        }
+        // Evenly spaced middle
+        let middle_start = HEAD;
+        let middle_end = count - TAIL;
+        let middle_len = middle_end - middle_start;
+        for i in 0..middle_budget {
+            let idx = middle_start + (i * middle_len) / middle_budget;
+            let (&pos, cell) = cells[idx];
+            hash_cell(&mut hasher, &pos, cell);
+        }
+        // Tail
+        for i in (count - TAIL)..count {
+            let (&pos, cell) = cells[i];
+            hash_cell(&mut hasher, &pos, cell);
+        }
+    }
+
+    hasher.finish()
+}
+
+/// Count how many cells in ops would overwrite non-empty cells.
+fn count_lua_overwrites(ops: &[crate::scripting::LuaOp], sheet: &visigrid_engine::sheet::Sheet) -> usize {
+    use crate::scripting::LuaOp;
+    let mut seen = std::collections::HashSet::new();
+    let mut count = 0;
+    for op in ops {
+        let (row, col) = match op {
+            LuaOp::SetValue { row, col, .. } => (*row as usize, *col as usize),
+            LuaOp::SetFormula { row, col, .. } => (*row as usize, *col as usize),
+            _ => continue,
+        };
+        if seen.insert((row, col)) && !sheet.get_raw(row, col).is_empty() {
+            count += 1;
+        }
+    }
+    count
 }
 
 #[cfg(test)]

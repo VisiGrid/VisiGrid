@@ -432,10 +432,47 @@ pub fn render_terminal_panel(
             cx.notify();
         }));
 
-    // Phase 5: Affordance bar when a structured result is pending
-    let has_result = app.terminal.pending_structured_result.is_some();
-    let result_description = app.terminal.pending_structured_result.as_ref()
-        .map(|r| r.description());
+    // Phase 5/6: Affordance bar when a pending result is available
+    use crate::terminal::state::PendingResult;
+    let (has_result, is_lua_preview) = match &app.terminal.pending_result {
+        Some(PendingResult::Structured(_)) => (true, false),
+        Some(PendingResult::LuaPreview(_)) => (true, true),
+        None => (false, false),
+    };
+    let result_description = match &app.terminal.pending_result {
+        Some(PendingResult::Structured(r)) => Some(r.description()),
+        _ => None,
+    };
+    let lua_preview_info: Option<(String, bool)> = match &app.terminal.pending_result {
+        Some(PendingResult::LuaPreview(data)) => {
+            if let Some(ref err) = data.error {
+                Some((format!("Lua error: {}", err), true))
+            } else {
+                let hash_prefix = if data.script_hash.len() >= 8 {
+                    &data.script_hash[..8]
+                } else {
+                    &data.script_hash
+                };
+                // Check drift at render time
+                let drifted = app.workbook.read(cx).sheet(data.source_sheet_index)
+                    .map(|s| crate::app::sheet_fingerprint(s) != data.source_fingerprint)
+                    .unwrap_or(true);
+                let drift_hint = if drifted {
+                    " \u{00b7} src changed \u{2192} will apply to new sheet"
+                } else {
+                    ""
+                };
+                Some((
+                    format!(
+                        "Lua preview \u{00b7} {} writes \u{00b7} {} overwrites \u{00b7} {}{}",
+                        data.cells_written, data.cells_overwritten, hash_prefix, drift_hint
+                    ),
+                    false,
+                ))
+            }
+        }
+        _ => None,
+    };
 
     div()
         .id("terminal-panel")
@@ -470,78 +507,190 @@ pub fn render_terminal_panel(
         .child(resize_handle)
         .child(header)
         .when(has_result, |d| {
-            let description = result_description.unwrap_or_default();
-            let accent_bg = rgba(0x2d6a4f30); // subtle green-accent tint
-            d.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .border_b_1()
-                    .border_color(panel_border)
-                    .bg(accent_bg)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .text_color(accent)
-                                    .text_size(px(12.0))
-                                    .child("\u{2713}")
-                            )
-                            .child(
-                                div()
-                                    .text_color(text_primary)
-                                    .text_size(px(11.0))
-                                    .child(format!("Structured result \u{00b7} {}", description))
-                            )
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .id("result-open-in-grid")
-                                    .cursor_pointer()
-                                    .text_size(px(11.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(accent)
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .rounded(px(3.0))
-                                    .border_1()
-                                    .border_color(accent)
-                                    .hover(|s| s.bg(accent).text_color(editor_bg))
-                                    .child("Open in Grid")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_structured_result(window, cx);
-                                    }))
-                            )
-                            .child(
-                                div()
-                                    .id("result-dismiss")
-                                    .cursor_pointer()
-                                    .text_size(px(11.0))
-                                    .text_color(text_muted)
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .hover(|s| s.text_color(text_primary))
-                                    .child("Dismiss")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.dismiss_structured_result(cx);
-                                    }))
-                            )
-                    )
-            )
+            if is_lua_preview {
+                // Phase 6: Lua preview affordance bar
+                let (description, is_error) = lua_preview_info.unwrap_or_default();
+                let bar_bg = if is_error {
+                    rgba(0x6a2d2d30) // subtle red tint for errors
+                } else {
+                    rgba(0x2d4f6a30) // subtle blue-accent tint for Lua
+                };
+                let icon = if is_error { "\u{2717}" } else { "\u{25b6}" }; // ✗ or ▶
+                d.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .h(px(28.0))
+                        .px(px(8.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .bg(bar_bg)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .text_color(if is_error { Into::<gpui::Hsla>::into(rgba(0xff6b6bff)) } else { accent })
+                                        .text_size(px(12.0))
+                                        .child(icon)
+                                )
+                                .child(
+                                    div()
+                                        .text_color(text_primary)
+                                        .text_size(px(11.0))
+                                        .child(description)
+                                )
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .when(!is_error, |d| {
+                                    d.child(
+                                        div()
+                                            .id("lua-apply-new-sheet")
+                                            .cursor_pointer()
+                                            .text_size(px(11.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(accent)
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .rounded(px(3.0))
+                                            .border_1()
+                                            .border_color(accent)
+                                            .hover(|s| s.bg(accent).text_color(editor_bg))
+                                            .child("Apply to New Sheet")
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.apply_lua_to_new_sheet(_window, cx);
+                                            }))
+                                    )
+                                    .child(
+                                        div()
+                                            .id("lua-apply-current-sheet")
+                                            .cursor_pointer()
+                                            .text_size(px(11.0))
+                                            .text_color(text_muted)
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .hover(|s| s.text_color(text_primary))
+                                            .child("Apply to Current Sheet")
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.apply_lua_to_current_sheet(_window, cx);
+                                            }))
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id("lua-dismiss")
+                                        .cursor_pointer()
+                                        .text_size(px(11.0))
+                                        .text_color(text_muted)
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .hover(|s| s.text_color(text_primary))
+                                        .child("Dismiss")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.dismiss_structured_result(cx);
+                                        }))
+                                )
+                        )
+                )
+            } else {
+                // Phase 5: Structured result affordance bar
+                let description = result_description.unwrap_or_default();
+                let accent_bg = rgba(0x2d6a4f30); // subtle green-accent tint
+                d.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .h(px(28.0))
+                        .px(px(8.0))
+                        .border_b_1()
+                        .border_color(panel_border)
+                        .bg(accent_bg)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .text_color(accent)
+                                        .text_size(px(12.0))
+                                        .child("\u{2713}")
+                                )
+                                .child(
+                                    div()
+                                        .text_color(text_primary)
+                                        .text_size(px(11.0))
+                                        .child(format!("Structured result \u{00b7} {}", description))
+                                )
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .id("result-open-in-grid")
+                                        .cursor_pointer()
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(accent)
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .rounded(px(3.0))
+                                        .border_1()
+                                        .border_color(accent)
+                                        .hover(|s| s.bg(accent).text_color(editor_bg))
+                                        .child("Open in Grid")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_structured_result(window, cx);
+                                        }))
+                                )
+                                .child(
+                                    div()
+                                        .id("result-explain-ai")
+                                        .cursor_pointer()
+                                        .text_size(px(11.0))
+                                        .text_color(text_muted)
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .hover(|s| s.text_color(text_primary))
+                                        .child("Explain with AI")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.explain_structured_result(window, cx);
+                                        }))
+                                )
+                                .child(
+                                    div()
+                                        .id("result-dismiss")
+                                        .cursor_pointer()
+                                        .text_size(px(11.0))
+                                        .text_color(text_muted)
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .hover(|s| s.text_color(text_primary))
+                                        .child("Dismiss")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.dismiss_structured_result(cx);
+                                        }))
+                                )
+                        )
+                )
+            }
         })
         .child(
             div()

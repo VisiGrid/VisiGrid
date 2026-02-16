@@ -131,9 +131,18 @@ fn classify(val: serde_json::Value) -> Option<StructuredResult> {
     }
 }
 
+/// Metadata about a rendered result (for the Run Log).
+pub struct ResultMeta {
+    pub sheet_idx: usize,
+    pub sheet_name: String,
+    pub result_type: &'static str,
+    pub row_count: usize,
+    pub col_count: usize,
+}
+
 /// Render a structured result into a new sheet in the workbook.
-/// Returns the sheet index of the newly created sheet.
-pub fn render_to_sheet(result: &StructuredResult, wb: &mut Workbook) -> usize {
+/// Returns metadata including the sheet index and name.
+pub fn render_to_sheet(result: &StructuredResult, wb: &mut Workbook) -> ResultMeta {
     match result {
         StructuredResult::Diff { raw } => render_diff(raw, wb),
         StructuredResult::Peek { columns, rows } => render_peek(columns, rows, wb),
@@ -141,8 +150,136 @@ pub fn render_to_sheet(result: &StructuredResult, wb: &mut Workbook) -> usize {
     }
 }
 
+/// Name of the Run Log index sheet.
+const RUN_LOG_SHEET: &str = "Run Log";
+/// Run Log header columns.
+const RUN_LOG_HEADERS: &[&str] = &["Timestamp", "Type", "Rows", "Cols", "Sheet", "Source", "Command"];
+/// Maximum data rows per Run Log sheet before rotating.
+const RUN_LOG_MAX_ROWS: usize = 1000;
+
+/// Append a row to the Run Log sheet, creating it if needed.
+/// Rotates to "Run Log (2)", "(3)", etc. when a sheet exceeds 1000 data rows.
+pub fn append_run_log(
+    wb: &mut Workbook,
+    meta: &ResultMeta,
+    source_file: Option<&str>,
+    command: Option<&str>,
+) {
+    // Find the latest Run Log sheet (prefer highest-numbered)
+    let log_idx = find_or_create_run_log(wb);
+
+    // Find next empty row
+    let prev_active = wb.active_sheet_index();
+    let _ = wb.set_active_sheet(log_idx);
+    let sheet = wb.active_sheet_mut();
+    let mut next_row = 1;
+    while !sheet.get_display(next_row, 0).is_empty() {
+        next_row += 1;
+        if next_row > 10_000 { break; } // safety cap
+    }
+
+    // If this sheet is full, rotate to a new one
+    let (log_idx, next_row) = if next_row > RUN_LOG_MAX_ROWS {
+        let _ = wb.set_active_sheet(prev_active);
+        let new_idx = create_run_log_sheet(wb);
+        let _ = wb.set_active_sheet(new_idx);
+        (new_idx, 1)
+    } else {
+        (log_idx, next_row)
+    };
+
+    // Timestamp: ISO 8601 compact
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let timestamp = format_epoch_timestamp(now);
+
+    let sheet = wb.active_sheet_mut();
+    sheet.set_value(next_row, 0, &timestamp);
+    sheet.set_value(next_row, 1, meta.result_type);
+    sheet.set_value(next_row, 2, &meta.row_count.to_string());
+    sheet.set_value(next_row, 3, &meta.col_count.to_string());
+    sheet.set_value(next_row, 4, &meta.sheet_name);
+    sheet.set_value(next_row, 5, source_file.unwrap_or(""));
+    sheet.set_value(next_row, 6, command.unwrap_or(""));
+
+    // Restore active sheet (use log_idx to suppress unused warning)
+    let _ = log_idx;
+    let _ = wb.set_active_sheet(prev_active);
+}
+
+/// Find the latest Run Log sheet, or create the first one.
+fn find_or_create_run_log(wb: &mut Workbook) -> usize {
+    // Find all sheets named "Run Log" or "Run Log (N)"
+    let mut best_idx = None;
+    for i in 0..wb.sheet_count() {
+        if let Some(s) = wb.sheet(i) {
+            if s.name == RUN_LOG_SHEET || s.name.starts_with("Run Log (") {
+                best_idx = Some(i);
+            }
+        }
+    }
+    best_idx.unwrap_or_else(|| create_run_log_sheet(wb))
+}
+
+/// Create a new Run Log sheet with headers, using dedup naming.
+fn create_run_log_sheet(wb: &mut Workbook) -> usize {
+    let name = unique_sheet_name(wb, RUN_LOG_SHEET);
+    let idx = wb.add_sheet_named(&name).unwrap_or_else(|| wb.add_sheet());
+    let prev_active = wb.active_sheet_index();
+    let _ = wb.set_active_sheet(idx);
+    let sheet = wb.active_sheet_mut();
+    for (c, header) in RUN_LOG_HEADERS.iter().enumerate() {
+        sheet.set_value(0, c, header);
+    }
+    let _ = wb.set_active_sheet(prev_active);
+    idx
+}
+
+/// Format epoch seconds as a human-readable timestamp (UTC, compact).
+fn format_epoch_timestamp(secs: u64) -> String {
+    // Simple UTC formatting without chrono dependency
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Days since epoch to Y-M-D (simplified, good enough for logging)
+    let (year, month, day) = days_to_ymd(days);
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", year, month, day, hours, minutes, seconds)
+}
+
+/// Convert days since 1970-01-01 to (year, month, day).
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut year = 1970u64;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year { break; }
+        days -= days_in_year;
+        year += 1;
+    }
+    let month_days: &[u64] = if is_leap(year) {
+        &[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        &[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut month = 1u64;
+    for &md in month_days {
+        if days < md { break; }
+        days -= md;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
+fn is_leap(y: u64) -> bool {
+    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+}
+
 /// Find a unique sheet name by appending (2), (3), etc.
-fn unique_sheet_name(wb: &Workbook, base: &str) -> String {
+pub(crate) fn unique_sheet_name(wb: &Workbook, base: &str) -> String {
     if !wb.sheet_name_exists(base) {
         return base.to_string();
     }
@@ -159,7 +296,7 @@ fn unique_sheet_name(wb: &Workbook, base: &str) -> String {
         .as_secs())
 }
 
-fn render_diff(raw: &serde_json::Value, wb: &mut Workbook) -> usize {
+fn render_diff(raw: &serde_json::Value, wb: &mut Workbook) -> ResultMeta {
     let name = unique_sheet_name(wb, "Diff Results");
     let sheet_idx = wb.add_sheet_named(&name).unwrap_or_else(|| wb.add_sheet());
     let _ = wb.set_active_sheet(sheet_idx);
@@ -168,7 +305,13 @@ fn render_diff(raw: &serde_json::Value, wb: &mut Workbook) -> usize {
     let Some(results) = results else {
         // Just put the summary if no results array
         wb.active_sheet_mut().set_value(0, 0, "No diff results found");
-        return sheet_idx;
+        return ResultMeta {
+            sheet_idx,
+            sheet_name: name,
+            result_type: "diff",
+            row_count: 0,
+            col_count: 1,
+        };
     };
 
     // Collect all column names from the diffs
@@ -239,10 +382,17 @@ fn render_diff(raw: &serde_json::Value, wb: &mut Workbook) -> usize {
         }
     }
 
-    sheet_idx
+    let total_cols = 2 + col_names.len() * 3;
+    ResultMeta {
+        sheet_idx,
+        sheet_name: name,
+        result_type: "diff",
+        row_count: results.len(),
+        col_count: total_cols,
+    }
 }
 
-fn render_peek(columns: &[String], rows: &[Vec<serde_json::Value>], wb: &mut Workbook) -> usize {
+fn render_peek(columns: &[String], rows: &[Vec<serde_json::Value>], wb: &mut Workbook) -> ResultMeta {
     let name = unique_sheet_name(wb, "Peek Results");
     let sheet_idx = wb.add_sheet_named(&name).unwrap_or_else(|| wb.add_sheet());
     let _ = wb.set_active_sheet(sheet_idx);
@@ -259,35 +409,57 @@ fn render_peek(columns: &[String], rows: &[Vec<serde_json::Value>], wb: &mut Wor
         }
     }
 
-    sheet_idx
+    ResultMeta {
+        sheet_idx,
+        sheet_name: name,
+        result_type: "peek",
+        row_count: rows.len(),
+        col_count: columns.len(),
+    }
 }
 
-fn render_calc(value: &serde_json::Value, wb: &mut Workbook) -> usize {
+fn render_calc(value: &serde_json::Value, wb: &mut Workbook) -> ResultMeta {
     let name = unique_sheet_name(wb, "Calc Results");
     let sheet_idx = wb.add_sheet_named(&name).unwrap_or_else(|| wb.add_sheet());
     let _ = wb.set_active_sheet(sheet_idx);
 
     let sheet = wb.active_sheet_mut();
-    match value {
+    let (row_count, col_count) = match value {
         serde_json::Value::Array(rows) => {
+            let mut max_cols = 0;
             for (r, row) in rows.iter().enumerate() {
                 if let Some(cells) = row.as_array() {
                     for (c, val) in cells.iter().enumerate() {
                         sheet.set_value(r, c, &json_cell_value(val));
                     }
+                    max_cols = max_cols.max(cells.len());
                 } else {
                     // 1D array: put each element in a column
                     sheet.set_value(r, 0, &json_cell_value(row));
+                    max_cols = max_cols.max(1);
                 }
             }
+            (rows.len(), max_cols)
         }
         _ => {
             // Scalar: single cell A1
             sheet.set_value(0, 0, &json_cell_value(value));
+            (1, 1)
         }
-    }
+    };
 
-    sheet_idx
+    ResultMeta {
+        sheet_idx,
+        sheet_name: name,
+        result_type: "calc",
+        row_count,
+        col_count,
+    }
+}
+
+/// Public accessor for json_cell_value (used by AI explain prompt building).
+pub fn json_cell_value_pub(val: &serde_json::Value) -> String {
+    json_cell_value(val)
 }
 
 /// Convert a JSON value to a cell-appropriate string.
