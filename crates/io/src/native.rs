@@ -5,7 +5,8 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
-use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, CellStyle, DateStyle, NegativeStyle, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, CellStyle, CellValue, DateStyle, NegativeStyle, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::formula::eval::Value;
 use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
@@ -122,6 +123,7 @@ CREATE TABLE IF NOT EXISTS cells (
     fmt_cell_style INTEGER DEFAULT 0,
     fmt_font_color INTEGER,              -- RGBA as u32 (0xRRGGBBAA), NULL = automatic
     fmt_background_color INTEGER,        -- RGBA as u32 (0xRRGGBBAA), NULL = no fill
+    formula_source TEXT,                 -- original formula text for TYPE_FORMULA cells
     PRIMARY KEY (sheet_idx, row, col)
 );
 
@@ -319,7 +321,7 @@ fn border_from_db(style: i32, color: Option<i64>) -> CellBorder {
 }
 
 /// Current schema version. Increment for each migration.
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 
 /// Run schema migrations for existing databases.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -442,7 +444,53 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    if version < 9 {
+        conn.execute_batch(
+            "ALTER TABLE cells ADD COLUMN formula_source TEXT;
+             PRAGMA user_version = 9;"
+        )?;
+    }
+
     Ok(())
+}
+
+/// Determine value_type, value_num, value_text, and formula_source for a cell during save.
+/// For formula cells, persists the computed cached value in value_num/value_text
+/// and the formula source text in formula_source.
+fn cell_save_values(
+    cell: &visigrid_engine::cell::Cell,
+    sheet: &Sheet,
+    row: usize,
+    col: usize,
+) -> (i32, Option<f64>, Option<String>, Option<String>) {
+    let raw = cell.value.raw_display();
+    if raw.is_empty() {
+        return (TYPE_EMPTY, None, None, None);
+    }
+
+    match &cell.value {
+        CellValue::Formula { .. } => {
+            // Store formula source in formula_source, cached result in value_num/value_text
+            let computed = sheet.get_computed_value(row, col);
+            let (vnum, vtext) = match computed {
+                Value::Number(n) => (Some(n), None),
+                Value::Text(s) => (None, Some(s)),
+                Value::Boolean(b) => (None, Some(if b { "TRUE".to_string() } else { "FALSE".to_string() })),
+                Value::Error(e) => (None, Some(e)),
+                Value::Empty => (None, None),
+            };
+            (TYPE_FORMULA, vnum, vtext, Some(raw))
+        }
+        CellValue::Number(_) => {
+            if let Ok(num) = raw.parse::<f64>() {
+                (TYPE_NUMBER, Some(num), None, None)
+            } else {
+                (TYPE_TEXT, None, Some(raw), None)
+            }
+        }
+        CellValue::Text(_) => (TYPE_TEXT, None, Some(raw), None),
+        CellValue::Empty => (TYPE_EMPTY, None, None, None),
+    }
 }
 
 pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
@@ -478,7 +526,7 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
 
     {
         let mut stmt = conn.prepare(
-            "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+            "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, formula_source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
         ).map_err(|e| e.to_string())?;
 
         for (&(row, col), cell) in sheet.cells_iter() {
@@ -490,17 +538,8 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
                     continue;
                 }
 
-                // Determine value type and store appropriately
-                let (value_type, value_num, value_text): (i32, Option<f64>, Option<&str>) =
-                    if raw.is_empty() {
-                        (TYPE_EMPTY, None, None)
-                    } else if raw.starts_with('=') {
-                        (TYPE_FORMULA, None, Some(&raw))
-                    } else if let Ok(num) = raw.parse::<f64>() {
-                        (TYPE_NUMBER, Some(num), None)
-                    } else {
-                        (TYPE_TEXT, None, Some(&raw))
-                    };
+                let (value_type, value_num, value_text, formula_source) =
+                    cell_save_values(cell, sheet, row, col);
 
                 let alignment_int = alignment_to_db(format.alignment);
 
@@ -524,7 +563,8 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
                     format.font_family.as_deref(),
                     thousands,
                     negative,
-                    currency_symbol
+                    currency_symbol,
+                    formula_source
                 ]).map_err(|e| e.to_string())?;
         }
     }
@@ -765,7 +805,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
         ).map_err(|e| e.to_string())?;
 
         let mut cell_stmt = conn.prepare(
-            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color, fmt_cell_style, fmt_font_color, fmt_background_color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)"
+            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color, fmt_cell_style, fmt_font_color, fmt_background_color, formula_source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)"
         ).map_err(|e| e.to_string())?;
 
         for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
@@ -787,17 +827,8 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     continue;
                 }
 
-                // Determine value type and store appropriately
-                let (value_type, value_num, value_text): (i32, Option<f64>, Option<&str>) =
-                    if raw.is_empty() {
-                        (TYPE_EMPTY, None, None)
-                    } else if raw.starts_with('=') {
-                        (TYPE_FORMULA, None, Some(&raw))
-                    } else if let Ok(num) = raw.parse::<f64>() {
-                        (TYPE_NUMBER, Some(num), None)
-                    } else {
-                        (TYPE_TEXT, None, Some(&raw))
-                    };
+                let (value_type, value_num, value_text, formula_source) =
+                    cell_save_values(cell, sheet, row, col);
 
                 let alignment_int = alignment_to_db(format.alignment);
                 let (number_type, decimals, thousands, negative, currency_symbol) = extract_number_format_fields(&format.number_format);
@@ -833,7 +864,8 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
                     format.cell_style.to_int(),
                     // Font and background colors
                     border_color_to_db(format.font_color),
-                    border_color_to_db(format.background_color)
+                    border_color_to_db(format.background_color),
+                    formula_source
                 ]).map_err(|e| e.to_string())?;
             }
         }
@@ -925,7 +957,7 @@ pub fn save_workbook_with_metadata(
         ).map_err(|e| e.to_string())?;
 
         let mut cell_stmt = conn.prepare(
-            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color, fmt_cell_style, fmt_font_color, fmt_background_color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)"
+            "INSERT INTO cells (sheet_idx, row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color, fmt_cell_style, fmt_font_color, fmt_background_color, formula_source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)"
         ).map_err(|e| e.to_string())?;
 
         for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
@@ -946,16 +978,8 @@ pub fn save_workbook_with_metadata(
                     continue;
                 }
 
-                let (value_type, value_num, value_text): (i32, Option<f64>, Option<&str>) =
-                    if raw.is_empty() {
-                        (TYPE_EMPTY, None, None)
-                    } else if raw.starts_with('=') {
-                        (TYPE_FORMULA, None, Some(&raw))
-                    } else if let Ok(num) = raw.parse::<f64>() {
-                        (TYPE_NUMBER, Some(num), None)
-                    } else {
-                        (TYPE_TEXT, None, Some(&raw))
-                    };
+                let (value_type, value_num, value_text, formula_source) =
+                    cell_save_values(cell, sheet, row, col);
 
                 let alignment_int = alignment_to_db(format.alignment);
                 let (number_type, decimals, thousands, negative, currency_symbol) = extract_number_format_fields(&format.number_format);
@@ -991,7 +1015,8 @@ pub fn save_workbook_with_metadata(
                     format.cell_style.to_int(),
                     // Font and background colors
                     border_color_to_db(format.font_color),
-                    border_color_to_db(format.background_color)
+                    border_color_to_db(format.background_color),
+                    formula_source
                 ]).map_err(|e| e.to_string())?;
             }
         }
@@ -1118,7 +1143,7 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
              fmt_thousands, fmt_negative, fmt_currency_symbol, \
              fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, \
              fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color, \
-             fmt_cell_style, fmt_font_color, fmt_background_color \
+             fmt_cell_style, fmt_font_color, fmt_background_color, formula_source \
              FROM cells ORDER BY sheet_idx, row, col"
         ).map_err(|e| e.to_string())?;
 
@@ -1155,6 +1180,8 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
                 // Font and background colors
                 row.get::<_, Option<i64>>(25).ok().flatten(), // fmt_font_color
                 row.get::<_, Option<i64>>(26).ok().flatten(), // fmt_background_color
+                // Formula source (may not exist in old files pre-v9)
+                row.get::<_, Option<String>>(27).ok().flatten(), // formula_source
             ))
         }).map_err(|e| e.to_string())?;
 
@@ -1166,7 +1193,8 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
                  border_top_style, border_right_style, border_bottom_style, border_left_style,
                  border_top_color, border_right_color, border_bottom_color, border_left_color,
                  cell_style_int,
-                 font_color_raw, background_color_raw
+                 font_color_raw, background_color_raw,
+                 formula_source
             ) = row_result.map_err(|e| e.to_string())?;
 
             // Ensure sheet exists
@@ -1178,8 +1206,9 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
             let sheet = &mut sheets[sheet_idx];
 
             // Set cell value
+            // For formulas: prefer formula_source (v9+), fall back to value_text (pre-v9)
             let value_str = match value_type {
-                TYPE_FORMULA => value_text.unwrap_or_default(),
+                TYPE_FORMULA => formula_source.or(value_text).unwrap_or_default(),
                 TYPE_NUMBER => value_num.map(|n| {
                     if n.fract() == 0.0 { (n as i64).to_string() } else { n.to_string() }
                 }).unwrap_or_default(),
@@ -2060,8 +2089,8 @@ pub fn save_workbook_full(
              fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, \
              fmt_border_top, fmt_border_right, fmt_border_bottom, fmt_border_left, \
              fmt_border_top_color, fmt_border_right_color, fmt_border_bottom_color, fmt_border_left_color, \
-             fmt_cell_style, fmt_font_color, fmt_background_color) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)"
+             fmt_cell_style, fmt_font_color, fmt_background_color, formula_source) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)"
         ).map_err(|e| e.to_string())?;
 
         for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
@@ -2077,16 +2106,8 @@ pub fn save_workbook_full(
                     continue;
                 }
 
-                let (value_type, value_num, value_text): (i32, Option<f64>, Option<&str>) =
-                    if raw.is_empty() {
-                        (TYPE_EMPTY, None, None)
-                    } else if raw.starts_with('=') {
-                        (TYPE_FORMULA, None, Some(&raw))
-                    } else if let Ok(num) = raw.parse::<f64>() {
-                        (TYPE_NUMBER, Some(num), None)
-                    } else {
-                        (TYPE_TEXT, None, Some(&raw))
-                    };
+                let (value_type, value_num, value_text, formula_source) =
+                    cell_save_values(cell, sheet, row, col);
 
                 let alignment_int = alignment_to_db(format.alignment);
                 let (number_type, decimals, thousands, negative, currency_symbol) =
@@ -2108,7 +2129,8 @@ pub fn save_workbook_full(
                     border_color_to_db(format.border_left.color),
                     format.cell_style.to_int(),
                     border_color_to_db(format.font_color),
-                    border_color_to_db(format.background_color)
+                    border_color_to_db(format.background_color),
+                    formula_source
                 ]).map_err(|e| e.to_string())?;
             }
         }
@@ -2199,6 +2221,8 @@ pub struct LightweightCell {
     pub col: usize,
     pub value: String,
     pub value_type: String,
+    /// Original formula text for formula cells (None for non-formula cells)
+    pub formula_source: Option<String>,
 }
 
 /// Query sheet metadata directly from SQLite without loading cells into memory.
@@ -2280,7 +2304,7 @@ pub fn inspect_range_lightweight(
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
 
     let mut stmt = conn.prepare(
-        "SELECT row, col, value_type, value_num, value_text \
+        "SELECT row, col, value_type, value_num, value_text, formula_source \
          FROM cells \
          WHERE sheet_idx = ?1 AND row BETWEEN ?2 AND ?3 AND col BETWEEN ?4 AND ?5 \
          ORDER BY row, col"
@@ -2294,25 +2318,35 @@ pub fn inspect_range_lightweight(
             let vtype = row.get::<_, i32>(2)?;
             let vnum = row.get::<_, Option<f64>>(3)?;
             let vtext = row.get::<_, Option<String>>(4)?;
+            let fsource = row.get::<_, Option<String>>(5).ok().flatten();
 
-            let (value, type_str) = match vtype {
+            let (value, type_str, formula_source) = match vtype {
                 TYPE_NUMBER => {
                     let v = vnum.map(|n| {
                         if n.fract() == 0.0 { (n as i64).to_string() } else { n.to_string() }
                     }).unwrap_or_default();
-                    (v, "number")
+                    (v, "number", None)
                 }
-                TYPE_TEXT => (vtext.unwrap_or_default(), "text"),
+                TYPE_TEXT => (vtext.unwrap_or_default(), "text", None),
                 TYPE_FORMULA => {
-                    // Use cached computed value: prefer value_num, fall back to value_text
-                    let v = if let Some(n) = vnum {
-                        if n.fract() == 0.0 { (n as i64).to_string() } else { n.to_string() }
+                    // Use cached computed value from value_num/value_text.
+                    // formula_source holds the original formula (v9+).
+                    // For pre-v9 files: formula_source is NULL, value_text has the formula text.
+                    let (v, src) = if fsource.is_some() {
+                        // v9+: cached result in value_num/value_text, formula in formula_source
+                        let val = if let Some(n) = vnum {
+                            if n.fract() == 0.0 { (n as i64).to_string() } else { n.to_string() }
+                        } else {
+                            vtext.unwrap_or_default()
+                        };
+                        (val, fsource)
                     } else {
-                        vtext.unwrap_or_default()
+                        // Pre-v9: value_text has formula text, no cached result available
+                        (String::new(), vtext)
                     };
-                    (v, "formula")
+                    (v, "formula", src)
                 }
-                _ => (String::new(), "empty"),
+                _ => (String::new(), "empty", None),
             };
 
             Ok(LightweightCell {
@@ -2320,6 +2354,7 @@ pub fn inspect_range_lightweight(
                 col: c,
                 value,
                 value_type: type_str.to_string(),
+                formula_source,
             })
         }
     ).map_err(|e| e.to_string())?;
@@ -3250,5 +3285,55 @@ mod tests {
         let fmt1 = loaded.active_sheet().get_format(1, 1);
         assert_eq!(fmt1.background_color, Some([0x00, 0x80, 0x00, 0xFF]), "Background should be green");
         assert_eq!(fmt1.font_color, None, "Font color should be None");
+    }
+
+    #[test]
+    fn test_formula_cached_values_lightweight() {
+        // Create a workbook with formulas
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+        sheet.set_value(0, 0, "10");
+        sheet.set_value(1, 0, "20");
+        sheet.set_value(2, 0, "=A1+A2");  // Should compute to 30
+        sheet.set_value(0, 1, "hello");
+        sheet.set_value(1, 1, "=UPPER(B1)");  // Should compute to "HELLO"
+
+        // Verify computed values in memory
+        assert_eq!(sheet.get_display(2, 0), "30");
+        assert_eq!(sheet.get_display(1, 1), "HELLO");
+
+        // Save to temp file
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+        save_workbook(&workbook, path).expect("Save should succeed");
+
+        // Lightweight inspect should return cached computed values, not formula text
+        let cells = inspect_range_lightweight(path, 0, 0, 0, 2, 1)
+            .expect("Lightweight inspect should succeed");
+
+        // Find the formula cells
+        let sum_cell = cells.iter().find(|c| c.row == 2 && c.col == 0).expect("sum cell");
+        assert_eq!(sum_cell.value, "30", "Formula =A1+A2 should show cached result 30");
+        assert_eq!(sum_cell.value_type, "formula");
+        assert_eq!(sum_cell.formula_source.as_deref(), Some("=A1+A2"));
+
+        let upper_cell = cells.iter().find(|c| c.row == 1 && c.col == 1).expect("upper cell");
+        assert_eq!(upper_cell.value, "HELLO", "Formula =UPPER(B1) should show cached result HELLO");
+        assert_eq!(upper_cell.value_type, "formula");
+        assert_eq!(upper_cell.formula_source.as_deref(), Some("=UPPER(B1)"));
+
+        // Non-formula cells should have no formula_source
+        let num_cell = cells.iter().find(|c| c.row == 0 && c.col == 0).expect("num cell");
+        assert_eq!(num_cell.value, "10");
+        assert_eq!(num_cell.value_type, "number");
+        assert!(num_cell.formula_source.is_none());
+
+        // Full load should still work correctly (formula text from formula_source)
+        let loaded = load_workbook(path).expect("Full load should succeed");
+        let loaded_sheet = loaded.active_sheet();
+        assert_eq!(loaded_sheet.get_raw(2, 0), "=A1+A2");
+        assert_eq!(loaded_sheet.get_display(2, 0), "30");
+        assert_eq!(loaded_sheet.get_raw(1, 1), "=UPPER(B1)");
+        assert_eq!(loaded_sheet.get_display(1, 1), "HELLO");
     }
 }

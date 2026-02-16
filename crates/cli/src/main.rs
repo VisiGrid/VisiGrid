@@ -5297,7 +5297,7 @@ fn cmd_sheet_inspect_range_lightweight(
             sheet_ops::CellInspectResult {
                 cell: sheet_ops::format_cell_ref(c.row, c.col),
                 value: c.value.clone(),
-                formula: if c.value_type == "formula" { Some("(cached)".to_string()) } else { None },
+                formula: c.formula_source.clone(),
                 value_type: c.value_type.clone(),
                 format: None,
                 header: hdr,
