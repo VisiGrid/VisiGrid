@@ -982,9 +982,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.58"
+version = "4.5.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63be97961acde393029492ce0be7a1af7e323e6bae9511ebfac33751be5e6806"
+checksum = "c5caf74d17c3aec5495110c34cc3f78644bfa89af6c8993ed4de2790e49b6499"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -992,9 +992,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.58"
+version = "4.5.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f13174bda5dfd69d7e947827e5af4b0f2f94a4a3ee92912fba07a66150f21e2"
+checksum = "370daa45065b80218950227371916a1633217ae42b2715b2287b606dcd618e24"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1103,7 +1103,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "indexmap",
  "rustc-hash 2.1.1",
@@ -1667,7 +1667,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2573,7 +2573,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
@@ -2673,7 +2673,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -2897,7 +2897,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -3520,9 +3520,9 @@ dependencies = [
 
 [[package]]
 name = "liblzma"
-version = "0.4.5"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73c36d08cad03a3fbe2c4e7bb3a9e84c57e4ee4135ed0b065cade3d98480c648"
+checksum = "b6033b77c21d1f56deeae8014eb9fbe7bdf1765185a6c508b5ca82eeaed7f899"
 dependencies = [
  "liblzma-sys",
 ]
@@ -3802,7 +3802,7 @@ dependencies = [
 [[package]]
 name = "media"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -4430,7 +4430,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "collections",
  "serde",
@@ -5103,7 +5103,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "derive_refineable",
 ]
@@ -5437,7 +5437,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "async-task",
  "backtrace",
@@ -6076,7 +6076,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "arrayvec",
  "log",
@@ -6903,7 +6903,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "util"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "anyhow",
  "async-fs",
@@ -6941,7 +6941,7 @@ dependencies = [
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "perf",
  "quote",
@@ -7028,7 +7028,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visigrid-cli"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "atty",
  "base64",
@@ -7067,7 +7067,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-config"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "dirs 5.0.1",
  "keyring",
@@ -7078,14 +7078,14 @@ dependencies = [
 
 [[package]]
 name = "visigrid-core"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "visigrid-engine"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "ordered-float 4.6.0",
  "rustc-hash 2.1.1",
@@ -7096,7 +7096,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-gpui"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -7132,7 +7132,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-hub-client"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "dirs 6.0.0",
@@ -7144,7 +7144,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-io"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "calamine",
@@ -7167,7 +7167,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-license"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "base64",
  "chrono",
@@ -7182,7 +7182,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-protocol"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -7190,7 +7190,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-recon"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "csv",
@@ -8792,14 +8792,14 @@ dependencies = [
 
 [[package]]
 name = "zlib-rs"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7948af682ccbc3342b6e9420e8c51c1fe5d7bf7756002b4a3c6cabfe96a7e3c"
+checksum = "3a33bbf307b25a1774cee0687694ec72fa7814b3ab5c1c12a9d2fc6a36fc439c"
 
 [[package]]
 name = "zlog"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8856,7 +8856,7 @@ dependencies = [
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -8867,7 +8867,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#3335a9b993de46a4a83b415b01e0257f97611bab"
+source = "git+https://github.com/zed-industries/zed#014bf4c332d58ae9e23166d658d594272588daad"
 
 [[package]]
 name = "zune-core"
