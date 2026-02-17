@@ -4,6 +4,7 @@ mod brex;
 mod common;
 mod gusto;
 mod mercury;
+mod qbo;
 mod sftp;
 mod stripe;
 
@@ -82,6 +83,64 @@ Examples:
         /// Suppress progress on stderr
         #[arg(long, short = 'q')]
         quiet: bool,
+    },
+
+    /// Fetch posted ledger transactions from QuickBooks Online
+    #[command(after_help = "\
+Examples:
+  # Fetch posted transactions for a bank account
+  vgrid fetch qbo --credentials ~/.config/vgrid/qbo.json --from 2026-01-01 --to 2026-01-31 --account \"Checking\"
+  vgrid fetch qbo --credentials ~/qbo.json --from 2026-01-01 --to 2026-01-31 --account \"Checking\" --out qbo.csv
+
+  # Only deposits (Stripe payouts)
+  vgrid fetch qbo --credentials ~/qbo.json --from 2026-01-01 --to 2026-01-31 --account \"Checking\" --include deposit
+
+  # Direct token (skips refresh)
+  vgrid fetch qbo --access-token eyJ... --realm-id 123456789 --from 2026-01-01 --to 2026-01-31 --account-id 35")]
+    Qbo {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// Path to QBO OAuth2 credentials JSON file
+        #[arg(long)]
+        credentials: Option<PathBuf>,
+
+        /// QBO access token (skips refresh, requires --realm-id)
+        #[arg(long)]
+        access_token: Option<String>,
+
+        /// QBO company realm ID (required with --access-token)
+        #[arg(long)]
+        realm_id: Option<String>,
+
+        /// Bank account name in QBO (resolved to ID via Account query)
+        #[arg(long)]
+        account: Option<String>,
+
+        /// Bank account ID directly (skip name resolution)
+        #[arg(long)]
+        account_id: Option<String>,
+
+        /// Entity types to query, comma-separated (default: deposit,purchase,transfer)
+        #[arg(long)]
+        include: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+
+        /// Use QBO sandbox API base URL
+        #[arg(long)]
+        sandbox: bool,
     },
 
     /// Fetch card transactions from Brex
@@ -311,6 +370,31 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             company_uuid,
             out,
             quiet,
+        ),
+        FetchCommands::Qbo {
+            from,
+            to,
+            credentials,
+            access_token,
+            realm_id,
+            account,
+            account_id,
+            include,
+            out,
+            quiet,
+            sandbox,
+        } => qbo::cmd_fetch_qbo(
+            from,
+            to,
+            credentials,
+            access_token,
+            realm_id,
+            account,
+            account_id,
+            include,
+            out,
+            quiet,
+            sandbox,
         ),
         FetchCommands::BrexCard {
             from,
