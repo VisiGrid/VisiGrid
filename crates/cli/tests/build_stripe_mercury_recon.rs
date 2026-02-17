@@ -72,7 +72,7 @@ fn build_template(out_path: &Path) {
             &format!("=IF(E{row1}=\"payout\",COUNTIFS(H$2:H$1001,H{row1},E$2:E$1001,\"charge\"),\"\")"));
         // R: expected fee (rate × charges + per-txn × count)
         wb.set_cell_value_tracked(0, r, 17,
-            &format!("=IF(E{row1}=\"payout\",-(O{row1}*summary!B$32+Q{row1}*summary!B$33),\"\")"));
+            &format!("=IF(E{row1}=\"payout\",-(O{row1}*summary!B$32/100+Q{row1}*summary!B$33),\"\")"));
         // S: fee variance (actual − expected)
         wb.set_cell_value_tracked(0, r, 18,
             &format!("=IF(E{row1}=\"payout\",P{row1}-R{row1},\"\")"));
@@ -214,7 +214,7 @@ fn build_template(out_path: &Path) {
     wb.set_cell_value_tracked(si, 30, 2, "Status");
 
     wb.set_cell_value_tracked(si, 31, 0, "Contract Rate (%)");
-    wb.set_cell_value_tracked(si, 31, 1, "0.029");
+    wb.set_cell_value_tracked(si, 31, 1, "2.90");
 
     wb.set_cell_value_tracked(si, 32, 0, "Per-Txn Fee (¢)");
     wb.set_cell_value_tracked(si, 32, 1, "30");
