@@ -40,6 +40,10 @@ unicode-width = "0.2"
 # Fetch adapters (Stripe, etc.)
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
 
+# Fetch SFTP adapter
+ssh2 = "0.9"
+glob = "0.3"
+
 # VisiHub publish
 atty = "0.2"
 

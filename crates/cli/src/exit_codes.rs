@@ -144,6 +144,12 @@ pub const EXIT_FETCH_RATE_LIMIT: u8 = 53;
 /// Upstream error (5xx) or network failure after retries.
 pub const EXIT_FETCH_UPSTREAM: u8 = 54;
 
+/// SFTP connection failed (TCP timeout, refused, handshake error).
+pub const EXIT_FETCH_SFTP_CONNECT: u8 = 55;
+
+/// SFTP host key verification failed (unknown or mismatched).
+pub const EXIT_FETCH_SFTP_HOST_KEY: u8 = 56;
+
 // =============================================================================
 // Session Error Types
 // =============================================================================

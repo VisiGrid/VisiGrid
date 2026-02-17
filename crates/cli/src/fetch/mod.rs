@@ -4,6 +4,7 @@ mod brex;
 mod common;
 mod gusto;
 mod mercury;
+mod sftp;
 mod stripe;
 
 use std::path::PathBuf;
@@ -178,6 +179,118 @@ Examples:
         #[arg(long, short = 'q')]
         quiet: bool,
     },
+
+    /// Download files from an SFTP server
+    #[command(after_help = "\
+Examples:
+  # List files (dry run, newest-first)
+  vgrid fetch sftp --host sftp.partner.com --user client123 --key ~/.ssh/id_ed25519 \\
+    --remote-dir /reports/ --list-only
+
+  # Download with TOFU on first connect
+  vgrid fetch sftp --host sftp.partner.com --user client123 --key ~/.ssh/id_ed25519 \\
+    --remote-dir /reports/ --glob 'settlement_*.csv' --out ./downloads/ --trust-on-first-use
+
+  # Pipe single file to stdout, provenance on stderr
+  vgrid fetch sftp --host sftp.partner.com --user client123 --key ~/.ssh/id_ed25519 \\
+    --remote-dir /reports/ --glob 'settlement_20260215.csv' --stdout
+
+  # Download with state tracking (skip already-seen files)
+  vgrid fetch sftp --host sftp.partner.com --user client123 --key ~/.ssh/id_ed25519 \\
+    --remote-dir /reports/ --out ./downloads/ --state-dir ~/.visigrid/sftp/partner/
+
+  # Provenance as sidecar JSON (default in --out mode), or suppress it
+  vgrid fetch sftp ... --out ./downloads/ --provenance sidecar
+  vgrid fetch sftp ... --stdout --provenance none")]
+    Sftp {
+        /// SFTP hostname
+        #[arg(long)]
+        host: String,
+
+        /// SFTP port
+        #[arg(long, default_value = "22")]
+        port: u16,
+
+        /// SSH username
+        #[arg(long, visible_alias = "user")]
+        username: String,
+
+        /// Path to SSH private key file
+        #[arg(long, visible_alias = "key")]
+        private_key: Option<PathBuf>,
+
+        /// Passphrase for private key (or SFTP_KEY_PASSPHRASE env)
+        #[arg(long, env = "SFTP_KEY_PASSPHRASE")]
+        passphrase: Option<String>,
+
+        /// Password for password auth (or SFTP_PASSWORD env)
+        #[arg(long, env = "SFTP_PASSWORD")]
+        password: Option<String>,
+
+        /// Remote directory to scan
+        #[arg(long)]
+        remote_dir: String,
+
+        /// Filename filter pattern (basename only)
+        #[arg(long, default_value = "*.csv")]
+        glob: String,
+
+        /// Minimum age in seconds since mtime before ingesting
+        #[arg(long, default_value = "120")]
+        min_age: u64,
+
+        /// Output directory for downloaded files
+        #[arg(long, required_unless_present = "stdout", conflicts_with = "stdout")]
+        out: Option<PathBuf>,
+
+        /// Write single file to stdout instead of --out
+        #[arg(long)]
+        stdout: bool,
+
+        /// Path to known_hosts file
+        #[arg(long, default_value = "~/.ssh/known_hosts")]
+        known_hosts: String,
+
+        /// Where to write TOFU'd keys (default: same as --known-hosts)
+        #[arg(long)]
+        known_hosts_out: Option<String>,
+
+        /// Accept unknown host key and write it to --known-hosts-out
+        #[arg(long)]
+        trust_on_first_use: bool,
+
+        /// Overwrite even if content hash matches existing file
+        #[arg(long)]
+        overwrite: bool,
+
+        /// Limit number of files to download
+        #[arg(long)]
+        max_files: Option<usize>,
+
+        /// Only files with mtime >= this ISO date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+
+        /// Dry run: print matching files (newest-first) and exit
+        #[arg(long)]
+        list_only: bool,
+
+        /// Where to write provenance records [default: sidecar with --out, stderr with --stdout]
+        #[arg(long, value_enum)]
+        provenance: Option<sftp::ProvenanceMode>,
+
+        /// Directory for seen.jsonl state file (skip already-processed files)
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+
+        /// Re-download files even if already recorded in --state-dir
+        #[arg(long)]
+        reprocess: bool,
+    },
 }
 
 pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
@@ -230,5 +343,52 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             account,
             quiet,
         } => mercury::cmd_fetch_mercury(from, to, api_key, out, account, quiet),
+        FetchCommands::Sftp {
+            host,
+            port,
+            username,
+            private_key,
+            passphrase,
+            password,
+            remote_dir,
+            glob,
+            min_age,
+            out,
+            stdout,
+            known_hosts,
+            known_hosts_out,
+            trust_on_first_use,
+            overwrite,
+            max_files,
+            since,
+            quiet,
+            list_only,
+            provenance,
+            state_dir,
+            reprocess,
+        } => sftp::cmd_fetch_sftp(sftp::SftpArgs {
+            host,
+            port,
+            username,
+            private_key,
+            passphrase,
+            password,
+            remote_dir,
+            glob_pattern: glob,
+            min_age,
+            out,
+            stdout_mode: stdout,
+            known_hosts_path: known_hosts,
+            known_hosts_out,
+            trust_on_first_use,
+            overwrite,
+            max_files,
+            since,
+            quiet,
+            list_only,
+            provenance,
+            state_dir,
+            reprocess,
+        }),
     }
 }
