@@ -2290,6 +2290,21 @@ pub fn inspect_sheets_lightweight(path: &Path) -> Result<Vec<SheetMetadata>, Str
     Ok(result)
 }
 
+/// Format an f64 for display, eliminating IEEE 754 floating-point noise.
+/// Rounds to 10 decimal places, trims trailing zeros.
+/// Examples: 0.07799999999997453 → "0.078", -440.8979999999999 → "-440.898", 92500.0 → "92500"
+fn format_f64_clean(n: f64) -> String {
+    let rounded = (n * 1e10).round() / 1e10;
+    if rounded.fract() == 0.0 {
+        (rounded as i64).to_string()
+    } else {
+        let s = format!("{:.10}", rounded);
+        let s = s.trim_end_matches('0');
+        let s = s.trim_end_matches('.');
+        s.to_string()
+    }
+}
+
 /// Query cells in a range directly from SQLite without loading the full workbook.
 /// Returns raw cell values (no formula recomputation, no formatting).
 /// For formulas, uses the cached value_num/value_text from the last desktop save.
@@ -2334,9 +2349,7 @@ pub fn inspect_range_lightweight(
 
             let (value, type_str, formula_source) = match vtype {
                 TYPE_NUMBER => {
-                    let v = vnum.map(|n| {
-                        if n.fract() == 0.0 { (n as i64).to_string() } else { n.to_string() }
-                    }).unwrap_or_default();
+                    let v = vnum.map(format_f64_clean).unwrap_or_default();
                     (v, "number", None)
                 }
                 TYPE_TEXT => (vtext.unwrap_or_default(), "text", None),
@@ -2347,7 +2360,7 @@ pub fn inspect_range_lightweight(
                     let (v, src) = if fsource.is_some() {
                         // v9+: cached result in value_num/value_text, formula in formula_source
                         let val = if let Some(n) = vnum {
-                            if n.fract() == 0.0 { (n as i64).to_string() } else { n.to_string() }
+                            format_f64_clean(n)
                         } else {
                             vtext.unwrap_or_default()
                         };
@@ -3515,5 +3528,24 @@ mod tests {
         let result2 = upgrade_sheet(path, None).unwrap();
         assert_eq!(result2.status, "already_upgraded");
         assert_eq!(result2.formula_cells_upgraded, 0);
+    }
+
+    #[test]
+    fn test_format_f64_clean() {
+        // Integers
+        assert_eq!(format_f64_clean(92500.0), "92500");
+        assert_eq!(format_f64_clean(-44006.0), "-44006");
+        assert_eq!(format_f64_clean(0.0), "0");
+
+        // Clean decimals
+        assert_eq!(format_f64_clean(-2832.5), "-2832.5");
+        assert_eq!(format_f64_clean(-1564.75), "-1564.75");
+
+        // IEEE 754 noise — should round cleanly
+        assert_eq!(format_f64_clean(0.07799999999997453), "0.078");
+        assert_eq!(format_f64_clean(-0.09400000000005093), "-0.094");
+        assert_eq!(format_f64_clean(-440.8979999999999), "-440.898");
+        assert_eq!(format_f64_clean(-216.59699999999998), "-216.597");
+        assert_eq!(format_f64_clean(-934.1020000000001), "-934.102");
     }
 }
