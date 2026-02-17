@@ -326,6 +326,7 @@ pub fn cmd_hub_publish(
     message: Option<String>,
     notes: Option<PathBuf>,
     checks: Option<PathBuf>,
+    summary: Option<PathBuf>,
     lock: bool,
     json_output: bool,
     dry_run: bool,
@@ -421,6 +422,107 @@ pub fn cmd_hub_publish(
         None
     };
 
+    // 5b. Extract summary from manifest (reads computed cell values from workbook)
+    let summary_json: Option<serde_json::Value> = if let Some(ref summary_path) = summary {
+        let manifest_data = std::fs::read_to_string(summary_path)
+            .map_err(|e| CliError {
+                code: EXIT_USAGE,
+                message: format!("Cannot read summary manifest: {}", e),
+                hint: None,
+            })?;
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_data)
+            .map_err(|e| CliError {
+                code: EXIT_USAGE,
+                message: format!("Invalid summary manifest JSON: {}", e),
+                hint: None,
+            })?;
+
+        let schema = manifest["schema"].as_str().unwrap_or("").to_string();
+        let title = manifest["title"].as_str().unwrap_or("").to_string();
+        let cells = manifest["cells"].as_object().ok_or_else(|| CliError {
+            code: EXIT_USAGE,
+            message: "Summary manifest must have a \"cells\" object".into(),
+            hint: None,
+        })?;
+
+        // Recalculate workbook so computed values are available
+        let mut wb = visigrid_io::native::load_workbook(&file)
+            .map_err(|e| CliError {
+                code: EXIT_ERROR,
+                message: format!("Failed to reload .sheet for summary: {}", e),
+                hint: None,
+            })?;
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+
+        let mut values = serde_json::Map::new();
+        for (key, cell_ref_val) in cells {
+            let cell_ref_str = cell_ref_val.as_str().ok_or_else(|| CliError {
+                code: EXIT_USAGE,
+                message: format!("Summary cell {:?} must be a string reference", key),
+                hint: None,
+            })?;
+
+            // Parse "sheet!cell" reference
+            let (sheet_name, cell_part) = if let Some(bang) = cell_ref_str.find('!') {
+                (&cell_ref_str[..bang], &cell_ref_str[bang + 1..])
+            } else {
+                return Err(CliError {
+                    code: EXIT_USAGE,
+                    message: format!("Summary cell {:?} must use sheet!cell format (e.g. summary!B2)", key),
+                    hint: None,
+                });
+            };
+
+            let (row, col) = parse_cell_ref(cell_part).ok_or_else(|| CliError {
+                code: EXIT_USAGE,
+                message: format!("Invalid cell reference {:?} in summary manifest", cell_ref_str),
+                hint: None,
+            })?;
+
+            let sheet_id = wb.sheet_id_by_name(sheet_name).ok_or_else(|| CliError {
+                code: EXIT_ERROR,
+                message: format!("Sheet {:?} not found (referenced by summary key {:?})", sheet_name, key),
+                hint: None,
+            })?;
+            let sheet_idx = wb.idx_for_sheet_id(sheet_id).ok_or_else(|| CliError {
+                code: EXIT_ERROR,
+                message: format!("Sheet {:?} not found", sheet_name),
+                hint: None,
+            })?;
+            let sheet = wb.sheet(sheet_idx).ok_or_else(|| CliError {
+                code: EXIT_ERROR,
+                message: format!("Sheet {:?} not accessible", sheet_name),
+                hint: None,
+            })?;
+
+            use visigrid_engine::formula::eval::Value;
+            let value = sheet.get_computed_value(row, col);
+            let json_val = match value {
+                Value::Number(n) => {
+                    if n == n.trunc() && n.abs() < 1e15 {
+                        serde_json::json!(n as i64)
+                    } else {
+                        serde_json::json!(n)
+                    }
+                }
+                Value::Text(s) => serde_json::json!(s),
+                Value::Boolean(b) => serde_json::json!(b),
+                Value::Empty => serde_json::Value::Null,
+                Value::Error(e) => serde_json::json!(format!("#{:?}", e)),
+            };
+            values.insert(key.clone(), json_val);
+        }
+
+        let mut summary_obj = serde_json::Map::new();
+        if !schema.is_empty() { summary_obj.insert("schema".into(), serde_json::json!(schema)); }
+        if !title.is_empty() { summary_obj.insert("title".into(), serde_json::json!(title)); }
+        summary_obj.insert("values".into(), serde_json::Value::Object(values));
+        Some(serde_json::Value::Object(summary_obj))
+    } else {
+        None
+    };
+
     // 6. Build message
     let message = message.unwrap_or_else(|| format!("Publish {}", filename));
 
@@ -481,6 +583,9 @@ pub fn cmd_hub_publish(
     if let Some(runner) = crate::ci::get_runner_context() {
         source_metadata["runner"] = runner;
     }
+    if let Some(ref summary) = summary_json {
+        source_metadata["summary"] = summary.clone();
+    }
 
     // 9. Dry-run exit
     if dry_run {
@@ -510,6 +615,7 @@ pub fn cmd_hub_publish(
             }
             eprintln!("  Checks:      {}", if checks_json.is_some() { "attached" } else { "none" });
             eprintln!("  Notes:       {}", if notes_text.is_some() { "attached" } else { "none" });
+            eprintln!("  Summary:     {}", if summary_json.is_some() { "attached" } else { "none" });
             eprintln!("  Message:     {}", message);
         }
         return Ok(());

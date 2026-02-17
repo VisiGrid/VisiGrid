@@ -968,7 +968,8 @@ Examples:
   vgrid hub publish invoices.sheet --repo quarry/invoices --message \"Q4 close\"
   vgrid hub publish invoices.sheet --repo quarry/invoices --checks checks.json --json
   vgrid hub publish invoices.sheet --repo quarry/invoices --no-wait --json
-  vgrid hub publish invoices.sheet --repo quarry/invoices --dry-run --json")]
+  vgrid hub publish invoices.sheet --repo quarry/invoices --dry-run --json
+  vgrid hub publish recon.sheet --repo haven/recon --summary stripe-mercury.summary.json")]
     Publish {
         /// .sheet file to publish
         file: PathBuf,
@@ -988,6 +989,10 @@ Examples:
         /// Path to checks JSON (output from `sheet inspect --calc`)
         #[arg(long)]
         checks: Option<PathBuf>,
+
+        /// Path to summary manifest JSON (declares which cells to extract)
+        #[arg(long)]
+        summary: Option<PathBuf>,
 
         /// Lock snapshot immutably (requires paid tier)
         #[arg(long)]
@@ -1831,8 +1836,8 @@ fn main() -> ExitCode {
             }
         }
         Some(Commands::Hub(hub_cmd)) => match hub_cmd {
-            HubCommands::Publish { file, repo, message, notes, checks, lock, json, dry_run, no_wait, timeout } => {
-                hub::cmd_hub_publish(file, repo, message, notes, checks, lock, json, dry_run, no_wait, timeout)
+            HubCommands::Publish { file, repo, message, notes, checks, summary, lock, json, dry_run, no_wait, timeout } => {
+                hub::cmd_hub_publish(file, repo, message, notes, checks, summary, lock, json, dry_run, no_wait, timeout)
             }
         }
         Some(Commands::Pipeline(pipeline_cmd)) => match pipeline_cmd {
