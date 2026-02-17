@@ -1,0 +1,136 @@
+# =============================================================================
+# vgrid recon — Example Config
+# =============================================================================
+#
+# Copy this file and edit for your data:
+#   cp recon.example.toml my-recon.toml
+#   vgrid recon validate my-recon.toml
+#   vgrid recon run my-recon.toml --json
+#
+# Two examples below. Uncomment the one that fits.
+
+# =============================================================================
+# EXAMPLE 1: 2-Way (Stripe ↔ Ledger)
+# =============================================================================
+#
+# Use this if you're matching Stripe payouts against your ERP deposits.
+
+name = "Stripe ↔ Ledger Payout Recon"
+way = 2
+
+# --- Processor (Stripe) ---------------------------------------------------
+# Export: Stripe Dashboard → Balance → Export, or `vgrid fetch stripe`
+#
+# Your CSV might look like:
+#   id,amount,fee,net,currency,created,type,description,payout
+#
+# Map YOUR column names below. The left side is what the engine expects,
+# the right side is YOUR column header.
+
+[roles.processor]
+kind = "processor"
+file = "stripe.csv"                     # ← path to your Stripe export
+
+[roles.processor.columns]
+record_id  = "id"                       # ← unique transaction ID
+match_key  = "payout"                   # ← payout ID (groups charges/fees into one payout)
+amount     = "net"                      # ← amount in minor units (cents). Use "net" not "amount"
+date       = "created"                  # ← transaction date (YYYY-MM-DD)
+currency   = "currency"                 # ← ISO currency code
+kind       = "type"                     # ← transaction type (charge, payout, refund, etc.)
+
+# Filter: only look at payout rows (ignore individual charges/fees)
+[roles.processor.filter]
+column = "type"
+values = ["payout"]
+
+# Transform: Stripe payouts are negative (money leaving). Flip sign for matching.
+[roles.processor.transform]
+multiply = -1
+when_column = "type"
+when_values = ["payout"]
+
+# --- Ledger (NetSuite / QBO / Xero) ----------------------------------------
+# Export: your ERP's deposit or cash receipt report
+#
+# Your CSV might look like:
+#   transaction_id,deposit_date,amount,currency,type,memo
+#
+# Map YOUR column names below.
+
+[roles.ledger]
+kind = "ledger"
+file = "ledger.csv"                     # ← path to your ERP export
+
+[roles.ledger.columns]
+record_id  = "transaction_id"           # ← unique deposit ID
+match_key  = "transaction_id"           # ← same as record_id if no shared key with Stripe
+amount     = "amount"                   # ← amount in minor units (cents)
+date       = "deposit_date"             # ← deposit date
+currency   = "currency"
+kind       = "type"
+
+# Filter: only look at deposit rows
+[roles.ledger.filter]
+column = "type"
+values = ["deposit"]
+
+# --- Pair: how to match them -----------------------------------------------
+
+[pairs.processor_ledger]
+left = "processor"
+right = "ledger"
+
+# If your Stripe payout ID appears in the ledger → use "exact_key"
+# If it doesn't (common) → use "fuzzy_amount_date" to match by amount + date
+strategy = "fuzzy_amount_date"
+
+# --- Tolerance --------------------------------------------------------------
+# How much slack to allow before flagging a mismatch.
+
+[tolerance]
+amount_cents = 0                        # ← 0 = exact match. Set to 100 for $1.00 tolerance.
+date_window_days = 2                    # ← allow 2 days for settlement lag
+
+
+# =============================================================================
+# EXAMPLE 2: 3-Way (Stripe ↔ Ledger ↔ Bank)
+# =============================================================================
+#
+# Uncomment everything below and comment out the 2-way section above.
+# Requires: way = 3, a third [roles.bank] section, and a second [pairs.*].
+#
+# name = "Stripe ↔ Ledger ↔ Bank 3-Way Recon"
+# way = 3
+#
+# # ... (keep processor and ledger from above) ...
+#
+# [roles.bank]
+# kind = "bank"
+# file = "bank.csv"
+#
+# [roles.bank.columns]
+# record_id  = "transaction_id"
+# match_key  = "transaction_id"
+# amount     = "amount"
+# date       = "post_date"
+# currency   = "currency"
+# kind       = "type"
+#
+# [roles.bank.filter]
+# column = "type"
+# values = ["deposit", "credit"]
+#
+# [pairs.processor_ledger]
+# left = "processor"
+# right = "ledger"
+# strategy = "fuzzy_amount_date"
+#
+# [pairs.processor_bank]
+# left = "processor"
+# right = "bank"
+# strategy = "fuzzy_amount_date"
+#
+# [tolerance]
+# amount_cents = 0
+# date_window_days = 3

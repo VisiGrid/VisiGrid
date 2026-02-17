@@ -62,10 +62,32 @@ pub enum StrictValue {
     Text(String),
 }
 
-/// Check if a string looks like a number with a currency symbol.
-fn has_currency_symbol(s: &str) -> bool {
-    s.contains('$') || s.contains('€') || s.contains('£')
-        || s.starts_with("USD") || s.starts_with("EUR") || s.starts_with("GBP")
+/// Check if a string is a monetary amount with a currency symbol.
+/// Only matches fields that are primarily numeric with a currency prefix/suffix,
+/// NOT text descriptions that happen to mention "$50" in prose.
+/// Examples that match: "$1250.00", "€50", "£30.00", "USD 100.00"
+/// Examples that DON'T match: "Stripe payout ($50.00 short)", "Invoice #123 for $500"
+fn looks_like_currency_amount(s: &str) -> bool {
+    // Strip leading/trailing whitespace and optional sign
+    let t = s.trim().trim_start_matches('-').trim_start_matches('+').trim();
+
+    // Strip leading currency symbol/code
+    let after_symbol = if t.starts_with('$') || t.starts_with('€') || t.starts_with('£') {
+        t[t.chars().next().unwrap().len_utf8()..].trim()
+    } else if t.starts_with("USD") || t.starts_with("EUR") || t.starts_with("GBP") {
+        t[3..].trim()
+    } else {
+        return false; // No leading currency indicator
+    };
+
+    // What remains must be purely numeric (digits, dots, optional trailing currency)
+    // e.g. "1250.00", "50", "1250"
+    if after_symbol.is_empty() {
+        return false;
+    }
+    after_symbol
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
 }
 
 /// Check if a numeric-looking string contains commas (e.g., "1,250.00").
@@ -104,17 +126,15 @@ pub fn parse_strict_value(s: &str, row_num: usize, col_num: usize) -> Result<Str
         )));
     }
 
-    // Check for currency symbols in numeric-looking fields
-    if has_currency_symbol(trimmed) {
-        // Only error if it looks numeric (has digits)
-        if trimmed.chars().any(|c| c.is_ascii_digit()) {
-            return Err(CliError::parse(format!(
-                "currency symbol in numeric field at row {} col {}: {:?} (strip in adapter)",
-                row_num + 1,
-                col_num + 1,
-                trimmed
-            )));
-        }
+    // Reject monetary amounts with currency symbols (e.g. "$1250.00").
+    // Text descriptions containing "$" in prose are allowed.
+    if looks_like_currency_amount(trimmed) {
+        return Err(CliError::parse(format!(
+            "currency symbol in numeric field at row {} col {}: {:?} (strip in adapter)",
+            row_num + 1,
+            col_num + 1,
+            trimmed
+        )));
     }
 
     // Check for commas in numeric-looking fields
@@ -352,10 +372,18 @@ pub fn cmd_fill(
     Ok(())
 }
 
-/// Clear all cells on a specific sheet.
+/// Clear all data (non-formula) cells on a specific sheet.
+/// Formula cells are preserved so that template logic (XLOOKUP, SUMIF, etc.)
+/// survives across fill cycles.
 fn clear_sheet(workbook: &mut visigrid_engine::workbook::Workbook, sheet_idx: usize) {
+    use visigrid_engine::cell::CellValue;
+
     let positions: Vec<(usize, usize)> = if let Some(sheet) = workbook.sheet(sheet_idx) {
-        sheet.cells_iter().map(|(&(r, c), _)| (r, c)).collect()
+        sheet
+            .cells_iter()
+            .filter(|(_, cell)| !matches!(cell.value, CellValue::Formula { .. }))
+            .map(|(&(r, c), _)| (r, c))
+            .collect()
     } else {
         return;
     };
@@ -427,10 +455,31 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_currency_symbol() {
+    fn test_reject_currency_amount() {
+        // Pure monetary amounts with currency prefix → rejected
         assert!(parse_strict_value("$100.00", 0, 0).is_err());
         assert!(parse_strict_value("€50.00", 0, 0).is_err());
         assert!(parse_strict_value("£30.00", 0, 0).is_err());
+        assert!(parse_strict_value("$1250", 0, 0).is_err());
+        assert!(parse_strict_value("USD 100.00", 0, 0).is_err());
+        assert!(parse_strict_value("-$50.00", 0, 0).is_err());
+    }
+
+    #[test]
+    fn test_dollar_in_text_allowed() {
+        // Text descriptions containing $ in prose → allowed as text
+        assert_eq!(
+            parse_strict_value("Stripe payout ($50.00 short)", 0, 0).unwrap(),
+            StrictValue::Text("Stripe payout ($50.00 short)".to_string())
+        );
+        assert_eq!(
+            parse_strict_value("Invoice #123 for $500", 0, 0).unwrap(),
+            StrictValue::Text("Invoice #123 for $500".to_string())
+        );
+        assert_eq!(
+            parse_strict_value("Refund of $25.00 to customer", 0, 0).unwrap(),
+            StrictValue::Text("Refund of $25.00 to customer".to_string())
+        );
     }
 
     #[test]

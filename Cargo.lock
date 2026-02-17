@@ -7060,6 +7060,7 @@ dependencies = [
  "visigrid-hub-client",
  "visigrid-io",
  "visigrid-protocol",
+ "visigrid-recon",
  "which 6.0.3",
  "windows-sys 0.59.0",
 ]
@@ -7185,6 +7186,18 @@ version = "0.8.3"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "visigrid-recon"
+version = "0.8.3"
+dependencies = [
+ "chrono",
+ "csv",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.8.23",
 ]
 
 [[package]]

@@ -7,10 +7,12 @@ mod export;
 mod fetch;
 mod fill;
 mod hub;
+mod recon;
 mod replay;
 mod scripts;
 mod session;
 mod sheet_ops;
+mod signing;
 mod tui;
 mod util;
 mod verify;
@@ -214,6 +216,7 @@ Examples:
   visigrid diff old.csv new.csv --key sku --out csv --output diffs.csv
   visigrid diff old.csv new.csv --key id --compare price,quantity
   visigrid diff old.csv new.csv --key name --match contains
+  visigrid diff stripe.csv qbo.csv --key effective_date --key amount_minor
   cat export.csv | visigrid diff - baseline.csv --key id
   docker exec db dump | visigrid diff expected.csv - --key sku")]
     Diff {
@@ -223,9 +226,9 @@ Examples:
         /// Right dataset (file path, or - for stdin)
         right: String,
 
-        /// Key column (name, letter, or 1-indexed number)
-        #[arg(long)]
-        key: String,
+        /// Key column (name, letter, or 1-indexed number). Repeatable for composite keys.
+        #[arg(long, required = true)]
+        key: Vec<String>,
 
         /// Matching mode (exact: keys must match exactly; contains: left key must be substring of right key)
         #[arg(long, default_value = "exact")]
@@ -689,9 +692,81 @@ Examples:
     #[command(subcommand)]
     Fetch(fetch::FetchCommands),
 
+    /// Multi-source reconciliation engine
+    #[command(subcommand)]
+    Recon(recon::ReconCommands),
+
     /// Export canonical truth data (dbt seeds, manifests)
     #[command(subcommand)]
     Export(export::ExportCommands),
+
+    /// Sign a file and produce an audit proof
+    #[command(after_help = "\
+Signs a file with Ed25519 and produces a JSON proof envelope containing the
+file's BLAKE3 hash, size, timestamp, and vgrid version. For .sheet files,
+the semantic fingerprint is included automatically.
+
+The proof can be verified with `vgrid verify proof`.
+
+Examples:
+  vgrid sign filled.sheet --out proof.json
+  vgrid sign filled.sheet --out proof.json --signing-key ~/.config/vgrid/proof_key.json
+  vgrid sign filled.sheet --context '{\"run_id\": 42}'
+  vgrid sign filled.sheet --out proof.json | # writes to file, nothing on stdout
+  vgrid sign filled.sheet | jq .key_id       # stdout mode")]
+    Sign {
+        /// File to sign
+        file: PathBuf,
+
+        /// Output proof JSON file (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Signing key path (default: ~/.config/vgrid/proof_key.json)
+        #[arg(long, env = "VGRID_SIGNING_KEY_PATH")]
+        signing_key: Option<PathBuf>,
+
+        /// Additional context JSON object to include in proof payload
+        #[arg(long)]
+        context: Option<String>,
+
+        /// Quiet mode: suppress stderr status output
+        #[arg(short, long)]
+        quiet: bool,
+    },
+
+    /// Compute BLAKE3 hash of a file
+    #[command(after_help = "\
+Examples:
+  vgrid hash filled.sheet
+  vgrid hash diff.json")]
+    Hash {
+        /// File to hash
+        file: PathBuf,
+    },
+
+    /// Sign a JSON payload from stdin (for structured data like run summaries)
+    #[command(name = "sign-payload", after_help = "\
+Examples:
+  echo '{\"status\":\"pass\"}' | vgrid sign-payload --schema vgrid.run_summary.v1
+  cat summary.json | vgrid sign-payload --schema vgrid.run_summary.v1 --out signed.json")]
+    SignPayload {
+        /// Schema identifier for the signed envelope
+        #[arg(long)]
+        schema: String,
+
+        /// Output signed envelope JSON file (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Signing key path (default: ~/.config/vgrid/proof_key.json)
+        #[arg(long, env = "VGRID_SIGNING_KEY_PATH")]
+        signing_key: Option<PathBuf>,
+
+        /// Quiet mode: suppress stderr status output
+        #[arg(short, long)]
+        quiet: bool,
+    },
 
     /// Verify financial data integrity (reconciliation)
     #[command(subcommand)]
@@ -1852,7 +1927,17 @@ fn main() -> ExitCode {
             }
         }
         Some(Commands::Fetch(fetch_cmd)) => fetch::cmd_fetch(fetch_cmd),
+        Some(Commands::Recon(recon_cmd)) => recon::cmd_recon(recon_cmd),
         Some(Commands::Export(export_cmd)) => export::cmd_export(export_cmd),
+        Some(Commands::Sign { file, out, signing_key, context, quiet }) => {
+            cmd_sign(file, out, signing_key, context, quiet)
+        }
+        Some(Commands::Hash { file }) => {
+            signing::hash_file_blake3(&file).map(|hash| println!("{hash}"))
+        }
+        Some(Commands::SignPayload { schema, out, signing_key, quiet }) => {
+            cmd_sign_payload(schema, out, signing_key, quiet)
+        }
         Some(Commands::Verify(verify_cmd)) => verify::cmd_verify(verify_cmd),
         Some(Commands::Scripts(scripts_cmd)) => match scripts_cmd {
             ScriptsCommands::List { file, json } => {
@@ -1887,6 +1972,165 @@ fn main() -> ExitCode {
             ExitCode::from(code)
         }
     }
+}
+
+// ── vgrid sign ──────────────────────────────────────────────────────
+
+fn cmd_sign(
+    file: PathBuf,
+    out: Option<PathBuf>,
+    signing_key: Option<PathBuf>,
+    context: Option<String>,
+    quiet: bool,
+) -> Result<(), CliError> {
+    use std::io::Write;
+
+    // Validate file exists
+    if !file.exists() {
+        return Err(CliError::io(format!("file not found: {}", file.display())));
+    }
+
+    // BLAKE3 hash the file
+    let file_hash = signing::hash_file_blake3(&file)?;
+
+    // File size
+    let file_size = std::fs::metadata(&file)
+        .map_err(|e| CliError::io(format!("cannot stat {}: {e}", file.display())))?
+        .len();
+
+    // Basename only (no path leakage)
+    let file_name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Semantic fingerprint for .sheet files
+    let semantic_fingerprint = if file.extension().and_then(|e| e.to_str()) == Some("sheet") {
+        let workbook = visigrid_io::native::load_workbook(&file)
+            .map_err(|e| CliError::io(format!("cannot load workbook: {e}")))?;
+        Some(visigrid_io::native::compute_semantic_fingerprint(&workbook))
+    } else {
+        None
+    };
+
+    // Parse --context if provided
+    let context_value = match &context {
+        Some(ctx_str) => {
+            let v: serde_json::Value = serde_json::from_str(ctx_str)
+                .map_err(|e| CliError::parse(format!("invalid --context JSON: {e}")))?;
+            if !v.is_object() {
+                return Err(CliError::args("--context must be a JSON object".to_string()));
+            }
+            Some(v)
+        }
+        None => None,
+    };
+
+    // Build payload
+    let mut file_obj = serde_json::json!({
+        "name": file_name,
+        "blake3": file_hash,
+        "size_bytes": file_size,
+    });
+    if let Some(ref fp) = semantic_fingerprint {
+        file_obj["semantic_fingerprint"] = serde_json::json!(fp);
+    }
+
+    let mut payload = serde_json::json!({
+        "signer": {
+            "name": "vgrid",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "signed_at": chrono::Utc::now().to_rfc3339(),
+        "file": file_obj,
+    });
+    if let Some(ctx) = context_value {
+        payload["context"] = ctx;
+    }
+
+    // Load or generate signing key
+    let (sk, vk) = signing::load_or_generate_key(&signing_key)?;
+
+    // Sign
+    let envelope = signing::sign_payload("vgrid.file_proof.v1", &payload, &sk, &vk)?;
+
+    // Output
+    let envelope_json = serde_json::to_string_pretty(&envelope)
+        .map_err(|e| CliError::io(format!("JSON serialization error: {e}")))?;
+
+    if let Some(ref out_path) = out {
+        std::fs::write(out_path, &envelope_json)
+            .map_err(|e| CliError::io(format!("cannot write {}: {e}", out_path.display())))?;
+    } else {
+        // Write to stdout
+        print!("{envelope_json}");
+        std::io::stdout().flush().ok();
+    }
+
+    // Status to stderr
+    if !quiet {
+        eprintln!(
+            "Signed: {} (key {}, blake3 {}...)",
+            file_name,
+            &envelope.key_id,
+            &file_hash[..16],
+        );
+    }
+
+    Ok(())
+}
+
+/// Sign a JSON payload read from stdin. Used for structured data (run summaries)
+/// where the payload is constructed by the caller, not derived from a file.
+fn cmd_sign_payload(
+    schema: String,
+    out: Option<PathBuf>,
+    signing_key: Option<PathBuf>,
+    quiet: bool,
+) -> Result<(), CliError> {
+    use std::io::{Read as _, Write};
+
+    // Read JSON from stdin
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|e| CliError::io(format!("cannot read stdin: {e}")))?;
+
+    let payload: serde_json::Value = serde_json::from_str(&input)
+        .map_err(|e| CliError::parse(format!("invalid JSON on stdin: {e}")))?;
+
+    if !payload.is_object() {
+        return Err(CliError::args("stdin payload must be a JSON object".to_string()));
+    }
+
+    // Load or generate signing key
+    let (sk, vk) = signing::load_or_generate_key(&signing_key)?;
+
+    // Sign
+    let envelope = signing::sign_payload(&schema, &payload, &sk, &vk)?;
+
+    // Output
+    let envelope_json = serde_json::to_string_pretty(&envelope)
+        .map_err(|e| CliError::io(format!("JSON serialization error: {e}")))?;
+
+    if let Some(ref out_path) = out {
+        std::fs::write(out_path, &envelope_json)
+            .map_err(|e| CliError::io(format!("cannot write {}: {e}", out_path.display())))?;
+    } else {
+        print!("{envelope_json}");
+        std::io::stdout().flush().ok();
+    }
+
+    if !quiet {
+        eprintln!(
+            "Signed payload: schema={} (key {}, payload_blake3 {}...)",
+            schema,
+            &envelope.key_id,
+            &envelope.payload_blake3[..16],
+        );
+    }
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -2931,7 +3175,7 @@ fn cmd_open(file: Option<PathBuf>) -> Result<(), CliError> {
 fn cmd_diff(
     left_arg: String,
     right_arg: String,
-    key: String,
+    key: Vec<String>,
     match_mode: DiffMatchMode,
     key_transform: DiffKeyTransform,
     compare: Option<String>,
@@ -3046,9 +3290,11 @@ fn cmd_diff(
         (0..right_bounds_cols).map(|c| col_letter(c)).collect()
     };
 
-    // Resolve key column (against merged headers — key mismatches are self-correcting
+    // Resolve key columns (against merged headers — key mismatches are self-correcting
     // because nothing matches, producing visible only_left/only_right results)
-    let key_col = resolve_column(&key, &headers)?;
+    let key_cols: Vec<usize> = key.iter()
+        .map(|k| resolve_column(k, &headers))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Resolve compare columns
     let compare_cols = match &compare {
@@ -3085,6 +3331,11 @@ fn cmd_diff(
         DiffAmbiguousPolicy::Report => diff::AmbiguityPolicy::Report,
     };
 
+    // Multi-key + contains mode is not supported (substring matching doesn't compose)
+    if key_cols.len() > 1 && mode == diff::MatchMode::Contains {
+        return Err(CliError::args("--match contains does not support composite keys (multiple --key)"));
+    }
+
     // Resolve --contains-column against right-side headers (that's the side it searches)
     let contains_col = match contains_column {
         Some(ref spec) => {
@@ -3097,7 +3348,7 @@ fn cmd_diff(
     };
 
     let options = diff::DiffOptions {
-        key_col,
+        key_cols,
         compare_cols,
         match_mode: mode,
         key_transform: kt,
@@ -3177,9 +3428,11 @@ fn cmd_diff(
             "diff".to_string(),
             shell_quote(&left_arg),
             shell_quote(&right_arg),
-            "--key".to_string(),
-            shell_quote(&key),
         ];
+        for k in &key {
+            parts.push("--key".to_string());
+            parts.push(shell_quote(k));
+        }
         if match_mode != DiffMatchMode::Exact {
             parts.push("--match".to_string());
             parts.push(format!("{}", match_mode));
@@ -3422,8 +3675,10 @@ fn extract_data_rows(
             continue;
         }
 
-        let key_raw = sheet.get_display(r, options.key_col);
-        let key_norm = diff::apply_key_transform(&key_raw, options.key_transform);
+        let key_raw = diff::build_composite_key(&options.key_cols, |col| sheet.get_display(r, col));
+        let key_norm = diff::build_composite_key(&options.key_cols, |col| {
+            diff::apply_key_transform(&sheet.get_display(r, col), options.key_transform)
+        });
 
         let mut values = HashMap::new();
         for (c, header) in headers.iter().enumerate() {
@@ -3451,7 +3706,10 @@ fn format_diff_json(
     invocation: &str,
     invocation_args: &serde_json::Value,
 ) -> Result<Vec<u8>, CliError> {
-    let key_name = headers.get(options.key_col).cloned().unwrap_or_default();
+    let key_name = options.key_cols.iter()
+        .map(|&c| headers.get(c).cloned().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(",");
     let match_str = match options.match_mode {
         diff::MatchMode::Exact => "exact",
         diff::MatchMode::Contains => "contains",

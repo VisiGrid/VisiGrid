@@ -1,0 +1,51 @@
+name = "Stripe ↔ QBO Payout Recon"
+way = 2
+
+[roles.processor]
+kind = "processor"
+file = "stripe.csv"
+
+[roles.processor.columns]
+record_id  = "source_id"
+match_key  = "group_id"
+amount     = "amount_minor"
+date       = "effective_date"
+currency   = "currency"
+kind       = "type"
+
+[roles.processor.transform]
+multiply = -1
+when_column = "type"
+when_values = ["payout"]
+
+[roles.processor.filter]
+column = "type"
+values = ["payout"]
+
+[roles.ledger]
+kind = "ledger"
+file = "qbo.csv"
+
+[roles.ledger.columns]
+record_id  = "source_id"
+match_key  = "source_id"
+amount     = "amount_minor"
+date       = "effective_date"
+currency   = "currency"
+kind       = "type"
+
+[roles.ledger.filter]
+column = "type"
+values = ["deposit"]
+
+[pairs.processor_ledger]
+left = "processor"
+right = "ledger"
+strategy = "fuzzy_amount_date"
+
+[tolerance]
+amount_cents = 0
+date_window_days = 2
+
+[output]
+json = "recon-result.json"

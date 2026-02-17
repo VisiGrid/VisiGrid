@@ -1,0 +1,14 @@
+source_id,group_id,amount_minor,effective_date,currency,type,description
+ch_100,po_999,10000,2026-01-15,USD,charge,Widget sale
+fee_100,po_999,-290,2026-01-15,USD,fee,Stripe fee
+ref_100,po_999,-2500,2026-01-16,USD,refund,Customer refund
+po_999,po_999,-7210,2026-01-17,USD,payout,Payout po_999
+ch_200,po_1000,5000,2026-01-16,USD,charge,Gadget sale
+fee_200,po_1000,-145,2026-01-16,USD,fee,Stripe fee
+po_1000,po_1000,-4855,2026-01-18,USD,payout,Payout po_1000
+ch_300,po_1001,8000,2026-01-17,USD,charge,Premium widget
+fee_300,po_1001,-232,2026-01-17,USD,fee,Stripe fee
+po_1001,po_1001,-7768,2026-01-19,USD,payout,Payout po_1001
+ch_400,po_1002,3000,2026-01-18,USD,charge,Basic plan
+fee_400,po_1002,-87,2026-01-18,USD,fee,Stripe fee
+po_1002,po_1002,-2913,2026-01-20,USD,payout,Payout po_1002

@@ -1,0 +1,8 @@
+source_id,group_id,amount_minor,effective_date,currency,type,description
+ch_100,po_1,10000,2026-01-15,USD,charge,Widget sale
+fee_100,po_1,-290,2026-01-15,USD,fee,Stripe fee
+po_1a,po_1,-5000,2026-01-17,USD,payout,Payout po_1 part A
+po_1b,po_1,-4710,2026-01-17,USD,payout,Payout po_1 part B
+ch_200,po_2,8000,2026-01-16,USD,charge,Gadget sale
+fee_200,po_2,-232,2026-01-16,USD,fee,Stripe fee
+po_2,po_2,-7768,2026-01-18,USD,payout,Payout po_2

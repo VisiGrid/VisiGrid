@@ -10,7 +10,8 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct DiffOptions {
-    pub key_col: usize,
+    /// Key column indices (one or more for composite keys).
+    pub key_cols: Vec<usize>,
     pub compare_cols: Option<Vec<usize>>,
     pub match_mode: MatchMode,
     pub key_transform: KeyTransform,
@@ -20,6 +21,23 @@ pub struct DiffOptions {
     /// When None, the right key column is searched. When Some, this column is
     /// searched instead. Index into headers[].
     pub contains_col: Option<usize>,
+}
+
+/// Separator for composite key values. ASCII Unit Separator — won't appear in
+/// normal cell data, so composite keys are collision-free.
+const COMPOSITE_KEY_SEP: char = '\x1F';
+
+/// Build a composite key string from multiple column values.
+/// For single-key diffs, returns the value as-is (no separator overhead).
+pub fn build_composite_key(key_cols: &[usize], get_value: impl Fn(usize) -> String) -> String {
+    if key_cols.len() == 1 {
+        get_value(key_cols[0])
+    } else {
+        key_cols.iter()
+            .map(|&col| get_value(col))
+            .collect::<Vec<_>>()
+            .join(&COMPOSITE_KEY_SEP.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,7 +296,7 @@ pub fn reconcile(
         None => headers
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != options.key_col)
+            .filter(|(i, _)| !options.key_cols.contains(i))
             .map(|(_, h)| h.clone())
             .collect(),
     };

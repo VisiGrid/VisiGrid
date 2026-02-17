@@ -9,6 +9,7 @@ members = [
     "crates/license",
     "crates/protocol",
     "crates/hub_client",
+    "crates/recon",
     "crates/cli",
     "gpui-app",
 ]
@@ -27,6 +28,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
 ordered-float = "4"
 sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
 
 # Internal crates
 visigrid-engine = { path = "crates/engine" }
@@ -36,6 +38,7 @@ visigrid-config = { path = "crates/config" }
 visigrid-license = { path = "crates/license" }
 visigrid-protocol = { path = "crates/protocol" }
 visigrid-hub-client = { path = "crates/hub_client" }
+visigrid-recon = { path = "crates/recon" }
 
 [profile.release]
 lto = true

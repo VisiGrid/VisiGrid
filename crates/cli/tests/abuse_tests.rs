@@ -351,3 +351,81 @@ fn test_balanced_fill_variance_zero() {
     assert!(matches!(charges, Value::Number(n) if n == 150000.0),
         "charges should be 150000 (100000 + 50000), got {:?}", charges);
 }
+
+// ── Test: --clear preserves formulas on data sheets ──
+// Regression test: clear_sheet used to wipe ALL cells including formulas.
+// The stripe-qbo-recon template has XLOOKUP/IF formulas in columns J-L
+// on the stripe sheet. --clear must preserve them.
+
+fn recon_template_path() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/recon/templates/stripe-qbo-recon.sheet")
+}
+
+fn recon_csv_path(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../demo/data/stripe-qbo")
+        .join(name)
+}
+
+#[test]
+fn test_clear_preserves_formulas() {
+    let out = tempfile::NamedTempFile::new().unwrap();
+
+    // Fill stripe sheet with --clear
+    let result = vgrid()
+        .args(["fill", recon_template_path().to_str().unwrap(),
+            "--csv", recon_csv_path("stripe.csv").to_str().unwrap(),
+            "--target", "stripe!A2", "--headers", "--clear",
+            "--out", out.path().to_str().unwrap()])
+        .output().unwrap();
+    assert!(result.status.success(), "fill failed: {}", String::from_utf8_lossy(&result.stderr));
+
+    // Load and verify formulas in J2, K2, L2 survived --clear
+    let mut wb = native::load_workbook(out.path()).expect("load filled workbook");
+    wb.rebuild_dep_graph();
+    wb.recompute_full_ordered();
+
+    let sheet_id = wb.sheet_id_by_name("stripe").expect("find stripe sheet");
+    let idx = wb.idx_for_sheet_id(sheet_id).expect("sheet idx");
+
+    // J2 should be a formula (=IF(E2="payout",-C2,"")), not empty
+    let j2 = wb.sheet(idx).unwrap().get_cell(1, 9); // row 1 (0-indexed), col 9 (J)
+    assert!(
+        matches!(j2.value, visigrid_engine::cell::CellValue::Formula { .. }),
+        "J2 should be a formula after --clear, got: {:?}", j2.value
+    );
+
+    // K2 should be a formula (XLOOKUP)
+    let k2 = wb.sheet(idx).unwrap().get_cell(1, 10);
+    assert!(
+        matches!(k2.value, visigrid_engine::cell::CellValue::Formula { .. }),
+        "K2 should be a formula after --clear, got: {:?}", k2.value
+    );
+
+    // L2 should be a formula (match status)
+    let l2 = wb.sheet(idx).unwrap().get_cell(1, 11);
+    assert!(
+        matches!(l2.value, visigrid_engine::cell::CellValue::Formula { .. }),
+        "L2 should be a formula after --clear, got: {:?}", l2.value
+    );
+
+    // Summary formulas should compute real values (not 0 from missing formulas)
+    let summary_id = wb.sheet_id_by_name("summary").expect("find summary sheet");
+    let summary_idx = wb.idx_for_sheet_id(summary_id).expect("summary idx");
+
+    // B2 = SUMIF(stripe charges) — should be 962000
+    let charges = wb.sheet(summary_idx).unwrap().get_computed_value(1, 1);
+    assert!(
+        matches!(charges, Value::Number(n) if n == 962000.0),
+        "summary!B2 (charges) should be 962000, got {:?}", charges
+    );
+
+    // B5 = SUMIF(stripe payouts) — should be -909102
+    let payouts = wb.sheet(summary_idx).unwrap().get_computed_value(4, 1);
+    assert!(
+        matches!(payouts, Value::Number(n) if n == -909102.0),
+        "summary!B5 (payouts) should be -909102, got {:?}", payouts
+    );
+
+    eprintln!("TEST PASS: --clear preserves formulas, summary computes correctly");
+}

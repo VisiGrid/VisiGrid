@@ -1,0 +1,5 @@
+source_id,amount_minor,effective_date,currency,type,description
+dep_999,7210,2026-01-18,USD,deposit,Stripe payout
+dep_1000,4855,2026-01-19,USD,deposit,Stripe payout
+dep_1001,7768,2026-01-20,USD,deposit,Stripe payout
+dep_1002,2913,2026-01-21,USD,deposit,Stripe payout

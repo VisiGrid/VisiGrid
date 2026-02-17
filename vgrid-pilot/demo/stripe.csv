@@ -1,0 +1,14 @@
+source_id,group_id,amount_minor,effective_date,currency,type,description
+ch_1001,po_501,25000,2026-01-10,USD,charge,Monthly subscription
+fee_1001,po_501,-725,2026-01-10,USD,fee,Processing fee
+po_501,po_501,-24275,2026-01-12,USD,payout,Payout Jan 12
+ch_1002,po_502,15000,2026-01-11,USD,charge,One-time purchase
+fee_1002,po_502,-435,2026-01-11,USD,fee,Processing fee
+ref_1002,po_502,-3000,2026-01-12,USD,refund,Customer refund
+po_502,po_502,-11565,2026-01-14,USD,payout,Payout Jan 14
+ch_1003,po_503,50000,2026-01-13,USD,charge,Enterprise license
+fee_1003,po_503,-1450,2026-01-13,USD,fee,Processing fee
+po_503,po_503,-48550,2026-01-15,USD,payout,Payout Jan 15
+ch_1004,po_504,8000,2026-01-14,USD,charge,Add-on purchase
+fee_1004,po_504,-232,2026-01-14,USD,fee,Processing fee
+po_504,po_504,-7768,2026-01-16,USD,payout,Payout Jan 16

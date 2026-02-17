@@ -1,0 +1,3 @@
+source_id,amount_minor,effective_date,currency,type,description
+dep_t1,10000,2026-01-17,USD,deposit,Exactly 2 days late
+dep_t2,5000,2026-01-18,USD,deposit,Exactly 3 days late

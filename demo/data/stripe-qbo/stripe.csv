@@ -1,0 +1,17 @@
+effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,description
+2026-01-05,2026-01-05,250000,USD,charge,stripe,ch_3a1,po_101,Enterprise license (Acme Corp)
+2026-01-05,2026-01-05,75000,USD,charge,stripe,ch_3a2,po_101,Add-on seats (Acme Corp)
+2026-01-05,2026-01-05,-9425,USD,fee,stripe,fee_3a1,po_101,Processing fee
+2026-01-07,2026-01-08,-315575,USD,payout,stripe,po_101,po_101,Weekly payout Jan 5-7
+2026-01-12,2026-01-12,180000,USD,charge,stripe,ch_3b1,po_102,Monthly subscription (Beta Inc)
+2026-01-12,2026-01-12,-5220,USD,fee,stripe,fee_3b1,po_102,Processing fee
+2026-01-13,2026-01-13,45000,USD,charge,stripe,ch_3b2,po_102,One-time setup (Beta Inc)
+2026-01-13,2026-01-13,-1305,USD,fee,stripe,fee_3b2,po_102,Processing fee
+2026-01-14,2026-01-15,-218475,USD,payout,stripe,po_102,po_102,Weekly payout Jan 8-14
+2026-01-19,2026-01-19,320000,USD,charge,stripe,ch_3c1,po_103,Annual plan (Gamma Ltd)
+2026-01-19,2026-01-19,-25000,USD,refund,stripe,re_3c1,po_103,Partial refund (Gamma Ltd)
+2026-01-19,2026-01-19,-9280,USD,fee,stripe,fee_3c1,po_103,Processing fee
+2026-01-21,2026-01-22,-285720,USD,payout,stripe,po_103,po_103,Weekly payout Jan 15-21
+2026-01-26,2026-01-26,92000,USD,charge,stripe,ch_3d1,po_104,Monthly (Delta Co)
+2026-01-26,2026-01-26,-2668,USD,fee,stripe,fee_3d1,po_104,Processing fee
+2026-01-28,2026-01-29,-89332,USD,payout,stripe,po_104,po_104,Weekly payout Jan 22-28

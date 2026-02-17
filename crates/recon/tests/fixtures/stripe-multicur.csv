@@ -1,0 +1,4 @@
+source_id,group_id,amount_minor,effective_date,currency,type,description
+po_mc1,po_mc1,-10000,2026-01-17,USD,payout,USD payout
+po_mc2,po_mc1,-5000,2026-01-17,CAD,payout,CAD payout same key
+po_mc3,po_mc2,-3000,2026-01-18,USD,payout,Another USD payout

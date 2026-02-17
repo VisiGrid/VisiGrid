@@ -367,7 +367,7 @@ fn add_commas(v: f64, with_decimals: bool) -> String {
 
 fn exact_opts(tolerance: f64) -> DiffOptions {
     DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: None,
         match_mode: MatchMode::Exact,
         key_transform: KeyTransform::None,
@@ -379,7 +379,7 @@ fn exact_opts(tolerance: f64) -> DiffOptions {
 
 fn contains_opts(policy: AmbiguityPolicy) -> DiffOptions {
     DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: None,
         match_mode: MatchMode::Contains,
         key_transform: KeyTransform::None,
@@ -1250,7 +1250,7 @@ fn combo_exact_digits_tolerance() {
     let hdrs = headers();
     let t = KeyTransform::Digits;
     let opts = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: Some(vec![1]),
         match_mode: MatchMode::Exact,
         key_transform: t,
@@ -1281,7 +1281,7 @@ fn combo_exact_digits_tolerance_zero() {
     let hdrs = headers();
     let t = KeyTransform::Digits;
     let opts = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: Some(vec![1]),
         match_mode: MatchMode::Exact,
         key_transform: t,
@@ -1312,7 +1312,7 @@ fn combo_contains_digits_ambiguity_error() {
     let hdrs = headers();
     let t = KeyTransform::Digits;
     let opts = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: Some(vec![1]),
         match_mode: MatchMode::Contains,
         key_transform: t,
@@ -1345,7 +1345,7 @@ fn combo_contains_digits_ambiguity_report() {
     let hdrs = headers();
     let t = KeyTransform::Digits;
     let opts = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: Some(vec![1]),
         match_mode: MatchMode::Contains,
         key_transform: t,
@@ -1384,7 +1384,7 @@ fn combo_contains_trim_tolerance() {
     let hdrs = headers();
     let t = KeyTransform::Trim;
     let opts = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: Some(vec![1]),
         match_mode: MatchMode::Contains,
         key_transform: t,
@@ -1411,7 +1411,7 @@ fn combo_exact_compare_cols_tolerance() {
     // Use exact f64 deltas to avoid floating-point boundary issues.
     let hdrs = headers();
     let opts = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: Some(vec![1]), // only "amount"
         match_mode: MatchMode::Exact,
         key_transform: KeyTransform::None,
@@ -1449,7 +1449,7 @@ fn combo_exact_tolerance_boundary() {
     // delta <= tolerance is within (inclusive). Verify the boundary.
     let hdrs = headers();
     let opts = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: Some(vec![1]),
         match_mode: MatchMode::Exact,
         key_transform: KeyTransform::None,
@@ -1489,7 +1489,7 @@ fn combo_mixed_type_with_tolerance() {
     // Mixed type or both non-numeric → string diff, delta=None, within_tolerance=false.
     let hdrs = headers();
     let opts = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: Some(vec![1]),
         match_mode: MatchMode::Exact,
         key_transform: KeyTransform::None,
@@ -1558,7 +1558,7 @@ fn tolerance_boundary_ieee754_summary() {
     // when boundary cases are present alongside clearly-outside cases.
     let hdrs = headers();
     let opts = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: Some(vec![1]),
         match_mode: MatchMode::Exact,
         key_transform: KeyTransform::None,
@@ -1668,7 +1668,7 @@ fn contains_tolerates_duplicate_right_keys() {
     ];
 
     let options = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: None,
         match_mode: MatchMode::Contains,
         key_transform: KeyTransform::None,
@@ -1729,7 +1729,7 @@ fn contains_column_searches_different_column() {
 
     // Without contains_col: no match (R1 doesn't contain "123")
     let options_no_col = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: None,
         match_mode: MatchMode::Contains,
         key_transform: KeyTransform::None,
@@ -1742,7 +1742,7 @@ fn contains_column_searches_different_column() {
 
     // With contains_col = description (index 1): match found
     let options_with_col = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: None,
         match_mode: MatchMode::Contains,
         key_transform: KeyTransform::None,
@@ -1813,7 +1813,7 @@ fn contains_reports_ambiguous_when_multiple_right_rows_match() {
     ];
 
     let options = DiffOptions {
-        key_col: 0,
+        key_cols: vec![0],
         compare_cols: None,
         match_mode: MatchMode::Contains,
         key_transform: KeyTransform::None,

@@ -1,0 +1,4 @@
+effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,description
+2026-01-08,2026-01-08,315575,USD,deposit,qbo,deposit:501,,Stripe payout - Jan 5-7
+2026-01-15,2026-01-15,213475,USD,deposit,qbo,deposit:502,,Stripe payout - Jan 8-14 ($50.00 short)
+2026-01-22,2026-01-22,285720,USD,deposit,qbo,deposit:503,,Stripe payout - Jan 15-21

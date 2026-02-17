@@ -16,6 +16,7 @@
 //! | 30-39   | replay           | Provenance replay codes                  |
 //! | 40-49   | hub              | VisiHub publish/verify codes              |
 //! | 50-59   | fetch            | External data source connectors           |
+//! | 60-69   | recon            | Reconciliation engine codes                |
 //!
 //! # Adding New Exit Codes
 //!
@@ -149,6 +150,19 @@ pub const EXIT_FETCH_SFTP_CONNECT: u8 = 55;
 
 /// SFTP host key verification failed (unknown or mismatched).
 pub const EXIT_FETCH_SFTP_HOST_KEY: u8 = 56;
+
+// =============================================================================
+// Recon (60-69) — reconciliation engine codes
+// =============================================================================
+
+/// Recon found mismatches (amount or timing).
+pub const EXIT_RECON_MISMATCH: u8 = 1;
+
+/// Recon runtime error (IO, CSV parse, corrupt file).
+pub const EXIT_RECON_RUNTIME: u8 = 2;
+
+/// Invalid recon config (bad TOML, missing roles, etc.).
+pub const EXIT_RECON_INVALID_CONFIG: u8 = 60;
 
 // =============================================================================
 // Session Error Types

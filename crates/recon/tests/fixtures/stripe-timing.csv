@@ -1,0 +1,3 @@
+source_id,group_id,amount_minor,effective_date,currency,type,description
+po_t1,po_t1,-10000,2026-01-15,USD,payout,Payout Jan 15
+po_t2,po_t2,-5000,2026-01-15,USD,payout,Payout Jan 15
