@@ -75,7 +75,7 @@ fn ensure_template() {
             wb.set_cell_value_tracked(0, r, 16,
                 &format!("=IF(E{row1}=\"payout\",COUNTIFS(H$2:H$1001,H{row1},E$2:E$1001,\"charge\"),\"\")"));
             wb.set_cell_value_tracked(0, r, 17,
-                &format!("=IF(E{row1}=\"payout\",-(O{row1}*summary!B$32+Q{row1}*summary!B$33),\"\")"));
+                &format!("=IF(E{row1}=\"payout\",-(O{row1}*summary!B$32/100+Q{row1}*summary!B$33),\"\")"));
             wb.set_cell_value_tracked(0, r, 18,
                 &format!("=IF(E{row1}=\"payout\",P{row1}-R{row1},\"\")"));
             wb.set_cell_value_tracked(0, r, 19,
@@ -128,7 +128,7 @@ fn ensure_template() {
         wb.set_cell_value_tracked(si, 8, 2, "Status");
 
         wb.set_cell_value_tracked(si, 9, 0, "Stripe Payouts");
-        wb.set_cell_value_tracked(si, 9, 1, "=ABS(B5)");
+        wb.set_cell_value_tracked(si, 9, 1, "=SUM(stripe!J$2:J$1001)");
         wb.set_cell_value_tracked(si, 10, 0, "Matched Deposits");
         wb.set_cell_value_tracked(si, 10, 1, "=SUMIF(stripe!L$2:L$1001,\"MATCHED\",stripe!J$2:J$1001)");
         wb.set_cell_value_tracked(si, 11, 0, "Unmatched Payouts");
@@ -182,7 +182,7 @@ fn ensure_template() {
         wb.set_cell_value_tracked(si, 30, 2, "Status");
 
         wb.set_cell_value_tracked(si, 31, 0, "Contract Rate (%)");
-        wb.set_cell_value_tracked(si, 31, 1, "0.029");
+        wb.set_cell_value_tracked(si, 31, 1, "2.90");
 
         wb.set_cell_value_tracked(si, 32, 0, "Per-Txn Fee (¢)");
         wb.set_cell_value_tracked(si, 32, 1, "30");
