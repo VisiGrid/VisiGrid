@@ -330,15 +330,22 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
+      - name: Install OpenSSL for x86_64 cross-compilation
+        run: |
+          # Install x86_64 Homebrew and OpenSSL for cross-compilation
+          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/null || true
+          arch -x86_64 /usr/local/bin/brew install openssl@3
+
       - name: Build universal binary
         run: |
-          # Build GUI
-          cargo build --release --target x86_64-apple-darwin -p visigrid-gpui
+          # Build aarch64 (native) first
           cargo build --release --target aarch64-apple-darwin -p visigrid-gpui
-
-          # Build CLI
-          cargo build --release --target x86_64-apple-darwin -p visigrid-cli
           cargo build --release --target aarch64-apple-darwin -p visigrid-cli
+
+          # Build x86_64 (cross) with OpenSSL dir set for pkg-config cross-compilation
+          export X86_64_APPLE_DARWIN_OPENSSL_DIR="/usr/local/opt/openssl@3"
+          cargo build --release --target x86_64-apple-darwin -p visigrid-gpui
+          cargo build --release --target x86_64-apple-darwin -p visigrid-cli
 
           mkdir -p dist/universal
           lipo -create \
