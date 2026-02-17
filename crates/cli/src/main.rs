@@ -933,6 +933,30 @@ Examples:
         #[arg(long)]
         delimiter: Option<String>,
     },
+
+    /// Upgrade a .sheet file to the latest schema (v9+).
+    /// Loads the workbook, recomputes formulas, and saves with cached
+    /// formula values. Idempotent: exits 0 if already upgraded.
+    Upgrade {
+        /// Path to the .sheet file
+        file: PathBuf,
+
+        /// Write upgraded file to a different path instead of overwriting
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Refuse to upgrade files larger than this (bytes)
+        #[arg(long, default_value = "26214400")]
+        max_bytes: u64,
+
+        /// Check if upgrade is needed without writing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output structured JSON result
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1801,6 +1825,9 @@ fn main() -> ExitCode {
             }
             SheetCommands::Import { source, output, sheet, headers, formulas, nulls, stamp, verify, dry_run, json, delimiter } => {
                 cmd_sheet_import(source, output, sheet, headers, formulas, nulls, stamp, verify, dry_run, json, delimiter)
+            }
+            SheetCommands::Upgrade { file, out, max_bytes, dry_run, json } => {
+                cmd_sheet_upgrade(file, out, max_bytes, dry_run, json)
             }
         }
         Some(Commands::Hub(hub_cmd)) => match hub_cmd {
@@ -6065,6 +6092,95 @@ fn cmd_sheet_fingerprint(file: PathBuf, json: bool) -> Result<(), CliError> {
         println!("{}", serde_json::to_string_pretty(&output).unwrap());
     } else {
         println!("{}", fingerprint.to_string());
+    }
+
+    Ok(())
+}
+
+fn cmd_sheet_upgrade(
+    file: PathBuf,
+    out: Option<PathBuf>,
+    max_bytes: u64,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    use visigrid_io::native::{sheet_schema_version, upgrade_sheet};
+
+    // Validate it's a .sheet file
+    let fmt = infer_inspect_format(&file)?;
+    if !matches!(fmt, InspectFormat::Sheet) {
+        return Err(CliError::args("upgrade only works with .sheet files"));
+    }
+
+    // Size guard
+    let file_bytes = std::fs::metadata(&file)
+        .map_err(|e| CliError::io(format!("cannot stat {}: {}", file.display(), e)))?
+        .len();
+    if file_bytes > max_bytes {
+        let msg = format!(
+            "file is {} bytes, exceeds --max-bytes limit of {} ({:.1} MB)",
+            file_bytes, max_bytes, max_bytes as f64 / 1_048_576.0
+        );
+        if json {
+            let output = serde_json::json!({
+                "status": "skipped",
+                "reason": msg,
+                "file_bytes": file_bytes,
+                "max_bytes": max_bytes,
+            });
+            println!("{}", serde_json::to_string(&output).unwrap());
+            return Ok(());
+        }
+        return Err(CliError::args(msg));
+    }
+
+    if dry_run {
+        let version = sheet_schema_version(&file)
+            .map_err(|e| CliError::io(format!("failed to read schema version: {}", e)))?;
+        let needs_upgrade = version < 9;
+        if json {
+            let output = serde_json::json!({
+                "status": if needs_upgrade { "needs_upgrade" } else { "already_upgraded" },
+                "schema_version": version,
+                "file_bytes": file_bytes,
+            });
+            println!("{}", serde_json::to_string(&output).unwrap());
+        } else if needs_upgrade {
+            eprintln!("{}: schema v{} → needs upgrade", file.display(), version);
+        } else {
+            eprintln!("{}: already at schema v{}", file.display(), version);
+        }
+        return Ok(());
+    }
+
+    let result = upgrade_sheet(&file, out.as_deref())
+        .map_err(|e| CliError::io(format!("upgrade failed: {}", e)))?;
+
+    if json {
+        println!("{}", serde_json::to_string(&result).unwrap());
+    } else {
+        match result.status.as_str() {
+            "already_upgraded" => {
+                eprintln!(
+                    "{}: already upgraded (schema v{}, {} formula cells)",
+                    file.display(), result.schema_after, result.formula_cells_total
+                );
+            }
+            "upgraded" => {
+                let target = out.as_ref().unwrap_or(&file);
+                eprintln!(
+                    "{}: upgraded v{} → v{} ({} formula cells recomputed) → {}",
+                    file.display(),
+                    result.schema_before,
+                    result.schema_after,
+                    result.formula_cells_upgraded,
+                    target.display(),
+                );
+            }
+            _ => {
+                eprintln!("{}: {}", file.display(), result.status);
+            }
+        }
     }
 
     Ok(())

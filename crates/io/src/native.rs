@@ -2303,12 +2303,24 @@ pub fn inspect_range_lightweight(
 ) -> Result<Vec<LightweightCell>, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
 
-    let mut stmt = conn.prepare(
+    // Detect whether formula_source column exists (pre-v9 files don't have it)
+    let has_formula_source = conn
+        .prepare("SELECT formula_source FROM cells LIMIT 0")
+        .is_ok();
+
+    let query = if has_formula_source {
         "SELECT row, col, value_type, value_num, value_text, formula_source \
          FROM cells \
          WHERE sheet_idx = ?1 AND row BETWEEN ?2 AND ?3 AND col BETWEEN ?4 AND ?5 \
          ORDER BY row, col"
-    ).map_err(|e| e.to_string())?;
+    } else {
+        "SELECT row, col, value_type, value_num, value_text, NULL as formula_source \
+         FROM cells \
+         WHERE sheet_idx = ?1 AND row BETWEEN ?2 AND ?3 AND col BETWEEN ?4 AND ?5 \
+         ORDER BY row, col"
+    };
+
+    let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
 
     let rows = stmt.query_map(
         params![sheet_idx as i64, start_row as i64, end_row as i64, start_col as i64, end_col as i64],
@@ -2392,6 +2404,98 @@ pub fn inspect_workbook_lightweight(path: &Path) -> Result<(usize, usize), Strin
     ).map_err(|e| e.to_string())? as usize;
 
     Ok((sheet_count, cell_count))
+}
+
+/// Result of an upgrade operation, suitable for JSON serialization.
+#[derive(Debug, serde::Serialize)]
+pub struct UpgradeResult {
+    pub status: String,                // "upgraded", "already_upgraded", "skipped"
+    pub schema_before: i32,
+    pub schema_after: i32,
+    pub formula_cells_total: usize,
+    pub formula_cells_upgraded: usize,
+    pub file_bytes: u64,
+}
+
+/// Check the schema version of a .sheet file without loading it.
+pub fn sheet_schema_version(path: &Path) -> Result<i32, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let version: i32 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(version)
+}
+
+/// Upgrade a .sheet file to schema v9 by loading the workbook, recomputing
+/// formulas, and saving with formula_source + cached computed values.
+///
+/// Idempotent: returns `already_upgraded` if file is already v9+ with
+/// formula_source populated for all formula cells.
+///
+/// If `out_path` is None, writes in-place (overwrites the input file).
+pub fn upgrade_sheet(path: &Path, out_path: Option<&Path>) -> Result<UpgradeResult, String> {
+    let file_bytes = std::fs::metadata(path)
+        .map_err(|e| format!("cannot stat {}: {}", path.display(), e))?
+        .len();
+
+    let schema_before = sheet_schema_version(path)?;
+
+    // Quick check: if already v9, verify formula cells have formula_source populated
+    if schema_before >= 9 {
+        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        let needs_upgrade: bool = conn.query_row(
+            "SELECT COUNT(*) FROM cells WHERE value_type = ?1 AND (formula_source IS NULL OR formula_source = '')",
+            params![TYPE_FORMULA],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).map_err(|e| e.to_string())?;
+
+        if !needs_upgrade {
+            let total: usize = conn.query_row(
+                "SELECT COUNT(*) FROM cells WHERE value_type = ?1",
+                params![TYPE_FORMULA],
+                |row| Ok(row.get::<_, i64>(0)? as usize),
+            ).map_err(|e| e.to_string())?;
+
+            return Ok(UpgradeResult {
+                status: "already_upgraded".to_string(),
+                schema_before,
+                schema_after: schema_before,
+                formula_cells_total: total,
+                formula_cells_upgraded: 0,
+                file_bytes,
+            });
+        }
+    }
+
+    // Full load + recompute
+    let workbook = load_workbook(path)?;
+
+    // Count formula cells
+    let mut formula_cells_total = 0;
+    for sheet in workbook.sheets() {
+        for row in 0..sheet.rows {
+            for col in 0..sheet.cols {
+                if matches!(sheet.get_cell(row, col).value, CellValue::Formula { .. }) {
+                    formula_cells_total += 1;
+                }
+            }
+        }
+    }
+
+    // Save to target path (in-place or out_path)
+    let target = out_path.unwrap_or(path);
+    save_workbook(&workbook, target)?;
+
+    let schema_after = sheet_schema_version(target)?;
+
+    Ok(UpgradeResult {
+        status: "upgraded".to_string(),
+        schema_before,
+        schema_after,
+        formula_cells_total,
+        formula_cells_upgraded: formula_cells_total,
+        file_bytes,
+    })
 }
 
 #[cfg(test)]
@@ -3335,5 +3439,81 @@ mod tests {
         assert_eq!(loaded_sheet.get_display(2, 0), "30");
         assert_eq!(loaded_sheet.get_raw(1, 1), "=UPPER(B1)");
         assert_eq!(loaded_sheet.get_display(1, 1), "HELLO");
+    }
+
+    #[test]
+    fn test_upgrade_sheet_pre_v9() {
+        // Create a pre-v9 .sheet file (formula text in value_text, no formula_source)
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        {
+            let conn = Connection::open(path).unwrap();
+            // Create a v8 schema (no formula_source column)
+            conn.execute_batch("
+                CREATE TABLE sheets (
+                    sheet_idx INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    row_count INTEGER,
+                    col_count INTEGER
+                );
+                CREATE TABLE cells (
+                    sheet_idx INTEGER NOT NULL DEFAULT 0,
+                    row INTEGER NOT NULL,
+                    col INTEGER NOT NULL,
+                    value_type INTEGER NOT NULL DEFAULT 0,
+                    value_num REAL,
+                    value_text TEXT,
+                    fmt_bold INTEGER, fmt_italic INTEGER, fmt_underline INTEGER,
+                    fmt_alignment INTEGER, fmt_number_type INTEGER, fmt_decimals INTEGER,
+                    fmt_font_family TEXT, fmt_thousands INTEGER, fmt_negative INTEGER,
+                    fmt_currency_symbol TEXT, fmt_border_top INTEGER, fmt_border_right INTEGER,
+                    fmt_border_bottom INTEGER, fmt_border_left INTEGER,
+                    fmt_border_top_color TEXT, fmt_border_right_color TEXT,
+                    fmt_border_bottom_color TEXT, fmt_border_left_color TEXT,
+                    fmt_cell_style TEXT, fmt_font_color TEXT, fmt_background_color TEXT
+                );
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO meta (key, value) VALUES ('active_sheet', '0');
+                INSERT INTO sheets (sheet_idx, name, row_count, col_count) VALUES (0, 'Sheet1', 3, 2);
+                -- Regular cells
+                INSERT INTO cells (sheet_idx, row, col, value_type, value_num) VALUES (0, 0, 0, 1, 10);
+                INSERT INTO cells (sheet_idx, row, col, value_type, value_num) VALUES (0, 1, 0, 1, 20);
+                -- Formula cell (pre-v9: formula text in value_text, no cached value)
+                INSERT INTO cells (sheet_idx, row, col, value_type, value_text) VALUES (0, 2, 0, 3, '=A1+A2');
+                -- Text cell
+                INSERT INTO cells (sheet_idx, row, col, value_type, value_text) VALUES (0, 0, 1, 2, 'hello');
+                -- Formula cell (pre-v9)
+                INSERT INTO cells (sheet_idx, row, col, value_type, value_text) VALUES (0, 1, 1, 3, '=UPPER(B1)');
+            ").unwrap();
+            conn.pragma_update(None, "user_version", 8).unwrap();
+        }
+
+        // Before upgrade: lightweight returns empty values for formulas
+        let cells_before = inspect_range_lightweight(path, 0, 0, 0, 2, 1).unwrap();
+        let sum_before = cells_before.iter().find(|c| c.row == 2 && c.col == 0).unwrap();
+        assert_eq!(sum_before.value, "", "Pre-v9 formula should have empty cached value");
+
+        // Upgrade
+        let result = upgrade_sheet(path, None).unwrap();
+        assert_eq!(result.status, "upgraded");
+        assert_eq!(result.schema_before, 8);
+        assert_eq!(result.schema_after, SCHEMA_VERSION);
+        assert_eq!(result.formula_cells_total, 2);
+        assert_eq!(result.formula_cells_upgraded, 2);
+
+        // After upgrade: lightweight returns computed values
+        let cells_after = inspect_range_lightweight(path, 0, 0, 0, 2, 1).unwrap();
+        let sum_after = cells_after.iter().find(|c| c.row == 2 && c.col == 0).unwrap();
+        assert_eq!(sum_after.value, "30", "Upgraded formula =A1+A2 should show 30");
+        assert_eq!(sum_after.formula_source.as_deref(), Some("=A1+A2"));
+
+        let upper_after = cells_after.iter().find(|c| c.row == 1 && c.col == 1).unwrap();
+        assert_eq!(upper_after.value, "HELLO", "Upgraded formula =UPPER(B1) should show HELLO");
+
+        // Idempotent: running again should return already_upgraded
+        let result2 = upgrade_sheet(path, None).unwrap();
+        assert_eq!(result2.status, "already_upgraded");
+        assert_eq!(result2.formula_cells_upgraded, 0);
     }
 }
