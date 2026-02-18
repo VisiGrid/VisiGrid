@@ -642,6 +642,9 @@ impl QboClient {
     }
 
     /// Fetch Purchase entities for the given account and date range.
+    /// Fetch Purchase entities for the given account and date range.
+    /// AccountRef is not queryable in QBO's API, so we fetch all purchases
+    /// in the date range and filter client-side by account ID.
     fn fetch_purchases(
         &mut self,
         account_id: &str,
@@ -650,15 +653,24 @@ impl QboClient {
         quiet: bool,
     ) -> Result<Vec<RawQboTransaction>, CliError> {
         let where_clause = format!(
-            "AccountRef = '{}' AND TxnDate >= '{}' AND TxnDate < '{}'",
-            account_id, from, to,
+            "TxnDate >= '{}' AND TxnDate < '{}'",
+            from, to,
         );
         let entities = self.query_entities("Purchase", &where_clause, quiet)?;
-        entities.iter().map(parse_purchase).collect()
+        let filtered: Vec<_> = entities
+            .iter()
+            .filter(|e| {
+                e["AccountRef"]["value"]
+                    .as_str()
+                    .map_or(false, |v| v == account_id)
+            })
+            .collect();
+        filtered.iter().map(|e| parse_purchase(e)).collect()
     }
 
     /// Fetch Transfer entities for the given account and date range.
-    /// Requires two queries: one for FromAccountRef, one for ToAccountRef.
+    /// FromAccountRef/ToAccountRef are not queryable, so we fetch all
+    /// transfers in the date range and filter client-side.
     fn fetch_transfers(
         &mut self,
         account_id: &str,
@@ -666,29 +678,17 @@ impl QboClient {
         to: &NaiveDate,
         quiet: bool,
     ) -> Result<Vec<RawQboTransaction>, CliError> {
+        let where_clause = format!(
+            "TxnDate >= '{}' AND TxnDate < '{}'",
+            from, to,
+        );
+        let entities = self.query_entities("Transfer", &where_clause, quiet)?;
+
         let mut all = Vec::new();
-
-        // Transfers FROM this account
-        let where_from = format!(
-            "FromAccountRef = '{}' AND TxnDate >= '{}' AND TxnDate < '{}'",
-            account_id, from, to,
-        );
-        let from_entities = self.query_entities("Transfer", &where_from, quiet)?;
-        for entity in &from_entities {
-            all.push(parse_transfer(entity, account_id)?);
-        }
-
-        // Transfers TO this account
-        let where_to = format!(
-            "ToAccountRef = '{}' AND TxnDate >= '{}' AND TxnDate < '{}'",
-            account_id, from, to,
-        );
-        let to_entities = self.query_entities("Transfer", &where_to, quiet)?;
-        for entity in &to_entities {
-            // Avoid duplicates: skip if we already have this transfer ID
-            let id = entity["Id"].as_str().unwrap_or("");
-            let source_id = format!("transfer:{}", id);
-            if !all.iter().any(|t| t.source_id == source_id) {
+        for entity in &entities {
+            let from_ref = entity["FromAccountRef"]["value"].as_str().unwrap_or("");
+            let to_ref = entity["ToAccountRef"]["value"].as_str().unwrap_or("");
+            if from_ref == account_id || to_ref == account_id {
                 all.push(parse_transfer(entity, account_id)?);
             }
         }
