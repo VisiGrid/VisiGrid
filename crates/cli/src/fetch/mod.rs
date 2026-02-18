@@ -7,6 +7,7 @@ mod mercury;
 mod qbo;
 mod sftp;
 mod stripe;
+mod xero;
 
 use std::path::PathBuf;
 
@@ -141,6 +142,60 @@ Examples:
         /// Use QBO sandbox API base URL
         #[arg(long)]
         sandbox: bool,
+    },
+
+    /// Fetch bank transactions from Xero
+    #[command(after_help = "\
+Examples:
+  # Fetch bank transactions for a bank account
+  vgrid fetch xero --credentials ~/.config/vgrid/xero.json --from 2026-01-01 --to 2026-01-31 --account \"Checking\"
+  vgrid fetch xero --credentials ~/xero.json --from 2026-01-01 --to 2026-01-31 --account \"Checking\" --out xero.csv
+
+  # Only transactions (no transfers)
+  vgrid fetch xero --credentials ~/xero.json --from 2026-01-01 --to 2026-01-31 --account \"Checking\" --include transaction
+
+  # Direct token (skips refresh)
+  vgrid fetch xero --access-token eyJ... --tenant-id abc-def-123 --from 2026-01-01 --to 2026-01-31 --account-id guid-here")]
+    Xero {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// Path to Xero OAuth2 credentials JSON file
+        #[arg(long)]
+        credentials: Option<PathBuf>,
+
+        /// Xero access token (skips refresh, requires --tenant-id)
+        #[arg(long)]
+        access_token: Option<String>,
+
+        /// Xero tenant ID (required with --access-token)
+        #[arg(long)]
+        tenant_id: Option<String>,
+
+        /// Bank account name in Xero (resolved to ID via Account query)
+        #[arg(long)]
+        account: Option<String>,
+
+        /// Bank account ID directly (skip name resolution)
+        #[arg(long)]
+        account_id: Option<String>,
+
+        /// Entity types to query, comma-separated (default: transaction,transfer)
+        #[arg(long)]
+        include: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
     },
 
     /// Fetch card transactions from Brex
@@ -395,6 +450,29 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             out,
             quiet,
             sandbox,
+        ),
+        FetchCommands::Xero {
+            from,
+            to,
+            credentials,
+            access_token,
+            tenant_id,
+            account,
+            account_id,
+            include,
+            out,
+            quiet,
+        } => xero::cmd_fetch_xero(
+            from,
+            to,
+            credentials,
+            access_token,
+            tenant_id,
+            account,
+            account_id,
+            include,
+            out,
+            quiet,
         ),
         FetchCommands::BrexCard {
             from,

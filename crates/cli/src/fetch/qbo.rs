@@ -194,36 +194,9 @@ fn qbo_escape(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-// ── Amount parsing (string-to-cents, no f64) ────────────────────────
+// ── Amount parsing ───────────────────────────────────────────────────
 
-/// Parse a QBO decimal amount string to i64 minor units (cents).
-/// Handles "1234.56", "1234.5", "1234", "-1234.56".
-fn parse_money_string(s: &str) -> Result<i64, String> {
-    let s = s.trim();
-    let negative = s.starts_with('-');
-    let s = s.trim_start_matches('-');
-    let (dollars, cents) = if let Some(dot) = s.find('.') {
-        let d: i64 = s[..dot]
-            .parse()
-            .map_err(|e| format!("bad dollars: {}", e))?;
-        let frac = &s[dot + 1..];
-        let c: i64 = match frac.len() {
-            0 => 0,
-            1 => {
-                frac.parse::<i64>()
-                    .map_err(|e| format!("bad cents: {}", e))?
-                    * 10
-            }
-            2 => frac.parse().map_err(|e| format!("bad cents: {}", e))?,
-            _ => return Err(format!("too many decimal places: {}", s)),
-        };
-        (d, c)
-    } else {
-        (s.parse().map_err(|e| format!("bad amount: {}", e))?, 0)
-    };
-    let minor = dollars * 100 + cents;
-    Ok(if negative { -minor } else { minor })
-}
+use super::common::parse_money_string;
 
 /// Extract a QBO amount from a serde_json::Value, handling both string and number types.
 fn extract_amount(val: &serde_json::Value) -> Result<i64, String> {
@@ -922,23 +895,6 @@ pub fn cmd_fetch_qbo(
 mod tests {
     use super::*;
     use httpmock::prelude::*;
-
-    // ── parse_money_string ─────────────────────────────────────────
-
-    #[test]
-    fn test_parse_money_string() {
-        assert_eq!(parse_money_string("1080.47").unwrap(), 108047);
-        assert_eq!(parse_money_string("0.01").unwrap(), 1);
-        assert_eq!(parse_money_string("100").unwrap(), 10000);
-        assert_eq!(parse_money_string("0").unwrap(), 0);
-        assert_eq!(parse_money_string("0.00").unwrap(), 0);
-        assert_eq!(parse_money_string("-500.25").unwrap(), -50025);
-        assert_eq!(parse_money_string("10.5").unwrap(), 1050);
-        assert_eq!(parse_money_string("100.").unwrap(), 10000);
-        assert_eq!(parse_money_string("  42  ").unwrap(), 4200);
-        assert!(parse_money_string("10.123").is_err());
-        assert!(parse_money_string("abc").is_err());
-    }
 
     // ── qbo_escape ─────────────────────────────────────────────────
 
