@@ -264,6 +264,7 @@ pub(crate) fn bind(
                 this.bottom_panel_visible = false;
                 this.lua_console.visible = false;
                 this.terminal.visible = false;
+                this.terminal_focused = false;
             } else {
                 // Open panel and switch to Terminal tab
                 this.bottom_panel_visible = true;
@@ -276,6 +277,7 @@ pub(crate) fn bind(
                     // Terminal already running — ensure CWD matches current workspace
                     this.terminal.ensure_cwd();
                 }
+                this.terminal_focused = true;
                 window.focus(&this.terminal_focus_handle, cx);
             }
             cx.notify();

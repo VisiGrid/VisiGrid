@@ -2464,6 +2464,9 @@ pub struct Spreadsheet {
     // Terminal panel state
     pub terminal: crate::terminal::TerminalState,
     pub terminal_focus_handle: FocusHandle,
+    /// Explicit boolean tracking terminal focus — secondary check for platforms
+    /// where `FocusHandle::is_focused()` may not reflect focus correctly (macOS).
+    pub terminal_focused: bool,
 
     // Lua scripting state
     pub lua_runtime: crate::scripting::LuaRuntime,
@@ -2746,6 +2749,7 @@ impl Spreadsheet {
             focus_handle,
             console_focus_handle,
             terminal_focus_handle,
+            terminal_focused: false,
             script_view_focus_handle,
             font_picker_focus,
             ui,
@@ -3042,7 +3046,7 @@ impl Spreadsheet {
     /// Returns true if the terminal panel currently has keyboard focus.
     /// Used by action handlers to bail out so keys go to the PTY instead.
     pub fn terminal_has_focus(&self, window: &Window) -> bool {
-        self.terminal_focus_handle.is_focused(window)
+        self.terminal_focus_handle.is_focused(window) || self.terminal_focused
     }
 
     /// Guard for grid actions: if terminal has focus, propagate and return true.
@@ -5170,13 +5174,16 @@ impl Spreadsheet {
         }
     }
 
-    /// Paste full VisiGrid context + analysis prompt into the terminal.
-    fn paste_full_context_with_prompt(&mut self, cx: &mut Context<Self>) {
-        if !self.terminal.visible || self.terminal.term.is_none() {
-            return;
-        }
-
-        // Build the context block (reuse paste_full_context logic inline)
+    /// Write the AI context file (`.visigrid/CLAUDE.md`) with system context,
+    /// sheet metadata, and optional extra instructions (e.g., Lua API contract).
+    ///
+    /// Returns the (sheet_name, headers, selection TSV) for the caller to paste
+    /// into the terminal as visible user context.
+    fn write_ai_context_and_collect_data(
+        &mut self,
+        cx: &mut Context<Self>,
+        extra_instructions: &str,
+    ) -> Option<(String, Vec<String>, String, usize, usize, usize, usize)> {
         let wb = self.workbook.read(cx);
         let sheet = wb.active_sheet();
         let sheet_name = sheet.name.clone();
@@ -5224,31 +5231,89 @@ impl Spreadsheet {
 
         let tsv = lines.join("\n");
 
-        // Build combined block with analysis prompt
-        let mut block = String::new();
-        block.push_str("# VisiGrid context\n");
-        if let Some(p) = &self.current_file {
-            block.push_str(&format!("# File: {}\n", p.display()));
+        // Write .visigrid/CLAUDE.md with full context (instructions stay out of terminal)
+        let workspace = self.terminal.workspace_root.clone()
+            .or_else(|| self.current_file.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())));
+        if let Some(ref ws) = workspace {
+            let visigrid_dir = ws.join(".visigrid");
+            let _ = std::fs::create_dir_all(&visigrid_dir);
+            let context_path = visigrid_dir.join("CLAUDE.md");
+
+            let mut context = String::new();
+            context.push_str(system_ai_context());
+            context.push('\n');
+
+            // Sheet metadata
+            context.push_str("## Current Session\n\n");
+            if let Some(p) = &self.current_file {
+                context.push_str(&format!("- **File**: {}\n", p.display()));
+            }
+            context.push_str(&format!(
+                "- **Sheet**: \"{}\"  Used range: {}x{}\n",
+                sheet_name, used_end_row + 1, used_end_col + 1,
+            ));
+            if !headers.is_empty() {
+                context.push_str(&format!(
+                    "- **Headers** (row {}): {}\n",
+                    header_row + 1, headers.join(", ")
+                ));
+            }
+            context.push_str(&format!(
+                "- **Selection**: {}x{} starting at {}\n",
+                sel_rows, sel_cols, crate::ai::cell_ref(top_row, left_col),
+            ));
+
+            // Extra instructions (Lua contract, analysis hints, etc.)
+            if !extra_instructions.is_empty() {
+                context.push('\n');
+                context.push_str(extra_instructions);
+            }
+
+            if let Err(e) = std::fs::write(&context_path, &context) {
+                log::warn!("Failed to write AI context file {}: {}", context_path.display(), e);
+            }
         }
+
+        Some((sheet_name, headers, tsv, sel_rows, sel_cols, used_end_row, used_end_col))
+    }
+
+    /// Paste full VisiGrid context + analysis prompt into the terminal.
+    ///
+    /// Writes instructions to `.visigrid/CLAUDE.md` for the AI CLI to discover.
+    /// Only pastes the selection data and a short prompt into the terminal.
+    fn paste_full_context_with_prompt(&mut self, cx: &mut Context<Self>) {
+        if !self.terminal.visible || self.terminal.term.is_none() {
+            return;
+        }
+
+        let analysis_instructions = "\
+## Task: Analyze Selection
+
+Summarize what this data shows. Detect anomalies, outliers, or suspicious patterns.
+Suggest formulas or next steps to validate it.
+";
+
+        let Some((sheet_name, headers, tsv, sel_rows, sel_cols, ..)) =
+            self.write_ai_context_and_collect_data(cx, analysis_instructions)
+        else {
+            return;
+        };
+
+        // Paste only the data + a short visible prompt into the terminal
+        let mut block = String::new();
         block.push_str(&format!(
-            "# Sheet: \"{}\"  Used range: {}x{}\n",
-            sheet_name, used_end_row + 1, used_end_col + 1,
+            "# Sheet: \"{}\" | Selection: {}x{}",
+            sheet_name, sel_rows, sel_cols,
         ));
         if !headers.is_empty() {
-            block.push_str(&format!(
-                "# Headers (row {}): {}\n",
-                header_row + 1, headers.join(", ")
-            ));
+            block.push_str(&format!(" | Headers: {}", headers.join(", ")));
         }
-        block.push_str(&format!(
-            "# Selection: {}x{} starting at {}\n",
-            sel_rows, sel_cols, crate::ai::cell_ref(top_row, left_col),
-        ));
+        block.push('\n');
         if !tsv.trim().is_empty() {
             block.push_str(&tsv);
             block.push('\n');
         }
-        block.push_str("\nSummarize what this data shows. Detect anomalies, outliers, or suspicious patterns. Suggest formulas or next steps to validate it.\n");
+        block.push_str("\nAnalyze this data. See .visigrid/CLAUDE.md for full context.\n");
 
         self.write_to_pty_bracketed(&block, cx);
         self.status_message = Some("Sent selection to AI for analysis.".into());
@@ -5273,6 +5338,7 @@ impl Spreadsheet {
             );
             update_user_settings(cx, |s| s.dismiss_tip(TipId::AiTerminal));
         }
+        self.terminal_focused = true;
         window.focus(&self.terminal_focus_handle, cx);
         cx.notify();
     }
@@ -5666,23 +5732,53 @@ impl Spreadsheet {
             return;
         }
 
-        // Paste full VisiGrid context (selection, headers, file path)
-        self.paste_full_context_with_prompt(cx);
+        // Lua API contract + rules — written to .visigrid/CLAUDE.md, not pasted
+        let lua_instructions = "\
+## Task: Build Lua Model
 
-        // Inject the Lua output contract — short, forceful constraints
-        let lua_contract = concat!(
-            "\n\nOutput ONLY a single ```lua fenced code block. No other code.\n",
-            "VisiGrid sheet API (1-indexed):\n",
-            "  sheet:set_value(row, col, value)\n",
-            "  sheet:set_formula(row, col, \"=...\")\n",
-            "  sheet:get_value(row, col) / sheet:rows() / sheet:cols()\n",
-            "Rules:\n",
-            "- Read inputs from the current sheet. Write outputs to new rows/columns.\n",
-            "- Do NOT delete or overwrite existing data.\n",
-            "- No os, io, file, or network operations.\n",
-            "- The user will preview your code before applying it.\n",
-        );
-        self.write_to_pty_bracketed(lua_contract, cx);
+Output ONLY a single ```lua fenced code block. No other text or code.
+
+### VisiGrid Lua Sheet API (1-indexed)
+
+```
+sheet:set_value(row, col, value)
+sheet:set_formula(row, col, \"=...\")
+sheet:get_value(row, col)
+sheet:rows()
+sheet:cols()
+```
+
+### Rules
+
+- Read inputs from the current sheet. Write outputs to new rows/columns.
+- Do NOT delete or overwrite existing data.
+- No `os`, `io`, file, or network operations.
+- The user will preview your code before applying it.
+";
+
+        let Some((sheet_name, headers, tsv, sel_rows, sel_cols, ..)) =
+            self.write_ai_context_and_collect_data(cx, lua_instructions)
+        else {
+            return;
+        };
+
+        // Paste only the data + a short visible prompt into the terminal
+        let mut block = String::new();
+        block.push_str(&format!(
+            "# Sheet: \"{}\" | Selection: {}x{}",
+            sheet_name, sel_rows, sel_cols,
+        ));
+        if !headers.is_empty() {
+            block.push_str(&format!(" | Headers: {}", headers.join(", ")));
+        }
+        block.push('\n');
+        if !tsv.trim().is_empty() {
+            block.push_str(&tsv);
+            block.push('\n');
+        }
+        block.push_str("\nBuild a Lua model for this data. Output a single ```lua block.\n");
+
+        self.write_to_pty_bracketed(&block, cx);
     }
 
     /// Capture the last ` ```lua ` block from terminal scrollback, preview it, and
@@ -6168,6 +6264,7 @@ impl Spreadsheet {
         self.terminal.write_to_pty(b"\x15");
         self.terminal.write_to_pty(command.as_bytes());
 
+        self.terminal_focused = true;
         window.focus(&self.terminal_focus_handle, cx);
         self.status_message = Some(format!("Convert command inserted \u{2014} press Enter to run."));
         cx.notify();

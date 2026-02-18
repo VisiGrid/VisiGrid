@@ -265,6 +265,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("shift-f5", DebugStop, Some("LuaDebug")),
         KeyBinding::new("f9", DebugToggleBreakpoint, Some("LuaDebug")),
 
+
         // Find dialog (in FindDialog context)
         KeyBinding::new(&kb(m, "f"), FindInCells, Some("FindDialog")),
         KeyBinding::new(&kb(m, "h"), FindReplace, Some("FindDialog")),
@@ -287,9 +288,16 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // Window switcher: Cmd+` (backtick)
         bindings.push(KeyBinding::new("cmd-`", SwitchWindow, Some("Spreadsheet")));
 
+        // Ctrl+` opens AI dialog (matches Zed terminal toggle convention)
+        bindings.push(KeyBinding::new("ctrl-`", InsertFormula, Some("Spreadsheet")));
+
         // Direct window cycling: Ctrl+Tab / Ctrl+Shift+Tab
         bindings.push(KeyBinding::new("ctrl-tab", NextWindow, Some("Spreadsheet")));
         bindings.push(KeyBinding::new("ctrl-shift-tab", PrevWindow, Some("Spreadsheet")));
+
+        // Ctrl+Shift+T: Toggle terminal (Cmd+` is taken by window switcher on Mac)
+        bindings.push(KeyBinding::new("ctrl-shift-t", ToggleTerminal, Some("Spreadsheet")));
+        bindings.push(KeyBinding::new("ctrl-shift-t", ToggleTerminal, Some("Terminal")));
 
         // Ctrl+U starts edit on Mac (F2 is often brightness)
         bindings.push(KeyBinding::new("ctrl-u", StartEdit, Some("Spreadsheet")));

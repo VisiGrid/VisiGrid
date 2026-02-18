@@ -142,7 +142,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         // Mouse wheel scrolling (or zoom with Ctrl/Cmd)
-        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+            // Don't scroll the grid when the terminal panel has focus —
+            // the terminal's own scroll handler handles it and calls stop_propagation,
+            // but this guard is defense-in-depth for edge cases.
+            if this.terminal_has_focus(window) {
+                return;
+            }
             // Check for zoom modifier (Ctrl on Linux/Windows, Cmd on macOS)
             // macOS: use .platform (Cmd), others: use .control (Ctrl)
             #[cfg(target_os = "macos")]
@@ -1552,6 +1558,7 @@ fn render_bottom_panel(
                 this.bottom_panel_tab = BottomPanelTab::Lua;
                 this.lua_console.visible = true;
                 this.terminal.visible = false;
+                this.terminal_focused = false;
                 if this.lua_console.first_open {
                     this.lua_console.show();
                 }
@@ -1569,6 +1576,7 @@ fn render_bottom_panel(
                 this.bottom_panel_tab = BottomPanelTab::Terminal;
                 this.lua_console.visible = false;
                 this.terminal.visible = true;
+                this.terminal_focused = true;
                 if this.terminal.term.is_none() && !this.terminal.exited {
                     this.spawn_terminal(window, cx);
                 } else {

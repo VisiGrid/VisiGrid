@@ -1291,6 +1291,8 @@ fn render_cell(
         .cursor(CursorStyle::Crosshair) // Grid interior = crosshair (Excel convention)
         .child(cell)
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            // Clicking the grid means terminal no longer has focus
+            this.terminal_focused = false;
             // Don't handle grid clicks when format bar owns focus
             if this.ui.format_bar.is_active(window) {
                 // Commit any pending font size edit, then close

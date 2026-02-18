@@ -66,6 +66,10 @@ pub fn spawn_pty(
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
 
+    // Clear CLAUDECODE env var so AI CLIs (claude) don't refuse to start
+    // when VisiGrid itself was launched from within a Claude Code session.
+    std::env::remove_var("CLAUDECODE");
+
     let pty_options = PtyOptions {
         shell: Some(tty::Shell::new(shell, Vec::new())),
         working_directory: cwd,

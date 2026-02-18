@@ -478,8 +478,20 @@ pub fn render_terminal_panel(
         .id("terminal-panel")
         .key_context("Terminal")
         .track_focus(&app.terminal_focus_handle)
+        // ToggleTerminal in Terminal context — allows closing the panel with the same
+        // shortcut that opened it (Ctrl+Shift+T on Mac, Ctrl+` elsewhere).
+        .on_action(cx.listener(|this, _: &crate::actions::ToggleTerminal, window, cx| {
+            // Close the panel and return focus to the grid
+            this.bottom_panel_visible = false;
+            this.lua_console.visible = false;
+            this.terminal.visible = false;
+            this.terminal_focused = false;
+            window.focus(&this.focus_handle, cx);
+            cx.notify();
+        }))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             window.focus(&this.terminal_focus_handle, cx);
+            this.terminal_focused = true;
             cx.notify();
         }))
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -493,6 +505,7 @@ pub fn render_terminal_panel(
         }))
         .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
             handle_terminal_scroll(this, event, cx);
+            cx.stop_propagation();
         }))
         .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
             handle_terminal_drop(this, paths.paths(), window, cx);
@@ -759,6 +772,28 @@ fn handle_terminal_key(
             // Ctrl+Shift+P: paste file path context into terminal
             "p" | "P" => {
                 app.paste_file_path_context(window, cx);
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // macOS: Cmd+C = copy, Cmd+V = paste (platform-native shortcuts)
+    // On Linux, Cmd (platform) is not available — Ctrl+Shift+C/V is used instead (handled above).
+    #[cfg(target_os = "macos")]
+    if mods.platform && !mods.shift && !mods.alt {
+        match key {
+            "c" | "C" => {
+                copy_viewport_text(app, cx);
+                return;
+            }
+            "v" | "V" => {
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        app.terminal.write_to_pty(text.as_bytes());
+                        cx.notify();
+                    }
+                }
                 return;
             }
             _ => {}

@@ -9,7 +9,9 @@ pub(crate) fn bind(
 ) -> Div {
     el
         // Clipboard actions
-        .on_action(cx.listener(|this, _: &Copy, _, cx| {
+        .on_action(cx.listener(|this, _: &Copy, window, cx| {
+            // Terminal handles its own copy (Cmd+C on Mac, Ctrl+Shift+C on Linux)
+            if this.terminal_has_focus(window) { return; }
             // Script view: copy script content
             if this.script.open {
                 let text = &this.script.buffer.text;
@@ -28,6 +30,8 @@ pub(crate) fn bind(
             this.copy(cx);
         }))
         .on_action(cx.listener(|this, _: &Cut, window, cx| {
+            // Terminal handles its own input
+            if this.terminal_has_focus(window) { return; }
             // Script view: cut script content
             if this.script.open {
                 let text = &this.script.buffer.text;
@@ -51,6 +55,8 @@ pub(crate) fn bind(
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &Paste, window, cx| {
+            // Terminal handles its own paste (Cmd+V on Mac, Ctrl+Shift+V on Linux)
+            if this.terminal_has_focus(window) { return; }
             // Script view: paste into script buffer
             if this.script.open {
                 if let Some(item) = cx.read_from_clipboard() {
