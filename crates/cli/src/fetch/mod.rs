@@ -5,6 +5,7 @@ mod common;
 mod gusto;
 mod mercury;
 mod qbo;
+mod ramp;
 mod sftp;
 mod stripe;
 mod xero;
@@ -261,6 +262,86 @@ Examples:
         quiet: bool,
     },
 
+    /// Fetch card transactions from Ramp
+    #[command(name = "ramp-card", after_help = "\
+Examples:
+  vgrid fetch ramp-card --from 2026-01-01 --to 2026-01-31
+  vgrid fetch ramp-card --from 2026-01-01 --to 2026-01-31 --out ramp-card.csv
+  vgrid fetch ramp-card --from 2026-01-01 --to 2026-01-31 --api-key ramp_token_...
+  vgrid fetch ramp-card --from 2026-01-01 --to 2026-01-31 --card card_id_123
+  RAMP_ACCESS_TOKEN=ramp_token_... vgrid fetch ramp-card --from 2026-01-01 --to 2026-01-31")]
+    RampCard {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// Ramp access token (default: RAMP_ACCESS_TOKEN env)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+
+        /// Transaction state filter (default: CLEARED)
+        #[arg(long)]
+        state: Option<String>,
+
+        /// Filter by card ID
+        #[arg(long)]
+        card: Option<String>,
+
+        /// Filter by entity ID
+        #[arg(long)]
+        entity: Option<String>,
+    },
+
+    /// Fetch business account transactions from Ramp
+    #[command(name = "ramp-bank", after_help = "\
+Examples:
+  vgrid fetch ramp-bank --from 2026-01-01 --to 2026-01-31
+  vgrid fetch ramp-bank --from 2026-01-01 --to 2026-01-31 --out ramp-bank.csv
+  vgrid fetch ramp-bank --from 2026-01-01 --to 2026-01-31 --api-key ramp_token_...
+  vgrid fetch ramp-bank --from 2026-01-01 --to 2026-01-31 --entity entity_id_123
+  RAMP_ACCESS_TOKEN=ramp_token_... vgrid fetch ramp-bank --from 2026-01-01 --to 2026-01-31")]
+    RampBank {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// Ramp access token (default: RAMP_ACCESS_TOKEN env)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+
+        /// Transaction state filter (default: CLEARED)
+        #[arg(long)]
+        state: Option<String>,
+
+        /// Filter by entity ID
+        #[arg(long)]
+        entity: Option<String>,
+    },
+
     /// Fetch bank transactions from Mercury
     #[command(after_help = "\
 Examples:
@@ -489,6 +570,25 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             account,
             quiet,
         } => brex::bank::cmd_fetch_brex_bank(from, to, api_key, out, account, quiet),
+        FetchCommands::RampCard {
+            from,
+            to,
+            api_key,
+            out,
+            quiet,
+            state,
+            card,
+            entity,
+        } => ramp::card::cmd_fetch_ramp_card(from, to, api_key, out, quiet, state, card, entity),
+        FetchCommands::RampBank {
+            from,
+            to,
+            api_key,
+            out,
+            quiet,
+            state,
+            entity,
+        } => ramp::bank::cmd_fetch_ramp_bank(from, to, api_key, out, quiet, state, entity),
         FetchCommands::Stripe {
             from,
             to,
