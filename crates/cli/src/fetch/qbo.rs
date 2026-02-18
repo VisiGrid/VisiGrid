@@ -616,6 +616,8 @@ impl QboClient {
     }
 
     /// Fetch Deposit entities for the given account and date range.
+    /// DepositToAccountRef is not queryable in QBO's API, so we fetch all
+    /// deposits in the date range and filter client-side by account ID.
     fn fetch_deposits(
         &mut self,
         account_id: &str,
@@ -624,11 +626,19 @@ impl QboClient {
         quiet: bool,
     ) -> Result<Vec<RawQboTransaction>, CliError> {
         let where_clause = format!(
-            "DepositToAccountRef = '{}' AND TxnDate >= '{}' AND TxnDate < '{}'",
-            account_id, from, to,
+            "TxnDate >= '{}' AND TxnDate < '{}'",
+            from, to,
         );
         let entities = self.query_entities("Deposit", &where_clause, quiet)?;
-        entities.iter().map(parse_deposit).collect()
+        let filtered: Vec<_> = entities
+            .iter()
+            .filter(|e| {
+                e["DepositToAccountRef"]["value"]
+                    .as_str()
+                    .map_or(false, |v| v == account_id)
+            })
+            .collect();
+        filtered.iter().map(|e| parse_deposit(e)).collect()
     }
 
     /// Fetch Purchase entities for the given account and date range.
@@ -1225,6 +1235,7 @@ mod tests {
                                 "Id": format!("{}", i),
                                 "TxnDate": "2026-01-15",
                                 "TotalAmt": 100.00,
+                                "DepositToAccountRef": { "value": "35" },
                             })
                         }).collect::<Vec<_>>()
                     }
@@ -1477,6 +1488,7 @@ mod tests {
                             "Id": "101",
                             "TxnDate": "2026-01-15",
                             "TotalAmt": 100.00,
+                            "DepositToAccountRef": { "value": "35" },
                         }]
                     }
                 }));
