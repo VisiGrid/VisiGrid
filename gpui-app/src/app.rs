@@ -4562,34 +4562,8 @@ impl Spreadsheet {
         self.open_terminal(window, cx);
         self.terminal.write_to_pty(b"\x15"); // Ctrl+U clear line
 
-        // Inject contract: printf context header so the user (and their scrollback) knows
-        // what's available. This runs as shell commands before the AI CLI starts.
-        let wb = self.workbook.read(cx);
-        let sheet = wb.active_sheet();
-        let (_, _, end_row, end_col) = crate::ai::find_used_range(sheet);
-        let sheet_name = wb.active_sheet().name.clone();
-        drop(wb);
-
-        let file_hint = match &self.current_file {
-            Some(p) => p.display().to_string(),
-            None => "(unsaved)".to_string(),
-        };
-        let ((top, left), (bottom, right)) = self.selection_range();
-        let sel_rows = bottom - top + 1;
-        let sel_cols = right - left + 1;
-
-        // Use printf %s to avoid shell interpretation of file paths / sheet names
-        let contract = format!(
-            "printf '\\n─── VisiGrid \\u2192 %s ───\\nFile: %s  Sheet: %s  Used: {}x{}  Sel: {}x{}\\nCtrl+Shift+S = paste selection | H = headers | P = file path\\n\\n' {} {} {}\n",
-            end_row + 1, end_col + 1, sel_rows, sel_cols,
-            shell_quote(cli.display_name()),
-            shell_quote(&file_hint),
-            shell_quote(&sheet_name),
-        );
-        self.terminal.write_to_pty(contract.as_bytes());
-
         // cd to workbook directory so the CLI discovers root context files
-        // (CLAUDE.md, AGENTS.md, GEMINI.md)
+        // (.visigrid/CLAUDE.md, AGENTS.md, GEMINI.md)
         if let Some(ref p) = self.current_file {
             if let Some(dir) = p.parent() {
                 let cd_cmd = format!("cd {} && ", shell_quote(&dir.display().to_string()));
@@ -5299,23 +5273,25 @@ Suggest formulas or next steps to validate it.
             return;
         };
 
-        // Paste only the data + a short visible prompt into the terminal
+        // Paste a visible prompt (seen by the user AND sent to the AI CLI).
+        // Full analysis instructions are in .visigrid/CLAUDE.md.
         let mut block = String::new();
         block.push_str(&format!(
-            "# Sheet: \"{}\" | Selection: {}x{}",
+            "# VisiGrid: Analyze Selection\n# Sheet: \"{}\" | Selection: {}x{}",
             sheet_name, sel_rows, sel_cols,
         ));
         if !headers.is_empty() {
             block.push_str(&format!(" | Headers: {}", headers.join(", ")));
         }
-        block.push('\n');
+        block.push_str("\n# Full context and instructions are in .visigrid/CLAUDE.md\n");
         if !tsv.trim().is_empty() {
             block.push_str(&tsv);
             block.push('\n');
         }
-        block.push_str("\nAnalyze this data. See .visigrid/CLAUDE.md for full context.\n");
+        block.push_str("\nAnalyze this data. Detect anomalies, outliers, or suspicious patterns.\n");
 
-        self.write_to_pty_bracketed(&block, cx);
+        // Write directly — AI CLI doesn't support bracketed paste escapes.
+        self.terminal.write_to_pty(block.as_bytes());
         self.status_message = Some("Sent selection to AI for analysis.".into());
         cx.notify();
     }
@@ -5762,23 +5738,28 @@ sheet:cols()
             return;
         };
 
-        // Paste only the data + a short visible prompt into the terminal
+        // Paste a visible prompt (seen by the user AND sent to the AI CLI).
+        // The Lua API contract and full instructions are in .visigrid/CLAUDE.md
+        // which the AI CLI auto-discovers.
         let mut block = String::new();
         block.push_str(&format!(
-            "# Sheet: \"{}\" | Selection: {}x{}",
+            "# VisiGrid: Build Lua Model\n# Sheet: \"{}\" | Selection: {}x{}",
             sheet_name, sel_rows, sel_cols,
         ));
         if !headers.is_empty() {
             block.push_str(&format!(" | Headers: {}", headers.join(", ")));
         }
-        block.push('\n');
+        block.push_str("\n# Lua API docs and rules are in .visigrid/CLAUDE.md\n");
         if !tsv.trim().is_empty() {
             block.push_str(&tsv);
             block.push('\n');
         }
         block.push_str("\nBuild a Lua model for this data. Output a single ```lua block.\n");
 
-        self.write_to_pty_bracketed(&block, cx);
+        // Write directly — not bracketed paste. The AI CLI is the foreground
+        // process and doesn't interpret bracketed paste escapes (they'd show
+        // as literal "200~" / "201~").
+        self.terminal.write_to_pty(block.as_bytes());
     }
 
     /// Capture the last ` ```lua ` block from terminal scrollback, preview it, and
