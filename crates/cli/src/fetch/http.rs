@@ -7,9 +7,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::exit_codes;
+use crate::signing;
 use crate::CliError;
 
 use super::common::{self, CanonicalRow, FetchClient};
@@ -37,6 +38,40 @@ pub struct MappingConfig {
     /// Sort order for deterministic output
     #[serde(default)]
     pub sort_by: Vec<String>,
+
+    /// Pagination configuration (optional — omit for single-request APIs)
+    #[serde(default)]
+    pub pagination: Option<PaginationConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaginationConfig {
+    /// "cursor" or "offset"
+    pub strategy: String,
+
+    /// Query param name for the cursor/offset value (e.g. "starting_after", "offset")
+    pub param: String,
+
+    /// Query param name for page size (e.g. "limit", "per_page")
+    pub page_size_param: String,
+
+    /// Number of items per page (default: 100)
+    #[serde(default = "default_page_size")]
+    pub page_size: u32,
+
+    /// For cursor: JSONPath to the next cursor value (e.g. "$.data[-1].id")
+    /// For offset: not used (offset is computed automatically)
+    #[serde(default)]
+    pub next_cursor_path: Option<String>,
+
+    /// JSONPath to boolean "has more" flag (e.g. "$.has_more")
+    /// If absent, stop when page returns fewer items than page_size
+    #[serde(default)]
+    pub has_more_path: Option<String>,
+}
+
+fn default_page_size() -> u32 {
+    100
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +133,40 @@ pub struct ColumnSpec {
 
 fn default_type() -> String {
     "string".to_string()
+}
+
+// ── Fingerprint types ───────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct FetchFingerprint {
+    schema_version: u32,
+    ran_at: String,
+    cli_version: String,
+    request: FetchFingerprintRequest,
+    mapping: FetchFingerprintMapping,
+    output: FetchFingerprintOutput,
+}
+
+#[derive(Debug, Serialize)]
+struct FetchFingerprintRequest {
+    url: String,
+    auth_method: String,
+    from: String,
+    to: String,
+    pages_fetched: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct FetchFingerprintMapping {
+    path: String,
+    blake3: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FetchFingerprintOutput {
+    row_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    csv_blake3: Option<String>,
 }
 
 // ── Auth resolution ─────────────────────────────────────────────────
@@ -184,7 +253,7 @@ fn json_extract<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serd
     let mut current = value;
 
     for segment in path.split('.') {
-        // Handle array indexing: field[0]
+        // Handle array indexing: field[0] or field[-1]
         if let Some(bracket_pos) = segment.find('[') {
             let field = &segment[..bracket_pos];
             let idx_str = &segment[bracket_pos + 1..segment.len() - 1];
@@ -193,8 +262,16 @@ fn json_extract<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serd
                 current = current.get(field)?;
             }
 
-            let idx: usize = idx_str.parse().ok()?;
-            current = current.get(idx)?;
+            if let Some(neg) = idx_str.strip_prefix('-') {
+                // Negative index: count from end
+                let offset: usize = neg.parse().ok()?;
+                let arr = current.as_array()?;
+                let idx = arr.len().checked_sub(offset)?;
+                current = arr.get(idx)?;
+            } else {
+                let idx: usize = idx_str.parse().ok()?;
+                current = current.get(idx)?;
+            }
         } else {
             current = current.get(segment)?;
         }
@@ -380,6 +457,8 @@ fn sort_rows(rows: &mut [CanonicalRow], sort_by: &[String]) {
 
 // ── Main command ────────────────────────────────────────────────────
 
+const DEFAULT_MAX_PAGES: u32 = 100;
+
 pub fn cmd_fetch_http(
     url: String,
     auth: String,
@@ -391,7 +470,9 @@ pub fn cmd_fetch_http(
     sample: bool,
     timeout: Option<u64>,
     max_items: Option<usize>,
+    max_pages: Option<u32>,
     quiet: bool,
+    fingerprint: Option<PathBuf>,
 ) -> Result<(), CliError> {
     // 1. Validate HTTPS
     if !url.starts_with("https://") {
@@ -469,7 +550,7 @@ pub fn cmd_fetch_http(
         eprintln!("Fetching {}...", request_url.as_str());
     }
 
-    // 6. Execute request
+    // 6. Execute request(s) — single or paginated
     let client = FetchClient::new("HTTP", |body, status| {
         // Generic error extractor for unknown APIs
         if let Some(msg) = body.get("message").and_then(|v| v.as_str()) {
@@ -492,96 +573,229 @@ pub fn cmd_fetch_http(
             hint: None,
         })?;
 
-    let response_body = client.request_with_retry(|_| {
-        let mut req = http.get(request_url.as_str());
+    let root_path = &config.root;
+    let pagination = &config.pagination;
+    let page_limit = max_pages.unwrap_or(DEFAULT_MAX_PAGES);
+    let num_pages = if pagination.is_some() { page_limit } else { 1 };
 
-        // Apply auth
-        req = match &auth_method {
-            AuthMethod::None => req,
-            AuthMethod::Bearer(token) => req.bearer_auth(token),
-            AuthMethod::Header(name, value) => req.header(name.as_str(), value.as_str()),
-            AuthMethod::Basic(user, pass) => req.basic_auth(user, Some(pass)),
+    let mut all_items: Vec<serde_json::Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut offset: u64 = 0;
+    let mut last_raw_response: Option<serde_json::Value> = None;
+    let mut pages_fetched: u32 = 0;
+
+    for page in 0..num_pages {
+        // Build page URL with pagination params
+        let mut page_url = request_url.clone();
+        if let Some(ref pag) = pagination {
+            match pag.strategy.as_str() {
+                "cursor" => {
+                    if let Some(ref c) = cursor {
+                        page_url.query_pairs_mut().append_pair(&pag.param, c);
+                    }
+                }
+                "offset" => {
+                    if page > 0 {
+                        page_url.query_pairs_mut().append_pair(&pag.param, &offset.to_string());
+                    }
+                }
+                other => {
+                    return Err(CliError {
+                        code: exit_codes::EXIT_USAGE,
+                        message: format!("unknown pagination strategy: '{}' (expected 'cursor' or 'offset')", other),
+                        hint: None,
+                    });
+                }
+            }
+            page_url.query_pairs_mut().append_pair(&pag.page_size_param, &pag.page_size.to_string());
+        }
+
+        let response_body = client.request_with_retry(|_| {
+            let mut req = http.get(page_url.as_str());
+            req = match &auth_method {
+                AuthMethod::None => req,
+                AuthMethod::Bearer(token) => req.bearer_auth(token),
+                AuthMethod::Header(name, value) => req.header(name.as_str(), value.as_str()),
+                AuthMethod::Basic(user, pass) => req.basic_auth(user, Some(pass)),
+            };
+            req
+        })?;
+
+        // Check response size (per-page cap)
+        let raw_json = serde_json::to_string(&response_body).unwrap_or_default();
+        if raw_json.len() > MAX_RESPONSE_BYTES {
+            return Err(CliError {
+                code: exit_codes::EXIT_FETCH_OVERFLOW,
+                message: format!(
+                    "response too large ({} bytes, max {} bytes)",
+                    raw_json.len(),
+                    MAX_RESPONSE_BYTES
+                ),
+                hint: Some("narrow the date range or increase --max-response-bytes".into()),
+            });
+        }
+
+        // Save raw response (first page only when paginating, or the single response)
+        if page == 0 {
+            if let Some(ref raw_path) = save_raw {
+                let pretty = serde_json::to_string_pretty(&response_body).unwrap_or_default();
+                std::fs::write(raw_path, pretty.as_bytes()).map_err(|e| {
+                    CliError::io(format!("cannot write raw response to {}: {}", raw_path.display(), e))
+                })?;
+                if !quiet {
+                    eprintln!("Raw response saved to {}", raw_path.display());
+                }
+            }
+
+            // Sample mode — print raw and exit (first page only)
+            if sample {
+                let pretty = serde_json::to_string_pretty(&response_body).unwrap_or_default();
+                println!("{}", pretty);
+                return Ok(());
+            }
+        }
+
+        // Extract root array from this page
+        let items_value = json_extract(&response_body, root_path).ok_or_else(|| {
+            mapping_error(format!(
+                "root path '{}' not found in response (page {})",
+                root_path, page + 1
+            ))
+        })?;
+
+        let page_items = items_value.as_array().ok_or_else(|| {
+            mapping_error(format!(
+                "root path '{}' resolved to {}, expected array",
+                root_path,
+                match items_value {
+                    serde_json::Value::Object(_) => "an object",
+                    serde_json::Value::String(_) => "a string",
+                    serde_json::Value::Number(_) => "a number",
+                    serde_json::Value::Bool(_) => "a boolean",
+                    serde_json::Value::Null => "null",
+                    _ => "non-array",
+                }
+            ))
+        })?;
+
+        let page_count = page_items.len();
+        all_items.extend(page_items.iter().cloned());
+
+        // Check total item cap
+        if all_items.len() > item_cap {
+            return Err(CliError {
+                code: exit_codes::EXIT_FETCH_OVERFLOW,
+                message: format!(
+                    "fetched {} items across {} pages, max {} allowed",
+                    all_items.len(),
+                    page + 1,
+                    item_cap
+                ),
+                hint: Some("narrow the date range or increase --max-items".into()),
+            });
+        }
+
+        pages_fetched += 1;
+
+        if !quiet && pagination.is_some() {
+            eprintln!("Page {}: {} items (total: {})", page + 1, page_count, all_items.len());
+        }
+
+        // No pagination config — single request, we're done
+        if pagination.is_none() {
+            break;
+        }
+
+        let pag = pagination.as_ref().unwrap();
+
+        // Determine whether there are more pages
+        let has_more = if let Some(ref hm_path) = pag.has_more_path {
+            match json_extract(&response_body, hm_path) {
+                Some(v) => v.as_bool().unwrap_or(false),
+                None => false,
+            }
+        } else {
+            // No has_more flag — stop when page is smaller than page_size
+            page_count >= pag.page_size as usize
         };
 
-        req
-    })?;
+        if !has_more {
+            break;
+        }
 
-    // Check response size (approximate — already parsed, but guards against huge objects)
-    let raw_json = serde_json::to_string(&response_body).unwrap_or_default();
-    if raw_json.len() > MAX_RESPONSE_BYTES {
-        return Err(CliError {
-            code: exit_codes::EXIT_FETCH_OVERFLOW,
-            message: format!(
-                "response too large ({} bytes, max {} bytes)",
-                raw_json.len(),
-                MAX_RESPONSE_BYTES
-            ),
-            hint: Some("narrow the date range or increase --max-response-bytes".into()),
-        });
+        // Empty page with has_more=true is a stuck condition
+        if page_count == 0 {
+            return Err(CliError {
+                code: exit_codes::EXIT_FETCH_UPSTREAM,
+                message: format!(
+                    "pagination stuck: page {} returned 0 items but has_more is true",
+                    page + 1
+                ),
+                hint: Some("check the API's pagination behavior or has_more_path in mapping".into()),
+            });
+        }
+
+        // Advance cursor/offset
+        match pag.strategy.as_str() {
+            "cursor" => {
+                let cursor_path = pag.next_cursor_path.as_deref().ok_or_else(|| CliError {
+                    code: exit_codes::EXIT_FETCH_MAPPING,
+                    message: "cursor pagination requires next_cursor_path in mapping".into(),
+                    hint: None,
+                })?;
+                let new_cursor = json_extract(&response_body, cursor_path)
+                    .map(|v| json_value_to_string(v))
+                    .filter(|s| !s.is_empty());
+                match new_cursor {
+                    Some(ref nc) if cursor.as_deref() == Some(nc.as_str()) => {
+                        return Err(CliError {
+                            code: exit_codes::EXIT_FETCH_UPSTREAM,
+                            message: format!(
+                                "pagination stuck: cursor unchanged ('{}') on page {}",
+                                nc, page + 1
+                            ),
+                            hint: Some("the API returned the same cursor twice — check next_cursor_path".into()),
+                        });
+                    }
+                    Some(nc) => cursor = Some(nc),
+                    None => break, // No cursor value means end of data
+                }
+            }
+            "offset" => {
+                offset += pag.page_size as u64;
+            }
+            _ => unreachable!(), // validated above
+        }
+
+        last_raw_response = Some(response_body);
     }
 
-    // 7. Save raw response if requested
-    if let Some(ref raw_path) = save_raw {
-        let pretty = serde_json::to_string_pretty(&response_body).unwrap_or_default();
-        std::fs::write(raw_path, pretty.as_bytes()).map_err(|e| {
-            CliError::io(format!("cannot write raw response to {}: {}", raw_path.display(), e))
-        })?;
-        if !quiet {
-            eprintln!("Raw response saved to {}", raw_path.display());
+    // Check if we hit the max-pages cap with more data remaining
+    if pagination.is_some() && all_items.len() > 0 {
+        let pag = pagination.as_ref().unwrap();
+        // If the last page was full-sized and we consumed all allowed pages, warn
+        if all_items.len() % (pag.page_size as usize) == 0
+            && (all_items.len() / pag.page_size as usize) >= page_limit as usize
+        {
+            if !quiet {
+                eprintln!(
+                    "Warning: reached --max-pages limit ({}). There may be more data.",
+                    page_limit
+                );
+            }
         }
     }
 
-    // 8. Sample mode — print raw and exit
-    if sample {
-        let pretty = serde_json::to_string_pretty(&response_body).unwrap_or_default();
-        println!("{}", pretty);
-        return Ok(());
-    }
-
-    // 9. Extract root array
-    let root_path = &config.root;
-    let items_value = json_extract(&response_body, root_path).ok_or_else(|| {
-        mapping_error(format!(
-            "root path '{}' not found in response",
-            root_path
-        ))
-    })?;
-
-    let items = items_value.as_array().ok_or_else(|| {
-        mapping_error(format!(
-            "root path '{}' resolved to {}, expected array",
-            root_path,
-            match items_value {
-                serde_json::Value::Object(_) => "an object",
-                serde_json::Value::String(_) => "a string",
-                serde_json::Value::Number(_) => "a number",
-                serde_json::Value::Bool(_) => "a boolean",
-                serde_json::Value::Null => "null",
-                _ => "non-array",
-            }
-        ))
-    })?;
-
-    // 10. Check item cap
-    if items.len() > item_cap {
-        return Err(CliError {
-            code: exit_codes::EXIT_FETCH_OVERFLOW,
-            message: format!(
-                "response contains {} items, max {} allowed",
-                items.len(),
-                item_cap
-            ),
-            hint: Some("narrow the date range or increase --max-items".into()),
-        });
-    }
+    // Drop the last raw response to free memory
+    drop(last_raw_response);
 
     if !quiet {
-        eprintln!("Extracted {} items from {}", items.len(), root_path);
+        eprintln!("Extracted {} items from {}", all_items.len(), root_path);
     }
 
-    // 11. Map each item to CanonicalRow
-    let mut rows: Vec<CanonicalRow> = Vec::with_capacity(items.len());
-    for (idx, item) in items.iter().enumerate() {
+    // 7. Map each item to CanonicalRow
+    let mut rows: Vec<CanonicalRow> = Vec::with_capacity(all_items.len());
+    for (idx, item) in all_items.iter().enumerate() {
         match item_to_row(item, &config) {
             Ok(row) => rows.push(row),
             Err(mut e) => {
@@ -603,6 +817,55 @@ pub fn cmd_fetch_http(
             rows.len(),
             out_label,
         );
+    }
+
+    // 14. Emit signed fingerprint if requested
+    if let Some(ref fp_path) = fingerprint {
+        let mapping_blake3 = signing::hash_file_blake3(&map_file)?;
+
+        let csv_blake3 = match &out {
+            Some(csv_path) => Some(signing::hash_file_blake3(csv_path)?),
+            None => None,
+        };
+
+        let fp = FetchFingerprint {
+            schema_version: 1,
+            ran_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            cli_version: common::USER_AGENT.to_string(),
+            request: FetchFingerprintRequest {
+                url: request_url.to_string(),
+                auth_method: auth.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                pages_fetched,
+            },
+            mapping: FetchFingerprintMapping {
+                path: map_file.display().to_string(),
+                blake3: mapping_blake3,
+            },
+            output: FetchFingerprintOutput {
+                row_count: rows.len(),
+                csv_blake3,
+            },
+        };
+
+        let payload = serde_json::to_value(&fp).map_err(|e| {
+            CliError::io(format!("fingerprint serialization error: {e}"))
+        })?;
+
+        let (sk, vk) = signing::load_or_generate_key(&None)?;
+        let envelope = signing::sign_payload("vgrid.fetch_proof.v1", &payload, &sk, &vk)?;
+
+        let json = serde_json::to_string_pretty(&envelope).map_err(|e| {
+            CliError::io(format!("fingerprint serialization error: {e}"))
+        })?;
+        std::fs::write(fp_path, json.as_bytes()).map_err(|e| {
+            CliError::io(format!("cannot write fingerprint to {}: {e}", fp_path.display()))
+        })?;
+
+        if !quiet {
+            eprintln!("Fingerprint written to {}", fp_path.display());
+        }
     }
 
     Ok(())
@@ -973,6 +1236,239 @@ effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,
              GOT:\n{}\nEXPECTED:\n{}",
             csv_output, expected
         );
+    }
+
+    #[test]
+    fn test_json_extract_negative_index() {
+        let json = serde_json::json!({"data": [{"id": "a"}, {"id": "b"}, {"id": "c"}]});
+        assert_eq!(
+            json_extract(&json, "$.data[-1].id").unwrap(),
+            &serde_json::json!("c")
+        );
+    }
+
+    #[test]
+    fn test_pagination_config_parse_cursor() {
+        let json = r#"{
+            "root": "$.data",
+            "pagination": {
+                "strategy": "cursor",
+                "param": "starting_after",
+                "page_size_param": "limit",
+                "page_size": 100,
+                "next_cursor_path": "$.data[-1].id",
+                "has_more_path": "$.has_more"
+            },
+            "columns": {
+                "effective_date": "$.date",
+                "posted_date": { "path": "$.posted", "optional": true },
+                "amount_minor": { "path": "$.amount", "transform": "cents" },
+                "currency": { "const": "USD" },
+                "type": "$.type",
+                "source": { "const": "test" },
+                "source_id": "$.id",
+                "group_id": { "path": "$.group", "optional": true },
+                "description": { "path": "$.desc", "optional": true }
+            }
+        }"#;
+
+        let config: MappingConfig = serde_json::from_str(json).unwrap();
+        let pag = config.pagination.unwrap();
+        assert_eq!(pag.strategy, "cursor");
+        assert_eq!(pag.param, "starting_after");
+        assert_eq!(pag.page_size_param, "limit");
+        assert_eq!(pag.page_size, 100);
+        assert_eq!(pag.next_cursor_path.as_deref(), Some("$.data[-1].id"));
+        assert_eq!(pag.has_more_path.as_deref(), Some("$.has_more"));
+    }
+
+    #[test]
+    fn test_pagination_config_parse_offset() {
+        let json = r#"{
+            "root": "$.transactions",
+            "pagination": {
+                "strategy": "offset",
+                "param": "offset",
+                "page_size_param": "limit",
+                "page_size": 500
+            },
+            "columns": {
+                "effective_date": "$.date",
+                "posted_date": { "path": "$.posted", "optional": true },
+                "amount_minor": { "path": "$.amount", "transform": "cents" },
+                "currency": { "const": "USD" },
+                "type": "$.type",
+                "source": { "const": "test" },
+                "source_id": "$.id",
+                "group_id": { "path": "$.group", "optional": true },
+                "description": { "path": "$.desc", "optional": true }
+            }
+        }"#;
+
+        let config: MappingConfig = serde_json::from_str(json).unwrap();
+        let pag = config.pagination.unwrap();
+        assert_eq!(pag.strategy, "offset");
+        assert_eq!(pag.param, "offset");
+        assert_eq!(pag.page_size, 500);
+        assert!(pag.has_more_path.is_none());
+    }
+
+    #[test]
+    fn test_pagination_config_default_page_size() {
+        let json = r#"{
+            "root": "$.data",
+            "pagination": {
+                "strategy": "cursor",
+                "param": "cursor",
+                "page_size_param": "limit"
+            },
+            "columns": {
+                "effective_date": "$.date",
+                "posted_date": { "path": "$.posted", "optional": true },
+                "amount_minor": { "path": "$.amount", "transform": "cents" },
+                "currency": { "const": "USD" },
+                "type": "$.type",
+                "source": { "const": "test" },
+                "source_id": "$.id",
+                "group_id": { "path": "$.group", "optional": true },
+                "description": { "path": "$.desc", "optional": true }
+            }
+        }"#;
+
+        let config: MappingConfig = serde_json::from_str(json).unwrap();
+        let pag = config.pagination.unwrap();
+        assert_eq!(pag.page_size, 100); // default
+    }
+
+    #[test]
+    fn test_no_pagination_config_backward_compat() {
+        // Existing mapping without pagination field should still parse
+        let json = r#"{
+            "root": "$.data",
+            "columns": {
+                "effective_date": "$.date",
+                "posted_date": { "path": "$.posted", "optional": true },
+                "amount_minor": { "path": "$.amount", "transform": "cents" },
+                "currency": { "const": "USD" },
+                "type": "$.type",
+                "source": { "const": "test" },
+                "source_id": "$.id",
+                "group_id": { "path": "$.group", "optional": true },
+                "description": { "path": "$.desc", "optional": true }
+            }
+        }"#;
+
+        let config: MappingConfig = serde_json::from_str(json).unwrap();
+        assert!(config.pagination.is_none());
+    }
+
+    #[test]
+    fn test_fingerprint_json_structure() {
+        let fp = FetchFingerprint {
+            schema_version: 1,
+            ran_at: "2026-01-15T10:00:00Z".to_string(),
+            cli_version: "vgrid/0.7.0".to_string(),
+            request: FetchFingerprintRequest {
+                url: "https://api.vendor.com/v1/payments?start_date=2026-01-01&end_date=2026-01-31".to_string(),
+                auth_method: "bearer-env:VENDOR_TOKEN".to_string(),
+                from: "2026-01-01".to_string(),
+                to: "2026-01-31".to_string(),
+                pages_fetched: 3,
+            },
+            mapping: FetchFingerprintMapping {
+                path: "mapping.json".to_string(),
+                blake3: "a".repeat(64),
+            },
+            output: FetchFingerprintOutput {
+                row_count: 150,
+                csv_blake3: Some("b".repeat(64)),
+            },
+        };
+
+        let json = serde_json::to_value(&fp).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["ran_at"], "2026-01-15T10:00:00Z");
+        assert_eq!(json["cli_version"], "vgrid/0.7.0");
+        assert_eq!(json["request"]["url"], "https://api.vendor.com/v1/payments?start_date=2026-01-01&end_date=2026-01-31");
+        assert_eq!(json["request"]["auth_method"], "bearer-env:VENDOR_TOKEN");
+        assert_eq!(json["request"]["from"], "2026-01-01");
+        assert_eq!(json["request"]["to"], "2026-01-31");
+        assert_eq!(json["request"]["pages_fetched"], 3);
+        assert_eq!(json["mapping"]["path"], "mapping.json");
+        assert_eq!(json["mapping"]["blake3"], "a".repeat(64));
+        assert_eq!(json["output"]["row_count"], 150);
+        assert_eq!(json["output"]["csv_blake3"], "b".repeat(64));
+    }
+
+    #[test]
+    fn test_fingerprint_auth_method_is_flag_not_secret() {
+        // The auth_method field should store the flag string (e.g. "bearer-env:VENDOR_TOKEN"),
+        // not the resolved secret value.
+        let fp = FetchFingerprint {
+            schema_version: 1,
+            ran_at: "2026-01-15T10:00:00Z".to_string(),
+            cli_version: "vgrid/0.7.0".to_string(),
+            request: FetchFingerprintRequest {
+                url: "https://api.example.com/data".to_string(),
+                auth_method: "bearer-env:VENDOR_TOKEN".to_string(),
+                from: "2026-01-01".to_string(),
+                to: "2026-01-31".to_string(),
+                pages_fetched: 1,
+            },
+            mapping: FetchFingerprintMapping {
+                path: "m.json".to_string(),
+                blake3: "c".repeat(64),
+            },
+            output: FetchFingerprintOutput {
+                row_count: 0,
+                csv_blake3: None,
+            },
+        };
+
+        let json = serde_json::to_string(&fp).unwrap();
+        assert!(json.contains("bearer-env:VENDOR_TOKEN"));
+        // The resolved secret should never appear
+        assert!(!json.contains("sk_live_"));
+        assert!(!json.contains("secret"));
+    }
+
+    #[test]
+    fn test_fingerprint_csv_blake3_omitted_for_stdout() {
+        let fp = FetchFingerprint {
+            schema_version: 1,
+            ran_at: "2026-01-15T10:00:00Z".to_string(),
+            cli_version: "vgrid/0.7.0".to_string(),
+            request: FetchFingerprintRequest {
+                url: "https://api.example.com/data".to_string(),
+                auth_method: "none".to_string(),
+                from: "2026-01-01".to_string(),
+                to: "2026-01-31".to_string(),
+                pages_fetched: 1,
+            },
+            mapping: FetchFingerprintMapping {
+                path: "m.json".to_string(),
+                blake3: "d".repeat(64),
+            },
+            output: FetchFingerprintOutput {
+                row_count: 5,
+                csv_blake3: None, // stdout mode
+            },
+        };
+
+        let json = serde_json::to_value(&fp).unwrap();
+        assert!(json["output"].get("csv_blake3").is_none());
+    }
+
+    #[test]
+    fn test_mapping_hash_determinism() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mapping.json");
+        std::fs::write(&path, r#"{"root":"$.data","columns":{}}"#).unwrap();
+
+        let hash1 = signing::hash_file_blake3(&path).unwrap();
+        let hash2 = signing::hash_file_blake3(&path).unwrap();
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), 64);
     }
 
     #[test]

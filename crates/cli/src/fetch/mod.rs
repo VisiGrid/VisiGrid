@@ -449,9 +449,17 @@ Examples:
         #[arg(long, default_value = "10000")]
         max_items: Option<usize>,
 
+        /// Maximum pages to fetch when paginating (default: 100)
+        #[arg(long)]
+        max_pages: Option<u32>,
+
         /// Suppress progress on stderr
         #[arg(long, short = 'q')]
         quiet: bool,
+
+        /// Write a signed request fingerprint (JSON) to this path
+        #[arg(long)]
+        fingerprint: Option<PathBuf>,
     },
 
     /// Download files from an SFTP server
@@ -695,8 +703,10 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             sample,
             timeout,
             max_items,
+            max_pages,
             quiet,
-        } => http::cmd_fetch_http(url, auth, from, to, mapping, out, save_raw, sample, timeout, max_items, quiet),
+            fingerprint,
+        } => http::cmd_fetch_http(url, auth, from, to, mapping, out, save_raw, sample, timeout, max_items, max_pages, quiet, fingerprint),
         FetchCommands::Sftp {
             host,
             port,
