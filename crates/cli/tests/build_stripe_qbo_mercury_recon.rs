@@ -159,21 +159,21 @@ fn build_template(out_path: &Path) {
     wb.set_cell_value_tracked(si, 0, 1, "Amount");
     wb.set_cell_value_tracked(si, 0, 2, "Status");
 
-    // Rows 2-6: category breakdowns
+    // Rows 2-6: category breakdowns (divide by 100: amount_minor → dollars)
     wb.set_cell_value_tracked(si, 1, 0, "Charges");
-    wb.set_cell_value_tracked(si, 1, 1, "=SUMIF(stripe!E$2:E$1001,\"charge\",stripe!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 1, 1, "=SUMIF(stripe!E$2:E$1001,\"charge\",stripe!C$2:C$1001)/100");
 
     wb.set_cell_value_tracked(si, 2, 0, "Fees");
-    wb.set_cell_value_tracked(si, 2, 1, "=SUMIF(stripe!E$2:E$1001,\"fee\",stripe!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 2, 1, "=SUMIF(stripe!E$2:E$1001,\"fee\",stripe!C$2:C$1001)/100");
 
     wb.set_cell_value_tracked(si, 3, 0, "Refunds");
-    wb.set_cell_value_tracked(si, 3, 1, "=SUMIF(stripe!E$2:E$1001,\"refund\",stripe!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 3, 1, "=SUMIF(stripe!E$2:E$1001,\"refund\",stripe!C$2:C$1001)/100");
 
     wb.set_cell_value_tracked(si, 4, 0, "Payouts");
-    wb.set_cell_value_tracked(si, 4, 1, "=SUMIF(stripe!E$2:E$1001,\"payout\",stripe!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 4, 1, "=SUMIF(stripe!E$2:E$1001,\"payout\",stripe!C$2:C$1001)/100");
 
     wb.set_cell_value_tracked(si, 5, 0, "Adjustments");
-    wb.set_cell_value_tracked(si, 5, 1, "=SUMIF(stripe!E$2:E$1001,\"adjustment\",stripe!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 5, 1, "=SUMIF(stripe!E$2:E$1001,\"adjustment\",stripe!C$2:C$1001)/100");
 
     // Row 7: Net (should be 0 for balanced books)
     wb.set_cell_value_tracked(si, 6, 0, "Net");
@@ -187,29 +187,29 @@ fn build_template(out_path: &Path) {
     wb.set_cell_value_tracked(si, 8, 1, "Amount");
     wb.set_cell_value_tracked(si, 8, 2, "Status");
 
-    // Row 10: Stripe Payouts total
+    // Row 10: Stripe Payouts total (divide by 100: cents → dollars)
     wb.set_cell_value_tracked(si, 9, 0, "Stripe Payouts");
-    wb.set_cell_value_tracked(si, 9, 1, "=SUM(stripe!J$2:J$1001)");
+    wb.set_cell_value_tracked(si, 9, 1, "=SUM(stripe!J$2:J$1001)/100");
 
     // Row 11: Matched in Mercury
     wb.set_cell_value_tracked(si, 10, 0, "Matched in Mercury");
-    wb.set_cell_value_tracked(si, 10, 1, "=SUMIF(stripe!L$2:L$1001,\"MATCHED\",stripe!J$2:J$1001)");
+    wb.set_cell_value_tracked(si, 10, 1, "=SUMIF(stripe!L$2:L$1001,\"MATCHED\",stripe!J$2:J$1001)/100");
 
     // Row 12: Matched in QBO
     wb.set_cell_value_tracked(si, 11, 0, "Matched in QBO");
-    wb.set_cell_value_tracked(si, 11, 1, "=SUMIF(stripe!N$2:N$1001,\"MATCHED\",stripe!J$2:J$1001)");
+    wb.set_cell_value_tracked(si, 11, 1, "=SUMIF(stripe!N$2:N$1001,\"MATCHED\",stripe!J$2:J$1001)/100");
 
     // Row 13: Fully Matched (both mercury + qbo)
     wb.set_cell_value_tracked(si, 12, 0, "Fully Matched (3-way)");
-    wb.set_cell_value_tracked(si, 12, 1, "=SUMIF(stripe!O$2:O$1001,\"MATCHED\",stripe!J$2:J$1001)");
+    wb.set_cell_value_tracked(si, 12, 1, "=SUMIF(stripe!O$2:O$1001,\"MATCHED\",stripe!J$2:J$1001)/100");
 
     // Row 14: Partially Matched
     wb.set_cell_value_tracked(si, 13, 0, "Partially Matched");
-    wb.set_cell_value_tracked(si, 13, 1, "=SUMIF(stripe!O$2:O$1001,\"PARTIAL\",stripe!J$2:J$1001)");
+    wb.set_cell_value_tracked(si, 13, 1, "=SUMIF(stripe!O$2:O$1001,\"PARTIAL\",stripe!J$2:J$1001)/100");
 
     // Row 15: Unmatched
     wb.set_cell_value_tracked(si, 14, 0, "Unmatched Payouts");
-    wb.set_cell_value_tracked(si, 14, 1, "=SUMIF(stripe!O$2:O$1001,\"UNMATCHED\",stripe!J$2:J$1001)");
+    wb.set_cell_value_tracked(si, 14, 1, "=SUMIF(stripe!O$2:O$1001,\"UNMATCHED\",stripe!J$2:J$1001)/100");
 
     // Row 16: Variance
     wb.set_cell_value_tracked(si, 15, 0, "Variance");
@@ -243,15 +243,15 @@ fn build_template(out_path: &Path) {
 
     wb.set_cell_value_tracked(si, 24, 0, "Total Deposits");
     wb.set_cell_value_tracked(si, 24, 1, "=COUNTIF(qbo!E$2:E$1001,\"deposit\")");
-    wb.set_cell_value_tracked(si, 24, 2, "=SUMIF(qbo!E$2:E$1001,\"deposit\",qbo!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 24, 2, "=SUMIF(qbo!E$2:E$1001,\"deposit\",qbo!C$2:C$1001)/100");
 
     wb.set_cell_value_tracked(si, 25, 0, "Matched to Stripe");
     wb.set_cell_value_tracked(si, 25, 1, "=COUNTIF(qbo!L$2:L$1001,\"MATCHED\")");
-    wb.set_cell_value_tracked(si, 25, 2, "=SUMIF(qbo!L$2:L$1001,\"MATCHED\",qbo!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 25, 2, "=SUMIF(qbo!L$2:L$1001,\"MATCHED\",qbo!C$2:C$1001)/100");
 
     wb.set_cell_value_tracked(si, 26, 0, "Unmatched");
     wb.set_cell_value_tracked(si, 26, 1, "=COUNTIF(qbo!L$2:L$1001,\"UNMATCHED\")");
-    wb.set_cell_value_tracked(si, 26, 2, "=SUMIF(qbo!L$2:L$1001,\"UNMATCHED\",qbo!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 26, 2, "=SUMIF(qbo!L$2:L$1001,\"UNMATCHED\",qbo!C$2:C$1001)/100");
 
     // Row 28: blank separator
 
@@ -262,15 +262,15 @@ fn build_template(out_path: &Path) {
 
     wb.set_cell_value_tracked(si, 29, 0, "Total Deposits");
     wb.set_cell_value_tracked(si, 29, 1, "=COUNTIF(mercury!E$2:E$1001,\"deposit\")");
-    wb.set_cell_value_tracked(si, 29, 2, "=SUMIF(mercury!E$2:E$1001,\"deposit\",mercury!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 29, 2, "=SUMIF(mercury!E$2:E$1001,\"deposit\",mercury!C$2:C$1001)/100");
 
     wb.set_cell_value_tracked(si, 30, 0, "Matched to Stripe");
     wb.set_cell_value_tracked(si, 30, 1, "=COUNTIF(mercury!L$2:L$1001,\"MATCHED\")");
-    wb.set_cell_value_tracked(si, 30, 2, "=SUMIF(mercury!L$2:L$1001,\"MATCHED\",mercury!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 30, 2, "=SUMIF(mercury!L$2:L$1001,\"MATCHED\",mercury!C$2:C$1001)/100");
 
     wb.set_cell_value_tracked(si, 31, 0, "Unmatched");
     wb.set_cell_value_tracked(si, 31, 1, "=COUNTIF(mercury!L$2:L$1001,\"UNMATCHED\")");
-    wb.set_cell_value_tracked(si, 31, 2, "=SUMIF(mercury!L$2:L$1001,\"UNMATCHED\",mercury!C$2:C$1001)");
+    wb.set_cell_value_tracked(si, 31, 2, "=SUMIF(mercury!L$2:L$1001,\"UNMATCHED\",mercury!C$2:C$1001)/100");
 
     // Row 33: blank separator
 
