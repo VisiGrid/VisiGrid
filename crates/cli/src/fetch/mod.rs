@@ -3,6 +3,7 @@
 mod brex;
 mod common;
 mod gusto;
+pub(crate) mod http;
 mod mercury;
 mod qbo;
 mod ramp;
@@ -375,6 +376,84 @@ Examples:
         quiet: bool,
     },
 
+    /// Fetch data from any HTTP API using a mapping file
+    #[command(after_help = "\
+Examples:
+  # Fetch with bearer token from env var
+  vgrid fetch http --url https://api.vendor.com/v1/payments \\
+    --auth bearer-env:VENDOR_API_TOKEN --from 2026-01-01 --to 2026-01-31 \\
+    --map mapping.json --out payments.csv
+
+  # Preview raw API response (no mapping applied)
+  vgrid fetch http --url https://api.vendor.com/v1/payments \\
+    --auth bearer-env:VENDOR_API_TOKEN --from 2026-01-01 --to 2026-01-31 \\
+    --map mapping.json --sample
+
+  # Save raw response for audit trail
+  vgrid fetch http --url https://api.vendor.com/v1/payments \\
+    --auth bearer-env:VENDOR_API_TOKEN --from 2026-01-01 --to 2026-01-31 \\
+    --map mapping.json --out payments.csv --save-raw raw.json
+
+  # API key in custom header
+  vgrid fetch http --url https://api.vendor.com/v1/data \\
+    --auth header-env:X-API-Key:MY_API_KEY --from 2026-01-01 --to 2026-01-31 \\
+    --map mapping.json --out data.csv
+
+  # No auth (public API)
+  vgrid fetch http --url https://api.example.com/rates \\
+    --auth none --from 2026-01-01 --to 2026-01-31 \\
+    --map mapping.json --out rates.csv")]
+    Http {
+        /// HTTPS URL of the API endpoint
+        #[arg(long)]
+        url: String,
+
+        /// Auth method (env-var indirection for safety)
+        ///
+        /// bearer-env:VAR — Bearer token from environment variable
+        /// header-env:NAME:VAR — Custom header from environment variable
+        /// basic-env:USER_VAR:PASS_VAR — Basic auth from environment variables
+        /// none — No authentication
+        #[arg(long)]
+        auth: String,
+
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// Path to mapping JSON file
+        #[arg(long, visible_alias = "map")]
+        mapping: PathBuf,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Save raw API response to file (for audit trail)
+        #[arg(long)]
+        save_raw: Option<PathBuf>,
+
+        /// Print raw response JSON and exit (no mapping)
+        #[arg(long)]
+        sample: bool,
+
+        /// Request timeout in seconds (default: 15)
+        #[arg(long)]
+        timeout: Option<u64>,
+
+        /// Maximum items to process (default: 10000)
+        #[arg(long, default_value = "10000")]
+        max_items: Option<usize>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
+
     /// Download files from an SFTP server
     #[command(after_help = "\
 Examples:
@@ -605,6 +684,19 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             account,
             quiet,
         } => mercury::cmd_fetch_mercury(from, to, api_key, out, account, quiet),
+        FetchCommands::Http {
+            url,
+            auth,
+            from,
+            to,
+            mapping,
+            out,
+            save_raw,
+            sample,
+            timeout,
+            max_items,
+            quiet,
+        } => http::cmd_fetch_http(url, auth, from, to, mapping, out, save_raw, sample, timeout, max_items, quiet),
         FetchCommands::Sftp {
             host,
             port,

@@ -151,6 +151,12 @@ pub const EXIT_FETCH_SFTP_CONNECT: u8 = 55;
 /// SFTP host key verification failed (unknown or mismatched).
 pub const EXIT_FETCH_SFTP_HOST_KEY: u8 = 56;
 
+/// Mapping error: bad mapping file, missing root, type mismatch, etc.
+pub const EXIT_FETCH_MAPPING: u8 = 57;
+
+/// Response too large or too many items.
+pub const EXIT_FETCH_OVERFLOW: u8 = 58;
+
 // =============================================================================
 // Recon (60-69) — reconciliation engine codes
 // =============================================================================

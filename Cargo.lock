@@ -7054,6 +7054,7 @@ dependencies = [
  "ssh2",
  "tempfile",
  "unicode-width 0.2.0",
+ "url",
  "uuid",
  "visigrid-config",
  "visigrid-engine",

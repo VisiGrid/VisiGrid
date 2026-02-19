@@ -1,11 +1,49 @@
 //! Shared infrastructure for `vgrid fetch` adapters.
 //!
-//! Each adapter (stripe, mercury, …) reuses:
+//! Each adapter (stripe, mercury, http, …) reuses:
 //! - `FetchClient` — HTTP client with retry / backoff / error classification
 //! - `CanonicalRow` — the 9-column CSV schema all adapters emit
 //! - `resolve_api_key` — flag > env > error
 //! - `parse_date_range` — parse + validate `--from` / `--to`
 //! - `write_csv` — open output, write header + rows, flush
+//!
+//! # CanonicalRow Contract
+//!
+//! Every fetch adapter MUST produce rows conforming to this contract.
+//! Downstream reconciliation, fingerprinting, and diffing depend on it.
+//! Breaking changes here break production fingerprints silently.
+//!
+//! ## Columns (in order)
+//!
+//! | #  | Column           | Type     | Required | Description                          |
+//! |----|------------------|----------|----------|--------------------------------------|
+//! | 1  | `effective_date` | `String` | Yes      | When the transaction occurred         |
+//! | 2  | `posted_date`    | `String` | No       | When the transaction settled/posted   |
+//! | 3  | `amount_minor`   | `i64`    | Yes      | Amount in minor units (cents). Never float. |
+//! | 4  | `currency`       | `String` | Yes      | ISO 4217 uppercase (USD, EUR, GBP)   |
+//! | 5  | `type`           | `String` | Yes      | Transaction type (charge, refund, …)  |
+//! | 6  | `source`         | `String` | Yes      | Adapter name (stripe, mercury, …)     |
+//! | 7  | `source_id`      | `String` | Yes      | Unique ID from the upstream system    |
+//! | 8  | `group_id`       | `String` | No       | Grouping key (payout ID, invoice, …)  |
+//! | 9  | `description`    | `String` | No       | Human-readable memo                   |
+//!
+//! ## Invariants
+//!
+//! - **Column order**: Fixed. Serialized by `serde` in struct field order.
+//!   CSV header is always `effective_date,posted_date,amount_minor,…`.
+//! - **Sort order**: Deterministic. Default: `group_id`, `effective_date`,
+//!   `source_id`. Adapters may override via `sort_by`. Ties are stable
+//!   (Rust's `sort_by` is stable). Two runs over the same data MUST
+//!   produce byte-identical CSV.
+//! - **Dates**: ISO 8601 date strings (`YYYY-MM-DD`). Timezone handling
+//!   is the adapter's responsibility — convert to UTC or local date before
+//!   writing. Empty string for missing optional dates.
+//! - **Amounts**: Always `i64` minor units. Use `parse_money_string()` for
+//!   decimal-to-cents conversion (integer math, no floats, max 2 decimal
+//!   places). Negative values for refunds/credits.
+//! - **Optional columns**: Empty string `""` when absent. Never `null`,
+//!   never omitted. CSV always has 9 columns per row.
+//! - **Encoding**: UTF-8. The `csv` crate handles quoting/escaping.
 
 use std::io::Write;
 use std::path::PathBuf;
