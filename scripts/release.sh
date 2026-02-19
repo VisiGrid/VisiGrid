@@ -123,7 +123,7 @@ else
     bold "Bumping version: $CURRENT_VERSION -> $VERSION"
     run sed_i "s/^version = \"$CURRENT_VERSION\"/version = \"$VERSION\"/" "$REPO_ROOT/Cargo.toml"
     bold "Updating Cargo.lock..."
-    run cargo generate-lockfile
+    run cargo check --workspace
     run git add Cargo.toml Cargo.lock
     run git commit -m "Bump version to $VERSION"
     run git push origin main

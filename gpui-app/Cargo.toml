@@ -35,8 +35,9 @@ visigrid-io = { workspace = true }
 visigrid-config = { workspace = true }
 visigrid-license = { workspace = true }
 
-# gpui
-gpui = { git = "https://github.com/zed-industries/zed" }
+# gpui (pinned to avoid breakage from upstream API changes)
+gpui = { git = "https://github.com/zed-industries/zed", rev = "6a9d259f" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "6a9d259f" }
 
 # External deps
 serde = { workspace = true }
@@ -76,6 +77,9 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "6a9d259f", features = ["wayland", "x11"] }
 
 [features]
 default = []

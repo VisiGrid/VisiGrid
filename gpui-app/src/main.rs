@@ -452,7 +452,7 @@ fn main() {
     // on_open_urls callback pushes here; polling task inside run() consumes.
     let pending_open_urls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let app = Application::new();
+    let app = Application::with_platform(gpui_platform::current_platform(false));
 
     // Register handler for files opened from Finder / "Open With" menu
     app.on_open_urls({
