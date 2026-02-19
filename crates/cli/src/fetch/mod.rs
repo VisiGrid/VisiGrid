@@ -1,7 +1,10 @@
 //! `vgrid fetch` — pull data from external sources into canonical CSV.
 
+mod authorizenet;
 mod brex;
 mod common;
+mod digits;
+mod fiserv;
 mod gusto;
 pub(crate) mod http;
 mod mercury;
@@ -46,6 +49,83 @@ Examples:
         /// Stripe Connect account ID (acct_...)
         #[arg(long)]
         account: Option<String>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
+
+    /// Fetch settled transactions from Authorize.net
+    #[command(after_help = "\
+Examples:
+  vgrid fetch authorizenet --from 2026-01-01 --to 2026-01-31
+  vgrid fetch authorizenet --from 2026-01-01 --to 2026-01-31 --out authorizenet.csv
+  vgrid fetch authorizenet --from 2026-01-01 --to 2026-01-31 --sandbox
+  AUTHORIZENET_API_LOGIN_ID=xxx AUTHORIZENET_TRANSACTION_KEY=yyy vgrid fetch authorizenet --from 2026-01-01 --to 2026-01-31")]
+    Authorizenet {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// API Login ID (default: AUTHORIZENET_API_LOGIN_ID env)
+        #[arg(long)]
+        api_login_id: Option<String>,
+
+        /// Transaction Key (default: AUTHORIZENET_TRANSACTION_KEY env)
+        #[arg(long)]
+        transaction_key: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+
+        /// Use sandbox API endpoint
+        #[arg(long)]
+        sandbox: bool,
+    },
+
+    /// Fetch settled transactions from Fiserv/CardPointe
+    #[command(after_help = "\
+Examples:
+  vgrid fetch fiserv --from 2026-01-01 --to 2026-01-31
+  vgrid fetch fiserv --from 2026-01-01 --to 2026-01-31 --out fiserv.csv
+  FISERV_MERCHANT_ID=xxx FISERV_API_USERNAME=user FISERV_API_PASSWORD=pass vgrid fetch fiserv --from 2026-01-01 --to 2026-01-31")]
+    Fiserv {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// CardPointe API base URL (default: FISERV_API_URL env or UAT)
+        #[arg(long)]
+        api_url: Option<String>,
+
+        /// Merchant ID (default: FISERV_MERCHANT_ID env)
+        #[arg(long)]
+        merchant_id: Option<String>,
+
+        /// API username (default: FISERV_API_USERNAME env)
+        #[arg(long)]
+        api_username: Option<String>,
+
+        /// API password (default: FISERV_API_PASSWORD env)
+        #[arg(long)]
+        api_password: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
 
         /// Suppress progress on stderr
         #[arg(long, short = 'q')]
@@ -188,6 +268,53 @@ Examples:
         account_id: Option<String>,
 
         /// Entity types to query, comma-separated (default: transaction,transfer)
+        #[arg(long)]
+        include: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
+
+    /// Fetch ledger entries from Digits
+    #[command(after_help = "\
+Examples:
+  vgrid fetch digits --credentials ~/.config/vgrid/digits.json --from 2026-01-01 --to 2026-01-31
+  vgrid fetch digits --access-token eyJ... --legal-entity-id le_123 --from 2026-01-01 --to 2026-01-31 --out digits.csv")]
+    Digits {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// Path to Digits OAuth2 credentials JSON file
+        #[arg(long)]
+        credentials: Option<PathBuf>,
+
+        /// Digits access token (skips refresh, requires --legal-entity-id)
+        #[arg(long)]
+        access_token: Option<String>,
+
+        /// Digits legal entity ID (required with --access-token)
+        #[arg(long)]
+        legal_entity_id: Option<String>,
+
+        /// Account name filter
+        #[arg(long)]
+        account: Option<String>,
+
+        /// Account ID filter
+        #[arg(long)]
+        account_id: Option<String>,
+
+        /// Entry types to include, comma-separated (default: credit,debit)
         #[arg(long)]
         include: Option<String>,
 
@@ -577,6 +704,25 @@ Examples:
 
 pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
     match command {
+        FetchCommands::Authorizenet {
+            from,
+            to,
+            api_login_id,
+            transaction_key,
+            out,
+            quiet,
+            sandbox,
+        } => authorizenet::cmd_fetch_authorizenet(from, to, api_login_id, transaction_key, out, quiet, sandbox),
+        FetchCommands::Fiserv {
+            from,
+            to,
+            api_url,
+            merchant_id,
+            api_username,
+            api_password,
+            out,
+            quiet,
+        } => fiserv::cmd_fetch_fiserv(from, to, api_url, merchant_id, api_username, api_password, out, quiet),
         FetchCommands::Gusto {
             from,
             to,
@@ -636,6 +782,29 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             credentials,
             access_token,
             tenant_id,
+            account,
+            account_id,
+            include,
+            out,
+            quiet,
+        ),
+        FetchCommands::Digits {
+            from,
+            to,
+            credentials,
+            access_token,
+            legal_entity_id,
+            account,
+            account_id,
+            include,
+            out,
+            quiet,
+        } => digits::cmd_fetch_digits(
+            from,
+            to,
+            credentials,
+            access_token,
+            legal_entity_id,
             account,
             account_id,
             include,
