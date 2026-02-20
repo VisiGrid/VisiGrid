@@ -11,7 +11,7 @@ use super::common::{self, CanonicalRow, FetchClient};
 
 // ── Constants ───────────────────────────────────────────────────────
 
-const DEFAULT_API_URL: &str = "https://fts-uat.cardconnect.com";
+const DEFAULT_API_URL: &str = "https://fts.cardconnect.com";
 
 // ── Type mapping ────────────────────────────────────────────────────
 
