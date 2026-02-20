@@ -28,6 +28,9 @@ pub fn run(config: &ReconConfig, input: &ReconInput) -> Result<ReconResult, Reco
 
     let summary = compute_summary(&classified);
 
+    let mut derived = DerivedOutputs::default();
+    derived.payout_rollup = crate::derived::build_payout_rollup(&classified, config);
+
     Ok(ReconResult {
         meta: ReconMeta {
             config_name: config.name.clone(),
@@ -38,7 +41,7 @@ pub fn run(config: &ReconConfig, input: &ReconInput) -> Result<ReconResult, Reco
         },
         summary,
         groups: classified,
-        derived: DerivedOutputs::default(),
+        derived,
     })
 }
 

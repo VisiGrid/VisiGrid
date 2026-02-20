@@ -196,14 +196,25 @@ pub struct DerivedDataset {
     pub version: u32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 impl DerivedDataset {
+    pub const MAX_ROWS: usize = 10_000;
+
     pub fn new(schema: &'static str) -> Self {
-        Self { schema, version: 1, rows: vec![] }
+        Self { schema, version: 1, rows: vec![], truncated: false }
     }
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
+    }
+    /// Enforce row cap. Call after building rows.
+    pub fn enforce_limit(&mut self) {
+        if self.rows.len() > Self::MAX_ROWS {
+            self.rows.truncate(Self::MAX_ROWS);
+            self.truncated = true;
+        }
     }
 }
 

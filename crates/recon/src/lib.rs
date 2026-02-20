@@ -6,6 +6,7 @@
 pub mod aggregate;
 pub mod classify;
 pub mod config;
+pub mod derived;
 pub mod engine;
 pub mod error;
 pub mod evidence;
