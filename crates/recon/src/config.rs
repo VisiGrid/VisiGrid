@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use chrono::NaiveDate;
 use serde::Deserialize;
@@ -196,6 +197,77 @@ impl Default for ToleranceConfig {
 pub struct OutputConfig {
     #[serde(default)]
     pub json: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Composite config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CompositeConfig {
+    pub kind: String,
+    pub name: String,
+    pub steps: Vec<StepConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StepConfig {
+    pub name: String,
+    pub config: String,
+}
+
+impl CompositeConfig {
+    pub fn from_toml(input: &str) -> Result<Self, ReconError> {
+        let config: CompositeConfig =
+            toml::from_str(input).map_err(|e| ReconError::ConfigParse(e.to_string()))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), ReconError> {
+        if self.kind != "composite" {
+            return Err(ReconError::ConfigValidation(format!(
+                "expected kind=\"composite\", got \"{}\"",
+                self.kind
+            )));
+        }
+
+        if self.steps.is_empty() {
+            return Err(ReconError::ConfigValidation(
+                "composite config must have at least one step".into(),
+            ));
+        }
+
+        // Reject duplicate step names
+        let mut seen = HashSet::new();
+        for step in &self.steps {
+            if !seen.insert(&step.name) {
+                return Err(ReconError::ConfigValidation(format!(
+                    "duplicate step name: '{}'",
+                    step.name
+                )));
+            }
+        }
+
+        // Reject path traversal and absolute paths in step configs
+        for step in &self.steps {
+            let p = Path::new(&step.config);
+            if p.is_absolute() {
+                return Err(ReconError::ConfigValidation(format!(
+                    "step '{}': config path must be relative, got '{}'",
+                    step.name, step.config
+                )));
+            }
+            if step.config.contains("..") {
+                return Err(ReconError::ConfigValidation(format!(
+                    "step '{}': config path must not contain '..', got '{}'",
+                    step.name, step.config
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +562,96 @@ right = "c"
 "#;
         let err = ReconConfig::from_toml(input).unwrap_err();
         assert!(err.to_string().contains("'c'"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Composite config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_valid_composite() {
+        let input = r#"
+kind = "composite"
+name = "Daily Close"
+
+[[steps]]
+name = "stripe_qbo"
+config = "stripe-qbo.recon.toml"
+
+[[steps]]
+name = "stripe_mercury"
+config = "stripe-mercury.recon.toml"
+"#;
+        let config = CompositeConfig::from_toml(input).unwrap();
+        assert_eq!(config.name, "Daily Close");
+        assert_eq!(config.steps.len(), 2);
+        assert_eq!(config.steps[0].name, "stripe_qbo");
+        assert_eq!(config.steps[1].config, "stripe-mercury.recon.toml");
+    }
+
+    #[test]
+    fn composite_reject_empty_steps() {
+        let input = r#"
+kind = "composite"
+name = "Empty"
+steps = []
+"#;
+        let err = CompositeConfig::from_toml(input).unwrap_err();
+        assert!(err.to_string().contains("at least one step"));
+    }
+
+    #[test]
+    fn composite_reject_duplicate_step_names() {
+        let input = r#"
+kind = "composite"
+name = "Dupes"
+
+[[steps]]
+name = "same"
+config = "a.recon.toml"
+
+[[steps]]
+name = "same"
+config = "b.recon.toml"
+"#;
+        let err = CompositeConfig::from_toml(input).unwrap_err();
+        assert!(err.to_string().contains("duplicate step name"));
+    }
+
+    #[test]
+    fn composite_reject_dotdot_in_path() {
+        let input = r#"
+kind = "composite"
+name = "Escape"
+
+[[steps]]
+name = "bad"
+config = "../secret.recon.toml"
+"#;
+        let err = CompositeConfig::from_toml(input).unwrap_err();
+        assert!(err.to_string().contains(".."));
+    }
+
+    #[test]
+    fn composite_reject_absolute_path() {
+        let input = r#"
+kind = "composite"
+name = "Absolute"
+
+[[steps]]
+name = "bad"
+config = "/etc/passwd"
+"#;
+        let err = CompositeConfig::from_toml(input).unwrap_err();
+        assert!(err.to_string().contains("relative"));
+    }
+
+    #[test]
+    fn backward_compat_recon_without_kind() {
+        // Existing configs without `kind` field still parse — kind dispatch
+        // is handled externally by extract_kind() in the CLI layer.
+        let config = ReconConfig::from_toml(VALID_2WAY).unwrap();
+        assert_eq!(config.name, "Test 2-Way");
     }
 
     #[test]

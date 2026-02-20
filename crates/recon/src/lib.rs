@@ -13,7 +13,10 @@ pub mod matcher;
 pub mod model;
 pub mod settlement;
 
-pub use config::ReconConfig;
+pub use config::{CompositeConfig, ReconConfig};
 pub use engine::run;
 pub use error::ReconError;
-pub use model::{DerivedOutputs, ReconInput, ReconResult, ReconRow};
+pub use model::{
+    CompositeResult, CompositeVerdict, DerivedOutputs, ReconInput, ReconResult, ReconRow,
+    StepResult, StepStatus,
+};

@@ -53,6 +53,7 @@ atty = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 dirs = "6"
+toml.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1,0 +1,10 @@
+kind = "composite"
+name = "Daily Close"
+
+[[steps]]
+name = "two_way"
+config = "two-way.recon.toml"
+
+[[steps]]
+name = "three_way"
+config = "three-way.recon.toml"
