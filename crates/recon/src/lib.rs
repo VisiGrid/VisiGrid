@@ -16,4 +16,4 @@ pub mod settlement;
 pub use config::ReconConfig;
 pub use engine::run;
 pub use error::ReconError;
-pub use model::{ReconInput, ReconResult, ReconRow};
+pub use model::{DerivedOutputs, ReconInput, ReconResult, ReconRow};

@@ -6,7 +6,7 @@ use crate::config::{MatchStrategy, ReconConfig};
 use crate::error::ReconError;
 use crate::evidence::compute_summary;
 use crate::matcher::{match_exact_key, match_fuzzy_amount_date};
-use crate::model::{Aggregate, ClassifiedResult, ReconInput, ReconMeta, ReconResult, ReconRow};
+use crate::model::{Aggregate, ClassifiedResult, DerivedOutputs, ReconInput, ReconMeta, ReconResult, ReconRow};
 
 /// Run reconciliation per config. Returns classified results + summary.
 pub fn run(config: &ReconConfig, input: &ReconInput) -> Result<ReconResult, ReconError> {
@@ -38,6 +38,7 @@ pub fn run(config: &ReconConfig, input: &ReconInput) -> Result<ReconResult, Reco
         },
         summary,
         groups: classified,
+        derived: DerivedOutputs::default(),
     })
 }
 

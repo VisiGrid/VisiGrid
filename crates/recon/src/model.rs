@@ -182,6 +182,34 @@ pub struct ReconResult {
     pub meta: ReconMeta,
     pub summary: ReconSummary,
     pub groups: Vec<ClassifiedResult>,
+    #[serde(skip_serializing_if = "DerivedOutputs::is_empty")]
+    pub derived: DerivedOutputs,
+}
+
+// ---------------------------------------------------------------------------
+// Derived outputs — future-proof surface for computed analyses
+// ---------------------------------------------------------------------------
+
+/// Derived analyses computed from recon groups. Each field is an optional
+/// vec that only serializes when populated. Initially ships empty — the
+/// shape exists so downstream consumers (Rails, React) can type against it
+/// without a binary update when implementations land.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DerivedOutputs {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub payout_rollup: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub clearing_delta: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub revenue_rollforward: Vec<serde_json::Value>,
+}
+
+impl DerivedOutputs {
+    pub fn is_empty(&self) -> bool {
+        self.payout_rollup.is_empty()
+            && self.clearing_delta.is_empty()
+            && self.revenue_rollforward.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
