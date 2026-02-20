@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 
-use crate::exit_codes::{EXIT_RECON_INVALID_CONFIG, EXIT_RECON_MISMATCH, EXIT_RECON_RUNTIME};
+use crate::exit_codes::{EXIT_RECON_INVALID_CONFIG, EXIT_RECON_MISMATCH, EXIT_RECON_RUNTIME, EXIT_RECON_STALE};
 use crate::CliError;
 
 #[derive(Subcommand)]
@@ -110,7 +110,26 @@ fn cmd_recon_run(
         s.left_only + s.right_only,
     );
 
-    // Exit code: 0 = all matched, 1 = mismatches found
+    if let Some(ref settlement) = s.settlement {
+        eprintln!(
+            "settlement: {} matched, {} pending, {} stale, {} errors",
+            settlement.matched, settlement.pending, settlement.stale, settlement.errors,
+        );
+    }
+
+    // Settlement-aware exit codes when settlement config is present
+    if let Some(ref settlement) = s.settlement {
+        if settlement.errors > 0 {
+            return Err(recon_err(EXIT_RECON_MISMATCH, "settlement errors found"));
+        }
+        if settlement.stale > 0 {
+            return Err(recon_err(EXIT_RECON_STALE, "stale items found"));
+        }
+        // pending only → pass
+        return Ok(());
+    }
+
+    // Fallback: original logic when no settlement config
     if s.amount_mismatches > 0 || s.timing_mismatches > 0 || s.left_only > 0 || s.right_only > 0 {
         return Err(recon_err(EXIT_RECON_MISMATCH, "mismatches found"));
     }

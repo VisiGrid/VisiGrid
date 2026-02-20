@@ -16,11 +16,15 @@ pub fn run(config: &ReconConfig, input: &ReconInput) -> Result<ReconResult, Reco
         aggregates.insert(role_name.clone(), aggregate_records(role_name, rows));
     }
 
-    let classified = if config.way == 2 {
+    let mut classified = if config.way == 2 {
         run_two_way(config, &aggregates)?
     } else {
         run_three_way(config, &aggregates)?
     };
+
+    if let Some(ref settlement_config) = config.settlement {
+        crate::settlement::classify_settlement(&mut classified, settlement_config);
+    }
 
     let summary = compute_summary(&classified);
 
@@ -30,6 +34,7 @@ pub fn run(config: &ReconConfig, input: &ReconInput) -> Result<ReconResult, Reco
             way: config.way,
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
             run_at: chrono::Utc::now().to_rfc3339(),
+            settlement_clock: config.settlement.as_ref().map(|s| s.clock),
         },
         summary,
         groups: classified,

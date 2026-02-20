@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::model::{ClassifiedResult, ReconBucket, ReconSummary};
+use crate::settlement;
 
 /// Compute summary statistics from classified results.
 pub fn compute_summary(results: &[ClassifiedResult]) -> ReconSummary {
@@ -23,6 +24,12 @@ pub fn compute_summary(results: &[ClassifiedResult]) -> ReconSummary {
         }
     }
 
+    let settlement = if results.iter().any(|r| r.settlement.is_some()) {
+        Some(settlement::compute_settlement_summary(results))
+    } else {
+        None
+    };
+
     ReconSummary {
         total_groups: results.len(),
         matched,
@@ -31,6 +38,7 @@ pub fn compute_summary(results: &[ClassifiedResult]) -> ReconSummary {
         left_only,
         right_only,
         bucket_counts,
+        settlement,
     }
 }
 
@@ -49,6 +57,7 @@ mod tests {
                 delta_cents: None,
                 date_offset_days: None,
             },
+            settlement: None,
         }
     }
 

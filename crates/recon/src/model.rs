@@ -116,6 +116,48 @@ pub struct ClassifiedResult {
     pub currency: String,
     pub aggregates: HashMap<String, Aggregate>,
     pub deltas: Deltas,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<SettlementClassification>,
+}
+
+// ---------------------------------------------------------------------------
+// Settlement classification
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementState {
+    Matched,
+    Pending,
+    Stale,
+    Error,
+}
+
+impl std::fmt::Display for SettlementState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Matched => write!(f, "matched"),
+            Self::Pending => write!(f, "pending"),
+            Self::Stale => write!(f, "stale"),
+            Self::Error => write!(f, "error"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlementClassification {
+    pub state: SettlementState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_days: Option<i64>,
+    pub sla_days: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlementSummary {
+    pub matched: usize,
+    pub pending: usize,
+    pub stale: usize,
+    pub errors: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +173,8 @@ pub struct ReconSummary {
     pub left_only: usize,
     pub right_only: usize,
     pub bucket_counts: HashMap<String, usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<SettlementSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,4 +190,8 @@ pub struct ReconMeta {
     pub way: u8,
     pub engine_version: String,
     pub run_at: String,
+    /// Which role's date was used as the settlement clock.
+    /// Only present when settlement classification is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settlement_clock: Option<crate::config::SettlementClock>,
 }

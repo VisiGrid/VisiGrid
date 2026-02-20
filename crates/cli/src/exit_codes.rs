@@ -170,6 +170,9 @@ pub const EXIT_RECON_RUNTIME: u8 = 2;
 /// Invalid recon config (bad TOML, missing roles, etc.).
 pub const EXIT_RECON_INVALID_CONFIG: u8 = 60;
 
+/// Recon: stale items found but no structural errors. Warn state.
+pub const EXIT_RECON_STALE: u8 = 61;
+
 // =============================================================================
 // Session Error Types
 // =============================================================================

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::NaiveDate;
 use serde::Deserialize;
 
 use crate::error::ReconError;
@@ -18,6 +19,67 @@ pub struct ReconConfig {
     pub tolerance: ToleranceConfig,
     #[serde(default)]
     pub output: OutputConfig,
+    #[serde(default)]
+    pub settlement: Option<SettlementConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Settlement
+// ---------------------------------------------------------------------------
+
+/// Settlement classification config.
+///
+/// `clock` specifies which role's date drives the settlement timeline.
+/// For `*_only` groups there's only one aggregate so the clock is unambiguous.
+/// For error groups (amount/timing mismatch), the clock role's date is used.
+///
+/// Each role's `columns.date` mapping already selects the right timestamp
+/// (e.g. `effective_date` for Stripe payouts = payout date, `posted_date`
+/// for bank = deposit date). The `clock` field selects which role's mapped
+/// date to prefer when multiple are available.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SettlementConfig {
+    pub reference_date: NaiveDate,
+    pub sla_days: u32,
+    /// Role whose date is the settlement clock origin.
+    /// Defaults to Processor if not specified.
+    #[serde(default)]
+    pub clock: SettlementClock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementClock {
+    Processor,
+    Ledger,
+    Bank,
+}
+
+impl Default for SettlementClock {
+    fn default() -> Self {
+        Self::Processor
+    }
+}
+
+impl SettlementClock {
+    /// The role name this clock corresponds to in aggregates.
+    pub fn role_name(&self) -> &'static str {
+        match self {
+            Self::Processor => "processor",
+            Self::Ledger => "ledger",
+            Self::Bank => "bank",
+        }
+    }
+}
+
+impl std::fmt::Display for SettlementClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Processor => write!(f, "processor"),
+            Self::Ledger => write!(f, "ledger"),
+            Self::Bank => write!(f, "bank"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +310,55 @@ date_window_days = 2
         assert_eq!(config.pairs.len(), 1);
         assert_eq!(config.tolerance.amount_cents, 0);
         assert_eq!(config.tolerance.date_window_days, 2);
+        assert!(config.settlement.is_none());
+    }
+
+    #[test]
+    fn parse_settlement_with_clock() {
+        let input = format!(
+            r#"{VALID_2WAY}
+
+[settlement]
+reference_date = "2026-01-31"
+sla_days = 5
+clock = "ledger"
+"#
+        );
+        let config = ReconConfig::from_toml(&input).unwrap();
+        let s = config.settlement.unwrap();
+        assert_eq!(s.reference_date.to_string(), "2026-01-31");
+        assert_eq!(s.sla_days, 5);
+        assert_eq!(s.clock, SettlementClock::Ledger);
+    }
+
+    #[test]
+    fn parse_settlement_clock_defaults_to_processor() {
+        let input = format!(
+            r#"{VALID_2WAY}
+
+[settlement]
+reference_date = "2026-01-31"
+sla_days = 3
+"#
+        );
+        let config = ReconConfig::from_toml(&input).unwrap();
+        let s = config.settlement.unwrap();
+        assert_eq!(s.clock, SettlementClock::Processor);
+    }
+
+    #[test]
+    fn parse_settlement_rejects_invalid_clock() {
+        let input = format!(
+            r#"{VALID_2WAY}
+
+[settlement]
+reference_date = "2026-01-31"
+sla_days = 5
+clock = "processer"
+"#
+        );
+        let err = ReconConfig::from_toml(&input);
+        assert!(err.is_err(), "typo in clock should fail deserialization");
     }
 
     #[test]

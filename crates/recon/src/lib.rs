@@ -11,6 +11,7 @@ pub mod error;
 pub mod evidence;
 pub mod matcher;
 pub mod model;
+pub mod settlement;
 
 pub use config::ReconConfig;
 pub use engine::run;

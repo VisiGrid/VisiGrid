@@ -34,6 +34,7 @@ pub fn classify_two_way(
                 delta_cents: Some(m.delta_cents),
                 date_offset_days: Some(m.date_offset_days),
             },
+            settlement: None,
         });
     }
 
@@ -50,6 +51,7 @@ pub fn classify_two_way(
                 delta_cents: None,
                 date_offset_days: None,
             },
+            settlement: None,
         });
     }
 
@@ -66,6 +68,7 @@ pub fn classify_two_way(
                 delta_cents: None,
                 date_offset_days: None,
             },
+            settlement: None,
         });
     }
 
@@ -160,6 +163,7 @@ pub fn merge_three_way(
                         delta_cents: Some(pl.delta_cents),
                         date_offset_days: Some(pl.date_offset_days),
                     },
+                    settlement: None,
                 });
             }
             (Some(pl), None) => {
@@ -185,6 +189,7 @@ pub fn merge_three_way(
                         delta_cents: Some(pl.delta_cents),
                         date_offset_days: Some(pl.date_offset_days),
                     },
+                    settlement: None,
                 });
             }
             (None, Some(pb)) => {
@@ -210,6 +215,7 @@ pub fn merge_three_way(
                         delta_cents: Some(pb.delta_cents),
                         date_offset_days: Some(pb.date_offset_days),
                     },
+                    settlement: None,
                 });
             }
             (None, None) => {
@@ -237,6 +243,7 @@ pub fn merge_three_way(
                             delta_cents: None,
                             date_offset_days: None,
                         },
+                        settlement: None,
                     });
                 }
             }
@@ -256,6 +263,7 @@ pub fn merge_three_way(
                 delta_cents: None,
                 date_offset_days: None,
             },
+            settlement: None,
         });
     }
 
@@ -272,6 +280,7 @@ pub fn merge_three_way(
                 delta_cents: None,
                 date_offset_days: None,
             },
+            settlement: None,
         });
     }
 
