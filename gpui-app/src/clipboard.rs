@@ -12,6 +12,8 @@ use visigrid_engine::formula::eval::Value;
 use visigrid_engine::provenance::{MutationOp, PasteMode, ClearMode};
 use visigrid_engine::sheet::MergedRegion;
 
+use visigrid_io::csv as csv_io;
+
 use crate::app::Spreadsheet;
 use crate::history::{CellChange, CellFormatPatch, FormatActionKind, UndoAction};
 
@@ -344,9 +346,20 @@ impl Spreadsheet {
             let is_filtered = self.row_view.is_filtered();
             let mut changes = Vec::new();
 
-            // Check if clipboard is a single cell (1 line, no tabs)
+            // For external pastes without tabs, try CSV-aware parsing (handles commas,
+            // semicolons, pipes, and quoted fields). Only use the result if it found
+            // multiple columns — otherwise fall through to existing tab-split behavior.
+            let parsed_grid: Option<Vec<Vec<String>>> = if !is_internal && !text.contains('\t') {
+                let grid = csv_io::parse_delimited_text(&text);
+                if grid.iter().any(|row| row.len() > 1) { Some(grid) } else { None }
+            } else {
+                None
+            };
+
+            // Check if clipboard is a single cell (1 line, no tabs, no CSV multi-col)
             let lines: Vec<&str> = text.lines().collect();
-            let is_single_cell = lines.len() == 1 && !lines[0].contains('\t');
+            let is_single_cell = parsed_grid.is_none()
+                && lines.len() == 1 && !lines[0].contains('\t');
 
             // If single cell and multi-selection, broadcast to all selected cells
             if is_single_cell && self.is_multi_selection() {
@@ -458,8 +471,11 @@ impl Spreadsheet {
             let data_start_row = self.row_view.view_to_data(start_row);
 
             // Compute paste rectangle for split-merge guard and merge recreation
-            let paste_rows = lines.len();
-            let paste_cols = lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1);
+            let paste_rows = parsed_grid.as_ref().map_or(lines.len(), |g| g.len());
+            let paste_cols = parsed_grid.as_ref().map_or_else(
+                || lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1),
+                |g| g.iter().map(|r| r.len()).max().unwrap_or(1),
+            );
             let paste_max_row = (data_start_row + paste_rows).saturating_sub(1);
             let paste_max_col = (start_col + paste_cols).saturating_sub(1);
 
@@ -499,7 +515,10 @@ impl Spreadsheet {
             let mut end_col = start_col;
 
             self.wb_mut(cx, |wb| wb.begin_batch());
-            for (row_offset, line) in text.lines().enumerate() {
+
+            // Choose iteration source: pre-parsed CSV grid or raw tab-split lines
+            let row_count = parsed_grid.as_ref().map_or(lines.len(), |g| g.len());
+            for row_offset in 0..row_count {
                 // Determine target view row for this clipboard row
                 let (_target_view_row, target_data_row) = if is_filtered {
                     if let Some(start_idx) = visible_start_idx {
@@ -524,8 +543,15 @@ impl Spreadsheet {
                     (view_row, view_row)
                 };
 
+                // Get columns for this row from either the parsed grid or tab-split
+                let row_cells: Vec<&str> = if let Some(ref grid) = parsed_grid {
+                    grid[row_offset].iter().map(|s| s.as_str()).collect()
+                } else {
+                    lines[row_offset].split('\t').collect()
+                };
+
                 let mut row_values: Vec<String> = Vec::new();
-                for (col_offset, value) in line.split('\t').enumerate() {
+                for (col_offset, value) in row_cells.iter().enumerate() {
                     let col = start_col + col_offset;
                     if target_data_row < NUM_ROWS && col < NUM_COLS {
                         let old_value = self.sheet(cx).get_raw(target_data_row, col);

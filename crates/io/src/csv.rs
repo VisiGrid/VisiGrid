@@ -21,11 +21,36 @@ pub fn import_with_delimiter(path: &Path, delimiter: u8) -> Result<Sheet, String
     import_from_string(&content, delimiter)
 }
 
+/// Parse delimited text into a 2D grid of strings.
+///
+/// Uses `sniff_delimiter` to auto-detect the delimiter (comma, semicolon, pipe, or tab),
+/// then parses with the `csv` crate (handles quoted fields). Returns a `Vec<Vec<String>>` grid.
+/// Useful for pasting CSV-formatted text from external sources.
+pub fn parse_delimited_text(text: &str) -> Vec<Vec<String>> {
+    let delimiter = sniff_delimiter(text);
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(text.as_bytes());
+
+    let mut grid = Vec::new();
+    for result in reader.records() {
+        let record = match result {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let row: Vec<String> = record.iter().map(|f| f.to_string()).collect();
+        grid.push(row);
+    }
+    grid
+}
+
 /// Detect the most likely field delimiter by checking consistency across the first few lines.
 ///
 /// For each candidate (tab, semicolon, comma, pipe), count fields per line. The delimiter
 /// that produces the most consistent field count (>1 field) wins.
-fn sniff_delimiter(content: &str) -> u8 {
+pub fn sniff_delimiter(content: &str) -> u8 {
     let candidates: &[u8] = &[b'\t', b';', b',', b'|'];
     let sample_lines: Vec<&str> = content.lines().take(10).collect();
 
@@ -240,6 +265,43 @@ mod tests {
     fn test_sniff_pipe_delimiter() {
         let content = "Name|Age|City\nAlice|30|Paris\nBob|25|London\n";
         assert_eq!(sniff_delimiter(content), b'|');
+    }
+
+    #[test]
+    fn test_parse_delimited_text_csv() {
+        let text = "Name,Age,City\nAlice,30,Paris\nBob,25,London\n";
+        let grid = parse_delimited_text(text);
+        assert_eq!(grid.len(), 3);
+        assert_eq!(grid[0], vec!["Name", "Age", "City"]);
+        assert_eq!(grid[1], vec!["Alice", "30", "Paris"]);
+        assert_eq!(grid[2], vec!["Bob", "25", "London"]);
+    }
+
+    #[test]
+    fn test_parse_delimited_text_quoted_fields() {
+        let text = "Name,Address,City\n\"Doe, Jane\",\"123 Main St\",Paris\n";
+        let grid = parse_delimited_text(text);
+        assert_eq!(grid.len(), 2);
+        assert_eq!(grid[1][0], "Doe, Jane");
+        assert_eq!(grid[1][1], "123 Main St");
+    }
+
+    #[test]
+    fn test_parse_delimited_text_single_column() {
+        // Plain text lines with no delimiters — should return single-column rows
+        let text = "hello\nworld\n";
+        let grid = parse_delimited_text(text);
+        assert_eq!(grid.len(), 2);
+        assert_eq!(grid[0].len(), 1);
+        assert_eq!(grid[0][0], "hello");
+    }
+
+    #[test]
+    fn test_parse_delimited_text_pipe() {
+        let text = "A|B|C\n1|2|3\n";
+        let grid = parse_delimited_text(text);
+        assert_eq!(grid[0], vec!["A", "B", "C"]);
+        assert_eq!(grid[1], vec!["1", "2", "3"]);
     }
 
     #[test]
