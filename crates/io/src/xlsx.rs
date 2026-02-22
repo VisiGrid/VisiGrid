@@ -959,6 +959,10 @@ pub struct ExportResult {
     pub warnings: Vec<String>,
     /// Total merged cell regions exported
     pub merges_exported: usize,
+    /// Whether autofilter was exported
+    pub autofilter_exported: bool,
+    /// Number of hidden rows exported
+    pub hidden_rows_exported: usize,
 }
 
 impl ExportResult {
@@ -1109,6 +1113,10 @@ pub struct ExportLayout {
     pub frozen_rows: usize,
     /// Number of frozen columns (for freeze panes)
     pub frozen_cols: usize,
+    /// AutoFilter range: (min_row, min_col, max_row, max_col)
+    pub autofilter_range: Option<(usize, usize, usize, usize)>,
+    /// Hidden data rows (from filter visibility mask)
+    pub hidden_rows: Vec<usize>,
 }
 
 /// Convert pixel width to Excel column width (approximate)
@@ -1188,6 +1196,23 @@ pub fn export(
         let (exported, skipped) = export_validation_rules(worksheet, sheet)?;
         result.validations_exported += exported;
         result.validations_skipped += skipped;
+
+        // Export autofilter state
+        if let Some(layout) = layout {
+            if let Some((min_r, min_c, max_r, max_c)) = layout.autofilter_range {
+                worksheet
+                    .autofilter(min_r as u32, min_c as u16, max_r as u32, max_c as u16)
+                    .map_err(|e| format!("Failed to set autofilter: {}", e))?;
+                result.autofilter_exported = true;
+            }
+
+            for &row in &layout.hidden_rows {
+                worksheet
+                    .set_row_hidden(row as u32)
+                    .map_err(|e| format!("Failed to hide row {}: {}", row, e))?;
+            }
+            result.hidden_rows_exported += layout.hidden_rows.len();
+        }
 
         result.sheets_exported += 1;
     }

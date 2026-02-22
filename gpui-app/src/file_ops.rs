@@ -1246,6 +1246,18 @@ impl Spreadsheet {
             // layout.frozen_rows = ...;
             // layout.frozen_cols = ...;
 
+            // AutoFilter state (only on active sheet — per-sheet filter persistence not yet implemented)
+            if sheet_idx == wb.active_sheet_index() && self.filter_state.is_enabled() {
+                layout.autofilter_range = self.filter_state.filter_range;
+
+                let mask = self.row_view.visible_mask();
+                for (data_row, &visible) in mask.iter().enumerate() {
+                    if !visible {
+                        layout.hidden_rows.push(data_row);
+                    }
+                }
+            }
+
             layouts.push(layout);
         }
 
