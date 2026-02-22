@@ -276,6 +276,8 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
     let accent = app.token(TokenKey::Accent);
     let selection_bg = app.token(TokenKey::SelectionBg);
     let is_selected = app.is_row_header_selected(row);
+    let is_filtered = app.row_view.is_filtered();
+    let data_row = if is_filtered { app.row_view.view_to_data(row) } else { row };
 
     div()
         .id(ElementId::NamedInteger("row-header".into(), row as u64))
@@ -287,7 +289,8 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
         .items_center()
         .justify_center()
         .when(is_selected, |div| div.bg(header_active_bg))
-        .when(!is_selected, |div| div.bg(header_bg))
+        .when(!is_selected && !is_filtered, |div| div.bg(header_bg))
+        .when(!is_selected && is_filtered, |div| div.bg(accent.opacity(0.1)))
         .border_1()
         .border_color(header_border)
         .when(is_selected, |div| div.text_color(header_active_text))
@@ -295,7 +298,7 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
         .text_size(px(app.metrics.font_size))  // Scaled font size
         .cursor_pointer()
         .hover(|s| s.bg(selection_bg.opacity(0.3)))
-        .child(format!("{}", row + 1))
+        .child(format!("{}", data_row + 1))
         // Click handler for row selection
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             // Check if click is in the resize handle area (bottom 4px of row)
