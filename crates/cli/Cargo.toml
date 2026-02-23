@@ -27,6 +27,7 @@ which = "6"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 blake3 = "1"
 sha2 = { workspace = true }
+hmac = { workspace = true }
 
 # Proof signing (verify --sign)
 ed25519-dalek = { version = "2", features = ["rand_core"] }

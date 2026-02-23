@@ -6,6 +6,7 @@ mod common;
 mod digits;
 mod fiserv;
 mod gusto;
+mod netsuite;
 pub(crate) mod http;
 mod mercury;
 mod qbo;
@@ -122,6 +123,49 @@ Examples:
         /// API password (default: FISERV_API_PASSWORD env)
         #[arg(long)]
         api_password: Option<String>,
+
+        /// Output CSV file path (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Suppress progress on stderr
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
+
+    /// Fetch general ledger transactions from NetSuite
+    #[command(after_help = "\
+Examples:
+  vgrid fetch netsuite --from 2026-01-01 --to 2026-01-31 --account-id 1234567 --consumer-key abc --consumer-secret def --token-id ghi --token-secret jkl
+  NETSUITE_ACCOUNT_ID=1234567 NETSUITE_CONSUMER_KEY=abc NETSUITE_CONSUMER_SECRET=def NETSUITE_TOKEN_ID=ghi NETSUITE_TOKEN_SECRET=jkl vgrid fetch netsuite --from 2026-01-01 --to 2026-01-31")]
+    Netsuite {
+        /// Start date inclusive (YYYY-MM-DD)
+        #[arg(long)]
+        from: String,
+
+        /// End date exclusive (YYYY-MM-DD)
+        #[arg(long)]
+        to: String,
+
+        /// NetSuite account ID (default: NETSUITE_ACCOUNT_ID env)
+        #[arg(long)]
+        account_id: Option<String>,
+
+        /// OAuth consumer key (default: NETSUITE_CONSUMER_KEY env)
+        #[arg(long)]
+        consumer_key: Option<String>,
+
+        /// OAuth consumer secret (default: NETSUITE_CONSUMER_SECRET env)
+        #[arg(long)]
+        consumer_secret: Option<String>,
+
+        /// OAuth token ID (default: NETSUITE_TOKEN_ID env)
+        #[arg(long)]
+        token_id: Option<String>,
+
+        /// OAuth token secret (default: NETSUITE_TOKEN_SECRET env)
+        #[arg(long)]
+        token_secret: Option<String>,
 
         /// Output CSV file path (default: stdout)
         #[arg(long)]
@@ -723,6 +767,17 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             out,
             quiet,
         } => fiserv::cmd_fetch_fiserv(from, to, api_url, merchant_id, api_username, api_password, out, quiet),
+        FetchCommands::Netsuite {
+            from,
+            to,
+            account_id,
+            consumer_key,
+            consumer_secret,
+            token_id,
+            token_secret,
+            out,
+            quiet,
+        } => netsuite::cmd_fetch_netsuite(from, to, account_id, consumer_key, consumer_secret, token_id, token_secret, out, quiet),
         FetchCommands::Gusto {
             from,
             to,
