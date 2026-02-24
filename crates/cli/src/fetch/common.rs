@@ -219,15 +219,28 @@ impl FetchClient {
                         continue;
                     }
 
-                    // Success: parse JSON
-                    let body: serde_json::Value = resp.json().map_err(|e| CliError {
+                    // Success: parse JSON (read as text first to handle
+                    // BOM-prefixed responses from providers like Authorize.net)
+                    let text = resp.text().map_err(|e| CliError {
                         code: exit_codes::EXIT_FETCH_UPSTREAM,
                         message: format!(
-                            "failed to parse {} JSON response: {}",
+                            "failed to read {} response body: {}",
                             self.source_name, e,
                         ),
                         hint: None,
                     })?;
+                    let trimmed = text.trim_start_matches('\u{feff}');
+                    let body: serde_json::Value =
+                        serde_json::from_str(trimmed).map_err(|e| CliError {
+                            code: exit_codes::EXIT_FETCH_UPSTREAM,
+                            message: format!(
+                                "failed to parse {} JSON response: {} (body: {})",
+                                self.source_name,
+                                e,
+                                &trimmed[..trimmed.len().min(200)],
+                            ),
+                            hint: None,
+                        })?;
 
                     return Ok(body);
                 }
