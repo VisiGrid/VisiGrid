@@ -255,6 +255,8 @@ if $IS_LINUX; then
 
         cd "$AUR_DIR"
 
+        git pull --rebase || die "Failed to pull AUR repo. Resolve conflicts manually."
+
         sed_i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
         sed_i "s/^sha256sums=.*/sha256sums=('$SHA256')/" PKGBUILD
 
