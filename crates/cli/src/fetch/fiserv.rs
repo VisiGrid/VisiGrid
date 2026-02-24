@@ -234,25 +234,26 @@ pub fn cmd_fetch_fiserv(
                         .unwrap_or("")
                         .to_string();
 
-                    let authdate = txn["authdate"]
+                    // settlestat uses the query date as the settlement date;
+                    // authdate may be present (MMDDYYYY) or absent.
+                    let effective_date = txn["authdate"]
                         .as_str()
-                        .unwrap_or("");
-                    let effective_date = parse_authdate(authdate);
+                        .filter(|s| !s.is_empty())
+                        .map(|s| parse_authdate(s))
+                        .unwrap_or_else(|| current.to_string());
 
                     let posted_date = current.to_string();
 
-                    let amount_str = txn["amount"]
+                    // settlestat returns "setlamount" (not "amount")
+                    let amount_field = txn["setlamount"]
                         .as_str()
-                        .or_else(|| txn["amount"].as_f64().map(|_| ""))
-                        .unwrap_or("0");
-
-                    let amount_value = if let Some(n) = txn["amount"].as_f64() {
+                        .or_else(|| txn["amount"].as_str());
+                    let amount_value = if let Some(s) = amount_field {
+                        s.to_string()
+                    } else if let Some(n) = txn["setlamount"].as_f64().or_else(|| txn["amount"].as_f64()) {
                         format!("{:.2}", n)
                     } else {
-                        txn["amount"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .to_string()
+                        "0".to_string()
                     };
 
                     let amount_minor =
@@ -260,16 +261,21 @@ pub fn cmd_fetch_fiserv(
                             code: exit_codes::EXIT_FETCH_UPSTREAM,
                             message: format!(
                                 "Fiserv bad amount {:?} for txn {}: {}",
-                                amount_str, retref, e,
+                                amount_value, retref, e,
                             ),
                             hint: None,
                         })?;
 
-                    let raw_type = txn["type"]
-                        .as_str()
-                        .or_else(|| txn["setlstat"].as_str())
-                        .unwrap_or("");
-                    let canonical_type = map_txn_type(raw_type).to_string();
+                    // settlestat "setlstat" is Y/N (settled or not), not a txn type.
+                    // Use "type" if present, otherwise infer from amount sign or
+                    // default to "charge" for settled transactions.
+                    let canonical_type = if let Some(t) = txn["type"].as_str() {
+                        map_txn_type(t).to_string()
+                    } else if amount_minor < 0 {
+                        "refund".to_string()
+                    } else {
+                        "charge".to_string()
+                    };
 
                     // Refunds and voids are negative
                     let signed_amount = if canonical_type == "refund" || canonical_type == "void" {
@@ -278,15 +284,19 @@ pub fn cmd_fetch_fiserv(
                         amount_minor.abs()
                     };
 
-                    // Description: card type + last 4 of token
+                    // Description: card type + salesdoc (order ref) or last 4 of token
                     let cardtype = txn["cardtype"].as_str().unwrap_or("");
+                    let salesdoc = txn["salesdoc"].as_str().unwrap_or("");
                     let token = txn["token"].as_str().unwrap_or("");
                     let last4 = if token.len() >= 4 {
                         &token[token.len() - 4..]
                     } else {
                         token
                     };
-                    let description = if !cardtype.is_empty() || !last4.is_empty() {
+                    // Prefer salesdoc (order ref) for description, fall back to card+last4
+                    let description = if !salesdoc.is_empty() {
+                        format!("{} {}", cardtype, salesdoc).trim().to_string()
+                    } else if !cardtype.is_empty() || !last4.is_empty() {
                         format!("{} {}", cardtype, last4).trim().to_string()
                     } else {
                         String::new()
@@ -390,11 +400,10 @@ mod tests {
                         "txns": [
                             {
                                 "retref": "RR001",
-                                "amount": "50.00",
-                                "type": "sale",
-                                "authdate": "01152026",
-                                "cardtype": "VISA",
-                                "token": "9876543210001234"
+                                "setlamount": "50.00",
+                                "setlstat": "Y",
+                                "salesdoc": "O2026011509275293EB",
+                                "cardtype": "VISA"
                             }
                         ]
                     }
