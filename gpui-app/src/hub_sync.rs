@@ -1,4 +1,4 @@
-//! VisiHub sync operations for Spreadsheet.
+//! Hub sync operations for Spreadsheet.
 //!
 //! This module contains all hub_* methods for VisiGrid ↔ VisiHub synchronization:
 //! - Status checking
@@ -110,7 +110,7 @@ fn generate_copy_path(original: &std::path::Path) -> std::path::PathBuf {
 
 impl Spreadsheet {
     // ========================================================================
-    // VisiHub Sync
+    // Hub Sync
     // ========================================================================
 
     /// Check hub status for the current file.
@@ -159,7 +159,7 @@ impl Spreadsheet {
                 self.hub_status = HubStatus::Offline;
                 self.hub_activity = None;
                 self.hub_last_error = Some("Not authenticated".to_string());
-                self.status_message = Some("Not signed in to VisiHub".to_string());
+                self.status_message = Some("Not signed in".to_string());
                 cx.notify();
                 return;
             }
@@ -205,7 +205,7 @@ impl Spreadsheet {
                             Some(&error_str),
                         );
                         this.hub_last_error = Some(error_str.clone());
-                        this.status_message = Some(format!("VisiHub: {}", error_str));
+                        this.status_message = Some(format!("Hub: {}", error_str));
                     }
                 }
                 cx.notify();
@@ -223,7 +223,7 @@ impl Spreadsheet {
         };
 
         let Some(hub_link) = self.hub_link.clone() else {
-            self.status_message = Some("Not linked to VisiHub".to_string());
+            self.status_message = Some("Not linked to a repository".to_string());
             cx.notify();
             return;
         };
@@ -232,7 +232,7 @@ impl Spreadsheet {
             Ok(c) => c,
             Err(_) => {
                 self.hub_last_error = Some("Not authenticated".to_string());
-                self.status_message = Some("Not signed in to VisiHub".to_string());
+                self.status_message = Some("Not signed in".to_string());
                 cx.notify();
                 return;
             }
@@ -373,7 +373,7 @@ impl Spreadsheet {
                         this.document_meta.is_saved = true;
                         this.document_meta.path = Some(copy_path);
                         this.request_title_refresh(cx);
-                        this.status_message = Some("Opened remote copy from VisiHub".to_string());
+                        this.status_message = Some("Opened remote copy".to_string());
                     }
                     Err(e) => {
                         this.hub_activity = None;
@@ -434,7 +434,7 @@ impl Spreadsheet {
             Ok(c) => c,
             Err(_) => {
                 self.hub_last_error = Some("Not authenticated".to_string());
-                self.status_message = Some("Not signed in to VisiHub".to_string());
+                self.status_message = Some("Not signed in".to_string());
                 cx.notify();
                 return;
             }
@@ -577,7 +577,7 @@ impl Spreadsheet {
                         this.hub_last_error = None;
                         this.is_modified = false;
                         this.history.clear();
-                        this.status_message = Some("Updated from VisiHub".to_string());
+                        this.status_message = Some("Updated from remote".to_string());
                     }
                     Err(e) => {
                         this.hub_activity = None;
@@ -603,21 +603,21 @@ impl Spreadsheet {
 
         // Precondition: Must be linked
         let Some(ref hub_link) = self.hub_link else {
-            self.status_message = Some("Link to VisiHub first".to_string());
+            self.status_message = Some("Link to a repository first".to_string());
             cx.notify();
             return;
         };
 
         // Precondition: Must be in publish mode (not pull-only)
         if hub_link.link_mode == "pull" {
-            self.status_message = Some("This workbook is linked in Pull-only mode. Use 'VisiHub: Link to Dataset' to change to Pull & Publish.".to_string());
+            self.status_message = Some("This workbook is linked in Pull-only mode. Use 'Hub: Link to Dataset' to change to Pull & Publish.".to_string());
             cx.notify();
             return;
         }
 
         // Precondition: Must be signed in
         if load_auth().is_none() {
-            self.status_message = Some("Sign in to VisiHub first".to_string());
+            self.status_message = Some("Sign in first".to_string());
             cx.notify();
             return;
         }
@@ -647,7 +647,7 @@ impl Spreadsheet {
             Ok(c) => c,
             Err(_) => {
                 self.hub_last_error = Some("Not authenticated".to_string());
-                self.status_message = Some("Sign in to VisiHub first".to_string());
+                self.status_message = Some("Sign in first".to_string());
                 cx.notify();
                 return;
             }
@@ -753,13 +753,13 @@ impl Spreadsheet {
                 this.hub_status = HubStatus::Idle;
                 this.hub_activity = None;
                 this.hub_last_error = None;
-                this.status_message = Some("Published to VisiHub".to_string());
+                this.status_message = Some("Published".to_string());
                 cx.notify();
             });
         }).detach();
     }
 
-    /// Unlink current file from VisiHub
+    /// Unlink current file
     pub fn hub_unlink(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.current_file else {
             return;
@@ -773,14 +773,14 @@ impl Spreadsheet {
             self.hub_status = HubStatus::Unlinked;
             self.hub_activity = None;
             self.hub_last_error = None;
-            self.status_message = Some("Unlinked from VisiHub".to_string());
+            self.status_message = Some("Unlinked".to_string());
         }
         cx.notify();
     }
 
     /// Show hub sync diagnostics (debugging aid)
     pub fn hub_diagnostics(&mut self, cx: &mut Context<Self>) {
-        let mut lines = vec!["=== VisiHub Diagnostics ===".to_string()];
+        let mut lines = vec!["=== Hub Diagnostics ===".to_string()];
         lines.push("Sync is manual. Nothing uploads automatically.".to_string());
         lines.push(String::new());
 
@@ -838,7 +838,7 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Start VisiHub sign in flow.
+    /// Start hub sign in flow.
     /// Opens browser to authorize, then shows paste token dialog as fallback.
     pub fn hub_sign_in(&mut self, cx: &mut Context<Self>) {
         // If already signed in, just show status
@@ -850,7 +850,7 @@ impl Spreadsheet {
         }
 
         // Open browser to authorize
-        let auth_url = "https://app.visihub.app/desktop/authorize";
+        let auth_url = "https://app.visigrid.app/desktop/authorize";
         if let Err(e) = open::that(auth_url) {
             self.status_message = Some(format!("Failed to open browser: {}", e));
             cx.notify();
@@ -876,7 +876,7 @@ impl Spreadsheet {
         // Create credentials and verify with API
         let creds = AuthCredentials::new(
             token.clone(),
-            "https://api.visihub.app".to_string(),
+            "https://api.visiapi.com".to_string(),
         );
 
         // Verify token by fetching user info (blocking HTTP in thread)
@@ -913,7 +913,7 @@ impl Spreadsheet {
             Ok(Err(e)) => {
                 // Better error message mentioning API base
                 self.status_message = Some(format!(
-                    "Token could not be verified with api.visihub.app. Check you copied the full token. ({})",
+                    "Token could not be verified with api.visiapi.com. Check you copied the full token. ({})",
                     e
                 ));
                 cx.notify();
@@ -974,17 +974,17 @@ impl Spreadsheet {
         }
     }
 
-    /// Sign out from VisiHub
+    /// Sign out
     pub fn hub_sign_out(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = delete_auth() {
             self.status_message = Some(format!("Failed to sign out: {}", e));
         } else {
-            self.status_message = Some("Signed out from VisiHub".to_string());
+            self.status_message = Some("Signed out".to_string());
         }
         cx.notify();
     }
 
-    /// Show link to VisiHub dialog
+    /// Show link dialog
     pub fn hub_show_link_dialog(&mut self, cx: &mut Context<Self>) {
         // Must be signed in first - start sign-in flow if not
         if load_auth().is_none() {
@@ -1020,7 +1020,7 @@ impl Spreadsheet {
         self.hub_fetch_repos(cx);
     }
 
-    /// Fetch available repos from VisiHub
+    /// Fetch available repos
     fn hub_fetch_repos(&mut self, cx: &mut Context<Self>) {
         let client = match HubClient::from_saved_auth() {
             Ok(c) => c,
@@ -1142,7 +1142,7 @@ impl Spreadsheet {
             local_head_hash: None,
             link_mode: "pull".to_string(),
             linked_at: iso_timestamp_now(),
-            api_base: "https://api.visihub.app".to_string(),
+            api_base: "https://api.visiapi.com".to_string(),
         };
 
         // Save to file
@@ -1209,7 +1209,7 @@ impl Spreadsheet {
                         local_head_hash: None,
                         link_mode: "pull".to_string(),
                         linked_at: iso_timestamp_now(),
-                        api_base: "https://api.visihub.app".to_string(),
+                        api_base: "https://api.visiapi.com".to_string(),
                     };
 
                     if let Err(e) = save_hub_link(&path, &link) {

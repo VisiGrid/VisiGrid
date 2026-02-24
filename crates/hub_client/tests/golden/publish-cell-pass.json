@@ -16,5 +16,5 @@
       "version": "0.1.0"
     }
   }],
-  "proof_url": "https://api.visihub.app/api/repos/acme/recon/runs/100/proof"
+  "proof_url": "https://api.visiapi.com/api/repos/acme/recon/runs/100/proof"
 }

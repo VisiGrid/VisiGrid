@@ -3,7 +3,7 @@ name = "visigrid-hub-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "VisiHub API client — shared between desktop and CLI"
+description = "Hub API client — shared between desktop and CLI"
 
 [dependencies]
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }

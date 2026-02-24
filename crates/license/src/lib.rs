@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 
 /// Signing key ID -> public key (base64) mapping
 ///
-/// Keys are generated and managed by VisiHub Rails app.
+/// Keys are generated and managed by the API server.
 /// To add a new key:
 ///   1. In Rails: `rails signing_keys:generate[2026-01]`
 ///   2. Copy the public_key_base64 output

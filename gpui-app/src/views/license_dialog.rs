@@ -119,10 +119,10 @@ pub fn user_friendly_error(error: &str) -> String {
 
     // Signature errors
     if error.contains("Invalid signature") {
-        return "License signature is invalid. Download a fresh license from VisiHub.".to_string();
+        return "License signature is invalid. Download a fresh license from your account.".to_string();
     }
     if error.contains("signature encoding") || error.contains("signature format") {
-        return "License signature is invalid. Download a fresh license from VisiHub.".to_string();
+        return "License signature is invalid. Download a fresh license from your account.".to_string();
     }
 
     // Unknown key

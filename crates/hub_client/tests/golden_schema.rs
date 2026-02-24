@@ -63,7 +63,7 @@ fn test_golden_publish_pass() {
             origin: None,
             engine: None,
         }]),
-        proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/42/proof".into(),
+        proof_url: "https://api.visiapi.com/api/repos/acme/payments/runs/42/proof".into(),
     };
 
     validate_golden_keys("tests/golden/publish-pass.json", &result);
@@ -102,7 +102,7 @@ fn test_golden_publish_fail() {
             origin: None,
             engine: None,
         }]),
-        proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/99/proof".into(),
+        proof_url: "https://api.visiapi.com/api/repos/acme/payments/runs/99/proof".into(),
     };
 
     validate_golden_keys("tests/golden/publish-fail.json", &result);
@@ -137,7 +137,7 @@ fn test_golden_publish_baseline() {
             origin: None,
             engine: None,
         }]),
-        proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/1/proof".into(),
+        proof_url: "https://api.visiapi.com/api/repos/acme/payments/runs/1/proof".into(),
     };
 
     validate_golden_keys("tests/golden/publish-baseline.json", &result);
@@ -166,7 +166,7 @@ fn test_golden_publish_warn() {
         content_hash: Some("blake3:b8ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a".into()),
         source_metadata: Some(serde_json::json!({"type": "dbt", "identity": "models/payments"})),
         assertions: None,
-        proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/55/proof".into(),
+        proof_url: "https://api.visiapi.com/api/repos/acme/payments/runs/55/proof".into(),
     };
 
     validate_golden_keys("tests/golden/publish-warn.json", &result);
@@ -283,7 +283,7 @@ fn test_golden_publish_cell_assertion_pass() {
                 fingerprint: None,
             }),
         }]),
-        proof_url: "https://api.visihub.app/api/repos/acme/recon/runs/100/proof".into(),
+        proof_url: "https://api.visiapi.com/api/repos/acme/recon/runs/100/proof".into(),
     };
 
     validate_golden_keys("tests/golden/publish-cell-pass.json", &result);

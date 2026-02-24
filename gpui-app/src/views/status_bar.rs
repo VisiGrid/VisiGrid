@@ -838,7 +838,7 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         })
 }
 
-/// Render the VisiHub sync status indicator
+/// Render the hub sync status indicator
 fn render_hub_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     use crate::hub::HubStatus;
 

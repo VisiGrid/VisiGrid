@@ -2509,7 +2509,7 @@ pub struct Spreadsheet {
     pub approved_fingerprint: Option<crate::history::HistoryFingerprint>,
     pub approval_history_len: usize,  // History length at time of approval (for drift diff)
 
-    // VisiHub sync state
+    // Hub sync state
     pub hub_link: Option<crate::hub::HubLink>,
     pub hub_status: crate::hub::HubStatus,
     pub hub_activity: Option<crate::hub::HubActivity>,
@@ -2517,7 +2517,7 @@ pub struct Spreadsheet {
     pub hub_last_error: Option<String>,
     pub(crate) hub_check_in_progress: bool,
 
-    // VisiHub auth/link dialog state
+    // Hub auth/link dialog state
     pub hub_token_input: String,
     pub hub_repos: Vec<crate::hub::RepoInfo>,
     pub hub_selected_repo: Option<usize>,
@@ -4480,7 +4480,7 @@ impl Spreadsheet {
             CommandId::OpenThisDiffFile => self.open_this_diff_file(cx),
             CommandId::RefreshDiffResults => self.refresh_diff_results(window, cx),
 
-            // VisiHub sync
+            // Hub sync
             CommandId::HubCheckStatus => self.hub_check_status(cx),
             CommandId::HubPull => self.hub_pull(cx),
             CommandId::HubPublish => self.hub_publish(cx),

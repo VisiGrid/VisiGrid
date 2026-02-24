@@ -1,7 +1,7 @@
-// VisiHub sync module
+// Hub sync module
 //
-// Provides sync functionality between VisiGrid and VisiHub.
-// Phase 1: Pull-only (download updates from VisiHub)
+// Provides sync functionality with the hub.
+// Phase 1: Pull-only (download updates from remote)
 
 pub mod auth;
 pub mod client;

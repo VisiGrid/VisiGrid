@@ -36,13 +36,13 @@ impl HubActivity {
     }
 }
 
-/// Status of the VisiHub sync for a workbook.
+/// Status of the hub sync for a workbook.
 ///
 /// This is derived from comparing local state (HubLink in .sheet) with
-/// remote state (fetched from VisiHub API).
+/// remote state (fetched from hub API).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubStatus {
-    /// Not linked to VisiHub
+    /// Not linked to remote
     Unlinked,
     /// Linked and in sync (local_head matches remote current)
     Idle,
@@ -54,7 +54,7 @@ pub enum HubStatus {
     Diverged,
     /// Currently syncing (checking status, pulling, or publishing)
     Syncing,
-    /// Cannot reach VisiHub API
+    /// Cannot reach hub API
     Offline,
     /// User lacks permission to access the linked dataset
     Forbidden,
@@ -89,7 +89,7 @@ impl HubStatus {
         }
     }
 
-    /// Returns true if the status indicates the workbook is linked to VisiHub
+    /// Returns true if the status indicates the workbook is linked to remote
     pub fn is_linked(&self) -> bool {
         !matches!(self, HubStatus::Unlinked)
     }
@@ -105,10 +105,10 @@ impl HubStatus {
     }
 }
 
-/// Remote dataset status from VisiHub API
+/// Remote dataset status from hub API
 #[derive(Debug, Clone)]
 pub struct RemoteStatus {
-    /// Current revision ID on VisiHub
+    /// Current revision ID on remote
     pub current_revision_id: Option<String>,
     /// Content hash of the current revision
     pub content_hash: Option<String>,
@@ -125,7 +125,7 @@ pub struct RemoteStatus {
 /// # Arguments
 /// * `hub_link` - The HubLink stored in the .sheet file (None if unlinked)
 /// * `local_content_hash` - Blake3 hash of the current .sheet file contents
-/// * `remote` - Status from VisiHub API (None if offline/forbidden)
+/// * `remote` - Status from hub API (None if offline/forbidden)
 /// * `remote_error` - Error from fetching remote status, if any
 pub fn compute_status(
     hub_link: Option<&HubLink>,
@@ -195,7 +195,7 @@ mod tests {
             local_head_hash: Some("abc123".to_string()),
             link_mode: "pull".to_string(),
             linked_at: "2024-01-01".to_string(),
-            api_base: "https://api.visihub.app".to_string(),
+            api_base: "https://api.visiapi.com".to_string(),
         };
         let remote = RemoteStatus {
             current_revision_id: Some("rev1".to_string()),
@@ -221,7 +221,7 @@ mod tests {
             local_head_hash: Some("abc123".to_string()),
             link_mode: "pull".to_string(),
             linked_at: "2024-01-01".to_string(),
-            api_base: "https://api.visihub.app".to_string(),
+            api_base: "https://api.visiapi.com".to_string(),
         };
         let remote = RemoteStatus {
             current_revision_id: Some("rev2".to_string()), // Different!
@@ -247,7 +247,7 @@ mod tests {
             local_head_hash: Some("abc123".to_string()),
             link_mode: "pull".to_string(),
             linked_at: "2024-01-01".to_string(),
-            api_base: "https://api.visihub.app".to_string(),
+            api_base: "https://api.visiapi.com".to_string(),
         };
         let remote = RemoteStatus {
             current_revision_id: Some("rev1".to_string()),
@@ -274,7 +274,7 @@ mod tests {
             local_head_hash: Some("abc123".to_string()),
             link_mode: "pull".to_string(),
             linked_at: "2024-01-01".to_string(),
-            api_base: "https://api.visihub.app".to_string(),
+            api_base: "https://api.visiapi.com".to_string(),
         };
         let remote = RemoteStatus {
             current_revision_id: Some("rev2".to_string()), // Remote updated
@@ -301,7 +301,7 @@ mod tests {
             local_head_hash: Some("abc123".to_string()),
             link_mode: "pull".to_string(),
             linked_at: "2024-01-01".to_string(),
-            api_base: "https://api.visihub.app".to_string(),
+            api_base: "https://api.visiapi.com".to_string(),
         };
 
         assert_eq!(
@@ -320,7 +320,7 @@ mod tests {
             local_head_hash: Some("abc123".to_string()),
             link_mode: "pull".to_string(),
             linked_at: "2024-01-01".to_string(),
-            api_base: "https://api.visihub.app".to_string(),
+            api_base: "https://api.visiapi.com".to_string(),
         };
 
         assert_eq!(

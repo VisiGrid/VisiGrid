@@ -41,7 +41,7 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &ExportProvenance, _, cx| {
             this.export_provenance(cx);
         }))
-        // VisiHub sync actions
+        // Hub sync actions
         .on_action(cx.listener(|this, _: &HubCheckStatus, _, cx| {
             this.hub_check_status(cx);
         }))

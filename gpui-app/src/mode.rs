@@ -38,9 +38,9 @@ pub enum Mode {
     Preferences,       // User preferences dialog (Cmd+,)
     Hint,              // Keyboard hints visible (Vimium-style jump mode)
     License,           // Enter/view license dialog
-    HubPasteToken,     // VisiHub: Paste device token (fallback auth)
-    HubLink,           // VisiHub: Link workbook to dataset
-    HubPublishConfirm, // VisiHub: Confirm publish when diverged
+    HubPasteToken,     // Hub: Paste device token (fallback auth)
+    HubLink,           // Hub: Link workbook to dataset
+    HubPublishConfirm, // Hub: Confirm publish when diverged
     ValidationDialog,  // Data validation dialog (Data > Validation)
     AISettings,        // AI configuration dialog (Help > AI Settings)
     AiDialog,          // AI dialog - Insert Formula or Analyze (Tools > AI)

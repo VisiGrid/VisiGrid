@@ -19,5 +19,5 @@
       "status": "baseline_created"
     }
   ],
-  "proof_url": "https://api.visihub.app/api/repos/acme/payments/runs/1/proof"
+  "proof_url": "https://api.visiapi.com/api/repos/acme/payments/runs/1/proof"
 }

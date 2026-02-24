@@ -1,6 +1,6 @@
-//! VisiHub API client — shared between desktop and CLI.
+//! Hub API client — shared between desktop and CLI.
 //!
-//! This crate is the single source of truth for the VisiHub wire contract:
+//! This crate is the single source of truth for the Hub wire contract:
 //! auth, create revision, upload, complete, poll run status, proof URL.
 //!
 //! No GUI concepts. No retries beyond basic backoff. No progress bars.

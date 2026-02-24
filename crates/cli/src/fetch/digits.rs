@@ -125,7 +125,7 @@ fn refresh_access_token(
             ),
             hint: Some(
                 "Refresh token expired or revoked. Reconnect Digits \
-                 in your OAuth app (or VisiHub settings) to regenerate credentials."
+                 in your OAuth app (or your account settings) to regenerate credentials."
                     .into(),
             ),
         });

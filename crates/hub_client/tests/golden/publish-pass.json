@@ -26,5 +26,5 @@
       "status": "pass"
     }
   ],
-  "proof_url": "https://api.visihub.app/api/repos/acme/payments/runs/42/proof"
+  "proof_url": "https://api.visiapi.com/api/repos/acme/payments/runs/42/proof"
 }

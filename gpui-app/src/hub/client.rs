@@ -1,6 +1,6 @@
-// VisiHub API client
+// Hub API client
 //
-// HTTP client for communicating with the VisiHub API.
+// HTTP client for communicating with the hub API.
 // Uses reqwest blocking client (gpui doesn't use Tokio runtime).
 
 use std::path::Path;
@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::hub::auth::{load_auth, AuthCredentials};
 use crate::hub::types::RemoteStatus;
 
-/// VisiHub API client
+/// Hub API client
 #[derive(Clone)]
 pub struct HubClient {
     http: reqwest::blocking::Client,
@@ -34,7 +34,7 @@ pub enum HubError {
 impl std::fmt::Display for HubError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HubError::NotAuthenticated => write!(f, "Not authenticated to VisiHub"),
+            HubError::NotAuthenticated => write!(f, "Not authenticated"),
             HubError::Network(msg) => write!(f, "Network error: {}", msg),
             HubError::Http(code, msg) => write!(f, "HTTP {}: {}", code, msg),
             HubError::Parse(msg) => write!(f, "Parse error: {}", msg),

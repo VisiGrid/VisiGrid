@@ -170,7 +170,7 @@ impl Spreadsheet {
                 self.finalize_load(path);
                 self.request_title_refresh(cx);
 
-                // Load VisiHub link and cell metadata (for .sheet files)
+                // Load hub link and cell metadata (for .sheet files)
                 if ext_lower == "sheet" {
                     match crate::hub::load_hub_link(path) {
                         Ok(Some(link)) => {

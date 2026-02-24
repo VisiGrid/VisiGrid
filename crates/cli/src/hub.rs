@@ -25,13 +25,13 @@ use crate::util;
 // ── Login ───────────────────────────────────────────────────────────
 
 pub fn cmd_login(token: Option<String>, api_base: String) -> Result<(), CliError> {
-    // Resolve token: --token flag > VISIHUB_API_KEY env > interactive prompt
+    // --token flag > VISIGRID_API_KEY env > VISIHUB_API_KEY env
     let token = if let Some(t) = token {
         t
-    } else if let Ok(t) = std::env::var("VISIHUB_API_KEY") {
+    } else if let Ok(t) = std::env::var("VISIGRID_API_KEY").or_else(|_| std::env::var("VISIHUB_API_KEY")) {
         t
     } else if atty::is(atty::Stream::Stdin) {
-        eprint!("VisiHub API token: ");
+        eprint!("API token: ");
         io::stderr().flush().ok();
         let mut buf = String::new();
         io::stdin().read_line(&mut buf)
@@ -41,7 +41,7 @@ pub fn cmd_login(token: Option<String>, api_base: String) -> Result<(), CliError
             return Err(CliError {
                 code: EXIT_USAGE,
                 message: "No token provided".into(),
-                hint: Some("pass --token or set VISIHUB_API_KEY".into()),
+                hint: Some("pass --token or set VISIGRID_API_KEY".into()),
             });
         }
         trimmed
@@ -49,7 +49,7 @@ pub fn cmd_login(token: Option<String>, api_base: String) -> Result<(), CliError
         return Err(CliError {
             code: EXIT_USAGE,
             message: "No token provided and stdin is not a TTY".into(),
-            hint: Some("pass --token or set VISIHUB_API_KEY".into()),
+            hint: Some("pass --token or set VISIGRID_API_KEY".into()),
         });
     };
 
@@ -61,11 +61,11 @@ pub fn cmd_login(token: Option<String>, api_base: String) -> Result<(), CliError
         HubError::Http(401, _) | HubError::Http(403, _) => CliError {
             code: EXIT_HUB_NOT_AUTH,
             message: "Invalid API token".into(),
-            hint: Some("generate a new token at app.visihub.app/settings/tokens".into()),
+            hint: Some("generate a new token at app.visigrid.app".into()),
         },
         HubError::Network(msg) => CliError {
             code: EXIT_HUB_NETWORK,
-            message: format!("Cannot reach VisiHub: {}", msg),
+            message: format!("Cannot reach API: {}", msg),
             hint: None,
         },
         other => hub_error(other),
@@ -174,7 +174,7 @@ pub fn cmd_publish(
         HubError::Http(404, _) => CliError {
             code: EXIT_HUB_NETWORK,
             message: format!("Repository '{}/{}' not found", owner, slug),
-            hint: Some("check the --repo value or create the repository on VisiHub first".into()),
+            hint: Some("check the --repo value or create the repository first".into()),
         },
         HubError::Http(403, _) => CliError {
             code: EXIT_HUB_NOT_AUTH,
@@ -652,7 +652,7 @@ pub fn cmd_hub_publish(
         HubError::Http(404, _) => CliError {
             code: EXIT_HUB_NETWORK,
             message: format!("Repository '{}/{}' not found", owner, slug),
-            hint: Some("check the --repo value or create the repository on VisiHub first".into()),
+            hint: Some("check the --repo value or create the repository first".into()),
         },
         HubError::Http(403, _) => CliError {
             code: EXIT_HUB_NOT_AUTH,
@@ -1281,7 +1281,7 @@ pub fn cmd_pipeline_publish(
         HubError::Http(404, _) => CliError {
             code: EXIT_HUB_NETWORK,
             message: format!("Repository '{}/{}' not found", owner, slug),
-            hint: Some("check the --repo value or create the repository on VisiHub first".into()),
+            hint: Some("check the --repo value or create the repository first".into()),
         },
         HubError::Http(403, _) => CliError {
             code: EXIT_HUB_NOT_AUTH,

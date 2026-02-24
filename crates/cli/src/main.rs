@@ -513,25 +513,25 @@ Use --force to override.")]
         json: bool,
     },
 
-    /// Authenticate with VisiHub
+    /// Authenticate with VisiGrid Hub
     #[command(after_help = "\
 Examples:
   vgrid login                             # interactive prompt
   vgrid login --token vht_abc123          # non-interactive (CI)
-  VISIHUB_API_KEY=vht_abc123 vgrid login  # from env var")]
+  VISIGRID_API_KEY=vht_abc123 vgrid login  # from env var")]
     Login {
-        /// API token (non-interactive; also reads VISIHUB_API_KEY env var)
+        /// API token (non-interactive; also reads VISIGRID_API_KEY env var)
         #[arg(long)]
         token: Option<String>,
 
         /// API base URL
-        #[arg(long, default_value = "https://api.visihub.app")]
+        #[arg(long, default_value = "https://api.visiapi.com")]
         api_base: String,
     },
 
-    /// Publish a file to VisiHub and verify its integrity
+    /// Publish a file to VisiGrid Hub and verify its integrity
     #[command(after_help = "\
-Uploads the file to VisiHub as a new dataset revision. VisiHub runs an integrity \
+Uploads the file as a new dataset revision. The server runs an integrity \
 check (row count, column names, schema structure, content hash) and computes a \
 structural diff against the previous version. A signed proof is available for download.
 
@@ -553,11 +553,11 @@ Examples:
         /// File to publish (CSV, TSV)
         file: PathBuf,
 
-        /// VisiHub repository (owner/slug format)
+        /// Repository (owner/slug format)
         #[arg(long)]
         repo: String,
 
-        /// Dataset name in VisiHub (defaults to file basename)
+        /// Dataset name (defaults to file basename)
         #[arg(long)]
         dataset: Option<String>,
 
@@ -680,7 +680,7 @@ Examples:
     #[command(subcommand)]
     Sheet(SheetCommands),
 
-    /// VisiHub cloud operations
+    /// Cloud operations
     #[command(subcommand)]
     Hub(HubCommands),
 
@@ -1036,7 +1036,7 @@ Examples:
 
 #[derive(Subcommand)]
 enum HubCommands {
-    /// Publish a verified .sheet file to VisiHub
+    /// Publish a verified .sheet file
     #[command(after_help = "\
 Examples:
   vgrid hub publish invoices.sheet --repo quarry/invoices
@@ -1049,7 +1049,7 @@ Examples:
         /// .sheet file to publish
         file: PathBuf,
 
-        /// VisiHub repository (owner/slug)
+        /// Repository (owner/slug)
         #[arg(long)]
         repo: String,
 
@@ -1093,7 +1093,7 @@ Examples:
 
 #[derive(Subcommand)]
 enum PipelineCommands {
-    /// Import, verify, and publish a source file to VisiHub in one step
+    /// Import, verify, and publish a source file in one step
     #[command(after_help = "\
 Examples:
   vgrid pipeline publish data.csv --repo quarry/invoices --headers
@@ -1106,7 +1106,7 @@ Examples:
         /// Source file (.csv, .tsv, .xlsx)
         source: PathBuf,
 
-        /// VisiHub repository (owner/slug)
+        /// Repository (owner/slug)
         #[arg(long)]
         repo: String,
 

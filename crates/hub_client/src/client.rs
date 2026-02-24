@@ -1,4 +1,4 @@
-//! VisiHub HTTP client.
+//! Hub HTTP client.
 //!
 //! Blocking reqwest client (no Tokio runtime required).
 //! Covers the full publish flow: create revision → upload → complete → poll.
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::auth::{load_auth, AuthCredentials};
 
-/// VisiHub API client (blocking).
+/// Hub API client (blocking).
 #[derive(Clone)]
 pub struct HubClient {
     http: reqwest::blocking::Client,
@@ -590,7 +590,7 @@ mod tests {
             content_hash: Some("blake3:deadbeef".into()),
             source_metadata: Some(serde_json::json!({"type": "dbt", "identity": "models/payments"})),
             assertions: None,
-            proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/99/proof".into(),
+            proof_url: "https://api.visiapi.com/api/repos/acme/payments/runs/99/proof".into(),
         };
 
         let json = serde_json::to_value(&result).unwrap();
@@ -624,7 +624,7 @@ mod tests {
             content_hash: Some("blake3:abc123".into()),
             source_metadata: Some(serde_json::json!({"type": "dbt"})),
             assertions: None,
-            proof_url: "https://api.visihub.app/api/repos/acme/payments/runs/42/proof".into(),
+            proof_url: "https://api.visiapi.com/api/repos/acme/payments/runs/42/proof".into(),
         };
 
         let json = serde_json::to_value(&result).unwrap();

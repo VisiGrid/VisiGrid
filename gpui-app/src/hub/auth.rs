@@ -1,6 +1,6 @@
-// VisiHub device token authentication
+// Device token authentication
 //
-// Stores and retrieves the device token for VisiHub API authentication.
+// Stores and retrieves the device token for API authentication.
 // Token is stored in ~/.config/visigrid/auth.json
 
 use std::path::PathBuf;
@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 /// Authentication credentials stored locally
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthCredentials {
-    /// Bearer token for VisiHub API
+    /// Bearer token for API
     pub token: String,
-    /// API base URL (e.g., "https://api.visihub.app")
+    /// API base URL (e.g., "https://api.visiapi.com")
     pub api_base: String,
     /// User slug (for display purposes)
     pub user_slug: Option<String>,
@@ -113,10 +113,10 @@ mod tests {
     fn test_auth_credentials_new() {
         let creds = AuthCredentials::new(
             "test-token".to_string(),
-            "https://api.visihub.app".to_string(),
+            "https://api.visiapi.com".to_string(),
         );
         assert_eq!(creds.token, "test-token");
-        assert_eq!(creds.api_base, "https://api.visihub.app");
+        assert_eq!(creds.api_base, "https://api.visiapi.com");
         assert!(creds.user_slug.is_none());
         assert!(creds.email.is_none());
     }

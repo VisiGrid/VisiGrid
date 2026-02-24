@@ -160,7 +160,7 @@ CREATE TABLE IF NOT EXISTS hub_link (
     local_head_hash TEXT,
     link_mode TEXT DEFAULT 'pull',
     linked_at TEXT NOT NULL,
-    api_base TEXT DEFAULT 'https://api.visihub.app'
+    api_base TEXT DEFAULT 'https://api.visiapi.com'
 );
 
 CREATE TABLE IF NOT EXISTS col_widths (
@@ -1475,7 +1475,7 @@ pub fn save_semantic_verification(path: &Path, verification: &SemanticVerificati
     Ok(())
 }
 
-/// VisiHub link information stored in .sheet files
+/// Hub link information stored in .sheet files
 #[derive(Debug, Clone, PartialEq)]
 pub struct HubLink {
     pub repo_owner: String,
@@ -1498,7 +1498,7 @@ impl HubLink {
             local_head_hash: None,
             link_mode: "pull".to_string(),
             linked_at: chrono_now_iso8601(),
-            api_base: "https://api.visihub.app".to_string(),
+            api_base: "https://api.visiapi.com".to_string(),
         }
     }
 
@@ -1544,7 +1544,7 @@ pub fn load_hub_link(path: &Path) -> Result<Option<HubLink>, String> {
                 local_head_hash: row.get(4)?,
                 link_mode: row.get::<_, Option<String>>(5)?.unwrap_or_else(|| "pull".to_string()),
                 linked_at: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                api_base: row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "https://api.visihub.app".to_string()),
+                api_base: row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "https://api.visiapi.com".to_string()),
             })
         },
     );
@@ -1571,7 +1571,7 @@ pub fn save_hub_link(path: &Path, link: &HubLink) -> Result<(), String> {
             local_head_hash TEXT,
             link_mode TEXT DEFAULT 'pull',
             linked_at TEXT NOT NULL,
-            api_base TEXT DEFAULT 'https://api.visihub.app'
+            api_base TEXT DEFAULT 'https://api.visiapi.com'
         )",
         [],
     ).map_err(|e| e.to_string())?;

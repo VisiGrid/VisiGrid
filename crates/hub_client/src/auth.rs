@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 /// Authentication credentials stored locally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthCredentials {
-    /// Bearer token for VisiHub API
+    /// Bearer token for API
     pub token: String,
-    /// API base URL (e.g., "https://api.visihub.app")
+    /// API base URL (e.g., "https://api.visiapi.com")
     pub api_base: String,
     /// User slug (for display)
     #[serde(default)]
@@ -88,7 +88,7 @@ mod tests {
     fn test_auth_credentials_roundtrip() {
         let creds = AuthCredentials {
             token: "test-token".into(),
-            api_base: "https://api.visihub.app".into(),
+            api_base: "https://api.visiapi.com".into(),
             user_slug: Some("alice".into()),
             email: Some("alice@example.com".into()),
         };
@@ -97,14 +97,14 @@ mod tests {
         let parsed: AuthCredentials = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.token, "test-token");
-        assert_eq!(parsed.api_base, "https://api.visihub.app");
+        assert_eq!(parsed.api_base, "https://api.visiapi.com");
         assert_eq!(parsed.user_slug.as_deref(), Some("alice"));
         assert_eq!(parsed.email.as_deref(), Some("alice@example.com"));
     }
 
     #[test]
     fn test_auth_credentials_missing_optional_fields() {
-        let json = r#"{"token":"tok","api_base":"https://api.visihub.app"}"#;
+        let json = r#"{"token":"tok","api_base":"https://api.visiapi.com"}"#;
         let parsed: AuthCredentials = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.token, "tok");
         assert!(parsed.user_slug.is_none());

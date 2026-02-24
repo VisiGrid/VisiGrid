@@ -1,4 +1,4 @@
-// VisiHub dialogs: Paste Token and Link to Dataset
+// Hub dialogs: Paste Token and Link to Dataset
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
@@ -36,7 +36,7 @@ pub fn render_paste_token_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet
                         .text_size(px(18.0))
                         .font_weight(FontWeight::BOLD)
                         .text_color(text_primary)
-                        .child("Sign in to VisiHub")
+                        .child("Sign in")
                 )
                 .child(
                     div()
@@ -56,7 +56,7 @@ pub fn render_paste_token_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet
                 .rounded_md()
                 .text_size(px(12.0))
                 .text_color(warning_color)
-                .child("Only paste tokens from visihub.app")
+                .child("Only paste tokens from visigrid.app")
         )
         // Token input
         .child(
@@ -96,7 +96,7 @@ pub fn render_paste_token_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet
             div()
                 .text_size(px(11.0))
                 .text_color(text_muted)
-                .child("If the browser didn't open, visit visihub.app/desktop/authorize")
+                .child("If the browser didn't open, visit visigrid.app/desktop/authorize")
         );
 
     // Footer with buttons
@@ -170,7 +170,7 @@ pub fn render_link_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                         .text_size(px(18.0))
                         .font_weight(FontWeight::BOLD)
                         .text_color(text_primary)
-                        .child("Link to VisiHub")
+                        .child("Link to Repository")
                 )
                 .child(
                     div()
@@ -526,7 +526,7 @@ pub fn render_publish_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreads
             div()
                 .text_size(px(13.0))
                 .text_color(text_muted)
-                .child("VisiHub has a newer version of this workbook. Publishing now will replace the remote version.")
+                .child("The remote has a newer version of this workbook. Publishing now will replace the remote version.")
         );
 
     // Footer with buttons

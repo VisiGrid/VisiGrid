@@ -334,15 +334,15 @@ actions!(default_app, [
     DismissDefaultPrompt, // Dismiss the prompt (forever for this file type)
 ]);
 
-// VisiHub sync actions
+// Hub sync actions
 actions!(hub, [
-    HubCheckStatus,       // Check sync status with VisiHub
-    HubPull,              // Pull latest version from VisiHub (only if local is clean)
+    HubCheckStatus,       // Check sync status with Hub
+    HubPull,              // Pull latest version from Hub (only if local is clean)
     HubOpenRemoteAsCopy,  // Open remote version as a new file (always safe)
-    HubPublish,           // Publish local changes to VisiHub (explicit only, never automatic)
-    HubLink,              // Link current file to a VisiHub dataset
-    HubUnlink,            // Remove VisiHub link from current file
-    HubSignIn,            // Sign in to VisiHub (opens browser)
-    HubSignOut,           // Sign out from VisiHub
+    HubPublish,           // Publish local changes to Hub (explicit only, never automatic)
+    HubLink,              // Link current file to a Hub dataset
+    HubUnlink,            // Remove Hub link from current file
+    HubSignIn,            // Sign in to Hub (opens browser)
+    HubSignOut,           // Sign out from Hub
     HubDiagnostics,       // Show hub sync diagnostics (state, errors, etc.)
 ]);

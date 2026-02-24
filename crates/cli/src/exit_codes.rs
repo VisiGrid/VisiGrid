@@ -14,7 +14,7 @@
 //! | 10-19   | ai               | AI provider/keychain codes               |
 //! | 20-29   | session          | Session server codes                     |
 //! | 30-39   | replay           | Provenance replay codes                  |
-//! | 40-49   | hub              | VisiHub publish/verify codes              |
+//! | 40-49   | hub              | Hub publish/verify codes                  |
 //! | 50-59   | fetch            | External data source connectors           |
 //! | 60-69   | recon            | Reconciliation engine codes                |
 //!
@@ -108,16 +108,16 @@ pub const EXIT_REPLAY_SCRIPT_ERROR: u8 = 31;
 pub const EXIT_REPLAY_NONDETERMINISTIC: u8 = 32;
 
 // =============================================================================
-// Hub (40-49) — VisiHub publish/verify codes
+// Hub (40-49) — Hub publish/verify codes
 // =============================================================================
 
-/// Not authenticated to VisiHub (no saved token).
+/// Not authenticated to Hub (no saved token).
 pub const EXIT_HUB_NOT_AUTH: u8 = 40;
 
 /// Integrity check failed (and --fail-on-check-failure is set).
 pub const EXIT_HUB_CHECK_FAILED: u8 = 41;
 
-/// Network/HTTP error communicating with VisiHub.
+/// Network/HTTP error communicating with Hub.
 pub const EXIT_HUB_NETWORK: u8 = 42;
 
 /// Server returned a validation error (bad request, unprocessable entity).
