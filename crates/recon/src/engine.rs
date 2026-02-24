@@ -17,9 +17,9 @@ pub fn run(config: &ReconConfig, input: &ReconInput) -> Result<ReconResult, Reco
     }
 
     let mut classified = if config.way == 2 {
-        run_two_way(config, &aggregates)?
+        run_two_way(config, &aggregates, input)?
     } else {
-        run_three_way(config, &aggregates)?
+        run_three_way(config, &aggregates, input)?
     };
 
     if let Some(ref settlement_config) = config.settlement {
@@ -48,6 +48,7 @@ pub fn run(config: &ReconConfig, input: &ReconInput) -> Result<ReconResult, Reco
 fn run_two_way(
     config: &ReconConfig,
     aggregates: &HashMap<String, Vec<Aggregate>>,
+    input: &ReconInput,
 ) -> Result<Vec<ClassifiedResult>, ReconError> {
     let (pair_name, pair) = config.pairs.iter().next().unwrap();
     let left_aggs = aggregates.get(&pair.left).ok_or_else(|| {
@@ -65,6 +66,12 @@ fn run_two_way(
         MatchStrategy::FuzzyAmountDate => {
             match_fuzzy_amount_date(left_aggs, right_aggs, &config.tolerance)
         }
+        MatchStrategy::WindowedNm => {
+            let wnm_config = pair.windowed_nm.clone().unwrap_or_default();
+            let left_rows = input.records.get(&pair.left).map(|v| v.as_slice()).unwrap_or(&[]);
+            let right_rows = input.records.get(&pair.right).map(|v| v.as_slice()).unwrap_or(&[]);
+            crate::windowed_nm::match_windowed_nm(left_rows, right_rows, &config.tolerance, &wnm_config)
+        }
     };
 
     Ok(classify_two_way(&pair_output, &pair.left, &pair.right))
@@ -73,6 +80,7 @@ fn run_two_way(
 fn run_three_way(
     config: &ReconConfig,
     aggregates: &HashMap<String, Vec<Aggregate>>,
+    input: &ReconInput,
 ) -> Result<Vec<ClassifiedResult>, ReconError> {
     // Find the two pairs. Convention: first pair = processor↔ledger, second = processor↔bank
     let pairs: Vec<_> = config.pairs.iter().collect();
@@ -101,17 +109,23 @@ fn run_three_way(
         ReconError::UnknownRole(format!("bank role '{bank_role}' has no data"))
     })?;
 
-    let match_fn = |left: &[Aggregate], right: &[Aggregate], strategy: MatchStrategy| {
-        match strategy {
+    let match_fn = |left: &[Aggregate], right: &[Aggregate], pair: &crate::config::PairConfig| {
+        match pair.strategy {
             MatchStrategy::ExactKey => match_exact_key(left, right, &config.tolerance),
             MatchStrategy::FuzzyAmountDate => {
                 match_fuzzy_amount_date(left, right, &config.tolerance)
             }
+            MatchStrategy::WindowedNm => {
+                let wnm_config = pair.windowed_nm.clone().unwrap_or_default();
+                let left_rows = input.records.get(&pair.left).map(|v| v.as_slice()).unwrap_or(&[]);
+                let right_rows = input.records.get(&pair.right).map(|v| v.as_slice()).unwrap_or(&[]);
+                crate::windowed_nm::match_windowed_nm(left_rows, right_rows, &config.tolerance, &wnm_config)
+            }
         }
     };
 
-    let pair_pl = match_fn(proc_aggs, ledger_aggs, pl_pair.strategy);
-    let pair_pb = match_fn(proc_aggs, bank_aggs, pb_pair.strategy);
+    let pair_pl = match_fn(proc_aggs, ledger_aggs, pl_pair);
+    let pair_pb = match_fn(proc_aggs, bank_aggs, pb_pair);
 
     Ok(merge_three_way(
         &pair_pl,
@@ -498,5 +512,96 @@ date_window_days = 2
         assert_eq!(result.meta.way, 2);
         assert_eq!(result.summary.matched, 2);
         assert_eq!(result.summary.amount_mismatches, 0);
+    }
+
+    #[test]
+    fn integration_two_way_windowed_nm() {
+        // Settlement scenario: 3 processor payments sum to 1 bank deposit,
+        // and 2 processor payments sum to another bank deposit.
+        let settlements_csv = "\
+settlement_id,net_minor,payout_date,currency,type
+s1,3000,2026-01-15,USD,payout
+s2,4000,2026-01-15,USD,payout
+s3,3000,2026-01-16,USD,payout
+s4,2500,2026-01-17,USD,payout
+s5,2500,2026-01-17,USD,payout
+";
+        let deposits_csv = "\
+txn_id,amount_minor,posted_date,currency,type
+d1,10000,2026-01-16,USD,deposit
+d2,5000,2026-01-18,USD,deposit
+";
+        let config_toml = r#"
+name = "Settlement Recon"
+way = 2
+
+[roles.processor]
+kind = "processor"
+file = "settlements.csv"
+[roles.processor.columns]
+record_id  = "settlement_id"
+match_key  = "settlement_id"
+amount     = "net_minor"
+date       = "payout_date"
+currency   = "currency"
+kind       = "type"
+
+[roles.bank]
+kind = "bank"
+file = "deposits.csv"
+[roles.bank.columns]
+record_id  = "txn_id"
+match_key  = "txn_id"
+amount     = "amount_minor"
+date       = "posted_date"
+currency   = "currency"
+kind       = "type"
+
+[pairs.settlement_bank]
+left = "processor"
+right = "bank"
+strategy = "windowed_nm"
+
+[pairs.settlement_bank.windowed_nm]
+max_group_size = 6
+max_bucket_size = 50
+max_nodes = 50000
+
+[tolerance]
+amount_cents = 0
+date_window_days = 3
+"#;
+        let config = crate::config::ReconConfig::from_toml(config_toml).unwrap();
+        let proc_rows =
+            load_csv_rows("processor", settlements_csv, &config.roles["processor"]).unwrap();
+        let bank_rows =
+            load_csv_rows("bank", deposits_csv, &config.roles["bank"]).unwrap();
+
+        assert_eq!(proc_rows.len(), 5);
+        assert_eq!(bank_rows.len(), 2);
+
+        let input = ReconInput {
+            records: HashMap::from([
+                ("processor".into(), proc_rows),
+                ("bank".into(), bank_rows),
+            ]),
+        };
+
+        let result = run(&config, &input).unwrap();
+        assert_eq!(result.meta.way, 2);
+        // s1(3000)+s2(4000)+s3(3000)=10000=d1, s4(2500)+s5(2500)=5000=d2
+        assert_eq!(result.summary.matched, 2, "expected 2 matched groups");
+        assert_eq!(result.summary.amount_mismatches, 0);
+        assert_eq!(result.summary.left_only, 0);
+        assert_eq!(result.summary.right_only, 0);
+
+        // Verify proofs exist
+        for group in &result.groups {
+            if group.bucket == crate::model::ReconBucket::MatchedTwoWay {
+                assert!(group.proof.is_some(), "matched groups should have proofs");
+                let proof = group.proof.as_ref().unwrap();
+                assert_eq!(proof.strategy, "windowed_nm");
+            }
+        }
     }
 }

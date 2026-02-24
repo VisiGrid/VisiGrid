@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use visigrid_recon::config::{CompositeConfig, ReconConfig};
 use visigrid_recon::engine::{load_csv_rows, run};
-use visigrid_recon::model::{ReconBucket, ReconInput};
+use visigrid_recon::model::{ReconBucket, ReconInput, ReconResult};
 use visigrid_recon::{CompositeVerdict, StepStatus};
 
 fn fixtures_dir() -> PathBuf {
@@ -766,4 +766,115 @@ fn composite_step_config_paths_preserved() {
 
     assert_eq!(steps[0].config_path, "two-way.recon.toml");
     assert_eq!(steps[1].config_path, "three-way.recon.toml");
+}
+
+// -------------------------------------------------------------------------
+// Golden JSON snapshot tests — lock the output schema
+// -------------------------------------------------------------------------
+
+/// Strip volatile fields (run_at, engine_version) from JSON for stable comparison.
+fn stabilize_json(result: &ReconResult) -> serde_json::Value {
+    let mut val = serde_json::to_value(result).unwrap();
+    // Zero out volatile meta fields
+    if let Some(meta) = val.get_mut("meta") {
+        meta["run_at"] = serde_json::Value::String("REDACTED".into());
+        meta["engine_version"] = serde_json::Value::String("REDACTED".into());
+    }
+    val
+}
+
+fn golden_path(name: &str) -> PathBuf {
+    fixtures_dir().join(format!("golden-{name}.json"))
+}
+
+/// Compare result against golden file. If golden doesn't exist, create it and pass.
+/// If it exists, assert equality.
+fn assert_golden(name: &str, result: &ReconResult) {
+    let stable = stabilize_json(result);
+    let json = serde_json::to_string_pretty(&stable).unwrap();
+    let path = golden_path(name);
+
+    if path.exists() {
+        let expected = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read golden file {}: {e}", path.display()));
+        assert_eq!(
+            json.trim(),
+            expected.trim(),
+            "golden JSON mismatch for '{}'. If the schema change is intentional, delete {} and re-run.",
+            name,
+            path.display()
+        );
+    } else {
+        // Create golden file on first run
+        std::fs::write(&path, &json)
+            .unwrap_or_else(|e| panic!("cannot write golden file {}: {e}", path.display()));
+        eprintln!("created golden file: {}", path.display());
+    }
+}
+
+#[test]
+fn golden_two_way_windowed_nm() {
+    let toml = std::fs::read_to_string(fixtures_dir().join("wnm-two-way.recon.toml")).unwrap();
+    let result = load_and_run(&toml);
+
+    // Structural assertions first
+    assert_eq!(result.meta.way, 2);
+    assert!(result.summary.matched > 0);
+    // At least one match should have proof
+    assert!(
+        result.groups.iter().any(|g| g.proof.is_some()),
+        "windowed_nm results must have proofs"
+    );
+
+    assert_golden("two-way-wnm", &result);
+}
+
+#[test]
+fn golden_two_way_windowed_nm_schema_fields() {
+    // Verify specific schema fields exist in the JSON output
+    let toml = std::fs::read_to_string(fixtures_dir().join("wnm-two-way.recon.toml")).unwrap();
+    let result = load_and_run(&toml);
+    let json = serde_json::to_value(&result).unwrap();
+
+    // Meta must have expected fields
+    let meta = &json["meta"];
+    assert!(meta["config_name"].is_string());
+    assert!(meta["way"].is_number());
+    assert!(meta["engine_version"].is_string());
+    assert!(meta["run_at"].is_string());
+
+    // Summary must have all count fields
+    let summary = &json["summary"];
+    for field in ["total_groups", "matched", "amount_mismatches", "timing_mismatches",
+                  "ambiguous", "left_only", "right_only"] {
+        assert!(
+            summary[field].is_number(),
+            "summary.{} must be a number, got {:?}",
+            field, summary[field]
+        );
+    }
+    assert!(summary["bucket_counts"].is_object());
+
+    // Groups must have expected shape
+    for group in json["groups"].as_array().unwrap() {
+        assert!(group["bucket"].is_string());
+        assert!(group["match_key"].is_string());
+        assert!(group["currency"].is_string());
+        assert!(group["aggregates"].is_object());
+        assert!(group["deltas"].is_object());
+
+        // If proof exists, check its shape
+        if let Some(proof) = group.get("proof") {
+            if !proof.is_null() {
+                assert!(proof["strategy"].is_string());
+                assert!(proof["pass"].is_string());
+                assert!(proof["bucket_id"].is_string());
+                assert!(proof["nodes_visited"].is_number());
+                assert!(proof["nodes_pruned"].is_number());
+                assert!(proof["cap_hit"].is_boolean());
+                assert!(proof["ambiguous"].is_boolean());
+                assert!(proof["num_equivalent_solutions"].is_number());
+            }
+        }
+    }
 }

@@ -122,11 +122,13 @@ mod tests {
                     left: "processor".into(),
                     right: "ledger".into(),
                     strategy: MatchStrategy::ExactKey,
+                    windowed_nm: None,
                 }),
             ]),
             tolerance: ToleranceConfig::default(),
             output: OutputConfig::default(),
             settlement: None,
+            fail_on_ambiguous: false,
         }
     }
 
@@ -148,6 +150,8 @@ mod tests {
             ]),
             deltas: Deltas { delta_cents: Some(0), date_offset_days: None },
             settlement: None,
+            proof: None,
+            leg_proofs: HashMap::new(),
         }
     }
 

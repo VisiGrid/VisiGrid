@@ -54,6 +54,7 @@ pub fn match_exact_key(
                 date_offset_days,
                 within_tolerance,
                 within_window,
+                proof: None,
             });
         } else {
             left_only.push((*left_agg).clone());
@@ -118,6 +119,7 @@ pub fn match_fuzzy_amount_date(
                 date_offset_days,
                 within_tolerance: delta_cents.abs() <= tolerance.amount_cents,
                 within_window: date_offset_days.unsigned_abs() <= tolerance.date_window_days,
+                proof: None,
             });
         } else {
             left_only.push(left_agg.clone());

@@ -1,0 +1,220 @@
+{
+  "derived": {
+    "payout_rollup": {
+      "rows": [
+        {
+          "bucket": "matched_two_way",
+          "currency": "eur",
+          "delta_cents": 0,
+          "earliest_date": "2026-01-15",
+          "payout_id": "wnm_0",
+          "record_count": 1,
+          "status": "matched",
+          "total_cents": 5000
+        },
+        {
+          "bucket": "matched_two_way",
+          "currency": "usd",
+          "delta_cents": 0,
+          "earliest_date": "2026-01-15",
+          "payout_id": "wnm_2",
+          "record_count": 1,
+          "status": "matched",
+          "total_cents": 10000
+        },
+        {
+          "bucket": "matched_two_way",
+          "currency": "usd",
+          "delta_cents": 0,
+          "earliest_date": "2026-01-15",
+          "payout_id": "wnm_4",
+          "record_count": 2,
+          "status": "matched",
+          "total_cents": 10000
+        },
+        {
+          "bucket": "bank_only",
+          "currency": "usd",
+          "delta_cents": 0,
+          "earliest_date": "2026-01-17",
+          "payout_id": "wnm_6",
+          "record_count": 1,
+          "status": "unclassified",
+          "total_cents": 9000
+        }
+      ],
+      "schema": "payout_rollup",
+      "version": 1
+    }
+  },
+  "groups": [
+    {
+      "aggregates": {
+        "bank": {
+          "currency": "EUR",
+          "date": "2026-01-15",
+          "match_key": "wnm_1",
+          "record_count": 1,
+          "record_ids": [
+            "D3"
+          ],
+          "role": "bank",
+          "total_cents": 5000
+        },
+        "processor": {
+          "currency": "EUR",
+          "date": "2026-01-15",
+          "match_key": "wnm_0",
+          "record_count": 1,
+          "record_ids": [
+            "S4"
+          ],
+          "role": "processor",
+          "total_cents": 5000
+        }
+      },
+      "bucket": "matched_two_way",
+      "currency": "EUR",
+      "deltas": {
+        "date_offset_days": 0,
+        "delta_cents": 0
+      },
+      "match_key": "wnm_0",
+      "proof": {
+        "ambiguous": false,
+        "bucket_id": "EUR:2026-01-15..2026-01-15",
+        "cap_hit": false,
+        "nodes_pruned": 0,
+        "nodes_visited": 1,
+        "num_equivalent_solutions": 1,
+        "pass": "exact_1_1",
+        "strategy": "windowed_nm"
+      }
+    },
+    {
+      "aggregates": {
+        "bank": {
+          "currency": "USD",
+          "date": "2026-01-15",
+          "match_key": "wnm_3",
+          "record_count": 1,
+          "record_ids": [
+            "D1"
+          ],
+          "role": "bank",
+          "total_cents": 10000
+        },
+        "processor": {
+          "currency": "USD",
+          "date": "2026-01-15",
+          "match_key": "wnm_2",
+          "record_count": 1,
+          "record_ids": [
+            "S1"
+          ],
+          "role": "processor",
+          "total_cents": 10000
+        }
+      },
+      "bucket": "matched_two_way",
+      "currency": "USD",
+      "deltas": {
+        "date_offset_days": 0,
+        "delta_cents": 0
+      },
+      "match_key": "wnm_2",
+      "proof": {
+        "ambiguous": false,
+        "bucket_id": "USD:2026-01-15..2026-01-17",
+        "cap_hit": false,
+        "nodes_pruned": 0,
+        "nodes_visited": 1,
+        "num_equivalent_solutions": 1,
+        "pass": "exact_1_1",
+        "strategy": "windowed_nm"
+      }
+    },
+    {
+      "aggregates": {
+        "bank": {
+          "currency": "USD",
+          "date": "2026-01-16",
+          "match_key": "wnm_5",
+          "record_count": 1,
+          "record_ids": [
+            "D2"
+          ],
+          "role": "bank",
+          "total_cents": 10000
+        },
+        "processor": {
+          "currency": "USD",
+          "date": "2026-01-15",
+          "match_key": "wnm_4",
+          "record_count": 2,
+          "record_ids": [
+            "S2",
+            "S3"
+          ],
+          "role": "processor",
+          "total_cents": 10000
+        }
+      },
+      "bucket": "matched_two_way",
+      "currency": "USD",
+      "deltas": {
+        "date_offset_days": -1,
+        "delta_cents": 0
+      },
+      "match_key": "wnm_4",
+      "proof": {
+        "ambiguous": false,
+        "bucket_id": "USD:2026-01-15..2026-01-17",
+        "cap_hit": false,
+        "nodes_pruned": 0,
+        "nodes_visited": 4,
+        "num_equivalent_solutions": 1,
+        "pass": "k_1",
+        "strategy": "windowed_nm"
+      }
+    },
+    {
+      "aggregates": {
+        "bank": {
+          "currency": "USD",
+          "date": "2026-01-17",
+          "match_key": "wnm_6",
+          "record_count": 1,
+          "record_ids": [
+            "D4"
+          ],
+          "role": "bank",
+          "total_cents": 9000
+        }
+      },
+      "bucket": "bank_only",
+      "currency": "USD",
+      "deltas": {},
+      "match_key": "wnm_6"
+    }
+  ],
+  "meta": {
+    "config_name": "WNM Two-Way Golden",
+    "engine_version": "REDACTED",
+    "run_at": "REDACTED",
+    "way": 2
+  },
+  "summary": {
+    "ambiguous": 0,
+    "amount_mismatches": 0,
+    "bucket_counts": {
+      "bank_only": 1,
+      "matched_two_way": 3
+    },
+    "left_only": 0,
+    "matched": 3,
+    "right_only": 1,
+    "timing_mismatches": 0,
+    "total_groups": 4
+  }
+}

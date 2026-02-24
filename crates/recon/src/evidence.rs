@@ -9,6 +9,7 @@ pub fn compute_summary(results: &[ClassifiedResult]) -> ReconSummary {
     let mut matched = 0;
     let mut amount_mismatches = 0;
     let mut timing_mismatches = 0;
+    let mut ambiguous = 0;
     let mut left_only = 0;
     let mut right_only = 0;
 
@@ -19,6 +20,7 @@ pub fn compute_summary(results: &[ClassifiedResult]) -> ReconSummary {
             ReconBucket::MatchedTwoWay | ReconBucket::MatchedThreeWay => matched += 1,
             ReconBucket::AmountMismatch => amount_mismatches += 1,
             ReconBucket::TimingMismatch => timing_mismatches += 1,
+            ReconBucket::Ambiguous => ambiguous += 1,
             ReconBucket::ProcessorLedgerOnly | ReconBucket::ProcessorBankOnly => left_only += 1,
             ReconBucket::LedgerOnly | ReconBucket::BankOnly => right_only += 1,
         }
@@ -35,6 +37,7 @@ pub fn compute_summary(results: &[ClassifiedResult]) -> ReconSummary {
         matched,
         amount_mismatches,
         timing_mismatches,
+        ambiguous,
         left_only,
         right_only,
         bucket_counts,
@@ -58,6 +61,8 @@ mod tests {
                 date_offset_days: None,
             },
             settlement: None,
+            proof: None,
+            leg_proofs: HashMap::new(),
         }
     }
 

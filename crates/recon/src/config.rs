@@ -22,6 +22,10 @@ pub struct ReconConfig {
     pub output: OutputConfig,
     #[serde(default)]
     pub settlement: Option<SettlementConfig>,
+    /// When true, ambiguous matches are treated as failures (exit code 1)
+    /// instead of warnings (exit code 61). Default: false.
+    #[serde(default)]
+    pub fail_on_ambiguous: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +163,46 @@ pub struct PairConfig {
     pub right: String,
     #[serde(default = "default_strategy")]
     pub strategy: MatchStrategy,
+    #[serde(default)]
+    pub windowed_nm: Option<WindowedNmConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WindowedNmConfig {
+    #[serde(default = "default_max_group_size")]
+    pub max_group_size: usize,
+    #[serde(default = "default_max_bucket_size")]
+    pub max_bucket_size: usize,
+    #[serde(default = "default_max_nodes")]
+    pub max_nodes: usize,
+    #[serde(default)]
+    pub allow_mixed_sign: bool,
+    #[serde(default)]
+    pub evidence_fields: Vec<String>,
+}
+
+impl Default for WindowedNmConfig {
+    fn default() -> Self {
+        Self {
+            max_group_size: default_max_group_size(),
+            max_bucket_size: default_max_bucket_size(),
+            max_nodes: default_max_nodes(),
+            allow_mixed_sign: false,
+            evidence_fields: Vec::new(),
+        }
+    }
+}
+
+fn default_max_group_size() -> usize {
+    6
+}
+
+fn default_max_bucket_size() -> usize {
+    50
+}
+
+fn default_max_nodes() -> usize {
+    50_000
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -166,6 +210,7 @@ pub struct PairConfig {
 pub enum MatchStrategy {
     ExactKey,
     FuzzyAmountDate,
+    WindowedNm,
 }
 
 fn default_strategy() -> MatchStrategy {
@@ -319,6 +364,13 @@ impl ReconConfig {
                 return Err(ReconError::UnknownRole(format!(
                     "pair '{pair_name}': right role '{}' not found",
                     pair.right
+                )));
+            }
+
+            // WindowedNm requires date_window_days > 0
+            if pair.strategy == MatchStrategy::WindowedNm && self.tolerance.date_window_days == 0 {
+                return Err(ReconError::ConfigValidation(format!(
+                    "pair '{pair_name}': strategy 'windowed_nm' requires date_window_days > 0"
                 )));
             }
         }

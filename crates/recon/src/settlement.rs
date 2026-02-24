@@ -127,6 +127,8 @@ mod tests {
                 date_offset_days: None,
             },
             settlement: None,
+            proof: None,
+            leg_proofs: HashMap::new(),
         }
     }
 

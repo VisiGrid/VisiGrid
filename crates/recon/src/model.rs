@@ -49,6 +49,43 @@ pub struct Aggregate {
 }
 
 // ---------------------------------------------------------------------------
+// Proof artifacts
+// ---------------------------------------------------------------------------
+
+/// Why a match was flagged as ambiguous.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbiguityReason {
+    /// Multiple solutions scored identically on all fields except record IDs.
+    /// The engine picked deterministically by lexicographic ID order.
+    TiedSolutions,
+    /// The DFS/BFS node cap was hit before exhaustive search completed.
+    /// The best-found solution may not be globally optimal.
+    SearchCapHit,
+    /// Both: tied solutions *and* cap hit — the worst case.
+    TiedAndCapHit,
+    /// The candidate bucket exceeded max_bucket_size.
+    /// Too many rows in the same date window to attempt matching.
+    BucketTooLarge,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MatchProof {
+    pub strategy: String,
+    pub pass: String,
+    pub bucket_id: String,
+    pub nodes_visited: u64,
+    pub nodes_pruned: u64,
+    pub cap_hit: bool,
+    pub ambiguous: bool,
+    pub num_equivalent_solutions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ambiguity_reason: Option<AmbiguityReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tie_break_reason: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Pair matching
 // ---------------------------------------------------------------------------
 
@@ -60,6 +97,8 @@ pub struct MatchedPair {
     pub date_offset_days: i32,
     pub within_tolerance: bool,
     pub within_window: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof: Option<MatchProof>,
 }
 
 #[derive(Debug)]
@@ -84,6 +123,7 @@ pub enum ReconBucket {
     BankOnly,
     AmountMismatch,
     TimingMismatch,
+    Ambiguous,
 }
 
 impl std::fmt::Display for ReconBucket {
@@ -97,6 +137,7 @@ impl std::fmt::Display for ReconBucket {
             Self::BankOnly => write!(f, "bank_only"),
             Self::AmountMismatch => write!(f, "amount_mismatch"),
             Self::TimingMismatch => write!(f, "timing_mismatch"),
+            Self::Ambiguous => write!(f, "ambiguous"),
         }
     }
 }
@@ -118,6 +159,12 @@ pub struct ClassifiedResult {
     pub deltas: Deltas,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settlement: Option<SettlementClassification>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof: Option<MatchProof>,
+    /// Per-leg proofs for 3-way recon. Keys are pair names (e.g. "processor_ledger").
+    /// Empty for 2-way recon.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub leg_proofs: HashMap<String, MatchProof>,
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +217,7 @@ pub struct ReconSummary {
     pub matched: usize,
     pub amount_mismatches: usize,
     pub timing_mismatches: usize,
+    pub ambiguous: usize,
     pub left_only: usize,
     pub right_only: usize,
     pub bucket_counts: HashMap<String, usize>,
@@ -261,6 +309,10 @@ pub enum StepStatus {
 
 impl StepStatus {
     pub fn from_recon_result(result: &ReconResult) -> Self {
+        Self::from_recon_result_with_options(result, false)
+    }
+
+    pub fn from_recon_result_with_options(result: &ReconResult, fail_on_ambiguous: bool) -> Self {
         let s = &result.summary;
 
         // Settlement-aware path: settlement config changes the exit semantics
@@ -270,7 +322,10 @@ impl StepStatus {
             {
                 return Self::Fail;
             }
-            if settlement.stale > 0 {
+            if s.ambiguous > 0 && fail_on_ambiguous {
+                return Self::Fail;
+            }
+            if settlement.stale > 0 || s.ambiguous > 0 {
                 return Self::Warn;
             }
             // pending only → pass (matches CLI: pending-only is not an error)
@@ -282,6 +337,11 @@ impl StepStatus {
             || s.left_only > 0 || s.right_only > 0
         {
             return Self::Fail;
+        }
+
+        // Ambiguous matches: fail if configured, otherwise warn
+        if s.ambiguous > 0 {
+            return if fail_on_ambiguous { Self::Fail } else { Self::Warn };
         }
 
         Self::Pass
@@ -385,6 +445,7 @@ mod tests {
                 matched,
                 amount_mismatches,
                 timing_mismatches,
+                ambiguous: 0,
                 left_only,
                 right_only,
                 bucket_counts: HashMap::new(),
@@ -524,7 +585,7 @@ mod tests {
 
     /// Reference implementation of CLI exit-code logic for a single recon result.
     /// Returns: 0 = pass, 1 = fail/mismatch, 61 = stale/warn.
-    fn cli_exit_code(result: &ReconResult) -> u8 {
+    fn cli_exit_code(result: &ReconResult, fail_on_ambiguous: bool) -> u8 {
         let s = &result.summary;
 
         // Settlement-aware path (matches cmd_recon_run_single)
@@ -532,7 +593,10 @@ mod tests {
             if settlement.errors > 0 {
                 return 1; // EXIT_RECON_MISMATCH
             }
-            if settlement.stale > 0 {
+            if s.ambiguous > 0 && fail_on_ambiguous {
+                return 1; // EXIT_RECON_MISMATCH
+            }
+            if settlement.stale > 0 || s.ambiguous > 0 {
                 return 61; // EXIT_RECON_STALE
             }
             return 0;
@@ -543,6 +607,11 @@ mod tests {
             || s.left_only > 0 || s.right_only > 0
         {
             return 1; // EXIT_RECON_MISMATCH
+        }
+
+        // Ambiguous matches
+        if s.ambiguous > 0 {
+            return if fail_on_ambiguous { 1 } else { 61 };
         }
 
         0
@@ -560,7 +629,7 @@ mod tests {
     #[test]
     fn lockstep_step_status_matches_cli_exit_code() {
         // Exhaustive scenarios: each (summary shape, expected agreement)
-        let cases: Vec<(ReconResult, &str)> = vec![
+        let mut cases: Vec<(ReconResult, &str)> = vec![
             (make_summary(5, 0, 0, 0, 0, None), "all matched, no settlement"),
             (make_summary(3, 1, 0, 0, 0, None), "amount mismatch"),
             (make_summary(3, 0, 1, 0, 0, None), "timing mismatch"),
@@ -592,15 +661,30 @@ mod tests {
             ),
         ];
 
+        // Also test ambiguous-specific cases
+        // With ambiguous=0 these are already covered above; add explicit ambiguous > 0 cases
+        let mut ambiguous_result = make_summary(3, 0, 0, 0, 0, None);
+        ambiguous_result.summary.ambiguous = 1;
+        cases.push((ambiguous_result, "ambiguous without settlement"));
+
+        let mut ambiguous_settlement = make_summary(2, 0, 0, 0, 0, Some(SettlementSummary {
+            matched: 1, pending: 0, stale: 0, errors: 0,
+        }));
+        ambiguous_settlement.summary.ambiguous = 1;
+        cases.push((ambiguous_settlement, "ambiguous with settlement"));
+
         for (result, label) in &cases {
-            let status = StepStatus::from_recon_result(result);
-            let step_exit = status_to_exit(&status);
-            let cli_exit = cli_exit_code(result);
-            assert_eq!(
-                step_exit, cli_exit,
-                "lockstep mismatch for '{}': StepStatus::{:?} (exit {}) vs CLI exit {}",
-                label, status, step_exit, cli_exit,
-            );
+            // Test both fail_on_ambiguous = false and true
+            for fail_on_ambiguous in [false, true] {
+                let status = StepStatus::from_recon_result_with_options(result, fail_on_ambiguous);
+                let step_exit = status_to_exit(&status);
+                let cli_exit = cli_exit_code(result, fail_on_ambiguous);
+                assert_eq!(
+                    step_exit, cli_exit,
+                    "lockstep mismatch for '{}' (fail_on_ambiguous={}): StepStatus::{:?} (exit {}) vs CLI exit {}",
+                    label, fail_on_ambiguous, status, step_exit, cli_exit,
+                );
+            }
         }
     }
 }

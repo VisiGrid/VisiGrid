@@ -165,8 +165,14 @@ fn cmd_recon_run_single(
         if settlement.errors > 0 {
             return Err(recon_err(EXIT_RECON_MISMATCH, "settlement errors found"));
         }
+        if s.ambiguous > 0 && config.fail_on_ambiguous {
+            return Err(recon_err(EXIT_RECON_MISMATCH, "ambiguous matches found (fail_on_ambiguous)"));
+        }
         if settlement.stale > 0 {
             return Err(recon_err(EXIT_RECON_STALE, "stale items found"));
+        }
+        if s.ambiguous > 0 {
+            return Err(recon_err(EXIT_RECON_STALE, "ambiguous matches found"));
         }
         // pending only → pass
         return Ok(());
@@ -175,6 +181,13 @@ fn cmd_recon_run_single(
     // Fallback: original logic when no settlement config
     if s.amount_mismatches > 0 || s.timing_mismatches > 0 || s.left_only > 0 || s.right_only > 0 {
         return Err(recon_err(EXIT_RECON_MISMATCH, "mismatches found"));
+    }
+
+    if s.ambiguous > 0 {
+        if config.fail_on_ambiguous {
+            return Err(recon_err(EXIT_RECON_MISMATCH, "ambiguous matches found (fail_on_ambiguous)"));
+        }
+        return Err(recon_err(EXIT_RECON_STALE, "ambiguous matches found"));
     }
 
     Ok(())
@@ -205,11 +218,14 @@ fn cmd_recon_run_composite(
         let start = Instant::now();
 
         // Attempt to load and run the child recon
-        let step_result = (|| -> Result<visigrid_recon::ReconResult, String> {
+        // Returns (result, fail_on_ambiguous) so exit code respects per-config flag
+        let step_result = (|| -> Result<(visigrid_recon::ReconResult, bool), String> {
             let child_str = std::fs::read_to_string(&step_config_path)
                 .map_err(|e| format!("cannot read {}: {e}", step_config_path.display()))?;
             let child_config = visigrid_recon::ReconConfig::from_toml(&child_str)
                 .map_err(|e| e.to_string())?;
+
+            let fail_on_ambiguous = child_config.fail_on_ambiguous;
 
             let child_base = step_config_path
                 .parent()
@@ -226,14 +242,15 @@ fn cmd_recon_run_composite(
             }
 
             let input = visigrid_recon::ReconInput { records };
-            visigrid_recon::run(&child_config, &input).map_err(|e| e.to_string())
+            let result = visigrid_recon::run(&child_config, &input).map_err(|e| e.to_string())?;
+            Ok((result, fail_on_ambiguous))
         })();
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match step_result {
-            Ok(result) => {
-                let status = StepStatus::from_recon_result(&result);
+            Ok((result, fail_on_ambiguous)) => {
+                let status = StepStatus::from_recon_result_with_options(&result, fail_on_ambiguous);
 
                 eprintln!(
                     "  step '{}': {} ({}ms)",
@@ -279,6 +296,7 @@ fn cmd_recon_run_composite(
                         matched: 0,
                         amount_mismatches: 0,
                         timing_mismatches: 0,
+                        ambiguous: 0,
                         left_only: 0,
                         right_only: 0,
                         bucket_counts: HashMap::new(),

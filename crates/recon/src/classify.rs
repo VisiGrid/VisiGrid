@@ -17,6 +17,8 @@ pub fn classify_two_way(
             ReconBucket::AmountMismatch
         } else if !m.within_window {
             ReconBucket::TimingMismatch
+        } else if is_ambiguous_match(m) {
+            ReconBucket::Ambiguous
         } else {
             ReconBucket::MatchedTwoWay
         };
@@ -35,6 +37,8 @@ pub fn classify_two_way(
                 date_offset_days: Some(m.date_offset_days),
             },
             settlement: None,
+            proof: m.proof.clone(),
+            leg_proofs: HashMap::new(),
         });
     }
 
@@ -52,6 +56,8 @@ pub fn classify_two_way(
                 date_offset_days: None,
             },
             settlement: None,
+            proof: None,
+            leg_proofs: HashMap::new(),
         });
     }
 
@@ -69,6 +75,8 @@ pub fn classify_two_way(
                 date_offset_days: None,
             },
             settlement: None,
+            proof: None,
+            leg_proofs: HashMap::new(),
         });
     }
 
@@ -145,6 +153,8 @@ pub fn merge_three_way(
                     ReconBucket::AmountMismatch
                 } else if !pl.within_window || !pb.within_window {
                     ReconBucket::TimingMismatch
+                } else if is_ambiguous_match(pl) || is_ambiguous_match(pb) {
+                    ReconBucket::Ambiguous
                 } else {
                     ReconBucket::MatchedThreeWay
                 };
@@ -153,6 +163,25 @@ pub fn merge_three_way(
                 aggregates.insert(processor_role.to_string(), pl.left.clone());
                 aggregates.insert(ledger_role.to_string(), pl.right.clone());
                 aggregates.insert(bank_role.to_string(), pb.right.clone());
+
+                // Collect per-leg proofs for 3-way transparency
+                let mut leg_proofs = HashMap::new();
+                if let Some(ref p) = pl.proof {
+                    let leg_name = format!("{}_{}", processor_role, ledger_role);
+                    leg_proofs.insert(leg_name, p.clone());
+                }
+                if let Some(ref p) = pb.proof {
+                    let leg_name = format!("{}_{}", processor_role, bank_role);
+                    leg_proofs.insert(leg_name, p.clone());
+                }
+
+                // Top-level proof: pick the ambiguous one if only one leg is ambiguous,
+                // or the first ambiguous one if both are
+                let proof = if is_ambiguous_match(pb) {
+                    pb.proof.clone()
+                } else {
+                    pl.proof.clone()
+                };
 
                 results.push(ClassifiedResult {
                     bucket,
@@ -164,6 +193,8 @@ pub fn merge_three_way(
                         date_offset_days: Some(pl.date_offset_days),
                     },
                     settlement: None,
+                    proof,
+                    leg_proofs,
                 });
             }
             (Some(pl), None) => {
@@ -180,6 +211,11 @@ pub fn merge_three_way(
                 aggregates.insert(processor_role.to_string(), pl.left.clone());
                 aggregates.insert(ledger_role.to_string(), pl.right.clone());
 
+                let mut leg_proofs = HashMap::new();
+                if let Some(ref p) = pl.proof {
+                    leg_proofs.insert(format!("{}_{}", processor_role, ledger_role), p.clone());
+                }
+
                 results.push(ClassifiedResult {
                     bucket,
                     match_key: key.0.clone(),
@@ -190,6 +226,8 @@ pub fn merge_three_way(
                         date_offset_days: Some(pl.date_offset_days),
                     },
                     settlement: None,
+                    proof: pl.proof.clone(),
+                    leg_proofs,
                 });
             }
             (None, Some(pb)) => {
@@ -206,6 +244,11 @@ pub fn merge_three_way(
                 aggregates.insert(processor_role.to_string(), pb.left.clone());
                 aggregates.insert(bank_role.to_string(), pb.right.clone());
 
+                let mut leg_proofs = HashMap::new();
+                if let Some(ref p) = pb.proof {
+                    leg_proofs.insert(format!("{}_{}", processor_role, bank_role), p.clone());
+                }
+
                 results.push(ClassifiedResult {
                     bucket,
                     match_key: key.0.clone(),
@@ -216,11 +259,12 @@ pub fn merge_three_way(
                         date_offset_days: Some(pb.date_offset_days),
                     },
                     settlement: None,
+                    proof: pb.proof.clone(),
+                    leg_proofs,
                 });
             }
             (None, None) => {
                 // Processor-only (in left_only of both pairs — rare but possible)
-                // Find the aggregate from either pair's left_only
                 let proc_agg = pair_pl
                     .left_only
                     .iter()
@@ -244,6 +288,8 @@ pub fn merge_three_way(
                             date_offset_days: None,
                         },
                         settlement: None,
+                        proof: None,
+                        leg_proofs: HashMap::new(),
                     });
                 }
             }
@@ -264,6 +310,8 @@ pub fn merge_three_way(
                 date_offset_days: None,
             },
             settlement: None,
+            proof: None,
+            leg_proofs: HashMap::new(),
         });
     }
 
@@ -281,10 +329,20 @@ pub fn merge_three_way(
                 date_offset_days: None,
             },
             settlement: None,
+            proof: None,
+            leg_proofs: HashMap::new(),
         });
     }
 
     results
+}
+
+/// A match is ambiguous if the proof indicates multiple equivalent solutions
+/// or the search was capped before exhaustive exploration.
+fn is_ambiguous_match(m: &MatchedPair) -> bool {
+    m.proof
+        .as_ref()
+        .map_or(false, |p| p.ambiguous || p.cap_hit)
 }
 
 fn bucket_for_only_role(role: &str) -> ReconBucket {
@@ -339,6 +397,7 @@ mod tests {
             date_offset_days: date_off,
             within_tolerance: tol,
             within_window: win,
+            proof: None,
         }
     }
 

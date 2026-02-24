@@ -13,6 +13,7 @@ pub mod evidence;
 pub mod matcher;
 pub mod model;
 pub mod settlement;
+pub mod windowed_nm;
 
 pub use config::{CompositeConfig, ReconConfig};
 pub use engine::run;

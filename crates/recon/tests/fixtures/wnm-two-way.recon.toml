@@ -1,0 +1,40 @@
+name = "WNM Two-Way Golden"
+way = 2
+
+[roles.processor]
+kind = "processor"
+file = "wnm-settlements.csv"
+
+[roles.processor.columns]
+record_id = "settlement_id"
+match_key = "settlement_id"
+amount = "net_minor"
+date = "payout_date"
+currency = "currency"
+kind = "type"
+
+[roles.bank]
+kind = "bank"
+file = "wnm-deposits.csv"
+
+[roles.bank.columns]
+record_id = "txn_id"
+match_key = "txn_id"
+amount = "amount_minor"
+date = "posted_date"
+currency = "currency"
+kind = "type"
+
+[pairs.settlement_bank]
+left = "processor"
+right = "bank"
+strategy = "windowed_nm"
+
+[pairs.settlement_bank.windowed_nm]
+max_group_size = 6
+max_bucket_size = 50
+max_nodes = 50000
+
+[tolerance]
+amount_cents = 0
+date_window_days = 3

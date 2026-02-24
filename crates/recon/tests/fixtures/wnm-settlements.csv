@@ -1,0 +1,5 @@
+settlement_id,net_minor,payout_date,currency,type,merchant_id
+S1,10000,2026-01-15,USD,payout,ACME
+S2,3000,2026-01-15,USD,payout,ACME
+S3,7000,2026-01-16,USD,payout,ACME
+S4,5000,2026-01-15,EUR,payout,BETA
