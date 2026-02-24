@@ -87,13 +87,15 @@ impl AuthorizeNetClient {
         to: &NaiveDate,
         quiet: bool,
     ) -> Result<Vec<serde_json::Value>, CliError> {
-        let payload = serde_json::json!({
-            "getSettledBatchListRequest": {
-                "merchantAuthentication": self.auth_block(),
-                "firstSettlementDate": format!("{}T00:00:00Z", from),
-                "lastSettlementDate": format!("{}T00:00:00Z", to),
-            }
-        });
+        // Authorize.net XML schema requires merchantAuthentication first.
+        // serde_json::json! uses BTreeMap (alphabetical), so build manually.
+        let mut inner = serde_json::Map::new();
+        inner.insert("merchantAuthentication".into(), self.auth_block());
+        inner.insert("firstSettlementDate".into(), format!("{}T00:00:00Z", from).into());
+        inner.insert("lastSettlementDate".into(), format!("{}T00:00:00Z", to).into());
+        let mut payload = serde_json::Map::new();
+        payload.insert("getSettledBatchListRequest".into(), serde_json::Value::Object(inner));
+        let payload = serde_json::Value::Object(payload);
 
         let url = self.api_url.clone();
         let body = self.client.request_with_retry(|http| {
@@ -123,12 +125,13 @@ impl AuthorizeNetClient {
         batch_id: &str,
         quiet: bool,
     ) -> Result<Vec<serde_json::Value>, CliError> {
-        let payload = serde_json::json!({
-            "getTransactionListRequest": {
-                "merchantAuthentication": self.auth_block(),
-                "batchId": batch_id,
-            }
-        });
+        // Authorize.net XML schema requires merchantAuthentication first.
+        let mut inner = serde_json::Map::new();
+        inner.insert("merchantAuthentication".into(), self.auth_block());
+        inner.insert("batchId".into(), batch_id.into());
+        let mut payload = serde_json::Map::new();
+        payload.insert("getTransactionListRequest".into(), serde_json::Value::Object(inner));
+        let payload = serde_json::Value::Object(payload);
 
         let url = self.api_url.clone();
         let body = self.client.request_with_retry(|http| {
