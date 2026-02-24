@@ -84,7 +84,15 @@ impl Spreadsheet {
             cx,
         );
 
-        let (row, col) = self.active_view_state().selected;
+        let (row, mut col) = self.active_view_state().selected;
+
+        // When collapsing a full-row selection, restore the original column
+        // so the cursor returns to where it was before Shift+Space.
+        if let Some(saved_col) = self.pre_row_select_col.take() {
+            if self.active_view_state().selection_end.is_some() {
+                col = saved_col;
+            }
+        }
 
         // Merge-aware navigation: if currently on a merge, move from the effective edge
         // so the merge is treated as a single cell
@@ -302,6 +310,35 @@ impl Spreadsheet {
         // Determine search mode: looking for non-empty or looking for empty
         let looking_for_nonempty = current_empty || next_empty;
 
+        // Use the sheet's data extent to short-circuit scanning through empty space.
+        // Without this, Ctrl+Down from past-the-last-data-row scans all 65536 rows.
+        let (extent_row, extent_col) = self.sheet(cx).data_extent();
+
+        // Fast path: if scanning through empty space and there's no data ahead,
+        // jump directly to the data extent boundary (not the sheet edge).
+        // This matches Excel: first Ctrl+Down stops at data boundary, second goes to sheet edge.
+        if looking_for_nonempty {
+            let no_data_ahead = if dr > 0 {
+                row > extent_row
+            } else if dr < 0 {
+                row == 0 || extent_row == 0
+            } else if dc > 0 {
+                col > extent_col
+            } else if dc < 0 {
+                col == 0 || extent_col == 0
+            } else {
+                false
+            };
+
+            if no_data_ahead {
+                // No data in scan direction — jump to sheet edge
+                if dr > 0 { return (NUM_ROWS - 1, col); }
+                if dr < 0 { return (0, col); }
+                if dc > 0 { return (row, NUM_COLS - 1); }
+                if dc < 0 { return (row, 0); }
+            }
+        }
+
         loop {
             let next_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
             let next_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
@@ -344,7 +381,14 @@ impl Spreadsheet {
     pub fn jump_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
 
-        let (row, col) = self.view_state.selected;
+        let (row, mut col) = self.view_state.selected;
+
+        // When collapsing a full-row selection with Ctrl+Arrow, restore the original column
+        if let Some(saved_col) = self.pre_row_select_col.take() {
+            if self.view_state.selection_end.is_some() {
+                col = saved_col;
+            }
+        }
 
         // Start from effective merge edge (merge = single cell for navigation)
         let (start_row, start_col) = if let Some(merge) = self.sheet(cx).get_merge(row, col) {
@@ -391,13 +435,22 @@ impl Spreadsheet {
         // Full column selection + vertical jump → no-op
         if is_full_col && dr != 0 && dc == 0 { return; }
 
+        // For full-row selections extending vertically, use the original column
+        // (from before Shift+Space) for boundary detection instead of column 0 or sentinel 255.
+        // Otherwise find_data_boundary scans an always-empty column and goes to sheet edge.
+        let boundary_col = if is_full_row && dr != 0 {
+            self.pre_row_select_col.unwrap_or(anchor_col)
+        } else {
+            col
+        };
+
         // Start from effective merge edge
-        let (start_row, start_col) = if let Some(merge) = self.sheet(cx).get_merge(row, col) {
+        let (start_row, start_col) = if let Some(merge) = self.sheet(cx).get_merge(row, boundary_col) {
             let sr = if dr > 0 { merge.end.0 } else if dr < 0 { merge.start.0 } else { row };
-            let sc = if dc > 0 { merge.end.1 } else if dc < 0 { merge.start.1 } else { col };
+            let sc = if dc > 0 { merge.end.1 } else if dc < 0 { merge.start.1 } else { boundary_col };
             (sr, sc)
         } else {
-            (row, col)
+            (row, boundary_col)
         };
 
         let (new_row, new_col) = self.find_data_boundary(start_row, start_col, dr, dc, cx);
@@ -803,6 +856,8 @@ impl Spreadsheet {
             self.view_state.selected = (anchor_row.min(row), 0);
             self.view_state.selection_end = Some((anchor_row.max(row), NUM_COLS - 1));
         } else {
+            // Remember the original column so navigation restores it when selection collapses
+            self.pre_row_select_col = Some(self.view_state.selected.1);
             self.view_state.selected = (row, 0);
             self.view_state.selection_end = Some((row, NUM_COLS - 1));
             self.view_state.additional_selections.clear();

@@ -345,6 +345,16 @@ impl Spreadsheet {
                     let action = if hidden { "hide" } else { "unhide" };
                     self.status_message = Some(format!("Undo: {} {} column(s)", action, cols.len()));
                 }
+                UndoAction::FreezePanesChanged { old_frozen_rows, old_frozen_cols, .. } => {
+                    self.view_state.frozen_rows = old_frozen_rows;
+                    self.view_state.frozen_cols = old_frozen_cols;
+                    self.clamp_scroll_to_freeze(cx);
+                    if old_frozen_rows == 0 && old_frozen_cols == 0 {
+                        self.status_message = Some("Undo: freeze panes".to_string());
+                    } else {
+                        self.status_message = Some("Undo: unfreeze panes".to_string());
+                    }
+                }
                 UndoAction::Rewind { .. } => {
                     // Rewind is audit-only - cannot be undone
                     // (It's the last action after truncation, so this shouldn't be reached)
@@ -632,6 +642,10 @@ impl Spreadsheet {
                 self.bump_cells_rev();
                 self.revalidate_range(&range, cx);
             }
+            UndoAction::FreezePanesChanged { old_frozen_rows, old_frozen_cols, .. } => {
+                self.view_state.frozen_rows = old_frozen_rows;
+                self.view_state.frozen_cols = old_frozen_cols;
+            }
             UndoAction::Rewind { .. } => {
                 // Rewind is audit-only - cannot be undone
                 // This should never be reached (Rewind is always last in stack)
@@ -865,6 +879,10 @@ impl Spreadsheet {
                 });
                 self.bump_cells_rev();
                 self.revalidate_range(&range, cx);
+            }
+            UndoAction::FreezePanesChanged { new_frozen_rows, new_frozen_cols, .. } => {
+                self.view_state.frozen_rows = new_frozen_rows;
+                self.view_state.frozen_cols = new_frozen_cols;
             }
             UndoAction::Rewind { .. } => {
                 // Rewind is audit-only - cannot be redone
@@ -1149,6 +1167,12 @@ impl Spreadsheet {
                     // Recompute invalid markers (cells may now be validated)
                     self.revalidate_range(&range, cx);
                     self.status_message = Some(format!("Redo: clear exclusions ({} cells)", range.cell_count()));
+                }
+                UndoAction::FreezePanesChanged { new_frozen_rows, new_frozen_cols, .. } => {
+                    self.view_state.frozen_rows = new_frozen_rows;
+                    self.view_state.frozen_cols = new_frozen_cols;
+                    self.clamp_scroll_to_freeze(cx);
+                    self.status_message = Some("Redo: freeze panes".to_string());
                 }
                 UndoAction::Rewind { .. } => {
                     // Rewind is audit-only - cannot be redone

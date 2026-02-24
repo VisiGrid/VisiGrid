@@ -495,6 +495,34 @@ impl Sheet {
         cell.frozen_formula = Some(formula_source); // Set AFTER clearing runtime state
     }
 
+    /// Return the (max_row, max_col) of the last cell with non-empty data.
+    /// Returns (0, 0) if the sheet has no data. O(n) over stored cells.
+    pub fn data_extent(&self) -> (usize, usize) {
+        let mut max_row: usize = 0;
+        let mut max_col: usize = 0;
+        let mut has_data = false;
+        for (&(r, c), cell) in &self.cells {
+            if !matches!(cell.value, CellValue::Empty) {
+                if !has_data || r > max_row { max_row = r; }
+                if !has_data || c > max_col { max_col = c; }
+                has_data = true;
+            }
+        }
+        // Also consider spill values
+        for &(r, c) in self.spill_values.keys() {
+            if !has_data || r > max_row { max_row = r; }
+            if !has_data || c > max_col { max_col = c; }
+            has_data = true;
+        }
+        // Also consider merged regions
+        for merge in &self.merged_regions {
+            if !has_data || merge.end.0 > max_row { max_row = merge.end.0; }
+            if !has_data || merge.end.1 > max_col { max_col = merge.end.1; }
+            has_data = true;
+        }
+        (max_row, max_col)
+    }
+
     /// Get a reference to a cell if it exists, without creating one.
     pub fn get_cell_opt(&self, row: usize, col: usize) -> Option<&Cell> {
         self.cells.get(&(row, col))

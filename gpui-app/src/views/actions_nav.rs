@@ -299,10 +299,11 @@ pub(crate) fn bind(
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &MoveToEnd, _, cx| {
-            this.view_state.selected = (crate::app::NUM_ROWS - 1, crate::app::NUM_COLS - 1);
-            this.view_state.scroll_row = crate::app::NUM_ROWS.saturating_sub(this.visible_rows());
-            this.view_state.scroll_col = crate::app::NUM_COLS.saturating_sub(this.visible_cols());
-            cx.notify();
+            // Excel behavior: Ctrl+End goes to the last used cell, not sheet edge
+            let (max_row, max_col) = this.sheet(cx).data_extent();
+            this.view_state.selected = (max_row, max_col);
+            this.view_state.selection_end = None;
+            this.ensure_visible(cx);
         }))
         .on_action(cx.listener(|this, _: &PageUp, window, cx| {
             if this.guard_terminal_focus(window, cx, "PageUp") { return; }

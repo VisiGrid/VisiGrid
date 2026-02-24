@@ -250,6 +250,10 @@ impl UndoAction {
                     range_ref(range.start_row, range.start_col, range.end_row, range.end_col)
                 ))
             }
+            UndoAction::FreezePanesChanged { .. } => {
+                // View-only - no executable Lua
+                None
+            }
             UndoAction::Rewind { .. } => {
                 // Rewind is audit-only - no executable Lua
                 None
@@ -446,6 +450,10 @@ impl UndoAction {
             UndoAction::SetMerges { sheet_index, description, .. } => {
                 let op = if description.starts_with("Unmerge") { "unmerge" } else { "merge" };
                 vec![format!("{}:{}", op, sheet_index + 1)]
+            }
+            UndoAction::FreezePanesChanged { .. } => {
+                // View-only — not hashed
+                vec![]
             }
             UndoAction::Rewind { .. } => {
                 // Audit-only — not replayed, not hashed
@@ -903,6 +911,8 @@ fn action_affects_sheet(action: &UndoAction, sheet_index: usize) -> bool {
         UndoAction::Group { actions, .. } => {
             actions.iter().any(|a| action_affects_sheet(a, sheet_index))
         }
+        // View-only, include everywhere
+        UndoAction::FreezePanesChanged { .. } => true,
         // Rewind is audit-only, always include
         UndoAction::Rewind { .. } => true,
         UndoAction::SetMerges { sheet_index: s, .. } => *s == sheet_index,

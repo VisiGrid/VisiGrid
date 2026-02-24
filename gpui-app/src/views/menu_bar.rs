@@ -368,7 +368,8 @@ fn menu_item(
     cx: &mut Context<Spreadsheet>,
     action: impl Fn(&mut Spreadsheet, &mut Window, &mut Context<Spreadsheet>) + 'static,
 ) -> impl IntoElement {
-    menu_item_with_accel(label, shortcut, None, selectable_index, is_highlighted, text_color, shortcut_color, hover_bg, cx, action)
+    let accel = crate::menu_model::accel_for_label(label);
+    menu_item_with_accel(label, shortcut, accel, selectable_index, is_highlighted, text_color, shortcut_color, hover_bg, cx, action)
 }
 
 fn menu_item_with_accel(

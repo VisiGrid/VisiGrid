@@ -195,6 +195,20 @@ pub fn resolve_accel(label: &str, accel: Option<char>) -> char {
     accel.unwrap_or_else(|| label.chars().next().unwrap_or(' ')).to_ascii_lowercase()
 }
 
+/// Look up the accel for a menu item by label across all menus.
+pub fn accel_for_label(label: &str) -> Option<char> {
+    for menu in [Menu::File, Menu::Edit, Menu::View, Menu::Insert, Menu::Format, Menu::Data, Menu::Help] {
+        for entry in menu_entries(menu) {
+            match entry {
+                MenuEntry::Item { label: l, accel, .. } if l == label => return accel,
+                MenuEntry::Color { label: l, accel, .. } if l == label => return accel,
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 /// Execute a menu action by selectable-item index.
 pub fn execute_menu_action(app: &mut Spreadsheet, menu: Menu, index: usize, window: &mut Window, cx: &mut Context<Spreadsheet>) {
     let entries = menu_entries(menu);

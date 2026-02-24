@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use visigrid_engine::workbook::Workbook;
 use visigrid_io::{csv, json, native, xlsx};
 
-use crate::app::{Spreadsheet, DocumentMeta};
+use crate::app::{Spreadsheet, DocumentMeta, ext_lower};
 use crate::settings::{load_doc_settings, save_doc_settings, DocumentSettings};
 
 /// Delay before showing the import overlay (prevents flash for fast imports)
@@ -899,7 +899,16 @@ impl Spreadsheet {
         self.commit_pending_edit(cx);
 
         if let Some(path) = &self.current_file.clone() {
-            self.save_to_path(path, cx);
+            // Only save directly for VisiGrid native formats (.sheet, .vgrid).
+            // For imported formats (csv, xlsx, xls, ods, etc.), redirect to Save As
+            // so the user explicitly chooses a .sheet path instead of silently overwriting
+            // the original file in an incompatible format.
+            let ext = ext_lower(path).unwrap_or_default();
+            if matches!(ext.as_str(), "sheet" | "vgrid") {
+                self.save_to_path(path, cx);
+            } else {
+                self.save_as(cx);
+            }
         } else {
             self.save_as(cx);
         }
@@ -913,11 +922,19 @@ impl Spreadsheet {
         self.commit_pending_edit(cx);
 
         if let Some(path) = &self.current_file.clone() {
-            // File has a path - save synchronously
-            self.save_to_path(path, cx);
-            // Check if save succeeded by looking at is_modified flag
-            // (save_to_path sets is_modified = false on success via finalize_save)
-            !self.is_modified
+            let ext = ext_lower(path).unwrap_or_default();
+            if matches!(ext.as_str(), "sheet" | "vgrid") {
+                // Native format - save synchronously
+                self.save_to_path(path, cx);
+                // Check if save succeeded by looking at is_modified flag
+                // (save_to_path sets is_modified = false on success via finalize_save)
+                !self.is_modified
+            } else {
+                // Non-native format - redirect to Save As
+                self.close_after_save = true;
+                self.save_as(cx);
+                false
+            }
         } else {
             // File is untitled - need Save As dialog
             // Set flag so window closes after save completes

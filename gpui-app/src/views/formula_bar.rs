@@ -16,11 +16,15 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
     let cell_ref = app.cell_ref();
     let editing = app.mode.is_editing();
 
+    // Map view row to data row for correct value lookup after sort/filter
+    let (view_row, view_col) = app.view_state.selected;
+    let data_row = app.view_to_data(view_row, cx);
+
     // Get the raw value (without cursor)
     let raw_value = if editing {
         app.edit_value.clone()
     } else {
-        app.sheet(cx).get_raw(app.view_state.selected.0, app.view_state.selected.1)
+        app.sheet(cx).get_raw(data_row, view_col)
     };
 
     // Theme colors
@@ -44,7 +48,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
     // Check if current cell is frozen (has frozen_formula from cycle freeze)
     let frozen_formula = if !editing {
         app.sheet(cx)
-            .get_cell_opt(app.view_state.selected.0, app.view_state.selected.1)
+            .get_cell_opt(data_row, view_col)
             .and_then(|c| c.frozen_formula.clone())
     } else {
         None

@@ -24,18 +24,32 @@ impl Spreadsheet {
 
     /// Freeze the top row (row 0)
     pub fn freeze_top_row(&mut self, cx: &mut Context<Self>) {
+        let old_rows = self.view_state.frozen_rows;
+        let old_cols = self.view_state.frozen_cols;
         self.view_state.frozen_rows = 1;
         self.view_state.frozen_cols = 0;
         self.clamp_scroll_to_freeze(cx);
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::FreezePanesChanged {
+                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
+                new_frozen_rows: 1, new_frozen_cols: 0,
+            }, None);
         self.status_message = Some("Frozen top row".to_string());
         cx.notify();
     }
 
     /// Freeze the first column (column A)
     pub fn freeze_first_column(&mut self, cx: &mut Context<Self>) {
+        let old_rows = self.view_state.frozen_rows;
+        let old_cols = self.view_state.frozen_cols;
         self.view_state.frozen_rows = 0;
         self.view_state.frozen_cols = 1;
         self.clamp_scroll_to_freeze(cx);
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::FreezePanesChanged {
+                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
+                new_frozen_rows: 0, new_frozen_cols: 1,
+            }, None);
         self.status_message = Some("Frozen first column".to_string());
         cx.notify();
     }
@@ -50,9 +64,16 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
+        let old_rows = self.view_state.frozen_rows;
+        let old_cols = self.view_state.frozen_cols;
         self.view_state.frozen_rows = row;
         self.view_state.frozen_cols = col;
         self.clamp_scroll_to_freeze(cx);
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::FreezePanesChanged {
+                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
+                new_frozen_rows: row, new_frozen_cols: col,
+            }, None);
         let msg = match (row, col) {
             (0, c) => format!("Frozen {} column{}", c, if c == 1 { "" } else { "s" }),
             (r, 0) => format!("Frozen {} row{}", r, if r == 1 { "" } else { "s" }),
@@ -69,14 +90,21 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
+        let old_rows = self.view_state.frozen_rows;
+        let old_cols = self.view_state.frozen_cols;
         self.view_state.frozen_rows = 0;
         self.view_state.frozen_cols = 0;
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::FreezePanesChanged {
+                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
+                new_frozen_rows: 0, new_frozen_cols: 0,
+            }, None);
         self.status_message = Some("Unfrozen all panes".to_string());
         cx.notify();
     }
 
     /// Clamp scroll position to ensure it doesn't overlap with frozen regions
-    fn clamp_scroll_to_freeze(&mut self, _cx: &mut Context<Self>) {
+    pub(crate) fn clamp_scroll_to_freeze(&mut self, _cx: &mut Context<Self>) {
         // When freeze panes are active, scrollable region starts after frozen rows/cols
         // Ensure scroll position doesn't show frozen rows/cols in the scrollable area
         if self.view_state.frozen_rows > 0 && self.view_state.scroll_row < self.view_state.frozen_rows {

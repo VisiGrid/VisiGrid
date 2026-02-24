@@ -283,7 +283,7 @@ pub fn render_grid(
                             (0..scrollable_visible_rows).filter_map(|screen_row| {
                                 // Get the view_row and data_row for this screen position
                                 // Account for frozen rows + scroll position in visible index
-                                let visible_index = frozen_rows + scroll_row + screen_row;
+                                let visible_index = scroll_row + screen_row;
                                 let (view_row, data_row) = app.nth_visible_row_with_hidden(visible_index, cx)?;
                                 let row_height = metrics.row_height(app.row_height(view_row));
                                 let is_last_row = screen_row == scrollable_visible_rows - 1;

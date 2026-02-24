@@ -100,31 +100,33 @@ pub(crate) fn render_f1_help_overlay(app: &Spreadsheet, cx: &App) -> impl IntoEl
         let end_ref = app.cell_ref_at(max_row, max_col);
         let range_ref = format!("{}:{}", start_ref, end_ref);
 
-        // Calculate stats
+        let cell_count = (max_row - min_row + 1) * (max_col - min_col + 1);
+
+        // Calculate stats (skip for very large selections to avoid freezing)
         let mut count = 0usize;
         let mut numeric_count = 0usize;
         let mut sum = 0.0f64;
         let mut min_val: Option<f64> = None;
         let mut max_val: Option<f64> = None;
 
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let display = app.sheet(cx).get_display(row, col);
-                if !display.is_empty() {
-                    count += 1;
-                    // Try to parse as number (handles both values and formula results)
-                    let clean = display.replace(',', "").replace('$', "").replace('%', "");
-                    if let Ok(num) = clean.parse::<f64>() {
-                        numeric_count += 1;
-                        sum += num;
-                        min_val = Some(min_val.map_or(num, |m| m.min(num)));
-                        max_val = Some(max_val.map_or(num, |m| m.max(num)));
+        if cell_count <= 10_000 {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let display = app.sheet(cx).get_display(row, col);
+                    if !display.is_empty() {
+                        count += 1;
+                        // Try to parse as number (handles both values and formula results)
+                        let clean = display.replace(',', "").replace('$', "").replace('%', "");
+                        if let Ok(num) = clean.parse::<f64>() {
+                            numeric_count += 1;
+                            sum += num;
+                            min_val = Some(min_val.map_or(num, |m| m.min(num)));
+                            max_val = Some(max_val.map_or(num, |m| m.max(num)));
+                        }
                     }
                 }
             }
         }
-
-        let cell_count = (max_row - min_row + 1) * (max_col - min_col + 1);
         let average = if numeric_count > 0 { Some(sum / numeric_count as f64) } else { None };
 
         // Helper to format numbers with thousands separators

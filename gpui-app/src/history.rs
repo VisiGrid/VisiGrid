@@ -262,6 +262,13 @@ pub enum UndoAction {
         /// Exclusions that were cleared (for undo: restore these)
         cleared_exclusions: Vec<visigrid_engine::validation::CellRange>,
     },
+    /// Freeze panes changed (for undo: restore previous freeze state)
+    FreezePanesChanged {
+        old_frozen_rows: usize,
+        old_frozen_cols: usize,
+        new_frozen_rows: usize,
+        new_frozen_cols: usize,
+    },
     /// Hard rewind: workbook reverted to historical state (audit-only, cannot undo)
     /// This action is for provenance tracking - it records that a rewind occurred
     /// Hard rewind: workbook reverted to historical state.
@@ -413,6 +420,13 @@ impl UndoAction {
                     "Clear exclusion".to_string()
                 } else {
                     format!("Clear exclusions ({} cells)", count)
+                }
+            }
+            UndoAction::FreezePanesChanged { new_frozen_rows, new_frozen_cols, .. } => {
+                if *new_frozen_rows == 0 && *new_frozen_cols == 0 {
+                    "Unfreeze panes".to_string()
+                } else {
+                    "Freeze panes".to_string()
                 }
             }
             UndoAction::Rewind { discarded_count, .. } => {
@@ -1426,7 +1440,8 @@ impl History {
                 }
             }
             UndoAction::ColumnWidthSet { .. } | UndoAction::RowHeightSet { .. }
-            | UndoAction::RowVisibilityChanged { .. } | UndoAction::ColVisibilityChanged { .. } => {
+            | UndoAction::RowVisibilityChanged { .. } | UndoAction::ColVisibilityChanged { .. }
+            | UndoAction::FreezePanesChanged { .. } => {
                 // Column/row sizing and visibility are stored at the app level (Spreadsheet), not in Workbook.
                 // For preview purposes, we skip these - the preview shows correct data values
                 // even if column widths or visibility differ from the historical state.
@@ -1535,6 +1550,7 @@ pub enum UndoActionKind {
     ValidationExclusionCleared,
     RowVisibilityChanged,
     ColVisibilityChanged,
+    FreezePanesChanged,
     /// Rewind is an audit-only action - it should never appear in replay paths
     /// because rewind truncates history (no actions after it to replay)
     Rewind,
@@ -1568,9 +1584,10 @@ impl UndoActionKind {
             UndoActionKind::SortApplied => true,
             UndoActionKind::SortCleared => true,
 
-            // Visibility changes are view-only (not serialized to file) - skip for replay
+            // View-only changes (not serialized to file) - skip for replay
             UndoActionKind::RowVisibilityChanged => false,
             UndoActionKind::ColVisibilityChanged => false,
+            UndoActionKind::FreezePanesChanged => false,
 
             // Merge topology changes are replay-supported
             UndoActionKind::SetMerges => true,
@@ -1605,6 +1622,7 @@ impl UndoActionKind {
             UndoActionKind::ValidationExclusionCleared => "Clear exclusion",
             UndoActionKind::RowVisibilityChanged => "Hide/unhide rows",
             UndoActionKind::ColVisibilityChanged => "Hide/unhide columns",
+            UndoActionKind::FreezePanesChanged => "Freeze panes",
             UndoActionKind::Rewind => "Rewind",
             UndoActionKind::SetMerges => "Merge cells",
         }
@@ -1636,6 +1654,7 @@ impl UndoActionKind {
             UndoActionKind::ValidationExclusionCleared => 0x10,
             UndoActionKind::RowVisibilityChanged => 0x15,
             UndoActionKind::ColVisibilityChanged => 0x16,
+            UndoActionKind::FreezePanesChanged => 0x17,
             UndoActionKind::Rewind => 0xFF, // Sentinel value for audit action
             UndoActionKind::SetMerges => 0x14,
         }
@@ -1667,6 +1686,7 @@ impl UndoAction {
             UndoAction::ValidationExclusionCleared { .. } => UndoActionKind::ValidationExclusionCleared,
             UndoAction::RowVisibilityChanged { .. } => UndoActionKind::RowVisibilityChanged,
             UndoAction::ColVisibilityChanged { .. } => UndoActionKind::ColVisibilityChanged,
+            UndoAction::FreezePanesChanged { .. } => UndoActionKind::FreezePanesChanged,
             UndoAction::Rewind { .. } => UndoActionKind::Rewind,
             UndoAction::SetMerges { .. } => UndoActionKind::SetMerges,
         }

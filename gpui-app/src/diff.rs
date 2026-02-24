@@ -481,7 +481,8 @@ fn process_action(
         UndoAction::ColumnWidthSet { .. }
         | UndoAction::RowHeightSet { .. }
         | UndoAction::RowVisibilityChanged { .. }
-        | UndoAction::ColVisibilityChanged { .. } => {}
+        | UndoAction::ColVisibilityChanged { .. }
+        | UndoAction::FreezePanesChanged { .. } => {}
 
         // Skip rewind entries (audit-only)
         UndoAction::Rewind { .. } => {}

@@ -2074,6 +2074,11 @@ pub struct Spreadsheet {
     // This will become Entity<WorkbookView> in future phases for multi-tab support
     pub view_state: WorkbookViewState,
 
+    /// Column the cursor was in before Shift+Space (select row).
+    /// Used to restore the column when the selection collapses (e.g. arrow key).
+    /// None when no row selection is active.
+    pub pre_row_select_col: Option<usize>,
+
     // Split view state (Ctrl+\ to split right)
     pub split_pane: Option<crate::split_view::SplitPane>,
     pub split_active_side: crate::split_view::SplitSide,
@@ -2699,6 +2704,7 @@ impl Spreadsheet {
             filter_search_text: String::new(),
             filter_checked_items: std::collections::HashSet::new(),
             view_state: WorkbookViewState::default(),
+            pre_row_select_col: None,
             split_pane: None,
             split_active_side: crate::split_view::SplitSide::Left,
             trace_enabled: false,
@@ -7093,6 +7099,11 @@ sheet:cols()
 
     /// Auto-fit column width to content
     pub fn auto_fit_col_width(&mut self, col: usize, cx: &mut Context<Self>) {
+        let old = self.col_widths
+            .get(&self.cached_sheet_id)
+            .and_then(|m| m.get(&col))
+            .copied();
+
         let mut max_width: f32 = 40.0; // Minimum width
 
         // Check all rows for content in this column
@@ -7106,6 +7117,7 @@ sheet:cols()
         }
 
         self.set_col_width(col, max_width);
+        self.record_col_width_change(col, old, cx);
         cx.notify();
     }
 
@@ -7130,9 +7142,44 @@ sheet:cols()
                     }
                 }
             }
+            // Capture old widths before auto-fit
+            let sheet_id = self.cached_sheet_id;
+            let old_widths: Vec<(usize, Option<f32>)> = cols_to_fit.iter().map(|&col| {
+                let old = self.col_widths.get(&sheet_id).and_then(|m| m.get(&col)).copied();
+                (col, old)
+            }).collect();
+
             // Auto-fit each selected column
-            for col in cols_to_fit {
-                self.auto_fit_col_width_no_notify(col, cx);
+            for col in &cols_to_fit {
+                self.auto_fit_col_width_no_notify(*col, cx);
+            }
+
+            // Record undo as a group so Ctrl+Z reverts all at once
+            let mut actions = Vec::new();
+            for (col, old) in old_widths {
+                let new = self.col_widths.get(&sheet_id).and_then(|m| m.get(&col)).copied();
+                if old != new {
+                    actions.push(crate::history::UndoAction::ColumnWidthSet {
+                        sheet_id,
+                        col,
+                        old,
+                        new,
+                    });
+                }
+            }
+            if !actions.is_empty() {
+                if actions.len() == 1 {
+                    self.history.record_action_with_provenance(actions.remove(0), None);
+                } else {
+                    self.history.record_action_with_provenance(
+                        crate::history::UndoAction::Group {
+                            actions,
+                            description: "Auto-fit column widths".to_string(),
+                        },
+                        None,
+                    );
+                }
+                self.is_modified = true;
             }
             cx.notify();
         } else {
