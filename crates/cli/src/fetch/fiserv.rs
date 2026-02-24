@@ -95,20 +95,40 @@ impl FiservClient {
         let password = self.api_password.clone();
         let url_clone = url.clone();
 
-        let body = self.client.request_with_retry(|http| {
+        let body = self.client.request_with_retry_text(|http| {
             http.get(&url_clone)
                 .basic_auth(&username, Some(&password))
         })?;
 
         let show_progress = !quiet && atty::is(atty::Stream::Stderr);
 
+        // CardPointe returns empty string or non-JSON for dates with no settlements
+        let trimmed = body.trim();
+        if trimmed.is_empty() {
+            if show_progress {
+                eprintln!("  {}: no settlement data", date);
+            }
+            return Ok(Vec::new());
+        }
+
+        let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+            CliError {
+                code: exit_codes::EXIT_FETCH_UPSTREAM,
+                message: format!(
+                    "failed to parse Fiserv settlestat response for {}: {} (body: {})",
+                    date, e, &trimmed[..trimmed.len().min(200)],
+                ),
+                hint: None,
+            }
+        })?;
+
         // Response is an array of batch objects
-        let batches = if let Some(arr) = body.as_array() {
+        let batches = if let Some(arr) = parsed.as_array() {
             arr.clone()
-        } else if body.is_object() {
+        } else if parsed.is_object() {
             // Single batch object or error
-            if body.get("txns").is_some() {
-                vec![body]
+            if parsed.get("txns").is_some() {
+                vec![parsed]
             } else {
                 // Possibly an error or empty response
                 if show_progress {

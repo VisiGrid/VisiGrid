@@ -259,6 +259,140 @@ impl FetchClient {
 
         unreachable!()
     }
+
+    /// Like `request_with_retry`, but returns the raw response body as a
+    /// `String` instead of parsing JSON.  Useful when the upstream may
+    /// return empty or non-JSON responses on success (e.g. Fiserv
+    /// settlestat for dates with no settlements).
+    pub(super) fn request_with_retry_text(
+        &self,
+        build_request: impl Fn(&reqwest::blocking::Client) -> reqwest::blocking::RequestBuilder,
+    ) -> Result<String, CliError> {
+        let mut backoff_secs = 1u64;
+
+        for attempt in 0..=MAX_RETRIES {
+            let req = build_request(&self.http);
+            let result = req.send();
+
+            match result {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+
+                    if status == 401 || status == 403 {
+                        let body: serde_json::Value =
+                            resp.json().unwrap_or(serde_json::Value::Null);
+                        let msg = (self.error_extractor)(&body, status);
+                        return Err(CliError {
+                            code: exit_codes::EXIT_FETCH_AUTH,
+                            message: format!(
+                                "{} auth failed ({}): {}",
+                                self.source_name, status, msg,
+                            ),
+                            hint: None,
+                        });
+                    }
+
+                    if status == 400 {
+                        let body: serde_json::Value =
+                            resp.json().unwrap_or(serde_json::Value::Null);
+                        let msg = (self.error_extractor)(&body, status);
+                        return Err(CliError {
+                            code: exit_codes::EXIT_FETCH_VALIDATION,
+                            message: format!(
+                                "{} request rejected ({}): {}",
+                                self.source_name, status, msg,
+                            ),
+                            hint: None,
+                        });
+                    }
+
+                    if status >= 400 && status < 500 && status != 429 {
+                        let body: serde_json::Value =
+                            resp.json().unwrap_or(serde_json::Value::Null);
+                        let msg = (self.error_extractor)(&body, status);
+                        return Err(CliError {
+                            code: exit_codes::EXIT_FETCH_UPSTREAM,
+                            message: format!(
+                                "{} error ({}): {}",
+                                self.source_name, status, msg,
+                            ),
+                            hint: None,
+                        });
+                    }
+
+                    if status >= 500 || status == 429 {
+                        if attempt == MAX_RETRIES {
+                            return Err(CliError {
+                                code: exit_codes::EXIT_FETCH_UPSTREAM,
+                                message: format!(
+                                    "{} error (HTTP {}) after {} attempts",
+                                    self.source_name, status, MAX_RETRIES,
+                                ),
+                                hint: None,
+                            });
+                        }
+
+                        let wait = if status == 429 {
+                            resp.headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .unwrap_or(backoff_secs)
+                        } else {
+                            backoff_secs
+                        };
+
+                        eprintln!(
+                            "warning: retry {}/{} in {}s (HTTP {})",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            wait,
+                            status,
+                        );
+                        thread::sleep(Duration::from_secs(wait));
+                        backoff_secs *= 2;
+                        continue;
+                    }
+
+                    // Success: return raw text
+                    let text = resp.text().map_err(|e| CliError {
+                        code: exit_codes::EXIT_FETCH_UPSTREAM,
+                        message: format!(
+                            "failed to read {} response body: {}",
+                            self.source_name, e,
+                        ),
+                        hint: None,
+                    })?;
+
+                    return Ok(text);
+                }
+                Err(e) => {
+                    if attempt == MAX_RETRIES {
+                        return Err(CliError {
+                            code: exit_codes::EXIT_FETCH_UPSTREAM,
+                            message: format!(
+                                "{} upstream error after {} attempts: {}",
+                                self.source_name, MAX_RETRIES, e,
+                            ),
+                            hint: None,
+                        });
+                    }
+
+                    eprintln!(
+                        "warning: retry {}/{} in {}s ({})",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        backoff_secs,
+                        e,
+                    );
+                    thread::sleep(Duration::from_secs(backoff_secs));
+                    backoff_secs *= 2;
+                }
+            }
+        }
+
+        unreachable!()
+    }
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────
