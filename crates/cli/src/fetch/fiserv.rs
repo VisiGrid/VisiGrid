@@ -102,9 +102,10 @@ impl FiservClient {
 
         let show_progress = !quiet && atty::is(atty::Stream::Stderr);
 
-        // CardPointe returns empty string or non-JSON for dates with no settlements
+        // CardPointe returns empty string, "Null batches", or other non-JSON
+        // for dates with no settlements
         let trimmed = body.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null batches") {
             if show_progress {
                 eprintln!("  {}: no settlement data", date);
             }
