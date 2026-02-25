@@ -64,7 +64,7 @@ pub(super) const USER_AGENT: &str = concat!("vgrid/", env!("CARGO_PKG_VERSION"))
 // ── Canonical CSV row ───────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
-pub(super) struct CanonicalRow {
+pub(crate) struct CanonicalRow {
     pub effective_date: String,
     pub posted_date: String,
     pub amount_minor: i64,
@@ -472,7 +472,7 @@ pub(super) fn parse_date_range(
 
 /// Write canonical rows to CSV (file or stdout). Returns the output label
 /// for use in progress messages.
-pub(super) fn write_csv(
+pub(crate) fn write_csv(
     rows: &[CanonicalRow],
     out: &Option<PathBuf>,
 ) -> Result<String, CliError> {
@@ -529,7 +529,7 @@ pub(super) fn write_csv(
 
 /// Parse a decimal amount string to i64 minor units (cents).
 /// Handles "1234.56", "1234.5", "1234", "-1234.56".
-pub(super) fn parse_money_string(s: &str) -> Result<i64, String> {
+pub(crate) fn parse_money_string(s: &str) -> Result<i64, String> {
     let s = s.trim();
     let negative = s.starts_with('-');
     let s = s.trim_start_matches('-');

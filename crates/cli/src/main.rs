@@ -7,6 +7,7 @@ mod export;
 mod fetch;
 mod fill;
 mod hub;
+mod parse;
 mod recon;
 mod replay;
 mod scripts;
@@ -691,6 +692,10 @@ Examples:
     /// Fetch data from external sources (Stripe, etc.)
     #[command(subcommand)]
     Fetch(fetch::FetchCommands),
+
+    /// Parse artifacts into canonical CSV (statement PDFs, etc.)
+    #[command(subcommand)]
+    Parse(parse::ParseCommands),
 
     /// Multi-source reconciliation engine
     #[command(subcommand)]
@@ -1927,6 +1932,7 @@ fn main() -> ExitCode {
             }
         }
         Some(Commands::Fetch(fetch_cmd)) => fetch::cmd_fetch(fetch_cmd),
+        Some(Commands::Parse(parse_cmd)) => parse::cmd_parse(parse_cmd),
         Some(Commands::Recon(recon_cmd)) => recon::cmd_recon(recon_cmd),
         Some(Commands::Export(export_cmd)) => export::cmd_export(export_cmd),
         Some(Commands::Sign { file, out, signing_key, context, quiet }) => {

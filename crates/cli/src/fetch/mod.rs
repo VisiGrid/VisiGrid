@@ -2,7 +2,7 @@
 
 mod authorizenet;
 mod brex;
-mod common;
+pub(crate) mod common;
 mod digits;
 mod fiserv;
 mod gusto;

@@ -39,6 +39,9 @@ ratatui = "0.29"
 crossterm = "0.28"
 unicode-width = "0.2"
 
+# Statement PDF parsing
+regex = "1"
+
 # Fetch adapters (Stripe, etc.)
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
 url = "2"
