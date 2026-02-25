@@ -98,6 +98,7 @@ Examples:
 Examples:
   vgrid fetch fiserv --from 2026-01-01 --to 2026-01-31
   vgrid fetch fiserv --from 2026-01-01 --to 2026-01-31 --out fiserv.csv
+  vgrid fetch fiserv --from 2026-01-01 --to 2026-01-31 --funding --save-raw /tmp/fiserv_raw
   FISERV_MERCHANT_ID=xxx FISERV_API_USERNAME=user FISERV_API_PASSWORD=pass vgrid fetch fiserv --from 2026-01-01 --to 2026-01-31")]
     Fiserv {
         /// Start date inclusive (YYYY-MM-DD)
@@ -127,6 +128,14 @@ Examples:
         /// Output CSV file path (default: stdout)
         #[arg(long)]
         out: Option<PathBuf>,
+
+        /// Fetch funding/deposit data instead of settled transactions
+        #[arg(long)]
+        funding: bool,
+
+        /// Directory to save raw JSON responses (one file per day)
+        #[arg(long)]
+        save_raw: Option<PathBuf>,
 
         /// Suppress progress on stderr
         #[arg(long, short = 'q')]
@@ -765,8 +774,10 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             api_username,
             api_password,
             out,
+            funding,
+            save_raw,
             quiet,
-        } => fiserv::cmd_fetch_fiserv(from, to, api_url, merchant_id, api_username, api_password, out, quiet),
+        } => fiserv::cmd_fetch_fiserv(from, to, api_url, merchant_id, api_username, api_password, out, funding, save_raw, quiet),
         FetchCommands::Netsuite {
             from,
             to,
