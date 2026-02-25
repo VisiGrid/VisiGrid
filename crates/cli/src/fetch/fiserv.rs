@@ -173,6 +173,7 @@ pub fn cmd_fetch_fiserv(
     api_password: Option<String>,
     out: Option<PathBuf>,
     quiet: bool,
+    group_by_batch: bool,
 ) -> Result<(), CliError> {
     // 1. Resolve credentials
     let url = api_url
@@ -318,28 +319,53 @@ pub fn cmd_fetch_fiserv(
         current = current.succ_opt().unwrap_or(current);
     }
 
-    // 4. Sort: (effective_date, retref)
-    all_txns.sort_by(|a, b| {
-        a.effective_date
-            .cmp(&b.effective_date)
-            .then_with(|| a.retref.cmp(&b.retref))
-    });
-
-    // 5. Build canonical rows
-    let rows: Vec<CanonicalRow> = all_txns
-        .iter()
-        .map(|txn| CanonicalRow {
-            effective_date: txn.effective_date.clone(),
-            posted_date: txn.posted_date.clone(),
-            amount_minor: txn.amount_minor,
-            currency: "USD".to_string(),
-            r#type: txn.canonical_type.clone(),
-            source: "fiserv".to_string(),
-            source_id: txn.retref.clone(),
-            group_id: txn.batch_id.clone(),
-            description: txn.description.clone(),
-        })
-        .collect();
+    // 4. Build canonical rows
+    let rows: Vec<CanonicalRow> = if group_by_batch {
+        // Aggregate transactions by (posted_date, batch_id) → one row per batch deposit
+        use std::collections::BTreeMap;
+        let mut batches: BTreeMap<(String, String), (i64, usize)> = BTreeMap::new();
+        for txn in &all_txns {
+            let key = (txn.posted_date.clone(), txn.batch_id.clone());
+            let entry = batches.entry(key).or_insert((0, 0));
+            entry.0 += txn.amount_minor;
+            entry.1 += 1;
+        }
+        batches
+            .into_iter()
+            .map(|((date, batch_id), (net, count))| CanonicalRow {
+                effective_date: date.clone(),
+                posted_date: date,
+                amount_minor: net,
+                currency: "USD".to_string(),
+                r#type: "deposit".to_string(),
+                source: "fiserv".to_string(),
+                source_id: format!("batch:{}", batch_id),
+                group_id: batch_id,
+                description: format!("{} transactions", count),
+            })
+            .collect()
+    } else {
+        // Individual transactions (default)
+        all_txns.sort_by(|a, b| {
+            a.effective_date
+                .cmp(&b.effective_date)
+                .then_with(|| a.retref.cmp(&b.retref))
+        });
+        all_txns
+            .iter()
+            .map(|txn| CanonicalRow {
+                effective_date: txn.effective_date.clone(),
+                posted_date: txn.posted_date.clone(),
+                amount_minor: txn.amount_minor,
+                currency: "USD".to_string(),
+                r#type: txn.canonical_type.clone(),
+                source: "fiserv".to_string(),
+                source_id: txn.retref.clone(),
+                group_id: txn.batch_id.clone(),
+                description: txn.description.clone(),
+            })
+            .collect()
+    };
 
     // 6. Write CSV
     let out_label = common::write_csv(&rows, &out)?;

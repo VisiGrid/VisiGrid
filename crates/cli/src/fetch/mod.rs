@@ -131,6 +131,10 @@ Examples:
         /// Suppress progress on stderr
         #[arg(long, short = 'q')]
         quiet: bool,
+
+        /// Aggregate transactions per batch (one row = one bank deposit)
+        #[arg(long)]
+        group_by_batch: bool,
     },
 
     /// Fetch general ledger transactions from NetSuite
@@ -766,7 +770,8 @@ pub fn cmd_fetch(command: FetchCommands) -> Result<(), CliError> {
             api_password,
             out,
             quiet,
-        } => fiserv::cmd_fetch_fiserv(from, to, api_url, merchant_id, api_username, api_password, out, quiet),
+            group_by_batch,
+        } => fiserv::cmd_fetch_fiserv(from, to, api_url, merchant_id, api_username, api_password, out, quiet, group_by_batch),
         FetchCommands::Netsuite {
             from,
             to,
