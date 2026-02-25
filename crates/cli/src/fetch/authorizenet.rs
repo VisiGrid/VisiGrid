@@ -290,31 +290,24 @@ pub fn cmd_fetch_authorizenet(
                 .unwrap_or("");
             let effective_date = parse_datetime_to_date(submit_time);
 
-            let settle_amount = txn["settleAmount"]
-                .as_str()
-                .or_else(|| txn["settleAmount"].as_f64().map(|_| ""))
-                .unwrap_or("0");
-
-            // settleAmount may be a number or string
-            let amount_str = if let Some(n) = txn["settleAmount"].as_f64() {
-                format!("{:.2}", n)
-            } else {
-                txn["settleAmount"]
-                    .as_str()
-                    .unwrap_or("0")
-                    .to_string()
-            };
-
-            let amount_minor = common::parse_money_string(&amount_str).map_err(|e| {
-                CliError {
+            // settleAmount may be a JSON number or string.
+            // Avoid f64 → format!("{:.2}") round-trip which can lose a cent.
+            // Prefer string path (integer math); fall back to f64 only if needed.
+            let amount_minor = if let Some(s) = txn["settleAmount"].as_str() {
+                common::parse_money_string(s).map_err(|e| CliError {
                     code: exit_codes::EXIT_FETCH_UPSTREAM,
                     message: format!(
                         "Authorize.net bad settleAmount {:?} for txn {}: {}",
-                        settle_amount, trans_id, e,
+                        s, trans_id, e,
                     ),
                     hint: None,
-                }
-            })?;
+                })?
+            } else if let Some(n) = txn["settleAmount"].as_f64() {
+                // Direct cents conversion: round half-away-from-zero (f64::round)
+                (n * 100.0).round() as i64
+            } else {
+                0
+            };
 
             let raw_type = txn["transactionType"].as_str().unwrap_or("");
             let canonical_type = map_txn_type(raw_type).to_string();
