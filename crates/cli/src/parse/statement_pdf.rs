@@ -50,13 +50,15 @@ pub(super) fn cmd_parse_statement_pdf(
         );
     }
 
-    // Cross-check: sum of rows vs Total line
+    // Cross-check: sum of rows + month_end_charge should equal Total line
     let sum: i64 = parsed.rows.iter().map(|r| r.amount_minor).sum();
+    let month_end = parsed.month_end_charge_minor.unwrap_or(0);
+    let expected_total = sum + month_end;
     if let Some(total) = parsed.total_amount_minor {
-        if sum != total {
+        if expected_total != total {
             eprintln!(
-                "warning: row sum ({}) != Total line ({}) — delta: {} cents",
-                sum, total, sum - total,
+                "warning: row sum ({}) + month_end_charge ({}) = {} != Total line ({}) — delta: {} cents",
+                sum, month_end, expected_total, total, expected_total - total,
             );
         }
     }
@@ -122,9 +124,10 @@ pub(super) fn cmd_parse_statement_pdf(
             "period_end": parsed.period_end,
             "row_count": parsed.rows.len(),
             "sum_rows_amount_minor": sum,
+            "month_end_charge_minor": parsed.month_end_charge_minor,
             "total_line_amount_minor": parsed.total_amount_minor,
             "has_total_crosscheck": parsed.total_amount_minor.is_some(),
-            "delta_minor": parsed.total_amount_minor.map(|t| sum - t),
+            "delta_minor": parsed.total_amount_minor.map(|t| expected_total - t),
             "vgrid_version": env!("CARGO_PKG_VERSION"),
         });
         let meta_path = raw_dir.join("engine_meta.json");

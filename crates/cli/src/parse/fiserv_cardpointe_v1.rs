@@ -16,6 +16,7 @@ pub(super) struct ParsedStatement {
     pub period_end: String,
     pub rows: Vec<DayRow>,
     pub total_amount_minor: Option<i64>,
+    pub month_end_charge_minor: Option<i64>,
 }
 
 /// A single day's Amount Processed.
@@ -38,7 +39,7 @@ pub(super) fn parse(text: &str) -> Result<ParsedStatement, CliError> {
     let merchant_id = extract_merchant_id(text)?;
     let (period_start, period_end) = extract_period(text)?;
 
-    let (rows, total_amount_minor) = extract_summary_rows(text)?;
+    let (rows, total_amount_minor, month_end_charge_minor) = extract_summary_rows(text)?;
 
     if rows.is_empty() {
         return Err(CliError::parse(
@@ -52,6 +53,7 @@ pub(super) fn parse(text: &str) -> Result<ParsedStatement, CliError> {
         period_end,
         rows,
         total_amount_minor,
+        month_end_charge_minor,
     })
 }
 
@@ -79,67 +81,100 @@ fn extract_period(text: &str) -> Result<(String, String), CliError> {
 }
 
 /// Find the Summary By Day section and extract rows.
-fn extract_summary_rows(text: &str) -> Result<(Vec<DayRow>, Option<i64>), CliError> {
+fn extract_summary_rows(text: &str) -> Result<(Vec<DayRow>, Option<i64>, Option<i64>), CliError> {
     let lines: Vec<&str> = text.lines().collect();
 
-    // Find section header: line containing both "Date" and "Processed"
-    let header_idx = lines
-        .iter()
-        .position(|line| {
-            let upper = line.to_uppercase();
-            upper.contains("DATE") && upper.contains("PROCESSED")
-        })
-        .ok_or_else(|| {
-            CliError::parse("Unsupported or unrecognized statement template")
-        })?;
-
+    // Find section header(s). The real statement splits "Date" and "Processed"
+    // across two lines (line N has "Date", line N+2 has "Processed"), and the
+    // table may span multiple pages with repeated headers. We find ALL header
+    // positions and parse rows between each header and the next section boundary.
+    let header_re = Regex::new(r"(?i)Processed\s*$").unwrap();
     let date_re = Regex::new(r"^\s*(\d{2}/\d{2}/\d{2})\s").unwrap();
     let money_re = Regex::new(r"-?\$[\d,]+\.\d{2}").unwrap();
     let total_re = Regex::new(r"(?i)^\s*T\s*o\s*t\s*a\s*l\s").unwrap();
+    let month_end_re = Regex::new(r"(?i)^\s*Month\s+End").unwrap();
     let section_end_re =
-        Regex::new(r"(?i)^\s*(BATCH|CARD\s+TYPE|CHARGEBACKS|INTERCHANGE)").unwrap();
+        Regex::new(r"(?i)^\s*(BATCH|CARD\s+TYPE|CHARGEBACKS|INTERCHANGE|SUMMARY\s+BY\s+BATCH)")
+            .unwrap();
+    // Page header/footer lines to skip when table spans pages
+    let page_header_re = Regex::new(r"(?i)(Page\s+\d|YOUR CARD PROCESSING|Customer Service|Statement Period|Merchant Number|S\s*UMMARY\s+B)").unwrap();
+
+    // Collect all header line indices
+    let header_indices: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| header_re.is_match(line))
+        .map(|(i, _)| i)
+        .collect();
+
+    if header_indices.is_empty() {
+        return Err(CliError::parse(
+            "Unsupported or unrecognized statement template",
+        ));
+    }
 
     let mut rows = Vec::new();
     let mut total_amount_minor: Option<i64> = None;
+    let mut month_end_charge_minor: Option<i64> = None;
 
-    for line in &lines[header_idx + 1..] {
-        // Stop at section boundary
-        if section_end_re.is_match(line) {
-            break;
-        }
-
-        // Total line: extract for cross-check, then stop
-        if total_re.is_match(line) {
-            if let Some(amount) = extract_last_dollar_amount(line, &money_re) {
-                total_amount_minor = Some(amount);
+    for &header_idx in &header_indices {
+        for line in &lines[header_idx + 1..] {
+            // Stop at section boundary
+            if section_end_re.is_match(line) {
+                break;
             }
-            break;
-        }
 
-        // Skip non-date lines (e.g. "Month End Charge")
-        if let Some(caps) = date_re.captures(line) {
-            let date_str = caps.get(1).unwrap().as_str();
+            // Another column header (multi-page) — stop this segment
+            if header_re.is_match(line) {
+                break;
+            }
 
-            // Require at least 2 dollar amounts on the line (ensures we're in the numeric table)
-            let dollar_matches: Vec<_> = money_re.find_iter(line).collect();
-            if dollar_matches.len() < 2 {
+            // Skip page headers/footers
+            if page_header_re.is_match(line) {
                 continue;
             }
 
-            // Last dollar amount is Amount Processed
-            let amount = extract_last_dollar_amount(line, &money_re).ok_or_else(|| {
-                CliError::parse(format!("Failed to parse row: {}", line.trim()))
-            })?;
+            // Total line: extract for cross-check, then stop
+            if total_re.is_match(line) {
+                if let Some(amount) = extract_last_dollar_amount(line, &money_re) {
+                    total_amount_minor = Some(amount);
+                }
+                break;
+            }
 
-            let date = parse_mmddyy(date_str)?;
-            rows.push(DayRow {
-                date,
-                amount_minor: amount,
-            });
+            // Capture Month End Charge amount but exclude from daily rows
+            if month_end_re.is_match(line) {
+                if let Some(amount) = extract_last_dollar_amount(line, &money_re) {
+                    month_end_charge_minor = Some(amount);
+                }
+                continue;
+            }
+
+            // Parse date rows
+            if let Some(caps) = date_re.captures(line) {
+                let date_str = caps.get(1).unwrap().as_str();
+
+                // Must have at least 1 dollar amount
+                let dollar_matches: Vec<_> = money_re.find_iter(line).collect();
+                if dollar_matches.is_empty() {
+                    continue;
+                }
+
+                // Last dollar amount is Amount Processed
+                let amount = extract_last_dollar_amount(line, &money_re).ok_or_else(|| {
+                    CliError::parse(format!("Failed to parse row: {}", line.trim()))
+                })?;
+
+                let date = parse_mmddyy(date_str)?;
+                rows.push(DayRow {
+                    date,
+                    amount_minor: amount,
+                });
+            }
         }
     }
 
-    Ok((rows, total_amount_minor))
+    Ok((rows, total_amount_minor, month_end_charge_minor))
 }
 
 /// Extract the last dollar amount token from a line.
