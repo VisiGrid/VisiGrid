@@ -277,6 +277,12 @@ pub fn cmd_fetch_authorizenet(
         let txns = client.fetch_transaction_list(&batch_id, quiet)?;
 
         for txn in &txns {
+            // Skip non-settled transactions (declined, voided, expired, etc.)
+            let status = txn["transactionStatus"].as_str().unwrap_or("");
+            if !matches!(status, "settledSuccessfully" | "refundSettledSuccessfully") {
+                continue;
+            }
+
             let trans_id = txn["transId"].as_str().unwrap_or("").to_string();
             let submit_time = txn["submitTimeUTC"]
                 .as_str()
