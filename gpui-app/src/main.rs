@@ -452,7 +452,7 @@ fn main() {
     // on_open_urls callback pushes here; polling task inside run() consumes.
     let pending_open_urls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let app = Application::with_platform(gpui_platform::current_platform(false));
+    let app = Application::new();
 
     // Register handler for files opened from Finder / "Open With" menu
     app.on_open_urls({
@@ -465,6 +465,10 @@ fn main() {
     app.run(move |cx: &mut App| {
         // Initialize app-level settings store (must be first)
         init_settings_store(cx);
+
+        // Load embedded fonts into gpui's text system.
+        // The wgpu renderer requires fonts to be explicitly registered.
+        load_embedded_fonts(cx);
 
         // Initialize license system
         visigrid_license::init();
@@ -879,4 +883,30 @@ fn main() {
 
     // Flush any buffered AI metrics before exit
     ai_metrics::flush();
+}
+
+/// Load bundled IBM Plex fonts into gpui's text system.
+///
+/// The wgpu-based renderer (post platform-extraction gpui) requires fonts to be
+/// explicitly registered — it cannot fall back to macOS system fonts the way the
+/// older Metal renderer did.
+fn load_embedded_fonts(cx: &App) {
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
+        // IBM Plex Sans (UI font)
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-sans/IBMPlexSans-Italic.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBoldItalic.ttf")),
+        // IBM Plex Mono (terminal / Lua editor)
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-Italic.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-SemiBold.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-SemiBoldItalic.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-BoldItalic.ttf")),
+    ];
+
+    cx.text_system()
+        .add_fonts(fonts)
+        .expect("failed to load embedded fonts");
 }
