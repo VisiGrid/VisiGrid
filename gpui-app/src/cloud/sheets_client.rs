@@ -19,6 +19,7 @@ pub struct SheetsClient {
 #[derive(Debug, Clone)]
 pub struct SheetInfo {
     pub id: i64,
+    pub public_id: String,
     pub name: String,
     pub slug: String,
     pub byte_size: Option<i64>,
@@ -240,6 +241,7 @@ impl SheetsClient {
 fn parse_sheet_info(v: &serde_json::Value) -> Option<SheetInfo> {
     Some(SheetInfo {
         id: v["id"].as_i64()?,
+        public_id: v["public_id"].as_str()?.to_string(),
         name: v["name"].as_str()?.to_string(),
         slug: v["slug"].as_str()?.to_string(),
         byte_size: v["byte_size"].as_i64(),

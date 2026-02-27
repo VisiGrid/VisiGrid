@@ -886,7 +886,7 @@ fn render_cloud_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
         };
 
         let sync_state = app.cloud_sync_state;
-        let sheet_id = identity.sheet_id;
+        let public_id = identity.public_id.clone();
 
         return div()
             .id("cloud-indicator")
@@ -904,7 +904,7 @@ fn render_cloud_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                     CloudSyncState::Offline | CloudSyncState::Error => this.cloud_retry_upload(cx),
                     CloudSyncState::Synced | CloudSyncState::Local | CloudSyncState::Dirty => {
                         // Open this specific sheet in the VisiGrid web app
-                        let url = format!("https://app.visigrid.app/sheets/{}", sheet_id);
+                        let url = format!("https://app.visigrid.app/sheets/{}", public_id);
                         if let Err(e) = open::that(&url) {
                             this.status_message = Some(format!("Failed to open browser: {}", e));
                         }

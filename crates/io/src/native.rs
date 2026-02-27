@@ -1617,6 +1617,7 @@ pub fn delete_hub_link(path: &Path) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CloudIdentity {
     pub sheet_id: i64,
+    pub public_id: String,
     pub sheet_name: String,
     pub api_base: String,
     pub last_synced_hash: Option<String>,
@@ -1637,15 +1638,16 @@ pub fn load_cloud_identity(path: &Path) -> Result<Option<CloudIdentity>, String>
     }
 
     let result = conn.query_row(
-        "SELECT sheet_id, sheet_name, api_base, last_synced_hash, last_synced_at FROM cloud_identity WHERE id = 1",
+        "SELECT sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at FROM cloud_identity WHERE id = 1",
         [],
         |row| {
             Ok(CloudIdentity {
                 sheet_id: row.get(0)?,
-                sheet_name: row.get(1)?,
-                api_base: row.get::<_, Option<String>>(2)?.unwrap_or_else(|| "https://api.visiapi.com".to_string()),
-                last_synced_hash: row.get(3)?,
-                last_synced_at: row.get(4)?,
+                public_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                sheet_name: row.get(2)?,
+                api_base: row.get::<_, Option<String>>(3)?.unwrap_or_else(|| "https://api.visiapi.com".to_string()),
+                last_synced_hash: row.get(4)?,
+                last_synced_at: row.get(5)?,
             })
         },
     );
@@ -1666,6 +1668,7 @@ pub fn save_cloud_identity(path: &Path, identity: &CloudIdentity) -> Result<(), 
         "CREATE TABLE IF NOT EXISTS cloud_identity (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             sheet_id INTEGER NOT NULL,
+            public_id TEXT NOT NULL DEFAULT '',
             sheet_name TEXT NOT NULL,
             api_base TEXT DEFAULT 'https://api.visiapi.com',
             last_synced_hash TEXT,
@@ -1676,10 +1679,11 @@ pub fn save_cloud_identity(path: &Path, identity: &CloudIdentity) -> Result<(), 
 
     // Upsert the singleton row
     conn.execute(
-        "INSERT OR REPLACE INTO cloud_identity (id, sheet_id, sheet_name, api_base, last_synced_hash, last_synced_at)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+        "INSERT OR REPLACE INTO cloud_identity (id, sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             &identity.sheet_id,
+            &identity.public_id,
             &identity.sheet_name,
             &identity.api_base,
             &identity.last_synced_hash,

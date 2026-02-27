@@ -49,6 +49,7 @@ impl Spreadsheet {
                     let _ = this.update(cx, |this, cx| {
                         let identity = CloudIdentity {
                             sheet_id: sheet_info.id,
+                            public_id: sheet_info.public_id,
                             sheet_name: sheet_info.name,
                             api_base: crate::hub::auth::load_auth()
                                 .map(|a| a.api_base)
@@ -134,6 +135,7 @@ impl Spreadsheet {
         cx.notify();
 
         let sheet_id = selected.id;
+        let public_id = selected.public_id.clone();
         let sheet_name = selected.name.clone();
         let slug = selected.slug.clone();
 
@@ -176,6 +178,7 @@ impl Spreadsheet {
                         // Attach cloud identity
                         let identity = CloudIdentity {
                             sheet_id,
+                            public_id,
                             sheet_name,
                             api_base: crate::hub::auth::load_auth()
                                 .map(|a| a.api_base)
