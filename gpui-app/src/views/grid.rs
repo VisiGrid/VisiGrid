@@ -2876,8 +2876,8 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
     let popup_gap = 4.0;
 
     // Popup dimensions (capped for consistent flip behavior)
-    let popup_max_width = 320.0;
-    let popup_max_height = 280.0; // Cap height for flip calculation
+    let popup_max_width = 380.0;
+    let popup_max_height = 180.0; // 8 rows × 22px + border
 
     // Determine anchor based on active editor surface
     let (popup_x, popup_y) = match app.active_editor {
@@ -2947,7 +2947,7 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
                 panel_border,
                 text_primary,
                 text_muted,
-                selection_bg,
+                accent,
                 cx,
             ))
         })
