@@ -58,6 +58,7 @@ pub enum TokenKey {
     CursorText,
 
     // Formula bar + editor fields
+    FormulaBarBg,
     EditorBg,
     EditorBorder,
     EditorText,
@@ -174,6 +175,7 @@ impl TokenKey {
         TokenKey::CursorBg,
         TokenKey::CursorText,
         // Formula bar + editor fields
+        TokenKey::FormulaBarBg,
         TokenKey::EditorBg,
         TokenKey::EditorBorder,
         TokenKey::EditorText,
@@ -391,6 +393,7 @@ pub fn ledger_dark_theme() -> Theme {
     tokens.insert(TokenKey::CursorText, bg_dark);
 
     // Formula bar + editor
+    tokens.insert(TokenKey::FormulaBarBg, rgb(0x191e2a));  // 1 step lighter than panel
     tokens.insert(TokenKey::EditorBg, bg_darkest);
     tokens.insert(TokenKey::EditorBorder, accent);
     tokens.insert(TokenKey::EditorText, text_primary);
@@ -536,6 +539,7 @@ pub fn slate_dark_theme() -> Theme {
     tokens.insert(TokenKey::CursorText, grid_900);
 
     // Formula bar + editor
+    tokens.insert(TokenKey::FormulaBarBg, rgb(0x253248));  // 1 step lighter than panel
     tokens.insert(TokenKey::EditorBg, rgb(0x1a2744));
     tokens.insert(TokenKey::EditorBorder, accent);
     tokens.insert(TokenKey::EditorText, grid_100);
@@ -694,6 +698,7 @@ pub fn ledger_light_theme() -> Theme {
     tokens.insert(TokenKey::CursorText, white);
 
     // Formula bar + editor
+    tokens.insert(TokenKey::FormulaBarBg, rgb(0xf5f6f9));  // Elevated: between panel (#eef0f4) and grid (white)
     tokens.insert(TokenKey::EditorBg, white);
     tokens.insert(TokenKey::EditorBorder, accent);
     tokens.insert(TokenKey::EditorText, text_primary);
@@ -832,6 +837,7 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::CursorText, black);
 
     // Formula bar + editor (slightly lifted from pure black to indicate editing)
+    tokens.insert(TokenKey::FormulaBarBg, rgb(0x061206));  // Subtle green tint above black
     tokens.insert(TokenKey::EditorBg, rgb(0x0a1a0a));  // Very dark green tint
     tokens.insert(TokenKey::EditorBorder, green);
     tokens.insert(TokenKey::EditorText, green_bright);
@@ -991,6 +997,7 @@ pub fn catppuccin_theme() -> Theme {
     tokens.insert(TokenKey::CursorText, base);
 
     // Formula bar + editor
+    tokens.insert(TokenKey::FormulaBarBg, rgb(0xebedf2));  // Elevated: between mantle and base
     tokens.insert(TokenKey::EditorBg, rgb(0xffffff));
     tokens.insert(TokenKey::EditorBorder, lavender);
     tokens.insert(TokenKey::EditorText, text);

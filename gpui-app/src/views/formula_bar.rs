@@ -29,17 +29,12 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
 
     // Theme colors
     let panel_bg = app.token(TokenKey::PanelBg);
+    let formula_bar_bg = app.token(TokenKey::FormulaBarBg);
     let panel_border = app.token(TokenKey::PanelBorder);
-    let app_bg = app.token(TokenKey::AppBg);
     let text_primary = app.token(TokenKey::TextPrimary);
     let text_muted = app.token(TokenKey::TextMuted);
     let selection_bg = app.token(TokenKey::SelectionBg);
-
-    let (input_bg, _input_text) = if editing {
-        (selection_bg, text_primary)
-    } else {
-        (app_bg, text_primary)
-    };
+    let accent = app.token(TokenKey::Accent);
 
     // Build the formula display content with scroll offset
     let scroll_x = app.formula_bar_scroll_x;
@@ -65,11 +60,11 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
         .relative()
         .flex_shrink_0()
         .h(px(bar_height))
-        .bg(panel_bg)
+        .bg(formula_bar_bg)
         .flex()
         .items_center()
         .border_b_1()
-        .border_color(panel_border)
+        .border_color(if editing { accent } else { panel_border })
         // Cell reference label (name box) - editable, Excel-style
         .child({
             let name_box_editing = app.name_box_editing;
@@ -77,7 +72,6 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
             let name_box_focus = app.name_box_focus.clone();
             let name_box_replace_next = app.name_box_replace_next;
             let accent = app.token(TokenKey::Accent);
-            let editor_bg = app.token(TokenKey::EditorBg);
             let selection_bg = app.token(TokenKey::SelectionBg);
             let caret_visible = app.caret_visible;
 
@@ -105,13 +99,14 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 .items_center()
                 .justify_center()
                 .mx_1()
-                .border_1()
-                .border_color(if name_box_editing { accent } else { panel_border })
-                .rounded_sm()
-                .bg(if name_box_editing { editor_bg } else { panel_bg })
+                .border_r_1()
+                .border_color(panel_border)
+                .when(name_box_editing, |d| d.border_b_2().border_color(accent))
+                .bg(formula_bar_bg)
                 .text_color(text_primary)
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
+                .font_family("monospace")
                 .cursor_text()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
                     if !this.name_box_editing {
@@ -177,11 +172,12 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_sm()
+                .border_r_1()
+                .border_color(panel_border)
                 .cursor_pointer()
                 .text_color(fx_color)
-                .text_sm()
-                .italic()
+                .text_size(px(12.0))
+                .font_family("monospace")
                 .hover(|s| s.text_color(text_primary))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     // Start editing with '=' if not already editing a formula
@@ -197,7 +193,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 .tooltip(|_window, cx| {
                     cx.new(|_| FxTooltip).into()
                 })
-                .child("fx")
+                .child("ƒ")
         })
         // Frozen cell indicator — shown when selected cell was frozen during import
         .when(frozen_formula.is_some(), |d| {
@@ -230,7 +226,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 .flex()
                 .items_center()
                 .px_2()
-                .bg(input_bg)
+                .bg(formula_bar_bg)
                 .text_sm()
                 .overflow_hidden()
                 .cursor_text()
@@ -867,26 +863,23 @@ pub fn render_autocomplete_popup(
     panel_border: Hsla,
     text_primary: Hsla,
     text_muted: Hsla,
-    selection_bg: Hsla,
+    accent: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    // Limit to 7 items as per spec
-    let visible_items = suggestions.iter().take(7).enumerate();
+    let max_visible = 8;
+    let visible_items = suggestions.iter().take(max_visible).enumerate();
 
-    // Position below the active cell
     div()
         .absolute()
         .top(px(popup_y))
         .left(px(popup_x))
-        .w(px(320.0))
-        .max_h(px(220.0))
+        .w(px(380.0))
+        .max_h(px((max_visible as f32) * 22.0 + 2.0))
         .bg(panel_bg)
         .border_1()
         .border_color(panel_border)
-        .rounded_md()
-        .shadow_lg()
+        .rounded(px(2.0))
         .overflow_hidden()
-        .py_1()
         .children(
             visible_items.map(|(idx, entry)| {
                 let is_selected = idx == selected_index;
@@ -896,25 +889,30 @@ pub fn render_autocomplete_popup(
                     is_selected,
                     text_primary,
                     text_muted,
-                    selection_bg,
+                    accent,
                     cx,
                 )
             })
         )
 }
 
-/// Render a single autocomplete item (built-in or custom function)
+/// Render a single autocomplete item — terminal-style.
+///
+/// Non-selected: just the function name (max density).
+/// Selected: name + inline signature (contextual detail).
+/// Custom functions: right-aligned dim "custom" tag.
 fn render_autocomplete_item(
     entry: &crate::autocomplete::AutocompleteEntry,
     idx: usize,
     is_selected: bool,
     text_primary: Hsla,
     text_muted: Hsla,
-    selection_bg: Hsla,
+    accent: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
+    // Selection: ~7% accent tint — confident but restrained
     let bg_color = if is_selected {
-        selection_bg
+        Hsla { a: 0.07, ..accent }
     } else {
         hsla(0.0, 0.0, 0.0, 0.0)
     };
@@ -922,65 +920,99 @@ fn render_autocomplete_item(
     let func_name = entry.name().to_string();
     let is_custom = entry.is_custom();
 
-    // Built-in: show signature. Custom: show "Custom" badge.
-    let subtitle = match entry {
-        crate::autocomplete::AutocompleteEntry::BuiltIn(func) => {
-            let sig = func.signature;
-            if sig.len() > 35 {
-                format!("{}...", &sig[..32])
-            } else {
-                sig.to_string()
+    // Signature only shown for the selected row
+    let signature: Option<String> = if is_selected {
+        match entry {
+            crate::autocomplete::AutocompleteEntry::BuiltIn(func) => {
+                let sig = func.signature;
+                if sig.len() > 44 {
+                    Some(format!("{}…", &sig[..42]))
+                } else {
+                    Some(sig.to_string())
+                }
             }
+            crate::autocomplete::AutocompleteEntry::Custom { .. } => None,
         }
-        crate::autocomplete::AutocompleteEntry::Custom { .. } => {
-            "Custom".to_string()
-        }
+    } else {
+        None
     };
 
-    div()
-        .id(ElementId::NamedInteger("autocomplete-item".into(), idx as u64))
+    // Name: slightly brighter when selected
+    let name_color = if is_selected { text_primary } else { text_muted };
+
+    let mut row = div()
         .flex()
         .items_center()
-        .px_2()
-        .py(px(4.0))
+        .flex_1()
+        .overflow_hidden()
+        .child(
+            div()
+                .text_color(name_color)
+                .text_size(px(12.0))
+                .font_family("monospace")
+                .font_weight(if is_selected { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                .child(func_name)
+        );
+
+    if let Some(sig) = signature {
+        let sig_color = Hsla { a: text_muted.a * 0.55, ..text_muted };
+        row = row.child(
+            div()
+                .ml_2()
+                .text_color(sig_color)
+                .text_size(px(11.0))
+                .font_family("monospace")
+                .overflow_hidden()
+                .child(sig)
+        );
+    }
+
+    if is_custom {
+        row = row.child(
+            div()
+                .ml_auto()
+                .pl_2()
+                .flex_shrink_0()
+                .text_color(hsla(0.55, 0.3, 0.50, 0.40))
+                .text_size(px(10.0))
+                .font_family("monospace")
+                .child("custom")
+        );
+    }
+
+    let base = div()
+        .id(ElementId::NamedInteger("ac".into(), idx as u64))
+        .flex()
+        .items_center()
+        .h(px(22.0))
         .cursor_pointer()
         .bg(bg_color)
         .hover(|s| {
             if is_selected {
                 s
             } else {
-                s.bg(hsla(0.0, 0.0, 1.0, 0.05))
+                s.bg(hsla(0.0, 0.0, 1.0, 0.03))
             }
         })
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
             this.autocomplete_selected = idx;
             this.autocomplete_accept(cx);
-        }))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_color(text_primary)
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(func_name)
-                )
-                .child(
-                    div()
-                        .text_color(if is_custom {
-                            // Slightly brighter for "Custom" badge
-                            hsla(0.55, 0.5, 0.6, 1.0)
-                        } else {
-                            text_muted
-                        })
-                        .text_size(px(11.0))
-                        .when(is_custom, |d| d.italic())
-                        .child(subtitle)
-                )
-        )
+        }));
+
+    // Selected: 2px accent left rail + slightly less left padding to compensate
+    // Non-selected: uniform padding, no rail
+    if is_selected {
+        base
+            .border_l_2()
+            .border_color(accent)
+            .pl(px(6.0))
+            .pr_2()
+            .child(row)
+    } else {
+        base
+            .px_2()
+            .child(row)
+    }
 }
 
 /// Render the signature help tooltip
@@ -1014,6 +1046,7 @@ pub fn render_signature_help(
 
         div()
             .text_color(text_color)
+            .text_size(px(12.0))
             .font_weight(font_weight)
             .child(param_text)
     }).collect();
@@ -1021,7 +1054,7 @@ pub fn render_signature_help(
     // Get current parameter description if available
     let current_param_desc = params.get(current_arg).map(|p| p.description);
 
-    // Position below the active cell
+    // Terminal-style: flat, monospace, minimal chrome — matches autocomplete popup
     div()
         .absolute()
         .top(px(popup_y))
@@ -1029,30 +1062,29 @@ pub fn render_signature_help(
         .bg(panel_bg)
         .border_1()
         .border_color(panel_border)
-        .rounded_md()
-        .shadow_lg()
-        .px_3()
-        .py_2()
-        .max_w(px(400.0))
+        .rounded(px(2.0))
+        .px_2()
+        .py(px(3.0))
+        .max_w(px(420.0))
         .flex()
         .flex_col()
-        .gap_1()
+        .gap(px(2.0))
+        .font_family("monospace")
         // Function signature line
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(2.0))
+                .gap(px(1.0))
                 .child(
                     div()
                         .text_color(text_primary)
-                        .text_size(px(13.0))
+                        .text_size(px(12.0))
                         .font_weight(FontWeight::MEDIUM)
                         .child(format!("{}(", func.name))
                 )
                 .children(
                     param_elements.into_iter().enumerate().map(|(idx, elem)| {
-                        // Add comma separator between params (not before first)
                         if idx > 0 {
                             div()
                                 .flex()
@@ -1060,7 +1092,7 @@ pub fn render_signature_help(
                                 .child(
                                     div()
                                         .text_color(text_muted)
-                                        .text_size(px(13.0))
+                                        .text_size(px(12.0))
                                         .child(", ")
                                 )
                                 .child(elem)
@@ -1072,15 +1104,15 @@ pub fn render_signature_help(
                 .child(
                     div()
                         .text_color(text_primary)
-                        .text_size(px(13.0))
+                        .text_size(px(12.0))
                         .child(")")
                 )
         )
-        // Current parameter description
+        // Current parameter description — single muted line
         .when_some(current_param_desc, |parent, desc| {
             parent.child(
                 div()
-                    .text_color(text_muted)
+                    .text_color(Hsla { a: text_muted.a * 0.7, ..text_muted })
                     .text_size(px(11.0))
                     .child(desc)
             )
@@ -1096,7 +1128,6 @@ pub fn render_error_banner(
     error_text: Hsla,
     panel_border: Hsla,
 ) -> impl IntoElement {
-    // Position below the active cell
     div()
         .absolute()
         .top(px(popup_y))
@@ -1104,26 +1135,25 @@ pub fn render_error_banner(
         .bg(error_bg)
         .border_1()
         .border_color(panel_border)
-        .rounded_md()
-        .shadow_lg()
-        .px_3()
-        .py_2()
-        .max_w(px(350.0))
+        .rounded(px(2.0))
+        .px_2()
+        .py(px(3.0))
+        .max_w(px(380.0))
         .flex()
         .items_center()
-        .gap_2()
-        // Error icon
-        .child(
-            div()
-                .text_color(error_text)
-                .text_size(px(14.0))
-                .child("!")
-        )
-        // Error message
+        .gap_1()
+        .font_family("monospace")
         .child(
             div()
                 .text_color(error_text)
                 .text_size(px(12.0))
+                .font_weight(FontWeight::BOLD)
+                .child("!")
+        )
+        .child(
+            div()
+                .text_color(error_text)
+                .text_size(px(11.0))
                 .child(error_info.message.clone())
         )
 }
@@ -1151,19 +1181,18 @@ pub fn render_hover_docs(
         (name, param.description)
     }).collect();
 
-    // Position below the formula bar
+    // Position below the formula bar — flat, terminal-style
     div()
         .absolute()
         .top(px(CELL_HEIGHT * 2.0))
-        .left(px(90.0))  // After cell ref and fx button
+        .left(px(90.0))
         .bg(panel_bg)
         .border_1()
         .border_color(panel_border)
-        .rounded_md()
-        .shadow_lg()
-        .px_3()
-        .py_2()
-        .max_w(px(400.0))
+        .rounded(px(2.0))
+        .px_2()
+        .py(px(4.0))
+        .max_w(px(420.0))
         .flex()
         .flex_col()
         .gap_2()
