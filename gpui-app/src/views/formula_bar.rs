@@ -3,6 +3,7 @@ use gpui::prelude::FluentBuilder;
 use crate::app::{
     Spreadsheet, CELL_HEIGHT, REF_COLORS, EditorSurface,
     FORMULA_BAR_CELL_REF_WIDTH, FORMULA_BAR_FX_WIDTH,
+    FORMULA_HELPER_STRIP_HEIGHT,
 };
 use crate::theme::TokenKey;
 use crate::formula_context::{tokenize_for_highlight, TokenType, char_index_to_byte_offset};
@@ -983,11 +984,12 @@ fn render_autocomplete_item(
         )
 }
 
-/// Render the signature help tooltip
-pub fn render_signature_help(
+/// Render the formula helper strip — a thin inline bar showing the function signature.
+///
+/// Ghostty / terminal-inspired: monospace, single line, subtle background, no shadow.
+/// Sits between the formula bar and format bar in the main layout flow.
+pub fn render_formula_helper_strip(
     sig_info: &crate::app::SignatureHelpInfo,
-    popup_x: f32,
-    popup_y: f32,
     panel_bg: Hsla,
     panel_border: Hsla,
     text_primary: Hsla,
@@ -998,11 +1000,11 @@ pub fn render_signature_help(
     let current_arg = sig_info.current_arg;
     let params = func.parameters;
 
-    // Build parameter list with current arg highlighted
+    // Build parameter spans with active arg highlighted
     let param_elements: Vec<_> = params.iter().enumerate().map(|(idx, param)| {
         let is_current = idx == current_arg;
-        let text_color = if is_current { accent } else { text_muted };
-        let font_weight = if is_current { FontWeight::BOLD } else { FontWeight::NORMAL };
+        let color = if is_current { accent } else { text_muted };
+        let weight = if is_current { FontWeight::BOLD } else { FontWeight::NORMAL };
 
         let param_text = if param.optional {
             format!("[{}]", param.name)
@@ -1013,46 +1015,41 @@ pub fn render_signature_help(
         };
 
         div()
-            .text_color(text_color)
-            .font_weight(font_weight)
+            .text_color(color)
+            .font_weight(weight)
             .child(param_text)
     }).collect();
 
-    // Get current parameter description if available
-    let current_param_desc = params.get(current_arg).map(|p| p.description);
+    // Slightly darker than panel bg for the strip background
+    let strip_bg = hsla(panel_bg.h, panel_bg.s, (panel_bg.l - 0.03).max(0.0), panel_bg.a);
 
-    // Position below the active cell
     div()
-        .absolute()
-        .top(px(popup_y))
-        .left(px(popup_x))
-        .bg(panel_bg)
-        .border_1()
+        .flex_shrink_0()
+        .h(px(FORMULA_HELPER_STRIP_HEIGHT))
+        .w_full()
+        .bg(strip_bg)
+        .border_b_1()
         .border_color(panel_border)
-        .rounded_md()
-        .shadow_lg()
-        .px_3()
-        .py_2()
-        .max_w(px(400.0))
         .flex()
-        .flex_col()
-        .gap_1()
-        // Function signature line
+        .items_center()
+        .justify_between()
+        .px_2()
+        .overflow_hidden()
+        // Left: function signature (monospace, single line)
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(2.0))
+                .gap(px(1.0))
+                .text_size(px(11.0))
                 .child(
                     div()
                         .text_color(text_primary)
-                        .text_size(px(13.0))
                         .font_weight(FontWeight::MEDIUM)
                         .child(format!("{}(", func.name))
                 )
                 .children(
                     param_elements.into_iter().enumerate().map(|(idx, elem)| {
-                        // Add comma separator between params (not before first)
                         if idx > 0 {
                             div()
                                 .flex()
@@ -1060,7 +1057,7 @@ pub fn render_signature_help(
                                 .child(
                                     div()
                                         .text_color(text_muted)
-                                        .text_size(px(13.0))
+                                        .text_size(px(11.0))
                                         .child(", ")
                                 )
                                 .child(elem)
@@ -1072,19 +1069,22 @@ pub fn render_signature_help(
                 .child(
                     div()
                         .text_color(text_primary)
-                        .text_size(px(13.0))
+                        .text_size(px(11.0))
                         .child(")")
                 )
         )
-        // Current parameter description
-        .when_some(current_param_desc, |parent, desc| {
-            parent.child(
-                div()
-                    .text_color(text_muted)
-                    .text_size(px(11.0))
-                    .child(desc)
-            )
-        })
+        // Right: faint key hints (terminal statusline style)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(px(10.0))
+                .text_color(text_muted.opacity(0.4))
+                .flex_shrink_0()
+                .child("F1 Help")
+                .child("Tab Complete")
+        )
 }
 
 /// Render the error banner

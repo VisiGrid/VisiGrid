@@ -484,6 +484,22 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(!zen_mode, |div| {
             div.child(formula_bar::render_formula_bar(app, window, cx))
         })
+        // Inline formula helper strip (signature hint, shown only when editing a formula)
+        .when_some(if zen_mode { None } else { app.signature_help() }, |div, sig_info| {
+            let panel_bg = app.token(TokenKey::PanelBg);
+            let panel_border = app.token(TokenKey::PanelBorder);
+            let text_primary = app.token(TokenKey::TextPrimary);
+            let text_muted = app.token(TokenKey::TextMuted);
+            let accent = app.token(TokenKey::Accent);
+            div.child(formula_bar::render_formula_helper_strip(
+                &sig_info,
+                panel_bg,
+                panel_border,
+                text_primary,
+                text_muted,
+                accent,
+            ))
+        })
         .when(!zen_mode && {
             use crate::settings::{Setting, user_settings};
             match &user_settings(cx).appearance.show_format_bar {

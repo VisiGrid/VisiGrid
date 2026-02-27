@@ -1874,6 +1874,8 @@ pub const FORMULA_BAR_HEIGHT: f32 = 28.0;
 pub const COLUMN_HEADER_HEIGHT: f32 = 24.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 pub const MACOS_TITLEBAR_HEIGHT: f32 = 34.0;
+/// Height of the inline formula helper strip (signature hint below formula bar)
+pub const FORMULA_HELPER_STRIP_HEIGHT: f32 = 20.0;
 
 // Resize grab zones — the clickable area at header edges for resizing.
 // Must be less than half the minimum row/col dimension to avoid swallowing selection clicks.
@@ -7576,6 +7578,7 @@ sheet:cols()
     ///   macOS titlebar (MACOS_TITLEBAR_HEIGHT, macOS only)
     ///   Menu bar       (MENU_BAR_HEIGHT, Linux only, hidden in zen mode)
     ///   Formula bar    (FORMULA_BAR_HEIGHT, hidden in zen mode)
+    ///   Helper strip   (FORMULA_HELPER_STRIP_HEIGHT, only when editing a formula with signature help)
     ///   Format bar     (FORMAT_BAR_HEIGHT, hidden in zen mode or when disabled)
     ///   Column headers (metrics.header_h, always visible, scales with zoom)
     ///
@@ -7588,6 +7591,7 @@ sheet:cols()
         let titlebar_h = if cfg!(target_os = "macos") { MACOS_TITLEBAR_HEIGHT } else { 0.0 };
         let menu_h = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
         let formula_h = FORMULA_BAR_HEIGHT;
+        let helper_h = if self.signature_help().is_some() { FORMULA_HELPER_STRIP_HEIGHT } else { 0.0 };
         let format_h = {
             use crate::settings::Setting;
             match &user_settings(cx).appearance.show_format_bar {
@@ -7595,7 +7599,7 @@ sheet:cols()
                 Setting::Inherit => crate::views::format_bar::FORMAT_BAR_HEIGHT,
             }
         };
-        titlebar_h + menu_h + formula_h + format_h + self.metrics.header_h
+        titlebar_h + menu_h + formula_h + helper_h + format_h + self.metrics.header_h
     }
 
     /// Total height of UI chrome below the grid body.
@@ -9166,9 +9170,11 @@ mod layout_geometry_tests {
     /// Verify that top_chrome_height components add up correctly for Linux.
     /// If someone adds a new bar above the grid and forgets top_chrome_height(),
     /// this test's expected value will be stale — that's the point.
+    /// Note: formula helper strip (FORMULA_HELPER_STRIP_HEIGHT) is conditional —
+    /// only visible during formula editing, so not included in baseline chrome.
     #[test]
     fn linux_top_chrome_components() {
-        // Linux, not zen, format bar visible, zoom 1.0
+        // Linux, not zen, format bar visible, zoom 1.0, not editing formula
         let expected = MENU_BAR_HEIGHT            // 28
             + FORMULA_BAR_HEIGHT                   // 28
             + crate::views::format_bar::FORMAT_BAR_HEIGHT // 28
@@ -9180,6 +9186,7 @@ mod layout_geometry_tests {
     /// Verify macOS chrome height.
     #[test]
     fn macos_top_chrome_components() {
+        // macOS, not zen, format bar visible, zoom 1.0, not editing formula
         let expected = MACOS_TITLEBAR_HEIGHT       // 34
             + FORMULA_BAR_HEIGHT                   // 28
             + crate::views::format_bar::FORMAT_BAR_HEIGHT // 28
@@ -9194,5 +9201,14 @@ mod layout_geometry_tests {
         // In zen mode, top_chrome_height returns only metrics.header_h.
         // At zoom 1.0, that equals COLUMN_HEADER_HEIGHT.
         assert_eq!(COLUMN_HEADER_HEIGHT, 24.0);
+    }
+
+    /// Formula helper strip height is small enough not to dominate the UI
+    /// but large enough to be readable (terminal statusline feel).
+    #[test]
+    fn formula_helper_strip_height_is_sane() {
+        use super::FORMULA_HELPER_STRIP_HEIGHT;
+        assert!(FORMULA_HELPER_STRIP_HEIGHT >= 16.0, "Strip too small to be readable");
+        assert!(FORMULA_HELPER_STRIP_HEIGHT <= 24.0, "Strip too tall — should be a subtle hint, not a bar");
     }
 }

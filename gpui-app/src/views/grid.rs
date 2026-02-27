@@ -2927,7 +2927,6 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
     let text_primary = app.token(TokenKey::TextPrimary);
     let text_muted = app.token(TokenKey::TextMuted);
     let selection_bg = app.token(TokenKey::SelectionBg);
-    let accent = app.token(TokenKey::Accent);
     let error_bg = app.token(TokenKey::ErrorBg);
     let error_color = app.token(TokenKey::Error);
 
@@ -2951,19 +2950,7 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
                 cx,
             ))
         })
-        // Formula signature help popup
-        .when_some(app.signature_help(), |div, sig_info| {
-            div.child(formula_bar::render_signature_help(
-                &sig_info,
-                popup_x,
-                popup_y,
-                panel_bg,
-                panel_border,
-                text_primary,
-                text_muted,
-                accent,
-            ))
-        })
+        // Signature help moved to inline helper strip (rendered in views/mod.rs layout flow)
         // Formula error banner
         .when_some(app.formula_error(), |div, error_info| {
             div.child(formula_bar::render_error_banner(
