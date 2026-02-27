@@ -988,10 +988,16 @@ fn render_autocomplete_item(
 ///
 /// Ghostty / terminal-inspired: monospace, single line, subtle background, no shadow.
 /// Sits between the formula bar and format bar in the main layout flow.
+///
+/// Design decisions:
+/// - Uses AppBg (darker surface) for natural contrast against PanelBg formula bar
+/// - 12px text for HiDPI crispness (11px can look cheap with bad kerning)
+/// - Single emphasis: accent color only for active param, no bold (Ghostty restraint)
+/// - Key hints are conditional — only shown when the action is available
 pub fn render_formula_helper_strip(
     sig_info: &crate::app::SignatureHelpInfo,
-    panel_bg: Hsla,
-    panel_border: Hsla,
+    strip_bg: Hsla,
+    strip_border: Hsla,
     text_primary: Hsla,
     text_muted: Hsla,
     accent: Hsla,
@@ -1000,11 +1006,10 @@ pub fn render_formula_helper_strip(
     let current_arg = sig_info.current_arg;
     let params = func.parameters;
 
-    // Build parameter spans with active arg highlighted
+    // Build parameter spans — accent color only for active arg (no bold)
     let param_elements: Vec<_> = params.iter().enumerate().map(|(idx, param)| {
         let is_current = idx == current_arg;
         let color = if is_current { accent } else { text_muted };
-        let weight = if is_current { FontWeight::BOLD } else { FontWeight::NORMAL };
 
         let param_text = if param.optional {
             format!("[{}]", param.name)
@@ -1016,12 +1021,8 @@ pub fn render_formula_helper_strip(
 
         div()
             .text_color(color)
-            .font_weight(weight)
             .child(param_text)
     }).collect();
-
-    // Slightly darker than panel bg for the strip background
-    let strip_bg = hsla(panel_bg.h, panel_bg.s, (panel_bg.l - 0.03).max(0.0), panel_bg.a);
 
     div()
         .flex_shrink_0()
@@ -1029,7 +1030,7 @@ pub fn render_formula_helper_strip(
         .w_full()
         .bg(strip_bg)
         .border_b_1()
-        .border_color(panel_border)
+        .border_color(strip_border)
         .flex()
         .items_center()
         .justify_between()
@@ -1041,7 +1042,8 @@ pub fn render_formula_helper_strip(
                 .flex()
                 .items_center()
                 .gap(px(1.0))
-                .text_size(px(11.0))
+                .text_size(px(12.0))
+                .line_height(px(FORMULA_HELPER_STRIP_HEIGHT))
                 .child(
                     div()
                         .text_color(text_primary)
@@ -1057,7 +1059,6 @@ pub fn render_formula_helper_strip(
                                 .child(
                                     div()
                                         .text_color(text_muted)
-                                        .text_size(px(11.0))
                                         .child(", ")
                                 )
                                 .child(elem)
@@ -1069,21 +1070,18 @@ pub fn render_formula_helper_strip(
                 .child(
                     div()
                         .text_color(text_primary)
-                        .text_size(px(11.0))
                         .child(")")
                 )
         )
-        // Right: faint key hints (terminal statusline style)
+        // Right: faint key hint — only F1 (always available for context help)
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap_2()
                 .text_size(px(10.0))
                 .text_color(text_muted.opacity(0.4))
                 .flex_shrink_0()
                 .child("F1 Help")
-                .child("Tab Complete")
         )
 }
 

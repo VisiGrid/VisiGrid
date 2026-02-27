@@ -486,14 +486,14 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         // Inline formula helper strip (signature hint, shown only when editing a formula)
         .when_some(if zen_mode { None } else { app.signature_help() }, |div, sig_info| {
-            let panel_bg = app.token(TokenKey::PanelBg);
+            let app_bg = app.token(TokenKey::AppBg);
             let panel_border = app.token(TokenKey::PanelBorder);
             let text_primary = app.token(TokenKey::TextPrimary);
             let text_muted = app.token(TokenKey::TextMuted);
             let accent = app.token(TokenKey::Accent);
             div.child(formula_bar::render_formula_helper_strip(
                 &sig_info,
-                panel_bg,
+                app_bg,
                 panel_border,
                 text_primary,
                 text_muted,
