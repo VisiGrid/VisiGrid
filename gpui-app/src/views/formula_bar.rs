@@ -385,8 +385,8 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 })
                 .child(if app.formula_bar_expanded { "▲" } else { "▼" })
         )
-        // Note: Autocomplete, signature help, and error popups are rendered at the top level
-        // in views/mod.rs to avoid being clipped by the formula bar's fixed height
+        // Note: Autocomplete and error popups are in grid.rs popup overlay.
+        // Signature help is now an inline strip rendered in the main layout flow (views/mod.rs).
 }
 
 /// Tooltip for formula bar expand button.

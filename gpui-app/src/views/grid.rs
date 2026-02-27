@@ -2866,7 +2866,8 @@ fn render_text_spill_overlay(
         .into_any_element()
 }
 
-/// Render the popup overlay layer for autocomplete, signature help, and error banners.
+/// Render the popup overlay layer for autocomplete and error banners.
+/// (Signature help is now an inline strip in the main layout flow.)
 /// Popups are positioned relative to the active cell rect in grid coordinates (post-scroll).
 /// When editing in formula bar, popup anchors to top of grid (just below formula bar).
 fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {

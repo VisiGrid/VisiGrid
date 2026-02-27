@@ -822,9 +822,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         // Inspector panel was moved above modal overlays (rendered after status bar)
         // so that modals sit on top in z-order and receive clicks first.
-        // NOTE: Autocomplete, signature help, and error banner popups are now rendered
-        // in the grid overlay layer (grid.rs::render_popup_overlay) where they can be
-        // positioned relative to the cell rect without menu/formula bar offset math.
+        // NOTE: Autocomplete and error banner popups are rendered in the grid overlay
+        // layer (grid.rs::render_popup_overlay). Signature help is now an inline strip
+        // rendered in the main layout flow between formula bar and format bar.
         // Hover documentation popup (when not editing and hovering over formula bar)
         .when_some(app.hover_function.filter(|_| !app.mode.is_editing() && !app.autocomplete_visible), |div, func| {
             let panel_bg = app.token(TokenKey::PanelBg);
