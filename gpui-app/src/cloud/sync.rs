@@ -46,6 +46,7 @@ impl Spreadsheet {
             // Set state to Syncing
             let _ = this.update(cx, |this, cx| {
                 this.cloud_sync_state = CloudSyncState::Syncing;
+                this.status_message = Some("Syncing to cloud...".to_string());
                 cx.notify();
             });
 
@@ -57,6 +58,7 @@ impl Spreadsheet {
                     let _ = this.update(cx, |this, cx| {
                         this.cloud_sync_state = CloudSyncState::Error;
                         this.cloud_last_error = Some(format!("Failed to read file: {}", e));
+                        this.status_message = Some(format!("Cloud sync error: {}", e));
                         cx.notify();
                     });
                     return;
@@ -67,7 +69,7 @@ impl Spreadsheet {
             let byte_size = file_bytes.len() as u64;
             let sheet_id = identity.sheet_id;
 
-            // Request presigned upload URL
+            // Request presigned upload URL and upload
             let save_result = {
                 smol::unblock(move || {
                     let client = SheetsClient::from_saved_auth()?;
@@ -92,13 +94,15 @@ impl Spreadsheet {
                             }
                         }
                         this.cloud_sync_state = CloudSyncState::Synced;
+                        this.status_message = Some("Synced to cloud".to_string());
                         cx.notify();
                     });
                 }
-                Err(HubError::Network(_)) => {
+                Err(HubError::Network(ref msg)) => {
                     let _ = this.update(cx, |this, cx| {
                         this.cloud_sync_state = CloudSyncState::Offline;
-                        this.cloud_last_error = Some("Network unavailable".to_string());
+                        this.cloud_last_error = Some(format!("Network: {}", msg));
+                        this.status_message = Some("Cloud sync: offline".to_string());
                         cx.notify();
                     });
                 }
@@ -106,7 +110,8 @@ impl Spreadsheet {
                     let msg = e.to_string();
                     let _ = this.update(cx, |this, cx| {
                         this.cloud_sync_state = CloudSyncState::Error;
-                        this.cloud_last_error = Some(msg);
+                        this.cloud_last_error = Some(msg.clone());
+                        this.status_message = Some(format!("Cloud sync error: {}", msg));
                         cx.notify();
                     });
                 }
