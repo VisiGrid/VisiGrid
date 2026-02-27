@@ -1036,7 +1036,7 @@ pub fn render_formula_helper_strip(
         .justify_between()
         .px_2()
         .overflow_hidden()
-        // Left: function signature (monospace, single line)
+        // Left: function signature (monospace, single line, truncates on narrow windows)
         .child(
             div()
                 .flex()
@@ -1044,6 +1044,9 @@ pub fn render_formula_helper_strip(
                 .gap(px(1.0))
                 .text_size(px(12.0))
                 .line_height(px(FORMULA_HELPER_STRIP_HEIGHT))
+                .overflow_hidden()
+                .text_ellipsis()
+                .min_w(px(0.0))  // Allow flex shrink below content width
                 .child(
                     div()
                         .text_color(text_primary)
