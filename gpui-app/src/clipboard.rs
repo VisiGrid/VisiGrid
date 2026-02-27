@@ -349,9 +349,27 @@ impl Spreadsheet {
             // For external pastes without tabs, try CSV-aware parsing (handles commas,
             // semicolons, pipes, and quoted fields). Only use the result if it found
             // multiple columns — otherwise fall through to existing tab-split behavior.
+            //
+            // Guard: if the sniffed delimiter is comma, check whether every line is
+            // actually a formatted number (e.g. "6,601.43"). Commas inside numbers
+            // are thousands separators, not field delimiters.
             let parsed_grid: Option<Vec<Vec<String>>> = if !is_internal && !text.contains('\t') {
+                let sniffed = csv_io::sniff_delimiter(&text);
                 let grid = csv_io::parse_delimited_text(&text);
-                if grid.iter().any(|row| row.len() > 1) { Some(grid) } else { None }
+                let has_multi_col = grid.iter().any(|row| row.len() > 1);
+
+                if has_multi_col && sniffed == b',' {
+                    // If every line parses as a formatted number, the commas are
+                    // thousands separators — don't split into columns.
+                    let all_numbers = text.lines().all(|line| {
+                        visigrid_engine::cell::try_parse_number(line.trim()).is_some()
+                    });
+                    if all_numbers { None } else { Some(grid) }
+                } else if has_multi_col {
+                    Some(grid)
+                } else {
+                    None
+                }
             } else {
                 None
             };
