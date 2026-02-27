@@ -16,6 +16,7 @@ use crate::mode::Menu;
 #[derive(Clone, Copy)]
 pub enum MenuAction {
     NewWorkbook, Open, Save, SaveAs,
+    OpenCloud, MoveToCloud,
     ExportCsv, ExportTsv, ExportJson, ExportXlsx,
     Undo, Redo, Cut, Copy, Paste, PasteValues, Delete, Find, GoTo,
     CommandPalette, Inspector, ZoomIn, ZoomOut, ZoomReset,
@@ -47,6 +48,9 @@ pub fn file_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Item { label: "Open...", shortcut: Some("Ctrl+O"), action: MenuAction::Open, accel: None },
         MenuEntry::Item { label: "Save", shortcut: Some("Ctrl+S"), action: MenuAction::Save, accel: Some('s') },
         MenuEntry::Item { label: "Save As...", shortcut: Some("Ctrl+Shift+S"), action: MenuAction::SaveAs, accel: Some('a') },
+        MenuEntry::Separator,
+        MenuEntry::Item { label: "Open Cloud...", shortcut: None, action: MenuAction::OpenCloud, accel: Some('l') },
+        MenuEntry::Item { label: "Move to Cloud...", shortcut: None, action: MenuAction::MoveToCloud, accel: Some('m') },
         MenuEntry::Separator,
         MenuEntry::Item { label: "Export as CSV...", shortcut: None, action: MenuAction::ExportCsv, accel: Some('c') },
         MenuEntry::Item { label: "Export as TSV...", shortcut: None, action: MenuAction::ExportTsv, accel: Some('t') },
@@ -233,6 +237,8 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::Open => app.open_file(cx),
         MenuAction::Save => app.save(cx),
         MenuAction::SaveAs => app.save_as(cx),
+        MenuAction::OpenCloud => app.cloud_open(cx),
+        MenuAction::MoveToCloud => app.cloud_move_to_cloud(cx),
         MenuAction::ExportCsv => app.export_csv(cx),
         MenuAction::ExportTsv => app.export_tsv(cx),
         MenuAction::ExportJson => app.export_json(cx),

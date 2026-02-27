@@ -864,8 +864,20 @@ fn render_cloud_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
             CloudSyncState::Error => ("☁ !", error_color),
         };
 
+        // Build label: "sheet_name" for synced, or state for others
+        // Include account info from saved auth
+        let account_slug = crate::hub::auth::load_auth()
+            .and_then(|a| a.user_slug)
+            .unwrap_or_default();
+
         let label_text = match app.cloud_sync_state {
-            CloudSyncState::Synced => identity.sheet_name.clone(),
+            CloudSyncState::Synced => {
+                if account_slug.is_empty() {
+                    identity.sheet_name.clone()
+                } else {
+                    format!("{} · @{}", identity.sheet_name, account_slug)
+                }
+            }
             CloudSyncState::Syncing => "Syncing...".to_string(),
             CloudSyncState::Dirty => "Modified".to_string(),
             CloudSyncState::Offline => "Offline".to_string(),
@@ -874,6 +886,7 @@ fn render_cloud_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
         };
 
         let sync_state = app.cloud_sync_state;
+        let sheet_id = identity.sheet_id;
 
         return div()
             .id("cloud-indicator")
@@ -889,7 +902,15 @@ fn render_cloud_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                 match sync_state {
                     CloudSyncState::Offline | CloudSyncState::Error => this.cloud_retry_upload(cx),
-                    _ => {} // Synced/Syncing: no action needed
+                    CloudSyncState::Synced | CloudSyncState::Local | CloudSyncState::Dirty => {
+                        // Open this specific sheet in the VisiGrid web app
+                        let url = format!("https://app.visigrid.app/sheets/{}", sheet_id);
+                        if let Err(e) = open::that(&url) {
+                            this.status_message = Some(format!("Failed to open browser: {}", e));
+                        }
+                        cx.notify();
+                    }
+                    _ => {}
                 }
             }))
             .child(icon)
