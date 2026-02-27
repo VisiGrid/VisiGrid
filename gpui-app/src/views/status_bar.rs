@@ -183,8 +183,8 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                             .child(trace_summary)
                     )
                 })
-                // Hub sync status indicator (always shown)
-                .child(render_hub_indicator(app, cx))
+                // Cloud/Hub sync status indicator (always shown)
+                .child(render_cloud_indicator(app, cx))
                 // Verified mode indicator
                 .when(app.verified_mode, |d| {
                     d.child(render_verified_indicator(app, cx))
@@ -838,40 +838,89 @@ fn render_approval_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         })
 }
 
-/// Render the hub sync status indicator
-fn render_hub_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+/// Render the cloud/hub sync status indicator.
+///
+/// Priority: cloud_identity > hub_link > local.
+/// If a file has a cloud identity, show cloud sync state.
+/// If it has a hub_link (dataset), show the old hub indicator.
+/// Otherwise show "Local".
+fn render_cloud_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    use crate::cloud::CloudSyncState;
     use crate::hub::HubStatus;
 
     let text_muted = app.token(TokenKey::TextMuted);
     let panel_border = app.token(TokenKey::PanelBorder);
     let accent = app.token(TokenKey::Accent);
     let success_color = app.token(TokenKey::Ok);
-    let warning_color = app.token(TokenKey::Warn);
     let error_color = app.token(TokenKey::Error);
 
-    // Determine icon and color based on status
-    let (icon, color) = match app.hub_status {
-        HubStatus::Unlinked => ("☁", text_muted),
-        HubStatus::Idle => ("☁ ✓", success_color),
-        HubStatus::Ahead => ("☁ ↑", accent),
-        HubStatus::Behind => ("☁ ↓", accent),
-        HubStatus::Diverged => ("☁ ↕", warning_color),
-        HubStatus::Syncing => ("☁ ⟳", text_muted),
-        HubStatus::Offline => ("☁ ✗", text_muted),
-        HubStatus::Forbidden => ("☁ 🔒", error_color),
-    };
+    // If cloud identity exists, show cloud sync state
+    if let Some(ref identity) = app.cloud_identity {
+        let (icon, color) = match app.cloud_sync_state {
+            CloudSyncState::Local => ("☁", text_muted),
+            CloudSyncState::Synced => ("☁ ✓", success_color),
+            CloudSyncState::Dirty | CloudSyncState::Syncing => ("☁ ⟳", accent),
+            CloudSyncState::Offline => ("☁ ✗", text_muted),
+            CloudSyncState::Error => ("☁ !", error_color),
+        };
 
-    // Display text depends on whether linked
-    let label_text = if app.hub_status == HubStatus::Unlinked {
-        "Local".to_string()
-    } else {
-        // Display name from hub link
+        let label_text = match app.cloud_sync_state {
+            CloudSyncState::Synced => identity.sheet_name.clone(),
+            CloudSyncState::Syncing => "Syncing...".to_string(),
+            CloudSyncState::Dirty => "Modified".to_string(),
+            CloudSyncState::Offline => "Offline".to_string(),
+            CloudSyncState::Error => app.cloud_last_error.clone().unwrap_or_else(|| "Error".to_string()),
+            CloudSyncState::Local => identity.sheet_name.clone(),
+        };
+
+        let sync_state = app.cloud_sync_state;
+
+        return div()
+            .id("cloud-indicator")
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_px()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_color(color)
+            .hover(move |s| s.bg(panel_border))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                match sync_state {
+                    CloudSyncState::Offline | CloudSyncState::Error => this.cloud_retry_upload(cx),
+                    _ => {} // Synced/Syncing: no action needed
+                }
+            }))
+            .child(icon)
+            .child(
+                div()
+                    .text_color(text_muted)
+                    .text_xs()
+                    .child(label_text)
+            );
+    }
+
+    // Fall back to hub_link indicator if dataset-linked
+    if app.hub_link.is_some() {
+        let warning_color = app.token(TokenKey::Warn);
+
+        let (icon, color) = match app.hub_status {
+            HubStatus::Unlinked => ("☁", text_muted),
+            HubStatus::Idle => ("☁ ✓", success_color),
+            HubStatus::Ahead => ("☁ ↑", accent),
+            HubStatus::Behind => ("☁ ↓", accent),
+            HubStatus::Diverged => ("☁ ↕", warning_color),
+            HubStatus::Syncing => ("☁ ⟳", text_muted),
+            HubStatus::Offline => ("☁ ✗", text_muted),
+            HubStatus::Forbidden => ("☁ 🔒", error_color),
+        };
+
         let display_name = app.hub_link
             .as_ref()
             .map(|link| link.display_name())
             .unwrap_or_default();
 
-        // When syncing, show the current activity instead of generic "Syncing..."
         let status_label = if app.hub_status == HubStatus::Syncing {
             app.hub_activity
                 .map(|a| a.label())
@@ -880,14 +929,42 @@ fn render_hub_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
             app.hub_status.label()
         };
 
-        format!("{} · {}", display_name, status_label)
-    };
+        let label_text = format!("{} · {}", display_name, status_label);
+        let status = app.hub_status;
 
-    // Click action depends on status
-    let status = app.hub_status;
+        return div()
+            .id("hub-indicator")
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_px()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_color(color)
+            .hover(move |s| s.bg(panel_border))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                match status {
+                    HubStatus::Unlinked => this.hub_show_link_dialog(cx),
+                    HubStatus::Behind => this.hub_pull(cx),
+                    HubStatus::Ahead | HubStatus::Diverged => this.hub_open_remote_as_copy(cx),
+                    _ => this.hub_check_status(cx),
+                }
+            }))
+            .child(icon)
+            .child(
+                div()
+                    .text_color(text_muted)
+                    .text_xs()
+                    .child(label_text)
+            );
+    }
+
+    // No cloud identity, no hub link — show "Local"
+    let is_signed_in = crate::hub::auth::is_authenticated();
 
     div()
-        .id("hub-indicator")
+        .id("cloud-indicator")
         .flex()
         .items_center()
         .gap_1()
@@ -895,22 +972,21 @@ fn render_hub_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
         .py_px()
         .rounded_sm()
         .cursor_pointer()
-        .text_color(color)
+        .text_color(text_muted)
         .hover(move |s| s.bg(panel_border))
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            match status {
-                HubStatus::Unlinked => this.hub_show_link_dialog(cx),
-                HubStatus::Behind => this.hub_pull(cx),
-                HubStatus::Ahead | HubStatus::Diverged => this.hub_open_remote_as_copy(cx),
-                _ => this.hub_check_status(cx),
+            if is_signed_in {
+                this.cloud_move_to_cloud(cx);
+            } else {
+                this.hub_sign_in(cx);
             }
         }))
-        .child(icon)
+        .child("☁")
         .child(
             div()
                 .text_color(text_muted)
                 .text_xs()
-                .child(label_text)
+                .child("Local")
         )
 }
 

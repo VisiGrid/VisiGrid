@@ -2514,6 +2514,15 @@ pub struct Spreadsheet {
     pub approved_fingerprint: Option<crate::history::HistoryFingerprint>,
     pub approval_history_len: usize,  // History length at time of approval (for drift diff)
 
+    // Cloud sync state
+    pub cloud_identity: Option<crate::cloud::CloudIdentity>,
+    pub cloud_sync_state: crate::cloud::CloudSyncState,
+    pub cloud_upload_generation: u64,
+    pub cloud_last_error: Option<String>,
+    pub cloud_sheets_list: Vec<crate::cloud::SheetInfo>,
+    pub cloud_selected_sheet: Option<usize>,
+    pub cloud_sheets_loading: bool,
+
     // Hub sync state
     pub hub_link: Option<crate::hub::HubLink>,
     pub hub_status: crate::hub::HubStatus,
@@ -2976,6 +2985,14 @@ impl Spreadsheet {
             approval_label_input: String::new(),
             approved_fingerprint: None,
             approval_history_len: 0,
+
+            cloud_identity: None,
+            cloud_sync_state: crate::cloud::CloudSyncState::Local,
+            cloud_upload_generation: 0,
+            cloud_last_error: None,
+            cloud_sheets_list: Vec::new(),
+            cloud_selected_sheet: None,
+            cloud_sheets_loading: false,
 
             hub_link: None,
             hub_status: crate::hub::HubStatus::Unlinked,

@@ -170,6 +170,24 @@ impl Spreadsheet {
                 self.finalize_load(path);
                 self.request_title_refresh(cx);
 
+                // Load cloud identity (for .sheet files)
+                if ext_lower == "sheet" {
+                    match crate::cloud::load_cloud_identity(path) {
+                        Ok(Some(identity)) => {
+                            self.cloud_identity = Some(identity);
+                            self.cloud_sync_state = crate::cloud::CloudSyncState::Synced;
+                        }
+                        Ok(None) => {
+                            self.cloud_identity = None;
+                            self.cloud_sync_state = crate::cloud::CloudSyncState::Local;
+                        }
+                        Err(_) => {
+                            self.cloud_identity = None;
+                            self.cloud_sync_state = crate::cloud::CloudSyncState::Local;
+                        }
+                    }
+                }
+
                 // Load hub link and cell metadata (for .sheet files)
                 if ext_lower == "sheet" {
                     match crate::hub::load_hub_link(path) {
@@ -1066,12 +1084,24 @@ impl Spreadsheet {
                     }
                 }
 
+                // Re-save cloud_identity if present (save_workbook recreates file fresh)
+                if let Some(ref identity) = self.cloud_identity {
+                    if let Err(e) = crate::cloud::save_cloud_identity(path, identity) {
+                        eprintln!("Warning: failed to preserve cloud identity: {}", e);
+                    }
+                }
+
                 // Save document settings to sidecar file
                 // (best-effort - don't fail the whole save if sidecar fails)
                 let _ = save_doc_settings(path, &self.doc_settings);
 
                 // Update session with new file path
                 self.update_session_cached(cx);
+
+                // Cloud sync: schedule upload if cloud-backed
+                if self.cloud_identity.is_some() {
+                    self.cloud_schedule_upload(cx);
+                }
 
                 let named_count = self.wb(cx).list_named_ranges().len();
                 let status = if named_count > 0 {

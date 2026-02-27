@@ -51,6 +51,7 @@ pub enum Mode {
     NumberFormatEditor, // Number format editor (Ctrl+1 when Format tab is open)
     TransformPreview,  // Transform diff preview dialog (Pro)
     ConvertPicker,     // Convert format picker dialog (palette → Convert)
+    CloudOpen,         // Cloud sheet picker dialog (File > Open Cloud)
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)

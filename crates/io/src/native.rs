@@ -1612,6 +1612,100 @@ pub fn delete_hub_link(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Cloud identity information stored in .sheet files.
+/// Links a local file to a cloud-backed sheet on VisiHub.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloudIdentity {
+    pub sheet_id: i64,
+    pub sheet_name: String,
+    pub api_base: String,
+    pub last_synced_hash: Option<String>,
+    pub last_synced_at: Option<String>,
+}
+
+/// Load cloud_identity from a .sheet file (if present)
+pub fn load_cloud_identity(path: &Path) -> Result<Option<CloudIdentity>, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Check if cloud_identity table exists
+    let has_table = conn
+        .prepare("SELECT id FROM cloud_identity LIMIT 1")
+        .is_ok();
+
+    if !has_table {
+        return Ok(None);
+    }
+
+    let result = conn.query_row(
+        "SELECT sheet_id, sheet_name, api_base, last_synced_hash, last_synced_at FROM cloud_identity WHERE id = 1",
+        [],
+        |row| {
+            Ok(CloudIdentity {
+                sheet_id: row.get(0)?,
+                sheet_name: row.get(1)?,
+                api_base: row.get::<_, Option<String>>(2)?.unwrap_or_else(|| "https://api.visiapi.com".to_string()),
+                last_synced_hash: row.get(3)?,
+                last_synced_at: row.get(4)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(identity) => Ok(Some(identity)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Save cloud_identity to a .sheet file (creates table if needed)
+pub fn save_cloud_identity(path: &Path, identity: &CloudIdentity) -> Result<(), String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    // Ensure table exists
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cloud_identity (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            sheet_id INTEGER NOT NULL,
+            sheet_name TEXT NOT NULL,
+            api_base TEXT DEFAULT 'https://api.visiapi.com',
+            last_synced_hash TEXT,
+            last_synced_at TEXT
+        )",
+        [],
+    ).map_err(|e| e.to_string())?;
+
+    // Upsert the singleton row
+    conn.execute(
+        "INSERT OR REPLACE INTO cloud_identity (id, sheet_id, sheet_name, api_base, last_synced_hash, last_synced_at)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+        params![
+            &identity.sheet_id,
+            &identity.sheet_name,
+            &identity.api_base,
+            &identity.last_synced_hash,
+            &identity.last_synced_at,
+        ],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Remove cloud_identity from a .sheet file
+pub fn delete_cloud_identity(path: &Path) -> Result<(), String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+
+    let has_table = conn
+        .prepare("SELECT id FROM cloud_identity LIMIT 1")
+        .is_ok();
+
+    if has_table {
+        conn.execute("DELETE FROM cloud_identity WHERE id = 1", [])
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 /// Layout data (column widths, row heights, hidden rows/cols) keyed by sheet index.
 ///
 /// Hidden rows/cols are visual-only state (like formatting) and do NOT affect

@@ -26,6 +26,7 @@ mod grid_ops;
 mod hints;
 mod history;
 mod hub;
+mod cloud;
 mod impact_preview;
 mod keyboard_hints;
 mod hub_sync;
