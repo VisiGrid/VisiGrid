@@ -163,9 +163,7 @@ fn build_cell_menu(
         separator(panel_border),
         menu_item("ctx-insert-row", "Insert Row", None, true, text_primary, text_muted, selection_bg, cx,
             |this, _, cx| {
-                let ((min_row, _), (max_row, _)) = this.selection_range();
-                let count = max_row - min_row + 1;
-                this.insert_rows(min_row, count, cx);
+                this.insert_rows_or_cols(cx);
             },
         ),
         menu_item("ctx-insert-col", "Insert Column", None, true, text_primary, text_muted, selection_bg, cx,
@@ -177,9 +175,7 @@ fn build_cell_menu(
         ),
         menu_item("ctx-delete-row", "Delete Row", None, true, text_primary, text_muted, selection_bg, cx,
             |this, _, cx| {
-                let ((min_row, _), (max_row, _)) = this.selection_range();
-                let count = max_row - min_row + 1;
-                this.delete_rows(min_row, count, cx);
+                this.delete_rows_or_cols(cx);
             },
         ),
         menu_item("ctx-delete-col", "Delete Column", None, true, text_primary, text_muted, selection_bg, cx,

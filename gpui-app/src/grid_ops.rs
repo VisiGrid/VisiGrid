@@ -27,10 +27,11 @@ impl Spreadsheet {
         }
 
         if self.is_row_selection() {
-            // Insert rows above selection
-            let ((min_row, _), (max_row, _)) = self.selection_range();
-            let count = max_row - min_row + 1;
-            self.insert_rows(min_row, count, cx);
+            // Insert rows above selection — convert view→data when sorted
+            let ((min_view, _), (max_view, _)) = self.selection_range();
+            let count = max_view - min_view + 1;
+            let data_row = self.view_to_data(min_view, cx);
+            self.insert_rows(data_row, count, cx);
         } else if self.is_col_selection() {
             // Insert columns left of selection
             let ((_, min_col), (_, max_col)) = self.selection_range();
@@ -56,10 +57,25 @@ impl Spreadsheet {
         }
 
         if self.is_row_selection() {
-            // Delete selected rows
-            let ((min_row, _), (max_row, _)) = self.selection_range();
-            let count = max_row - min_row + 1;
-            self.delete_rows(min_row, count, cx);
+            let ((min_view, _), (max_view, _)) = self.selection_range();
+
+            if self.row_view.is_sorted() {
+                // Sorted: view rows may map to non-contiguous data rows.
+                // Convert each view row to data row, sort descending, delete bottom-up.
+                let mut data_rows: Vec<usize> = (min_view..=max_view)
+                    .map(|vr| self.view_to_data(vr, cx))
+                    .collect();
+                data_rows.sort_unstable();
+                data_rows.dedup();
+                // Delete from bottom-up so earlier indices stay valid
+                for &data_row in data_rows.iter().rev() {
+                    self.delete_rows(data_row, 1, cx);
+                }
+            } else {
+                // Not sorted: view == data, contiguous range
+                let count = max_view - min_view + 1;
+                self.delete_rows(min_view, count, cx);
+            }
         } else if self.is_col_selection() {
             // Delete selected columns
             let ((_, min_col), (_, max_col)) = self.selection_range();
@@ -80,6 +96,11 @@ impl Spreadsheet {
         self.sheet_mut(sheet_index, cx, |sheet| {
             sheet.insert_rows(at_row, count);
         });
+
+        // Update row_view to track new data rows
+        for i in 0..count {
+            self.row_view.insert_row(at_row + i);
+        }
 
         // Shift row heights down (from bottom to avoid overwriting)
         let sheet_heights = self.sheet_row_heights_mut();
@@ -156,6 +177,11 @@ impl Spreadsheet {
         self.sheet_mut(sheet_index, cx, |sheet| {
             sheet.delete_rows(at_row, count);
         });
+
+        // Update row_view to remove deleted data rows (bottom-up to keep indices stable)
+        for i in (0..count).rev() {
+            self.row_view.delete_row(at_row + i);
+        }
 
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::RowsDeleted {
