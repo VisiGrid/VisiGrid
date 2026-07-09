@@ -703,6 +703,29 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
         ],
     },
     FunctionInfo {
+        name: "OFFSET",
+        signature: "OFFSET(reference, rows, cols, [height], [width])",
+        description: "Returns a range shifted from a starting reference, optionally resized.",
+        category: FunctionCategory::Lookup,
+        parameters: &[
+            ParameterInfo { name: "reference", description: "The starting cell or range.", optional: false, repeatable: false },
+            ParameterInfo { name: "rows", description: "Number of rows to offset (may be negative).", optional: false, repeatable: false },
+            ParameterInfo { name: "cols", description: "Number of columns to offset (may be negative).", optional: false, repeatable: false },
+            ParameterInfo { name: "height", description: "Height of the returned range. Defaults to the reference height.", optional: true, repeatable: false },
+            ParameterInfo { name: "width", description: "Width of the returned range. Defaults to the reference width.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "INDIRECT",
+        signature: "INDIRECT(ref_text, [a1])",
+        description: "Returns the reference specified by a text string (A1 style, current sheet).",
+        category: FunctionCategory::Lookup,
+        parameters: &[
+            ParameterInfo { name: "ref_text", description: "A cell reference as text, e.g. \"A1\" or \"B2:C3\".", optional: false, repeatable: false },
+            ParameterInfo { name: "a1", description: "Reference style (A1 assumed; reserved).", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
         name: "ROW",
         signature: "ROW([reference])",
         description: "Returns the row number of a reference.",
@@ -763,6 +786,15 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
             ParameterInfo { name: "year", description: "The year.", optional: false, repeatable: false },
             ParameterInfo { name: "month", description: "The month (1-12).", optional: false, repeatable: false },
             ParameterInfo { name: "day", description: "The day (1-31).", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "DATEVALUE",
+        signature: "DATEVALUE(date_text)",
+        description: "Converts a date in text form to a serial number.",
+        category: FunctionCategory::DateTime,
+        parameters: &[
+            ParameterInfo { name: "date_text", description: "A date as text, e.g. \"2026-01-15\".", optional: false, repeatable: false },
         ],
     },
     FunctionInfo {
