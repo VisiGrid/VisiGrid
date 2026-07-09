@@ -976,6 +976,11 @@ impl Workbook {
 
             let preds: FxHashSet<CellId> = refs.into_iter().collect();
             self.dep_graph.replace_edges(cell_id, preds);
+            // replace_edges skips registering a cell that has no precedents, so a formula
+            // with no static cell references (=1+1, =TODAY(), =INDIRECT("A1")) would be left
+            // out of the dep graph and never evaluated by recompute. Register it as a leaf
+            // formula so it is always recomputed.
+            self.dep_graph.register_leaf_formula(cell_id);
         } else {
             // Not a formula, clear any existing edges
             self.dep_graph.clear_cell(cell_id);
@@ -1859,7 +1864,7 @@ impl Workbook {
     /// Incremental recalc: re-evaluate only cells that transitively depend
     /// on any cell in `changed`. BFS to collect dirty subgraph, then
     /// evaluate in global topo order.
-    fn recalc_dirty_set(&self, changed: &[CellId]) {
+    fn recalc_dirty_set(&mut self, changed: &[CellId]) {
         use std::collections::VecDeque;
 
         // Test instrumentation: count recalc calls
@@ -1916,11 +1921,22 @@ impl Workbook {
         // On recalc: if valid, use cached order. If not, recompute and cache.
         // For small-to-medium models the current approach is fine. Profile before
         // optimizing — the BFS dirty-set collection is likely the bigger cost.
-        if let Ok(order) = self.dep_graph.topo_order_all_formulas() {
-            for cell_id in order {
-                if dirty_set.contains(&cell_id) {
-                    let _ = self.evaluate_cell(cell_id);
+        match self.dep_graph.topo_order_all_formulas() {
+            Ok(order) => {
+                for cell_id in order {
+                    if dirty_set.contains(&cell_id) {
+                        let _ = self.evaluate_cell(cell_id);
+                    }
                 }
+            }
+            Err(_cycle) => {
+                // A circular reference makes a global topo order impossible. The old code
+                // silently skipped evaluation here, so whenever *any* cycle existed anywhere
+                // in the workbook every dirty cell was cleared (step 2) and never re-evaluated,
+                // leaving unrelated cells blank. Fall back to the full ordered recompute, which
+                // marks true cycle members #CYCLE! (or resolves them iteratively when enabled)
+                // and refreshes every acyclic cell.
+                self.recompute_full_ordered();
             }
         }
     }
@@ -3537,6 +3553,67 @@ mod tests {
             b1_display.contains("CYCLE") || b1_display.contains("REF") || b1_display.contains("ERR"),
             "Expected cycle error in B1, got: {}", b1_display
         );
+    }
+
+    #[test]
+    fn incremental_recalc_refreshes_acyclic_cells_despite_unrelated_cycle() {
+        // Regression: a circular reference *anywhere* in the workbook used to make the
+        // incremental path (set_cell_value_tracked -> recalc_dirty_set) skip evaluation
+        // entirely, leaving unrelated cells blank/stale. It must still refresh acyclic
+        // cells and flag the true cycle members #CYCLE!.
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+
+        // Acyclic dependent: A2 = A1 + 1
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "=A1+1");
+        // Unrelated live cycle: B1 = B2, B2 = B1
+        wb.sheet_mut(0).unwrap().set_value(0, 1, "=B2");
+        wb.sheet_mut(0).unwrap().set_value(1, 1, "=B1");
+        for (r, c) in [(1, 0), (0, 1), (1, 1)] {
+            wb.update_cell_deps(sid, r, c);
+        }
+
+        // Edit A1 via the incremental path while the B1/B2 cycle is live in the dep graph.
+        wb.set_cell_value_tracked(0, 0, 0, "20");
+
+        // The acyclic dependent must recompute (was left blank before the fix).
+        assert_eq!(
+            wb.sheet(0).unwrap().get_display(1, 0),
+            "21",
+            "A2 should refresh to 21 despite an unrelated cycle"
+        );
+        // The cycle members must still surface as errors.
+        let b1 = wb.sheet(0).unwrap().get_display(0, 1);
+        let b2 = wb.sheet(0).unwrap().get_display(1, 1);
+        assert!(b1.contains("CYCLE") || b1.contains("REF") || b1.contains("ERR"), "B1: {b1}");
+        assert!(b2.contains("CYCLE") || b2.contains("REF") || b2.contains("ERR"), "B2: {b2}");
+    }
+
+    #[test]
+    fn offset_and_indirect_resolve_references() {
+        let mut wb = Workbook::new();
+        let sid = wb.sheet_id_at_idx(0).unwrap();
+        // Column A: 10, 20, 30
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "10");
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "20");
+        wb.sheet_mut(0).unwrap().set_value(2, 0, "30");
+        // Column C exercises OFFSET/INDIRECT, scalar and range-into-aggregate.
+        wb.sheet_mut(0).unwrap().set_value(0, 2, "=OFFSET(A1,1,0)"); // -> A2 = 20
+        wb.sheet_mut(0).unwrap().set_value(1, 2, "=SUM(OFFSET(A1,0,0,3,1))"); // -> A1:A3 = 60
+        wb.sheet_mut(0).unwrap().set_value(2, 2, "=INDIRECT(\"A3\")"); // -> 30
+        wb.sheet_mut(0).unwrap().set_value(3, 2, "=SUM(INDIRECT(\"A1:A3\"))"); // -> 60
+        wb.sheet_mut(0).unwrap().set_value(4, 2, "=OFFSET(A1,-1,0)"); // -> #REF! (off-grid)
+        for r in 0..5 {
+            wb.update_cell_deps(sid, r, 0);
+            wb.update_cell_deps(sid, r, 2);
+        }
+        wb.recompute_full_ordered();
+
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 2), "20", "OFFSET scalar");
+        assert_eq!(wb.sheet(0).unwrap().get_display(1, 2), "60", "SUM(OFFSET range)");
+        assert_eq!(wb.sheet(0).unwrap().get_display(2, 2), "30", "INDIRECT single cell");
+        assert_eq!(wb.sheet(0).unwrap().get_display(3, 2), "60", "SUM(INDIRECT range)");
+        assert!(wb.sheet(0).unwrap().get_display(4, 2).contains("REF"), "OFFSET off-grid -> #REF!");
     }
 
     #[test]

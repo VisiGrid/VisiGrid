@@ -10,22 +10,22 @@ const FUNCTION_NAMES: &[&str] = &[
     "CEILING", "CHOOSE", "COLUMN", "COLUMNS", "CONCAT", "CONCATENATE",
     "COS", "COUNT", "COUNTA", "COUNTBLANK", "COUNTIF", "COUNTIFS",
     "CUMIPMT", "CUMPRINC",
-    "DATE", "DATEDIF", "DAY", "DEGREES",
+    "DATE", "DATEDIF", "DATEVALUE", "DAY", "DEGREES",
     "EDATE", "EOMONTH", "EXP",
     "FILTER", "FIND", "FLOOR", "FV",
     "HLOOKUP", "HOUR",
-    "IF", "IFERROR", "IFNA", "IFS", "INDEX", "INT", "IPMT", "IRR",
+    "IF", "IFERROR", "IFNA", "IFS", "INDEX", "INDIRECT", "INT", "IPMT", "IRR",
     "ISBLANK", "ISERROR", "ISNA", "ISNUMBER", "ISTEXT",
     "LEFT", "LEN", "LN", "LOG", "LOG10", "LOWER",
     "MATCH", "MAX", "MEDIAN", "MID", "MIN", "MINUTE", "MOD", "MONTH",
     "NORM.S.DIST", "NORMSDIST", "NOT", "NOW", "NPV",
-    "OR",
+    "OFFSET", "OR",
     "PI", "PMT", "POWER", "PPMT", "PRODUCT", "PV",
     "RADIANS", "RAND", "RANDBETWEEN", "REPT", "RIGHT", "ROUND", "ROUNDDOWN", "ROUNDUP", "ROW", "ROWS",
-    "SECOND", "SEQUENCE", "SIN", "SORT", "SPARKLINE", "SQRT", "STDEV", "SUBSTITUTE", "SUM", "SUMIF", "SUMIFS", "SUMPRODUCT", "SWITCH",
+    "SECOND", "SEQUENCE", "SIN", "SORT", "SPARKLINE", "SQRT", "STDEV", "STDEV.P", "STDEV.S", "STDEVP", "SUBSTITUTE", "SUM", "SUMIF", "SUMIFS", "SUMPRODUCT", "SWITCH",
     "TAN", "TEXT", "TEXTJOIN", "TODAY", "TRANSPOSE", "TRIM", "TRUNC",
     "UNIQUE", "UPPER",
-    "VALUE", "VAR", "VLOOKUP",
+    "VALUE", "VAR", "VAR.P", "VAR.S", "VARP", "VLOOKUP",
     "WEEKDAY",
     "XLOOKUP",
     "YEAR",
@@ -110,4 +110,32 @@ pub fn max(args: &[EvalResult]) -> EvalResult {
         }
     }
     result.map(EvalResult::Number).unwrap_or(EvalResult::Number(0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn function_names_are_sorted() {
+        // `is_known_function` uses binary_search, which is only correct on a sorted list.
+        // Note: '.' (0x2E) sorts before ASCII letters, so e.g. "STDEV.P" precedes "STDEVP".
+        for pair in FUNCTION_NAMES.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "FUNCTION_NAMES not strictly sorted: {:?} !< {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn previously_orphaned_functions_are_registered() {
+        // Regression: these were callable in dispatch but missing from FUNCTION_NAMES,
+        // so is_known_function() wrongly returned false (breaking autocomplete/validation).
+        for name in ["DATEVALUE", "STDEV.S", "STDEV.P", "STDEVP", "VAR.S", "VAR.P", "VARP"] {
+            assert!(is_known_function(name), "{name} should be a known function");
+        }
+    }
 }

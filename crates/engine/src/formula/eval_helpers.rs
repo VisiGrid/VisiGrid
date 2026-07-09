@@ -163,51 +163,136 @@ pub fn try_parse_date_string(s: &str) -> Option<f64> {
     None
 }
 
+/// Compare two floats for spreadsheet equality.
+///
+/// Uses a magnitude-relative tolerance rather than a bare `f64::EPSILON` absolute check.
+/// `f64::EPSILON` (~2.2e-16) is only meaningful near 1.0: for large values `=` would never
+/// hold (rounding error exceeds it) and near zero it is needlessly loose. A relative
+/// tolerance tracks the ~15 significant figures a spreadsheet treats as "equal".
+pub(crate) fn approx_eq(a: f64, b: f64) -> bool {
+    if a == b {
+        return true;
+    }
+    let scale = a.abs().max(b.abs());
+    (a - b).abs() <= (scale * 1e-12).max(f64::EPSILON)
+}
+
+/// Case-insensitive text match supporting Excel-style wildcards: `*` matches any run of
+/// characters, `?` matches exactly one, and `~` escapes the following `*`/`?`/`~` to a
+/// literal. With no wildcard characters this is a plain case-insensitive equality.
+pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
+    if !pattern.contains(['*', '?', '~']) {
+        return pattern.eq_ignore_ascii_case(text);
+    }
+
+    enum Tok {
+        Star,
+        AnyOne,
+        Lit(char),
+    }
+    let pchars: Vec<char> = pattern.to_lowercase().chars().collect();
+    let mut toks: Vec<Tok> = Vec::with_capacity(pchars.len());
+    let mut i = 0;
+    while i < pchars.len() {
+        match pchars[i] {
+            '~' if i + 1 < pchars.len() => {
+                toks.push(Tok::Lit(pchars[i + 1]));
+                i += 2;
+            }
+            '*' => {
+                toks.push(Tok::Star);
+                i += 1;
+            }
+            '?' => {
+                toks.push(Tok::AnyOne);
+                i += 1;
+            }
+            c => {
+                toks.push(Tok::Lit(c));
+                i += 1;
+            }
+        }
+    }
+
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // Backtracking anchor for the most recent `*`.
+    let (mut star_pi, mut star_ti): (Option<usize>, usize) = (None, 0);
+    while ti < t.len() {
+        match toks.get(pi) {
+            Some(Tok::Star) => {
+                star_pi = Some(pi);
+                star_ti = ti;
+                pi += 1;
+            }
+            Some(Tok::AnyOne) => {
+                pi += 1;
+                ti += 1;
+            }
+            Some(Tok::Lit(c)) if *c == t[ti] => {
+                pi += 1;
+                ti += 1;
+            }
+            _ => match star_pi {
+                Some(sp) => {
+                    pi = sp + 1;
+                    star_ti += 1;
+                    ti = star_ti;
+                }
+                None => return false,
+            },
+        }
+    }
+    while matches!(toks.get(pi), Some(Tok::Star)) {
+        pi += 1;
+    }
+    pi == toks.len()
+}
+
 /// Check if a cell value matches criteria (for SUMIF, COUNTIF, etc.)
 pub(crate) fn matches_criteria(value: &EvalResult, criteria: &EvalResult) -> bool {
     let criteria_str = criteria.to_text();
 
     // Check for comparison operators in criteria
-    if criteria_str.starts_with(">=") {
-        if let (Ok(v), Ok(c)) = (value.to_number(), criteria_str[2..].trim().parse::<f64>()) {
+    if let Some(rest) = criteria_str.strip_prefix(">=") {
+        if let (Ok(v), Ok(c)) = (value.to_number(), rest.trim().parse::<f64>()) {
             return v >= c;
         }
-    } else if criteria_str.starts_with("<=") {
-        if let (Ok(v), Ok(c)) = (value.to_number(), criteria_str[2..].trim().parse::<f64>()) {
+    } else if let Some(rest) = criteria_str.strip_prefix("<=") {
+        if let (Ok(v), Ok(c)) = (value.to_number(), rest.trim().parse::<f64>()) {
             return v <= c;
         }
-    } else if criteria_str.starts_with("<>") {
-        let c = criteria_str[2..].trim();
+    } else if let Some(rest) = criteria_str.strip_prefix("<>") {
+        let c = rest.trim();
         if let Ok(n) = c.parse::<f64>() {
             if let Ok(v) = value.to_number() {
-                return (v - n).abs() >= f64::EPSILON;
+                return !approx_eq(v, n);
             }
         }
-        return value.to_text().to_lowercase() != c.to_lowercase();
-    } else if criteria_str.starts_with('>') {
-        if let (Ok(v), Ok(c)) = (value.to_number(), criteria_str[1..].trim().parse::<f64>()) {
+        return !wildcard_match(c, &value.to_text());
+    } else if let Some(rest) = criteria_str.strip_prefix('>') {
+        if let (Ok(v), Ok(c)) = (value.to_number(), rest.trim().parse::<f64>()) {
             return v > c;
         }
-    } else if criteria_str.starts_with('<') {
-        if let (Ok(v), Ok(c)) = (value.to_number(), criteria_str[1..].trim().parse::<f64>()) {
+    } else if let Some(rest) = criteria_str.strip_prefix('<') {
+        if let (Ok(v), Ok(c)) = (value.to_number(), rest.trim().parse::<f64>()) {
             return v < c;
         }
-    } else if criteria_str.starts_with('=') {
-        let c = criteria_str[1..].trim();
+    } else if let Some(rest) = criteria_str.strip_prefix('=') {
+        let c = rest.trim();
         if let Ok(n) = c.parse::<f64>() {
             if let Ok(v) = value.to_number() {
-                return (v - n).abs() < f64::EPSILON;
+                return approx_eq(v, n);
             }
         }
-        return value.to_text().to_lowercase() == c.to_lowercase();
+        return wildcard_match(c, &value.to_text());
     }
 
-    // Simple equality check
-    match (value, criteria) {
-        (EvalResult::Number(v), EvalResult::Number(c)) => (v - c).abs() < f64::EPSILON,
-        (EvalResult::Text(v), EvalResult::Text(c)) => v.to_lowercase() == c.to_lowercase(),
-        _ => value.to_text().to_lowercase() == criteria_str.to_lowercase(),
+    // No operator: numeric equality when both sides are numeric, else wildcard-aware text.
+    if let (Ok(v), Ok(c)) = (value.to_number(), criteria_str.parse::<f64>()) {
+        return approx_eq(v, c);
     }
+    wildcard_match(&criteria_str, &value.to_text())
 }
 
 /// Helper to get text from a cell, handling cross-sheet references
@@ -243,10 +328,25 @@ pub(crate) fn collect_numbers<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> 
                 }
             }
             _ => {
-                let result = evaluate(arg, lookup);
-                match result.to_number() {
-                    Ok(n) => values.push(n),
-                    Err(e) => return Err(e),
+                // A function may return a range as an Array (e.g. OFFSET/INDIRECT over a
+                // multi-cell region). Flatten its numeric cells like a Range arg does,
+                // skipping text/blanks; scalars keep the strict number-or-error behavior.
+                match evaluate(arg, lookup) {
+                    EvalResult::Array(arr) => {
+                        for r in 0..arr.rows() {
+                            for c in 0..arr.cols() {
+                                if let Some(v) = arr.get(r, c) {
+                                    if let Ok(n) = EvalResult::from_value(v).to_number() {
+                                        values.push(n);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    result => match result.to_number() {
+                        Ok(n) => values.push(n),
+                        Err(e) => return Err(e),
+                    },
                 }
             }
         }
@@ -395,6 +495,47 @@ fn collect_all_values_from_range<L: CellLookup>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approx_eq_holds_at_large_magnitude() {
+        // The old `(a-b).abs() < f64::EPSILON` check could never hold for large values
+        // because rounding error exceeds ~2.2e-16. Relative tolerance fixes that.
+        let a = 1_000_000_000.0_f64;
+        // Rounding-level difference at large magnitude must compare equal — impossible
+        // under the old `abs() < f64::EPSILON` (2.2e-16) check.
+        assert!(approx_eq(a, a + 1e-4), "rounding-level diff at 1e9 should compare equal");
+        assert!(approx_eq(0.1 + 0.2, 0.3), "0.1+0.2 should equal 0.3");
+        assert!(approx_eq(0.0, 0.0));
+        // Genuinely different values must still be unequal at every magnitude.
+        assert!(!approx_eq(1.0, 1.0001), "small clearly-different values stay unequal");
+        assert!(!approx_eq(a, a + 100.0), "large clearly-different values stay unequal");
+        assert!(!approx_eq(1_000_000_000.0, 1_000_100_000.0));
+    }
+
+    #[test]
+    fn matches_criteria_numeric_and_wildcards() {
+        let num = |n: f64| EvalResult::Number(n);
+        let txt = |s: &str| EvalResult::Text(s.to_string());
+
+        // Numeric operators
+        assert!(matches_criteria(&num(5.0), &txt(">=5")));
+        assert!(matches_criteria(&num(5.0), &txt("=5")));
+        assert!(!matches_criteria(&num(4.0), &txt(">5")));
+        assert!(matches_criteria(&num(4.0), &txt("<>5")));
+
+        // Wildcards: * (any run) and ? (single char), case-insensitive
+        assert!(matches_criteria(&txt("Apple"), &txt("app*")));
+        assert!(matches_criteria(&txt("banana"), &txt("*ana*")));
+        assert!(matches_criteria(&txt("cat"), &txt("c?t")));
+        assert!(!matches_criteria(&txt("cart"), &txt("c?t")));
+        assert!(!matches_criteria(&txt("Apple"), &txt("*z*")));
+        // <> with a wildcard = "not matching"
+        assert!(matches_criteria(&txt("Apple"), &txt("<>*z*")));
+        assert!(!matches_criteria(&txt("Apple"), &txt("<>app*")));
+        // ~ escapes a wildcard to a literal
+        assert!(matches_criteria(&txt("a*b"), &txt("a~*b")));
+        assert!(!matches_criteria(&txt("axb"), &txt("a~*b")));
+    }
 
     #[test]
     fn test_try_parse_date_string_iso() {

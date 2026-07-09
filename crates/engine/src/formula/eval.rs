@@ -666,10 +666,10 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
                             match op {
                                 Op::Lt => a < b,
                                 Op::Gt => a > b,
-                                Op::Eq => (a - b).abs() < f64::EPSILON,
+                                Op::Eq => super::eval_helpers::approx_eq(*a, *b),
                                 Op::LtEq => a <= b,
                                 Op::GtEq => a >= b,
-                                Op::NotEq => (a - b).abs() >= f64::EPSILON,
+                                Op::NotEq => !super::eval_helpers::approx_eq(*a, *b),
                                 _ => unreachable!(),
                             }
                         }
@@ -700,10 +700,10 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
                                 match op {
                                     Op::Lt => a < b,
                                     Op::Gt => a > b,
-                                    Op::Eq => (a - b).abs() < f64::EPSILON,
+                                    Op::Eq => super::eval_helpers::approx_eq(a, b),
                                     Op::LtEq => a <= b,
                                     Op::GtEq => a >= b,
-                                    Op::NotEq => (a - b).abs() >= f64::EPSILON,
+                                    Op::NotEq => !super::eval_helpers::approx_eq(a, b),
                                     _ => unreachable!(),
                                 }
                             } else {
