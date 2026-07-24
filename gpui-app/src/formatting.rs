@@ -41,17 +41,36 @@ pub enum BorderApplyMode {
     Clear,
 }
 
+/// Maximum number of cells to scan when resolving selection format state.
+/// This runs on every render of the format bar, so an uncapped scan freezes
+/// the UI for seconds on huge selections (Ctrl+A = 16.7M cells). Mirrors
+/// MAX_STATS_CELLS in status_bar.rs. Beyond the cap, tri-state resolution is
+/// based on the first N cells of the selection (which includes the viewport
+/// for a fresh select-all).
+const MAX_FORMAT_STATE_CELLS: usize = 10_000;
+
 impl Spreadsheet {
     /// Compute format state for the current selection (tri-state resolution)
     pub fn selection_format_state(&self, cx: &App) -> SelectionFormatState {
         let mut state = SelectionFormatState::default();
         let mut first = true;
         let mut last_display: Option<String> = None;
+        let mut scanned = 0usize;
 
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        let ranges = self.all_selection_ranges();
+        // True cell count, independent of the scan cap below
+        state.cell_count = ranges
+            .iter()
+            .map(|((r1, c1), (r2, c2))| (r2 - r1 + 1) * (c2 - c1 + 1))
+            .sum();
+
+        'scan: for ((min_row, min_col), (max_row, max_col)) in ranges {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
-                    state.cell_count += 1;
+                    if scanned >= MAX_FORMAT_STATE_CELLS {
+                        break 'scan;
+                    }
+                    scanned += 1;
                     let raw = self.sheet(cx).get_raw(row, col);
                     let display = self.sheet(cx).get_display(row, col);
                     let format = self.sheet(cx).get_format(row, col);
@@ -89,6 +108,26 @@ impl Spreadsheet {
                         state.font_color = state.font_color.combine(&format.font_color);
                         state.cell_style = state.cell_style.combine(&format.cell_style);
                         last_display = Some(display);
+
+                        // Every property already resolved to Mixed — scanning
+                        // further cells cannot change the outcome.
+                        if state.raw_value.is_mixed()
+                            && state.bold.is_mixed()
+                            && state.italic.is_mixed()
+                            && state.underline.is_mixed()
+                            && state.strikethrough.is_mixed()
+                            && state.font_family.is_mixed()
+                            && state.alignment.is_mixed()
+                            && state.vertical_alignment.is_mixed()
+                            && state.text_overflow.is_mixed()
+                            && state.number_format.is_mixed()
+                            && state.background_color.is_mixed()
+                            && state.font_size.is_mixed()
+                            && state.font_color.is_mixed()
+                            && state.cell_style.is_mixed()
+                        {
+                            break 'scan;
+                        }
                     }
                 }
             }
