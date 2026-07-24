@@ -183,6 +183,54 @@ fn test_fill_down_with_ranges_end_to_end() {
 }
 
 // =========================================================================
+// Single-row Ctrl+D: fill from the row above (Excel-style)
+// =========================================================================
+// With a single row selected on row R, fill_down uses row R-1 as the source
+// and row R as the target — equivalent to a fill from R-1 through R.
+
+#[test]
+fn test_fill_down_single_cell_copies_value_from_above() {
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    sheet.set_value(0, 0, "hello"); // A1
+
+    // Ctrl+D with only A2 selected: source is A1, target is A2
+    fill_down_on_sheet(&mut sheet, 0, 1, 0);
+
+    assert_eq!(sheet.get_raw(1, 0), "hello", "A2 receives A1's value");
+    assert_eq!(sheet.get_raw(0, 0), "hello", "A1 unchanged");
+}
+
+#[test]
+fn test_fill_down_single_cell_adjusts_formula_from_above() {
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    sheet.set_value(0, 0, "10"); // A1
+    sheet.set_value(1, 0, "20"); // A2
+    sheet.set_value(2, 1, "=A1 + $A$1"); // B3
+
+    // Ctrl+D with only B4 selected: source is B3, refs shift down by 1
+    fill_down_on_sheet(&mut sheet, 2, 3, 1);
+
+    assert_eq!(sheet.get_raw(3, 1), "=A2 + $A$1", "relative ref adjusted, absolute kept");
+    assert_eq!(sheet.get_display(3, 1), "30", "B4 value: 20+10");
+}
+
+#[test]
+fn test_fill_right_single_cell_adjusts_formula_from_left() {
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    sheet.set_value(0, 0, "10"); // A1
+    sheet.set_value(0, 1, "20"); // B1
+    sheet.set_value(1, 0, "=A1 + $A$1"); // A2
+
+    // Ctrl+R with only B2 selected: source is A2, refs shift right by 1
+    let source = sheet.get_raw(1, 0);
+    let adjusted = adjust_formula_refs(&source, 0, 1);
+    sheet.set_value(1, 1, &adjusted);
+
+    assert_eq!(sheet.get_raw(1, 1), "=B1 + $A$1", "relative ref adjusted, absolute kept");
+    assert_eq!(sheet.get_display(1, 1), "30", "B2 value: 20+10");
+}
+
+// =========================================================================
 // EDGE CASE: Multi-letter columns (AA, AB, etc.)
 // =========================================================================
 

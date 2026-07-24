@@ -13,14 +13,18 @@ Fill & copy semantics define what happens when data is replicated, propagated, o
 ### Source Range
 - The cells providing data for an operation
 - For Copy: the primary selection at time of copy
-- For Fill Down: the first row of the primary selection
-- For Fill Right: the first column of the primary selection
+- For Fill Down: the first row of the primary selection; if the selection is a
+  single row, the row above the selection
+- For Fill Right: the first column of the primary selection; if the selection
+  is a single column, the column to the left of the selection
 
 ### Target Range
 - The cells receiving data from an operation
 - For Paste: rectangle starting at active cell, sized to match source
-- For Fill Down: all rows below the first in primary selection
-- For Fill Right: all columns after the first in primary selection
+- For Fill Down: all rows below the first in primary selection; if the
+  selection is a single row, the selected row itself
+- For Fill Right: all columns after the first in primary selection; if the
+  selection is a single column, the selected column itself
 
 ### Clipboard
 - System clipboard (shared with OS)
@@ -127,15 +131,16 @@ Formulas are adjusted based on the delta from original copy location:
 
 ### Ctrl+D / Data → Fill Down
 
-**Precondition:** Primary selection must span at least 2 rows
+**Source:** First row of primary selection. If the selection spans only 1 row,
+the row above the selection (Excel-style single-cell/single-row fill).
+**Target:** All rows below the source row, within the selection.
 
-**Source:** First row of primary selection
-**Target:** All rows below first row in primary selection
+**Precondition:** Multi-row selection, or single-row selection not on row 1.
 
 **Behavior:**
 1. For each column in selection:
-   - Read source cell (first row)
-   - For each target cell (rows below):
+   - Read source cell (source row)
+   - For each target cell (rows below source, within selection):
      - If source is formula: adjust references by row delta
      - If source is value: copy verbatim
      - Write to target cell
@@ -143,11 +148,12 @@ Formulas are adjusted based on the delta from original copy location:
 
 **Rules:**
 - Additional selections are ignored
-- If only 1 row selected: show error, no action
+- If only 1 row selected: fill from the row above into the selection
+- If only 1 row selected AND it is row 1: show error, no action
 - Formulas adjust row references, column references unchanged
 - Selection is preserved after fill
 
-**Example:**
+**Example (multi-row):**
 ```
 Before (A1:A3 selected):
 A1: =B1*2
@@ -160,21 +166,35 @@ A2: =B2*2
 A3: =B3*2
 ```
 
+**Example (single cell):**
+```
+Before (A2 selected):
+A1: =B1*2
+A2: (empty)
+
+After Ctrl+D:
+A1: =B1*2
+A2: =B2*2
+```
+
 ---
 
 ## Fill Right Operation
 
 ### Ctrl+R / Data → Fill Right
 
-**Precondition:** Primary selection must span at least 2 columns
+**Source:** First column of primary selection. If the selection spans only 1
+column, the column to the left of the selection (Excel-style
+single-cell/single-column fill).
+**Target:** All columns after the source column, within the selection.
 
-**Source:** First column of primary selection
-**Target:** All columns after first column in primary selection
+**Precondition:** Multi-column selection, or single-column selection not on
+column A.
 
 **Behavior:**
 1. For each row in selection:
-   - Read source cell (first column)
-   - For each target cell (columns right):
+   - Read source cell (source column)
+   - For each target cell (columns right of source, within selection):
      - If source is formula: adjust references by column delta
      - If source is value: copy verbatim
      - Write to target cell
@@ -182,7 +202,8 @@ A3: =B3*2
 
 **Rules:**
 - Additional selections are ignored
-- If only 1 column selected: show error, no action
+- If only 1 column selected: fill from the column to the left into the selection
+- If only 1 column selected AND it is column A: show error, no action
 - Formulas adjust column references, row references unchanged
 - Selection is preserved after fill
 
@@ -292,8 +313,8 @@ These are explicitly deferred to future versions.
 
 | Condition | Result |
 |-----------|--------|
-| Fill Down with <2 rows | Error message, no action |
-| Fill Right with <2 columns | Error message, no action |
+| Fill Down with 1 row selected on row 1 | Error message, no action |
+| Fill Right with 1 column selected on column A | Error message, no action |
 | Paste would exceed sheet bounds | Error message, no action |
 | Empty clipboard on paste | No action, no error |
 | Cut in edit mode | Cut selected text from edit buffer |

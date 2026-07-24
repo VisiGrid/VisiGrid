@@ -33,7 +33,9 @@ pub const FILL_HANDLE_INWARD_OVERLAP: f32 = 1.0;
 impl Spreadsheet {
     // Fill operations
 
-    /// Fill down: copy the first row's values/formulas to remaining rows in selection
+    /// Fill down: copy the first row's values/formulas to remaining rows in selection.
+    /// With a single row selected, fills from the row above into the selection
+    /// (Excel-style Ctrl+D on a single cell/row).
     pub fn fill_down(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
@@ -41,12 +43,17 @@ impl Spreadsheet {
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
-        // Need at least 2 rows selected
-        if max_row <= min_row {
-            self.status_message = Some("Select at least 2 rows to fill down".into());
-            cx.notify();
-            return;
-        }
+        // Single row selected: source is the row above the selection
+        let src_row = if max_row <= min_row {
+            if min_row == 0 {
+                self.status_message = Some("Nothing above to fill down from".into());
+                cx.notify();
+                return;
+            }
+            min_row - 1
+        } else {
+            min_row
+        };
 
         let mut changes = Vec::new();
 
@@ -55,15 +62,15 @@ impl Spreadsheet {
 
         // For each column in selection
         for col in min_col..=max_col {
-            // Get the source value/formula from the first row
-            let source = self.sheet(cx).get_raw(min_row, col);
+            // Get the source value/formula from the source row
+            let source = self.sheet(cx).get_raw(src_row, col);
 
-            // Fill down to all other rows
-            for row in (min_row + 1)..=max_row {
+            // Fill down to all rows below the source
+            for row in (src_row + 1)..=max_row {
                 let old_value = self.sheet(cx).get_raw(row, col);
                 let new_value = if source.starts_with('=') {
                     // Adjust relative references for formulas
-                    self.adjust_formula_refs(&source, row as i32 - min_row as i32, 0)
+                    self.adjust_formula_refs(&source, row as i32 - src_row as i32, 0)
                 } else {
                     source.clone()
                 };
@@ -85,11 +92,11 @@ impl Spreadsheet {
         if !changes.is_empty() {
             let provenance = MutationOp::Fill {
                 sheet: self.sheet(cx).id,
-                src_start_row: min_row,
+                src_start_row: src_row,
                 src_start_col: min_col,
-                src_end_row: min_row,
+                src_end_row: src_row,
                 src_end_col: max_col,
-                dst_start_row: min_row + 1,
+                dst_start_row: src_row + 1,
                 dst_start_col: min_col,
                 dst_end_row: max_row,
                 dst_end_col: max_col,
@@ -107,9 +114,9 @@ impl Spreadsheet {
 
         // Validate filled range and report failures
         let failures = self.wb(cx).validate_range(
-            self.sheet_index(cx), min_row + 1, min_col, max_row, max_col
+            self.sheet_index(cx), src_row + 1, min_col, max_row, max_col
         );
-        let total_cells = (max_row - min_row) * (max_col - min_col + 1);
+        let total_cells = (max_row - src_row) * (max_col - min_col + 1);
         if failures.count > 0 {
             self.store_validation_failures(&failures);
             self.status_message = Some(format!(
@@ -130,12 +137,18 @@ impl Spreadsheet {
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
-        // Need at least 2 columns selected
-        if max_col <= min_col {
-            self.status_message = Some("Select at least 2 columns to fill right".into());
-            cx.notify();
-            return;
-        }
+        // Single column selected: source is the column to the left of the selection
+        // (Excel-style Ctrl+R on a single cell/column)
+        let src_col = if max_col <= min_col {
+            if min_col == 0 {
+                self.status_message = Some("Nothing to the left to fill right from".into());
+                cx.notify();
+                return;
+            }
+            min_col - 1
+        } else {
+            min_col
+        };
 
         let mut changes = Vec::new();
 
@@ -144,15 +157,15 @@ impl Spreadsheet {
 
         // For each row in selection
         for row in min_row..=max_row {
-            // Get the source value/formula from the first column
-            let source = self.sheet(cx).get_raw(row, min_col);
+            // Get the source value/formula from the source column
+            let source = self.sheet(cx).get_raw(row, src_col);
 
-            // Fill right to all other columns
-            for col in (min_col + 1)..=max_col {
+            // Fill right to all columns after the source
+            for col in (src_col + 1)..=max_col {
                 let old_value = self.sheet(cx).get_raw(row, col);
                 let new_value = if source.starts_with('=') {
                     // Adjust relative references for formulas
-                    self.adjust_formula_refs(&source, 0, col as i32 - min_col as i32)
+                    self.adjust_formula_refs(&source, 0, col as i32 - src_col as i32)
                 } else {
                     source.clone()
                 };
@@ -175,11 +188,11 @@ impl Spreadsheet {
             let provenance = MutationOp::Fill {
                 sheet: self.sheet(cx).id,
                 src_start_row: min_row,
-                src_start_col: min_col,
+                src_start_col: src_col,
                 src_end_row: max_row,
-                src_end_col: min_col,
+                src_end_col: src_col,
                 dst_start_row: min_row,
-                dst_start_col: min_col + 1,
+                dst_start_col: src_col + 1,
                 dst_end_row: max_row,
                 dst_end_col: max_col,
                 direction: FillDirection::Right,
@@ -196,9 +209,9 @@ impl Spreadsheet {
 
         // Validate filled range and report failures
         let failures = self.wb(cx).validate_range(
-            self.sheet_index(cx), min_row, min_col + 1, max_row, max_col
+            self.sheet_index(cx), min_row, src_col + 1, max_row, max_col
         );
-        let total_cells = (max_row - min_row + 1) * (max_col - min_col);
+        let total_cells = (max_row - min_row + 1) * (max_col - src_col);
         if failures.count > 0 {
             self.store_validation_failures(&failures);
             self.status_message = Some(format!(
