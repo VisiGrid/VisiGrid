@@ -387,7 +387,7 @@ impl CellFormat {
 /// Partial format override with all-Option fields.
 /// Used during XLSX import to represent style deltas.
 /// `None` = "not overridden, use base style"; `Some(v)` = "explicitly set to v".
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CellFormatOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bold: Option<bool>,
@@ -430,6 +430,64 @@ pub struct CellFormatOverride {
 }
 
 impl CellFormatOverride {
+    /// Merge another override into this one. Properties set in `other`
+    /// replace properties here; unset properties in `other` leave this
+    /// override untouched (later-wins-per-property semantics).
+    pub fn merge_from(&mut self, other: &Self) {
+        macro_rules! take {
+            ($field:ident) => {
+                if other.$field.is_some() {
+                    self.$field = other.$field.clone();
+                }
+            };
+        }
+        take!(bold);
+        take!(italic);
+        take!(underline);
+        take!(strikethrough);
+        take!(alignment);
+        take!(vertical_alignment);
+        take!(text_overflow);
+        take!(number_format);
+        take!(font_family);
+        take!(font_size);
+        take!(font_color);
+        take!(background_color);
+        take!(border_top);
+        take!(border_right);
+        take!(border_bottom);
+        take!(border_left);
+        take!(cell_style);
+    }
+
+    /// Apply this override's set properties onto a full format.
+    pub fn apply_to(&self, format: &mut CellFormat) {
+        macro_rules! apply {
+            ($field:ident) => {
+                if let Some(v) = &self.$field {
+                    format.$field = v.clone();
+                }
+            };
+        }
+        apply!(bold);
+        apply!(italic);
+        apply!(underline);
+        apply!(strikethrough);
+        apply!(alignment);
+        apply!(vertical_alignment);
+        apply!(text_overflow);
+        apply!(number_format);
+        apply!(font_family);
+        apply!(font_size);
+        apply!(font_color);
+        apply!(background_color);
+        apply!(border_top);
+        apply!(border_right);
+        apply!(border_bottom);
+        apply!(border_left);
+        apply!(cell_style);
+    }
+
     /// Convert a full CellFormat into an override where all fields are `Some`.
     pub fn from_format(format: &CellFormat) -> Self {
         Self {

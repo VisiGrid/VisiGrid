@@ -1,5 +1,6 @@
 pub mod cell;
 pub mod cell_id;
+pub mod cond_format;
 pub mod dep_graph;
 pub mod events;
 pub mod filter;
