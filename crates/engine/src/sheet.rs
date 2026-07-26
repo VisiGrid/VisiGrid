@@ -274,6 +274,9 @@ pub struct Sheet {
     /// Data validation rules for cells
     #[serde(default)]
     pub validations: ValidationStore,
+    /// Conditional formatting rules
+    #[serde(default)]
+    pub cond_formats: super::cond_format::CondFormatStore,
     /// Merged cell regions
     #[serde(default)]
     pub merged_regions: Vec<MergedRegion>,
@@ -394,6 +397,7 @@ impl Sheet {
             spill_values: HashMap::new(),
             computed_cache: RefCell::new(HashMap::new()),
             validations: ValidationStore::new(),
+            cond_formats: super::cond_format::CondFormatStore::new(),
             merged_regions: Vec::new(),
             merge_index: HashMap::new(),
             has_any_borders: false,
@@ -414,6 +418,7 @@ impl Sheet {
             spill_values: HashMap::new(),
             computed_cache: RefCell::new(HashMap::new()),
             validations: ValidationStore::new(),
+            cond_formats: super::cond_format::CondFormatStore::new(),
             merged_regions: Vec::new(),
             merge_index: HashMap::new(),
             has_any_borders: false,
@@ -1318,6 +1323,7 @@ impl Sheet {
             }
         }
         self.normalize_merges();
+        self.cond_formats.insert_rows(at_row, count);
     }
 
     /// Delete rows at the specified position, shifting remaining rows up
@@ -1374,6 +1380,7 @@ impl Sheet {
             }
         }
         self.normalize_merges();
+        self.cond_formats.delete_rows(start_row, count);
         // Deleted rows may have removed the only bordered cells.
         // Only rescan when the flag is currently true (can't flip false→false).
         // TODO(perf): if delete_rows on a 50k+ row bordered sheet causes >16ms frame hitch
@@ -1415,6 +1422,7 @@ impl Sheet {
             }
         }
         self.normalize_merges();
+        self.cond_formats.insert_cols(at_col, count);
     }
 
     /// Delete columns at the specified position, shifting remaining columns left
@@ -1471,6 +1479,7 @@ impl Sheet {
             }
         }
         self.normalize_merges();
+        self.cond_formats.delete_cols(start_col, count);
         // Deleted columns may have removed the only bordered cells.
         // Only rescan when the flag is currently true (can't flip false→false).
         // TODO(perf): if delete_cols on a 50k+ col bordered sheet causes >16ms frame hitch
@@ -1479,6 +1488,30 @@ impl Sheet {
         if self.has_any_borders {
             self.scan_border_flag();
         }
+    }
+
+    // =========================================================================
+    // Conditional Formatting
+    // =========================================================================
+
+    /// Cell format with conditional formatting applied.
+    ///
+    /// Cheap for cells no enabled rule targets (the common case); for
+    /// covered cells, evaluates the rules' predicates against this sheet.
+    /// Render paths should cache results and invalidate on cell or rule
+    /// changes — never call this per frame for the whole sheet.
+    pub fn get_effective_format(&self, row: usize, col: usize) -> CellFormat {
+        let base = self.get_format(row, col);
+        if !self.cond_formats.any_rule_covers(row, col) {
+            return base;
+        }
+        self.cond_formats.effective_format(row, col, &base, self)
+    }
+
+    /// Does conditional formatting change this cell's format right now?
+    pub fn has_cond_format(&self, row: usize, col: usize) -> bool {
+        self.cond_formats.any_rule_covers(row, col)
+            && self.cond_formats.override_for_cell(row, col, self).is_some()
     }
 
     // =========================================================================

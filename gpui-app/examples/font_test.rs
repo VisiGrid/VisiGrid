@@ -17,7 +17,7 @@ impl Render for FontTest {
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    Application::with_platform(gpui_platform::current_platform(false)).run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(600.), px(400.)), cx);
         cx.open_window(
             WindowOptions {

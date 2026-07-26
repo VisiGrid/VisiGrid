@@ -362,6 +362,88 @@ impl CondFormatStore {
             .map(|r| r.id)
             .collect()
     }
+
+    // ------------------------------------------------------------------
+    // Row/column structure changes (grid-line semantics, matching merges)
+    // ------------------------------------------------------------------
+    //
+    // Only target ranges shift; predicate text is not rewritten. A rule
+    // whose ranges are all deleted keeps an empty range list and simply
+    // stops matching (still visible in the rules panel).
+
+    pub fn insert_rows(&mut self, at_row: usize, count: usize) {
+        self.shift_insert(at_row, count, true);
+    }
+
+    pub fn insert_cols(&mut self, at_col: usize, count: usize) {
+        self.shift_insert(at_col, count, false);
+    }
+
+    pub fn delete_rows(&mut self, start_row: usize, count: usize) {
+        self.shift_delete(start_row, count, true);
+    }
+
+    pub fn delete_cols(&mut self, start_col: usize, count: usize) {
+        self.shift_delete(start_col, count, false);
+    }
+
+    fn shift_insert(&mut self, at: usize, count: usize, rows: bool) {
+        for rule in &mut self.rules {
+            for r in &mut rule.ranges {
+                let (start, end) = if rows {
+                    (&mut r.start_row, &mut r.end_row)
+                } else {
+                    (&mut r.start_col, &mut r.end_col)
+                };
+                if at <= *start {
+                    // Insertion at or before range → shift whole range
+                    *start += count;
+                    *end += count;
+                } else if at <= *end {
+                    // Insertion inside range → expand
+                    *end += count;
+                }
+            }
+        }
+    }
+
+    fn shift_delete(&mut self, del_start: usize, count: usize, rows: bool) {
+        let del_end = del_start + count; // exclusive
+        for rule in &mut self.rules {
+            rule.ranges.retain_mut(|r| {
+                let (start, end) = if rows {
+                    (&mut r.start_row, &mut r.end_row)
+                } else {
+                    (&mut r.start_col, &mut r.end_col)
+                };
+                if del_end <= *start {
+                    // Deletion entirely before → shift toward origin
+                    *start -= count;
+                    *end -= count;
+                    true
+                } else if del_start > *end {
+                    // Deletion entirely after → no effect
+                    true
+                } else if del_start <= *start && del_end > *end {
+                    // Deletion engulfs range → drop it
+                    false
+                } else if del_start <= *start {
+                    // Deletion clips leading edge
+                    *start = del_start;
+                    *end -= count;
+                    true
+                } else if del_end > *end {
+                    // Deletion clips trailing edge
+                    *end = del_start - 1;
+                    true
+                } else {
+                    // Deletion entirely inside → shrink
+                    *end -= count;
+                    true
+                }
+            });
+        }
+    }
 }
 
 // ============================================================================
@@ -578,6 +660,61 @@ mod tests {
         assert!(restored.override_for_cell(0, 0, &sheet).is_none());
         restored.reparse_all();
         assert!(restored.override_for_cell(0, 0, &sheet).is_some());
+    }
+
+    #[test]
+    fn insert_rows_shifts_and_expands_ranges() {
+        let mut store = CondFormatStore::new();
+        let id = store.add(vec![range(5, 0, 10, 3)], "=A1", CondStyle::Named(CellStyle::Note));
+
+        // Insert above → whole range shifts down
+        store.insert_rows(2, 3);
+        assert_eq!(store.get(id).unwrap().ranges[0], range(8, 0, 13, 3));
+
+        // Insert inside → range expands
+        store.insert_rows(10, 2);
+        assert_eq!(store.get(id).unwrap().ranges[0], range(8, 0, 15, 3));
+
+        // Insert below → no effect
+        store.insert_rows(50, 5);
+        assert_eq!(store.get(id).unwrap().ranges[0], range(8, 0, 15, 3));
+    }
+
+    #[test]
+    fn delete_rows_clips_shrinks_and_drops_ranges() {
+        let mut store = CondFormatStore::new();
+        let id = store.add(vec![range(5, 0, 10, 3)], "=A1", CondStyle::Named(CellStyle::Note));
+
+        // Delete entirely above → shift up
+        store.delete_rows(0, 2);
+        assert_eq!(store.get(id).unwrap().ranges[0], range(3, 0, 8, 3));
+
+        // Delete clipping the top (rows 2-4 → deletes range rows 3-4)
+        store.delete_rows(2, 3);
+        assert_eq!(store.get(id).unwrap().ranges[0], range(2, 0, 5, 3));
+
+        // Delete inside → shrink
+        store.delete_rows(3, 1);
+        assert_eq!(store.get(id).unwrap().ranges[0], range(2, 0, 4, 3));
+
+        // Delete clipping the bottom
+        store.delete_rows(4, 10);
+        assert_eq!(store.get(id).unwrap().ranges[0], range(2, 0, 3, 3));
+
+        // Delete engulfing → range dropped, rule kept
+        store.delete_rows(0, 20);
+        assert!(store.get(id).unwrap().ranges.is_empty());
+        assert!(!store.get(id).unwrap().covers(0, 0));
+    }
+
+    #[test]
+    fn delete_cols_shifts_ranges() {
+        let mut store = CondFormatStore::new();
+        let id = store.add(vec![range(0, 5, 3, 8)], "=A1", CondStyle::Named(CellStyle::Note));
+        store.delete_cols(0, 2);
+        assert_eq!(store.get(id).unwrap().ranges[0], range(0, 3, 3, 6));
+        store.insert_cols(4, 1);
+        assert_eq!(store.get(id).unwrap().ranges[0], range(0, 3, 3, 7));
     }
 
     #[test]

@@ -569,6 +569,8 @@ pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
         }
     }
 
+    save_cond_formats_sheet(&conn, 0, &sheet.cond_formats)?;
+
     conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
 
     Ok(())
@@ -773,6 +775,18 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
         }
     }
 
+    // Restore conditional formatting rules (single-sheet format uses idx 0)
+    if let Ok(json) = conn.query_row(
+        "SELECT value FROM meta WHERE key = 'cond_formats_0'",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        if let Ok(mut store) = serde_json::from_str::<visigrid_engine::cond_format::CondFormatStore>(&json) {
+            store.reparse_all();
+            sheet.cond_formats = store;
+        }
+    }
+
     Ok(sheet)
 }
 
@@ -916,6 +930,8 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
             ]).map_err(|e| e.to_string())?;
         }
     }
+
+    save_cond_formats(&conn, workbook)?;
 
     conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
 
@@ -1080,6 +1096,8 @@ pub fn save_workbook_with_metadata(
             ]).map_err(|e| e.to_string())?;
         }
     }
+
+    save_cond_formats(&conn, workbook)?;
 
     conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
 
@@ -1358,11 +1376,68 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
         }
     }
 
+    // Load conditional formatting rules (stored as JSON blobs in meta)
+    load_cond_formats(&conn, &mut workbook);
+
     // Rebuild dependency graph and compute all formulas after loading
     workbook.rebuild_dep_graph();
     workbook.recompute_full_ordered();
 
     Ok(workbook)
+}
+
+/// Persist one sheet's conditional formatting rules as a JSON meta blob.
+/// Empty stores are skipped (key absent = no rules, backward compatible).
+fn save_cond_formats_sheet(
+    conn: &Connection,
+    sheet_idx: usize,
+    store: &visigrid_engine::cond_format::CondFormatStore,
+) -> Result<(), String> {
+    if store.is_empty() {
+        return Ok(());
+    }
+    let json = serde_json::to_string(store).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        params![format!("cond_formats_{}", sheet_idx), json],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Persist conditional formatting rules for every sheet in the workbook.
+fn save_cond_formats(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
+    for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
+        save_cond_formats_sheet(conn, sheet_idx, &sheet.cond_formats)?;
+    }
+    Ok(())
+}
+
+/// Restore conditional formatting rules from meta blobs. Missing keys or
+/// unparseable blobs (from newer versions) leave the store empty rather
+/// than failing the load.
+fn load_cond_formats(conn: &Connection, workbook: &mut Workbook) {
+    let sheet_count = workbook.sheets().len();
+    for sheet_idx in 0..sheet_count {
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![format!("cond_formats_{}", sheet_idx)],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(json) = json else { continue };
+        match serde_json::from_str::<visigrid_engine::cond_format::CondFormatStore>(&json) {
+            Ok(mut store) => {
+                store.reparse_all();
+                if let Some(sheet) = workbook.sheet_mut(sheet_idx) {
+                    sheet.cond_formats = store;
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: skipping unreadable cond_formats_{}: {}", sheet_idx, e);
+            }
+        }
+    }
 }
 
 /// Load semantic metadata from a .sheet file.
@@ -3291,6 +3366,39 @@ mod tests {
         let fp_tolerance = compute_semantic_fingerprint(&wb);
         assert_ne!(fp_max_iters, fp_tolerance,
             "Fingerprint must change when tolerance changes");
+    }
+
+    #[test]
+    fn test_cond_formats_persistence_roundtrip() {
+        use visigrid_engine::cond_format::CondStyle;
+        use visigrid_engine::validation::CellRange;
+
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "5");
+        wb.active_sheet_mut().set_value(1, 0, "15");
+        wb.active_sheet_mut().cond_formats.add(
+            vec![CellRange { start_row: 0, start_col: 0, end_row: 1, end_col: 0 }],
+            "=A1>10",
+            CondStyle::Named(CellStyle::Warning),
+        );
+        save_workbook(&wb, path).expect("Save should succeed");
+
+        let loaded = load_workbook(path).expect("Load should succeed");
+        let sheet = loaded.active_sheet();
+        assert_eq!(sheet.cond_formats.len(), 1, "rule survives roundtrip");
+        // Predicates must be re-parsed and functional after load
+        assert!(!sheet.has_cond_format(0, 0), "A1=5 no match");
+        assert!(sheet.has_cond_format(1, 0), "A2=15 matches");
+
+        // A workbook with no rules must not write the meta key at all
+        let temp_file2 = NamedTempFile::with_suffix(".sheet").unwrap();
+        let wb2 = Workbook::new();
+        save_workbook(&wb2, temp_file2.path()).expect("Save should succeed");
+        let loaded2 = load_workbook(temp_file2.path()).expect("Load should succeed");
+        assert!(loaded2.active_sheet().cond_formats.is_empty());
     }
 
     #[test]
