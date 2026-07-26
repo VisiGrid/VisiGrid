@@ -479,7 +479,9 @@ fn render_cell(
 
     // Cell value: use data_row to access actual storage
     // Merge-hidden cells display nothing (text is shown only at the origin)
-    let format = app.sheet(cx).get_format(data_row, col);
+    // Effective format = stored format + conditional formatting rules.
+    // Cheap for cells no rule covers; viewport-bounded by construction.
+    let format = app.sheet(cx).get_effective_format(data_row, col);
 
     // Role-based auto-styling (from agent metadata)
     let role_style = app.get_cell_role_style(data_row, col);

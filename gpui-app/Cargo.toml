@@ -38,7 +38,7 @@ visigrid-license = { workspace = true }
 # gpui (pinned to Zed v1.12.0 — verified on Linux/Wayland; macOS Tahoe/Metal
 # needs a verification pass before next release)
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f96212f2c5" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f96212f2c5" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f96212f2c5", features = ["wayland", "x11", "font-kit"] }
 
 # External deps
 serde = { workspace = true }
