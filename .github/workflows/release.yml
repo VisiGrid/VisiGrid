@@ -237,13 +237,9 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: |
-          # Download Inno Setup
-          $InnoUrl = "https://jrsoftware.org/download.php/is.exe"
-          $InnoInstaller = "$env:TEMP\innosetup.exe"
-          Invoke-WebRequest -Uri $InnoUrl -OutFile $InnoInstaller
-
-          # Install silently
-          Start-Process -FilePath $InnoInstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          # Install via Chocolatey (CDN-backed) — direct downloads from
+          # jrsoftware.org time out or serve corrupt files intermittently
+          choco install innosetup -y --no-progress
 
           # Add to PATH for this job
           echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
