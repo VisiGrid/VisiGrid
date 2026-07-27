@@ -165,7 +165,15 @@ if [[ "$VERSION" == *"workspace"* ]]; then
     VERSION=$(grep '^version' "$WORKSPACE_DIR/Cargo.toml" | head -1 | sed 's/.*= *"\(.*\)".*/\1/')
 fi
 
-sed -e "s/0\.1\.0/$VERSION/g" "$PROJECT_DIR/macos/Info.plist" > "$BUNDLE_DIR/Contents/Info.plist"
+# Set version by key name (PlistBuddy), not string substitution — a
+# hardcoded version in the plist silently defeated the old sed approach
+cp "$PROJECT_DIR/macos/Info.plist" "$BUNDLE_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy \
+    -c "Set :CFBundleVersion $VERSION" \
+    -c "Set :CFBundleShortVersionString $VERSION" \
+    "$BUNDLE_DIR/Contents/Info.plist"
+grep -q "<string>$VERSION</string>" "$BUNDLE_DIR/Contents/Info.plist" \
+    || { echo "ERROR: Info.plist version stamp failed"; exit 1; }
 
 # Generate .icns from iconset if needed
 if [[ ! -f "$PROJECT_DIR/assets/AppIcon.icns" && -d "$PROJECT_DIR/assets/AppIcon.iconset" ]]; then
