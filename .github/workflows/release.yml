@@ -296,6 +296,12 @@ jobs:
         with:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
 
+      # rust-toolchain.toml pins 1.95.0, which rustup installs fresh —
+      # the targets above only landed on the action's stable toolchain.
+      # Add them to whichever toolchain the pin resolves to.
+      - name: Add targets to pinned toolchain
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
