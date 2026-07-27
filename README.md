@@ -3,9 +3,9 @@
 <img width="1897" height="1030" alt="screenshot-2026-02-07_15-44-09" src="https://github.com/user-attachments/assets/a4674b48-09e2-4ca1-9131-dce45a6b73b5" />
 
 
-**A fast, keyboard-first, local-only spreadsheet for people who care about flow.**
+**The spreadsheet built like a code editor.**
 
-VisiGrid is a native spreadsheet app that starts instantly, stays out of your way, and makes its work visible. It's built for Linux-first workflows, power users, and anyone tired of heavyweight, ribbon-driven spreadsheets.
+Native, keyboard-first, and ~300ms from launch to first cell. A 16 MB download in a category where the incumbent install is 50× bigger. For macOS, Windows, and Linux.
 
 Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)).
 
@@ -13,14 +13,15 @@ Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framew
 
 Most spreadsheets feel heavy.
 
-They take seconds to open. They hide actions behind menus. They encourage copy-paste instead of understanding.
+They take seconds to open. They hide actions behind menus. They bury a formula — the thing a spreadsheet *is* — under ribbons and dialogs.
 
-VisiGrid is built to feel light, fast, and intentional:
+VisiGrid treats a spreadsheet the way a code editor treats code:
 
 - **Instant startup** (~300ms cold launch)
+- **Command palette** for every action — type what you want, no menu spelunking
+- **Keyboard-first** navigation with Excel muscle-memory shortcuts that never change
+- **Conditional formatting you type, not click** — `=A1>100 -> warning`, previewed live on the grid as you type
 - **Local-only files** — no accounts, no cloud
-- **Keyboard-first** navigation and editing
-- **Command palette** for every action
 - **Inspectable formulas** and dependencies
 - **Works with existing files** — Excel, CSV, ODS, JSON, TSV
 
@@ -32,15 +33,16 @@ When correctness matters, VisiGrid also makes failure visible:
 
 For advanced workflows, VisiGrid also includes a CLI and headless mode built on the same engine.
 
-VisiGrid was influenced by keyboard-first Linux environments such as [Omarchy](https://omarchy.com) — prioritizing speed, minimal friction, and staying in flow.
+VisiGrid was influenced by keyboard-first environments such as [Omarchy](https://omarchy.com) — prioritizing speed, minimal friction, and staying in flow.
 
 ## Editing and Navigation
 
 - Command palette for every action
-- Keyboard-first navigation and editing
+- Keyboard-first navigation and editing — smart Ctrl+A (region first, sheet second), single-cell Ctrl+D/Ctrl+R fill, Ctrl+Enter fill-selection
+- Conditional formatting as typed rules with live grid preview and match counts
 - Multi-select editing across non-adjacent cells
 - Format Painter (single-shot and locked mode)
-- 100+ formula functions with autocomplete
+- 120+ formula functions with autocomplete
 - Instant startup and smooth scrolling
 - 5 built-in themes including System (follows OS dark/light)
 
@@ -124,13 +126,21 @@ yay -S visigrid-bin
 
 ## Build from Source
 
-Requires [Rust](https://rustup.rs/) 1.80+.
+Requires [Rust](https://rustup.rs/) 1.95.0+ (pinned in `rust-toolchain.toml` — rustup picks it up automatically).
 
 ```bash
 git clone https://github.com/VisiGrid/VisiGrid.git
 cd VisiGrid
 cargo build --release -p visigrid-gpui
 ./target/release/visigrid
+```
+
+### macOS Dependencies
+
+Recent Xcode versions ship the Metal shader compiler as a separate component. If the build fails with `cannot execute tool 'metal'`:
+
+```bash
+xcodebuild -downloadComponent MetalToolchain
 ```
 
 ### Linux Dependencies
@@ -144,7 +154,7 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 ## Formats
 
 - Import: CSV, TSV, JSON, XLSX, XLS, XLSB, ODS
-- Export: CSV, TSV, JSON, .sheet (XLSX export planned)
+- Export: XLSX (File → Export to Excel), CSV, TSV, JSON, .sheet
 - Cross-platform: macOS, Windows, Linux
 
 ## Advanced: Automation, CLI, and Reproducible Workflows
@@ -227,20 +237,20 @@ Control a running VisiGrid GUI from the terminal. Inspect cells, apply changes, 
 
 ```bash
 # List running sessions
-visigrid sessions
+vgrid sessions
 
 # View live grid snapshot (auto-refresh on changes)
-visigrid view --follow
+vgrid view --follow
 
 # Inspect a cell
-visigrid inspect A1
+vgrid inspect A1
 # → A1 = 1234.56  (number)
 
 # Apply operations with retry on contention
-cat ops.jsonl | visigrid apply --atomic --wait
+cat ops.jsonl | vgrid apply --atomic --wait
 
 # Query server health
-visigrid stats
+vgrid stats
 ```
 
 **Session protocol**: TCP localhost with token auth. Protocol v1 is frozen — wire format locked by golden vectors.
@@ -249,16 +259,16 @@ visigrid stats
 
 ```bash
 # Get session
-SESSION=$(visigrid sessions --json | jq -r '.[0].session_id')
+SESSION=$(vgrid sessions --json | jq -r '.[0].session_id')
 
 # Inspect current state
-REV=$(visigrid inspect workbook --json | jq '.revision')
+REV=$(vgrid inspect workbook --json | jq '.revision')
 
 # Apply changes with revision check (prevents stale overwrites)
-visigrid apply ops.jsonl --atomic --expected-revision $REV --wait
+vgrid apply ops.jsonl --atomic --expected-revision $REV --wait
 
 # Verify new state
-visigrid view --range A1:D10
+vgrid view --range A1:D10
 ```
 
 **Exit codes** are stable for scripting: 0 = success, 20-29 = session errors (conflict, auth, protocol).
@@ -337,9 +347,10 @@ rails runner 'Ledger.export_csv' | vgrid diff - expected.csv --key id --quiet
 vgrid replay audit-trail.lua --verify --quiet
 ```
 
-## Known Limitations (v0.4)
+## Known Limitations (v0.12)
 
-- **XLSX export** is not yet implemented — CLI writes CSV, TSV, JSON, .sheet
+- **CLI XLSX export**: the desktop app exports XLSX; `vgrid convert -t xlsx` is not wired up yet (CLI writes CSV, TSV, JSON, .sheet)
+- **Conditional formatting** is new in 0.12: rules are add/clear via the typed dialog; a full rules-management panel (edit/reorder existing rules) is in progress
 - **Replay**: layout operations (sort, column widths, merge) are hashed for fingerprint but not applied to workbook data
 - **Nondeterminism detection** is conservative — `NOW()`, `TODAY()`, `RAND()`, `RANDBETWEEN()` fail `--verify` even in dead-code branches
 - **Multi-sheet export** writes sheet 0 only
@@ -371,7 +382,7 @@ See [LICENSE.md](LICENSE.md) for details.
 
 Issues and pull requests are welcome.
 
-**Diff bug reports**: if you file a bug against `visigrid diff`, include a minimal
+**Diff bug reports**: if you file a bug against `vgrid diff`, include a minimal
 CSV fixture that reproduces the issue. Every confirmed diff bug becomes a corpus
 golden test in `tests/cli/diff/` — this is how the contract stays honest.
 
