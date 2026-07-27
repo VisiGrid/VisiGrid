@@ -16,6 +16,7 @@ use crate::mode::Menu;
 #[derive(Clone, Copy)]
 pub enum MenuAction {
     AddCondFormat,
+    ManageCondFormats,
     ClearCondFormats,
     NewWorkbook, Open, Save, SaveAs,
     OpenCloud, MoveToCloud,
@@ -116,6 +117,7 @@ pub fn format_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Item { label: "Underline", shortcut: Some("Ctrl+U"), action: MenuAction::Underline, accel: Some('u') },
         MenuEntry::Separator,
         MenuEntry::Item { label: "Conditional Format...", shortcut: None, action: MenuAction::AddCondFormat, accel: Some('h') },
+        MenuEntry::Item { label: "Manage Rules...", shortcut: None, action: MenuAction::ManageCondFormats, accel: Some('w') },
         MenuEntry::Item { label: "Clear Conditional Formats", shortcut: None, action: MenuAction::ClearCondFormats, accel: Some('s') },
         MenuEntry::Separator,
         MenuEntry::Item { label: "Font...", shortcut: None, action: MenuAction::Font, accel: Some('f') },
@@ -266,6 +268,7 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::ShowZeros => app.toggle_show_zeros(cx),
         MenuAction::FormatBar => app.toggle_format_bar(cx),
         MenuAction::AddCondFormat => app.show_add_cond_format(cx),
+        MenuAction::ManageCondFormats => app.toggle_cf_panel(cx),
         MenuAction::ClearCondFormats => app.clear_cond_formats_in_selection(cx),
         MenuAction::Minimap => { app.minimap_visible = !app.minimap_visible; cx.notify(); }
         MenuAction::FreezeTopRow => app.freeze_top_row(cx),

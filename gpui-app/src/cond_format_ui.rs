@@ -230,6 +230,17 @@ impl Spreadsheet {
                 }
             });
         }
+        // Cancelled an edit: put the original rule back where it was
+        if let Some((pos, rule)) = self.cf_edit_backup.take() {
+            let sheet_index = self.sheet_index(cx);
+            self.wb_mut(cx, |wb| {
+                if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                    let mut r = rule;
+                    r.reparse();
+                    sheet.cond_formats.insert_at(pos, r);
+                }
+            });
+        }
         self.cf_preview_matches = None;
         self.mode = Mode::Navigation;
         self.cf_input.clear();
@@ -346,25 +357,49 @@ impl Spreadsheet {
             }
         };
 
-        // Undoable: undo removes the rule, redo re-adds it
-        if let Some(rule) = self
-            .sheet(cx)
-            .cond_formats
-            .get(added_id)
-            .cloned()
-        {
-            self.history.record_action_with_provenance(
-                crate::history::UndoAction::CondFormatAdded { sheet_index, rule },
-                None,
-            );
-        }
-
         let range_label = format_range_label(&self.cf_target);
+        if let Some((pos, old_rule)) = self.cf_edit_backup.take() {
+            // Editing an existing rule: keep its precedence slot, and record
+            // one undoable replacement (before-list has the old rule back in
+            // place; the new rule is excluded so redo reconstructs exactly).
+            self.wb_mut(cx, |wb| {
+                if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                    sheet.cond_formats.reorder(added_id, pos);
+                }
+            });
+            let mut before: Vec<CondFormatRule> = self
+                .sheet(cx)
+                .cond_formats
+                .iter()
+                .filter(|r| r.id != added_id)
+                .cloned()
+                .collect();
+            let insert_at = pos.min(before.len());
+            before.insert(insert_at, old_rule);
+            self.record_cf_list_change(sheet_index, before, "Edit conditional format", cx);
+            self.status_message = Some(format!(
+                "Rule updated on {}: {} (Ctrl+Z to undo)",
+                range_label, predicate
+            ));
+        } else {
+            // Undoable: undo removes the rule, redo re-adds it
+            if let Some(rule) = self
+                .sheet(cx)
+                .cond_formats
+                .get(added_id)
+                .cloned()
+            {
+                self.history.record_action_with_provenance(
+                    crate::history::UndoAction::CondFormatAdded { sheet_index, rule },
+                    None,
+                );
+            }
+            self.status_message = Some(format!(
+                "Conditional format on {}: {} (Ctrl+Z to undo)",
+                range_label, predicate
+            ));
+        }
         self.is_modified = true;
-        self.status_message = Some(format!(
-            "Conditional format on {}: {} (Ctrl+Z to undo)",
-            range_label, predicate
-        ));
         self.mode = Mode::Navigation;
         self.cf_input.clear();
         self.cf_input_error = None;
@@ -424,7 +459,162 @@ impl Spreadsheet {
     }
 }
 
-fn format_range_label(ranges: &[CellRange]) -> String {
+/// Serialize a rule's style back to the typed syntax (for edit prefill and
+/// the rules panel display).
+pub fn style_to_text(style: &CondStyle) -> String {
+    match style {
+        CondStyle::Named(s) => match s {
+            CellStyle::Error => "bad".into(),
+            CellStyle::Warning => "neutral".into(),
+            CellStyle::Success => "good".into(),
+            CellStyle::Input => "input".into(),
+            CellStyle::Total => "total".into(),
+            CellStyle::Note => "note".into(),
+            CellStyle::None => "note".into(),
+        },
+        CondStyle::Inline(ov) => {
+            let mut parts: Vec<String> = Vec::new();
+            if ov.bold == Some(true) { parts.push("bold".into()); }
+            if ov.italic == Some(true) { parts.push("italic".into()); }
+            if ov.underline == Some(true) { parts.push("underline".into()); }
+            if ov.strikethrough == Some(true) { parts.push("strikethrough".into()); }
+            if let Some(Some(bg)) = ov.background_color {
+                parts.push(format!("bg=#{:02X}{:02X}{:02X}", bg[0], bg[1], bg[2]));
+            }
+            if let Some(Some(fg)) = ov.font_color {
+                parts.push(format!("fg=#{:02X}{:02X}{:02X}", fg[0], fg[1], fg[2]));
+            }
+            if parts.is_empty() { "note".into() } else { parts.join(", ") }
+        }
+        CondStyle::Like { source, .. } => {
+            format!("like({}{})", col_letter(source.1), source.0 + 1)
+        }
+    }
+}
+
+impl Spreadsheet {
+    /// Snapshot-based undo for any rules-list mutation: records a Group of
+    /// existing CondFormatsCleared/CondFormatAdded actions that transforms
+    /// `before` into the store's current state on redo, and restores
+    /// `before` (including order) on undo. No new undo variants needed.
+    fn record_cf_list_change(
+        &mut self,
+        sheet_index: usize,
+        before: Vec<CondFormatRule>,
+        description: &str,
+        cx: &Context<Self>,
+    ) {
+        let after: Vec<CondFormatRule> =
+            self.sheet(cx).cond_formats.iter().cloned().collect();
+        let mut actions = vec![crate::history::UndoAction::CondFormatsCleared {
+            sheet_index,
+            rules: before,
+        }];
+        for rule in after {
+            actions.push(crate::history::UndoAction::CondFormatAdded { sheet_index, rule });
+        }
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::Group {
+                actions,
+                description: description.to_string(),
+            },
+            None,
+        );
+        self.is_modified = true;
+    }
+
+    fn cf_rules_snapshot(&self, cx: &Context<Self>) -> Vec<CondFormatRule> {
+        self.sheet(cx).cond_formats.iter().cloned().collect()
+    }
+
+    pub fn toggle_cf_panel(&mut self, cx: &mut Context<Self>) {
+        self.cf_panel_visible = !self.cf_panel_visible;
+        cx.notify();
+    }
+
+    pub fn toggle_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
+        let sheet_index = self.sheet_index(cx);
+        let before = self.cf_rules_snapshot(cx);
+        let mut changed = false;
+        self.wb_mut(cx, |wb| {
+            if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                if let Some(rule) = sheet.cond_formats.get_mut(id) {
+                    rule.enabled = !rule.enabled;
+                    changed = true;
+                }
+            }
+        });
+        if changed {
+            self.record_cf_list_change(sheet_index, before, "Toggle conditional format", cx);
+        }
+        cx.notify();
+    }
+
+    pub fn delete_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
+        let sheet_index = self.sheet_index(cx);
+        let before = self.cf_rules_snapshot(cx);
+        let mut removed = false;
+        self.wb_mut(cx, |wb| {
+            if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                removed = sheet.cond_formats.remove(id).is_some();
+            }
+        });
+        if removed {
+            self.record_cf_list_change(sheet_index, before, "Delete conditional format", cx);
+            self.status_message = Some("Rule deleted (Ctrl+Z to undo)".into());
+        }
+        cx.notify();
+    }
+
+    /// Move a rule up (-1) or down (+1) in precedence order.
+    pub fn move_cf_rule(&mut self, id: u64, delta: i32, cx: &mut Context<Self>) {
+        let sheet_index = self.sheet_index(cx);
+        let before = self.cf_rules_snapshot(cx);
+        let Some(pos) = before.iter().position(|r| r.id == id) else { return };
+        let new_pos = pos as i32 + delta;
+        if new_pos < 0 || new_pos as usize >= before.len() {
+            return;
+        }
+        self.wb_mut(cx, |wb| {
+            if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                sheet.cond_formats.reorder(id, new_pos as usize);
+            }
+        });
+        self.record_cf_list_change(sheet_index, before, "Reorder conditional formats", cx);
+        cx.notify();
+    }
+
+    /// Open the quick-add dialog pre-filled with an existing rule. The rule
+    /// is pulled from the store while editing (so the live preview replaces
+    /// it cleanly instead of stacking); cancel restores it, confirm records
+    /// a single undoable replacement.
+    pub fn edit_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
+        let sheet_index = self.sheet_index(cx);
+        let rules = self.cf_rules_snapshot(cx);
+        let Some(pos) = rules.iter().position(|r| r.id == id) else { return };
+        let rule = rules[pos].clone();
+
+        self.wb_mut(cx, |wb| {
+            if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                sheet.cond_formats.remove(id);
+            }
+        });
+
+        self.cf_target = rule.ranges.clone();
+        self.cf_input = format!(
+            "{} -> {}",
+            rule.predicate,
+            style_to_text(&rule.style)
+        );
+        self.cf_input_error = None;
+        self.cf_edit_backup = Some((pos, rule));
+        self.mode = Mode::AddCondFormat;
+        self.update_cf_preview(cx);
+        cx.notify();
+    }
+}
+
+pub(crate) fn format_range_label(ranges: &[CellRange]) -> String {
     ranges
         .iter()
         .map(|r| {

@@ -79,6 +79,7 @@ pub enum CommandId {
     GoToStart,
     SelectAll,
     AddConditionalFormat,
+    ManageConditionalFormats,
     ClearConditionalFormats,
     SelectBlanks,
     SelectCurrentRegion,
@@ -281,6 +282,7 @@ impl CommandId {
             Self::GoToStart => "Go to Start (A1)",
             Self::SelectAll => "Select All",
             Self::AddConditionalFormat => "Add Conditional Format Rule",
+            Self::ManageConditionalFormats => "Conditional Formatting: Manage Rules",
             Self::ClearConditionalFormats => "Clear Conditional Formats in Selection",
             Self::SelectBlanks => "Select: Blanks in Region",
             Self::SelectCurrentRegion => "Select Current Region",
@@ -444,6 +446,7 @@ impl CommandId {
             Self::GoToStart => Some("Ctrl+Home"),
             Self::SelectAll => Some("Ctrl+A"),
             Self::AddConditionalFormat => None,
+            Self::ManageConditionalFormats => None,
             Self::ClearConditionalFormats => None,
             Self::SelectCurrentRegion => Some("Ctrl+Shift+*"),
             Self::HideRows => Some("Ctrl+9"),
@@ -520,6 +523,7 @@ impl CommandId {
             Self::GoToStart => "home beginning",
             Self::SelectAll => "selection",
             Self::AddConditionalFormat => "conditional formatting highlight rule color if",
+            Self::ManageConditionalFormats => "conditional formatting rules manage panel edit reorder",
             Self::ClearConditionalFormats => "conditional formatting remove clear rules",
             Self::SelectBlanks => "empty cells region selection",
             Self::SelectCurrentRegion => "select region contiguous data block table area ctrl shift star asterisk",
@@ -683,6 +687,7 @@ impl CommandId {
             Self::GoToStart,
             Self::SelectAll,
             Self::AddConditionalFormat,
+            Self::ManageConditionalFormats,
             Self::ClearConditionalFormats,
             Self::SelectBlanks,
             Self::SelectCurrentRegion,
@@ -918,6 +923,7 @@ impl CommandId {
 
             // Format menu
             Self::AddConditionalFormat
+            | Self::ManageConditionalFormats
             | Self::ClearConditionalFormats
             | Self::ToggleBold
             | Self::ToggleItalic

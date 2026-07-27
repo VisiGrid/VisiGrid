@@ -45,6 +45,7 @@ mod actions_edit;
 mod actions_ui;
 mod key_handler;
 mod f1_help;
+mod cf_rules_panel;
 mod cond_format_dialog;
 mod named_range_dialogs;
 mod rewind_dialogs;
@@ -75,6 +76,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_rename_symbol = app.mode == Mode::RenameSymbol;
     let show_create_named_range = app.mode == Mode::CreateNamedRange;
     let show_add_cond_format = app.mode == Mode::AddCondFormat;
+    let show_cf_panel = app.cf_panel_visible;
     let show_edit_description = app.mode == Mode::EditDescription;
     let show_tour = app.mode == Mode::Tour;
     let show_impact_preview = app.mode == Mode::ImpactPreview;
@@ -635,6 +637,28 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     })
                     // The panel itself stops propagation so clicks on it don't close
                     .child(inspector_panel::render_inspector_panel(app, cx))
+            )
+        })
+        // Conditional formatting rules panel (right-side drawer)
+        .when(show_cf_panel, |d| {
+            d.child(
+                gpui::div()
+                    .id("cf-panel-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        if this.mode.is_overlay() {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        this.cf_panel_visible = false;
+                        cx.notify();
+                    }))
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(cf_rules_panel::render_cf_rules_panel(app, cx))
             )
         })
         // Profiler panel (right-side drawer, mutually exclusive with inspector)

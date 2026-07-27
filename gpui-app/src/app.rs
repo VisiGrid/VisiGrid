@@ -2405,6 +2405,8 @@ pub struct Spreadsheet {
     pub cf_target: Vec<visigrid_engine::validation::CellRange>,  // Selection when opened
     pub cf_preview_id: Option<u64>,                // Live-preview rule currently in the store
     pub cf_preview_matches: Option<(usize, usize)>, // (matching, scanned) for the preview
+    pub cf_panel_visible: bool,                    // Rules management drawer
+    pub cf_edit_backup: Option<(usize, visigrid_engine::cond_format::CondFormatRule)>, // Rule pulled for editing (index, rule) — restored on cancel
 
     // Create named range state (Ctrl+Shift+N)
     pub create_name_name: String,           // User-typed name
@@ -2893,6 +2895,8 @@ impl Spreadsheet {
             cf_target: Vec::new(),
             cf_preview_id: None,
             cf_preview_matches: None,
+            cf_panel_visible: false,
+            cf_edit_backup: None,
             create_name_name: String::new(),
             create_name_description: String::new(),
             create_name_target: String::new(),
@@ -4302,6 +4306,7 @@ impl Spreadsheet {
             }
             CommandId::SelectAll => self.select_all(cx),
             CommandId::AddConditionalFormat => self.show_add_cond_format(cx),
+            CommandId::ManageConditionalFormats => self.toggle_cf_panel(cx),
             CommandId::ClearConditionalFormats => self.clear_cond_formats_in_selection(cx),
             CommandId::SelectBlanks => self.select_blanks(cx),
             CommandId::SelectCurrentRegion => self.select_current_region(cx),
