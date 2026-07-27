@@ -2357,6 +2357,49 @@ fn cmd_convert(
         None
     };
 
+    // Binary spreadsheet outputs: full fidelity (formulas, formats) when
+    // unfiltered; --where/--select materialize display values first (same
+    // semantics as the CSV writer — filtered rows can't keep live formulas).
+    match to {
+        Format::Xlsx => {
+            let out_sheet = if row_filter.is_some() || col_filter.is_some() {
+                materialize_filtered(&sheet, header_row, headers, row_filter.as_deref(), col_filter.as_deref())
+            } else {
+                sheet.clone()
+            };
+            let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![out_sheet], 0);
+            match output {
+                Some(path) => {
+                    visigrid_io::xlsx::export(&wb, &path, None)
+                        .map_err(|e| CliError::io(e))?;
+                }
+                None => {
+                    let (bytes, _) = visigrid_io::xlsx::export_to_buffer(&wb, None)
+                        .map_err(|e| CliError::io(e))?;
+                    io::stdout()
+                        .write_all(&bytes)
+                        .map_err(|e| CliError::io(e.to_string()))?;
+                }
+            }
+            return Ok(());
+        }
+        Format::Sheet => {
+            let Some(path) = output else {
+                return Err(CliError::format("sheet format cannot be written to stdout")
+                    .with_hint("use -o output.sheet to write to a file"));
+            };
+            let out_sheet = if row_filter.is_some() || col_filter.is_some() {
+                materialize_filtered(&sheet, header_row, headers, row_filter.as_deref(), col_filter.as_deref())
+            } else {
+                sheet.clone()
+            };
+            visigrid_io::native::save(&out_sheet, &path)
+                .map_err(|e| CliError::io(e))?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
     // Write output
     let output_bytes = write_format(
         &sheet, to, delimiter, headers, header_row,
@@ -2377,6 +2420,44 @@ fn cmd_convert(
     }
 
     Ok(())
+}
+
+/// Build a values-only sheet from filtered rows/columns (display values,
+/// like the CSV writer — formulas can't survive row removal).
+fn materialize_filtered(
+    sheet: &visigrid_engine::sheet::Sheet,
+    header_row: usize,
+    headers: bool,
+    row_filter: Option<&[usize]>,
+    col_filter: Option<&[(usize, String)]>,
+) -> visigrid_engine::sheet::Sheet {
+    use visigrid_engine::sheet::{Sheet, SheetId};
+    let (bounds_rows, bounds_cols) = get_data_bounds(sheet);
+    let rows: Vec<usize> = match row_filter {
+        Some(f) => {
+            let mut v: Vec<usize> = Vec::new();
+            if headers {
+                v.push(header_row);
+            }
+            v.extend_from_slice(f);
+            v
+        }
+        None => (0..bounds_rows).collect(),
+    };
+    let cols: Vec<usize> = match col_filter {
+        Some(f) => f.iter().map(|(idx, _)| *idx).collect(),
+        None => (0..bounds_cols).collect(),
+    };
+    let mut out = Sheet::new(SheetId(1), rows.len().max(1), cols.len().max(1));
+    for (out_r, &src_r) in rows.iter().enumerate() {
+        for (out_c, &src_c) in cols.iter().enumerate() {
+            let v = sheet.get_display(src_r, src_c);
+            if !v.is_empty() {
+                out.set_value(out_r, out_c, &v);
+            }
+        }
+    }
+    out
 }
 
 fn infer_inspect_format(path: &PathBuf) -> Result<InspectFormat, CliError> {
@@ -2607,8 +2688,8 @@ fn write_format(
         Format::Tsv => write_csv(sheet, b'\t', headers, header_row, row_filter, col_filter),
         Format::Json => write_json(sheet, headers, header_row, row_filter, col_filter),
         Format::Lines => write_lines(sheet, header_row, row_filter, col_filter),
-        Format::Xlsx => Err(CliError::format("xlsx export not yet implemented")
-            .with_hint("use -t csv or -t json instead")),
+        Format::Xlsx => Err(CliError::format("xlsx output is handled before write_format")
+            .with_hint("this is a bug — please report it")),
         Format::Sheet => Err(CliError::format("sheet format cannot be written to stdout")
             .with_hint("use -o output.sheet to write to a file")),
     }

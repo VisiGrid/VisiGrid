@@ -172,8 +172,9 @@ cat sales.csv | vgrid calc "=SUM(B:B)" --from csv
 # Reconcile two datasets by key
 vgrid diff vendor.xlsx ours.csv --key Invoice --compare Total --tolerance 0.01
 
-# Convert between formats
+# Convert between formats (both directions — xlsx in and out)
 vgrid convert data.xlsx --to csv
+vgrid convert data.csv --to xlsx -o report.xlsx
 
 # Project a vendor export down to reconciliation columns, then diff
 vgrid convert vendor.xlsx -t csv --headers --select 'Invoice,Amount' | \
@@ -349,7 +350,6 @@ vgrid replay audit-trail.lua --verify --quiet
 
 ## Known Limitations (v0.12)
 
-- **CLI XLSX export**: the desktop app exports XLSX; `vgrid convert -t xlsx` is not wired up yet (CLI writes CSV, TSV, JSON, .sheet)
 - **Conditional formatting** is new in 0.12: rules are add/clear via the typed dialog; a full rules-management panel (edit/reorder existing rules) is in progress
 - **Replay**: layout operations (sort, column widths, merge) are hashed for fingerprint but not applied to workbook data
 - **Nondeterminism detection** is conservative — `NOW()`, `TODAY()`, `RAND()`, `RANDBETWEEN()` fail `--verify` even in dead-code branches

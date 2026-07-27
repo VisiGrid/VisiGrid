@@ -1147,6 +1147,33 @@ pub fn export(
     layouts: Option<&[ExportLayout]>,
 ) -> Result<ExportResult, String> {
     let start_time = Instant::now();
+    let (mut xlsx_workbook, mut result) = build_export(workbook, layouts)?;
+    xlsx_workbook
+        .save(path)
+        .map_err(|e| format!("Failed to save XLSX file: {}", e))?;
+    result.export_duration_ms = start_time.elapsed().as_millis();
+    Ok(result)
+}
+
+/// Export to an in-memory XLSX byte buffer (for stdout / HTTP responses).
+pub fn export_to_buffer(
+    workbook: &Workbook,
+    layouts: Option<&[ExportLayout]>,
+) -> Result<(Vec<u8>, ExportResult), String> {
+    let start_time = Instant::now();
+    let (mut xlsx_workbook, mut result) = build_export(workbook, layouts)?;
+    let bytes = xlsx_workbook
+        .save_to_buffer()
+        .map_err(|e| format!("Failed to serialize XLSX: {}", e))?;
+    result.export_duration_ms = start_time.elapsed().as_millis();
+    Ok((bytes, result))
+}
+
+/// Shared body: build the rust_xlsxwriter workbook from ours.
+fn build_export(
+    workbook: &Workbook,
+    layouts: Option<&[ExportLayout]>,
+) -> Result<(XlsxWorkbook, ExportResult), String> {
     let mut result = ExportResult::default();
 
     let mut xlsx_workbook = XlsxWorkbook::new();
@@ -1222,13 +1249,7 @@ pub fn export(
         let _ = ws.set_active(true);
     }
 
-    // Save to file
-    xlsx_workbook
-        .save(path)
-        .map_err(|e| format!("Failed to save XLSX file: {}", e))?;
-
-    result.export_duration_ms = start_time.elapsed().as_millis();
-    Ok(result)
+    Ok((xlsx_workbook, result))
 }
 
 /// Convert column index to Excel column letter (0 = A, 25 = Z, 26 = AA, etc.)
