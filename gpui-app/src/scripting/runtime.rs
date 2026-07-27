@@ -381,7 +381,7 @@ impl LuaRuntime {
             // set()/clear()/style()/meta() API. Alias what maps exactly to
             // the console's sheet: API; degrade the rest with a one-time
             // note instead of a fatal "attempt to call nil value 'set'".
-            if let Err(e) = self.lua.load(CLI_COMPAT_SHIM).exec() {
+            if let Err(e) = self.lua.load(CLI_COMPAT_SHIM).set_name("=cli-compat").exec() {
                 return LuaEvalResult::error(vec![], format!("Failed to register compat shim: {}", e), false);
             }
         }
@@ -431,7 +431,10 @@ impl LuaRuntime {
         );
 
         // Execute
-        let result = self.lua.load(&code).eval::<MultiValue>();
+        // Name the chunk "console" — the default chunk name is the Rust
+        // caller's file:line, which leaks internal paths into user-facing
+        // Lua errors ("=" prefix means: use this name verbatim).
+        let result = self.lua.load(&code).set_name("=console").eval::<MultiValue>();
 
         // Remove the instruction hook
         self.lua.remove_hook();

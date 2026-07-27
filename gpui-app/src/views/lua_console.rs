@@ -142,6 +142,12 @@ fn render_run_tab_content(
                 .overflow_hidden()
                 .px_2()
                 .py_1()
+                // Terminal convention: output hugs the input bar at the bottom;
+                // history grows upward. Without this, a tall panel is a sea of
+                // empty space between the output (top) and the input (bottom).
+                .flex()
+                .flex_col()
+                .justify_end()
                 .when(console.output.is_empty(), |d| {
                     d.child(
                         div()
@@ -227,12 +233,15 @@ fn render_input_bar(
     let visible_lines = line_count.min(max_lines);
     let bar_height = (visible_lines as f32) * line_height + padding;
 
+    let _ = panel_border;
     div()
         .h(px(bar_height))
         .mx_2()
         .mb_1()
         .border_1()
-        .border_color(panel_border)
+        // Accent-tinted border: this is the live typing surface — make it
+        // read as one, like a focused editor pane
+        .border_color(accent.opacity(0.45))
         .rounded_sm()
         .bg(editor_bg)
         .overflow_hidden()
