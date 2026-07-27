@@ -47,7 +47,10 @@ reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-fea
 url = "2"
 
 # Fetch SFTP adapter
-ssh2 = "0.9"
+# vendored-openssl: statically link OpenSSL. The released binary must not
+# dynamically link Homebrew's openssl@3 — it fails code-signature validation
+# (Team ID mismatch) on Macs without that exact keg, breaking vgrid at launch.
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 glob = "0.3"
 
 # VisiHub publish

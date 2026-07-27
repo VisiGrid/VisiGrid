@@ -19,6 +19,47 @@ use std::time::{Duration, Instant};
 use super::ops::{LuaOp, SheetReader};
 use super::sheet_api::{DynOpSink, SheetUserData, MAX_OUTPUT_LINES};
 
+/// Compatibility layer so `vgrid sheet apply --lua` scripts run in the
+/// console. `set`/`clear` map exactly onto the sheet: API. `style` passes
+/// semantic names through; CLI-only table styles ({bold=true, ...}) and
+/// `meta` roles have no console equivalent yet — those print a one-time
+/// note and continue rather than aborting the whole script.
+const CLI_COMPAT_SHIM: &str = r#"
+function set(a1, v) return sheet:set(a1, v) end
+
+function clear(range_str)
+    local r = sheet:range(range_str)
+    local rows, cols = r:rows(), r:cols()
+    local vals = {}
+    for i = 1, rows do
+        vals[i] = {}
+        for j = 1, cols do vals[i][j] = "" end
+    end
+    return r:set_values(vals)
+end
+
+do
+    local style_warned = false
+    function style(range_str, s)
+        if type(s) == "string" then
+            return sheet:style(range_str, s)
+        end
+        if not style_warned then
+            style_warned = true
+            print("note: style({...}) tables are CLI-only — use sheet:style(range, 'input'|'total'|'error'|...); ignored")
+        end
+    end
+
+    local meta_warned = false
+    function meta(_, _)
+        if not meta_warned then
+            meta_warned = true
+            print("note: meta() roles aren't supported in the console yet — ignored")
+        end
+    end
+end
+"#;
+
 /// Maximum number of Lua instructions per script execution.
 /// 100 million instructions is enough for any reasonable spreadsheet script.
 pub const INSTRUCTION_LIMIT: i64 = 100_000_000;
@@ -336,6 +377,13 @@ impl LuaRuntime {
             if let Err(e) = self.lua.globals().set("sheet", userdata) {
                 return LuaEvalResult::error(vec![], format!("Failed to register sheet: {}", e), false);
             }
+            // CLI-compat shim: `vgrid sheet apply` scripts use a bare
+            // set()/clear()/style()/meta() API. Alias what maps exactly to
+            // the console's sheet: API; degrade the rest with a one-time
+            // note instead of a fatal "attempt to call nil value 'set'".
+            if let Err(e) = self.lua.load(CLI_COMPAT_SHIM).exec() {
+                return LuaEvalResult::error(vec![], format!("Failed to register compat shim: {}", e), false);
+            }
         }
 
         // Try expression-first: if it parses as `return (input)`, use that
@@ -546,6 +594,50 @@ mod tests {
         let result = rt.eval("1 + 1");
         assert!(result.error.is_none());
         assert_eq!(result.returned, Some("2".to_string()));
+    }
+
+    // Minimal reader so eval_with_sheet registers the sheet API + compat shim
+    struct NullReader;
+    impl SheetReader for NullReader {
+        fn get_value(&self, _row: usize, _col: usize) -> super::super::ops::LuaCellValue {
+            super::super::ops::LuaCellValue::Nil
+        }
+        fn get_formula(&self, _row: usize, _col: usize) -> Option<String> {
+            None
+        }
+        fn rows(&self) -> usize { 100 }
+        fn cols(&self) -> usize { 26 }
+    }
+
+    #[test]
+    fn test_cli_compat_bare_set() {
+        let rt = LuaRuntime::new().unwrap();
+        let result = rt.eval_with_sheet("set('A1', 42); set('A2', '=A1*2')", Box::new(NullReader));
+        assert!(result.error.is_none(), "bare set() should work: {:?}", result.error);
+    }
+
+    #[test]
+    fn test_cli_compat_clear_range() {
+        let rt = LuaRuntime::new().unwrap();
+        let result = rt.eval_with_sheet("set('A1', 1); clear('A1:B2')", Box::new(NullReader));
+        assert!(result.error.is_none(), "bare clear() should work: {:?}", result.error);
+    }
+
+    #[test]
+    fn test_cli_compat_style_and_meta_degrade_gracefully() {
+        let rt = LuaRuntime::new().unwrap();
+        // CLI-style table styles and meta() must not abort the script —
+        // they print a one-time note and continue.
+        let result = rt.eval_with_sheet(
+            "style('A1', {bold=true}); style('A2', {bold=true}); meta('A1', {role='title'}); set('A3', 'still ran')",
+            Box::new(NullReader),
+        );
+        assert!(result.error.is_none(), "script should survive: {:?}", result.error);
+        let notes: Vec<_> = result.output.iter().filter(|l| l.starts_with("note:")).collect();
+        assert_eq!(notes.len(), 2, "one note for style, one for meta (warned once each): {:?}", result.output);
+        // Semantic string styles still pass through to the real API
+        let result2 = rt.eval_with_sheet("style('A1:B2', 'input')", Box::new(NullReader));
+        assert!(result2.error.is_none(), "string style should work: {:?}", result2.error);
     }
 
     #[test]
