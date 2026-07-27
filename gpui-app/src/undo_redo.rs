@@ -39,6 +39,7 @@ impl Spreadsheet {
                             sheet.cond_formats.remove(rule.id);
                         }
                     });
+                self.bump_cf_rules_rev();
                 }
                 UndoAction::CondFormatsCleared { sheet_index, rules } => {
                     self.workbook.update(cx, |wb, _| {
@@ -49,6 +50,7 @@ impl Spreadsheet {
                             }
                         }
                     });
+                self.bump_cf_rules_rev();
                 }
                 UndoAction::Values { sheet_index, changes } => {
                     self.workbook.update(cx, |wb, _| {
@@ -408,6 +410,7 @@ impl Spreadsheet {
                         sheet.cond_formats.remove(rule.id);
                     }
                 });
+                self.bump_cf_rules_rev();
                 }
             UndoAction::CondFormatsCleared { sheet_index, rules } => {
                 self.workbook.update(cx, |wb, _| {
@@ -418,6 +421,7 @@ impl Spreadsheet {
                         }
                     }
                 });
+                self.bump_cf_rules_rev();
                 }
             UndoAction::Values { sheet_index, changes } => {
                 self.workbook.update(cx, |wb, _| {
@@ -710,6 +714,7 @@ impl Spreadsheet {
                         sheet.cond_formats.insert_at(usize::MAX, r);
                     }
                 });
+                self.bump_cf_rules_rev();
                 }
             UndoAction::CondFormatsCleared { sheet_index, rules } => {
                 self.workbook.update(cx, |wb, _| {
@@ -719,6 +724,7 @@ impl Spreadsheet {
                         }
                     }
                 });
+                self.bump_cf_rules_rev();
                 }
             UndoAction::Values { sheet_index, changes } => {
                 self.workbook.update(cx, |wb, _| {
@@ -968,6 +974,7 @@ impl Spreadsheet {
                             sheet.cond_formats.insert_at(usize::MAX, r);
                         }
                     });
+                    self.bump_cf_rules_rev();
                 }
                 UndoAction::CondFormatsCleared { sheet_index, rules } => {
                     self.workbook.update(cx, |wb, _| {
@@ -977,6 +984,7 @@ impl Spreadsheet {
                             }
                         }
                     });
+                self.bump_cf_rules_rev();
                 }
                 UndoAction::Values { sheet_index, changes } => {
                     self.workbook.update(cx, |wb, _| {

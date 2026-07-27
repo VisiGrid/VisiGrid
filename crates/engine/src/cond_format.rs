@@ -146,6 +146,21 @@ impl CondFormatRule {
             .map(|r| (r.start_row, r.start_col))
     }
 
+    /// The predicate as it evaluates for a specific cell — relative refs
+    /// shifted to that cell's offset from the range anchor. This is the
+    /// inspector's "why is this cell styled" answer: `=A1>100` on A1:A10
+    /// shows as `=A7>100` when inspecting row 7.
+    pub fn predicate_at(&self, row: usize, col: usize) -> Option<String> {
+        let ast = self.ast.as_ref()?;
+        let (anchor_row, anchor_col) = self.anchor_for(row, col)?;
+        let dr = row as i64 - anchor_row as i64;
+        let dc = col as i64 - anchor_col as i64;
+        let shifted = offset_expr(ast, dr, dc)?;
+        let bound = bind_expr_same_sheet(&shifted);
+        // format_expr includes the leading '='
+        Some(crate::formula::parser::format_expr(&bound, |name| Some(name.to_string())))
+    }
+
     /// Evaluate the predicate for a cell. True = the rule's style applies.
     ///
     /// No-match on: disabled rule, cell outside all ranges, unparseable

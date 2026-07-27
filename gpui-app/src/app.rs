@@ -2406,6 +2406,12 @@ pub struct Spreadsheet {
     pub cf_preview_id: Option<u64>,                // Live-preview rule currently in the store
     pub cf_preview_matches: Option<(usize, usize)>, // (matching, scanned) for the preview
     pub cf_panel_visible: bool,                    // Rules management drawer
+    pub(crate) cf_rules_rev: u64,                  // Bumped on any CF rule mutation (cache key)
+    /// Per-cell conditional format override cache, keyed by (cells_rev, cf_rules_rev).
+    /// Heavy predicates (COUNTIF over large ranges) are evaluated once per
+    /// edit/rule-change instead of once per frame per cell.
+    pub(crate) cf_cache: std::cell::RefCell<std::collections::HashMap<(usize, usize), Option<visigrid_engine::cell::CellFormatOverride>>>,
+    pub(crate) cf_cache_key: std::cell::Cell<(u64, u64)>,
     pub cf_edit_backup: Option<(usize, visigrid_engine::cond_format::CondFormatRule)>, // Rule pulled for editing (index, rule) — restored on cancel
 
     // Create named range state (Ctrl+Shift+N)
@@ -2897,6 +2903,9 @@ impl Spreadsheet {
             cf_preview_matches: None,
             cf_panel_visible: false,
             cf_edit_backup: None,
+            cf_rules_rev: 1,
+            cf_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            cf_cache_key: std::cell::Cell::new((0, 0)),
             create_name_name: String::new(),
             create_name_description: String::new(),
             create_name_target: String::new(),
@@ -4179,6 +4188,45 @@ impl Spreadsheet {
     #[inline]
     pub(crate) fn bump_cells_rev(&mut self) {
         self.cells_rev = self.cells_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn bump_cf_rules_rev(&mut self) {
+        self.cf_rules_rev = self.cf_rules_rev.wrapping_add(1);
+    }
+
+    /// Effective format (base + conditional rules) with per-cell caching.
+    /// Cache is invalidated wholesale when cell contents or rules change.
+    pub(crate) fn effective_format_cached(&self, row: usize, col: usize, cx: &App) -> visigrid_engine::cell::CellFormat {
+        let sheet = self.sheet(cx);
+        let base = sheet.get_format(row, col);
+        if !sheet.cond_formats.any_rule_covers(row, col) {
+            return base;
+        }
+
+        let key = (self.cells_rev, self.cf_rules_rev);
+        if self.cf_cache_key.get() != key {
+            self.cf_cache.borrow_mut().clear();
+            self.cf_cache_key.set(key);
+        }
+
+        let cached = self.cf_cache.borrow().get(&(row, col)).cloned();
+        let override_opt = match cached {
+            Some(ov) => ov,
+            None => {
+                let ov = sheet.cond_formats.override_for_cell(row, col, sheet);
+                self.cf_cache.borrow_mut().insert((row, col), ov.clone());
+                ov
+            }
+        };
+
+        match override_opt {
+            Some(ov) => {
+                let mut f = base;
+                ov.apply_to(&mut f);
+                f
+            }
+            None => base,
+        }
     }
 
     /// Ensure cell search cache is fresh (rebuilds if cells_rev changed)

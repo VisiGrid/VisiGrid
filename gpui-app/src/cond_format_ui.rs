@@ -229,6 +229,7 @@ impl Spreadsheet {
                     sheet.cond_formats.remove(id);
                 }
             });
+            self.bump_cf_rules_rev();
         }
         // Cancelled an edit: put the original rule back where it was
         if let Some((pos, rule)) = self.cf_edit_backup.take() {
@@ -240,6 +241,7 @@ impl Spreadsheet {
                     sheet.cond_formats.insert_at(pos, r);
                 }
             });
+            self.bump_cf_rules_rev();
         }
         self.cf_preview_matches = None;
         self.mode = Mode::Navigation;
@@ -276,6 +278,7 @@ impl Spreadsheet {
                     sheet.cond_formats.remove(id);
                 }
             });
+            self.bump_cf_rules_rev();
         }
         self.cf_preview_matches = None;
 
@@ -294,6 +297,7 @@ impl Spreadsheet {
                 id = sheet.cond_formats.add(ranges, predicate, style);
             }
         });
+        self.bump_cf_rules_rev();
         self.cf_preview_id = Some(id);
 
         // Bounded match count for the dialog (same 10k convention as the
@@ -353,6 +357,7 @@ impl Spreadsheet {
                         id = sheet.cond_formats.add(ranges, predicate.clone(), style);
                     }
                 });
+                self.bump_cf_rules_rev();
                 id
             }
         };
@@ -367,6 +372,7 @@ impl Spreadsheet {
                     sheet.cond_formats.reorder(added_id, pos);
                 }
             });
+            self.bump_cf_rules_rev();
             let mut before: Vec<CondFormatRule> = self
                 .sheet(cx)
                 .cond_formats
@@ -440,6 +446,7 @@ impl Spreadsheet {
                 }
             }
         });
+        self.bump_cf_rules_rev();
 
         let count = doomed.len();
         self.history.record_action_with_provenance(
@@ -544,6 +551,7 @@ impl Spreadsheet {
                 }
             }
         });
+        self.bump_cf_rules_rev();
         if changed {
             self.record_cf_list_change(sheet_index, before, "Toggle conditional format", cx);
         }
@@ -559,6 +567,7 @@ impl Spreadsheet {
                 removed = sheet.cond_formats.remove(id).is_some();
             }
         });
+        self.bump_cf_rules_rev();
         if removed {
             self.record_cf_list_change(sheet_index, before, "Delete conditional format", cx);
             self.status_message = Some("Rule deleted (Ctrl+Z to undo)".into());
@@ -580,6 +589,7 @@ impl Spreadsheet {
                 sheet.cond_formats.reorder(id, new_pos as usize);
             }
         });
+        self.bump_cf_rules_rev();
         self.record_cf_list_change(sheet_index, before, "Reorder conditional formats", cx);
         cx.notify();
     }
@@ -599,6 +609,7 @@ impl Spreadsheet {
                 sheet.cond_formats.remove(id);
             }
         });
+        self.bump_cf_rules_rev();
 
         self.cf_target = rule.ranges.clone();
         self.cf_input = format!(

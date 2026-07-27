@@ -1330,6 +1330,8 @@ fn render_format_tab(
         .child(render_selection_summary(&state, text_muted, panel_border))
         // Value preview (raw + display)
         .child(render_value_preview(&state, text_primary, text_muted, panel_border))
+        // Conditional formatting: why is this cell styled?
+        .child(render_cond_format_section(app, _row, _col, text_primary, text_muted, accent, panel_border, cx))
         // Number format section
         .child(render_number_format_section(&state, text_primary, text_muted, accent, panel_border, cx))
         // Alignment section
@@ -5386,4 +5388,126 @@ impl Render for ContractTooltip {
             .text_color(rgb(0xcccccc))
             .child("Execution Contracts define what AI is allowed to read and write.")
     }
+}
+
+/// "Why is this cell styled?" — conditional formatting rules affecting the
+/// active cell, with predicates resolved to this cell's coordinates.
+fn render_cond_format_section(
+    app: &Spreadsheet,
+    row: usize,
+    col: usize,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    accent: Hsla,
+    panel_border: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let sheet = app.sheet(cx);
+    let covering: Vec<_> = sheet
+        .cond_formats
+        .iter()
+        .filter(|r| r.covers(row, col))
+        .map(|r| {
+            let matches = r.matches(row, col, sheet);
+            let pred = r
+                .predicate_at(row, col)
+                .unwrap_or_else(|| r.predicate.clone());
+            let style = crate::cond_format_ui::style_to_text(&r.style);
+            (r.id, r.enabled, matches, pred, style)
+        })
+        .collect();
+
+    let total_rules = sheet.cond_formats.len();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(text_muted)
+                        .child("CONDITIONAL FORMATTING")
+                )
+                .when(total_rules > 0, |d| {
+                    d.child(
+                        div()
+                            .id("insp-cf-manage")
+                            .text_xs()
+                            .text_color(accent)
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.cf_panel_visible = true;
+                                cx.notify();
+                            }))
+                            .child("Manage rules \u{2192}")
+                    )
+                })
+        )
+        .when(covering.is_empty(), |d| {
+            d.child(
+                div()
+                    .text_xs()
+                    .text_color(text_muted.opacity(0.6))
+                    .child(if total_rules == 0 {
+                        "No rules on this sheet".to_string()
+                    } else {
+                        format!("No rules cover this cell ({} on sheet)", total_rules)
+                    })
+            )
+        })
+        .children(covering.into_iter().map(|(id, enabled, matches, pred, style)| {
+            div()
+                .id(ElementId::Name(format!("insp-cf-{}", id).into()))
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(panel_border.opacity(0.6))
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(if !enabled {
+                                    text_muted.opacity(0.5)
+                                } else if matches {
+                                    accent
+                                } else {
+                                    text_muted
+                                })
+                                .child(if !enabled {
+                                    "DISABLED"
+                                } else if matches {
+                                    "MATCHES \u{2192} applied"
+                                } else {
+                                    "no match"
+                                })
+                        )
+                        .child(
+                            div().text_xs().text_color(text_muted).child(style)
+                        )
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
+                        .text_color(if matches && enabled { text_primary } else { text_muted })
+                        .child(pred)
+                )
+        }))
 }
