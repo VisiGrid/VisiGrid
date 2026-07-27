@@ -1,0 +1,7 @@
+# Minimum toolchain for the gpui (Zed v1.12.0) dependency, which uses
+# std::hint::cold_path — stabilized in Rust 1.95.0. Zed pins the same
+# version in its own rust-toolchain.toml. rustup-managed machines pick
+# this up automatically; distro-packaged toolchains (no rustup) need
+# rustc >= 1.95 on their own.
+[toolchain]
+channel = "1.95.0"
