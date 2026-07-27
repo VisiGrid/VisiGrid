@@ -1045,8 +1045,6 @@ fn render_cell(
             &value,
             col_width,
             format.alignment,
-            is_selected,
-            is_active,
             is_editing,
             app,
             window,
@@ -1727,6 +1725,13 @@ fn calculate_text_spill(
 /// - There's at least one adjacent empty cell to spill into
 ///
 /// When this returns true, render_cell should NOT draw the text - the spill overlay will handle it.
+///
+/// Excel parity: selection does NOT clip overflow — the overlay owns spilling
+/// text in every state except editing (the inline editor draws its own text).
+/// The overlay renders above per-cell selection tints, so tinted cells show
+/// normal-weight text on top of the highlight, exactly like Excel.
+/// The overlay's skip condition MUST mirror this predicate or text double-draws
+/// (stacked antialiasing reads as faux bold).
 #[inline]
 fn should_use_spill_overlay(
     data_row: usize,
@@ -1734,15 +1739,13 @@ fn should_use_spill_overlay(
     text: &str,
     cell_width: f32,
     alignment: Alignment,
-    is_selected: bool,
-    is_active: bool,
     is_editing: bool,
     app: &Spreadsheet,
     window: &Window,
     cx: &App,
 ) -> bool {
-    // Selected, active, or editing cells don't use spill overlay (z-order complexity)
-    if is_selected || is_active || is_editing {
+    // The inline editor owns text while editing
+    if is_editing {
         return false;
     }
 
@@ -2595,7 +2598,8 @@ fn render_merge_text(
 /// Key invariants:
 /// - Only left-aligned text (or General for text values) spills rightward
 /// - Spill stops at first non-empty adjacent cell
-/// - Selected/active/editing cells don't spill (simplifies z-order)
+/// - Editing cells don't spill (the inline editor owns text); selection
+///   does NOT clip spill — Excel parity, overlay paints above selection tints
 /// - This is paint-only: no hit testing (clicks go to underlying cells)
 ///
 /// IMPORTANT: Spill text is rendered in a second pass as a paint-only overlay.
@@ -2637,8 +2641,9 @@ fn render_text_spill_overlay(
 
     let mut spill_runs: std::collections::HashMap<(usize, usize), SpillRun> = std::collections::HashMap::new();
 
-    // Text color for non-selected cells
+    // Text colors: normal cells vs cells under the selection tint
     let cell_text = app.token(TokenKey::CellText);
+    let selection_text = app.token(TokenKey::SelectionText);
 
     // Scan visible cells for spill candidates
     for screen_row in 0..visible_rows {
@@ -2662,12 +2667,13 @@ fn render_text_spill_overlay(
         for screen_col in 0..visible_cols {
             let Some(col) = app.nth_visible_col(screen_col, scroll_col) else { continue; };
 
-            // Skip selected/active cells (they don't spill to avoid z-order complexity).
-            // MUST match should_use_spill_overlay's predicate exactly: that function
-            // returns false for ANY selected cell (so the cell draws its own text),
-            // and if we draw it here too the two copies stack into faux-bold text
-            // (#5-adjacent field report: "selected rows look bolded").
-            if is_selected_in_pane(view_state, view_row, col) {
+            // Skip only the cell being edited (the inline editor owns its text).
+            // MUST mirror should_use_spill_overlay exactly: exactly one layer
+            // owns a spilling cell's text in every state, or the two copies
+            // stack into faux-bold ("selected rows look bolded" field report).
+            // Selection does NOT suppress spill — Excel parity: the overlay
+            // paints above per-cell selection tints.
+            if app.mode.is_editing() && view_state.selected == (view_row, col) {
                 continue;
             }
 
@@ -2785,6 +2791,11 @@ fn render_text_spill_overlay(
                     })
                 } else if let Some(sc) = spill_cs.text {
                     sc
+                } else if is_selected_in_pane(view_state, view_row, col) {
+                    // Origin cell sits under the selection tint — use the
+                    // theme's selection text color (matters for inverse-video
+                    // themes like VisiCalc)
+                    selection_text
                 } else {
                     cell_text
                 },
