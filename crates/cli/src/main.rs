@@ -1309,6 +1309,8 @@ enum Format {
     Csv,
     Tsv,
     Json,
+    /// Full-fidelity visigrid-json (values, formulas, formats, merges)
+    JsonFull,
     Lines,
     Xlsx,
     Sheet,
@@ -2357,6 +2359,13 @@ fn cmd_convert(
         None
     };
 
+    // json-full is a full-fidelity format: row/column filters would strip
+    // formulas, which contradicts its purpose — refuse rather than surprise
+    if matches!(to, Format::JsonFull) && (row_filter.is_some() || col_filter.is_some()) {
+        return Err(CliError::args("--where/--select are not supported with -t json-full")
+            .with_hint("filter to csv/json first, or export the full sheet"));
+    }
+
     // Binary spreadsheet outputs: full fidelity (formulas, formats) when
     // unfiltered; --where/--select materialize display values first (same
     // semantics as the CSV writer — filtered rows can't keep live formulas).
@@ -2520,6 +2529,11 @@ fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_arg: Option
             let (_, sheet) = resolve_sheet(&workbook, sheet_arg)?;
             Ok(sheet.clone())
         }
+        Format::JsonFull => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| CliError::io(e.to_string()))?;
+            return visigrid_io::json::import_full(&content).map_err(CliError::io);
+        }
         Format::Json => {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| CliError::io(e.to_string()))?;
@@ -2548,6 +2562,7 @@ fn read_stdin(format: Format, delimiter: char, into_row: usize, into_col: usize)
         Format::Csv => parse_csv(&input, delimiter as u8, into_row, into_col),
         Format::Tsv => parse_csv(&input, b'\t', into_row, into_col),
         Format::Json => parse_json(&input, into_row, into_col),
+        Format::JsonFull => visigrid_io::json::import_full(&input).map_err(CliError::io),
         Format::Lines => parse_lines(&input, into_row, into_col),
         Format::Xlsx | Format::Sheet => {
             Err(CliError::args("xlsx and sheet formats require file input"))
@@ -2687,6 +2702,9 @@ fn write_format(
         Format::Csv => write_csv(sheet, delimiter as u8, headers, header_row, row_filter, col_filter),
         Format::Tsv => write_csv(sheet, b'\t', headers, header_row, row_filter, col_filter),
         Format::Json => write_json(sheet, headers, header_row, row_filter, col_filter),
+        Format::JsonFull => visigrid_io::json::export_full(sheet)
+            .map(|s| s.into_bytes())
+            .map_err(CliError::io),
         Format::Lines => write_lines(sheet, header_row, row_filter, col_filter),
         Format::Xlsx => Err(CliError::format("xlsx output is handled before write_format")
             .with_hint("this is a bug — please report it")),

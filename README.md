@@ -155,6 +155,7 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 - Import: CSV, TSV, JSON, XLSX, XLS, XLSB, ODS
 - Export: XLSX (File → Export to Excel), CSV, TSV, JSON, .sheet
+- Interchange: `visigrid-json` — a stable, versioned JSON schema carrying values, formulas, formats, and merges (`vgrid convert model.xlsx -t json-full`); built for scripts and services that round-trip sheets through the engine
 - Cross-platform: macOS, Windows, Linux
 
 ## Advanced: Automation, CLI, and Reproducible Workflows
@@ -175,6 +176,9 @@ vgrid diff vendor.xlsx ours.csv --key Invoice --compare Total --tolerance 0.01
 # Convert between formats (both directions — xlsx in and out)
 vgrid convert data.xlsx --to csv
 vgrid convert data.csv --to xlsx -o report.xlsx
+
+# Full-fidelity JSON: formulas, formats, merges (stable versioned schema)
+vgrid convert model.xlsx -t json-full | jq '.cells[] | select(.formula)'
 
 # Project a vendor export down to reconciliation columns, then diff
 vgrid convert vendor.xlsx -t csv --headers --select 'Invoice,Amount' | \
