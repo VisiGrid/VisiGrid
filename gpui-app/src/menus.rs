@@ -22,6 +22,7 @@ pub fn set_app_menus(cx: &mut App) {
                 // Note: Hide/Show items would go here if GPUI supports them
                 MenuItem::action("Quit VisiGrid", Quit),
             ],
+            disabled: false,
         },
         // File menu
         Menu {
@@ -42,6 +43,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Close Window", CloseWindow),
             ],
+            disabled: false,
         },
         // Edit menu
         Menu {
@@ -63,6 +65,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Find...", FindInCells),
                 MenuItem::action("Go To...", GoToCell),
             ],
+            disabled: false,
         },
         // View menu
         Menu {
@@ -76,6 +79,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Show Zeros", ToggleShowZeros),
                 MenuItem::action("Format Bar", ToggleFormatBar),
             ],
+            disabled: false,
         },
         // Format menu
         Menu {
@@ -87,6 +91,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Font...", ShowFontPicker),
             ],
+            disabled: false,
         },
         // Data menu
         Menu {
@@ -103,6 +108,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Validation...", ShowDataValidation),
             ],
+            disabled: false,
         },
         // Window menu
         Menu {
@@ -115,6 +121,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Bring All to Front", BringAllToFront),
             ],
+            disabled: false,
         },
         // Help menu
         Menu {
@@ -125,6 +132,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("About VisiGrid", ShowAbout),
                 MenuItem::action("License...", ShowLicense),
             ],
+            disabled: false,
         },
     ]);
 }
