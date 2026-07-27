@@ -73,7 +73,7 @@ pub(crate) fn render_add_cond_format_dialog(app: &Spreadsheet) -> impl IntoEleme
                                 .child(range_label)
                         )
                 )
-                // Input line
+                // Input line (text + caret)
                 .child(
                     div()
                         .px_2()
@@ -83,6 +83,8 @@ pub(crate) fn render_add_cond_format_dialog(app: &Spreadsheet) -> impl IntoEleme
                         .rounded_sm()
                         .text_sm()
                         .font_family("IBM Plex Mono")
+                        .flex()
+                        .items_center()
                         .when_some(input_display, |d, text| {
                             d.text_color(text_primary).child(text)
                         })
@@ -90,15 +92,33 @@ pub(crate) fn render_add_cond_format_dialog(app: &Spreadsheet) -> impl IntoEleme
                             d.text_color(text_muted)
                                 .child("=A1>100 -> warning")
                         })
+                        // Caret
+                        .child(
+                            div()
+                                .w(px(2.0))
+                                .h(px(16.0))
+                                .ml(px(1.0))
+                                .bg(accent)
+                        )
                 )
-                // Error or hint line
-                .child(match error {
-                    Some(e) => div().text_color(error_color).text_sm().child(e),
-                    None => div()
+                // Feedback line: error > live match count > hint
+                .child(match (error, app.cf_preview_matches) {
+                    (Some(e), _) => div().text_color(error_color).text_sm().child(e),
+                    (None, Some((matching, scanned))) => {
+                        let noun = if matching == 1 { "cell matches" } else { "cells match" };
+                        div()
+                            .text_color(if matching > 0 { accent } else { text_muted })
+                            .text_sm()
+                            .child(format!(
+                                "{} of {} {} — previewing on grid · Enter to add · Esc to cancel",
+                                matching, scanned, noun
+                            ))
+                    }
+                    (None, None) => div()
                         .text_color(text_muted)
                         .text_sm()
                         .child(
-                            "predicate -> style · styles: warning, error, success, note, \
+                            "predicate -> style · styles: good, bad, neutral, note, \
                              bold, bg=#RRGGBB, fg=#RRGGBB, like(Z1) · Enter to add · Esc to cancel",
                         ),
                 })

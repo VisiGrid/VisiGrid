@@ -2403,6 +2403,8 @@ pub struct Spreadsheet {
     pub cf_input: String,                          // Typed rule: "=PRED -> STYLE"
     pub cf_input_error: Option<String>,            // Parse error shown in dialog
     pub cf_target: Vec<visigrid_engine::validation::CellRange>,  // Selection when opened
+    pub cf_preview_id: Option<u64>,                // Live-preview rule currently in the store
+    pub cf_preview_matches: Option<(usize, usize)>, // (matching, scanned) for the preview
 
     // Create named range state (Ctrl+Shift+N)
     pub create_name_name: String,           // User-typed name
@@ -2889,6 +2891,8 @@ impl Spreadsheet {
             cf_input: String::new(),
             cf_input_error: None,
             cf_target: Vec::new(),
+            cf_preview_id: None,
+            cf_preview_matches: None,
             create_name_name: String::new(),
             create_name_description: String::new(),
             create_name_target: String::new(),

@@ -46,11 +46,11 @@ pub fn parse_style(
         return Err("Missing style after '->'".into());
     }
 
-    // Named styles
+    // Named styles ("good"/"bad"/"neutral" are Excel's preset vocabulary)
     let named = match text.to_ascii_lowercase().as_str() {
-        "error" => Some(CellStyle::Error),
-        "warning" => Some(CellStyle::Warning),
-        "success" => Some(CellStyle::Success),
+        "error" | "bad" | "red" => Some(CellStyle::Error),
+        "warning" | "neutral" | "yellow" => Some(CellStyle::Warning),
+        "success" | "good" | "green" => Some(CellStyle::Success),
         "input" => Some(CellStyle::Input),
         "total" => Some(CellStyle::Total),
         "note" => Some(CellStyle::Note),
@@ -221,6 +221,16 @@ impl Spreadsheet {
     }
 
     pub fn hide_add_cond_format(&mut self, cx: &mut Context<Self>) {
+        // Cancel: withdraw the live-preview rule, if any
+        if let Some(id) = self.cf_preview_id.take() {
+            let sheet_index = self.sheet_index(cx);
+            self.wb_mut(cx, |wb| {
+                if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                    sheet.cond_formats.remove(id);
+                }
+            });
+        }
+        self.cf_preview_matches = None;
         self.mode = Mode::Navigation;
         self.cf_input.clear();
         self.cf_input_error = None;
@@ -230,21 +240,83 @@ impl Spreadsheet {
     pub fn cf_input_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
         self.cf_input.push(c);
         self.cf_input_error = None;
+        self.update_cf_preview(cx);
         cx.notify();
     }
 
     pub fn cf_input_backspace(&mut self, cx: &mut Context<Self>) {
         self.cf_input.pop();
         self.cf_input_error = None;
+        self.update_cf_preview(cx);
         cx.notify();
     }
 
-    /// Parse the typed rule and add it to the active sheet.
+    /// Live preview: keep a (history-bypassing) rule in the store that
+    /// mirrors the currently-typed input, so the grid highlights matches
+    /// while the user types. Promoted to a real rule on Enter, removed on
+    /// cancel or when the input stops parsing.
+    fn update_cf_preview(&mut self, cx: &mut Context<Self>) {
+        let sheet_index = self.sheet_index(cx);
+
+        // Drop the previous preview rule
+        if let Some(id) = self.cf_preview_id.take() {
+            self.wb_mut(cx, |wb| {
+                if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                    sheet.cond_formats.remove(id);
+                }
+            });
+        }
+        self.cf_preview_matches = None;
+
+        let input = self.cf_input.clone();
+        let parsed = {
+            let sheet = self.sheet(cx);
+            let lookup = |row: usize, col: usize| sheet.get_format(row, col);
+            parse_rule_input(&input, &lookup)
+        };
+        let Ok((predicate, style)) = parsed else { return };
+
+        let ranges = self.cf_target.clone();
+        let mut id = 0u64;
+        self.wb_mut(cx, |wb| {
+            if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                id = sheet.cond_formats.add(ranges, predicate, style);
+            }
+        });
+        self.cf_preview_id = Some(id);
+
+        // Bounded match count for the dialog (same 10k convention as the
+        // status bar — never scan unbounded ranges from a keystroke).
+        const MAX_PREVIEW_SCAN: usize = 10_000;
+        let sheet = self.sheet(cx);
+        if let Some(rule) = sheet.cond_formats.get(id) {
+            let mut scanned = 0usize;
+            let mut matching = 0usize;
+            'scan: for range in &rule.ranges {
+                for row in range.start_row..=range.end_row {
+                    for col in range.start_col..=range.end_col {
+                        if scanned >= MAX_PREVIEW_SCAN {
+                            break 'scan;
+                        }
+                        scanned += 1;
+                        if rule.matches(row, col, sheet) {
+                            matching += 1;
+                        }
+                    }
+                }
+            }
+            self.cf_preview_matches = Some((matching, scanned));
+        }
+    }
+
+    /// Commit the typed rule: promote the live-preview rule (already in
+    /// the store and visible on the grid) into a permanent, undoable rule.
     pub fn confirm_add_cond_format(&mut self, cx: &mut Context<Self>) {
         let input = self.cf_input.clone();
         let sheet_index = self.sheet_index(cx);
 
-        // like() templates resolve against the active sheet's stored formats
+        // Validate first so a broken input surfaces an error rather than
+        // silently closing (preview is only present for valid input).
         let parsed = {
             let sheet = self.sheet(cx);
             let lookup = |row: usize, col: usize| sheet.get_format(row, col);
@@ -259,14 +331,20 @@ impl Spreadsheet {
             }
         };
 
-        let ranges = self.cf_target.clone();
-        let range_label = format_range_label(&ranges);
-        let mut added_id = 0u64;
-        self.wb_mut(cx, |wb| {
-            if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                added_id = sheet.cond_formats.add(ranges, predicate.clone(), style);
+        // Promote the preview rule if present; otherwise add fresh.
+        let added_id = match self.cf_preview_id.take() {
+            Some(id) => id,
+            None => {
+                let ranges = self.cf_target.clone();
+                let mut id = 0u64;
+                self.wb_mut(cx, |wb| {
+                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                        id = sheet.cond_formats.add(ranges, predicate.clone(), style);
+                    }
+                });
+                id
             }
-        });
+        };
 
         // Undoable: undo removes the rule, redo re-adds it
         if let Some(rule) = self
@@ -281,6 +359,7 @@ impl Spreadsheet {
             );
         }
 
+        let range_label = format_range_label(&self.cf_target);
         self.is_modified = true;
         self.status_message = Some(format!(
             "Conditional format on {}: {} (Ctrl+Z to undo)",
@@ -289,6 +368,7 @@ impl Spreadsheet {
         self.mode = Mode::Navigation;
         self.cf_input.clear();
         self.cf_input_error = None;
+        self.cf_preview_matches = None;
         cx.notify();
     }
 
