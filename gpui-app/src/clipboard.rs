@@ -1403,7 +1403,42 @@ impl Spreadsheet {
         // Delete from all selection ranges (including discontiguous Ctrl+Click selections)
         // When filtered, only delete from visible rows
         self.wb_mut(cx, |wb| wb.begin_batch());
+        let rows_are_identity = !is_filtered && !self.row_view.is_sorted();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            if rows_are_identity {
+                // Sparse fast path: enumerate only populated cells intersecting
+                // the range. Ctrl+A selects 16.7M coordinates; walking them all
+                // beachballs for seconds while the sheet holds a few dozen
+                // values. Excel's clear is O(actual data) — so is this.
+                let mut targets: Vec<(usize, usize)> = self
+                    .sheet(cx)
+                    .cells_iter()
+                    .filter(|((r, c), _)| {
+                        *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col
+                    })
+                    .map(|(&(r, c), _)| (r, c))
+                    .collect();
+                targets.sort_unstable(); // deterministic change/undo order
+
+                for (data_row, col) in targets {
+                    if self.sheet(cx).is_spill_receiver(data_row, col) {
+                        skipped_spill_receivers = true;
+                        continue;
+                    }
+                    let old_value = self.sheet(cx).get_raw(data_row, col);
+                    if !old_value.is_empty() {
+                        changes.push(CellChange {
+                            row: data_row, col, old_value, new_value: String::new(),
+                        });
+                    }
+                    self.clear_cell_value(data_row, col, cx);
+                }
+                continue;
+            }
+
+            // Sorted/filtered views: selection rows are view-space, so walk the
+            // rectangle and map each row (bounded by the visible row count in
+            // practice, since filtered/sorted views operate on real data extents)
             for view_row in min_row..=max_row {
                 // Skip hidden rows when filtered
                 if is_filtered && !self.row_view.is_view_row_visible(view_row) {
