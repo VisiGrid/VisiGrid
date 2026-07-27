@@ -817,8 +817,14 @@ fn render_cell(
                 app.debug_gridline_cells.set(app.debug_gridline_cells.get() + 1);
             }
             if show_gridlines {
-                if !user_top && data_row > 0 && !top_in_merge { c = c.border_t_1(); }
-                if !user_left && col > 0 && !left_in_merge { c = c.border_l_1(); }
+                // A neighboring selection's accent border owns shared edges.
+                // Drawing our gridline beside it doubles the line — and the
+                // doubled edge visually continues past the selection corner,
+                // reading as an "extra border" (#5-adjacent field report).
+                let above_selected = view_row > 0 && is_selected_in_pane(view_state, view_row - 1, col);
+                let left_selected = col > 0 && is_selected_in_pane(view_state, view_row, col - 1);
+                if !user_top && data_row > 0 && !top_in_merge && !above_selected { c = c.border_t_1(); }
+                if !user_left && col > 0 && !left_in_merge && !left_selected { c = c.border_l_1(); }
                 if !user_bottom && is_last_visible_row && !bottom_in_merge { c = c.border_b_1(); }
                 if !user_right && is_last_visible_col && !right_in_merge { c = c.border_r_1(); }
             }
@@ -2607,8 +2613,6 @@ fn render_text_spill_overlay(
     let view_state = get_pane_view_state(app, pane_side);
     let scroll_row = view_state.scroll_row;
     let scroll_col = view_state.scroll_col;
-    let (selected_row, selected_col) = view_state.selected;
-
     let visible_rows = app.visible_rows();
     let visible_cols = app.visible_cols();
     let metrics = &app.metrics;
@@ -2658,8 +2662,12 @@ fn render_text_spill_overlay(
         for screen_col in 0..visible_cols {
             let Some(col) = app.nth_visible_col(screen_col, scroll_col) else { continue; };
 
-            // Skip selected/active cells (they don't spill to avoid z-order complexity)
-            if view_row == selected_row && col == selected_col {
+            // Skip selected/active cells (they don't spill to avoid z-order complexity).
+            // MUST match should_use_spill_overlay's predicate exactly: that function
+            // returns false for ANY selected cell (so the cell draws its own text),
+            // and if we draw it here too the two copies stack into faux-bold text
+            // (#5-adjacent field report: "selected rows look bolded").
+            if is_selected_in_pane(view_state, view_row, col) {
                 continue;
             }
 
