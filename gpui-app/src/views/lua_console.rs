@@ -17,6 +17,36 @@ use gpui::prelude::FluentBuilder;
 
 use crate::actions::*;
 use crate::app::Spreadsheet;
+use crate::scripting::lua_tokenizer::tokenize_lua;
+
+/// Precomputed syntax colors for echo highlighting (theme tokens resolved
+/// once per frame; render_output_entry_grouped can't take &Spreadsheet
+/// because the console state is already borrowed from it).
+#[derive(Clone, Copy)]
+pub(crate) struct LuaSyntaxColors {
+    pub keyword: Hsla,
+    pub boolean: Hsla,
+    pub string: Hsla,
+    pub number: Hsla,
+    pub comment: Hsla,
+    pub operator: Hsla,
+    pub identifier: Hsla,
+}
+
+impl LuaSyntaxColors {
+    fn color(&self, tt: LuaTokenType) -> Hsla {
+        match tt {
+            LuaTokenType::Keyword => self.keyword,
+            LuaTokenType::Boolean => self.boolean,
+            LuaTokenType::String => self.string,
+            LuaTokenType::Number => self.number,
+            LuaTokenType::Comment => self.comment,
+            LuaTokenType::Operator | LuaTokenType::Punctuation => self.operator,
+            LuaTokenType::Identifier => self.identifier,
+        }
+    }
+}
+
 use crate::scripting::{
     ConsoleState, ConsoleTab, DebugAction, DebugConfig, DebugEventPayload, DebugSessionState,
     LuaCellValue, LuaEvalResult, LuaOp, LuaTokenType, OutputEntry, OutputKind, SheetSnapshot,
@@ -42,6 +72,15 @@ pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     let accent = app.token(TokenKey::Accent);
     let error_color = app.token(TokenKey::Error);
     let editor_bg = app.token(TokenKey::EditorBg);
+    let syntax = LuaSyntaxColors {
+        keyword: app.token(TokenKey::FormulaFunction),
+        boolean: app.token(TokenKey::FormulaBoolean),
+        string: app.token(TokenKey::FormulaString),
+        number: app.token(TokenKey::FormulaNumber),
+        comment: text_muted,
+        operator: app.token(TokenKey::FormulaOperator),
+        identifier: text_primary,
+    };
 
     // Viewport-relative max height: cap at 60% of window height
     let window_height: f32 = app.window_size.height.into();
@@ -105,7 +144,7 @@ pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
         .when(current_tab == ConsoleTab::Run, |d| {
             d.child(
                 // Run tab: output area with virtual scroll
-                render_run_tab_content(console, text_primary, text_muted, accent, error_color, panel_border, editor_bg, cx)
+                render_run_tab_content(console, text_primary, text_muted, accent, error_color, panel_border, editor_bg, syntax, cx)
             )
             .child(
                 // Input area
@@ -129,6 +168,7 @@ fn render_run_tab_content(
     error_color: Hsla,
     panel_border: Hsla,
     editor_bg: Hsla,
+    syntax: LuaSyntaxColors,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     div()
@@ -174,6 +214,7 @@ fn render_run_tab_content(
                         render_output_entry_grouped(
                             entry, "run", base + i, is_group_start,
                             text_primary, text_muted, accent, error_color, panel_border,
+                            syntax,
                         )
                     }).collect::<Vec<_>>()
                 })
@@ -476,6 +517,7 @@ fn render_output_entry_grouped(
     accent: Hsla,
     error_color: Hsla,
     panel_border: Hsla,
+    syntax: LuaSyntaxColors,
 ) -> Stateful<Div> {
     let id = ElementId::Name(format!("lua-{}-output-{}", tab, index).into());
 
@@ -493,8 +535,34 @@ fn render_output_entry_grouped(
                 .font_family(crate::views::terminal_panel::TERM_FONT_FAMILY)
                 .text_color(text_muted);
 
+            // Echoes get the same syntax highlighting as the input editor
             for line in entry.text.split('\n') {
-                card = card.child(div().child(line.to_string()));
+                if line.is_empty() {
+                    card = card.child(div().child(String::new()));
+                    continue;
+                }
+                let tokens = tokenize_lua(line);
+                let mut row = div().flex().flex_wrap();
+                let mut pos = 0usize;
+                for (range, tt) in &tokens {
+                    if range.start > pos {
+                        row = row.child(
+                            div().text_color(text_muted)
+                                .child(line[pos..range.start].to_string())
+                        );
+                    }
+                    row = row.child(
+                        div().text_color(syntax.color(*tt))
+                            .child(line[range.start..range.end].to_string())
+                    );
+                    pos = range.end;
+                }
+                if pos < line.len() {
+                    row = row.child(
+                        div().text_color(text_muted).child(line[pos..].to_string())
+                    );
+                }
+                card = card.child(row);
             }
 
             let mut wrapper = div().id(id);
@@ -903,8 +971,13 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
         app.lua_console.push_output(OutputEntry::print(line.clone()));
     }
 
+    // Statements evaluated expression-first return nil — echoing "nil"
+    // after every sheet:set(...) is REPL noise (Lua's own REPL is silent
+    // for statements). Real nil expressions stay silent too, matching it.
     if let Some(ref returned) = result.returned {
-        app.lua_console.push_output(OutputEntry::result(returned.clone()));
+        if returned != "nil" {
+            app.lua_console.push_output(OutputEntry::result(returned.clone()));
+        }
     }
 
     if let Some(ref error) = result.error {
