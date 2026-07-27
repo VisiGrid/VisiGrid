@@ -9,6 +9,7 @@ mod autocomplete;
 mod clipboard;
 mod color_palette;
 mod command_palette;
+mod cond_format_ui;
 mod default_app;
 mod default_app_prompt;
 mod dialogs;

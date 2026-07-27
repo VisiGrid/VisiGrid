@@ -33,6 +33,23 @@ impl Spreadsheet {
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if let Some(entry) = self.history.undo() {
             match entry.action {
+                UndoAction::CondFormatAdded { sheet_index, rule } => {
+                    self.workbook.update(cx, |wb, _| {
+                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                            sheet.cond_formats.remove(rule.id);
+                        }
+                    });
+                }
+                UndoAction::CondFormatsCleared { sheet_index, rules } => {
+                    self.workbook.update(cx, |wb, _| {
+                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                            for mut r in rules {
+                                r.reparse();
+                                sheet.cond_formats.insert_at(usize::MAX, r);
+                            }
+                        }
+                    });
+                }
                 UndoAction::Values { sheet_index, changes } => {
                     self.workbook.update(cx, |wb, _| {
                         let mut guard = wb.batch_guard();
@@ -385,6 +402,23 @@ impl Spreadsheet {
     /// Apply a single undo action (helper for Group handling)
     fn apply_undo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) {
         match action {
+            UndoAction::CondFormatAdded { sheet_index, rule } => {
+                self.workbook.update(cx, |wb, _| {
+                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                        sheet.cond_formats.remove(rule.id);
+                    }
+                });
+                }
+            UndoAction::CondFormatsCleared { sheet_index, rules } => {
+                self.workbook.update(cx, |wb, _| {
+                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                        for mut r in rules {
+                            r.reparse();
+                            sheet.cond_formats.insert_at(usize::MAX, r);
+                        }
+                    }
+                });
+                }
             UndoAction::Values { sheet_index, changes } => {
                 self.workbook.update(cx, |wb, _| {
                     // CRITICAL: Apply in reverse order to handle same-cell sequences correctly.
@@ -668,6 +702,24 @@ impl Spreadsheet {
     /// Apply a single redo action (helper for Group handling)
     fn apply_redo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) {
         match action {
+            UndoAction::CondFormatAdded { sheet_index, rule } => {
+                self.workbook.update(cx, |wb, _| {
+                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                        let mut r = rule;
+                        r.reparse();
+                        sheet.cond_formats.insert_at(usize::MAX, r);
+                    }
+                });
+                }
+            UndoAction::CondFormatsCleared { sheet_index, rules } => {
+                self.workbook.update(cx, |wb, _| {
+                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                        for r in rules {
+                            sheet.cond_formats.remove(r.id);
+                        }
+                    }
+                });
+                }
             UndoAction::Values { sheet_index, changes } => {
                 self.workbook.update(cx, |wb, _| {
                     let mut guard = wb.batch_guard();
@@ -908,6 +960,24 @@ impl Spreadsheet {
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if let Some(entry) = self.history.redo() {
             match entry.action {
+                UndoAction::CondFormatAdded { sheet_index, rule } => {
+                    self.workbook.update(cx, |wb, _| {
+                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                            let mut r = rule;
+                            r.reparse();
+                            sheet.cond_formats.insert_at(usize::MAX, r);
+                        }
+                    });
+                }
+                UndoAction::CondFormatsCleared { sheet_index, rules } => {
+                    self.workbook.update(cx, |wb, _| {
+                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                            for r in rules {
+                                sheet.cond_formats.remove(r.id);
+                            }
+                        }
+                    });
+                }
                 UndoAction::Values { sheet_index, changes } => {
                     self.workbook.update(cx, |wb, _| {
                         let mut guard = wb.batch_guard();

@@ -2399,6 +2399,11 @@ pub struct Spreadsheet {
     pub rename_affected_cells: Vec<(usize, usize)>,  // Cells with formulas referencing this name
     pub rename_validation_error: Option<String>,     // Current validation error (if any)
 
+    // Add conditional format state
+    pub cf_input: String,                          // Typed rule: "=PRED -> STYLE"
+    pub cf_input_error: Option<String>,            // Parse error shown in dialog
+    pub cf_target: Vec<visigrid_engine::validation::CellRange>,  // Selection when opened
+
     // Create named range state (Ctrl+Shift+N)
     pub create_name_name: String,           // User-typed name
     pub create_name_description: String,    // Optional description
@@ -2881,6 +2886,9 @@ impl Spreadsheet {
             rename_select_all: false,
             rename_affected_cells: Vec::new(),
             rename_validation_error: None,
+            cf_input: String::new(),
+            cf_input_error: None,
+            cf_target: Vec::new(),
             create_name_name: String::new(),
             create_name_description: String::new(),
             create_name_target: String::new(),
@@ -4289,6 +4297,8 @@ impl Spreadsheet {
                 cx.notify();
             }
             CommandId::SelectAll => self.select_all(cx),
+            CommandId::AddConditionalFormat => self.show_add_cond_format(cx),
+            CommandId::ClearConditionalFormats => self.clear_cond_formats_in_selection(cx),
             CommandId::SelectBlanks => self.select_blanks(cx),
             CommandId::SelectCurrentRegion => self.select_current_region(cx),
             CommandId::HideRows => self.hide_rows(cx),

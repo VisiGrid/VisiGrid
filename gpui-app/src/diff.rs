@@ -331,6 +331,9 @@ fn process_action(
     format_change_count: &mut usize,
 ) {
     match action {
+        UndoAction::CondFormatAdded { .. } | UndoAction::CondFormatsCleared { .. } => {
+            *format_change_count += 1;
+        }
         UndoAction::Values { sheet_index, changes } => {
             for change in changes {
                 let key = (*sheet_index, change.row, change.col);

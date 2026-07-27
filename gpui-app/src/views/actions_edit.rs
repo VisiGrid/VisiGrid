@@ -317,6 +317,7 @@ pub(crate) fn bind(
                 Mode::Command => this.palette_execute(window, cx),
                 Mode::GoTo => this.confirm_goto(cx),
                 Mode::CreateNamedRange => this.confirm_create_named_range(cx),
+                Mode::AddCondFormat => this.confirm_add_cond_format(cx),
                 _ => {
                     this.confirm_edit_enter(cx);
                     this.update_title_if_needed(window, cx);
@@ -411,6 +412,8 @@ pub(crate) fn bind(
                 this.hide_rename_symbol(cx);
             } else if this.mode == Mode::CreateNamedRange {
                 this.hide_create_named_range(cx);
+            } else if this.mode == Mode::AddCondFormat {
+                this.hide_add_cond_format(cx);
             } else if this.mode == Mode::EditDescription {
                 this.hide_edit_description(cx);
             } else if this.mode == Mode::Tour {
@@ -556,6 +559,10 @@ pub(crate) fn bind(
             // Dialog modes handle backspace themselves
             if this.mode == Mode::CreateNamedRange {
                 this.create_name_backspace(cx);
+                return;
+            }
+            if this.mode == Mode::AddCondFormat {
+                this.cf_input_backspace(cx);
                 return;
             }
             // Lua console handles its own backspace

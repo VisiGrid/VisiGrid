@@ -45,6 +45,7 @@ mod actions_edit;
 mod actions_ui;
 mod key_handler;
 mod f1_help;
+mod cond_format_dialog;
 mod named_range_dialogs;
 mod rewind_dialogs;
 mod transform_diff_dialog;
@@ -73,6 +74,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_about = app.mode == Mode::About;
     let show_rename_symbol = app.mode == Mode::RenameSymbol;
     let show_create_named_range = app.mode == Mode::CreateNamedRange;
+    let show_add_cond_format = app.mode == Mode::AddCondFormat;
     let show_edit_description = app.mode == Mode::EditDescription;
     let show_tour = app.mode == Mode::Tour;
     let show_impact_preview = app.mode == Mode::ImpactPreview;
@@ -768,6 +770,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_create_named_range, |div| {
             div.child(named_range_dialogs::render_create_named_range_dialog(app, cx))
+        })
+        .when(show_add_cond_format, |div| {
+            div.child(cond_format_dialog::render_add_cond_format_dialog(app))
         })
         .when(show_edit_description, |div| {
             div.child(named_range_dialogs::render_edit_description_dialog(app))

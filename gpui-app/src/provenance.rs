@@ -96,6 +96,7 @@ impl UndoAction {
     /// Returns None for audit-only actions (Rewind) that are represented as comments.
     pub fn to_lua(&self) -> Option<String> {
         match self {
+            UndoAction::CondFormatAdded { .. } | UndoAction::CondFormatsCleared { .. } => None,
             UndoAction::Values { sheet_index, changes } => {
                 Some(values_to_lua(*sheet_index, changes))
             }
@@ -328,6 +329,7 @@ impl UndoAction {
     /// hashes in `register_grid_api`, ensuring fingerprint alignment.
     pub fn to_replay_hashes(&self) -> Vec<String> {
         match self {
+            UndoAction::CondFormatAdded { .. } | UndoAction::CondFormatsCleared { .. } => Vec::new(),
             UndoAction::Values { sheet_index, changes } => {
                 let sheet = sheet_index + 1; // 1-indexed in Lua API
                 if changes.len() == 1 {
@@ -884,6 +886,8 @@ pub fn export_script(
 /// Check if an action affects a specific sheet.
 fn action_affects_sheet(action: &UndoAction, sheet_index: usize) -> bool {
     match action {
+        UndoAction::CondFormatAdded { sheet_index: s, .. } => *s == sheet_index,
+        UndoAction::CondFormatsCleared { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::Values { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::Format { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::RowsInserted { sheet_index: s, .. } => *s == sheet_index,

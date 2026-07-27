@@ -509,6 +509,36 @@ pub(crate) fn handle_key_down(
         }
     }
 
+    // Handle Add Conditional Format mode
+    if this.mode == Mode::AddCondFormat {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                this.hide_add_cond_format(cx);
+                return;
+            }
+            "enter" => {
+                this.confirm_add_cond_format(cx);
+                return;
+            }
+            "backspace" => {
+                this.cf_input_backspace(cx);
+                return;
+            }
+            _ => {}
+        }
+        if let Some(key_char) = &event.keystroke.key_char {
+            if !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt
+                && !event.keystroke.modifiers.platform
+            {
+                for c in key_char.chars().filter(|c| !c.is_control()) {
+                    this.cf_input_insert_char(c, cx);
+                }
+            }
+        }
+        return; // Consume all keystrokes in this mode
+    }
+
     // Handle Create Named Range mode
     if this.mode == Mode::CreateNamedRange {
         match event.keystroke.key.as_str() {

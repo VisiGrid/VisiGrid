@@ -1,0 +1,448 @@
+//! Conditional formatting quick-add: the menuless authoring surface.
+//!
+//! Select a range, invoke "Add Conditional Format" (command palette or
+//! Format menu), type a rule, Enter. The rule text is:
+//!
+//!     =PREDICATE -> STYLE
+//!
+//! The target range is the selection at the moment the dialog opened.
+//! The predicate is a formula anchored at the selection's top-left cell
+//! (relative refs shift per cell, `$` refs don't — Excel semantics).
+//!
+//! STYLE is one of:
+//!   - a named style:  error | warning | success | input | total | note
+//!   - inline properties, comma-separated:
+//!       bold, italic, underline, strikethrough,
+//!       bg=#RRGGBB, fg=#RRGGBB
+//!   - like(A1) — copy the explicit formatting of a template cell
+//!     (snapshotted now, not tracked live)
+//!
+//! Examples:
+//!     =A1>100 -> warning
+//!     =$C1="overdue" -> bold, fg=#B71C1C, bg=#FDE2E2
+//!     =ISBLANK(A1) -> like(Z1)
+
+use gpui::Context;
+
+use visigrid_engine::cell::{CellFormat, CellFormatOverride, CellStyle};
+use visigrid_engine::cond_format::{CondFormatRule, CondStyle};
+use visigrid_engine::validation::CellRange;
+
+use crate::app::Spreadsheet;
+use crate::mode::Mode;
+
+// ============================================================================
+// Rule text parsing
+// ============================================================================
+
+/// Parse the style half of a rule ("warning", "bold, bg=#FFEB3B", "like(Z1)").
+/// `template_lookup` resolves a like() reference to the cell's explicit format.
+pub fn parse_style(
+    text: &str,
+    template_lookup: &dyn Fn(usize, usize) -> CellFormat,
+) -> Result<CondStyle, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Missing style after '->'".into());
+    }
+
+    // Named styles
+    let named = match text.to_ascii_lowercase().as_str() {
+        "error" => Some(CellStyle::Error),
+        "warning" => Some(CellStyle::Warning),
+        "success" => Some(CellStyle::Success),
+        "input" => Some(CellStyle::Input),
+        "total" => Some(CellStyle::Total),
+        "note" => Some(CellStyle::Note),
+        _ => None,
+    };
+    if let Some(style) = named {
+        return Ok(CondStyle::Named(style));
+    }
+
+    // like(REF)
+    let lower = text.to_ascii_lowercase();
+    if lower.starts_with("like(") && text.ends_with(')') {
+        let inner = &text[5..text.len() - 1];
+        let (row, col) = parse_cell_ref(inner.trim())
+            .ok_or_else(|| format!("Invalid cell reference in like(): '{}'", inner.trim()))?;
+        let format = template_lookup(row, col);
+        let snapshot = override_from_explicit(&format);
+        if snapshot == CellFormatOverride::default() {
+            return Err(format!("Template cell {} has no explicit formatting", inner.trim()));
+        }
+        return Ok(CondStyle::Like { source: (row, col), snapshot });
+    }
+
+    // Inline property list
+    let mut ov = CellFormatOverride::default();
+    for part in text.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let lower = part.to_ascii_lowercase();
+        match lower.as_str() {
+            "bold" => ov.bold = Some(true),
+            "italic" => ov.italic = Some(true),
+            "underline" => ov.underline = Some(true),
+            "strikethrough" => ov.strikethrough = Some(true),
+            _ => {
+                if let Some(hex) = lower.strip_prefix("bg=") {
+                    ov.background_color = Some(Some(parse_hex_color(hex)?));
+                } else if let Some(hex) = lower.strip_prefix("fg=") {
+                    ov.font_color = Some(Some(parse_hex_color(hex)?));
+                } else {
+                    return Err(format!(
+                        "Unknown style '{}' — use a named style (warning, error, …), \
+                         properties (bold, bg=#RRGGBB, fg=#RRGGBB), or like(A1)",
+                        part
+                    ));
+                }
+            }
+        }
+    }
+    if ov == CellFormatOverride::default() {
+        return Err("Style produced no formatting".into());
+    }
+    Ok(CondStyle::Inline(ov))
+}
+
+/// Parse a full rule line: "=PREDICATE -> STYLE".
+/// Returns (predicate, style).
+pub fn parse_rule_input(
+    input: &str,
+    template_lookup: &dyn Fn(usize, usize) -> CellFormat,
+) -> Result<(String, CondStyle), String> {
+    let input = input.trim();
+    let Some((pred, style_text)) = input.rsplit_once("->") else {
+        return Err("Expected: =PREDICATE -> STYLE  (e.g. =A1>100 -> warning)".into());
+    };
+    let pred = pred.trim();
+    if pred.is_empty() {
+        return Err("Missing predicate before '->'".into());
+    }
+    let pred = if pred.starts_with('=') {
+        pred.to_string()
+    } else {
+        format!("={}", pred)
+    };
+    // Validate the predicate parses as a formula now, so errors surface in
+    // the dialog instead of a silently-inert rule.
+    visigrid_engine::formula::parser::parse(&pred)
+        .map_err(|e| format!("Predicate error: {}", e))?;
+    let style = parse_style(style_text, template_lookup)?;
+    Ok((pred, style))
+}
+
+/// "#RRGGBB" or "RRGGBB" → RGBA (alpha 255).
+fn parse_hex_color(hex: &str) -> Result<[u8; 4], String> {
+    let hex = hex.trim().trim_start_matches('#');
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("Invalid color '#{}' — expected #RRGGBB", hex));
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).unwrap();
+    let g = u8::from_str_radix(&hex[2..4], 16).unwrap();
+    let b = u8::from_str_radix(&hex[4..6], 16).unwrap();
+    Ok([r, g, b, 255])
+}
+
+/// Parse an A1-style reference ("Z1", "$Z$1") into (row, col).
+fn parse_cell_ref(s: &str) -> Option<(usize, usize)> {
+    let s = s.replace('$', "");
+    let split = s.find(|c: char| c.is_ascii_digit())?;
+    let (col_part, row_part) = s.split_at(split);
+    if col_part.is_empty() || row_part.is_empty() {
+        return None;
+    }
+    let mut col = 0usize;
+    for c in col_part.chars() {
+        let c = c.to_ascii_uppercase();
+        if !c.is_ascii_uppercase() {
+            return None;
+        }
+        col = col * 26 + (c as usize - 'A' as usize + 1);
+    }
+    let row: usize = row_part.parse().ok()?;
+    if row == 0 {
+        return None;
+    }
+    Some((row - 1, col - 1))
+}
+
+/// Explicit (non-default) format properties of a cell, as an override.
+/// This is the like() snapshot: only what the user actually set.
+fn override_from_explicit(format: &CellFormat) -> CellFormatOverride {
+    let default = CellFormat::default();
+    let mut ov = CellFormatOverride::default();
+    macro_rules! diff {
+        ($field:ident) => {
+            if format.$field != default.$field {
+                ov.$field = Some(format.$field.clone());
+            }
+        };
+    }
+    diff!(bold);
+    diff!(italic);
+    diff!(underline);
+    diff!(strikethrough);
+    diff!(alignment);
+    diff!(vertical_alignment);
+    diff!(number_format);
+    diff!(font_family);
+    diff!(font_size);
+    diff!(font_color);
+    diff!(background_color);
+    diff!(cell_style);
+    ov
+}
+
+// ============================================================================
+// Dialog state + commit (Spreadsheet impl)
+// ============================================================================
+
+impl Spreadsheet {
+    /// Open the Add Conditional Format dialog for the current selection.
+    pub fn show_add_cond_format(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_editing() {
+            return;
+        }
+        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+        self.cf_target = vec![CellRange {
+            start_row: min_row,
+            start_col: min_col,
+            end_row: max_row,
+            end_col: max_col,
+        }];
+        self.cf_input.clear();
+        self.cf_input_error = None;
+        self.mode = Mode::AddCondFormat;
+        cx.notify();
+    }
+
+    pub fn hide_add_cond_format(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        self.cf_input.clear();
+        self.cf_input_error = None;
+        cx.notify();
+    }
+
+    pub fn cf_input_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        self.cf_input.push(c);
+        self.cf_input_error = None;
+        cx.notify();
+    }
+
+    pub fn cf_input_backspace(&mut self, cx: &mut Context<Self>) {
+        self.cf_input.pop();
+        self.cf_input_error = None;
+        cx.notify();
+    }
+
+    /// Parse the typed rule and add it to the active sheet.
+    pub fn confirm_add_cond_format(&mut self, cx: &mut Context<Self>) {
+        let input = self.cf_input.clone();
+        let sheet_index = self.sheet_index(cx);
+
+        // like() templates resolve against the active sheet's stored formats
+        let parsed = {
+            let sheet = self.sheet(cx);
+            let lookup = |row: usize, col: usize| sheet.get_format(row, col);
+            parse_rule_input(&input, &lookup)
+        };
+        let (predicate, style) = match parsed {
+            Ok(p) => p,
+            Err(e) => {
+                self.cf_input_error = Some(e);
+                cx.notify();
+                return;
+            }
+        };
+
+        let ranges = self.cf_target.clone();
+        let range_label = format_range_label(&ranges);
+        let mut added_id = 0u64;
+        self.wb_mut(cx, |wb| {
+            if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                added_id = sheet.cond_formats.add(ranges, predicate.clone(), style);
+            }
+        });
+
+        // Undoable: undo removes the rule, redo re-adds it
+        if let Some(rule) = self
+            .sheet(cx)
+            .cond_formats
+            .get(added_id)
+            .cloned()
+        {
+            self.history.record_action_with_provenance(
+                crate::history::UndoAction::CondFormatAdded { sheet_index, rule },
+                None,
+            );
+        }
+
+        self.is_modified = true;
+        self.status_message = Some(format!(
+            "Conditional format on {}: {} (Ctrl+Z to undo)",
+            range_label, predicate
+        ));
+        self.mode = Mode::Navigation;
+        self.cf_input.clear();
+        self.cf_input_error = None;
+        cx.notify();
+    }
+
+    /// Remove all conditional format rules that touch the current selection
+    /// (or all rules on the sheet when the selection covers everything).
+    pub fn clear_cond_formats_in_selection(&mut self, cx: &mut Context<Self>) {
+        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+        let sel = CellRange {
+            start_row: min_row,
+            start_col: min_col,
+            end_row: max_row,
+            end_col: max_col,
+        };
+        let sheet_index = self.sheet_index(cx);
+
+        let doomed: Vec<_> = self
+            .sheet(cx)
+            .cond_formats
+            .iter()
+            .filter(|r| r.ranges.iter().any(|range| range.overlaps(&sel)))
+            .cloned()
+            .collect();
+
+        if doomed.is_empty() {
+            self.status_message = Some("No conditional formats in selection".into());
+            cx.notify();
+            return;
+        }
+
+        self.wb_mut(cx, |wb| {
+            if let Some(sheet) = wb.sheet_mut(sheet_index) {
+                for rule in &doomed {
+                    sheet.cond_formats.remove(rule.id);
+                }
+            }
+        });
+
+        let count = doomed.len();
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::CondFormatsCleared {
+                sheet_index,
+                rules: doomed,
+            },
+            None,
+        );
+        self.is_modified = true;
+        self.status_message = Some(format!(
+            "Removed {} conditional format rule{}",
+            count,
+            if count == 1 { "" } else { "s" }
+        ));
+        cx.notify();
+    }
+}
+
+fn format_range_label(ranges: &[CellRange]) -> String {
+    ranges
+        .iter()
+        .map(|r| {
+            format!(
+                "{}{}:{}{}",
+                col_letter(r.start_col),
+                r.start_row + 1,
+                col_letter(r.end_col),
+                r.end_row + 1
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn col_letter(mut col: usize) -> String {
+    let mut s = String::new();
+    loop {
+        s.insert(0, (b'A' + (col % 26) as u8) as char);
+        if col < 26 {
+            break;
+        }
+        col = col / 26 - 1;
+    }
+    s
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn no_template(_r: usize, _c: usize) -> CellFormat {
+        CellFormat::default()
+    }
+
+    #[test]
+    fn parses_named_style_rule() {
+        let (pred, style) = parse_rule_input("=A1>100 -> warning", &no_template).unwrap();
+        assert_eq!(pred, "=A1>100");
+        assert_eq!(style, CondStyle::Named(CellStyle::Warning));
+    }
+
+    #[test]
+    fn parses_inline_style_rule() {
+        let (pred, style) =
+            parse_rule_input("A1>100 -> bold, bg=#FFEB3B, fg=#823C00", &no_template).unwrap();
+        assert_eq!(pred, "=A1>100", "leading = added when omitted");
+        let CondStyle::Inline(ov) = style else { panic!("expected inline") };
+        assert_eq!(ov.bold, Some(true));
+        assert_eq!(ov.background_color, Some(Some([255, 235, 59, 255])));
+        assert_eq!(ov.font_color, Some(Some([130, 60, 0, 255])));
+    }
+
+    #[test]
+    fn parses_like_rule_with_snapshot() {
+        let template = |_r: usize, _c: usize| {
+            let mut f = CellFormat::default();
+            f.bold = true;
+            f.background_color = Some([1, 2, 3, 255]);
+            f
+        };
+        let (_, style) = parse_rule_input("=ISBLANK(A1) -> like(Z1)", &template).unwrap();
+        let CondStyle::Like { source, snapshot } = style else { panic!("expected like") };
+        assert_eq!(source, (0, 25));
+        assert_eq!(snapshot.bold, Some(true));
+        assert_eq!(snapshot.background_color, Some(Some([1, 2, 3, 255])));
+        assert_eq!(snapshot.italic, None, "unset properties not snapshotted");
+    }
+
+    #[test]
+    fn arrow_inside_predicate_string_is_ok() {
+        // rsplit_once means a literal "->" inside the predicate text would
+        // mis-split; but ">" comparisons parse fine
+        let (pred, _) = parse_rule_input("=A1>-5 -> error", &no_template).unwrap();
+        assert_eq!(pred, "=A1>-5");
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(parse_rule_input("no arrow here", &no_template).is_err());
+        assert!(parse_rule_input("=A1>1 -> ", &no_template).is_err());
+        assert!(parse_rule_input(" -> warning", &no_template).is_err());
+        assert!(parse_rule_input("=A1>1 -> shiny", &no_template).is_err());
+        assert!(parse_rule_input("=A1>1 -> bg=#XYZXYZ", &no_template).is_err());
+        assert!(parse_rule_input("=SUM(( -> warning", &no_template).is_err());
+    }
+
+    #[test]
+    fn cell_ref_parsing() {
+        assert_eq!(parse_cell_ref("A1"), Some((0, 0)));
+        assert_eq!(parse_cell_ref("Z1"), Some((0, 25)));
+        assert_eq!(parse_cell_ref("AA10"), Some((9, 26)));
+        assert_eq!(parse_cell_ref("$B$2"), Some((1, 1)));
+        assert_eq!(parse_cell_ref("1A"), None);
+        assert_eq!(parse_cell_ref(""), None);
+    }
+}

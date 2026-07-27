@@ -117,6 +117,16 @@ pub enum UndoAction {
         kind: FormatActionKind,
         description: String,
     },
+    /// Conditional format rule added (undo removes it)
+    CondFormatAdded {
+        sheet_index: usize,
+        rule: visigrid_engine::cond_format::CondFormatRule,
+    },
+    /// Conditional format rules removed (undo re-adds them)
+    CondFormatsCleared {
+        sheet_index: usize,
+        rules: Vec<visigrid_engine::cond_format::CondFormatRule>,
+    },
     /// Named range deleted (for undo)
     NamedRangeDeleted {
         named_range: NamedRange,
@@ -313,6 +323,10 @@ impl UndoAction {
     /// Generate a human-readable label for this action.
     pub fn label(&self) -> String {
         match self {
+            UndoAction::CondFormatAdded { .. } => "Add conditional format".to_string(),
+            UndoAction::CondFormatsCleared { rules, .. } => {
+                format!("Clear {} conditional format{}", rules.len(), if rules.len() == 1 { "" } else { "s" })
+            }
             UndoAction::Values { changes, .. } => {
                 if changes.len() == 1 {
                     "Edit cell".to_string()
@@ -1353,6 +1367,20 @@ impl History {
         action: &UndoAction,
     ) -> Result<(), PreviewBuildError> {
         match action {
+            UndoAction::CondFormatAdded { sheet_index, rule } => {
+                if let Some(sheet) = workbook.sheet_mut(*sheet_index) {
+                    let mut r = rule.clone();
+                    r.reparse();
+                    sheet.cond_formats.insert_at(usize::MAX, r);
+                }
+            }
+            UndoAction::CondFormatsCleared { sheet_index, rules } => {
+                if let Some(sheet) = workbook.sheet_mut(*sheet_index) {
+                    for r in rules {
+                        sheet.cond_formats.remove(r.id);
+                    }
+                }
+            }
             UndoAction::Values { sheet_index, changes } => {
                 let sheet = workbook.sheet_mut(*sheet_index)
                     .ok_or_else(|| PreviewBuildError::InvariantViolation(
@@ -1529,6 +1557,8 @@ impl History {
 /// Classification of undo action types for replay support checking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoActionKind {
+    CondFormatAdded,
+    CondFormatsCleared,
     Values,
     Format,
     NamedRangeCreated,
@@ -1563,6 +1593,8 @@ impl UndoActionKind {
         match self {
             // Fully supported
             UndoActionKind::Values => true,
+            UndoActionKind::CondFormatAdded => true,
+            UndoActionKind::CondFormatsCleared => true,
             UndoActionKind::Format => true,
             UndoActionKind::NamedRangeCreated => true,
             UndoActionKind::NamedRangeDeleted => true,
@@ -1602,6 +1634,8 @@ impl UndoActionKind {
     pub fn display_name(&self) -> &'static str {
         match self {
             UndoActionKind::Values => "Edit",
+            UndoActionKind::CondFormatAdded => "Add conditional format",
+            UndoActionKind::CondFormatsCleared => "Clear conditional formats",
             UndoActionKind::Format => "Format",
             UndoActionKind::NamedRangeCreated => "Create named range",
             UndoActionKind::NamedRangeDeleted => "Delete named range",
@@ -1633,6 +1667,8 @@ impl UndoActionKind {
     /// Never reuse or change assigned values.
     pub fn tag(&self) -> u8 {
         match self {
+            UndoActionKind::CondFormatAdded => 0x18,
+            UndoActionKind::CondFormatsCleared => 0x19,
             UndoActionKind::Values => 0x01,
             UndoActionKind::Format => 0x02,
             UndoActionKind::NamedRangeCreated => 0x03,
@@ -1665,6 +1701,8 @@ impl UndoAction {
     /// Get the kind of this action for replay support checking
     pub fn kind(&self) -> UndoActionKind {
         match self {
+            UndoAction::CondFormatAdded { .. } => UndoActionKind::CondFormatAdded,
+            UndoAction::CondFormatsCleared { .. } => UndoActionKind::CondFormatsCleared,
             UndoAction::Values { .. } => UndoActionKind::Values,
             UndoAction::Format { .. } => UndoActionKind::Format,
             UndoAction::NamedRangeCreated { .. } => UndoActionKind::NamedRangeCreated,

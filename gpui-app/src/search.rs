@@ -78,6 +78,8 @@ pub enum CommandId {
     FindInCells,
     GoToStart,
     SelectAll,
+    AddConditionalFormat,
+    ClearConditionalFormats,
     SelectBlanks,
     SelectCurrentRegion,
     HideRows,
@@ -278,6 +280,8 @@ impl CommandId {
             Self::FindInCells => "Find in Cells",
             Self::GoToStart => "Go to Start (A1)",
             Self::SelectAll => "Select All",
+            Self::AddConditionalFormat => "Add Conditional Format Rule",
+            Self::ClearConditionalFormats => "Clear Conditional Formats in Selection",
             Self::SelectBlanks => "Select: Blanks in Region",
             Self::SelectCurrentRegion => "Select Current Region",
             Self::HideRows => "Hide Rows",
@@ -439,6 +443,8 @@ impl CommandId {
             Self::FindInCells => Some("Ctrl+F"),
             Self::GoToStart => Some("Ctrl+Home"),
             Self::SelectAll => Some("Ctrl+A"),
+            Self::AddConditionalFormat => None,
+            Self::ClearConditionalFormats => None,
             Self::SelectCurrentRegion => Some("Ctrl+Shift+*"),
             Self::HideRows => Some("Ctrl+9"),
             Self::UnhideRows => Some("Ctrl+Shift+9"),
@@ -513,6 +519,8 @@ impl CommandId {
             Self::FindInCells => "search",
             Self::GoToStart => "home beginning",
             Self::SelectAll => "selection",
+            Self::AddConditionalFormat => "conditional formatting highlight rule color if",
+            Self::ClearConditionalFormats => "conditional formatting remove clear rules",
             Self::SelectBlanks => "empty cells region selection",
             Self::SelectCurrentRegion => "select region contiguous data block table area ctrl shift star asterisk",
             Self::HideRows => "hide row invisible conceal",
@@ -674,6 +682,8 @@ impl CommandId {
             Self::FindInCells,
             Self::GoToStart,
             Self::SelectAll,
+            Self::AddConditionalFormat,
+            Self::ClearConditionalFormats,
             Self::SelectBlanks,
             Self::SelectCurrentRegion,
             Self::HideRows,
@@ -907,7 +917,9 @@ impl CommandId {
             | Self::BuildModelWithLua => Some(MenuCategory::Tools),
 
             // Format menu
-            Self::ToggleBold
+            Self::AddConditionalFormat
+            | Self::ClearConditionalFormats
+            | Self::ToggleBold
             | Self::ToggleItalic
             | Self::ToggleUnderline
             | Self::FormatCurrency

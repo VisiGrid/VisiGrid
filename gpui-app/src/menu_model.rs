@@ -15,6 +15,8 @@ use crate::mode::Menu;
 /// Prevents usize drift between item count and execution.
 #[derive(Clone, Copy)]
 pub enum MenuAction {
+    AddCondFormat,
+    ClearCondFormats,
     NewWorkbook, Open, Save, SaveAs,
     OpenCloud, MoveToCloud,
     ExportCsv, ExportTsv, ExportJson, ExportXlsx,
@@ -112,6 +114,9 @@ pub fn format_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Item { label: "Bold", shortcut: Some("Ctrl+B"), action: MenuAction::Bold, accel: Some('b') },
         MenuEntry::Item { label: "Italic", shortcut: Some("Ctrl+I"), action: MenuAction::Italic, accel: Some('i') },
         MenuEntry::Item { label: "Underline", shortcut: Some("Ctrl+U"), action: MenuAction::Underline, accel: Some('u') },
+        MenuEntry::Separator,
+        MenuEntry::Item { label: "Conditional Format...", shortcut: None, action: MenuAction::AddCondFormat, accel: Some('h') },
+        MenuEntry::Item { label: "Clear Conditional Formats", shortcut: None, action: MenuAction::ClearCondFormats, accel: Some('s') },
         MenuEntry::Separator,
         MenuEntry::Item { label: "Font...", shortcut: None, action: MenuAction::Font, accel: Some('f') },
         MenuEntry::Disabled("Cells..."),
@@ -260,6 +265,8 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::ShowFormulas => app.toggle_show_formulas(cx),
         MenuAction::ShowZeros => app.toggle_show_zeros(cx),
         MenuAction::FormatBar => app.toggle_format_bar(cx),
+        MenuAction::AddCondFormat => app.show_add_cond_format(cx),
+        MenuAction::ClearCondFormats => app.clear_cond_formats_in_selection(cx),
         MenuAction::Minimap => { app.minimap_visible = !app.minimap_visible; cx.notify(); }
         MenuAction::FreezeTopRow => app.freeze_top_row(cx),
         MenuAction::FreezeFirstCol => app.freeze_first_column(cx),
