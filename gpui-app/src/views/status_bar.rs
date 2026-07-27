@@ -140,9 +140,9 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                 // Multi-selection hint (context-aware)
                 .when(app.is_multi_selection(), |d| {
                     let hint = if editing {
-                        "Enter to apply · Esc to cancel"
+                        "Enter: this cell · Ctrl+Enter: apply to selection · Esc: cancel"
                     } else {
-                        "Type to edit all · Ctrl+Enter to fill"
+                        "Type to edit · Ctrl+Enter fills selection"
                     };
                     d.child(
                         div()

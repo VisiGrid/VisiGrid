@@ -653,7 +653,32 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Excel-style smart select-all: the first Ctrl+A inside a data block
+    /// selects the current region; a second press (or Ctrl+A outside any
+    /// data) selects the whole sheet.
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        let (row, col) = self.active_view_state().selected;
+        let (min_row, min_col, max_row, max_col) =
+            crate::ai::find_current_region(self.sheet(cx), row, col);
+        let region_is_multi = (min_row, min_col) != (max_row, max_col);
+        let region = ((min_row, min_col), (max_row, max_col));
+        let has_range = self.active_view_state().selection_end.is_some();
+        let current = self.selection_range();
+
+        if region_is_multi && !(has_range && current == region) {
+            let view_state = self.active_view_state_mut();
+            view_state.selected = (min_row, min_col);
+            view_state.selection_end = Some((max_row, max_col));
+            view_state.additional_selections.clear();
+            let rows = max_row - min_row + 1;
+            let cols = max_col - min_col + 1;
+            self.status_message = Some(format!(
+                "Selected region {}×{} — Ctrl+A again for whole sheet", rows, cols
+            ));
+            cx.notify();
+            return;
+        }
+
         let view_state = self.active_view_state_mut();
         view_state.selected = (0, 0);
         view_state.selection_end = Some((NUM_ROWS - 1, NUM_COLS - 1));

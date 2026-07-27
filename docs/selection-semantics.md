@@ -73,6 +73,17 @@ The behavioral contract users rely on. Not implementation, not keybindings—the
 2. Ctrl+End: move to last used cell in sheet
 3. Collapse selection
 
+### Ctrl+A (Smart Select All)
+1. If the active cell is inside a multi-cell data region AND the current
+   selection is not already exactly that region: select the current region
+   (contiguous data block around the active cell)
+2. Otherwise (second press, or active cell not in a data block): select the
+   whole sheet
+3. Either form clears additional selections
+
+This matches Excel: first Ctrl+A grabs the table you're in, second grabs
+everything.
+
 ---
 
 ## Selection Expansion Rules
@@ -140,6 +151,28 @@ The behavioral contract users rely on. Not implementation, not keybindings—the
 | Shift+Tab | Commit edit, move left |
 | Escape | Cancel edit, restore original value |
 | Click another cell | Commit edit, select clicked cell |
+
+### Editing with a Multi-Cell Selection
+
+Typing with a multi-cell selection edits the **active cell**. The grid may
+preview the value across the selection, but commit scope is explicit:
+
+| Action | Result |
+|--------|--------|
+| Enter / Shift+Enter | Commit **active cell only**, move down/up (collapses selection) |
+| Tab / Shift+Tab | Commit **active cell only**, move right/left (collapses selection) |
+| Ctrl+Enter | Apply value to **every selected cell** (relative refs shift per cell; one undo step) |
+| Escape | Cancel, nothing committed |
+
+Plain Enter must never write to more than one cell. Applying to the whole
+selection is always the explicit Ctrl+Enter gesture — a stray keystroke
+after Ctrl+A must not be able to rewrite the sheet.
+
+> **Deferred (needs active-cell/anchor decoupling):** Excel's Enter-cycling
+> — Enter moving the active cell *within* a preserved selection — requires
+> an active cell distinct from the selection anchor, which the current
+> model doesn't have. When that lands, Enter in a multi-selection should
+> cycle instead of collapsing.
 
 ### Formula Mode Special Behavior
 
@@ -227,3 +260,6 @@ We do **not** support:
 ## Version History
 
 - **v1** (2026-01): Initial specification based on Excel compatibility
+- **v1.1** (2026-07): Smart Ctrl+A (current region first, sheet second);
+  multi-selection editing commits active cell only on Enter — selection-wide
+  apply is exclusively Ctrl+Enter (VisiGrid/VisiGrid#5 data-loss report)

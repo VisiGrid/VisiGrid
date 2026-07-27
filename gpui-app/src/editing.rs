@@ -212,12 +212,11 @@ impl Spreadsheet {
     /// In Mode::Edit (non-formula): Arrow keys commit the edit and move selection.
     /// In Mode::Formula: Arrow keys do ref-picking (Option A), NOT commit.
     pub fn confirm_edit(&mut self, cx: &mut Context<Self>) {
-        // Multi-edit: If multiple cells selected, apply to all (the "wow" moment)
-        if self.is_multi_selection() {
-            self.confirm_edit_in_place(cx);
-        } else {
-            self.confirm_edit_and_move(1, 0, cx);  // Enter moves down
-        }
+        // Excel semantics: Enter commits ONLY the active cell, even with a
+        // multi-cell selection. Applying to the whole selection is the
+        // explicit Ctrl+Enter path (confirm_edit_in_place) — plain Enter
+        // one keystroke after Ctrl+A must never rewrite the sheet (#5).
+        self.confirm_edit_and_move(1, 0, cx);  // Enter moves down
     }
 
     /// Commit edit and move up (Shift+Enter, or Up arrow in Edit mode)
@@ -792,12 +791,6 @@ impl Spreadsheet {
     /// to the origin column on the next row instead of staying in the current
     /// column. This matches Excel's Tab-chain return behavior.
     pub fn confirm_edit_enter(&mut self, cx: &mut Context<Self>) {
-        if self.is_multi_selection() && self.mode.is_editing() {
-            self.tab_chain_origin_col = None;
-            self.confirm_edit_in_place(cx);
-            return;
-        }
-
         if let Some(origin_col) = self.tab_chain_origin_col.take() {
             // Commit the edit if currently editing
             self.commit_current_edit(cx);
