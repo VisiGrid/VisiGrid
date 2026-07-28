@@ -281,7 +281,7 @@ fn print_help() {
     eprintln!("    -n, --no-restore     Skip session restore (start fresh, session preserved)");
     eprintln!("    --reset-session      Delete session file and start fresh");
     eprintln!("    --dump-session       Print session JSON to stdout and exit");
-    eprintln!("    --session-server     Enable session server on startup (for CI/automation)");
+    eprintln!("    --no-session-server  Disable the local control socket (agents/CLI pair via approval dialog)");
     eprintln!("    -h, --help           Print this help message");
     eprintln!();
     eprintln!("ARGS:");
@@ -293,7 +293,7 @@ fn parse_args() -> CliArgs {
     let mut cli = CliArgs {
         no_restore: false,
         files: Vec::new(),
-        session_server: false,
+        session_server: true,
     };
 
     let mut i = 1;
@@ -318,8 +318,12 @@ fn parse_args() -> CliArgs {
                 cli.no_restore = true;
             }
             "--session-server" => {
-                // Enable session server on startup (for CI/automation)
+                // Default since v0.14; kept as a no-op for scripts that pass it
                 cli.session_server = true;
+            }
+            "--no-session-server" => {
+                // Opt out of the agent/CLI control socket for this launch
+                cli.session_server = false;
             }
             arg if !arg.starts_with('-') => {
                 cli.files.push(arg.to_string());
