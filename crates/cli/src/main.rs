@@ -2317,9 +2317,48 @@ fn cmd_convert(
     };
 
     // Validate --sheet is only used with multi-sheet formats
-    if sheet_arg.is_some() && !matches!(input_format, Format::Xlsx | Format::Sheet) {
+    if sheet_arg.is_some() && !matches!(input_format, Format::Xlsx | Format::Sheet | Format::JsonFull) {
         return Err(CliError::args("--sheet is not supported for single-sheet formats")
-            .with_hint("--sheet works with .sheet and .xlsx files"));
+            .with_hint("--sheet works with .sheet, .xlsx, and json-full inputs"));
+    }
+
+    // Full-fidelity passthrough: json-full in, json-full out, no reshaping.
+    // Recomputes all formulas and preserves every sheet, layout side-car,
+    // and the active-sheet index — the server-side recalc primitive
+    // (blob in, recomputed blob out). Workbook-form inputs stay workbook
+    // form; single-sheet inputs stay version 1.
+    if matches!(input_format, Format::JsonFull)
+        && matches!(to, Format::JsonFull)
+        && sheet_arg.is_none()
+        && where_clauses.is_empty()
+        && select_args.is_empty()
+        && rename.is_none()
+    {
+        let content = match &input {
+            Some(path) => std::fs::read_to_string(path).map_err(|e| CliError::io(e.to_string()))?,
+            None => {
+                let mut buf = String::new();
+                io::stdin().read_to_string(&mut buf).map_err(|e| CliError::io(e.to_string()))?;
+                buf
+            }
+        };
+        let workbook_form = visigrid_io::json::is_workbook_form(&content);
+        let (wb, layouts, active) = visigrid_io::json::import_any(&content).map_err(CliError::io)?;
+        let out = if workbook_form {
+            visigrid_io::json::export_workbook(&wb, &layouts, active).map_err(CliError::io)?
+        } else {
+            visigrid_io::json::export_full_with_layout(&wb.sheets()[active], &layouts[active])
+                .map_err(CliError::io)?
+        };
+        match &output {
+            Some(path) => std::fs::write(path, out.as_bytes()).map_err(|e| CliError::io(e.to_string()))?,
+            None => {
+                let mut stdout = io::stdout();
+                stdout.write_all(out.as_bytes()).and_then(|_| stdout.write_all(b"\n"))
+                    .map_err(|e| CliError::io(e.to_string()))?;
+            }
+        }
+        return Ok(());
     }
 
     // Read input into sheet (convert always starts at A1)
@@ -2580,7 +2619,14 @@ fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_arg: Option
         Format::JsonFull => {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| CliError::io(e.to_string()))?;
-            return visigrid_io::json::import_full(&content).map_err(CliError::io);
+            let (workbook, _, active) = visigrid_io::json::import_any(&content).map_err(CliError::io)?;
+            return match sheet_arg {
+                Some(_) => {
+                    let (_, sheet) = resolve_sheet(&workbook, sheet_arg)?;
+                    Ok(sheet.clone())
+                }
+                None => Ok(workbook.sheets()[active].clone()),
+            };
         }
         Format::Json => {
             let content = std::fs::read_to_string(path)

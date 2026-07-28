@@ -407,6 +407,15 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
     }
 }
 
+/// Cheap check: is this a workbook-form (version 2) document?
+/// Used by callers that want to preserve the input's form on re-export.
+pub fn is_workbook_form(content: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|v| v.get("sheets").map(|s| s.is_array() && !s.as_array().unwrap().is_empty()))
+        .unwrap_or(false)
+}
+
 /// Import visigrid-json into a Sheet (formulas recomputed). Accepts both
 /// forms; workbook-form documents yield the active sheet.
 pub fn import_full(content: &str) -> Result<Sheet, String> {
