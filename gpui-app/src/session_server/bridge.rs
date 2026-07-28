@@ -49,11 +49,26 @@ pub mod oneshot {
 pub struct SessionBridgeHandle {
     /// Channel for sending requests to the engine thread.
     pub tx: mpsc::Sender<SessionRequest>,
+    /// Wakes the GUI main thread after enqueueing a request. Without this,
+    /// requests are only drained at the start of a render frame — and an
+    /// unfocused window renders no frames, so the bridge would sit dead
+    /// until the user interacts (30s client timeouts).
+    waker: Option<smol::channel::Sender<()>>,
 }
 
 impl SessionBridgeHandle {
     pub fn new(tx: mpsc::Sender<SessionRequest>) -> Self {
-        Self { tx }
+        Self { tx, waker: None }
+    }
+
+    pub fn new_with_waker(tx: mpsc::Sender<SessionRequest>, waker: smol::channel::Sender<()>) -> Self {
+        Self { tx, waker: Some(waker) }
+    }
+
+    fn wake(&self) {
+        if let Some(w) = &self.waker {
+            let _ = w.try_send(());
+        }
     }
 
     /// Send an apply_ops request and wait for the response.
@@ -62,6 +77,7 @@ impl SessionBridgeHandle {
         self.tx
             .send(SessionRequest::ApplyOps { req, reply: reply_tx })
             .map_err(|_| BridgeError::ChannelClosed)?;
+        self.wake();
         reply_rx.blocking_recv().map_err(|_| BridgeError::ChannelClosed)
     }
 
@@ -71,6 +87,7 @@ impl SessionBridgeHandle {
         self.tx
             .send(SessionRequest::Inspect { req, reply: reply_tx })
             .map_err(|_| BridgeError::ChannelClosed)?;
+        self.wake();
         reply_rx.blocking_recv().map_err(|_| BridgeError::ChannelClosed)
     }
 
@@ -80,6 +97,7 @@ impl SessionBridgeHandle {
         self.tx
             .send(SessionRequest::Subscribe { req, reply: reply_tx })
             .map_err(|_| BridgeError::ChannelClosed)?;
+        self.wake();
         reply_rx.blocking_recv().map_err(|_| BridgeError::ChannelClosed)
     }
 
@@ -89,6 +107,7 @@ impl SessionBridgeHandle {
         self.tx
             .send(SessionRequest::Unsubscribe { req, reply: reply_tx })
             .map_err(|_| BridgeError::ChannelClosed)?;
+        self.wake();
         reply_rx.blocking_recv().map_err(|_| BridgeError::ChannelClosed)
     }
 }

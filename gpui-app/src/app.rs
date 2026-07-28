@@ -3892,7 +3892,29 @@ impl Spreadsheet {
         token_override: Option<String>,
         cx: &mut Context<Self>,
     ) -> std::io::Result<()> {
-        let bridge = self.session_bridge_handle();
+        // Waker: the bridge pings this channel after enqueueing a request and
+        // this task drains immediately. Without it, requests are only drained
+        // at the start of a render frame — an unfocused window renders no
+        // frames, so the bridge would sit dead until the user interacts.
+        let (waker_tx, waker_rx) = smol::channel::unbounded::<()>();
+        cx.spawn(async move |this, cx| {
+            while waker_rx.recv().await.is_ok() {
+                while waker_rx.try_recv().is_ok() {} // coalesce bursts
+                let alive = this.update(cx, |app, cx| {
+                    app.drain_session_requests(cx);
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break; // entity dropped
+                }
+            }
+        })
+        .detach();
+
+        let bridge = crate::session_server::SessionBridgeHandle::new_with_waker(
+            self.session_request_tx.clone(),
+            waker_tx,
+        );
         let workbook_path = self.current_file.clone();
         let workbook_title = self.document_meta.display_name.clone();
 
