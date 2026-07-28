@@ -1872,6 +1872,15 @@ pub const NUM_COLS: usize = 256;
 /// telling them to split larger ranges.
 pub const MAX_SESSION_FORMAT_CELLS: usize = 250_000;
 
+/// A pending pairing approval dialog: a client asked to control this
+/// workbook and the user hasn't answered yet.
+pub struct PairingPrompt {
+    /// Sanitized client name to display.
+    pub client_name: String,
+    /// Reply channel back to the TCP thread (true = approve).
+    pub reply: Option<crate::session_server::bridge::oneshot::Sender<bool>>,
+}
+
 /// Validate one session-protocol op against the workbook's sheet list and the
 /// governing grid bounds. Returns (code, message, suggestion) on failure.
 /// Called for every op BEFORE any op is applied — a failure here rejects the
@@ -2920,6 +2929,8 @@ pub struct Spreadsheet {
     /// Sender for session requests (cloned to give to server).
     /// Kept here so we can create bridge handles on demand.
     session_request_tx: std::sync::mpsc::Sender<crate::session_server::SessionRequest>,
+    /// Pending pairing approval dialog (client name + reply channel).
+    pub pairing_prompt: Option<PairingPrompt>,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -3372,6 +3383,7 @@ impl Spreadsheet {
             // Session server: initialized below
             session_server: session_server,
             session_request_rx: session_rx,
+            pairing_prompt: None,
             session_request_tx: session_tx,
         };
 
@@ -3583,6 +3595,16 @@ impl Spreadsheet {
                         current_revision: self.workbook.read(cx).revision(),
                     });
                 }
+                SessionRequest::Pair { client_name, reply } => {
+                    if self.pairing_prompt.is_some() {
+                        // One dialog at a time; the server also gates this,
+                        // but a race between two servers' requests lands here.
+                        let _ = reply.send(false);
+                    } else {
+                        self.pairing_prompt = Some(PairingPrompt { client_name, reply: Some(reply) });
+                        cx.notify();
+                    }
+                }
                 SessionRequest::Unsubscribe { req, reply } => {
                     // TODO: Implement unsubscription
                     let _ = reply.send(UnsubscribeResponse {
@@ -3590,6 +3612,23 @@ impl Spreadsheet {
                     });
                 }
             }
+        }
+    }
+
+    /// Resolve the pending pairing dialog. `approve` = user clicked Allow.
+    /// The TCP thread persists the credential and replies to the client;
+    /// if it already timed out, the send fails silently — dialog just closes.
+    pub fn respond_pairing(&mut self, approve: bool, cx: &mut Context<Self>) {
+        if let Some(mut prompt) = self.pairing_prompt.take() {
+            if let Some(reply) = prompt.reply.take() {
+                let _ = reply.send(approve);
+            }
+            self.status_message = Some(if approve {
+                format!("Paired \"{}\" — it can now control this workbook (revoke: vgrid pair --revoke)", prompt.client_name)
+            } else {
+                format!("Denied pairing request from \"{}\"", prompt.client_name)
+            });
+            cx.notify();
         }
     }
 

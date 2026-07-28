@@ -35,6 +35,7 @@ pub enum ClientMessage {
 
     /// Request server stats (for diagnostics).
     Stats(StatsMessage),
+    PairRequest(PairRequestMessage),
 }
 
 /// Messages from server to client.
@@ -67,6 +68,26 @@ pub enum ServerMessage {
 
     /// Error response.
     Error(ErrorMessage),
+    PairResult(PairResultMessage),
+}
+
+/// Request to pair a new client (pre-authentication). Mirror of the
+/// visigrid-protocol copy — keep in lockstep.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairRequestMessage {
+    pub id: String,
+    pub client_name: String,
+    pub client_version: String,
+}
+
+/// Response to a pair_request. Mirror of the visigrid-protocol copy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairResultMessage {
+    pub id: String,
+    pub approved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    pub message: String,
 }
 
 // ============================================================================

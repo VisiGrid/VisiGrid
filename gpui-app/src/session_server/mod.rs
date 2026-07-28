@@ -9,7 +9,7 @@
 //!
 //! See: docs/future/phase-1-session-server.md
 
-mod bridge;
+pub mod bridge;
 mod coalesce;
 mod discovery;
 mod events;

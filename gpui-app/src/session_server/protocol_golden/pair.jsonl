@@ -1,0 +1,4 @@
+{"type":"pair_request","id":"pair-1","client_name":"Claude Code","client_version":"0.13.0"}
+{"type":"pair_result","id":"pair-1","approved":true,"token":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","message":"approved"}
+{"type":"pair_result","id":"pair-2","approved":false,"message":"denied by user"}
+{"type":"pair_result","id":"pair-3","approved":false,"message":"timed out waiting for approval"}

@@ -25,6 +25,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod paired;
+
 /// Current protocol version. Increment for breaking changes.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -43,6 +45,19 @@ pub enum ClientMessage {
     Subscribe(SubscribeMessage),
     Unsubscribe(UnsubscribeMessage),
     Stats(StatsMessage),
+    PairRequest(PairRequestMessage),
+}
+
+/// Request to pair a new client (pre-authentication). The GUI shows an
+/// approval dialog; on approval the server issues a persistent token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairRequestMessage {
+    /// Request ID for correlation.
+    pub id: String,
+    /// Human-readable client name shown in the approval dialog.
+    pub client_name: String,
+    /// Client version string.
+    pub client_version: String,
 }
 
 /// Initial handshake from client.
@@ -189,6 +204,21 @@ pub enum ServerMessage {
     Unsubscribed(UnsubscribedMessage),
     Event(EventMessage),
     StatsResult(StatsResultMessage),
+    PairResult(PairResultMessage),
+}
+
+/// Response to a pair_request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairResultMessage {
+    /// Echoed request ID.
+    pub id: String,
+    /// Whether the user approved the pairing.
+    pub approved: bool,
+    /// The issued bearer token (present only when approved).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Human-readable outcome ("approved", "denied by user", "timed out").
+    pub message: String,
 }
 
 /// Welcome response after successful hello.

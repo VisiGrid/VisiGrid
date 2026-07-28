@@ -6,6 +6,7 @@ pub mod command_palette;
 pub(crate) mod context_menu;
 mod cycle_banner;
 mod hub_dialogs;
+mod pairing_dialog;
 mod export_report_dialog;
 mod filter_dropdown;
 mod find_dialog;
@@ -101,6 +102,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_keytips = app.keytips_active;
     let show_rewind_confirm = app.rewind_confirm.visible;
     let show_rewind_success = app.rewind_success.visible;
+    let show_pairing_prompt = app.pairing_prompt.is_some();
     let show_cycle_banner = app.cycle_banner.visible;
     let show_merge_confirm = app.merge_confirm.visible;
     let show_close_confirm = app.close_confirm_visible;
@@ -766,6 +768,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_rewind_success, |div| {
             div.child(rewind_dialogs::render_rewind_success_banner(app, cx))
+        })
+        .when(show_pairing_prompt, |div| {
+            div.child(pairing_dialog::render_pairing_dialog(app, cx))
         })
         .when(show_cycle_banner, |div| {
             div.child(cycle_banner::render_cycle_banner(app, cx))

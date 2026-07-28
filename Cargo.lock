@@ -7540,6 +7540,7 @@ dependencies = [
  "visigrid-engine",
  "visigrid-io",
  "visigrid-license",
+ "visigrid-protocol",
  "which 7.0.3",
  "windows-sys 0.59.0",
  "winresource",
@@ -7599,6 +7600,8 @@ dependencies = [
 name = "visigrid-protocol"
 version = "0.13.0"
 dependencies = [
+ "dirs 6.0.0",
+ "rand 0.8.7",
  "serde",
  "serde_json",
 ]

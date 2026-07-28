@@ -524,6 +524,21 @@ fn run_listener(
     }
 }
 
+/// True while a pairing approval dialog is pending — one at a time
+/// process-wide so a local process can't stack prompts.
+static PAIRING_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Clamp a client-supplied name to something safe to render in a dialog.
+fn sanitize_client_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(60)
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() { "Unknown client".to_string() } else { trimmed.to_string() }
+}
+
 /// Handle a single client connection.
 fn handle_connection(
     mut stream: TcpStream,
@@ -598,11 +613,65 @@ fn handle_connection(
             }
         };
 
-        // First message must be Hello
+        // First message must be Hello (or a pre-auth pairing request)
         if !authenticated {
             match msg {
+                ClientMessage::PairRequest(pair) => {
+                    // Pre-auth by design: pairing is how a client GETS a
+                    // token. The user's approval dialog is the gate. One
+                    // dialog at a time process-wide, so a hostile local
+                    // process can't stack prompts.
+                    if PAIRING_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+                        send_error(&mut stream, Some(pair.id), ProtocolError::RateLimited)?;
+                        return Ok(());
+                    }
+                    let name = sanitize_client_name(&pair.client_name);
+                    let decision = bridge.pair(name.clone(), std::time::Duration::from_secs(120));
+                    PAIRING_IN_PROGRESS.store(false, Ordering::SeqCst);
+
+                    let response = match decision {
+                        Ok(true) => match visigrid_protocol::paired::approve_client(&name) {
+                            Ok(token) => ServerMessage::PairResult(PairResultMessage {
+                                id: pair.id,
+                                approved: true,
+                                token: Some(token),
+                                message: "approved".to_string(),
+                            }),
+                            Err(e) => {
+                                log::error!("Failed to persist paired client: {}", e);
+                                ServerMessage::PairResult(PairResultMessage {
+                                    id: pair.id,
+                                    approved: false,
+                                    token: None,
+                                    message: "failed to store credential".to_string(),
+                                })
+                            }
+                        },
+                        Ok(false) => ServerMessage::PairResult(PairResultMessage {
+                            id: pair.id,
+                            approved: false,
+                            token: None,
+                            message: "denied by user".to_string(),
+                        }),
+                        Err(_) => ServerMessage::PairResult(PairResultMessage {
+                            id: pair.id,
+                            approved: false,
+                            token: None,
+                            message: "timed out waiting for approval".to_string(),
+                        }),
+                    };
+                    send_message(&mut stream, &response)?;
+                    // Pairing connections are single-purpose; client
+                    // reconnects with hello + the issued token.
+                    return Ok(());
+                }
                 ClientMessage::Hello(hello) => {
-                    if hello.token != expected_token {
+                    // Accept the per-launch session token or any paired
+                    // client token (re-read from disk each attempt so
+                    // revocation applies without a GUI restart).
+                    let token_ok = hello.token == expected_token
+                        || visigrid_protocol::paired::verify_paired_token(&hello.token).is_some();
+                    if !token_ok {
                         send_error(&mut stream, Some(hello.id), ProtocolError::AuthFailed)?;
                         return Ok(());
                     }
@@ -668,6 +737,7 @@ fn handle_message_with_rate_limit(
         ClientMessage::Inspect(i) => Some(i.id.clone()),
         ClientMessage::Ping(p) => Some(p.id.clone()),
         ClientMessage::Stats(s) => Some(s.id.clone()),
+        ClientMessage::PairRequest(p) => Some(p.id.clone()),
     };
 
     // Check rate limit based on message type
@@ -679,6 +749,7 @@ fn handle_message_with_rate_limit(
         ClientMessage::Inspect(_) => rate_limiter.try_inspect(),
         ClientMessage::Ping(_) => rate_limiter.try_ping(),
         ClientMessage::Stats(_) => rate_limiter.try_ping(), // Stats is cheap like ping
+        ClientMessage::PairRequest(_) => Ok(()), // handled pre-auth; post-auth arm rejects below
     };
 
     if let Err(e) = rate_check {
@@ -816,6 +887,12 @@ fn handle_message(
                 }),
             }
         }
+        ClientMessage::PairRequest(pair) => ServerMessage::Error(ErrorMessage {
+            id: Some(pair.id),
+            code: "bad_request".to_string(),
+            message: "pair_request is only valid before authentication".to_string(),
+            retry_after_ms: None,
+        }),
         ClientMessage::Ping(ping) => ServerMessage::Pong(PongMessage { id: ping.id }),
         ClientMessage::Stats(stats) => ServerMessage::StatsResult(StatsResultMessage {
             id: stats.id,

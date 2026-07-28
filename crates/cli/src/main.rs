@@ -398,17 +398,45 @@ Examples:
         json: bool,
     },
 
+    /// Pair this machine's tools with a running VisiGrid (GUI approval)
+    #[command(after_help = "\
+Pairing stores a persistent credential so vgrid and vgrid mcp connect
+without tokens. Approve the dialog in the VisiGrid window.
+
+Examples:
+  vgrid pair
+  vgrid pair --name \"Claude Code\"
+  vgrid pair --list
+  vgrid pair --revoke \"Claude Code\"")]
+    Pair {
+        /// Session ID (prefix match supported; auto-selects if only one session)
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Client name shown in the approval dialog and paired-clients list
+        #[arg(long, default_value = "vgrid CLI")]
+        name: String,
+
+        /// List paired clients
+        #[arg(long)]
+        list: bool,
+
+        /// Revoke a paired client by name
+        #[arg(long)]
+        revoke: Option<String>,
+    },
+
     /// Serve MCP (Model Context Protocol) over stdio for AI agents
     #[command(after_help = "\
 Bridges an MCP host (Claude Code, Claude Desktop) to a running VisiGrid
-session. Requires VISIGRID_SESSION_TOKEN in the host's env config.
+session. First use triggers a pairing approval dialog in the VisiGrid
+window; the credential persists until revoked (vgrid pair --revoke).
 
 Claude Code setup:
-  claude mcp add visigrid -e VISIGRID_SESSION_TOKEN=xxx -- vgrid mcp
+  claude mcp add visigrid -- vgrid mcp
 
 .mcp.json:
-  {\"mcpServers\": {\"visigrid\": {\"command\": \"vgrid\", \"args\": [\"mcp\"],
-    \"env\": {\"VISIGRID_SESSION_TOKEN\": \"xxx\"}}}}")]
+  {\"mcpServers\": {\"visigrid\": {\"command\": \"vgrid\", \"args\": [\"mcp\"]}}}")]
     Mcp {
         /// Session ID to target (prefix match; default: auto-select / per-call argument)
         #[arg(long)]
@@ -1869,6 +1897,7 @@ fn main() -> ExitCode {
             cmd_apply(ops, session, atomic, expected_revision, wait, wait_timeout)
         }
         Some(Commands::Inspect { range, session, sheet, json }) => cmd_inspect(range, session, sheet, json),
+        Some(Commands::Pair { session, name, list, revoke }) => cmd_pair(session, name, list, revoke),
         Some(Commands::Mcp { session }) => mcp::cmd_mcp(session),
         Some(Commands::Stats { session, json }) => cmd_stats(session, json),
         Some(Commands::View { session, range, sheet, follow, width }) => {
@@ -2196,7 +2225,7 @@ impl CliError {
                 Some("is VisiGrid GUI running with session server enabled?".to_string())
             }
             session::SessionError::AuthFailed(_) => {
-                Some("check VISIGRID_SESSION_TOKEN environment variable".to_string())
+                Some("re-pair with 'vgrid pair' (or check VISIGRID_SESSION_TOKEN if set)".to_string())
             }
             session::SessionError::ServerError { code: err_code, .. }
                 if err_code == "writer_conflict" =>
@@ -5463,11 +5492,51 @@ fn resolve_session(session_id: Option<&str>) -> Result<session::DiscoveryFile, C
     }
 }
 
-/// Get session token from environment variable.
+/// Get session token: VISIGRID_SESSION_TOKEN env var, else the credential
+/// stored by `vgrid pair`.
 fn get_session_token() -> Result<String, CliError> {
-    std::env::var("VISIGRID_SESSION_TOKEN")
-        .map_err(|_| CliError::args("VISIGRID_SESSION_TOKEN environment variable not set")
-            .with_hint("copy the token from VisiGrid GUI session panel and set: export VISIGRID_SESSION_TOKEN=xxx"))
+    if let Ok(tok) = std::env::var("VISIGRID_SESSION_TOKEN") {
+        return Ok(tok);
+    }
+    if let Some(cred) = visigrid_protocol::paired::load_client_credential() {
+        return Ok(cred.token);
+    }
+    Err(CliError::args("no session credential found")
+        .with_hint("run 'vgrid pair' to pair with the running VisiGrid (or set VISIGRID_SESSION_TOKEN)"))
+}
+
+/// `vgrid pair` — pair with a running session, or manage paired clients.
+fn cmd_pair(session_id: Option<String>, name: String, list: bool, revoke: Option<String>) -> Result<(), CliError> {
+    use visigrid_protocol::paired;
+
+    if list {
+        let clients = paired::load_paired_clients();
+        if clients.is_empty() {
+            println!("No paired clients.");
+        } else {
+            for c in clients {
+                println!("{}  (paired_at unix {})", c.name, c.paired_at);
+            }
+        }
+        return Ok(());
+    }
+    if let Some(name) = revoke {
+        return if paired::revoke_client(&name).map_err(|e| CliError::io(e.to_string()))? {
+            println!("Revoked '{}'. Takes effect on that client's next connection.", name);
+            Ok(())
+        } else {
+            Err(CliError::args(format!("no paired client named '{}'", name))
+                .with_hint("list paired clients with: vgrid pair --list"))
+        };
+    }
+
+    let discovery = resolve_session(session_id.as_deref())?;
+    eprintln!("Requesting pairing as \"{}\" — approve in the VisiGrid window...", name);
+    let token = session::pair(&discovery, &name).map_err(CliError::session)?;
+    paired::store_client_credential(&name, &token)
+        .map_err(|e| CliError::io(format!("pairing approved but storing credential failed: {}", e)))?;
+    println!("Paired. Credential stored; vgrid and vgrid mcp will use it automatically.");
+    Ok(())
 }
 
 // =============================================================================

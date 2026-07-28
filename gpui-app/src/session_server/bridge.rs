@@ -32,6 +32,10 @@ pub mod oneshot {
         pub fn blocking_recv(self) -> Result<T, RecvError> {
             self.0.recv().map_err(|_| RecvError)
         }
+
+        pub fn blocking_recv_timeout(self, timeout: std::time::Duration) -> Result<T, RecvError> {
+            self.0.recv_timeout(timeout).map_err(|_| RecvError)
+        }
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -91,6 +95,18 @@ impl SessionBridgeHandle {
         reply_rx.blocking_recv().map_err(|_| BridgeError::ChannelClosed)
     }
 
+    /// Send a pairing request and wait (bounded) for the user's decision.
+    /// The timeout covers the human thinking about the dialog — generous,
+    /// but bounded so an abandoned dialog can't wedge the TCP thread.
+    pub fn pair(&self, client_name: String, timeout: std::time::Duration) -> Result<bool, BridgeError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(SessionRequest::Pair { client_name, reply: reply_tx })
+            .map_err(|_| BridgeError::ChannelClosed)?;
+        self.wake();
+        reply_rx.blocking_recv_timeout(timeout).map_err(|_| BridgeError::ChannelClosed)
+    }
+
     /// Send a subscribe request (fire-and-forget for now).
     pub fn subscribe(&self, req: SubscribeRequest) -> Result<SubscribeResponse, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -140,6 +156,11 @@ pub enum SessionRequest {
     Unsubscribe {
         req: UnsubscribeRequest,
         reply: oneshot::Sender<UnsubscribeResponse>,
+    },
+    /// Ask the user to approve pairing a new client. Reply true = approved.
+    Pair {
+        client_name: String,
+        reply: oneshot::Sender<bool>,
     },
 }
 

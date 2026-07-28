@@ -6,9 +6,10 @@
 //! stdio; each tool call opens a short-lived TCP connection to the session
 //! server, so a stale GUI restart never wedges the bridge.
 //!
-//! Auth: the session token comes from VISIGRID_SESSION_TOKEN (set it in the
-//! MCP host's env config; the GUI session panel shows the token). Pairing
-//! flow is planned to replace this — see planning/visigrid/features/mcp-v1.md.
+//! Auth, in order: VISIGRID_SESSION_TOKEN env override → the credential
+//! stored by pairing → interactive pairing (the GUI shows an approval
+//! dialog; on approval a persistent token is issued and stored). See
+//! planning/visigrid/features/mcp-v1.md.
 
 use std::io::{BufRead, Write};
 
@@ -28,7 +29,7 @@ pub fn cmd_mcp(session_id: Option<String>) -> Result<(), CliError> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
-    let mut server = McpServer { session_pref: session_id };
+    let mut server = McpServer { session_pref: session_id, client_name: "MCP client".to_string() };
 
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| CliError::io(format!("stdin read failed: {}", e)))?;
@@ -51,6 +52,8 @@ pub fn cmd_mcp(session_id: Option<String>) -> Result<(), CliError> {
 struct McpServer {
     /// --session prefix from the command line; resolved per call.
     session_pref: Option<String>,
+    /// Client name from the initialize handshake; used as the pairing name.
+    client_name: String,
 }
 
 impl McpServer {
@@ -71,6 +74,9 @@ impl McpServer {
 
         let result = match method {
             "initialize" => {
+                if let Some(name) = msg.pointer("/params/clientInfo/name").and_then(|v| v.as_str()) {
+                    self.client_name = name.to_string();
+                }
                 // Echo the client's requested version when present — we speak
                 // the tools-only core, which is stable across revisions.
                 let version = msg
@@ -394,10 +400,31 @@ impl McpServer {
             },
         };
 
-        let token = std::env::var("VISIGRID_SESSION_TOKEN").map_err(|_| {
-            "VISIGRID_SESSION_TOKEN is not set. Add it to this MCP server's env config; the user can copy the token from the VisiGrid session panel.".to_string()
-        })?;
+        // Credential order: env override → stored pairing credential →
+        // interactive pairing (GUI approval dialog).
+        if let Ok(token) = std::env::var("VISIGRID_SESSION_TOKEN") {
+            return SessionClient::connect(&discovery, &token).map_err(session_error_text);
+        }
+        if let Some(cred) = visigrid_protocol::paired::load_client_credential() {
+            match SessionClient::connect(&discovery, &cred.token) {
+                Ok(client) => return Ok(client),
+                Err(session::SessionError::AuthFailed(_)) => {
+                    // Credential was revoked or the store was reset — fall
+                    // through and pair again.
+                }
+                Err(e) => return Err(session_error_text(e)),
+            }
+        }
 
+        let token = session::pair(&discovery, &self.client_name).map_err(|e| match e {
+            session::SessionError::AuthFailed(msg) => {
+                format!("pairing failed: {} — the user declined or missed the approval dialog in the VisiGrid window; ask them to approve and retry", msg)
+            }
+            other => session_error_text(other),
+        })?;
+        if let Err(e) = visigrid_protocol::paired::store_client_credential(&self.client_name, &token) {
+            return Err(format!("pairing approved but storing the credential failed: {}", e));
+        }
         SessionClient::connect(&discovery, &token).map_err(session_error_text)
     }
 }

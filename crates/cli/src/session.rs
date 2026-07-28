@@ -7,7 +7,7 @@
 //! - `inspect` - Query cell state
 
 use std::fs;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -171,6 +171,64 @@ pub fn find_session(id_prefix: &str) -> std::io::Result<Option<DiscoveryFile>> {
             std::io::ErrorKind::InvalidInput,
             format!("Ambiguous session ID '{}' matches {} sessions", id_prefix, matches.len()),
         )),
+    }
+}
+
+// ============================================================================
+// Pairing
+// ============================================================================
+
+/// Request pairing with a session: the GUI shows an approval dialog and, on
+/// approval, returns a persistent bearer token. Blocks until the user
+/// decides (or the server's 120s dialog timeout fires).
+pub fn pair(discovery: &DiscoveryFile, client_name: &str) -> Result<String, SessionError> {
+    use visigrid_protocol::{PairRequestMessage, PairResultMessage};
+
+    let addr = format!("127.0.0.1:{}", discovery.port);
+    let stream = TcpStream::connect_timeout(
+        &addr.parse().map_err(|_| SessionError::ConnectionFailed("Invalid address".into()))?,
+        Duration::from_secs(5),
+    ).map_err(|e| SessionError::ConnectionFailed(e.to_string()))?;
+
+    // Generous read timeout: a human is deciding on the other end.
+    stream.set_read_timeout(Some(Duration::from_secs(150)))
+        .map_err(|e| SessionError::ConnectionFailed(e.to_string()))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| SessionError::ConnectionFailed(e.to_string()))?;
+
+    let mut writer = BufWriter::new(stream.try_clone()
+        .map_err(|e| SessionError::ConnectionFailed(e.to_string()))?);
+    let mut reader = BufReader::new(stream);
+
+    let msg = ClientMessage::PairRequest(PairRequestMessage {
+        id: "pair-1".to_string(),
+        client_name: client_name.to_string(),
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+    });
+    let mut line = serde_json::to_string(&msg)
+        .map_err(|e| SessionError::ProtocolError(e.to_string()))?;
+    line.push('\n');
+    writer.write_all(line.as_bytes())
+        .and_then(|_| writer.flush())
+        .map_err(|e| SessionError::IoError(e.to_string()))?;
+
+    let mut response = String::new();
+    reader.read_line(&mut response)
+        .map_err(|e| SessionError::IoError(e.to_string()))?;
+    let parsed: ServerMessage = serde_json::from_str(response.trim())
+        .map_err(|e| SessionError::ProtocolError(format!("bad pair response: {}", e)))?;
+
+    match parsed {
+        ServerMessage::PairResult(PairResultMessage { approved: true, token: Some(token), .. }) => Ok(token),
+        ServerMessage::PairResult(PairResultMessage { message, .. }) => {
+            Err(SessionError::AuthFailed(format!("pairing rejected: {}", message)))
+        }
+        ServerMessage::Error(err) => Err(SessionError::ServerError {
+            code: err.code,
+            message: err.message,
+            retry_after_ms: err.retry_after_ms,
+        }),
+        _ => Err(SessionError::ProtocolError("unexpected response to pair_request".into())),
     }
 }
 
