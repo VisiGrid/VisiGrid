@@ -1,0 +1,16 @@
+[package]
+name = "visigrid-engine-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WASM build of the formula engine for client-side verification"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+visigrid-engine = { path = "../engine" }
+wasm-bindgen = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-wasm-bindgen = "0.6"

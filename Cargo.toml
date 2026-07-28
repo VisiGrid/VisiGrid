@@ -3,6 +3,7 @@ resolver = "2"
 default-members = ["gpui-app"]
 members = [
     "crates/engine",
+    "crates/engine-wasm",
     "crates/core",
     "crates/io",
     "crates/config",
