@@ -189,8 +189,17 @@ pub struct InspectResponse {
     /// Current revision at time of inspection.
     /// INVARIANT: Always present per spec.
     pub current_revision: u64,
-    /// Inspection result.
-    pub result: InspectResult,
+    /// Inspection result, or a structured rejection (bad sheet index,
+    /// out-of-bounds coordinates, oversized range).
+    pub result: Result<InspectResult, InspectError>,
+}
+
+/// Inspect request rejected before reading the workbook.
+/// `code` follows the session protocol error taxonomy.
+#[derive(Debug, Clone)]
+pub struct InspectError {
+    pub code: String,
+    pub message: String,
 }
 
 // ============================================================================
@@ -291,11 +300,11 @@ mod tests {
     fn test_inspect_response_always_has_revision() {
         let response = InspectResponse {
             current_revision: 42,
-            result: InspectResult::Workbook(super::super::protocol::WorkbookInfo {
+            result: Ok(InspectResult::Workbook(super::super::protocol::WorkbookInfo {
                 sheet_count: 1,
                 active_sheet: 0,
                 title: "Test".to_string(),
-            }),
+            })),
         };
         assert_eq!(response.current_revision, 42);
     }

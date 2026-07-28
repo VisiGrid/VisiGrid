@@ -1969,6 +1969,78 @@ fn validate_session_op(
     }
 }
 
+/// Largest cell count a single Inspect range may cover. Keeps the response
+/// comfortably under the protocol's 10 MB message cap.
+pub const MAX_SESSION_INSPECT_CELLS: usize = 65_536;
+
+/// Validate an inspect target against the workbook's sheet list and the
+/// governing grid bounds. Returns (code, message) on failure, using the same
+/// error taxonomy as the write path.
+fn validate_inspect_target(
+    target: &crate::session_server::InspectTarget,
+    sheet_count: usize,
+) -> Option<(&'static str, String)> {
+    use crate::session_server::InspectTarget;
+
+    let check_sheet = |sheet: usize| -> Option<(&'static str, String)> {
+        if sheet >= sheet_count {
+            Some((
+                "sheet_not_found",
+                format!("sheet index {} does not exist (workbook has {} sheet{})",
+                    sheet, sheet_count, if sheet_count == 1 { "" } else { "s" }),
+            ))
+        } else {
+            None
+        }
+    };
+    let check_cell = |row: usize, col: usize| -> Option<(&'static str, String)> {
+        if row >= NUM_ROWS || col >= NUM_COLS {
+            Some((
+                "out_of_bounds",
+                format!("cell (row {}, col {}) is outside the grid of {} rows × {} columns",
+                    row, col, NUM_ROWS, NUM_COLS),
+            ))
+        } else {
+            None
+        }
+    };
+
+    match target {
+        InspectTarget::Workbook => None,
+        InspectTarget::Cell { sheet, row, col } => {
+            check_sheet(*sheet).or_else(|| check_cell(*row, *col))
+        }
+        InspectTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
+            check_sheet(*sheet)
+                .or_else(|| {
+                    if start_row > end_row || start_col > end_col {
+                        Some((
+                            "invalid_op",
+                            format!("range start (row {}, col {}) is after its end (row {}, col {})",
+                                start_row, start_col, end_row, end_col),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| check_cell(*start_row, *start_col))
+                .or_else(|| check_cell(*end_row, *end_col))
+                .or_else(|| {
+                    let cells = (end_row - start_row + 1) * (end_col - start_col + 1);
+                    if cells > MAX_SESSION_INSPECT_CELLS {
+                        Some((
+                            "cells_limit_exceeded",
+                            format!("range covers {} cells; inspect is limited to {} cells per request",
+                                cells, MAX_SESSION_INSPECT_CELLS),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+        }
+    }
+}
+
 /// Map a session-protocol number-format string to an engine NumberFormat.
 /// Named formats: "general", "number[:decimals]", "currency[:decimals]",
 /// "percent[:decimals]", "date", "time", "datetime". Anything else is treated
@@ -1995,8 +2067,11 @@ fn parse_session_number_format(s: &str) -> visigrid_engine::cell::NumberFormat {
 
 #[cfg(test)]
 mod session_op_validation_tests {
-    use super::{validate_session_op, parse_session_number_format, NUM_ROWS, NUM_COLS, MAX_SESSION_FORMAT_CELLS};
-    use crate::session_server::Op;
+    use super::{
+        validate_session_op, validate_inspect_target, parse_session_number_format,
+        NUM_ROWS, NUM_COLS, MAX_SESSION_FORMAT_CELLS, MAX_SESSION_INSPECT_CELLS,
+    };
+    use crate::session_server::{InspectTarget, Op};
     use visigrid_engine::cell::NumberFormat;
 
     fn set_value(sheet: usize, row: usize, col: usize) -> Op {
@@ -2061,6 +2136,30 @@ mod session_op_validation_tests {
         assert_eq!(code, "invalid_op");
         let (code, _, _) = validate_session_op(&nf("percent:99"), 1).unwrap();
         assert_eq!(code, "invalid_op");
+    }
+
+    #[test]
+    fn inspect_target_checks() {
+        let range = |sheet: usize, sr: usize, sc: usize, er: usize, ec: usize| InspectTarget::Range {
+            sheet, start_row: sr, start_col: sc, end_row: er, end_col: ec,
+        };
+        assert!(validate_inspect_target(&InspectTarget::Workbook, 1).is_none());
+        assert!(validate_inspect_target(&InspectTarget::Cell { sheet: 0, row: 0, col: 0 }, 1).is_none());
+
+        // Bad sheet is an error, not a redirect to the active sheet
+        let (code, _) = validate_inspect_target(&InspectTarget::Cell { sheet: 3, row: 0, col: 0 }, 1).unwrap();
+        assert_eq!(code, "sheet_not_found");
+        let (code, _) = validate_inspect_target(&InspectTarget::Cell { sheet: 0, row: 70_000, col: 0 }, 1).unwrap();
+        assert_eq!(code, "out_of_bounds");
+
+        assert!(validate_inspect_target(&range(0, 0, 0, 19, 9), 1).is_none());
+        let (code, _) = validate_inspect_target(&range(0, 5, 0, 0, 9), 1).unwrap();
+        assert_eq!(code, "invalid_op");
+        let (code, _) = validate_inspect_target(&range(0, 0, 0, NUM_ROWS - 1, NUM_COLS - 1), 1).unwrap();
+        assert_eq!(code, "cells_limit_exceeded");
+        // One full column is exactly at the cap
+        assert_eq!(NUM_ROWS, MAX_SESSION_INSPECT_CELLS);
+        assert!(validate_inspect_target(&range(0, 0, 0, NUM_ROWS - 1, 0), 1).is_none());
     }
 
     #[test]
@@ -3724,18 +3823,23 @@ impl Spreadsheet {
         req: &crate::session_server::InspectRequest,
         cx: &Context<Self>,
     ) -> crate::session_server::InspectResponse {
-        use crate::session_server::{InspectResponse, InspectResult, InspectTarget, CellInfo, WorkbookInfo};
+        use crate::session_server::{InspectError, InspectResponse, InspectResult, InspectTarget, CellInfo, WorkbookInfo};
 
         let wb = self.workbook.read(cx);
         let current_rev = wb.revision();
 
+        // Same contract as the write path: bad sheet indexes and out-of-bounds
+        // coordinates are errors, not silent redirects to the active sheet.
+        if let Some((code, message)) = validate_inspect_target(&req.target, wb.sheets().len()) {
+            return InspectResponse {
+                current_revision: current_rev,
+                result: Err(InspectError { code: code.to_string(), message }),
+            };
+        }
+
         let result = match &req.target {
             InspectTarget::Cell { sheet, row, col } => {
-                let sheet_data = if *sheet < wb.sheets().len() {
-                    &wb.sheets()[*sheet]
-                } else {
-                    wb.active_sheet()
-                };
+                let sheet_data = &wb.sheets()[*sheet];
                 let display = sheet_data.get_display(*row, *col);
                 let raw = sheet_data.get_raw(*row, *col);
                 let formula = if raw.starts_with('=') { Some(raw.clone()) } else { None };
@@ -3746,11 +3850,7 @@ impl Spreadsheet {
                 })
             }
             InspectTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
-                let sheet_data = if *sheet < wb.sheets().len() {
-                    &wb.sheets()[*sheet]
-                } else {
-                    wb.active_sheet()
-                };
+                let sheet_data = &wb.sheets()[*sheet];
                 let mut cells = Vec::new();
                 for r in *start_row..=*end_row {
                     for c in *start_col..=*end_col {
@@ -3777,7 +3877,7 @@ impl Spreadsheet {
 
         InspectResponse {
             current_revision: current_rev,
-            result,
+            result: Ok(result),
         }
     }
 

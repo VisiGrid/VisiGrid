@@ -20,7 +20,7 @@ mod server;
 pub use bridge::{
     SessionBridgeHandle, SessionRequest, BridgeError,
     ApplyOpsRequest, ApplyOpsResponse, ApplyOpsError,
-    InspectRequest, InspectResponse,
+    InspectRequest, InspectResponse, InspectError,
     SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest, UnsubscribeResponse,
 };

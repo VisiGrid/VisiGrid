@@ -795,11 +795,19 @@ fn handle_message(
             };
 
             match bridge.inspect(req) {
-                Ok(resp) => ServerMessage::InspectResult(InspectResultMessage {
-                    id: inspect.id,
-                    revision: resp.current_revision,
-                    result: resp.result,
-                }),
+                Ok(resp) => match resp.result {
+                    Ok(result) => ServerMessage::InspectResult(InspectResultMessage {
+                        id: inspect.id,
+                        revision: resp.current_revision,
+                        result,
+                    }),
+                    Err(e) => ServerMessage::Error(ErrorMessage {
+                        id: Some(inspect.id),
+                        code: e.code,
+                        message: e.message,
+                        retry_after_ms: None,
+                    }),
+                },
                 Err(_) => ServerMessage::Error(ErrorMessage {
                     id: Some(inspect.id),
                     code: "internal_error".to_string(),
@@ -865,11 +873,11 @@ mod tests {
                     SessionRequest::Inspect { req: _, reply } => {
                         let _ = reply.send(InspectResponse {
                             current_revision: 0,
-                            result: InspectResult::Workbook(WorkbookInfo {
+                            result: Ok(InspectResult::Workbook(WorkbookInfo {
                                 sheet_count: 1,
                                 active_sheet: 0,
                                 title: "Test".to_string(),
-                            }),
+                            })),
                         });
                     }
                     SessionRequest::Subscribe { req, reply } => {
