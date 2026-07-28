@@ -36,7 +36,7 @@ impl CellRecalcInfo {
         Self {
             depth,
             eval_order,
-            recompute_time: SystemTime::now(),
+            recompute_time: crate::timing::system_now(),
             has_unknown_deps,
         }
     }

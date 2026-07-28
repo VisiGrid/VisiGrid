@@ -316,6 +316,17 @@ impl Spreadsheet {
             return;
         }
 
+        // Purist setting: Ctrl+V pastes values only. Full paste remains
+        // available via Paste Special > All (Ctrl+Alt+V).
+        if crate::settings::user_settings(cx)
+            .editing
+            .paste_values_by_default
+            .resolve(false)
+        {
+            self.paste_values(cx);
+            return;
+        }
+
         // Read clipboard item to get both text and metadata
         let clipboard_item = cx.read_from_clipboard();
         let system_text = clipboard_item.as_ref().and_then(|item| item.text().map(|s| s.to_string()));
@@ -803,6 +814,23 @@ impl Spreadsheet {
     /// Paste Values: paste computed values only (no formulas).
     /// Uses typed values from internal clipboard, or parses external clipboard with leading-zero guard.
     /// When filtered, pastes to consecutive visible rows only.
+    /// Toggle the "Ctrl+V pastes values" default and persist it.
+    pub fn toggle_paste_values_default(&mut self, cx: &mut Context<Self>) {
+        let new_value = !crate::settings::user_settings(cx)
+            .editing
+            .paste_values_by_default
+            .resolve(false);
+        crate::settings::update_user_settings(cx, |s| {
+            s.editing.paste_values_by_default = crate::settings::Setting::Value(new_value);
+        });
+        self.status_message = Some(if new_value {
+            "Ctrl+V now pastes values only (full paste: Paste Special > All)".to_string()
+        } else {
+            "Ctrl+V now pastes everything (values only: Ctrl+Alt+Shift+V)".to_string()
+        });
+        cx.notify();
+    }
+
     pub fn paste_values(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }

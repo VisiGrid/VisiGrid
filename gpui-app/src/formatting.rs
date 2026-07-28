@@ -307,6 +307,26 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Center Across Selection, toggle-style: if every selected cell is
+    /// already CenterAcrossSelection, revert to General; otherwise apply.
+    /// The merge-free alternative to Merge & Center — sorting, filtering,
+    /// and formulas keep working because no cells are actually merged.
+    pub fn center_across_selection_toggle(&mut self, cx: &mut Context<Self>) {
+        let mut all_cas = true;
+        'outer: for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    if self.sheet(cx).get_format(row, col).alignment != Alignment::CenterAcrossSelection {
+                        all_cas = false;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        let target = if all_cas { Alignment::General } else { Alignment::CenterAcrossSelection };
+        self.set_alignment_selection(target, cx);
+    }
+
     /// Set vertical alignment on all selected cells
     pub fn set_vertical_alignment_selection(&mut self, valign: VerticalAlignment, cx: &mut Context<Self>) {
         let mut patches = Vec::new();

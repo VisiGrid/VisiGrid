@@ -257,6 +257,21 @@ pub(crate) fn bind(
             }
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &ToggleProblems, _window, cx| {
+            use crate::app::BottomPanelTab;
+            if this.bottom_panel_visible && this.bottom_panel_tab == BottomPanelTab::Problems {
+                // Already showing Problems — close the panel
+                this.bottom_panel_visible = false;
+            } else {
+                // Open panel on the Problems tab
+                this.bottom_panel_visible = true;
+                this.bottom_panel_tab = BottomPanelTab::Problems;
+                this.lua_console.visible = false;
+                this.terminal.visible = false;
+                this.terminal_focused = false;
+            }
+            cx.notify();
+        }))
         .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
             use crate::app::BottomPanelTab;
             if this.bottom_panel_visible && this.bottom_panel_tab == BottomPanelTab::Terminal {

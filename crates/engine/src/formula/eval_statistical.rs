@@ -81,12 +81,8 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if !args.is_empty() {
                 return Some(EvalResult::Error("RAND takes no arguments".to_string()));
             }
-            use std::time::{SystemTime, UNIX_EPOCH};
-            // Simple LCG random - good enough for spreadsheet use
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64;
+                        // Simple LCG random - good enough for spreadsheet use
+            let seed = crate::timing::now_since_epoch().as_nanos() as u64;
             let random = ((seed.wrapping_mul(6364136223846793005).wrapping_add(1)) as f64)
                 / (u64::MAX as f64);
             EvalResult::Number(random)
@@ -106,11 +102,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if bottom > top {
                 return Some(EvalResult::Error("#NUM!".to_string()));
             }
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64;
+                        let seed = crate::timing::now_since_epoch().as_nanos() as u64;
             let range = (top - bottom + 1) as u64;
             let random = (seed.wrapping_mul(6364136223846793005).wrapping_add(1)) % range;
             EvalResult::Number((bottom + random as i64) as f64)

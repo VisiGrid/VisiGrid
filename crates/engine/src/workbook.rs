@@ -1262,7 +1262,7 @@ impl Workbook {
         use crate::formula::eval::Value;
         use crate::recalc::{CellRecalcInfo, RecalcError, RecalcReport};
         use rustc_hash::{FxHashMap, FxHashSet};
-        use std::time::Instant;
+        use crate::timing::Instant;
 
         let start = Instant::now();
         let mut report = RecalcReport::new();

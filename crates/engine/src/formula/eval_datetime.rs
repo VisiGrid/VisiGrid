@@ -14,8 +14,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("TODAY takes no arguments".to_string()));
             }
             // Return Excel-style date serial number (days since 1899-12-30)
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                        let now = crate::timing::now_since_epoch();
             let days_since_unix = now.as_secs() / 86400;
             // Excel epoch is 1899-12-30, Unix epoch is 1970-01-01
             // Difference is 25569 days
@@ -26,8 +25,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if !args.is_empty() {
                 return Some(EvalResult::Error("NOW takes no arguments".to_string()));
             }
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                        let now = crate::timing::now_since_epoch();
             let secs = now.as_secs() as f64 + now.subsec_nanos() as f64 / 1_000_000_000.0;
             let days_since_unix = secs / 86400.0;
             let excel_datetime = days_since_unix + 25569.0;

@@ -60,6 +60,7 @@ pub fn engine_version() -> String {
 
 #[wasm_bindgen]
 pub fn recompute(input: JsValue) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
     let sheets: Vec<InSheet> =
         serde_wasm_bindgen::from_value(input).map_err(|e| JsValue::from_str(&e.to_string()))?;
 

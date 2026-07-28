@@ -102,12 +102,18 @@ pub enum CommandId {
     Cut,
     Paste,
     PasteValues,
+    TogglePasteValuesDefault,
     PasteSpecial,
     PasteFormulas,
     PasteFormats,
 
     // Formatting
     ToggleBold,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
+    AlignGeneral,
+    CenterAcrossSelection,
     ToggleItalic,
     ToggleUnderline,
     FormatCurrency,
@@ -305,10 +311,16 @@ impl CommandId {
             Self::Cut => "Cut",
             Self::Paste => "Paste",
             Self::PasteValues => "Paste Values",
+            Self::TogglePasteValuesDefault => "Toggle Paste Values by Default (Ctrl+V)",
             Self::PasteSpecial => "Paste Special...",
             Self::PasteFormulas => "Paste Formulas",
             Self::PasteFormats => "Paste Formats",
             Self::ToggleBold => "Toggle Bold",
+            Self::AlignLeft => "Align Left",
+            Self::AlignCenter => "Align Center",
+            Self::AlignRight => "Align Right",
+            Self::AlignGeneral => "Align General (Default)",
+            Self::CenterAcrossSelection => "Center Across Selection",
             Self::ToggleItalic => "Toggle Italic",
             Self::ToggleUnderline => "Toggle Underline",
             Self::FormatCurrency => "Format as Currency",
@@ -463,11 +475,17 @@ impl CommandId {
             Self::Cut => Some("Ctrl+X"),
             Self::Paste => Some("Ctrl+V"),
             Self::PasteValues => Some("Ctrl+Alt+Shift+V"),
+            Self::TogglePasteValuesDefault => None,
             #[cfg(target_os = "macos")]
             Self::PasteSpecial => Some("Cmd+Option+V"),
             #[cfg(not(target_os = "macos"))]
             Self::PasteSpecial => Some("Ctrl+Alt+V"),
             Self::ToggleBold => Some("Ctrl+B"),
+            Self::AlignLeft => None,
+            Self::AlignCenter => None,
+            Self::AlignRight => None,
+            Self::AlignGeneral => None,
+            Self::CenterAcrossSelection => None,
             Self::ToggleItalic => Some("Ctrl+I"),
             Self::ToggleUnderline => Some("Ctrl+U"),
             Self::FormatCurrency => Some("Ctrl+Shift+$"),
@@ -546,10 +564,16 @@ impl CommandId {
             Self::Cut => "clipboard",
             Self::Paste => "clipboard",
             Self::PasteValues => "clipboard special values only",
+            Self::TogglePasteValuesDefault => "paste default setting ctrl+v values plain formatting",
             Self::PasteSpecial => "clipboard special dialog formulas formats values",
             Self::PasteFormulas => "clipboard special formulas reference adjust",
             Self::PasteFormats => "clipboard special formatting style",
             Self::ToggleBold => "format style",
+            Self::AlignLeft => "format alignment horizontal",
+            Self::AlignCenter => "format alignment horizontal middle",
+            Self::AlignRight => "format alignment horizontal",
+            Self::AlignGeneral => "format alignment horizontal default reset",
+            Self::CenterAcrossSelection => "format alignment title header across columns without merge merging cells",
             Self::ToggleItalic => "format style",
             Self::ToggleUnderline => "format style",
             Self::FormatCurrency => "format number money dollar",
@@ -710,10 +734,16 @@ impl CommandId {
             Self::Cut,
             Self::Paste,
             Self::PasteValues,
+            Self::TogglePasteValuesDefault,
             Self::PasteSpecial,
             Self::PasteFormulas,
             Self::PasteFormats,
             Self::ToggleBold,
+            Self::AlignLeft,
+            Self::AlignCenter,
+            Self::AlignRight,
+            Self::AlignGeneral,
+            Self::CenterAcrossSelection,
             Self::ToggleItalic,
             Self::ToggleUnderline,
             Self::FormatCurrency,
@@ -877,6 +907,7 @@ impl CommandId {
             | Self::Copy
             | Self::Paste
             | Self::PasteValues
+            | Self::TogglePasteValuesDefault
             | Self::PasteSpecial
             | Self::PasteFormulas
             | Self::PasteFormats
@@ -926,6 +957,11 @@ impl CommandId {
             | Self::ManageConditionalFormats
             | Self::ClearConditionalFormats
             | Self::ToggleBold
+            | Self::AlignLeft
+            | Self::AlignCenter
+            | Self::AlignRight
+            | Self::AlignGeneral
+            | Self::CenterAcrossSelection
             | Self::ToggleItalic
             | Self::ToggleUnderline
             | Self::FormatCurrency

@@ -7523,6 +7523,7 @@ dependencies = [
 name = "visigrid-engine-wasm"
 version = "0.14.0"
 dependencies = [
+ "console_error_panic_hook",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

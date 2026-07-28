@@ -582,6 +582,7 @@ pub fn render_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let align_left = matches!(state.alignment, TriState::Uniform(Alignment::Left));
     let align_center = matches!(state.alignment, TriState::Uniform(Alignment::Center));
     let align_right = matches!(state.alignment, TriState::Uniform(Alignment::Right));
+    let align_cas = matches!(state.alignment, TriState::Uniform(Alignment::CenterAcrossSelection));
 
     // Position below format bar, roughly under Format button
     // macOS: titlebar(34) + formula_bar(24) + format_bar(28) = 86
@@ -707,6 +708,23 @@ pub fn render_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 }))
                 .child(div().w(px(16.0)).text_size(px(10.0)).text_color(accent).child(if align_right { "✓" } else { "" }))
                 .child(div().flex_1().text_size(px(12.0)).text_color(if align_right { accent } else { text_primary }).child("Align Right"))
+        )
+        // Center Across Selection — the merge-free way to center a title
+        // over several columns (sorting/filtering/formulas keep working)
+        .child(
+            div()
+                .id("fmt-menu-center-across")
+                .flex()
+                .items_center()
+                .px_2()
+                .py(px(4.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover_bg))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.center_across_selection_toggle(cx);
+                }))
+                .child(div().w(px(16.0)).text_size(px(10.0)).text_color(accent).child(if align_cas { "✓" } else { "" }))
+                .child(div().flex_1().text_size(px(12.0)).text_color(if align_cas { accent } else { text_primary }).child("Center Across Selection"))
         )
 }
 

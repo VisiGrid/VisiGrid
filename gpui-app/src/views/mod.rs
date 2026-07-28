@@ -47,6 +47,7 @@ mod actions_ui;
 mod key_handler;
 mod f1_help;
 mod cf_rules_panel;
+mod problems_panel;
 mod cond_format_dialog;
 mod named_range_dialogs;
 mod rewind_dialogs;
@@ -1619,6 +1620,20 @@ fn render_bottom_panel(
                 window.focus(&this.terminal_focus_handle, cx);
                 cx.notify();
             }),
+        ))
+        .child(render_panel_tab(
+            "bottom-tab-problems",
+            "Problems",
+            active_tab == BottomPanelTab::Problems,
+            accent, text_primary, text_muted, panel_border,
+            cx.listener(|this, _, _window, cx| {
+                use crate::app::BottomPanelTab;
+                this.bottom_panel_tab = BottomPanelTab::Problems;
+                this.lua_console.visible = false;
+                this.terminal.visible = false;
+                this.terminal_focused = false;
+                cx.notify();
+            }),
         ));
 
     // Panel content (only one is visible at a time)
@@ -1628,6 +1643,9 @@ fn render_bottom_panel(
         }
         BottomPanelTab::Terminal => {
             terminal_panel::render_terminal_panel(app, window, cx).into_any_element()
+        }
+        BottomPanelTab::Problems => {
+            problems_panel::render_problems_panel(app, cx).into_any_element()
         }
     };
 

@@ -608,6 +608,20 @@ pub enum BottomPanelTab {
     #[default]
     Lua,
     Terminal,
+    Problems,
+}
+
+/// One row in the Problems panel: a cell whose formula evaluates to an error.
+#[derive(Debug, Clone)]
+pub struct Problem {
+    pub sheet_idx: usize,
+    pub sheet_name: String,
+    pub row: usize,
+    pub col: usize,
+    /// Error code, e.g. "#DIV/0!", "#REF!", "#CYCLE!"
+    pub error: String,
+    /// The formula (raw text) that produced it.
+    pub formula: String,
 }
 
 /// Which editor surface is active (for popup anchoring and input routing)
@@ -3615,6 +3629,64 @@ impl Spreadsheet {
         }
     }
 
+    /// Scan all sheets for cells whose computed value is an error.
+    /// Sparse iteration over occupied cells only — cheap even on big books.
+    /// Capped at 200 problems; the panel reports truncation.
+    pub fn collect_problems(&self, cx: &Context<Self>) -> (Vec<Problem>, bool) {
+        use visigrid_engine::formula::eval::Value;
+        const CAP: usize = 200;
+
+        let wb = self.workbook.read(cx);
+        let mut problems = Vec::new();
+        let mut truncated = false;
+        'outer: for (sheet_idx, sheet) in wb.sheets().iter().enumerate() {
+            let mut coords: Vec<(usize, usize)> =
+                sheet.cells_iter().map(|(&rc, _)| rc).collect();
+            coords.sort_unstable();
+            for (row, col) in coords {
+                // Computed errors surface as Value::Error; cycle-marked cells
+                // store the literal text "#CYCLE!" instead (see set_cycle_error).
+                let error = match sheet.get_computed_value(row, col) {
+                    Value::Error(e) => Some(e),
+                    Value::Text(t) if t == "#CYCLE!" => Some(t),
+                    _ => None,
+                };
+                if let Some(error) = error {
+                    if problems.len() >= CAP {
+                        truncated = true;
+                        break 'outer;
+                    }
+                    problems.push(Problem {
+                        sheet_idx,
+                        sheet_name: sheet.name.clone(),
+                        row,
+                        col,
+                        error,
+                        formula: sheet.get_raw(row, col),
+                    });
+                }
+            }
+        }
+        (problems, truncated)
+    }
+
+    /// Switch to a sheet (if needed) and move the cursor to a cell,
+    /// scrolling it into view. Used by the Problems panel's click-to-jump.
+    pub fn reveal_cell(&mut self, sheet_idx: usize, row: usize, col: usize, cx: &mut Context<Self>) {
+        let current_idx = self.wb(cx).active_sheet_index();
+        if sheet_idx != current_idx && sheet_idx < self.wb(cx).sheets().len() {
+            self.wb_mut(cx, |wb| wb.set_active_sheet(sheet_idx));
+            self.update_cached_sheet_id(cx);
+            self.active_view_state_mut().active_sheet = sheet_idx;
+        }
+        let view_state = self.active_view_state_mut();
+        view_state.selected = (row, col);
+        view_state.selection_end = None;
+        view_state.additional_selections.clear();
+        self.ensure_cell_visible(row, col);
+        cx.notify();
+    }
+
     /// Resolve the pending pairing dialog. `approve` = user clicked Allow.
     /// The TCP thread persists the credential and replies to the client;
     /// if it already timed out, the send fails silently — dialog just closes.
@@ -4817,12 +4889,18 @@ impl Spreadsheet {
             CommandId::Cut => self.cut(cx),
             CommandId::Paste => self.paste(cx),
             CommandId::PasteValues => self.paste_values(cx),
+            CommandId::TogglePasteValuesDefault => self.toggle_paste_values_default(cx),
             CommandId::PasteSpecial => self.show_paste_special(cx),
             CommandId::PasteFormulas => self.paste_formulas(cx),
             CommandId::PasteFormats => self.paste_formats(cx),
 
             // Formatting
             CommandId::ToggleBold => self.toggle_bold(cx),
+            CommandId::AlignLeft => self.set_alignment_selection(visigrid_engine::cell::Alignment::Left, cx),
+            CommandId::AlignCenter => self.set_alignment_selection(visigrid_engine::cell::Alignment::Center, cx),
+            CommandId::AlignRight => self.set_alignment_selection(visigrid_engine::cell::Alignment::Right, cx),
+            CommandId::AlignGeneral => self.set_alignment_selection(visigrid_engine::cell::Alignment::General, cx),
+            CommandId::CenterAcrossSelection => self.center_across_selection_toggle(cx),
             CommandId::ToggleItalic => self.toggle_italic(cx),
             CommandId::ToggleUnderline => self.toggle_underline(cx),
             CommandId::FormatCurrency => self.format_currency(cx),

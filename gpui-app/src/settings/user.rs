@@ -86,6 +86,11 @@ pub struct EditingSettings {
     /// Allow typing directly to overwrite cell (vs requiring edit mode)
     #[serde(default = "default_allow_direct_edit", skip_serializing_if = "Setting::is_inherit")]
     pub allow_direct_edit: Setting<bool>,
+
+    /// Ctrl+V pastes values only (Excel's most-requested unshipped setting).
+    /// Full paste stays available via Paste Special > All.
+    #[serde(default = "default_paste_values_by_default", skip_serializing_if = "Setting::is_inherit")]
+    pub paste_values_by_default: Setting<bool>,
 }
 
 fn default_enter_behavior() -> Setting<EnterBehavior> {
@@ -96,11 +101,16 @@ fn default_allow_direct_edit() -> Setting<bool> {
     Setting::Value(true)
 }
 
+fn default_paste_values_by_default() -> Setting<bool> {
+    Setting::Value(false)
+}
+
 impl Default for EditingSettings {
     fn default() -> Self {
         Self {
             enter_behavior: Setting::Value(EnterBehavior::MoveDown),
             allow_direct_edit: Setting::Value(true),
+            paste_values_by_default: Setting::Value(false),
         }
     }
 }

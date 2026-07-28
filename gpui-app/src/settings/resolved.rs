@@ -295,6 +295,7 @@ mod tests {
             editing: crate::settings::user::EditingSettings {
                 enter_behavior: Setting::Inherit,
                 allow_direct_edit: Setting::Inherit,
+                paste_values_by_default: Setting::Inherit,
             },
             navigation: crate::settings::user::NavigationSettings {
                 tab_moves_right: Setting::Inherit,
