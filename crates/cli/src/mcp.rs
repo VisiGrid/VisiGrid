@@ -591,7 +591,7 @@ mod tests {
     use super::*;
 
     fn server() -> McpServer {
-        McpServer { session_pref: None }
+        McpServer { session_pref: None, client_name: "Test Client".to_string() }
     }
 
     #[test]

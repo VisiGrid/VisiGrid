@@ -968,6 +968,10 @@ mod tests {
                             topics: req.topics,
                         });
                     }
+                    SessionRequest::Pair { reply, .. } => {
+                        // Test bridge auto-approves pairing
+                        let _ = reply.send(true);
+                    }
                 }
             }
         });
