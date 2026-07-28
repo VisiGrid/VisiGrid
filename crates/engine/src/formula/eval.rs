@@ -531,17 +531,13 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
         Expr::Boolean(b) => EvalResult::Boolean(*b),
         Expr::CellRef { sheet, col, row, .. } => {
             // Get cell value, potentially from another sheet.
-            // Redirect hidden merge cells to origin so =B1 returns the
-            // merge origin's value when B1 is hidden inside a merge.
+            // Excel parity (ruled 2026-07-28): hidden cells inside a merge
+            // read as EMPTY — only the merge origin holds the value. This
+            // also matches range semantics (hidden cells are empty in
+            // storage), which the previous redirect-to-origin diverged from.
             let text = match sheet {
-                SheetRef::Current => {
-                    let (r, c) = lookup.get_merge_start(*row, *col).unwrap_or((*row, *col));
-                    lookup.get_text(r, c)
-                }
-                SheetRef::Id(sheet_id) => {
-                    let (r, c) = lookup.get_merge_start_sheet(*sheet_id, *row, *col).unwrap_or((*row, *col));
-                    lookup.get_text_sheet(*sheet_id, r, c)
-                }
+                SheetRef::Current => lookup.get_text(*row, *col),
+                SheetRef::Id(sheet_id) => lookup.get_text_sheet(*sheet_id, *row, *col),
                 SheetRef::RefError { .. } => return EvalResult::Error("#REF!".to_string()),
             };
             if text.is_empty() {

@@ -3330,7 +3330,7 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_formula_single_ref_redirect() {
+    fn test_formula_single_ref_hidden_merge_reads_empty() {
         use crate::sheet::MergedRegion;
 
         let mut wb = Workbook::new();
@@ -3340,18 +3340,18 @@ mod tests {
         wb.sheet_mut(0).unwrap().set_value(0, 0, "Hello");
         wb.sheet_mut(0).unwrap().add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
 
-        // D1 = =B1 (B1 is hidden in merge, should redirect to A1)
+        // Excel parity (ruled 2026-07-28): hidden cells inside a merge read
+        // as EMPTY — only the origin (A1) holds the value.
         wb.sheet_mut(0).unwrap().set_value(0, 3, "=B1");
         wb.update_cell_deps(sheet_id, 0, 3);
 
-        // E1 = =C1 (C1 is hidden in merge, should redirect to A1)
-        wb.sheet_mut(0).unwrap().set_value(0, 4, "=C1");
+        wb.sheet_mut(0).unwrap().set_value(0, 4, "=A1");
         wb.update_cell_deps(sheet_id, 0, 4);
 
         wb.recompute_full_ordered();
 
-        assert_eq!(wb.sheet(0).unwrap().get_display(0, 3), "Hello"); // =B1 → "Hello"
-        assert_eq!(wb.sheet(0).unwrap().get_display(0, 4), "Hello"); // =C1 → "Hello"
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 3), "");      // =B1 → empty (hidden)
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 4), "Hello"); // =A1 → origin value
     }
 
     #[test]
@@ -3385,7 +3385,7 @@ mod tests {
     }
 
     #[test]
-    fn test_formula_explicit_refs_redirect() {
+    fn test_formula_explicit_refs_hidden_merge_empty() {
         use crate::sheet::MergedRegion;
 
         let mut wb = Workbook::new();
@@ -3395,17 +3395,18 @@ mod tests {
         wb.sheet_mut(0).unwrap().set_value(0, 0, "10");
         wb.sheet_mut(0).unwrap().add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
 
-        // D1 = =A1+B1+C1 → each is a single-cell ref, each redirects to origin → 30
+        // Excel parity: B1/C1 are hidden in the merge and read as empty,
+        // so only A1 contributes — matching =SUM(A1:C1) range semantics.
         wb.sheet_mut(0).unwrap().set_value(0, 3, "=A1+B1+C1");
         wb.update_cell_deps(sheet_id, 0, 3);
 
         wb.recompute_full_ordered();
 
-        assert_eq!(wb.sheet(0).unwrap().get_display(0, 3), "30"); // 10+10+10
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, 3), "10"); // 10+0+0
     }
 
     #[test]
-    fn test_formula_cross_sheet_ref_redirect() {
+    fn test_formula_cross_sheet_hidden_merge_reads_empty() {
         use crate::sheet::MergedRegion;
 
         let mut wb = Workbook::new();
@@ -3418,13 +3419,17 @@ mod tests {
         let sheet2_idx = wb.add_sheet();
         let sheet2_id = wb.sheet_id_at_idx(sheet2_idx).unwrap();
 
-        // Sheet2 A1 = =Sheet1!B1  (B1 is hidden in merge, should redirect to A1)
+        // Excel parity: Sheet1!B1 is hidden in the merge → empty.
+        // Sheet1!A1 (the origin) still reads normally cross-sheet.
         wb.sheet_mut(sheet2_idx).unwrap().set_value(0, 0, "=Sheet1!B1");
         wb.update_cell_deps(sheet2_id, 0, 0);
+        wb.sheet_mut(sheet2_idx).unwrap().set_value(0, 1, "=Sheet1!A1");
+        wb.update_cell_deps(sheet2_id, 0, 1);
 
         wb.recompute_full_ordered();
 
-        assert_eq!(wb.sheet(sheet2_idx).unwrap().get_display(0, 0), "Hi");
+        assert_eq!(wb.sheet(sheet2_idx).unwrap().get_display(0, 0), "");
+        assert_eq!(wb.sheet(sheet2_idx).unwrap().get_display(0, 1), "Hi");
     }
 
     // =========================================================================
