@@ -239,6 +239,59 @@ struct FullFormat {
     /// may pass it through opaquely)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     number_format: Option<serde_json::Value>,
+    /// Text overflow behavior: "wrap" | "overflow" (absent = clip, the default)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overflow: Option<String>,
+    /// Per-edge borders (absent edges have no border). Added 2026-07-28 (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    borders: Option<FullBorders>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct FullBorders {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    top: Option<FullBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    right: Option<FullBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bottom: Option<FullBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    left: Option<FullBorder>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FullBorder {
+    /// "thin" | "medium" | "thick"
+    style: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
+}
+
+fn border_out(b: visigrid_engine::cell::CellBorder) -> Option<FullBorder> {
+    use visigrid_engine::cell::BorderStyle;
+    let style = match b.style {
+        BorderStyle::None => return None,
+        BorderStyle::Thin => "thin",
+        BorderStyle::Medium => "medium",
+        BorderStyle::Thick => "thick",
+    };
+    Some(FullBorder { style: style.to_string(), color: b.color.map(hex) })
+}
+
+fn border_in(b: &Option<FullBorder>) -> visigrid_engine::cell::CellBorder {
+    use visigrid_engine::cell::{BorderStyle, CellBorder};
+    match b {
+        None => CellBorder::default(),
+        Some(fb) => CellBorder {
+            style: match fb.style.as_str() {
+                "medium" => BorderStyle::Medium,
+                "thick" => BorderStyle::Thick,
+                "thin" => BorderStyle::Thin,
+                _ => BorderStyle::None,
+            },
+            color: fb.color.as_deref().and_then(parse_hex),
+        },
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -371,6 +424,21 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
                 },
                 font: format.font_family.clone(),
                 size: format.font_size,
+                overflow: match format.text_overflow {
+                    visigrid_engine::cell::TextOverflow::Clip => None,
+                    visigrid_engine::cell::TextOverflow::Wrap => Some("wrap".into()),
+                    visigrid_engine::cell::TextOverflow::Overflow => Some("overflow".into()),
+                },
+                borders: if format.has_any_border() {
+                    Some(FullBorders {
+                        top: border_out(format.border_top),
+                        right: border_out(format.border_right),
+                        bottom: border_out(format.border_bottom),
+                        left: border_out(format.border_left),
+                    })
+                } else {
+                    None
+                },
                 number_format: serde_json::to_value(&format.number_format).ok().filter(|v| {
                     // omit the default number format
                     serde_json::to_value(visigrid_engine::cell::NumberFormat::default())
@@ -531,6 +599,19 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
             }
             format.font_family = f.font.clone();
             format.font_size = f.size;
+            if let Some(o) = &f.overflow {
+                format.text_overflow = match o.as_str() {
+                    "wrap" => visigrid_engine::cell::TextOverflow::Wrap,
+                    "overflow" => visigrid_engine::cell::TextOverflow::Overflow,
+                    _ => visigrid_engine::cell::TextOverflow::Clip,
+                };
+            }
+            if let Some(b) = &f.borders {
+                format.border_top = border_in(&b.top);
+                format.border_right = border_in(&b.right);
+                format.border_bottom = border_in(&b.bottom);
+                format.border_left = border_in(&b.left);
+            }
             if let Some(nf) = &f.number_format {
                 if let Ok(parsed) = serde_json::from_value(nf.clone()) {
                     format.number_format = parsed;
@@ -636,6 +717,30 @@ mod full_json_tests {
         // import_full on a workbook doc yields the active sheet
         let active_sheet = import_full(&json).unwrap();
         assert_eq!(active_sheet.name, "Summary");
+    }
+
+    #[test]
+    fn borders_and_wrap_roundtrip() {
+        use visigrid_engine::cell::{BorderStyle, CellBorder, TextOverflow};
+
+        let mut sheet = Sheet::new(SheetId(1), 100, 100);
+        sheet.set_value(0, 0, "boxed");
+        let mut f = sheet.get_format(0, 0);
+        f.text_overflow = TextOverflow::Wrap;
+        f.border_top = CellBorder { style: BorderStyle::Thick, color: Some([255, 0, 0, 255]) };
+        f.border_bottom = CellBorder { style: BorderStyle::Thin, color: None };
+        sheet.set_format(0, 0, f);
+
+        let json = export_full(&sheet).unwrap();
+        assert!(json.contains("\"wrap\"") && json.contains("\"thick\""));
+
+        let restored = import_full(&json).unwrap();
+        let rf = restored.get_format(0, 0);
+        assert_eq!(rf.text_overflow, TextOverflow::Wrap);
+        assert_eq!(rf.border_top.style, BorderStyle::Thick);
+        assert_eq!(rf.border_top.color, Some([255, 0, 0, 255]));
+        assert_eq!(rf.border_bottom.style, BorderStyle::Thin);
+        assert_eq!(rf.border_left.style, BorderStyle::None);
     }
 
     #[test]
