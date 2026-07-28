@@ -27,7 +27,7 @@ pub use bridge::{
 pub use coalesce::coalesce_cells_to_ranges;
 pub use discovery::{DiscoveryFile, DiscoveryManager, discovery_dir, list_sessions};
 pub use protocol::{
-    ClientMessage, ServerMessage, ProtocolError, Op,
+    ClientMessage, ServerMessage, ProtocolError, Op, OpError,
     InspectTarget, InspectResult, CellInfo, WorkbookInfo,
     PROTOCOL_VERSION, MAX_MESSAGE_SIZE,
 };

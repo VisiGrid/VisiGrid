@@ -84,6 +84,11 @@ pub struct Workbook {
     #[serde(skip)]
     pub(crate) batch_changed: Vec<CellId>,
 
+    /// Cells whose format (not value) changed during the current batch.
+    /// Bumps the revision at end_batch() but does not trigger recalc.
+    #[serde(skip)]
+    pub(crate) batch_format_changed: Vec<CellId>,
+
     /// Maps to `CalculationMode` from document settings:
     ///   `true`  = `CalculationMode::Automatic` — recalc on every edit (default)
     ///   `false` = `CalculationMode::Manual`    — recalc only on F9
@@ -143,6 +148,7 @@ impl Workbook {
             dep_graph: DepGraph::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
+            batch_format_changed: Vec::new(),
             auto_recalc: true,
             iterative_enabled: false,
             iterative_max_iters: 100,
@@ -407,6 +413,7 @@ impl Workbook {
             dep_graph: DepGraph::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
+            batch_format_changed: Vec::new(),
             auto_recalc: true,
             iterative_enabled: false,
             iterative_max_iters: 100,
@@ -430,6 +437,7 @@ impl Workbook {
             dep_graph: DepGraph::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
+            batch_format_changed: Vec::new(),
             auto_recalc: true,
             iterative_enabled: false,
             iterative_max_iters: 100,
@@ -1761,10 +1769,14 @@ impl Workbook {
         assert!(self.batch_depth > 0, "end_batch without begin_batch");
         self.batch_depth -= 1;
         if self.batch_depth == 0 {
-            let changed = std::mem::take(&mut self.batch_changed);
+            let mut changed = std::mem::take(&mut self.batch_changed);
+            let format_changed = std::mem::take(&mut self.batch_format_changed);
             if !changed.is_empty() {
                 self.recalc_dirty_set(&changed);
+            }
+            if !changed.is_empty() || !format_changed.is_empty() {
                 self.increment_revision();
+                changed.extend(format_changed);
                 return changed;
             }
         }
@@ -1793,6 +1805,17 @@ impl Workbook {
                 let _ = self.evaluate_cell(cell_id);
             }
             self.recalc_dirty_set(&[cell_id]);
+            self.increment_revision();
+        }
+    }
+
+    /// Record a format-only cell change. Bumps the revision (at end_batch when
+    /// batching, immediately otherwise) without triggering recalc — format
+    /// changes never affect computed values.
+    pub fn note_format_changed(&mut self, cell_id: CellId) {
+        if self.batch_depth > 0 {
+            self.batch_format_changed.push(cell_id);
+        } else {
             self.increment_revision();
         }
     }
@@ -2235,6 +2258,45 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_only_batch_bumps_revision_without_recalc() {
+        let mut wb = Workbook::new();
+        let rev0 = wb.revision();
+        wb.begin_batch();
+        let sheet_id = wb.sheets()[0].id;
+        wb.sheet_mut(0).unwrap().set_bold(0, 0, true);
+        wb.note_format_changed(CellId::new(sheet_id, 0, 0));
+        let changed = wb.end_batch();
+        assert_eq!(wb.revision(), rev0 + 1, "format-only batch must bump revision");
+        assert_eq!(changed, vec![CellId::new(sheet_id, 0, 0)]);
+        assert_eq!(wb.recalc_count(), 0, "format-only batch must not recalc");
+    }
+
+    #[test]
+    fn format_change_outside_batch_bumps_revision() {
+        let mut wb = Workbook::new();
+        let rev0 = wb.revision();
+        let sheet_id = wb.sheets()[0].id;
+        wb.sheet_mut(0).unwrap().set_bold(0, 0, true);
+        wb.note_format_changed(CellId::new(sheet_id, 0, 0));
+        assert_eq!(wb.revision(), rev0 + 1);
+    }
+
+    #[test]
+    fn mixed_batch_recalcs_and_returns_both_kinds_of_change() {
+        let mut wb = Workbook::new();
+        let sheet_id = wb.sheets()[0].id;
+        let rev0 = wb.revision();
+        wb.begin_batch();
+        wb.set_cell_value_tracked(0, 0, 0, "1");
+        wb.sheet_mut(0).unwrap().set_bold(1, 1, true);
+        wb.note_format_changed(CellId::new(sheet_id, 1, 1));
+        let changed = wb.end_batch();
+        assert_eq!(wb.revision(), rev0 + 1, "one bump per batch");
+        assert!(changed.contains(&CellId::new(sheet_id, 0, 0)));
+        assert!(changed.contains(&CellId::new(sheet_id, 1, 1)));
+    }
 
     #[test]
     fn test_new_workbook() {

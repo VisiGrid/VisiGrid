@@ -1866,6 +1866,215 @@ impl AskAIDialogState {
 // Grid configuration
 pub const NUM_ROWS: usize = 65536;
 pub const NUM_COLS: usize = 256;
+
+/// Largest cell count a single session format op (SetNumberFormat/SetStyle)
+/// may cover. Bounds memory for undo patches; agents get a precise error
+/// telling them to split larger ranges.
+pub const MAX_SESSION_FORMAT_CELLS: usize = 250_000;
+
+/// Validate one session-protocol op against the workbook's sheet list and the
+/// governing grid bounds. Returns (code, message, suggestion) on failure.
+/// Called for every op BEFORE any op is applied — a failure here rejects the
+/// whole batch, which is what makes `atomic` semantics honest.
+fn validate_session_op(
+    op: &crate::session_server::Op,
+    sheet_count: usize,
+) -> Option<(&'static str, String, Option<String>)> {
+    use crate::session_server::Op;
+
+    let check_sheet = |sheet: usize| -> Option<(&'static str, String, Option<String>)> {
+        if sheet >= sheet_count {
+            Some((
+                "sheet_not_found",
+                format!("sheet index {} does not exist (workbook has {} sheet{})",
+                    sheet, sheet_count, if sheet_count == 1 { "" } else { "s" }),
+                Some("Inspect the workbook to list its sheets".to_string()),
+            ))
+        } else {
+            None
+        }
+    };
+    let check_cell = |row: usize, col: usize| -> Option<(&'static str, String, Option<String>)> {
+        if row >= NUM_ROWS || col >= NUM_COLS {
+            Some((
+                "out_of_bounds",
+                format!("cell (row {}, col {}) is outside the grid of {} rows × {} columns",
+                    row, col, NUM_ROWS, NUM_COLS),
+                Some(format!("Rows are 0..={}, columns 0..={}", NUM_ROWS - 1, NUM_COLS - 1)),
+            ))
+        } else {
+            None
+        }
+    };
+    let check_range = |sr: usize, sc: usize, er: usize, ec: usize| -> Option<(&'static str, String, Option<String>)> {
+        if sr > er || sc > ec {
+            return Some((
+                "invalid_op",
+                format!("range start (row {}, col {}) is after its end (row {}, col {})", sr, sc, er, ec),
+                Some("Ensure start_row <= end_row and start_col <= end_col".to_string()),
+            ));
+        }
+        check_cell(sr, sc).or_else(|| check_cell(er, ec)).or_else(|| {
+            let cells = (er - sr + 1) * (ec - sc + 1);
+            if cells > MAX_SESSION_FORMAT_CELLS {
+                Some((
+                    "cells_limit_exceeded",
+                    format!("range covers {} cells; format ops are limited to {} cells per op",
+                        cells, MAX_SESSION_FORMAT_CELLS),
+                    Some("Split the range into smaller ops in the same batch".to_string()),
+                ))
+            } else {
+                None
+            }
+        })
+    };
+
+    match op {
+        Op::SetCellValue { sheet, row, col, .. }
+        | Op::SetCellFormula { sheet, row, col, .. }
+        | Op::ClearCell { sheet, row, col } => {
+            check_sheet(*sheet).or_else(|| check_cell(*row, *col))
+        }
+        Op::SetNumberFormat { sheet, start_row, start_col, end_row, end_col, format } => {
+            check_sheet(*sheet)
+                .or_else(|| check_range(*start_row, *start_col, *end_row, *end_col))
+                .or_else(|| {
+                    let t = format.trim();
+                    if t.is_empty() {
+                        return Some((
+                            "invalid_op",
+                            "number format string is empty".to_string(),
+                            Some("Use a named format (general, number, currency, percent, date, time, datetime — optionally with :decimals) or an Excel format code like \"#,##0.00\"".to_string()),
+                        ));
+                    }
+                    // A known keyword with an unparseable decimals suffix is a
+                    // client mistake — reject rather than store it as a Custom code.
+                    if let Some((name, dec)) = t.split_once(':') {
+                        let known = matches!(name.trim().to_ascii_lowercase().as_str(),
+                            "general" | "number" | "currency" | "percent" | "date" | "time" | "datetime");
+                        if known && dec.trim().parse::<u8>().map(|d| d > 10).unwrap_or(true) {
+                            return Some((
+                                "invalid_op",
+                                format!("\"{}\" has an invalid decimals suffix (must be an integer 0..=10)", t),
+                                Some("Example: \"number:2\" or \"percent:1\"".to_string()),
+                            ));
+                        }
+                    }
+                    None
+                })
+        }
+        Op::SetStyle { sheet, start_row, start_col, end_row, end_col, .. } => {
+            check_sheet(*sheet).or_else(|| check_range(*start_row, *start_col, *end_row, *end_col))
+        }
+    }
+}
+
+/// Map a session-protocol number-format string to an engine NumberFormat.
+/// Named formats: "general", "number[:decimals]", "currency[:decimals]",
+/// "percent[:decimals]", "date", "time", "datetime". Anything else is treated
+/// as a raw Excel format code (e.g. "#,##0.00"). Assumes the string already
+/// passed validate_session_op.
+fn parse_session_number_format(s: &str) -> visigrid_engine::cell::NumberFormat {
+    use visigrid_engine::cell::{DateStyle, NumberFormat};
+    let t = s.trim();
+    let (name, dec) = match t.split_once(':') {
+        Some((n, d)) => (n.trim(), d.trim().parse::<u8>().ok()),
+        None => (t, None),
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "general" => NumberFormat::General,
+        "number" => NumberFormat::number(dec.unwrap_or(2)),
+        "currency" => NumberFormat::currency(dec.unwrap_or(2)),
+        "percent" => NumberFormat::Percent { decimals: dec.unwrap_or(0).min(10) },
+        "date" => NumberFormat::Date { style: DateStyle::Short },
+        "time" => NumberFormat::Time,
+        "datetime" => NumberFormat::DateTime,
+        _ => NumberFormat::Custom(t.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod session_op_validation_tests {
+    use super::{validate_session_op, parse_session_number_format, NUM_ROWS, NUM_COLS, MAX_SESSION_FORMAT_CELLS};
+    use crate::session_server::Op;
+    use visigrid_engine::cell::NumberFormat;
+
+    fn set_value(sheet: usize, row: usize, col: usize) -> Op {
+        Op::SetCellValue { sheet, row, col, value: "x".to_string() }
+    }
+
+    #[test]
+    fn valid_ops_pass() {
+        assert!(validate_session_op(&set_value(0, 0, 0), 1).is_none());
+        assert!(validate_session_op(&set_value(0, NUM_ROWS - 1, NUM_COLS - 1), 1).is_none());
+        assert!(validate_session_op(&set_value(2, 5, 5), 3).is_none());
+    }
+
+    #[test]
+    fn out_of_bounds_cell_rejected() {
+        // The exact ghost-cell case: row 70,000 on the 65,536-row grid
+        let (code, msg, _) = validate_session_op(&set_value(0, 70_000, 0), 1).unwrap();
+        assert_eq!(code, "out_of_bounds");
+        assert!(msg.contains("70000") && msg.contains("65536"));
+        let (code, _, _) = validate_session_op(&set_value(0, 0, NUM_COLS), 1).unwrap();
+        assert_eq!(code, "out_of_bounds");
+    }
+
+    #[test]
+    fn invalid_sheet_rejected_not_redirected() {
+        let (code, msg, _) = validate_session_op(&set_value(5, 0, 0), 1).unwrap();
+        assert_eq!(code, "sheet_not_found");
+        assert!(msg.contains("5"));
+    }
+
+    #[test]
+    fn format_range_checks() {
+        let style = |sr: usize, sc: usize, er: usize, ec: usize| Op::SetStyle {
+            sheet: 0, start_row: sr, start_col: sc, end_row: er, end_col: ec,
+            bold: Some(true), italic: None, underline: None,
+        };
+        assert!(validate_session_op(&style(0, 0, 9, 9), 1).is_none());
+        let (code, _, _) = validate_session_op(&style(9, 0, 0, 9), 1).unwrap();
+        assert_eq!(code, "invalid_op");
+        let (code, _, _) = validate_session_op(&style(0, 0, NUM_ROWS, 0), 1).unwrap();
+        assert_eq!(code, "out_of_bounds");
+        // Whole grid exceeds the per-op cap
+        let (code, _, _) = validate_session_op(&style(0, 0, NUM_ROWS - 1, NUM_COLS - 1), 1).unwrap();
+        assert_eq!(code, "cells_limit_exceeded");
+        // One full column (65,536 cells) is comfortably under the cap
+        assert!(NUM_ROWS <= MAX_SESSION_FORMAT_CELLS);
+        assert!(validate_session_op(&style(0, 0, NUM_ROWS - 1, 0), 1).is_none());
+    }
+
+    #[test]
+    fn number_format_string_checks() {
+        let nf = |format: &str| Op::SetNumberFormat {
+            sheet: 0, start_row: 0, start_col: 0, end_row: 0, end_col: 0,
+            format: format.to_string(),
+        };
+        assert!(validate_session_op(&nf("currency"), 1).is_none());
+        assert!(validate_session_op(&nf("number:2"), 1).is_none());
+        assert!(validate_session_op(&nf("#,##0.00"), 1).is_none());
+        let (code, _, _) = validate_session_op(&nf(""), 1).unwrap();
+        assert_eq!(code, "invalid_op");
+        let (code, _, _) = validate_session_op(&nf("number:abc"), 1).unwrap();
+        assert_eq!(code, "invalid_op");
+        let (code, _, _) = validate_session_op(&nf("percent:99"), 1).unwrap();
+        assert_eq!(code, "invalid_op");
+    }
+
+    #[test]
+    fn number_format_parsing() {
+        assert_eq!(parse_session_number_format("general"), NumberFormat::General);
+        assert_eq!(parse_session_number_format("number:3"), NumberFormat::number(3));
+        assert_eq!(parse_session_number_format("Currency"), NumberFormat::currency(2));
+        assert_eq!(parse_session_number_format("percent:1"), NumberFormat::Percent { decimals: 1 });
+        assert_eq!(
+            parse_session_number_format("#,##0.00"),
+            NumberFormat::Custom("#,##0.00".to_string())
+        );
+    }
+}
 pub const CELL_WIDTH: f32 = 80.0;
 pub const CELL_HEIGHT: f32 = 24.0;
 pub const HEADER_WIDTH: f32 = 50.0;
@@ -3323,103 +3532,169 @@ impl Spreadsheet {
             };
         }
 
+        // Validate the entire batch up front against the real grid bounds and
+        // sheet list. Any invalid op rejects the whole request (regardless of
+        // `atomic`) before anything is applied — by the time we touch the
+        // workbook, no op can fail, so a success response never lies.
+        let sheet_count = self.workbook.read(cx).sheets().len();
+        for (i, op) in req.ops.iter().enumerate() {
+            if let Some((code, message, suggestion)) = validate_session_op(op, sheet_count) {
+                return ApplyOpsResponse {
+                    applied: 0,
+                    total: req.ops.len(),
+                    current_revision: current_rev,
+                    error: Some(ApplyOpsError::OpFailed(crate::session_server::OpError {
+                        code: code.to_string(),
+                        message,
+                        op_index: i,
+                        suggestion,
+                    })),
+                };
+            }
+        }
+
         // Apply all ops within a single batch_guard, collecting changes for history
-        let (applied, error, changes_by_sheet) = self.workbook.update(cx, |wb, _| {
+        let (applied, changes_by_sheet, format_patches_by_sheet) = self.workbook.update(cx, |wb, _| {
+            use crate::history::CellFormatPatch;
+
             let mut guard = wb.batch_guard();
             let mut applied = 0;
-            let mut error: Option<crate::session_server::ApplyOpsError> = None;
             // Group changes by sheet for history recording
             let mut changes_by_sheet: std::collections::HashMap<usize, Vec<CellChange>> =
                 std::collections::HashMap::new();
+            // Format patches by sheet, deduped per cell (first `before` kept,
+            // last `after` wins) so a multi-op request undoes correctly.
+            let mut format_patches_by_sheet: std::collections::HashMap<
+                usize,
+                (Vec<CellFormatPatch>, std::collections::HashMap<(usize, usize), usize>),
+            > = std::collections::HashMap::new();
 
-            for (_i, op) in req.ops.iter().enumerate() {
-                let sheet_count = guard.sheets().len();
+            let mut push_format_patch = |acc: &mut std::collections::HashMap<
+                usize,
+                (Vec<CellFormatPatch>, std::collections::HashMap<(usize, usize), usize>),
+            >, sheet_idx: usize, patch: CellFormatPatch| {
+                let (patches, index) = acc.entry(sheet_idx).or_default();
+                match index.get(&(patch.row, patch.col)) {
+                    Some(&i) => patches[i].after = patch.after,
+                    None => {
+                        index.insert((patch.row, patch.col), patches.len());
+                        patches.push(patch);
+                    }
+                }
+            };
 
+            for op in req.ops.iter() {
                 match op {
                     Op::SetCellValue { sheet, row, col, value } => {
-                        let sheet_idx = if *sheet < sheet_count { *sheet } else { guard.active_sheet_index() };
-
-                        // Capture old value for history
-                        let old_value = guard.sheets()[sheet_idx].get_raw(*row, *col);
-                        changes_by_sheet.entry(sheet_idx).or_default().push(CellChange {
+                        let old_value = guard.sheets()[*sheet].get_raw(*row, *col);
+                        changes_by_sheet.entry(*sheet).or_default().push(CellChange {
                             row: *row,
                             col: *col,
                             old_value,
                             new_value: value.clone(),
                         });
-
-                        // Apply the mutation via tracked method
-                        guard.set_cell_value_tracked(sheet_idx, *row, *col, value);
+                        guard.set_cell_value_tracked(*sheet, *row, *col, value);
                         applied += 1;
                     }
                     Op::SetCellFormula { sheet, row, col, formula } => {
-                        let sheet_idx = if *sheet < sheet_count { *sheet } else { guard.active_sheet_index() };
-
-                        let old_value = guard.sheets()[sheet_idx].get_raw(*row, *col);
-                        changes_by_sheet.entry(sheet_idx).or_default().push(CellChange {
+                        let old_value = guard.sheets()[*sheet].get_raw(*row, *col);
+                        changes_by_sheet.entry(*sheet).or_default().push(CellChange {
                             row: *row,
                             col: *col,
                             old_value,
                             new_value: formula.clone(),
                         });
-
-                        guard.set_cell_value_tracked(sheet_idx, *row, *col, formula);
+                        guard.set_cell_value_tracked(*sheet, *row, *col, formula);
                         applied += 1;
                     }
                     Op::ClearCell { sheet, row, col } => {
-                        let sheet_idx = if *sheet < sheet_count { *sheet } else { guard.active_sheet_index() };
-
-                        let old_value = guard.sheets()[sheet_idx].get_raw(*row, *col);
-                        changes_by_sheet.entry(sheet_idx).or_default().push(CellChange {
+                        let old_value = guard.sheets()[*sheet].get_raw(*row, *col);
+                        changes_by_sheet.entry(*sheet).or_default().push(CellChange {
                             row: *row,
                             col: *col,
                             old_value,
                             new_value: String::new(),
                         });
-
-                        guard.clear_cell_tracked(sheet_idx, *row, *col);
+                        guard.clear_cell_tracked(*sheet, *row, *col);
                         applied += 1;
                     }
-                    Op::SetNumberFormat { .. } => {
-                        // TODO: Parse format string and apply to range
+                    Op::SetNumberFormat { sheet, start_row, start_col, end_row, end_col, format } => {
+                        let nf = parse_session_number_format(format);
+                        let sheet_id = guard.sheets()[*sheet].id;
+                        for r in *start_row..=*end_row {
+                            for c in *start_col..=*end_col {
+                                let s = guard.sheet_mut(*sheet).expect("validated sheet index");
+                                let before = s.get_format(r, c);
+                                s.set_number_format(r, c, nf.clone());
+                                let after = s.get_format(r, c);
+                                if after != before {
+                                    push_format_patch(&mut format_patches_by_sheet, *sheet,
+                                        CellFormatPatch { row: r, col: c, before, after });
+                                    guard.note_format_changed(CellId::new(sheet_id, r, c));
+                                }
+                            }
+                        }
                         applied += 1;
                     }
-                    Op::SetStyle { .. } => {
-                        // TODO: Apply style changes to range
+                    Op::SetStyle { sheet, start_row, start_col, end_row, end_col, bold, italic, underline } => {
+                        let sheet_id = guard.sheets()[*sheet].id;
+                        for r in *start_row..=*end_row {
+                            for c in *start_col..=*end_col {
+                                let s = guard.sheet_mut(*sheet).expect("validated sheet index");
+                                let before = s.get_format(r, c);
+                                if let Some(b) = bold { s.set_bold(r, c, *b); }
+                                if let Some(b) = italic { s.set_italic(r, c, *b); }
+                                if let Some(b) = underline { s.set_underline(r, c, *b); }
+                                let after = s.get_format(r, c);
+                                if after != before {
+                                    push_format_patch(&mut format_patches_by_sheet, *sheet,
+                                        CellFormatPatch { row: r, col: c, before, after });
+                                    guard.note_format_changed(CellId::new(sheet_id, r, c));
+                                }
+                            }
+                        }
                         applied += 1;
                     }
-                }
-
-                // If atomic and there was an error, stop
-                if req.atomic && error.is_some() {
-                    break;
                 }
             }
 
-            (applied, error, changes_by_sheet)
+            (applied, changes_by_sheet, format_patches_by_sheet)
         });
         // batch_guard dropped here → single recalc + revision increment
 
-        // Build changed cells list BEFORE history takes ownership of changes_by_sheet
-        let changed_cells: Vec<crate::session_server::CellRef> = if applied > 0 && error.is_none() {
-            changes_by_sheet
-                .iter()
-                .flat_map(|(sheet_idx, changes)| {
-                    changes.iter().map(move |c| crate::session_server::CellRef {
-                        sheet: *sheet_idx,
-                        row: c.row,
-                        col: c.col,
-                    })
+        // Build changed cells list BEFORE history takes ownership of the patches
+        let mut changed_cells: Vec<crate::session_server::CellRef> = changes_by_sheet
+            .iter()
+            .flat_map(|(sheet_idx, changes)| {
+                changes.iter().map(move |c| crate::session_server::CellRef {
+                    sheet: *sheet_idx,
+                    row: c.row,
+                    col: c.col,
                 })
-                .collect()
-        } else {
-            Vec::new()
-        };
+            })
+            .collect();
+        changed_cells.extend(format_patches_by_sheet.iter().flat_map(|(sheet_idx, (patches, _))| {
+            patches.iter().map(move |p| crate::session_server::CellRef {
+                sheet: *sheet_idx,
+                row: p.row,
+                col: p.col,
+            })
+        }));
 
         // Record history entries for undo (one per sheet that had changes)
         for (sheet_idx, changes) in changes_by_sheet {
             if !changes.is_empty() {
                 self.history.record_batch(sheet_idx, changes);
+            }
+        }
+        for (sheet_idx, (patches, _)) in format_patches_by_sheet {
+            if !patches.is_empty() {
+                self.history.record_format(
+                    sheet_idx,
+                    patches,
+                    crate::history::FormatActionKind::PasteFormats,
+                    req.batch_name.clone(),
+                );
             }
         }
 
@@ -3439,7 +3714,7 @@ impl Spreadsheet {
             applied,
             total: req.ops.len(),
             current_revision: new_rev,
-            error,
+            error: None,
         }
     }
 
