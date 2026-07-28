@@ -7,6 +7,7 @@ mod export;
 mod fetch;
 mod fill;
 mod hub;
+mod mcp;
 mod parse;
 mod recon;
 mod replay;
@@ -395,6 +396,23 @@ Examples:
         /// Output as JSON (default: human-readable table)
         #[arg(long)]
         json: bool,
+    },
+
+    /// Serve MCP (Model Context Protocol) over stdio for AI agents
+    #[command(after_help = "\
+Bridges an MCP host (Claude Code, Claude Desktop) to a running VisiGrid
+session. Requires VISIGRID_SESSION_TOKEN in the host's env config.
+
+Claude Code setup:
+  claude mcp add visigrid -e VISIGRID_SESSION_TOKEN=xxx -- vgrid mcp
+
+.mcp.json:
+  {\"mcpServers\": {\"visigrid\": {\"command\": \"vgrid\", \"args\": [\"mcp\"],
+    \"env\": {\"VISIGRID_SESSION_TOKEN\": \"xxx\"}}}}")]
+    Mcp {
+        /// Session ID to target (prefix match; default: auto-select / per-call argument)
+        #[arg(long)]
+        session: Option<String>,
     },
 
     /// Show session server statistics (health check)
@@ -1851,6 +1869,7 @@ fn main() -> ExitCode {
             cmd_apply(ops, session, atomic, expected_revision, wait, wait_timeout)
         }
         Some(Commands::Inspect { range, session, sheet, json }) => cmd_inspect(range, session, sheet, json),
+        Some(Commands::Mcp { session }) => mcp::cmd_mcp(session),
         Some(Commands::Stats { session, json }) => cmd_stats(session, json),
         Some(Commands::View { session, range, sheet, follow, width }) => {
             cmd_view(session, range, sheet, follow, width)
@@ -4746,14 +4765,14 @@ fn cmd_inspect(
         client.inspect_workbook()
     } else if let Some((start, end)) = range.split_once(':') {
         // Range like "A1:B2"
-        let (start_col, start_row) = parse_cell_ref(start)
+        let (start_row, start_col) = parse_cell_ref(start)
             .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", start)))?;
-        let (end_col, end_row) = parse_cell_ref(end)
+        let (end_row, end_col) = parse_cell_ref(end)
             .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", end)))?;
         client.inspect_range(sheet, start_row, start_col, end_row, end_col)
     } else {
         // Single cell like "A1"
-        let (col, row) = parse_cell_ref(&range)
+        let (row, col) = parse_cell_ref(&range)
             .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", range)))?;
         client.inspect_cell(sheet, row, col)
     }.map_err(CliError::session)?;
@@ -5294,9 +5313,9 @@ fn cmd_view(
     let (start, end) = range.split_once(':')
         .ok_or_else(|| CliError::args(format!("invalid range '{}', expected format like A1:J20", range)))?;
 
-    let (start_col, start_row) = parse_cell_ref(start)
+    let (start_row, start_col) = parse_cell_ref(start)
         .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", start)))?;
-    let (end_col, end_row) = parse_cell_ref(end)
+    let (end_row, end_col) = parse_cell_ref(end)
         .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", end)))?;
 
     let discovery = resolve_session(session_id.as_deref())?;
