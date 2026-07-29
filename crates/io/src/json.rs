@@ -98,7 +98,11 @@ mod tests {
 //   "col_widths": {"0": 120.0},          // added 2026-07-28 (additive)
 //   "row_heights": {"3": 40.0},
 //   "frozen_rows": 1,
-//   "frozen_cols": 0
+//   "frozen_cols": 0,
+//   "cond_formats": { ...engine CondFormatStore serde form... },   // added 2026-07-29
+//   "validations": [ {"range": {...}, "rule": {...}} ],            // list form, NOT a map
+//   "filter": {"range": [0,0,99,3], "columns": [{"col":1, "filter": {...}}], "sort": {...}},
+//   "charts": [ ...opaque; preserved, not interpreted... ]
 // }
 //
 // Workbook form (version 2) — canonical storage for multi-sheet documents
@@ -138,6 +142,11 @@ pub struct SheetLayout {
     pub row_heights: BTreeMap<usize, f32>,
     pub frozen_rows: usize,
     pub frozen_cols: usize,
+    /// AutoFilter/sort state (engine-backed on the web side).
+    pub filter: Option<FilterSpec>,
+    /// Opaque per-sheet charts payload: crates/io doesn't model charts, but
+    /// preserves them so a recalc round-trip never strips web-authored charts.
+    pub charts: Option<serde_json::Value>,
 }
 
 impl SheetLayout {
@@ -146,11 +155,42 @@ impl SheetLayout {
             && self.row_heights.is_empty()
             && self.frozen_rows == 0
             && self.frozen_cols == 0
+            && self.filter.is_none()
+            && self.charts.is_none()
     }
 }
 
 fn is_zero(n: &usize) -> bool {
     *n == 0
+}
+
+/// One data-validation rule: JSON-friendly list projection of the engine's
+/// ValidationStore (whose native serde form is a range-keyed map JSON can't
+/// represent). Same shape as engine-wasm's evaluate_sheet_extras input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationSpec {
+    pub range: visigrid_engine::validation::CellRange,
+    pub rule: visigrid_engine::validation::ValidationRule,
+}
+
+/// AutoFilter/sort state projection (GUI/web presentation state — the
+/// engine's FilterState also carries runtime caches, which never serialize).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FilterSpec {
+    /// (min_row, min_col, max_row, max_col); header row = min_row.
+    pub range: (usize, usize, usize, usize),
+    /// List form (not a map): JSON object keys are strings and serde(flatten)
+    /// can't round-trip integer-keyed maps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<ColumnFilterSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<visigrid_engine::filter::SortState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ColumnFilterSpec {
+    pub col: usize,
+    pub filter: visigrid_engine::filter::ColumnFilter,
 }
 
 fn keys_to_string(m: &BTreeMap<usize, f32>) -> BTreeMap<String, f32> {
@@ -197,6 +237,15 @@ struct SheetBody {
     frozen_rows: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
     frozen_cols: usize,
+    /// Engine CondFormatStore in its serde form; predicates reparse on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cond_formats: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    validations: Vec<ValidationSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    filter: Option<FilterSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    charts: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -472,6 +521,18 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
         row_heights: keys_to_string(&layout.row_heights),
         frozen_rows: layout.frozen_rows,
         frozen_cols: layout.frozen_cols,
+        cond_formats: if sheet.cond_formats.is_empty() {
+            None
+        } else {
+            serde_json::to_value(&sheet.cond_formats).ok()
+        },
+        validations: sheet
+            .validations
+            .iter()
+            .map(|(range, rule)| ValidationSpec { range: range.clone(), rule: rule.clone() })
+            .collect(),
+        filter: layout.filter.clone(),
+        charts: layout.charts.clone(),
     }
 }
 
@@ -527,7 +588,7 @@ pub fn import_any(
     let mut sheets = Vec::with_capacity(bodies.len());
     let mut layouts = Vec::with_capacity(bodies.len());
     for (i, body) in bodies.iter().enumerate() {
-        let (sheet, layout) = apply_body(body, SheetId(i as u64 + 1), i);
+        let (sheet, layout) = apply_body(body, SheetId(i as u64 + 1), i)?;
         sheets.push(sheet);
         layouts.push(layout);
     }
@@ -540,7 +601,7 @@ pub fn import_any(
     Ok((wb, layouts, active))
 }
 
-fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usize) -> (Sheet, SheetLayout) {
+fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usize) -> Result<(Sheet, SheetLayout), String> {
     let mut sheet = Sheet::new(id, 65536, 256);
     if !body.name.is_empty() {
         sheet.set_name(&body.name);
@@ -625,13 +686,27 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
         let _ = sheet.add_merge(MergedRegion::new(m.start_row, m.start_col, m.end_row, m.end_col));
     }
 
+    if let Some(cf) = &body.cond_formats {
+        // Loud on malformed stores: silently dropping rules would be data
+        // loss. A structurally alien store fails the whole import.
+        let mut store = serde_json::from_value::<visigrid_engine::cond_format::CondFormatStore>(cf.clone())
+            .map_err(|e| format!("sheet {:?}: invalid cond_formats: {}", body.name, e))?;
+        store.reparse_all();
+        sheet.cond_formats = store;
+    }
+    for v in &body.validations {
+        sheet.validations.set(v.range.clone(), v.rule.clone());
+    }
+
     let layout = SheetLayout {
         col_widths: keys_to_usize(&body.col_widths),
         row_heights: keys_to_usize(&body.row_heights),
         frozen_rows: body.frozen_rows,
         frozen_cols: body.frozen_cols,
+        filter: body.filter.clone(),
+        charts: body.charts.clone(),
     };
-    (sheet, layout)
+    Ok((sheet, layout))
 }
 
 #[cfg(test)]
@@ -741,6 +816,73 @@ mod full_json_tests {
         assert_eq!(rf.border_top.color, Some([255, 0, 0, 255]));
         assert_eq!(rf.border_bottom.style, BorderStyle::Thin);
         assert_eq!(rf.border_left.style, BorderStyle::None);
+    }
+
+    #[test]
+    fn tier1_extras_roundtrip() {
+        use visigrid_engine::cell::CellStyle;
+        use visigrid_engine::cond_format::CondStyle;
+        use visigrid_engine::filter::{ColumnFilter, SortDirection, SortState};
+        use visigrid_engine::validation::{
+            CellRange, ListSource, ValidationResult, ValidationRule, ValidationType,
+        };
+        use visigrid_engine::workbook::Workbook;
+
+        let mut sheet = Sheet::new(SheetId(1), 100, 100);
+        sheet.set_name("Data");
+        sheet.set_value(0, 0, "150");
+        // CF: values > 100 get the error style
+        sheet.cond_formats.add(
+            vec![CellRange { start_row: 0, start_col: 0, end_row: 9, end_col: 0 }],
+            "=A1>100",
+            CondStyle::Named(CellStyle::Error),
+        );
+        // Validation: B column restricted to a list
+        sheet.validations.set(
+            CellRange { start_row: 0, start_col: 1, end_row: 9, end_col: 1 },
+            ValidationRule::new(ValidationType::List(ListSource::Inline(vec![
+                "yes".into(),
+                "no".into(),
+            ]))),
+        );
+        let mut wb = Workbook::from_sheets(vec![sheet], 0);
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+
+        let layout = SheetLayout {
+            filter: Some(FilterSpec {
+                range: (0, 0, 9, 3),
+                columns: vec![ColumnFilterSpec { col: 1, filter: ColumnFilter::default() }],
+                sort: Some(SortState { column: 0, direction: SortDirection::Descending }),
+            }),
+            charts: Some(serde_json::json!([{"kind": "bar", "web_only": true}])),
+            ..SheetLayout::default()
+        };
+
+        let json = export_workbook(&wb, &[layout.clone()], 0).unwrap();
+        assert!(json.contains("cond_formats") && json.contains("validations"));
+        assert!(json.contains("\"filter\"") && json.contains("web_only"));
+
+        let (restored, layouts, _) = import_any(&json).unwrap();
+        let rsheet = &restored.sheets()[0];
+        // CF survived AND predicates reparsed (rule actually evaluates)
+        assert!(rsheet.cond_formats.override_for_cell(0, 0, rsheet).is_some(),
+            "reparsed CF rule must match A1=150");
+        assert!(rsheet.cond_formats.override_for_cell(1, 0, rsheet).is_none());
+        // Validation survived and enforces
+        assert!(matches!(
+            rsheet.validate_cell_input(0, 1, "maybe"),
+            ValidationResult::Invalid { .. }
+        ));
+        // Filter + charts side-car round-tripped exactly
+        assert_eq!(layouts[0].filter, layout.filter);
+        assert_eq!(layouts[0].charts, layout.charts);
+    }
+
+    #[test]
+    fn malformed_cond_formats_fail_loudly() {
+        let doc = r#"{"format":"visigrid-json","version":1,"cond_formats":{"rules":"not-a-list"}}"#;
+        assert!(import_full(doc).is_err());
     }
 
     #[test]

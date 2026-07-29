@@ -399,7 +399,7 @@ impl FilterKey {
 }
 
 /// Normalized key for comparison/hashing (used in filter HashSet)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum NormalizedFilterKey {
     Blank,
     Error(ErrorKind),
@@ -451,7 +451,7 @@ pub enum SortDirection {
 }
 
 /// Current sort state
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SortState {
     pub column: usize,
     pub direction: SortDirection,
@@ -578,7 +578,7 @@ pub struct UniqueValueEntry {
 }
 
 /// Text filter mode
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TextFilterMode {
     Contains,
     NotContains,
@@ -589,7 +589,7 @@ pub enum TextFilterMode {
 }
 
 /// Text filter predicate
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextFilter {
     pub mode: TextFilterMode,
     pub value: String,
@@ -616,7 +616,7 @@ impl TextFilter {
 }
 
 /// Per-column filter criteria
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ColumnFilter {
     /// Selected normalized filter keys to INCLUDE (None = all pass)
     /// Uses NormalizedFilterKey for consistent comparison
