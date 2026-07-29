@@ -34,3 +34,5 @@ winget-manifests/
 crates/io/target/
 visigrid-site/
 visihub-site/
+visigrid-bin/
+test-results/
