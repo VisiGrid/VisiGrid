@@ -18,7 +18,7 @@ use visigrid_engine::formula::eval::Value;
 use visigrid_engine::workbook::Workbook;
 use wasm_bindgen::prelude::*;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct InSheet {
     #[serde(default)]
     name: Option<String>,
@@ -26,7 +26,7 @@ struct InSheet {
     cells: Vec<InCell>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct InCell {
     row: usize,
     col: usize,
@@ -58,12 +58,10 @@ pub fn engine_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-#[wasm_bindgen]
-pub fn recompute(input: JsValue) -> Result<JsValue, JsValue> {
-    console_error_panic_hook::set_once();
-    let sheets: Vec<InSheet> =
-        serde_wasm_bindgen::from_value(input).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
+/// Build a workbook from raw input sheets and recompute it (shared by every
+/// export). Cells are written directly onto sheets, so the dependency graph
+/// is rebuilt before the ordered recompute (io::json::import_any pattern).
+fn build_workbook(sheets: &[InSheet]) -> Workbook {
     let mut wb = Workbook::new();
 
     // Workbook::new() pre-creates one sheet; grow to match, then name them.
@@ -93,10 +91,18 @@ pub fn recompute(input: JsValue) -> Result<JsValue, JsValue> {
         }
     }
 
-    // Cells were written directly onto sheets: rebuild the dependency graph
-    // before the ordered recompute (same pattern as io::json::import_any).
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
+    wb
+}
+
+#[wasm_bindgen]
+pub fn recompute(input: JsValue) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
+    let sheets: Vec<InSheet> =
+        serde_wasm_bindgen::from_value(input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let wb = build_workbook(&sheets);
 
     let mut results = Vec::new();
     for (i, sheet_in) in sheets.iter().enumerate() {
@@ -130,6 +136,120 @@ pub fn recompute(input: JsValue) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// Conditional formatting + data validation evaluation (Tier-1, own engine)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ExtrasSheet {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    cells: Vec<InCell>,
+    /// serde form of engine CondFormatStore (rules reparse on load)
+    #[serde(default)]
+    cond_formats: Option<serde_json::Value>,
+    /// JSON-friendly list projection of the ValidationStore: its native
+    /// serde form is a CellRange-keyed map, which JSON cannot represent
+    /// ("key must be a string") — the vg-json schema must use this list
+    /// form too.
+    #[serde(default)]
+    validations: Vec<ValidationEntry>,
+}
+
+#[derive(Deserialize, Clone)]
+struct ValidationEntry {
+    range: visigrid_engine::validation::CellRange,
+    rule: visigrid_engine::validation::ValidationRule,
+}
+
+#[derive(Serialize)]
+struct CondHit {
+    sheet: usize,
+    row: usize,
+    col: usize,
+    /// Engine CellFormatOverride as its serde value (fg/bg/bold/… deltas)
+    style: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct Violation {
+    sheet: usize,
+    row: usize,
+    col: usize,
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct ExtrasOutput {
+    engine_version: String,
+    cond: Vec<CondHit>,
+    violations: Vec<Violation>,
+}
+
+/// Evaluate conditional-formatting rules and data-validation rules through
+/// the real engine. Input mirrors `recompute` plus optional per-sheet
+/// `cond_formats` / `validations` stores in their engine serde forms (the
+/// same shapes visigrid-json will carry once the schema fields land).
+/// CF is evaluated at each provided cell; validation at each literal cell.
+#[wasm_bindgen]
+pub fn evaluate_sheet_extras(input: JsValue) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
+    let extras: Vec<ExtrasSheet> =
+        serde_wasm_bindgen::from_value(input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let output = evaluate_extras_core(extras);
+    serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+fn evaluate_extras_core(extras: Vec<ExtrasSheet>) -> ExtrasOutput {
+    let base: Vec<InSheet> = extras
+        .iter()
+        .map(|s| InSheet { name: s.name.clone(), cells: s.cells.clone() })
+        .collect();
+    let mut wb = build_workbook(&base);
+
+    // Install the stores, reparsing CF predicates (parse state is serde-skipped).
+    for (i, sheet_in) in extras.iter().enumerate() {
+        let sheet = &mut wb.sheets_mut()[i];
+        if let Some(cf) = &sheet_in.cond_formats {
+            if let Ok(mut store) =
+                serde_json::from_value::<visigrid_engine::cond_format::CondFormatStore>(cf.clone())
+            {
+                store.reparse_all();
+                sheet.cond_formats = store;
+            }
+        }
+        for entry in &sheet_in.validations {
+            sheet.validations.set(entry.range.clone(), entry.rule.clone());
+        }
+    }
+
+    let mut cond = Vec::new();
+    let mut violations = Vec::new();
+    for (i, sheet_in) in extras.iter().enumerate() {
+        let sheet = &wb.sheets()[i];
+        for cell in &sheet_in.cells {
+            if cell.row >= 65536 || cell.col >= 256 {
+                continue;
+            }
+            if let Some(over) = sheet.cond_formats.override_for_cell(cell.row, cell.col, sheet) {
+                if let Ok(style) = serde_json::to_value(&over) {
+                    cond.push(CondHit { sheet: i, row: cell.row, col: cell.col, style });
+                }
+            }
+            if !cell.raw.starts_with('=') {
+                if let visigrid_engine::validation::ValidationResult::Invalid { reason, .. } =
+                    sheet.validate_cell_input(cell.row, cell.col, &cell.raw)
+                {
+                    violations.push(Violation { sheet: i, row: cell.row, col: cell.col, reason });
+                }
+            }
+        }
+    }
+
+    ExtrasOutput { engine_version: engine_version(), cond, violations }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +267,49 @@ mod tests {
             Value::Number(n) => assert_eq!(n, 84.0),
             other => panic!("expected 84, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn cond_format_and_validation_evaluate() {
+        use visigrid_engine::cell::CellFormatOverride;
+        use visigrid_engine::cond_format::{CondFormatStore, CondStyle};
+        use visigrid_engine::validation::{CellRange, ValidationRule, ValidationStore};
+
+        // Build the stores with engine APIs, serialize them — exactly what
+        // the web will send once vg-json carries the schema fields.
+        let mut cf = CondFormatStore::new();
+        cf.add(
+            vec![CellRange::new(0, 0, 10, 0)],
+            "=A1>10",
+            CondStyle::Inline(CellFormatOverride {
+                background_color: Some(Some([255, 0, 0, 255])),
+                ..Default::default()
+            }),
+        );
+
+        let validations = vec![ValidationEntry {
+            range: CellRange::new(0, 1, 10, 1),
+            rule: ValidationRule::list_inline(vec!["Yes".into(), "No".into()]),
+        }];
+
+        let extras = vec![ExtrasSheet {
+            name: Some("S".into()),
+            cells: vec![
+                InCell { row: 0, col: 0, raw: "42".into() },   // CF matches (>10)
+                InCell { row: 1, col: 0, raw: "3".into() },    // CF no match
+                InCell { row: 0, col: 1, raw: "Maybe".into() }, // invalid vs list
+                InCell { row: 1, col: 1, raw: "Yes".into() },  // valid
+            ],
+            cond_formats: Some(serde_json::to_value(&cf).unwrap()),
+            validations,
+        }];
+
+        let out = evaluate_extras_core(extras);
+        assert_eq!(out.cond.len(), 1, "exactly the >10 cell gets the style");
+        assert_eq!((out.cond[0].row, out.cond[0].col), (0, 0));
+        assert_eq!(out.violations.len(), 1, "exactly the off-list cell violates");
+        assert_eq!((out.violations[0].row, out.violations[0].col), (0, 1));
+        assert!(out.violations[0].reason.len() > 0);
     }
 
     #[test]
