@@ -342,6 +342,22 @@ impl SessionClient {
         }
     }
 
+    /// Ask the host to persist the workbook (headless sessions).
+    pub fn save(&mut self) -> Result<visigrid_protocol::SaveResultMessage, SessionError> {
+        let msg = ClientMessage::Save(visigrid_protocol::SaveMessage { id: self.next_request_id() });
+        self.send(&msg)?;
+        match self.receive()? {
+            ServerMessage::SaveResult(r) => {
+                self.revision = r.revision;
+                Ok(r)
+            }
+            ServerMessage::Error(err) => Err(SessionError::ServerError {
+                code: err.code, message: err.message, retry_after_ms: err.retry_after_ms,
+            }),
+            _ => Err(SessionError::ProtocolError("Unexpected response to save".into())),
+        }
+    }
+
     /// Inspect a single cell.
     pub fn inspect_cell(&mut self, sheet: usize, row: usize, col: usize) -> Result<InspectResultMessage, SessionError> {
         let msg = ClientMessage::Inspect(InspectMessage {

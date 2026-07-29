@@ -46,6 +46,15 @@ pub enum ClientMessage {
     Unsubscribe(UnsubscribeMessage),
     Stats(StatsMessage),
     PairRequest(PairRequestMessage),
+    Save(SaveMessage),
+}
+
+/// Request the host to persist the workbook (added 2026-07-29, additive).
+/// Headless hosts save to their configured path; the GUI may refuse with
+/// `save_unsupported` (use the window's own save flow).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveMessage {
+    pub id: String,
 }
 
 /// Request to pair a new client (pre-authentication). The GUI shows an
@@ -205,6 +214,17 @@ pub enum ServerMessage {
     Event(EventMessage),
     StatsResult(StatsResultMessage),
     PairResult(PairResultMessage),
+    SaveResult(SaveResultMessage),
+}
+
+/// Successful save acknowledgement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveResultMessage {
+    pub id: String,
+    /// Path written (absent if the host has no backing file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub revision: u64,
 }
 
 /// Response to a pair_request.

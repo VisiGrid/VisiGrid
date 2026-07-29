@@ -14,6 +14,8 @@ visigrid-engine = { path = "../engine" }
 visigrid-io = { path = "../io" }
 visigrid-config = { path = "../config" }
 visigrid-protocol = { path = "../protocol" }
+visigrid-session-host = { path = "../session-host" }
+ctrlc = "3"
 visigrid-hub-client = { path = "../hub_client" }
 visigrid-recon = { path = "../recon" }
 clap = { version = "4", features = ["derive", "env"] }

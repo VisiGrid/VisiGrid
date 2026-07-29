@@ -8,6 +8,7 @@ mod fetch;
 mod fill;
 mod hub;
 mod convert;
+mod serve;
 mod mcp;
 mod parse;
 mod recon;
@@ -426,6 +427,43 @@ Examples:
         /// Revoke a paired client by name
         #[arg(long)]
         revoke: Option<String>,
+    },
+
+    /// Ask a session to save its workbook (headless sessions)
+    #[command(after_help = "Examples:\n  vgrid save\n  vgrid save --session abc123")]
+    Save {
+        /// Session ID (prefix match supported; auto-selects if only one session)
+        #[arg(long)]
+        session: Option<String>,
+    },
+
+    /// Host a workbook headless — engine + session server, no window
+    #[command(after_help = "\
+Every protocol client works against a served session exactly as against
+the GUI: vgrid mcp, vgrid apply/inspect/view, agents. Paired credentials
+work unchanged; new pairing requests prompt y/N on this terminal.
+
+Examples:
+  vgrid serve budget.sheet
+  vgrid serve data.json --autosave 30
+  vgrid serve report.xlsx --save-as report.sheet
+  vgrid serve --new --save-as model.json")]
+    Serve {
+        /// Workbook to serve (.sheet, .json visigrid-json, .xlsx)
+        file: Option<PathBuf>,
+
+        /// Start with an empty workbook
+        #[arg(long)]
+        new: bool,
+
+        /// Where to persist (.sheet or .json). Defaults to the input path
+        /// when it is a writable format; otherwise the session is read-only.
+        #[arg(long)]
+        save_as: Option<PathBuf>,
+
+        /// Autosave interval in seconds (also saves on Ctrl+C)
+        #[arg(long)]
+        autosave: Option<u64>,
     },
 
     /// Serve MCP (Model Context Protocol) over stdio for AI agents
@@ -1781,6 +1819,8 @@ fn main() -> ExitCode {
             cmd_apply(ops, session, atomic, expected_revision, wait, wait_timeout)
         }
         Some(Commands::Inspect { range, session, sheet, json }) => cmd_inspect(range, session, sheet, json),
+        Some(Commands::Save { session }) => cmd_save(session),
+        Some(Commands::Serve { file, new, save_as, autosave }) => serve::cmd_serve(file, new, save_as, autosave),
         Some(Commands::Pair { session, name, list, revoke }) => cmd_pair(session, name, list, revoke),
         Some(Commands::Mcp { session }) => mcp::cmd_mcp(session),
         Some(Commands::Stats { session, json }) => cmd_stats(session, json),
@@ -4640,6 +4680,19 @@ fn get_session_token() -> Result<String, CliError> {
     }
     Err(CliError::args("no session credential found")
         .with_hint("run 'vgrid pair' to pair with the running VisiGrid (or set VISIGRID_SESSION_TOKEN)"))
+}
+
+/// `vgrid save` — ask a (headless) session to persist its workbook.
+fn cmd_save(session_id: Option<String>) -> Result<(), CliError> {
+    let discovery = resolve_session(session_id.as_deref())?;
+    let token = get_session_token()?;
+    let mut client = session::SessionClient::connect(&discovery, &token).map_err(CliError::session)?;
+    let result = client.save().map_err(CliError::session)?;
+    match result.path {
+        Some(p) => println!("saved {} (revision {})", p, result.revision),
+        None => println!("saved (revision {})", result.revision),
+    }
+    Ok(())
 }
 
 /// `vgrid pair` — pair with a running session, or manage paired clients.

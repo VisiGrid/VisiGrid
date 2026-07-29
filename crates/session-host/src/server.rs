@@ -739,6 +739,7 @@ fn handle_message_with_rate_limit(
         ClientMessage::Ping(p) => Some(p.id.clone()),
         ClientMessage::Stats(s) => Some(s.id.clone()),
         ClientMessage::PairRequest(p) => Some(p.id.clone()),
+        ClientMessage::Save(sv) => Some(sv.id.clone()),
     };
 
     // Check rate limit based on message type
@@ -751,6 +752,7 @@ fn handle_message_with_rate_limit(
         ClientMessage::Ping(_) => rate_limiter.try_ping(),
         ClientMessage::Stats(_) => rate_limiter.try_ping(), // Stats is cheap like ping
         ClientMessage::PairRequest(_) => Ok(()), // handled pre-auth; post-auth arm rejects below
+        ClientMessage::Save(_) => rate_limiter.try_ping(),
     };
 
     if let Err(e) = rate_check {
@@ -894,6 +896,27 @@ fn handle_message(
             message: "pair_request is only valid before authentication".to_string(),
             retry_after_ms: None,
         }),
+        ClientMessage::Save(save) => match bridge.save(save.id.clone()) {
+            Ok(outcome) => match outcome.error {
+                None => ServerMessage::SaveResult(SaveResultMessage {
+                    id: save.id,
+                    path: outcome.path,
+                    revision: outcome.revision,
+                }),
+                Some((code, message)) => ServerMessage::Error(ErrorMessage {
+                    id: Some(save.id),
+                    code,
+                    message,
+                    retry_after_ms: None,
+                }),
+            },
+            Err(_) => ServerMessage::Error(ErrorMessage {
+                id: Some(save.id),
+                code: "internal_error".to_string(),
+                message: "Bridge communication failed".to_string(),
+                retry_after_ms: None,
+            }),
+        },
         ClientMessage::Ping(ping) => ServerMessage::Pong(PongMessage { id: ping.id }),
         ClientMessage::Stats(stats) => ServerMessage::StatsResult(StatsResultMessage {
             id: stats.id,
@@ -972,6 +995,13 @@ mod tests {
                     SessionRequest::Pair { reply, .. } => {
                         // Test bridge auto-approves pairing
                         let _ = reply.send(true);
+                    }
+                    SessionRequest::Save { reply, .. } => {
+                        let _ = reply.send(crate::bridge::SaveOutcome {
+                            path: None,
+                            revision: 1,
+                            error: None,
+                        });
                     }
                 }
             }

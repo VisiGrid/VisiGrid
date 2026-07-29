@@ -1577,6 +1577,18 @@ impl Spreadsheet {
                         current_revision: self.workbook.read(cx).revision(),
                     });
                 }
+                SessionRequest::Save { reply, .. } => {
+                    // The GUI owns its save flow (prompts, cloud sync); the
+                    // protocol save op is for headless hosts.
+                    let _ = reply.send(crate::session_server::SaveOutcome {
+                        path: None,
+                        revision: self.workbook.read(cx).revision(),
+                        error: Some((
+                            "save_unsupported".to_string(),
+                            "this session is a GUI window — save from the app (Ctrl+S)".to_string(),
+                        )),
+                    });
+                }
                 SessionRequest::Pair { client_name, reply } => {
                     if self.pairing_prompt.is_some() {
                         // One dialog at a time; the server also gates this,

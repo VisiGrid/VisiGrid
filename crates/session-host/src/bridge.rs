@@ -107,6 +107,17 @@ impl SessionBridgeHandle {
         reply_rx.blocking_recv_timeout(timeout).map_err(|_| BridgeError::ChannelClosed)
     }
 
+    /// Request a save and wait for the host.
+    pub fn save(&self, request_id: String) -> Result<SaveOutcome, BridgeError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(SessionRequest::Save { request_id, reply: reply_tx })
+            .map_err(|_| BridgeError::ChannelClosed)?;
+        self.wake();
+        reply_rx.blocking_recv_timeout(std::time::Duration::from_secs(30))
+            .map_err(|_| BridgeError::ChannelClosed)
+    }
+
     /// Send a subscribe request (fire-and-forget for now).
     pub fn subscribe(&self, req: SubscribeRequest) -> Result<SubscribeResponse, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -162,6 +173,21 @@ pub enum SessionRequest {
         client_name: String,
         reply: oneshot::Sender<bool>,
     },
+    /// Persist the workbook (headless hosts; GUI may refuse).
+    Save {
+        request_id: String,
+        reply: oneshot::Sender<SaveOutcome>,
+    },
+}
+
+/// Host reply to a save request.
+#[derive(Debug, Clone)]
+pub struct SaveOutcome {
+    /// Path written on success.
+    pub path: Option<String>,
+    pub revision: u64,
+    /// Error (code, message) if the host could not save.
+    pub error: Option<(String, String)>,
 }
 
 // ============================================================================

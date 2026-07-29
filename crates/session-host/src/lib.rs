@@ -22,7 +22,7 @@ pub mod wire_ext;
 pub use bridge::{
     ApplyOpsRequest, ApplyOpsResponse, ApplyOpsError, BridgeError,
     InspectRequest, InspectResponse, InspectError,
-    SessionBridgeHandle, SessionRequest,
+    SessionBridgeHandle, SessionRequest, SaveOutcome,
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
 };
 pub use coalesce::coalesce_cells_to_ranges;

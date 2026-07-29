@@ -52,6 +52,59 @@ fn assert_valid_json(line: &str, context: &str) {
 // =============================================================================
 
 #[test]
+fn test_pair() {
+    let lines = load_golden_lines("pair.jsonl");
+    assert_eq!(lines.len(), 4, "pair.jsonl should have 4 lines");
+
+    let req: ClientMessage = serde_json::from_str(&lines[0]).expect("pair_request should parse");
+    match req {
+        ClientMessage::PairRequest(p) => {
+            assert_eq!(p.id, "pair-1");
+            assert_eq!(p.client_name, "Claude Code");
+        }
+        other => panic!("expected PairRequest, got {:?}", other),
+    }
+    let approved: ServerMessage = serde_json::from_str(&lines[1]).expect("approved pair_result should parse");
+    match approved {
+        ServerMessage::PairResult(r) => {
+            assert!(r.approved);
+            assert_eq!(r.token.as_deref().map(|t| t.len()), Some(64));
+        }
+        other => panic!("expected PairResult, got {:?}", other),
+    }
+    for line in &lines[2..] {
+        let denied: ServerMessage = serde_json::from_str(line).expect("denied pair_result should parse");
+        match denied {
+            ServerMessage::PairResult(r) => {
+                assert!(!r.approved);
+                assert!(r.token.is_none(), "denied result must not carry a token");
+            }
+            other => panic!("expected PairResult, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn test_save() {
+    let lines = load_golden_lines("save.jsonl");
+    assert_eq!(lines.len(), 3, "save.jsonl should have 3 lines");
+
+    let req: ClientMessage = serde_json::from_str(&lines[0]).expect("save request should parse");
+    assert!(matches!(req, ClientMessage::Save(_)));
+
+    let with_path: ServerMessage = serde_json::from_str(&lines[1]).expect("save_result should parse");
+    match with_path {
+        ServerMessage::SaveResult(r) => {
+            assert_eq!(r.path.as_deref(), Some("/home/user/budget.sheet"));
+            assert_eq!(r.revision, 7);
+        }
+        other => panic!("expected SaveResult, got {:?}", other),
+    }
+    let pathless: ServerMessage = serde_json::from_str(&lines[2]).expect("pathless save_result should parse");
+    assert!(matches!(pathless, ServerMessage::SaveResult(r) if r.path.is_none()));
+}
+
+#[test]
 fn test_hello_ok() {
     let lines = load_golden_lines("hello_ok.jsonl");
     assert_eq!(lines.len(), 2, "hello_ok.jsonl should have 2 lines");

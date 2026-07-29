@@ -9,7 +9,7 @@
 pub use visigrid_session_host::bridge;
 
 pub use visigrid_session_host::{
-    SessionBridgeHandle, SessionRequest, BridgeError,
+    SessionBridgeHandle, SessionRequest, SaveOutcome, BridgeError,
     ApplyOpsRequest, ApplyOpsResponse, ApplyOpsError,
     InspectRequest, InspectResponse, InspectError,
     SubscribeRequest, SubscribeResponse,
