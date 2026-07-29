@@ -270,6 +270,112 @@ fn evaluate_extras_core(extras: Vec<ExtrasSheet>) -> ExtrasOutput {
     ExtrasOutput { engine_version: engine_version(), cond, violations }
 }
 
+// ---------------------------------------------------------------------------
+// Sort + filter (Tier-1) — the engine owns the ordering and matching rules
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SortInput {
+    cells: Vec<InCell>,
+    /// Inclusive data range to sort (header row excluded by the caller).
+    start_row: usize,
+    end_row: usize,
+    /// Column whose values order the rows.
+    col: usize,
+    #[serde(default)]
+    descending: bool,
+}
+
+#[derive(Serialize)]
+struct SortOutput {
+    /// data_row order after sorting, parallel to start_row..=end_row.
+    order: Vec<usize>,
+}
+
+/// Sort rows by a column using the engine's exact ordering semantics:
+/// Numbers < Text < Bool < Error < Blank, normalized comparison within a
+/// type, and a STABLE tie-break on current position. Returns the row
+/// permutation; the caller moves the data (the web grid has no row view).
+#[wasm_bindgen]
+pub fn sort_rows(input: JsValue) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
+    let req: SortInput =
+        serde_wasm_bindgen::from_value(input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let sheets = vec![InSheet { name: None, cells: req.cells }];
+    let wb = build_workbook(&sheets);
+    let sheet = &wb.sheets()[0];
+
+    let mut keyed: Vec<(visigrid_engine::filter::SortKey, usize)> = (req.start_row..=req.end_row)
+        .enumerate()
+        .map(|(offset, data_row)| {
+            let value = sheet.get_computed_value(data_row, req.col);
+            let filter_key = visigrid_engine::filter::FilterKey::from_value(&value);
+            (
+                visigrid_engine::filter::SortKey::from_filter_key(&filter_key, offset),
+                data_row,
+            )
+        })
+        .collect();
+
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    if req.descending {
+        keyed.reverse();
+    }
+
+    let output = SortOutput { order: keyed.into_iter().map(|(_, row)| row).collect() };
+    serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[derive(Deserialize)]
+struct FilterInput {
+    cells: Vec<InCell>,
+    start_row: usize,
+    end_row: usize,
+    col: usize,
+    /// Display strings to KEEP (engine-normalized matching).
+    keep: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct FilterOutput {
+    /// data_rows to hide.
+    hide: Vec<usize>,
+    /// Every distinct display value in the column, engine-formatted.
+    values: Vec<String>,
+}
+
+/// Which rows survive a value filter, using the engine's FilterKey
+/// normalization (so "1.0" and "1" match, blanks group, errors group).
+#[wasm_bindgen]
+pub fn filter_rows(input: JsValue) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
+    let req: FilterInput =
+        serde_wasm_bindgen::from_value(input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let sheets = vec![InSheet { name: None, cells: req.cells }];
+    let wb = build_workbook(&sheets);
+    let sheet = &wb.sheets()[0];
+
+    let keep: std::collections::HashSet<String> = req.keep.into_iter().collect();
+    let mut hide = Vec::new();
+    let mut values: Vec<String> = Vec::new();
+
+    for data_row in req.start_row..=req.end_row {
+        let value = sheet.get_computed_value(data_row, req.col);
+        let display = visigrid_engine::filter::FilterKey::from_value(&value).display_string();
+        if !values.contains(&display) {
+            values.push(display.clone());
+        }
+        if !keep.is_empty() && !keep.contains(&display) {
+            hide.push(data_row);
+        }
+    }
+
+    let output = FilterOutput { hide, values };
+    serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +441,31 @@ mod tests {
         assert_eq!(out.violations.len(), 1, "exactly the off-list cell violates");
         assert_eq!((out.violations[0].row, out.violations[0].col), (0, 1));
         assert!(out.violations[0].reason.len() > 0);
+    }
+
+    #[test]
+    fn sort_uses_engine_type_ranking() {
+        // Numbers before text before blanks, regardless of input order.
+        let cells = vec![
+            InCell { row: 0, col: 0, raw: "banana".into() },
+            InCell { row: 1, col: 0, raw: "10".into() },
+            InCell { row: 2, col: 0, raw: "apple".into() },
+            InCell { row: 3, col: 0, raw: "2".into() },
+        ];
+        let sheets = vec![InSheet { name: None, cells: cells.clone() }];
+        let wb = build_workbook(&sheets);
+        let sheet = &wb.sheets()[0];
+        let mut keyed: Vec<(visigrid_engine::filter::SortKey, usize)> = (0..=3)
+            .map(|r| {
+                let v = sheet.get_computed_value(r, 0);
+                let k = visigrid_engine::filter::FilterKey::from_value(&v);
+                (visigrid_engine::filter::SortKey::from_filter_key(&k, r), r)
+            })
+            .collect();
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        let order: Vec<usize> = keyed.into_iter().map(|(_, r)| r).collect();
+        // 2 (row 3), 10 (row 1), apple (row 2), banana (row 0)
+        assert_eq!(order, vec![3, 1, 2, 0]);
     }
 
     #[test]
