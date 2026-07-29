@@ -15,7 +15,8 @@
 //! - Bounded: output size is capped regardless of input pattern
 
 use std::collections::HashMap;
-use super::protocol::{CellRange, CellRef};
+use visigrid_protocol::CellRange;
+use crate::wire_ext::CellRef;
 
 /// Maximum number of ranges per event before falling back to bounding box.
 const MAX_RANGES_PER_SHEET: usize = 2000;

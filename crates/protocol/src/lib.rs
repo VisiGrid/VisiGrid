@@ -296,7 +296,10 @@ pub struct PongMessage {
 /// Error response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorMessage {
-    pub id: String,
+    /// Request ID (absent for errors with no parseable request, e.g.
+    /// malformed messages — matches server behavior since v0.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub code: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -337,7 +340,7 @@ pub enum EventPayload {
 }
 
 /// A rectangular range of cells.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CellRange {
     pub sheet: usize,
     pub r1: usize,
@@ -345,6 +348,21 @@ pub struct CellRange {
     pub r2: usize,
     pub c2: usize,
 }
+
+impl CellRange {
+    pub fn single(sheet: usize, row: usize, col: usize) -> Self {
+        Self { sheet, r1: row, c1: col, r2: row, c2: col }
+    }
+
+    pub fn new(sheet: usize, r1: usize, c1: usize, r2: usize, c2: usize) -> Self {
+        Self { sheet, r1, c1, r2, c2 }
+    }
+
+    pub fn cell_count(&self) -> usize {
+        (self.r2 - self.r1 + 1) * (self.c2 - self.c1 + 1)
+    }
+}
+
 
 /// Server statistics result.
 #[derive(Debug, Clone, Serialize, Deserialize)]

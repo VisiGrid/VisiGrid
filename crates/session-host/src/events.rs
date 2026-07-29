@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
-use super::protocol::{CellRange, EventMessage, EventPayload, ServerMessage};
+use visigrid_protocol::{CellRange, EventMessage, EventPayload, ServerMessage};
 
 /// Topic for cell change events.
 pub const TOPIC_CELLS: &str = "cells";

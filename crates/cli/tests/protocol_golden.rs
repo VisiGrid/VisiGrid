@@ -26,7 +26,7 @@ fn golden_dir() -> PathBuf {
         .unwrap()
         .parent() // workspace root
         .unwrap()
-        .join("gpui-app/src/session_server/protocol_golden")
+        .join("crates/session-host/protocol_golden")
 }
 
 /// Load all lines from a golden vector file.
@@ -542,7 +542,7 @@ fn test_server_error_byte_exact() {
     let golden = load_golden_lines("errors.jsonl")[9].clone();
 
     let msg = ServerMessage::Error(ErrorMessage {
-        id: "req-10".to_string(),
+        id: Some("req-10".to_string()),
         code: "writer_conflict".to_string(),
         message: "Write lease held by another connection".to_string(),
         retry_after_ms: Some(5000),

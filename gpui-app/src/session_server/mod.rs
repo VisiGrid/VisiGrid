@@ -1,37 +1,29 @@
-//! Session Server for external control of VisiGrid.
+//! Session server for external control of VisiGrid.
 //!
-//! Exposes a local TCP endpoint that allows external clients (CLI, agents, scripts)
-//! to interact with a running VisiGrid instance:
-//!
-//! - Discover running sessions via discovery files
-//! - Apply batches of spreadsheet operations
-//! - Subscribe to live cell change events
-//!
-//! See: docs/future/phase-1-session-server.md
+//! The implementation lives in the `visigrid-session-host` crate (extracted
+//! 2026-07-29 so headless hosts — `vgrid serve` — share it). This module is
+//! a re-export shim: everything the GUI referenced as
+//! `crate::session_server::X` still resolves. Wire types come from
+//! `visigrid-protocol`; the GUI's historical mirror copy is gone.
 
-pub mod bridge;
-mod coalesce;
-mod discovery;
-mod events;
-mod protocol;
-mod rate_limiter;
-mod server;
+pub use visigrid_session_host::bridge;
 
-pub use bridge::{
+pub use visigrid_session_host::{
     SessionBridgeHandle, SessionRequest, BridgeError,
     ApplyOpsRequest, ApplyOpsResponse, ApplyOpsError,
     InspectRequest, InspectResponse, InspectError,
     SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest, UnsubscribeResponse,
+    coalesce_cells_to_ranges,
+    DiscoveryFile, DiscoveryManager, discovery_dir, list_sessions,
+    SessionServer, SessionServerConfig, ServerMode, EventRegistry,
+    RateLimiter, RateLimiterConfig, RateLimitedError,
+    EventBroadcaster, BroadcastEvent, ConnectionSubscriptions, TOPIC_CELLS,
+    CellRef, ProtocolError, MAX_MESSAGE_SIZE,
 };
-pub use coalesce::coalesce_cells_to_ranges;
-pub use discovery::{DiscoveryFile, DiscoveryManager, discovery_dir, list_sessions};
-pub use protocol::{
-    ClientMessage, ServerMessage, ProtocolError, Op, OpError,
+
+pub use visigrid_protocol::{
+    ClientMessage, ServerMessage, Op, OpError,
     InspectTarget, InspectResult, CellInfo, WorkbookInfo,
-    PROTOCOL_VERSION, MAX_MESSAGE_SIZE,
+    CellRange, PROTOCOL_VERSION,
 };
-pub use server::{SessionServer, SessionServerConfig, ServerMode, EventRegistry};
-pub use rate_limiter::{RateLimiter, RateLimiterConfig, RateLimitedError};
-pub use events::{EventBroadcaster, BroadcastEvent, ConnectionSubscriptions, TOPIC_CELLS};
-pub use protocol::{CellRef, CellRange};

@@ -31,6 +31,7 @@ osx_minimum_system_version = "12.0"
 # Workspace crates
 visigrid-engine = { workspace = true }
 visigrid-protocol = { path = "../crates/protocol" }
+visigrid-session-host = { path = "../crates/session-host" }
 visigrid-core = { workspace = true }
 visigrid-io = { workspace = true }
 visigrid-config = { workspace = true }

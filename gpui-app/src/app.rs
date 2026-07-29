@@ -154,13 +154,7 @@ pub type ApprovalStatus = VerificationStatus;
 
 
 // Grid configuration
-pub const NUM_ROWS: usize = 65536;
-pub const NUM_COLS: usize = 256;
-
-/// Largest cell count a single session format op (SetNumberFormat/SetStyle)
-/// may cover. Bounds memory for undo patches; agents get a precise error
-/// telling them to split larger ranges.
-pub const MAX_SESSION_FORMAT_CELLS: usize = 250_000;
+pub use visigrid_session_host::{NUM_ROWS, NUM_COLS, MAX_SESSION_FORMAT_CELLS, MAX_SESSION_INSPECT_CELLS};
 
 /// A pending pairing approval dialog: a client asked to control this
 /// workbook and the user hasn't answered yet.
@@ -171,308 +165,6 @@ pub struct PairingPrompt {
     pub reply: Option<crate::session_server::bridge::oneshot::Sender<bool>>,
 }
 
-/// Validate one session-protocol op against the workbook's sheet list and the
-/// governing grid bounds. Returns (code, message, suggestion) on failure.
-/// Called for every op BEFORE any op is applied — a failure here rejects the
-/// whole batch, which is what makes `atomic` semantics honest.
-fn validate_session_op(
-    op: &crate::session_server::Op,
-    sheet_count: usize,
-) -> Option<(&'static str, String, Option<String>)> {
-    use crate::session_server::Op;
-
-    let check_sheet = |sheet: usize| -> Option<(&'static str, String, Option<String>)> {
-        if sheet >= sheet_count {
-            Some((
-                "sheet_not_found",
-                format!("sheet index {} does not exist (workbook has {} sheet{})",
-                    sheet, sheet_count, if sheet_count == 1 { "" } else { "s" }),
-                Some("Inspect the workbook to list its sheets".to_string()),
-            ))
-        } else {
-            None
-        }
-    };
-    let check_cell = |row: usize, col: usize| -> Option<(&'static str, String, Option<String>)> {
-        if row >= NUM_ROWS || col >= NUM_COLS {
-            Some((
-                "out_of_bounds",
-                format!("cell (row {}, col {}) is outside the grid of {} rows × {} columns",
-                    row, col, NUM_ROWS, NUM_COLS),
-                Some(format!("Rows are 0..={}, columns 0..={}", NUM_ROWS - 1, NUM_COLS - 1)),
-            ))
-        } else {
-            None
-        }
-    };
-    let check_range = |sr: usize, sc: usize, er: usize, ec: usize| -> Option<(&'static str, String, Option<String>)> {
-        if sr > er || sc > ec {
-            return Some((
-                "invalid_op",
-                format!("range start (row {}, col {}) is after its end (row {}, col {})", sr, sc, er, ec),
-                Some("Ensure start_row <= end_row and start_col <= end_col".to_string()),
-            ));
-        }
-        check_cell(sr, sc).or_else(|| check_cell(er, ec)).or_else(|| {
-            let cells = (er - sr + 1) * (ec - sc + 1);
-            if cells > MAX_SESSION_FORMAT_CELLS {
-                Some((
-                    "cells_limit_exceeded",
-                    format!("range covers {} cells; format ops are limited to {} cells per op",
-                        cells, MAX_SESSION_FORMAT_CELLS),
-                    Some("Split the range into smaller ops in the same batch".to_string()),
-                ))
-            } else {
-                None
-            }
-        })
-    };
-
-    match op {
-        Op::SetCellValue { sheet, row, col, .. }
-        | Op::SetCellFormula { sheet, row, col, .. }
-        | Op::ClearCell { sheet, row, col } => {
-            check_sheet(*sheet).or_else(|| check_cell(*row, *col))
-        }
-        Op::SetNumberFormat { sheet, start_row, start_col, end_row, end_col, format } => {
-            check_sheet(*sheet)
-                .or_else(|| check_range(*start_row, *start_col, *end_row, *end_col))
-                .or_else(|| {
-                    let t = format.trim();
-                    if t.is_empty() {
-                        return Some((
-                            "invalid_op",
-                            "number format string is empty".to_string(),
-                            Some("Use a named format (general, number, currency, percent, date, time, datetime — optionally with :decimals) or an Excel format code like \"#,##0.00\"".to_string()),
-                        ));
-                    }
-                    // A known keyword with an unparseable decimals suffix is a
-                    // client mistake — reject rather than store it as a Custom code.
-                    if let Some((name, dec)) = t.split_once(':') {
-                        let known = matches!(name.trim().to_ascii_lowercase().as_str(),
-                            "general" | "number" | "currency" | "percent" | "date" | "time" | "datetime");
-                        if known && dec.trim().parse::<u8>().map(|d| d > 10).unwrap_or(true) {
-                            return Some((
-                                "invalid_op",
-                                format!("\"{}\" has an invalid decimals suffix (must be an integer 0..=10)", t),
-                                Some("Example: \"number:2\" or \"percent:1\"".to_string()),
-                            ));
-                        }
-                    }
-                    None
-                })
-        }
-        Op::SetStyle { sheet, start_row, start_col, end_row, end_col, .. } => {
-            check_sheet(*sheet).or_else(|| check_range(*start_row, *start_col, *end_row, *end_col))
-        }
-    }
-}
-
-/// Largest cell count a single Inspect range may cover. Keeps the response
-/// comfortably under the protocol's 10 MB message cap.
-pub const MAX_SESSION_INSPECT_CELLS: usize = 65_536;
-
-/// Validate an inspect target against the workbook's sheet list and the
-/// governing grid bounds. Returns (code, message) on failure, using the same
-/// error taxonomy as the write path.
-fn validate_inspect_target(
-    target: &crate::session_server::InspectTarget,
-    sheet_count: usize,
-) -> Option<(&'static str, String)> {
-    use crate::session_server::InspectTarget;
-
-    let check_sheet = |sheet: usize| -> Option<(&'static str, String)> {
-        if sheet >= sheet_count {
-            Some((
-                "sheet_not_found",
-                format!("sheet index {} does not exist (workbook has {} sheet{})",
-                    sheet, sheet_count, if sheet_count == 1 { "" } else { "s" }),
-            ))
-        } else {
-            None
-        }
-    };
-    let check_cell = |row: usize, col: usize| -> Option<(&'static str, String)> {
-        if row >= NUM_ROWS || col >= NUM_COLS {
-            Some((
-                "out_of_bounds",
-                format!("cell (row {}, col {}) is outside the grid of {} rows × {} columns",
-                    row, col, NUM_ROWS, NUM_COLS),
-            ))
-        } else {
-            None
-        }
-    };
-
-    match target {
-        InspectTarget::Workbook => None,
-        InspectTarget::Cell { sheet, row, col } => {
-            check_sheet(*sheet).or_else(|| check_cell(*row, *col))
-        }
-        InspectTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
-            check_sheet(*sheet)
-                .or_else(|| {
-                    if start_row > end_row || start_col > end_col {
-                        Some((
-                            "invalid_op",
-                            format!("range start (row {}, col {}) is after its end (row {}, col {})",
-                                start_row, start_col, end_row, end_col),
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| check_cell(*start_row, *start_col))
-                .or_else(|| check_cell(*end_row, *end_col))
-                .or_else(|| {
-                    let cells = (end_row - start_row + 1) * (end_col - start_col + 1);
-                    if cells > MAX_SESSION_INSPECT_CELLS {
-                        Some((
-                            "cells_limit_exceeded",
-                            format!("range covers {} cells; inspect is limited to {} cells per request",
-                                cells, MAX_SESSION_INSPECT_CELLS),
-                        ))
-                    } else {
-                        None
-                    }
-                })
-        }
-    }
-}
-
-/// Map a session-protocol number-format string to an engine NumberFormat.
-/// Named formats: "general", "number[:decimals]", "currency[:decimals]",
-/// "percent[:decimals]", "date", "time", "datetime". Anything else is treated
-/// as a raw Excel format code (e.g. "#,##0.00"). Assumes the string already
-/// passed validate_session_op.
-fn parse_session_number_format(s: &str) -> visigrid_engine::cell::NumberFormat {
-    use visigrid_engine::cell::{DateStyle, NumberFormat};
-    let t = s.trim();
-    let (name, dec) = match t.split_once(':') {
-        Some((n, d)) => (n.trim(), d.trim().parse::<u8>().ok()),
-        None => (t, None),
-    };
-    match name.to_ascii_lowercase().as_str() {
-        "general" => NumberFormat::General,
-        "number" => NumberFormat::number(dec.unwrap_or(2)),
-        "currency" => NumberFormat::currency(dec.unwrap_or(2)),
-        "percent" => NumberFormat::Percent { decimals: dec.unwrap_or(0).min(10) },
-        "date" => NumberFormat::Date { style: DateStyle::Short },
-        "time" => NumberFormat::Time,
-        "datetime" => NumberFormat::DateTime,
-        _ => NumberFormat::Custom(t.to_string()),
-    }
-}
-
-#[cfg(test)]
-mod session_op_validation_tests {
-    use super::{
-        validate_session_op, validate_inspect_target, parse_session_number_format,
-        NUM_ROWS, NUM_COLS, MAX_SESSION_FORMAT_CELLS, MAX_SESSION_INSPECT_CELLS,
-    };
-    use crate::session_server::{InspectTarget, Op};
-    use visigrid_engine::cell::NumberFormat;
-
-    fn set_value(sheet: usize, row: usize, col: usize) -> Op {
-        Op::SetCellValue { sheet, row, col, value: "x".to_string() }
-    }
-
-    #[test]
-    fn valid_ops_pass() {
-        assert!(validate_session_op(&set_value(0, 0, 0), 1).is_none());
-        assert!(validate_session_op(&set_value(0, NUM_ROWS - 1, NUM_COLS - 1), 1).is_none());
-        assert!(validate_session_op(&set_value(2, 5, 5), 3).is_none());
-    }
-
-    #[test]
-    fn out_of_bounds_cell_rejected() {
-        // The exact ghost-cell case: row 70,000 on the 65,536-row grid
-        let (code, msg, _) = validate_session_op(&set_value(0, 70_000, 0), 1).unwrap();
-        assert_eq!(code, "out_of_bounds");
-        assert!(msg.contains("70000") && msg.contains("65536"));
-        let (code, _, _) = validate_session_op(&set_value(0, 0, NUM_COLS), 1).unwrap();
-        assert_eq!(code, "out_of_bounds");
-    }
-
-    #[test]
-    fn invalid_sheet_rejected_not_redirected() {
-        let (code, msg, _) = validate_session_op(&set_value(5, 0, 0), 1).unwrap();
-        assert_eq!(code, "sheet_not_found");
-        assert!(msg.contains("5"));
-    }
-
-    #[test]
-    fn format_range_checks() {
-        let style = |sr: usize, sc: usize, er: usize, ec: usize| Op::SetStyle {
-            sheet: 0, start_row: sr, start_col: sc, end_row: er, end_col: ec,
-            bold: Some(true), italic: None, underline: None,
-        };
-        assert!(validate_session_op(&style(0, 0, 9, 9), 1).is_none());
-        let (code, _, _) = validate_session_op(&style(9, 0, 0, 9), 1).unwrap();
-        assert_eq!(code, "invalid_op");
-        let (code, _, _) = validate_session_op(&style(0, 0, NUM_ROWS, 0), 1).unwrap();
-        assert_eq!(code, "out_of_bounds");
-        // Whole grid exceeds the per-op cap
-        let (code, _, _) = validate_session_op(&style(0, 0, NUM_ROWS - 1, NUM_COLS - 1), 1).unwrap();
-        assert_eq!(code, "cells_limit_exceeded");
-        // One full column (65,536 cells) is comfortably under the cap
-        assert!(NUM_ROWS <= MAX_SESSION_FORMAT_CELLS);
-        assert!(validate_session_op(&style(0, 0, NUM_ROWS - 1, 0), 1).is_none());
-    }
-
-    #[test]
-    fn number_format_string_checks() {
-        let nf = |format: &str| Op::SetNumberFormat {
-            sheet: 0, start_row: 0, start_col: 0, end_row: 0, end_col: 0,
-            format: format.to_string(),
-        };
-        assert!(validate_session_op(&nf("currency"), 1).is_none());
-        assert!(validate_session_op(&nf("number:2"), 1).is_none());
-        assert!(validate_session_op(&nf("#,##0.00"), 1).is_none());
-        let (code, _, _) = validate_session_op(&nf(""), 1).unwrap();
-        assert_eq!(code, "invalid_op");
-        let (code, _, _) = validate_session_op(&nf("number:abc"), 1).unwrap();
-        assert_eq!(code, "invalid_op");
-        let (code, _, _) = validate_session_op(&nf("percent:99"), 1).unwrap();
-        assert_eq!(code, "invalid_op");
-    }
-
-    #[test]
-    fn inspect_target_checks() {
-        let range = |sheet: usize, sr: usize, sc: usize, er: usize, ec: usize| InspectTarget::Range {
-            sheet, start_row: sr, start_col: sc, end_row: er, end_col: ec,
-        };
-        assert!(validate_inspect_target(&InspectTarget::Workbook, 1).is_none());
-        assert!(validate_inspect_target(&InspectTarget::Cell { sheet: 0, row: 0, col: 0 }, 1).is_none());
-
-        // Bad sheet is an error, not a redirect to the active sheet
-        let (code, _) = validate_inspect_target(&InspectTarget::Cell { sheet: 3, row: 0, col: 0 }, 1).unwrap();
-        assert_eq!(code, "sheet_not_found");
-        let (code, _) = validate_inspect_target(&InspectTarget::Cell { sheet: 0, row: 70_000, col: 0 }, 1).unwrap();
-        assert_eq!(code, "out_of_bounds");
-
-        assert!(validate_inspect_target(&range(0, 0, 0, 19, 9), 1).is_none());
-        let (code, _) = validate_inspect_target(&range(0, 5, 0, 0, 9), 1).unwrap();
-        assert_eq!(code, "invalid_op");
-        let (code, _) = validate_inspect_target(&range(0, 0, 0, NUM_ROWS - 1, NUM_COLS - 1), 1).unwrap();
-        assert_eq!(code, "cells_limit_exceeded");
-        // One full column is exactly at the cap
-        assert_eq!(NUM_ROWS, MAX_SESSION_INSPECT_CELLS);
-        assert!(validate_inspect_target(&range(0, 0, 0, NUM_ROWS - 1, 0), 1).is_none());
-    }
-
-    #[test]
-    fn number_format_parsing() {
-        assert_eq!(parse_session_number_format("general"), NumberFormat::General);
-        assert_eq!(parse_session_number_format("number:3"), NumberFormat::number(3));
-        assert_eq!(parse_session_number_format("Currency"), NumberFormat::currency(2));
-        assert_eq!(parse_session_number_format("percent:1"), NumberFormat::Percent { decimals: 1 });
-        assert_eq!(
-            parse_session_number_format("#,##0.00"),
-            NumberFormat::Custom("#,##0.00".to_string())
-        );
-    }
-}
 pub const CELL_WIDTH: f32 = 80.0;
 pub const CELL_HEIGHT: f32 = 24.0;
 pub const HEADER_WIDTH: f32 = 50.0;
@@ -1980,292 +1672,78 @@ impl Spreadsheet {
         }
     }
 
-    /// Handle an apply_ops request from the session server.
-    ///
-    /// Uses proper batching: all ops are applied within a single batch_guard,
-    /// ensuring exactly one recalc and one revision increment for the entire batch.
+    /// Handle an apply_ops request: delegate to session-host, then record
+    /// undo history from the outcome and broadcast to subscribers.
     fn handle_session_apply_ops(
         &mut self,
         req: &crate::session_server::ApplyOpsRequest,
         cx: &mut Context<Self>,
     ) -> crate::session_server::ApplyOpsResponse {
-        use crate::session_server::{ApplyOpsResponse, ApplyOpsError, Op};
-        use crate::history::CellChange;
-        use visigrid_engine::cell_id::CellId;
+        use crate::history::{CellChange, CellFormatPatch, FormatActionKind};
 
-        // Check expected_revision if provided
-        let current_rev = self.workbook.read(cx).revision();
-        if let Some(expected) = req.expected_revision {
-            if expected != current_rev {
-                return ApplyOpsResponse {
-                    applied: 0,
-                    total: req.ops.len(),
-                    current_revision: current_rev,
-                    error: Some(ApplyOpsError::RevisionMismatch {
-                        expected,
-                        actual: current_rev,
-                    }),
-                };
-            }
-        }
+        let outcome = self
+            .workbook
+            .update(cx, |wb, _| visigrid_session_host::apply_ops(wb, req));
 
-        if req.ops.is_empty() {
-            return ApplyOpsResponse {
-                applied: 0,
-                total: 0,
-                current_revision: current_rev,
-                error: None,
-            };
-        }
-
-        // Validate the entire batch up front against the real grid bounds and
-        // sheet list. Any invalid op rejects the whole request (regardless of
-        // `atomic`) before anything is applied — by the time we touch the
-        // workbook, no op can fail, so a success response never lies.
-        let sheet_count = self.workbook.read(cx).sheets().len();
-        for (i, op) in req.ops.iter().enumerate() {
-            if let Some((code, message, suggestion)) = validate_session_op(op, sheet_count) {
-                return ApplyOpsResponse {
-                    applied: 0,
-                    total: req.ops.len(),
-                    current_revision: current_rev,
-                    error: Some(ApplyOpsError::OpFailed(crate::session_server::OpError {
-                        code: code.to_string(),
-                        message,
-                        op_index: i,
-                        suggestion,
-                    })),
-                };
-            }
-        }
-
-        // Apply all ops within a single batch_guard, collecting changes for history
-        let (applied, changes_by_sheet, format_patches_by_sheet) = self.workbook.update(cx, |wb, _| {
-            use crate::history::CellFormatPatch;
-
-            let mut guard = wb.batch_guard();
-            let mut applied = 0;
-            // Group changes by sheet for history recording
-            let mut changes_by_sheet: std::collections::HashMap<usize, Vec<CellChange>> =
-                std::collections::HashMap::new();
-            // Format patches by sheet, deduped per cell (first `before` kept,
-            // last `after` wins) so a multi-op request undoes correctly.
-            let mut format_patches_by_sheet: std::collections::HashMap<
-                usize,
-                (Vec<CellFormatPatch>, std::collections::HashMap<(usize, usize), usize>),
-            > = std::collections::HashMap::new();
-
-            let mut push_format_patch = |acc: &mut std::collections::HashMap<
-                usize,
-                (Vec<CellFormatPatch>, std::collections::HashMap<(usize, usize), usize>),
-            >, sheet_idx: usize, patch: CellFormatPatch| {
-                let (patches, index) = acc.entry(sheet_idx).or_default();
-                match index.get(&(patch.row, patch.col)) {
-                    Some(&i) => patches[i].after = patch.after,
-                    None => {
-                        index.insert((patch.row, patch.col), patches.len());
-                        patches.push(patch);
-                    }
+        if outcome.response.error.is_none() && outcome.response.applied > 0 {
+            for (sheet_idx, changes) in &outcome.value_changes {
+                if !changes.is_empty() {
+                    self.history.record_batch(
+                        *sheet_idx,
+                        changes
+                            .iter()
+                            .map(|c| CellChange {
+                                row: c.row,
+                                col: c.col,
+                                old_value: c.old_value.clone(),
+                                new_value: c.new_value.clone(),
+                            })
+                            .collect(),
+                    );
                 }
-            };
-
-            for op in req.ops.iter() {
-                match op {
-                    Op::SetCellValue { sheet, row, col, value } => {
-                        let old_value = guard.sheets()[*sheet].get_raw(*row, *col);
-                        changes_by_sheet.entry(*sheet).or_default().push(CellChange {
-                            row: *row,
-                            col: *col,
-                            old_value,
-                            new_value: value.clone(),
-                        });
-                        guard.set_cell_value_tracked(*sheet, *row, *col, value);
-                        applied += 1;
-                    }
-                    Op::SetCellFormula { sheet, row, col, formula } => {
-                        let old_value = guard.sheets()[*sheet].get_raw(*row, *col);
-                        changes_by_sheet.entry(*sheet).or_default().push(CellChange {
-                            row: *row,
-                            col: *col,
-                            old_value,
-                            new_value: formula.clone(),
-                        });
-                        guard.set_cell_value_tracked(*sheet, *row, *col, formula);
-                        applied += 1;
-                    }
-                    Op::ClearCell { sheet, row, col } => {
-                        let old_value = guard.sheets()[*sheet].get_raw(*row, *col);
-                        changes_by_sheet.entry(*sheet).or_default().push(CellChange {
-                            row: *row,
-                            col: *col,
-                            old_value,
-                            new_value: String::new(),
-                        });
-                        guard.clear_cell_tracked(*sheet, *row, *col);
-                        applied += 1;
-                    }
-                    Op::SetNumberFormat { sheet, start_row, start_col, end_row, end_col, format } => {
-                        let nf = parse_session_number_format(format);
-                        let sheet_id = guard.sheets()[*sheet].id;
-                        for r in *start_row..=*end_row {
-                            for c in *start_col..=*end_col {
-                                let s = guard.sheet_mut(*sheet).expect("validated sheet index");
-                                let before = s.get_format(r, c);
-                                s.set_number_format(r, c, nf.clone());
-                                let after = s.get_format(r, c);
-                                if after != before {
-                                    push_format_patch(&mut format_patches_by_sheet, *sheet,
-                                        CellFormatPatch { row: r, col: c, before, after });
-                                    guard.note_format_changed(CellId::new(sheet_id, r, c));
-                                }
-                            }
-                        }
-                        applied += 1;
-                    }
-                    Op::SetStyle { sheet, start_row, start_col, end_row, end_col, bold, italic, underline } => {
-                        let sheet_id = guard.sheets()[*sheet].id;
-                        for r in *start_row..=*end_row {
-                            for c in *start_col..=*end_col {
-                                let s = guard.sheet_mut(*sheet).expect("validated sheet index");
-                                let before = s.get_format(r, c);
-                                if let Some(b) = bold { s.set_bold(r, c, *b); }
-                                if let Some(b) = italic { s.set_italic(r, c, *b); }
-                                if let Some(b) = underline { s.set_underline(r, c, *b); }
-                                let after = s.get_format(r, c);
-                                if after != before {
-                                    push_format_patch(&mut format_patches_by_sheet, *sheet,
-                                        CellFormatPatch { row: r, col: c, before, after });
-                                    guard.note_format_changed(CellId::new(sheet_id, r, c));
-                                }
-                            }
-                        }
-                        applied += 1;
-                    }
+            }
+            for (sheet_idx, patches) in &outcome.format_patches {
+                if !patches.is_empty() {
+                    self.history.record_format(
+                        *sheet_idx,
+                        patches
+                            .iter()
+                            .map(|p| CellFormatPatch {
+                                row: p.row,
+                                col: p.col,
+                                before: p.before.clone(),
+                                after: p.after.clone(),
+                            })
+                            .collect(),
+                        FormatActionKind::PasteFormats,
+                        req.batch_name.clone(),
+                    );
                 }
             }
 
-            (applied, changes_by_sheet, format_patches_by_sheet)
-        });
-        // batch_guard dropped here → single recalc + revision increment
+            self.is_modified = true;
+            self.cached_title = None;
 
-        // Build changed cells list BEFORE history takes ownership of the patches
-        let mut changed_cells: Vec<crate::session_server::CellRef> = changes_by_sheet
-            .iter()
-            .flat_map(|(sheet_idx, changes)| {
-                changes.iter().map(move |c| crate::session_server::CellRef {
-                    sheet: *sheet_idx,
-                    row: c.row,
-                    col: c.col,
-                })
-            })
-            .collect();
-        changed_cells.extend(format_patches_by_sheet.iter().flat_map(|(sheet_idx, (patches, _))| {
-            patches.iter().map(move |p| crate::session_server::CellRef {
-                sheet: *sheet_idx,
-                row: p.row,
-                col: p.col,
-            })
-        }));
-
-        // Record history entries for undo (one per sheet that had changes)
-        for (sheet_idx, changes) in changes_by_sheet {
-            if !changes.is_empty() {
-                self.history.record_batch(sheet_idx, changes);
-            }
-        }
-        for (sheet_idx, (patches, _)) in format_patches_by_sheet {
-            if !patches.is_empty() {
-                self.history.record_format(
-                    sheet_idx,
-                    patches,
-                    crate::history::FormatActionKind::PasteFormats,
-                    req.batch_name.clone(),
-                );
+            if !outcome.changed_cells.is_empty() {
+                self.session_server
+                    .broadcast_cells(outcome.response.current_revision, outcome.changed_cells);
             }
         }
 
-        // Mark document as modified
-        self.is_modified = true;
-        self.cached_title = None;
-
-        let new_rev = self.workbook.read(cx).revision();
-
-        // Broadcast cell changes to subscribed connections
-        // This happens in the same transaction boundary as revision increment
-        if !changed_cells.is_empty() {
-            self.session_server.broadcast_cells(new_rev, changed_cells);
-        }
-
-        ApplyOpsResponse {
-            applied,
-            total: req.ops.len(),
-            current_revision: new_rev,
-            error: None,
-        }
+        outcome.response
     }
 
-    /// Handle an inspect request from the session server.
+    /// Handle an inspect request: delegate to session-host.
     fn handle_session_inspect(
         &self,
         req: &crate::session_server::InspectRequest,
         cx: &Context<Self>,
     ) -> crate::session_server::InspectResponse {
-        use crate::session_server::{InspectError, InspectResponse, InspectResult, InspectTarget, CellInfo, WorkbookInfo};
-
-        let wb = self.workbook.read(cx);
-        let current_rev = wb.revision();
-
-        // Same contract as the write path: bad sheet indexes and out-of-bounds
-        // coordinates are errors, not silent redirects to the active sheet.
-        if let Some((code, message)) = validate_inspect_target(&req.target, wb.sheets().len()) {
-            return InspectResponse {
-                current_revision: current_rev,
-                result: Err(InspectError { code: code.to_string(), message }),
-            };
-        }
-
-        let result = match &req.target {
-            InspectTarget::Cell { sheet, row, col } => {
-                let sheet_data = &wb.sheets()[*sheet];
-                let display = sheet_data.get_display(*row, *col);
-                let raw = sheet_data.get_raw(*row, *col);
-                let formula = if raw.starts_with('=') { Some(raw.clone()) } else { None };
-                InspectResult::Cell(CellInfo {
-                    raw,
-                    display,
-                    formula,
-                })
-            }
-            InspectTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
-                let sheet_data = &wb.sheets()[*sheet];
-                let mut cells = Vec::new();
-                for r in *start_row..=*end_row {
-                    for c in *start_col..=*end_col {
-                        let display = sheet_data.get_display(r, c);
-                        let raw = sheet_data.get_raw(r, c);
-                        let formula = if raw.starts_with('=') { Some(raw.clone()) } else { None };
-                        cells.push(CellInfo {
-                            raw,
-                            display,
-                            formula,
-                        });
-                    }
-                }
-                InspectResult::Range { cells }
-            }
-            InspectTarget::Workbook => {
-                InspectResult::Workbook(WorkbookInfo {
-                    sheet_count: wb.sheets().len(),
-                    active_sheet: wb.active_sheet_index(),
-                    title: self.document_meta.display_name.clone(),
-                })
-            }
-        };
-
-        InspectResponse {
-            current_revision: current_rev,
-            result: Ok(result),
-        }
+        visigrid_session_host::inspect(
+            self.workbook.read(cx),
+            req,
+            &self.document_meta.display_name,
+        )
     }
 
     /// Start the session server with the given mode.

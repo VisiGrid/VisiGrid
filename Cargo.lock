@@ -7568,6 +7568,7 @@ dependencies = [
  "visigrid-io",
  "visigrid-license",
  "visigrid-protocol",
+ "visigrid-session-host",
  "which 7.0.3",
  "windows-sys 0.59.0",
  "winresource",
@@ -7643,6 +7644,25 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "visigrid-session-host"
+version = "0.15.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "dirs 6.0.0",
+ "libc",
+ "log",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "smol",
+ "subtle",
+ "uuid",
+ "visigrid-engine",
+ "visigrid-protocol",
 ]
 
 [[package]]

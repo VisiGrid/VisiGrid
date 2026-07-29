@@ -10,14 +10,15 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::session_server::bridge::{
+use crate::bridge::{
     SessionBridgeHandle, ApplyOpsRequest, InspectRequest,
     SubscribeRequest, UnsubscribeRequest,
 };
-use crate::session_server::discovery::DiscoveryManager;
-use crate::session_server::events::{BroadcastEvent, ConnectionSubscriptions, TOPIC_CELLS};
-use crate::session_server::protocol::*;
-use crate::session_server::rate_limiter::{RateLimiter, RateLimiterConfig, RateLimitedError};
+use crate::discovery::DiscoveryManager;
+use crate::events::{BroadcastEvent, ConnectionSubscriptions, TOPIC_CELLS};
+use visigrid_protocol::*;
+use crate::wire_ext::{CellRef, ProtocolError, MAX_MESSAGE_SIZE};
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig, RateLimitedError};
 
 /// Server operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -821,7 +822,7 @@ fn handle_message(
                         total: resp.total,
                         revision: resp.current_revision,
                         error: resp.error.map(|e| match e {
-                            crate::session_server::bridge::ApplyOpsError::RevisionMismatch { expected, actual } => {
+                            crate::bridge::ApplyOpsError::RevisionMismatch { expected, actual } => {
                                 OpError {
                                     code: "revision_mismatch".to_string(),
                                     message: format!("Expected revision {} but current is {}", expected, actual),
@@ -829,7 +830,7 @@ fn handle_message(
                                     suggestion: Some("Retry with updated revision".to_string()),
                                 }
                             }
-                            crate::session_server::bridge::ApplyOpsError::OpFailed(op_err) => op_err,
+                            crate::bridge::ApplyOpsError::OpFailed(op_err) => op_err,
                         }),
                     })
                 }
@@ -923,7 +924,7 @@ fn send_error(stream: &mut TcpStream, id: Option<String>, error: ProtocolError) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_server::bridge::{
+    use crate::bridge::{
         SessionRequest, ApplyOpsResponse, InspectResponse,
         SubscribeResponse, UnsubscribeResponse,
     };

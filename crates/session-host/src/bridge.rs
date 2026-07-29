@@ -12,7 +12,7 @@
 
 use std::sync::mpsc;
 
-use super::protocol::{Op, InspectTarget, InspectResult, OpError};
+use visigrid_protocol::{Op, InspectTarget, InspectResult, OpError};
 
 /// A simple oneshot channel for single-use responses.
 /// Uses std::sync::mpsc under the hood.
@@ -340,7 +340,7 @@ mod tests {
     fn test_inspect_response_always_has_revision() {
         let response = InspectResponse {
             current_revision: 42,
-            result: Ok(InspectResult::Workbook(super::super::protocol::WorkbookInfo {
+            result: Ok(InspectResult::Workbook(visigrid_protocol::WorkbookInfo {
                 sheet_count: 1,
                 active_sheet: 0,
                 title: "Test".to_string(),
