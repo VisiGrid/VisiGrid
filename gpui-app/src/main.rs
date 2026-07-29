@@ -3,6 +3,7 @@
 
 mod actions;
 mod ai;
+mod ai_cli;
 mod ai_metrics;
 mod app;
 mod autocomplete;
