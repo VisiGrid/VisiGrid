@@ -4,6 +4,9 @@
 mod actions;
 mod ai;
 mod ai_cli;
+mod ai_dialog_state;
+mod rewind_state;
+mod validation_state;
 mod ai_metrics;
 mod app;
 mod autocomplete;
