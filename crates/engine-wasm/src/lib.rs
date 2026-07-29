@@ -163,13 +163,30 @@ struct ValidationEntry {
     rule: visigrid_engine::validation::ValidationRule,
 }
 
+/// JS-facing style delta. A typed struct on purpose: serde_wasm_bindgen
+/// serializes structs as plain JS objects but serde_json::Value maps as JS
+/// `Map`s, which read as empty from JS property access.
+#[derive(Serialize, Default)]
+struct CondStyleOut {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    background_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    font_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bold: Option<bool>,
+}
+
+fn hex_of(rgba: [u8; 4]) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgba[0], rgba[1], rgba[2])
+}
+
 #[derive(Serialize)]
 struct CondHit {
     sheet: usize,
     row: usize,
     col: usize,
-    /// Engine CellFormatOverride as its serde value (fg/bg/bold/… deltas)
-    style: serde_json::Value,
+    /// Engine CellFormatOverride, flattened to JS-friendly values
+    style: CondStyleOut,
 }
 
 #[derive(Serialize)]
@@ -233,9 +250,12 @@ fn evaluate_extras_core(extras: Vec<ExtrasSheet>) -> ExtrasOutput {
                 continue;
             }
             if let Some(over) = sheet.cond_formats.override_for_cell(cell.row, cell.col, sheet) {
-                if let Ok(style) = serde_json::to_value(&over) {
-                    cond.push(CondHit { sheet: i, row: cell.row, col: cell.col, style });
-                }
+                let style = CondStyleOut {
+                    background_color: over.background_color.flatten().map(hex_of),
+                    font_color: over.font_color.flatten().map(hex_of),
+                    bold: over.bold,
+                };
+                cond.push(CondHit { sheet: i, row: cell.row, col: cell.col, style });
             }
             if !cell.raw.starts_with('=') {
                 if let visigrid_engine::validation::ValidationResult::Invalid { reason, .. } =
@@ -307,6 +327,11 @@ mod tests {
         let out = evaluate_extras_core(extras);
         assert_eq!(out.cond.len(), 1, "exactly the >10 cell gets the style");
         assert_eq!((out.cond[0].row, out.cond[0].col), (0, 0));
+        assert_eq!(
+            out.cond[0].style.background_color.as_deref(),
+            Some("#FF0000"),
+            "style survives as a JS-friendly hex string"
+        );
         assert_eq!(out.violations.len(), 1, "exactly the off-list cell violates");
         assert_eq!((out.violations[0].row, out.violations[0].col), (0, 1));
         assert!(out.violations[0].reason.len() > 0);
