@@ -17,6 +17,18 @@ use visigrid_session_host as host;
 
 use crate::CliError;
 
+/// (at, count, delete, is_row) for row/column ops; None for sheet ops.
+fn structural_span(op: &visigrid_protocol::StructureOp) -> Option<(usize, usize, bool, bool)> {
+    use visigrid_protocol::StructureOp as S;
+    match op {
+        S::InsertRows { at, count, .. } => Some((*at, *count, false, true)),
+        S::DeleteRows { at, count, .. } => Some((*at, *count, true, true)),
+        S::InsertCols { at, count, .. } => Some((*at, *count, false, false)),
+        S::DeleteCols { at, count, .. } => Some((*at, *count, true, false)),
+        S::AddSheet { .. } | S::RenameSheet { .. } => None,
+    }
+}
+
 /// What `serve` persists to, if anything.
 enum SaveTarget {
     Native(PathBuf),
@@ -227,12 +239,14 @@ pub fn cmd_serve(
                         },
                         Ok(description) => {
                         dirty = true;
-                        // Layout side-cars are keyed by index; a structural
-                        // edit invalidates them, so drop the affected sheet's
-                        // rather than silently mis-mapping widths/heights.
+                        // Layout side-cars are keyed by index, so they must
+                        // follow the edit — widths, frozen panes, filters, and
+                        // chart ranges all describe rows that just moved.
                         let target = host::structure_target_sheet(&op, wb.active_sheet_index());
                         if let Some(l) = layouts.get_mut(target) {
-                            *l = SheetLayout::default();
+                            if let Some((at, count, delete, is_row)) = structural_span(&op) {
+                                l.shift_for_structural(at, count, delete, is_row);
+                            }
                         }
                         while layouts.len() < wb.sheets().len() {
                             layouts.push(SheetLayout::default());

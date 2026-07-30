@@ -150,6 +150,90 @@ pub struct SheetLayout {
 }
 
 impl SheetLayout {
+    /// Move presentation state to follow a structural edit on this sheet.
+    ///
+    /// The engine adjusts cells, formulas, validations, and named ranges;
+    /// this side-car holds what the engine doesn't model, and it has to move
+    /// too or widths, frozen panes, filters, and charts end up describing
+    /// the wrong rows.
+    ///
+    /// Charts are otherwise opaque here, but by convention each entry may
+    /// carry a `data_range` A1 string — the one field worth understanding,
+    /// since a chart pointing at shifted rows silently plots the wrong data.
+    /// A range wholly consumed by a delete becomes `#REF!`, which the web app
+    /// can surface as a broken chart rather than a plausible wrong one.
+    pub fn shift_for_structural(&mut self, at: usize, count: usize, delete: bool, is_row: bool) {
+        use visigrid_engine::structural::shift_span;
+
+        let shift_keys = |m: &BTreeMap<usize, f32>| -> BTreeMap<usize, f32> {
+            m.iter()
+                .filter_map(|(k, v)| shift_span(*k, *k, at, count, delete).map(|(nk, _)| (nk, *v)))
+                .collect()
+        };
+        if is_row {
+            self.row_heights = shift_keys(&self.row_heights);
+            if at < self.frozen_rows {
+                self.frozen_rows = if delete {
+                    self.frozen_rows.saturating_sub(count.min(self.frozen_rows - at))
+                } else {
+                    self.frozen_rows + count
+                };
+            }
+        } else {
+            self.col_widths = shift_keys(&self.col_widths);
+            if at < self.frozen_cols {
+                self.frozen_cols = if delete {
+                    self.frozen_cols.saturating_sub(count.min(self.frozen_cols - at))
+                } else {
+                    self.frozen_cols + count
+                };
+            }
+        }
+
+        if let Some(f) = &mut self.filter {
+            let (s, e) = if is_row { (f.range.0, f.range.2) } else { (f.range.1, f.range.3) };
+            match shift_span(s, e, at, count, delete) {
+                Some((ns, ne)) => {
+                    if is_row {
+                        f.range.0 = ns;
+                        f.range.2 = ne;
+                    } else {
+                        f.range.1 = ns;
+                        f.range.3 = ne;
+                        f.columns.retain_mut(|c| match shift_span(c.col, c.col, at, count, delete) {
+                            Some((nc, _)) => {
+                                c.col = nc;
+                                true
+                            }
+                            None => false,
+                        });
+                        if let Some(sort) = &mut f.sort {
+                            match shift_span(sort.column, sort.column, at, count, delete) {
+                                Some((nc, _)) => sort.column = nc,
+                                None => f.sort = None,
+                            }
+                        }
+                    }
+                }
+                None => self.filter = None, // the filtered region was deleted
+            }
+        }
+
+        if let Some(charts) = &mut self.charts {
+            if let Some(list) = charts.as_array_mut() {
+                for chart in list.iter_mut() {
+                    let Some(range) = chart.get("data_range").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let adjusted = shift_a1_range(range, at, count, delete, is_row);
+                    if let Some(obj) = chart.as_object_mut() {
+                        obj.insert("data_range".into(), serde_json::Value::String(adjusted));
+                    }
+                }
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.col_widths.is_empty()
             && self.row_heights.is_empty()
@@ -191,6 +275,32 @@ pub struct FilterSpec {
 pub struct ColumnFilterSpec {
     pub col: usize,
     pub filter: visigrid_engine::filter::ColumnFilter,
+}
+
+/// Adjust an A1 range string ("B2:D10", "Sheet1!A1:A9") for a structural
+/// edit, reusing the engine's formula-reference transform so chart ranges
+/// follow exactly the same rules as formula ranges.
+fn shift_a1_range(range: &str, at: usize, count: usize, delete: bool, is_row: bool) -> String {
+    use visigrid_engine::structural::{adjust_formula_text, Axis, StructuralEdit};
+
+    // The transform works on formulas; a range is one wrapped in '='.
+    // Sheet-qualified ranges keep their prefix, and because the edit names
+    // the same sheet the reference resolves either way.
+    let sheet_name = range
+        .split_once('!')
+        .map(|(s, _)| s.trim_matches('\'').to_string())
+        .unwrap_or_default();
+    let edit = StructuralEdit {
+        sheet_name: sheet_name.clone(),
+        axis: if is_row { Axis::Row } else { Axis::Col },
+        at,
+        count,
+        delete,
+    };
+    match adjust_formula_text(&format!("={}", range), &edit, &sheet_name) {
+        Some(adjusted) => adjusted.trim_start_matches('=').to_string(),
+        None => range.to_string(),
+    }
 }
 
 fn keys_to_string(m: &BTreeMap<usize, f32>) -> BTreeMap<String, f32> {
@@ -816,6 +926,66 @@ mod full_json_tests {
         assert_eq!(rf.border_top.color, Some([255, 0, 0, 255]));
         assert_eq!(rf.border_bottom.style, BorderStyle::Thin);
         assert_eq!(rf.border_left.style, BorderStyle::None);
+    }
+
+    #[test]
+    fn layout_follows_structural_edits() {
+        use visigrid_engine::filter::{ColumnFilter, SortDirection, SortState};
+
+        let mut layout = SheetLayout {
+            col_widths: [(0, 100.0), (3, 150.0)].into_iter().collect(),
+            row_heights: [(1, 30.0), (5, 40.0)].into_iter().collect(),
+            frozen_rows: 2,
+            frozen_cols: 1,
+            filter: Some(FilterSpec {
+                range: (4, 0, 20, 3),
+                columns: vec![ColumnFilterSpec { col: 2, filter: ColumnFilter::default() }],
+                sort: Some(SortState { column: 2, direction: SortDirection::Ascending }),
+            }),
+            charts: Some(serde_json::json!([
+                {"id": "c1", "chart_type": "bar", "data_range": "A5:B20"},
+                {"id": "c2", "chart_type": "pie", "data_range": "Sheet1!D1:D4"},
+            ])),
+        };
+
+        // Insert 2 rows at row index 1 (inside the frozen band, above everything).
+        layout.shift_for_structural(1, 2, false, true);
+        assert_eq!(layout.row_heights.keys().copied().collect::<Vec<_>>(), vec![3, 7]);
+        assert_eq!(layout.frozen_rows, 4, "frozen band grew with the insert");
+        assert_eq!(layout.col_widths.keys().copied().collect::<Vec<_>>(), vec![0, 3], "columns untouched");
+        let f = layout.filter.as_ref().unwrap();
+        assert_eq!((f.range.0, f.range.2), (6, 22), "filter range moved down");
+        // Chart ranges follow — a chart pointing at shifted rows would
+        // otherwise plot the wrong data with no visible error.
+        let charts = layout.charts.as_ref().unwrap().as_array().unwrap();
+        assert_eq!(charts[0]["data_range"], "A7:B22", "range below the insert shifts");
+        // D1:D4 spans rows 0-3, so an insert at row index 1 lands INSIDE it:
+        // grid-line semantics expand rather than shift, matching Excel and
+        // the formula-range rule.
+        assert_eq!(charts[1]["data_range"], "Sheet1!D1:D6", "range containing the insert expands");
+
+        // Deleting the columns a filter/sort targets drops them cleanly.
+        let mut l2 = SheetLayout {
+            filter: Some(FilterSpec {
+                range: (0, 0, 9, 5),
+                columns: vec![ColumnFilterSpec { col: 2, filter: ColumnFilter::default() }],
+                sort: Some(SortState { column: 2, direction: SortDirection::Ascending }),
+            }),
+            ..SheetLayout::default()
+        };
+        l2.shift_for_structural(2, 1, true, false);
+        let f2 = l2.filter.as_ref().unwrap();
+        assert!(f2.columns.is_empty(), "filter on a deleted column is dropped");
+        assert!(f2.sort.is_none(), "sort on a deleted column is dropped");
+
+        // A chart whose whole range is deleted becomes #REF!, not a plausible
+        // wrong range.
+        let mut l3 = SheetLayout {
+            charts: Some(serde_json::json!([{"id": "c", "data_range": "A2:A4"}])),
+            ..SheetLayout::default()
+        };
+        l3.shift_for_structural(0, 10, true, true);
+        assert_eq!(l3.charts.unwrap().as_array().unwrap()[0]["data_range"], "#REF!");
     }
 
     #[test]
