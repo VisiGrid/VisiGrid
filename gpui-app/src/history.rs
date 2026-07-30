@@ -157,6 +157,12 @@ pub enum UndoAction {
         sheet_index: usize,
         at_row: usize,
         count: usize,
+        /// Formulas rewritten by the edit, anywhere in the workbook:
+        /// (sheet_index, row, col, text_before). A #REF! rewrite is
+        /// destructive text — undo must restore it in the same step, or the
+        /// cells come back while the formulas stay mangled.
+        #[allow(dead_code)]
+        formula_rewrites: Vec<(usize, usize, usize, String)>,
     },
     /// Rows deleted (for undo: re-insert rows and restore cell data)
     RowsDeleted {
@@ -167,12 +173,18 @@ pub enum UndoAction {
         deleted_cells: Vec<(usize, usize, String, CellFormat)>,
         /// Deleted row heights: (row, height)
         deleted_row_heights: Vec<(usize, f32)>,
+        /// See RowsInserted::formula_rewrites.
+        #[allow(dead_code)]
+        formula_rewrites: Vec<(usize, usize, usize, String)>,
     },
     /// Columns inserted (for undo: delete the inserted columns)
     ColsInserted {
         sheet_index: usize,
         at_col: usize,
         count: usize,
+        /// See RowsInserted::formula_rewrites.
+        #[allow(dead_code)]
+        formula_rewrites: Vec<(usize, usize, usize, String)>,
     },
     /// Columns deleted (for undo: re-insert columns and restore cell data)
     ColsDeleted {
@@ -183,6 +195,9 @@ pub enum UndoAction {
         deleted_cells: Vec<(usize, usize, String, CellFormat)>,
         /// Deleted column widths: (col, width)
         deleted_col_widths: Vec<(usize, f32)>,
+        /// See RowsInserted::formula_rewrites.
+        #[allow(dead_code)]
+        formula_rewrites: Vec<(usize, usize, usize, String)>,
     },
     /// Column width changed (for undo: restore old width)
     ColumnWidthSet {
@@ -767,12 +782,18 @@ impl History {
         self.record_batch_with_provenance(sheet_index, changes, None);
     }
 
-    /// Record a value batch attributed to a specific source (session clients).
-    pub fn record_batch_from(&mut self, sheet_index: usize, changes: Vec<CellChange>, source: MutationSource) {
-        self.record_batch_with_provenance(sheet_index, changes, None);
+    /// Re-tag the most recent undo entry's source. Used after routing a
+    /// session client's edit through a normal GUI mutation path.
+    pub fn retag_last_source(&mut self, source: MutationSource) {
         if let Some(entry) = self.undo_stack.last_mut() {
             entry.source = source;
         }
+    }
+
+    /// Record a value batch attributed to a specific source (session clients).
+    pub fn record_batch_from(&mut self, sheet_index: usize, changes: Vec<CellChange>, source: MutationSource) {
+        self.record_batch_with_provenance(sheet_index, changes, None);
+        self.retag_last_source(source);
     }
 
     /// Record a format batch attributed to a specific source (session clients).
@@ -785,9 +806,7 @@ impl History {
         source: MutationSource,
     ) {
         self.record_format(sheet_index, patches, kind, description);
-        if let Some(entry) = self.undo_stack.last_mut() {
-            entry.source = source;
-        }
+        self.retag_last_source(source);
     }
 
     /// Source of the entry that `undo()` would revert next.
@@ -1085,7 +1104,7 @@ impl History {
                 let bbox = (range.start_row, range.start_col, range.end_row, range.end_col);
                 (Some(*sheet_index), vec![], Some(bbox))
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
                 // Highlight the inserted rows (full width, arbitrary column span)
                 let bbox = (*at_row, 0, at_row + count - 1, 25); // Show first 26 columns
                 (Some(*sheet_index), vec![], Some(bbox))
@@ -1101,7 +1120,7 @@ impl History {
                     (Some(*sheet_index), cells, range)
                 }
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count } => {
+            UndoAction::ColsInserted { sheet_index, at_col, count, .. } => {
                 // Highlight the inserted columns
                 let bbox = (0, *at_col, 99, at_col + count - 1); // Show first 100 rows
                 (Some(*sheet_index), vec![], Some(bbox))
@@ -1460,7 +1479,7 @@ impl History {
                     Self::apply_action_forward(workbook, view_state, sub_action)?;
                 }
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
                 let sheet = workbook.sheet_mut(*sheet_index)
                     .ok_or_else(|| PreviewBuildError::InvariantViolation(
                         format!("RowsInserted action references invalid sheet {}", sheet_index)
@@ -1485,7 +1504,7 @@ impl History {
                     sheet_view.sort = None;
                 }
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count } => {
+            UndoAction::ColsInserted { sheet_index, at_col, count, .. } => {
                 let sheet = workbook.sheet_mut(*sheet_index)
                     .ok_or_else(|| PreviewBuildError::InvariantViolation(
                         format!("ColsInserted action references invalid sheet {}", sheet_index)

@@ -360,7 +360,7 @@ fn process_action(
             *format_change_count += patches.len();
         }
 
-        UndoAction::RowsInserted { sheet_index, at_row, count } => {
+        UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
             structural_changes.push(StructuralChange::RowsInserted {
                 sheet_index: *sheet_index,
                 at_row: *at_row,
@@ -376,7 +376,7 @@ fn process_action(
             });
         }
 
-        UndoAction::ColsInserted { sheet_index, at_col, count } => {
+        UndoAction::ColsInserted { sheet_index, at_col, count, .. } => {
             structural_changes.push(StructuralChange::ColsInserted {
                 sheet_index: *sheet_index,
                 at_col: *at_col,

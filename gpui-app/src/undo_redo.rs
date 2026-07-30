@@ -105,7 +105,7 @@ impl Spreadsheet {
                     }
                     self.status_message = Some(format!("Undo: {}", description));
                 }
-                UndoAction::RowsInserted { sheet_index, at_row, count } => {
+                UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
                     // Undo insert by deleting the rows
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -125,10 +125,21 @@ impl Spreadsheet {
                     for (r, h) in heights_to_shift {
                         sheet_heights.insert(r - count, h);
                     }
+                    // Restore formula text the structural edit rewrote. A
+                    // #REF! rewrite is destructive: restoring cells without
+                    // this would leave the formulas mangled.
+                    if !formula_rewrites.is_empty() {
+                        self.workbook.update(cx, |wb, _| {
+                            let mut guard = wb.batch_guard();
+                            for (si, r, c, old) in &formula_rewrites {
+                                guard.set_cell_value_tracked(*si, *r, *c, old);
+                            }
+                        });
+                    }
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} row(s)", count));
                 }
-                UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights } => {
+                UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights, formula_rewrites } => {
                     // Undo delete by re-inserting rows and restoring data
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -161,10 +172,21 @@ impl Spreadsheet {
                     for (r, h) in deleted_row_heights {
                         sheet_heights.insert(r, h);
                     }
+                    // Restore formula text the structural edit rewrote. A
+                    // #REF! rewrite is destructive: restoring cells without
+                    // this would leave the formulas mangled.
+                    if !formula_rewrites.is_empty() {
+                        self.workbook.update(cx, |wb, _| {
+                            let mut guard = wb.batch_guard();
+                            for (si, r, c, old) in &formula_rewrites {
+                                guard.set_cell_value_tracked(*si, *r, *c, old);
+                            }
+                        });
+                    }
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: deleted {} row(s)", count));
                 }
-                UndoAction::ColsInserted { sheet_index, at_col, count } => {
+                UndoAction::ColsInserted { sheet_index, at_col, count, formula_rewrites } => {
                     // Undo insert by deleting the columns
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -184,10 +206,21 @@ impl Spreadsheet {
                     for (c, w) in widths_to_shift {
                         sheet_widths.insert(c - count, w);
                     }
+                    // Restore formula text the structural edit rewrote. A
+                    // #REF! rewrite is destructive: restoring cells without
+                    // this would leave the formulas mangled.
+                    if !formula_rewrites.is_empty() {
+                        self.workbook.update(cx, |wb, _| {
+                            let mut guard = wb.batch_guard();
+                            for (si, r, c, old) in &formula_rewrites {
+                                guard.set_cell_value_tracked(*si, *r, *c, old);
+                            }
+                        });
+                    }
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} column(s)", count));
                 }
-                UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths } => {
+                UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths, formula_rewrites } => {
                     // Undo delete by re-inserting columns and restoring data
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -219,6 +252,17 @@ impl Spreadsheet {
                     // Restore deleted column widths
                     for (c, w) in deleted_col_widths {
                         sheet_widths.insert(c, w);
+                    }
+                    // Restore formula text the structural edit rewrote. A
+                    // #REF! rewrite is destructive: restoring cells without
+                    // this would leave the formulas mangled.
+                    if !formula_rewrites.is_empty() {
+                        self.workbook.update(cx, |wb, _| {
+                            let mut guard = wb.batch_guard();
+                            for (si, r, c, old) in &formula_rewrites {
+                                guard.set_cell_value_tracked(*si, *r, *c, old);
+                            }
+                        });
                     }
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: deleted {} column(s)", count));
@@ -465,7 +509,7 @@ impl Spreadsheet {
                     self.apply_undo_action(sub_action, cx);
                 }
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.delete_rows(at_row, count);
@@ -484,9 +528,18 @@ impl Spreadsheet {
                 for (r, h) in heights_to_shift {
                     sheet_heights.insert(r - count, h);
                 }
+                // Restore formula text the structural edit rewrote (see undo()).
+                if !formula_rewrites.is_empty() {
+                    self.workbook.update(cx, |wb, _| {
+                        let mut guard = wb.batch_guard();
+                        for (si, r, c, old) in &formula_rewrites {
+                            guard.set_cell_value_tracked(*si, *r, *c, old);
+                        }
+                    });
+                }
                 self.bump_cells_rev();
             }
-            UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights } => {
+            UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.insert_rows(at_row, count);
@@ -517,9 +570,18 @@ impl Spreadsheet {
                 for (r, h) in deleted_row_heights {
                     sheet_heights.insert(r, h);
                 }
+                // Restore formula text the structural edit rewrote (see undo()).
+                if !formula_rewrites.is_empty() {
+                    self.workbook.update(cx, |wb, _| {
+                        let mut guard = wb.batch_guard();
+                        for (si, r, c, old) in &formula_rewrites {
+                            guard.set_cell_value_tracked(*si, *r, *c, old);
+                        }
+                    });
+                }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count } => {
+            UndoAction::ColsInserted { sheet_index, at_col, count, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.delete_cols(at_col, count);
@@ -538,9 +600,18 @@ impl Spreadsheet {
                 for (c, w) in widths_to_shift {
                     sheet_widths.insert(c - count, w);
                 }
+                // Restore formula text the structural edit rewrote (see undo()).
+                if !formula_rewrites.is_empty() {
+                    self.workbook.update(cx, |wb, _| {
+                        let mut guard = wb.batch_guard();
+                        for (si, r, c, old) in &formula_rewrites {
+                            guard.set_cell_value_tracked(*si, *r, *c, old);
+                        }
+                    });
+                }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths } => {
+            UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.insert_cols(at_col, count);
@@ -570,6 +641,15 @@ impl Spreadsheet {
                 }
                 for (c, w) in deleted_col_widths {
                     sheet_widths.insert(c, w);
+                }
+                // Restore formula text the structural edit rewrote (see undo()).
+                if !formula_rewrites.is_empty() {
+                    self.workbook.update(cx, |wb, _| {
+                        let mut guard = wb.batch_guard();
+                        for (si, r, c, old) in &formula_rewrites {
+                            guard.set_cell_value_tracked(*si, *r, *c, old);
+                        }
+                    });
                 }
                 self.bump_cells_rev();
             }
@@ -764,9 +844,12 @@ impl Spreadsheet {
                     self.apply_redo_action(sub_action, cx);
                 }
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count } => {
-                self.sheet_mut(sheet_index, cx, |sheet| {
-                    sheet.insert_rows(at_row, count);
+            UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
+                let _ = formula_rewrites;
+                // Redo re-runs the edit through the structural entry point so
+                // formulas, validations, and named ranges are re-adjusted.
+                let _ = self.workbook.update(cx, |wb, _| {
+                    wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, false)
                 });
                 // Shift row heights down (per-sheet)
                 let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
@@ -786,8 +869,11 @@ impl Spreadsheet {
                 self.bump_cells_rev();
             }
             UndoAction::RowsDeleted { sheet_index, at_row, count, .. } => {
-                self.sheet_mut(sheet_index, cx, |sheet| {
-                    sheet.delete_rows(at_row, count);
+                let _ = self.workbook.update(cx, |wb, _| {
+                    wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, true)
+                });
+                self.sheet_mut(sheet_index, cx, |_sheet| {
+                    // structural_edit already performed the delete
                 });
                 // Shift row heights up (per-sheet)
                 let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
@@ -804,9 +890,12 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count } => {
-                self.sheet_mut(sheet_index, cx, |sheet| {
-                    sheet.insert_cols(at_col, count);
+            UndoAction::ColsInserted { sheet_index, at_col, count, formula_rewrites } => {
+                let _ = formula_rewrites;
+                // Redo re-runs the edit through the structural entry point so
+                // formulas, validations, and named ranges are re-adjusted.
+                let _ = self.workbook.update(cx, |wb, _| {
+                    wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, false)
                 });
                 // Shift column widths right (per-sheet)
                 let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
@@ -826,8 +915,11 @@ impl Spreadsheet {
                 self.bump_cells_rev();
             }
             UndoAction::ColsDeleted { sheet_index, at_col, count, .. } => {
-                self.sheet_mut(sheet_index, cx, |sheet| {
-                    sheet.delete_cols(at_col, count);
+                let _ = self.workbook.update(cx, |wb, _| {
+                    wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, true)
+                });
+                self.sheet_mut(sheet_index, cx, |_sheet| {
+                    // structural_edit already performed the delete
                 });
                 // Shift column widths left (per-sheet)
                 let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
@@ -1039,7 +1131,7 @@ impl Spreadsheet {
                     }
                     self.status_message = Some(format!("Redo: {}", description));
                 }
-                UndoAction::RowsInserted { sheet_index, at_row, count } => {
+                UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
                     // Re-insert the rows
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -1087,7 +1179,7 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Redo: delete {} row(s)", count));
                 }
-                UndoAction::ColsInserted { sheet_index, at_col, count } => {
+                UndoAction::ColsInserted { sheet_index, at_col, count, formula_rewrites } => {
                     // Re-insert the columns
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {

@@ -92,10 +92,18 @@ impl Spreadsheet {
     pub(crate) fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
         let sheet_index = self.sheet_index(cx);
 
-        // Perform the insert
-        self.sheet_mut(sheet_index, cx, |sheet| {
-            sheet.insert_rows(at_row, count);
-        });
+        // Perform the insert through the engine's structural entry point so
+        // formulas, validations, and named ranges follow the moved cells.
+        let rewrites = match self.workbook.update(cx, |wb, _| {
+            wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, false)
+        }) {
+            Ok(r) => r,
+            Err(msg) => {
+                self.status_message = Some(msg);
+                cx.notify();
+                return;
+            }
+        };
 
         // Update row_view to track new data rows
         for i in 0..count {
@@ -124,6 +132,7 @@ impl Spreadsheet {
             sheet_index,
             at_row,
             count,
+            formula_rewrites: rewrites.iter().map(|(si, r, c, old, _)| (*si, *r, *c, old.clone())).collect(),
         });
 
         self.bump_cells_rev();
@@ -173,10 +182,16 @@ impl Spreadsheet {
             sheet_heights.insert(r - count, h);
         }
 
-        // Perform the delete
-        self.sheet_mut(sheet_index, cx, |sheet| {
-            sheet.delete_rows(at_row, count);
-        });
+        let rewrites = match self.workbook.update(cx, |wb, _| {
+            wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, true)
+        }) {
+            Ok(r) => r,
+            Err(msg) => {
+                self.status_message = Some(msg);
+                cx.notify();
+                return;
+            }
+        };
 
         // Update row_view to remove deleted data rows (bottom-up to keep indices stable)
         for i in (0..count).rev() {
@@ -190,6 +205,7 @@ impl Spreadsheet {
             count,
             deleted_cells,
             deleted_row_heights,
+            formula_rewrites: rewrites.iter().map(|(si, r, c, old, _)| (*si, *r, *c, old.clone())).collect(),
         });
 
         // Maintain full-row selection at the same position (Excel behavior):
@@ -210,9 +226,16 @@ impl Spreadsheet {
         let sheet_index = self.sheet_index(cx);
 
         // Perform the insert
-        self.sheet_mut(sheet_index, cx, |sheet| {
-            sheet.insert_cols(at_col, count);
-        });
+        let rewrites = match self.workbook.update(cx, |wb, _| {
+            wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, false)
+        }) {
+            Ok(r) => r,
+            Err(msg) => {
+                self.status_message = Some(msg);
+                cx.notify();
+                return;
+            }
+        };
 
         // Shift column widths right (from right to avoid overwriting) - per-sheet
         let sheet_widths = self.sheet_col_widths_mut();
@@ -236,6 +259,7 @@ impl Spreadsheet {
             sheet_index,
             at_col,
             count,
+            formula_rewrites: rewrites.iter().map(|(si, r, c, old, _)| (*si, *r, *c, old.clone())).collect(),
         });
 
         self.bump_cells_rev();
@@ -286,9 +310,16 @@ impl Spreadsheet {
         }
 
         // Perform the delete
-        self.sheet_mut(sheet_index, cx, |sheet| {
-            sheet.delete_cols(at_col, count);
-        });
+        let rewrites = match self.workbook.update(cx, |wb, _| {
+            wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, true)
+        }) {
+            Ok(r) => r,
+            Err(msg) => {
+                self.status_message = Some(msg);
+                cx.notify();
+                return;
+            }
+        };
 
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::ColsDeleted {
@@ -297,6 +328,7 @@ impl Spreadsheet {
             count,
             deleted_cells,
             deleted_col_widths,
+            formula_rewrites: rewrites.iter().map(|(si, r, c, old, _)| (*si, *r, *c, old.clone())).collect(),
         });
 
         // Maintain full-column selection at the same position (Excel behavior):

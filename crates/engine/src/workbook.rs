@@ -1885,6 +1885,24 @@ impl Workbook {
         //    sheet, qualified refs move from anywhere.
         let edit = StructuralEdit { sheet_name, axis, at, count, delete };
         let mut rewrites = Vec::new();
+        // Positions here are POST-edit (cells have already moved). Record
+        // PRE-edit positions instead: undo applies these after the inverse
+        // structural change, when each formula is back where it started.
+        let pre_edit_pos = |idx: usize, row: usize, col: usize| -> (usize, usize) {
+            if idx != sheet_index {
+                return (row, col); // other sheets never moved
+            }
+            let v = if is_row { row } else { col };
+            let pre = if delete {
+                if v >= at { v + count } else { v }
+            } else if v >= at + count {
+                v - count
+            } else {
+                v
+            };
+            if is_row { (pre, col) } else { (row, pre) }
+        };
+        let mut writes = Vec::new();
         for (idx, sheet) in self.sheets.iter().enumerate() {
             let formula_sheet = sheet.name.clone();
             for (&(row, col), cell) in sheet.cells.iter() {
@@ -1893,12 +1911,14 @@ impl Workbook {
                     continue;
                 }
                 if let Some(new_raw) = adjust_formula_text(&raw, &edit, &formula_sheet) {
-                    rewrites.push((idx, row, col, raw.to_string(), new_raw));
+                    let (pre_row, pre_col) = pre_edit_pos(idx, row, col);
+                    rewrites.push((idx, pre_row, pre_col, raw.to_string(), new_raw.clone()));
+                    writes.push((idx, row, col, new_raw));
                 }
             }
         }
-        for (idx, row, col, _, new_raw) in &rewrites {
-            self.sheets[*idx].set_value(*row, *col, new_raw);
+        for (idx, row, col, new_raw) in writes {
+            self.sheets[idx].set_value(row, col, &new_raw);
         }
 
         self.rebuild_dep_graph();
@@ -2389,6 +2409,13 @@ mod tests {
         // Insert 2 rows at the top of Sheet1.
         let rewrites = wb.structural_edit(0, Axis::Row, 0, 2, false).unwrap();
         assert!(!rewrites.is_empty(), "formulas were rewritten");
+        // Rewrites carry PRE-edit positions so undo — which runs after the
+        // inverse structural change — writes them back where they belong.
+        assert!(
+            rewrites.iter().any(|(si, r, _, old, _)| *si == 0 && *r == 1 && old == "=A1*2"),
+            "=A1*2 recorded at its pre-edit row 1, not its post-edit row 3: {:?}",
+            rewrites
+        );
 
         let s0 = &wb.sheets()[0];
         assert_eq!(s0.get_display(2, 0), "10", "value moved down 2");

@@ -127,7 +127,7 @@ impl UndoAction {
             UndoAction::Group { actions, description } => {
                 Some(group_to_lua(actions, description))
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
                 Some(format!(
                     "grid.insert_rows{{ sheet={}, at={}, count={} }}",
                     sheet_index + 1,
@@ -143,7 +143,7 @@ impl UndoAction {
                     count
                 ))
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count } => {
+            UndoAction::ColsInserted { sheet_index, at_col, count, .. } => {
                 Some(format!(
                     "grid.insert_cols{{ sheet={}, at={}, count={} }}",
                     sheet_index + 1,
@@ -356,13 +356,13 @@ impl UndoAction {
                 let kind_str = format_kind_hash_str(kind);
                 vec![format!("format:{}:{}:{}", sheet_index + 1, range, kind_str)]
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
                 vec![format!("insert_rows:{}:{}:{}", sheet_index + 1, at_row + 1, count)]
             }
             UndoAction::RowsDeleted { sheet_index, at_row, count, .. } => {
                 vec![format!("delete_rows:{}:{}:{}", sheet_index + 1, at_row + 1, count)]
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count } => {
+            UndoAction::ColsInserted { sheet_index, at_col, count, .. } => {
                 vec![format!("insert_cols:{}:{}:{}", sheet_index + 1, at_col + 1, count)]
             }
             UndoAction::ColsDeleted { sheet_index, at_col, count, .. } => {
@@ -991,6 +991,7 @@ mod tests {
             sheet_index: 0,
             at_row: 4,
             count: 3,
+            formula_rewrites: Vec::new(),
         };
         let lua = action.to_lua().unwrap();
         assert_eq!(lua, "grid.insert_rows{ sheet=1, at=5, count=3 }");
