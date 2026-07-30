@@ -9,6 +9,7 @@ mod fill;
 mod hub;
 mod convert;
 mod serve;
+mod share;
 mod mcp;
 mod parse;
 mod recon;
@@ -447,7 +448,9 @@ Examples:
   vgrid serve budget.sheet
   vgrid serve data.json --autosave 30
   vgrid serve report.xlsx --save-as report.sheet
-  vgrid serve --new --save-as model.json")]
+  vgrid serve --new --save-as model.json
+  vgrid serve budget.sheet --share            # + live viewer URL
+  vgrid serve budget.sheet --share --title Q3")]
     Serve {
         /// Workbook to serve (.sheet, .json visigrid-json, .xlsx)
         file: Option<PathBuf>,
@@ -464,6 +467,16 @@ Examples:
         /// Autosave interval in seconds (also saves on Ctrl+C)
         #[arg(long)]
         autosave: Option<u64>,
+
+        /// Stream this workbook to a live viewer URL you can open anywhere
+        /// (requires `vgrid login`). Read-only; nothing leaves the machine
+        /// without this flag.
+        #[arg(long)]
+        share: bool,
+
+        /// Title shown to viewers (default: the file name)
+        #[arg(long)]
+        title: Option<String>,
     },
 
     /// Serve MCP (Model Context Protocol) over stdio for AI agents
@@ -1820,7 +1833,7 @@ fn main() -> ExitCode {
         }
         Some(Commands::Inspect { range, session, sheet, json }) => cmd_inspect(range, session, sheet, json),
         Some(Commands::Save { session }) => cmd_save(session),
-        Some(Commands::Serve { file, new, save_as, autosave }) => serve::cmd_serve(file, new, save_as, autosave),
+        Some(Commands::Serve { file, new, save_as, autosave, share, title }) => serve::cmd_serve(file, new, save_as, autosave, share, title),
         Some(Commands::Pair { session, name, list, revoke }) => cmd_pair(session, name, list, revoke),
         Some(Commands::Mcp { session }) => mcp::cmd_mcp(session),
         Some(Commands::Stats { session, json }) => cmd_stats(session, json),

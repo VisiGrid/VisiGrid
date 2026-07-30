@@ -62,6 +62,8 @@ pub fn cmd_serve(
     new: bool,
     save_as: Option<PathBuf>,
     autosave: Option<u64>,
+    share: bool,
+    share_title: Option<String>,
 ) -> Result<(), CliError> {
     // ---- Load the workbook -------------------------------------------------
     let (mut wb, mut layouts, title): (Workbook, Vec<SheetLayout>, String) = match (&file, new) {
@@ -134,6 +136,25 @@ pub fn cmd_serve(
         );
     }
 
+    // Sharing is opt-in and additive: no frames leave this machine without
+    // --share, and a relay failure never stops the local session.
+    let mut share_session = if share {
+        let display_title = share_title.clone().unwrap_or_else(|| title.clone());
+        match crate::share::ShareSession::open(&display_title) {
+            Some(mut s) => {
+                eprintln!();
+                eprintln!("  Live viewer: {}", s.url);
+                eprintln!("  Sending this workbook's cell values to your account's relay while shared.");
+                eprintln!();
+                s.send_snapshot(&wb, &layouts);
+                Some(s)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
@@ -180,7 +201,12 @@ pub fn cmd_serve(
 
         let req = match rx.recv_timeout(Duration::from_millis(300)) {
             Ok(r) => r,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(sh) = share_session.as_mut() {
+                    sh.heartbeat_if_idle(&wb);
+                }
+                continue;
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
@@ -189,6 +215,14 @@ pub fn cmd_serve(
                 let outcome = host::apply_ops(&mut wb, &req);
                 if outcome.response.error.is_none() && outcome.response.applied > 0 {
                     dirty = true;
+                    if let Some(sh) = share_session.as_mut() {
+                        let cells: Vec<(usize, usize, usize)> = outcome
+                            .changed_cells
+                            .iter()
+                            .map(|c| (c.sheet, c.row, c.col))
+                            .collect();
+                        sh.send_delta(&wb, &cells);
+                    }
                     server.broadcast_cells(outcome.response.current_revision, outcome.changed_cells);
                 }
                 let _ = reply.send(outcome.response);
@@ -251,6 +285,9 @@ pub fn cmd_serve(
                         while layouts.len() < wb.sheets().len() {
                             layouts.push(SheetLayout::default());
                         }
+                        if let Some(sh) = share_session.as_mut() {
+                            sh.send_snapshot(&wb, &layouts);
+                        }
                         host::StructureOutcome {
                             description,
                             revision: wb.revision(),
@@ -304,6 +341,10 @@ pub fn cmd_serve(
             Ok(None) => {}
             Err(e) => eprintln!("save on exit failed: {} (edits lost)", e),
         }
+    }
+    if let Some(sh) = share_session.as_mut() {
+        sh.close();
+        eprintln!("live session ended (viewers keep the last state)");
     }
     server.stop();
     eprintln!("session closed");
