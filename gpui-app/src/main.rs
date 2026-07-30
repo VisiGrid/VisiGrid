@@ -58,6 +58,7 @@ mod role_styles;
 mod search;
 mod series_fill;
 mod session;
+mod session_adapter;
 mod session_server;
 mod settings;
 mod structured_results;
