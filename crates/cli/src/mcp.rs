@@ -505,11 +505,15 @@ fn tool_definitions() -> Value {
     json!([
         {
             "name": "list_sessions",
+            "title": "List VisiGrid sessions",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
             "description": "List running VisiGrid sessions (open GUI windows) with their workbook titles and session IDs. Use when get_workbook reports multiple sessions or to find a specific workbook.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
             "name": "get_workbook",
+            "title": "Get workbook info",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
             "description": "Get the current workbook's title, sheet count, active sheet index, and revision. Call this first to orient; the revision feeds expected_revision on writes.",
             "inputSchema": {
                 "type": "object",
@@ -521,6 +525,8 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "read_range",
+            "title": "Read cells",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
             "description": "Read a cell or range: display values in row-major order plus a map of formula cells. Max 65,536 cells per request (one full column).",
             "inputSchema": {
                 "type": "object",
@@ -535,6 +541,8 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "write_cells",
+            "title": "Write cells",
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false },
             "description": "Write values and formulas to cells in the live workbook. Edits render immediately in the user's GUI and land in undo history. Batch related edits into one call — a batch is one undo step and one recalc. Pass expected_revision from a prior read to avoid clobbering concurrent human edits.",
             "inputSchema": {
                 "type": "object",
@@ -565,6 +573,8 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "set_format",
+            "title": "Format cells",
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false },
             "description": "Format a range: bold/italic/underline and/or a number format. Number formats: named ('general', 'number:2', 'currency:2', 'percent:1', 'date', 'time', 'datetime') or a raw Excel code like '#,##0.00'. Max 250,000 cells per call.",
             "inputSchema": {
                 "type": "object",
@@ -629,6 +639,19 @@ mod tests {
         for t in tools {
             assert!(t["description"].as_str().unwrap().len() > 20);
             assert_eq!(t["inputSchema"]["type"], "object");
+            assert!(t["title"].is_string(), "{} needs a title", t["name"]);
+            // Every tool declares all four hints — clients use readOnlyHint to
+            // auto-approve, and the ChatGPT submission portal scans them.
+            let a = &t["annotations"];
+            for hint in ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] {
+                assert!(a[hint].is_boolean(), "{} missing {}", t["name"], hint);
+            }
+            // Everything here is a local, closed-world spreadsheet.
+            assert_eq!(a["openWorldHint"], false);
+            // A read-only tool must never be flagged destructive.
+            if a["readOnlyHint"] == true {
+                assert_eq!(a["destructiveHint"], false, "{} read-only but destructive", t["name"]);
+            }
         }
     }
 
