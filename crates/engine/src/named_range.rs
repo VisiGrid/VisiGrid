@@ -405,6 +405,58 @@ impl NamedRangeStore {
     }
 
     /// Remove a named range by name (case-insensitive)
+    /// Shift targets on `sheet_index` for a structural edit. Named ranges
+    /// whose target is wholly deleted are removed (there is no #REF! form
+    /// for a named range target).
+    pub fn shift_for_structural(
+        &mut self,
+        sheet_index: usize,
+        at: usize,
+        count: usize,
+        delete: bool,
+        is_row: bool,
+    ) {
+        let mut dead = Vec::new();
+        for (key, nr) in self.ranges.iter_mut() {
+            match &mut nr.target {
+                NamedRangeTarget::Cell { sheet, row, col } => {
+                    if *sheet != sheet_index {
+                        continue;
+                    }
+                    let v = if is_row { *row } else { *col };
+                    match crate::structural::shift_span(v, v, at, count, delete) {
+                        Some((nv, _)) => {
+                            if is_row { *row = nv } else { *col = nv }
+                        }
+                        None => dead.push(key.clone()),
+                    }
+                }
+                NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
+                    if *sheet != sheet_index {
+                        continue;
+                    }
+                    let (s, e) = if is_row { (*start_row, *end_row) } else { (*start_col, *end_col) };
+                    match crate::structural::shift_span(s, e, at, count, delete) {
+                        Some((ns, ne)) => {
+                            if is_row {
+                                *start_row = ns;
+                                *end_row = ne;
+                            } else {
+                                *start_col = ns;
+                                *end_col = ne;
+                            }
+                        }
+                        None => dead.push(key.clone()),
+                    }
+                }
+                _ => {}
+            }
+        }
+        for k in dead {
+            self.ranges.remove(&k);
+        }
+    }
+
     pub fn remove(&mut self, name: &str) -> Option<NamedRange> {
         self.ranges.remove(&name.to_lowercase())
     }

@@ -768,6 +768,40 @@ impl ValidationStore {
     }
 
     /// Iterate over all (range, rule) pairs.
+    /// Shift rules for a structural edit on this sheet. Ranges follow the
+    /// same grid-line semantics as merges and formula ranges; a range wholly
+    /// inside a deleted span is dropped.
+    pub fn shift_for_structural(&mut self, at: usize, count: usize, delete: bool, is_row: bool) {
+        let mut shifted: BTreeMap<CellRange, ValidationRule> = BTreeMap::new();
+        for (range, rule) in std::mem::take(&mut self.rules) {
+            let (s, e) = if is_row { (range.start_row, range.end_row) } else { (range.start_col, range.end_col) };
+            let span = crate::structural::shift_span(s, e, at, count, delete);
+            if let Some((ns, ne)) = span {
+                let mut r = range.clone();
+                if is_row {
+                    r.start_row = ns;
+                    r.end_row = ne;
+                } else {
+                    r.start_col = ns;
+                    r.end_col = ne;
+                }
+                shifted.insert(r, rule);
+            }
+        }
+        self.rules = shifted;
+        // Exclusions follow the same rule.
+        let mut ex = BTreeSet::new();
+        for range in std::mem::take(&mut self.exclusions) {
+            let (s, e) = if is_row { (range.start_row, range.end_row) } else { (range.start_col, range.end_col) };
+            if let Some((ns, ne)) = crate::structural::shift_span(s, e, at, count, delete) {
+                let mut r = range.clone();
+                if is_row { r.start_row = ns; r.end_row = ne; } else { r.start_col = ns; r.end_col = ne; }
+                ex.insert(r);
+            }
+        }
+        self.exclusions = ex;
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&CellRange, &ValidationRule)> {
         self.rules.iter()
     }

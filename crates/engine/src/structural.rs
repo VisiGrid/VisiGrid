@@ -72,6 +72,19 @@ fn adjust_coord(v: usize, edit: &StructuralEdit) -> Coord {
     }
 }
 
+/// Shift a [start, end] span for a structural edit — the shared rule used by
+/// formula ranges, validation ranges, merged regions, and named ranges.
+/// Returns None when the span is wholly consumed by a delete.
+pub fn shift_span(start: usize, end: usize, at: usize, count: usize, delete: bool) -> Option<(usize, usize)> {
+    adjust_span(start, end, &StructuralEdit {
+        sheet_name: String::new(),
+        axis: Axis::Row,
+        at,
+        count,
+        delete,
+    })
+}
+
 /// Adjust a range's [start, end] span. Returns None if the whole span died.
 fn adjust_span(start: usize, end: usize, edit: &StructuralEdit) -> Option<(usize, usize)> {
     let (at, n) = (edit.at, edit.count);

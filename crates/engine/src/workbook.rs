@@ -1809,6 +1809,104 @@ impl Workbook {
         }
     }
 
+    // =========================================================================
+    // Structural edits (rows/columns) — the ONLY correct entry point
+    // =========================================================================
+
+    /// Insert or delete rows/columns on `sheet_index`, keeping everything that
+    /// references the moved cells correct: formulas across ALL sheets, merged
+    /// regions, conditional formats, validations, and named ranges.
+    ///
+    /// Returns the formula rewrites performed as
+    /// `(sheet_index, row, col, old_raw, new_raw)` so callers can record them
+    /// in a single undo entry alongside the structural change — a `#REF!`
+    /// rewrite is destructive text, and undo must restore it.
+    ///
+    /// Refuses (Err) rather than silently discarding data when an insert would
+    /// push non-empty cells past the grid edge, which is what Excel does.
+    pub fn structural_edit(
+        &mut self,
+        sheet_index: usize,
+        axis: crate::structural::Axis,
+        at: usize,
+        count: usize,
+        delete: bool,
+    ) -> Result<Vec<(usize, usize, usize, String, String)>, String> {
+        use crate::structural::{adjust_formula_text, Axis, StructuralEdit};
+
+        let is_row = axis == Axis::Row;
+        let sheet_name = self
+            .sheets
+            .get(sheet_index)
+            .ok_or_else(|| format!("sheet index {} does not exist", sheet_index))?
+            .name
+            .clone();
+
+        // Refuse inserts that would push content off the grid rather than
+        // dropping it (Excel's behavior).
+        if !delete {
+            let sheet = &self.sheets[sheet_index];
+            let limit = if is_row { sheet.rows } else { sheet.cols };
+            let last_used = sheet
+                .cells
+                .iter()
+                .filter(|(_, cell)| !cell.value.raw_display().is_empty())
+                .map(|((r, c), _)| if is_row { *r } else { *c })
+                .max();
+            if let Some(last) = last_used {
+                if last >= at && last + count >= limit {
+                    return Err(format!(
+                        "inserting {} {}(s) would push data past the end of the sheet",
+                        count,
+                        if is_row { "row" } else { "column" }
+                    ));
+                }
+            }
+        }
+
+        // 1. Move cells + merges + conditional formats (sheet-local).
+        {
+            let sheet = &mut self.sheets[sheet_index];
+            match (is_row, delete) {
+                (true, false) => sheet.insert_rows(at, count),
+                (true, true) => sheet.delete_rows(at, count),
+                (false, false) => sheet.insert_cols(at, count),
+                (false, true) => sheet.delete_cols(at, count),
+            }
+            // 2. Validations move with their cells.
+            sheet.validations.shift_for_structural(at, count, delete, is_row);
+        }
+
+        // 3. Named ranges (workbook-level, so missed by any sheet-local pass).
+        self.named_ranges
+            .shift_for_structural(sheet_index, at, count, delete, is_row);
+
+        // 4. Formulas on EVERY sheet: unqualified refs move only on the edited
+        //    sheet, qualified refs move from anywhere.
+        let edit = StructuralEdit { sheet_name, axis, at, count, delete };
+        let mut rewrites = Vec::new();
+        for (idx, sheet) in self.sheets.iter().enumerate() {
+            let formula_sheet = sheet.name.clone();
+            for (&(row, col), cell) in sheet.cells.iter() {
+                let raw = cell.value.raw_display();
+                if !raw.starts_with('=') {
+                    continue;
+                }
+                if let Some(new_raw) = adjust_formula_text(&raw, &edit, &formula_sheet) {
+                    rewrites.push((idx, row, col, raw.to_string(), new_raw));
+                }
+            }
+        }
+        for (idx, row, col, _, new_raw) in &rewrites {
+            self.sheets[*idx].set_value(*row, *col, new_raw);
+        }
+
+        self.rebuild_dep_graph();
+        self.recompute_full_ordered();
+        self.increment_revision();
+        Ok(rewrites)
+    }
+
     /// Record a format-only cell change. Bumps the revision (at end_batch when
     /// batching, immediately otherwise) without triggering recalc — format
     /// changes never affect computed values.
@@ -2258,6 +2356,79 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structural_edit_keeps_everything_pointing_at_its_content() {
+        use crate::structural::Axis;
+        use crate::validation::{CellRange, ListSource, ValidationRule, ValidationType};
+        use crate::named_range::{NamedRange, NamedRangeTarget};
+
+        let mut wb = Workbook::new();
+        wb.add_sheet(); // Sheet2, for the cross-sheet case
+        {
+            let s = wb.sheet_mut(0).unwrap();
+            s.set_value(0, 0, "10");          // A1
+            s.set_value(1, 0, "=A1*2");       // A2 → 20
+            s.set_value(2, 0, "=SUM(A1:A2)"); // A3 → 30
+            s.set_value(3, 0, "=$A$1+1");     // A4 → 11
+            s.validations.set(
+                CellRange { start_row: 5, start_col: 0, end_row: 9, end_col: 0 },
+                ValidationRule::new(ValidationType::List(ListSource::Inline(vec!["y".into()]))),
+            );
+        }
+        wb.sheet_mut(1).unwrap().set_value(0, 0, "=Sheet1!A1+5"); // cross-sheet → 15
+        wb.named_ranges.set(NamedRange {
+            name: "Base".into(),
+            target: NamedRangeTarget::Cell { sheet: 0, row: 0, col: 0 },
+            description: None,
+        }).unwrap();
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+        assert_eq!(wb.sheets()[0].get_display(1, 0), "20");
+
+        // Insert 2 rows at the top of Sheet1.
+        let rewrites = wb.structural_edit(0, Axis::Row, 0, 2, false).unwrap();
+        assert!(!rewrites.is_empty(), "formulas were rewritten");
+
+        let s0 = &wb.sheets()[0];
+        assert_eq!(s0.get_display(2, 0), "10", "value moved down 2");
+        assert_eq!(s0.get_raw(3, 0), "=A3*2", "single ref followed its content");
+        assert_eq!(s0.get_display(3, 0), "20", "and still computes");
+        assert_eq!(s0.get_raw(4, 0), "=SUM(A3:A4)", "range shifted whole");
+        assert_eq!(s0.get_raw(5, 0), "=$A$3+1", "ABSOLUTE ref shifted too");
+        // Validation followed its rows.
+        let (vr, _) = s0.validations.iter().next().expect("validation survived");
+        assert_eq!((vr.start_row, vr.end_row), (7, 11));
+        // Cross-sheet qualified ref followed the edit.
+        assert_eq!(wb.sheets()[1].get_raw(0, 0), "=Sheet1!A3+5");
+        assert_eq!(wb.sheets()[1].get_display(0, 0), "15");
+        // Named range followed its cell.
+        match &wb.named_ranges.get("Base").unwrap().target {
+            NamedRangeTarget::Cell { row, .. } => assert_eq!(*row, 2),
+            other => panic!("unexpected target {:?}", other),
+        }
+
+        // Now delete the row holding A3's content: the dependent formula's
+        // reference dies permanently, in the stored text.
+        let rewrites = wb.structural_edit(0, Axis::Row, 2, 1, true).unwrap();
+        assert!(rewrites.iter().any(|(_, _, _, old, new)| old.contains("A3") && new.contains("#REF!")));
+        let s0 = &wb.sheets()[0];
+        assert_eq!(s0.get_raw(2, 0), "=#REF!*2");
+        assert_eq!(s0.get_display(2, 0), "#REF!", "and evaluates as #REF!");
+    }
+
+    #[test]
+    fn structural_insert_refuses_to_push_data_off_the_grid() {
+        use crate::structural::Axis;
+        let mut wb = Workbook::new();
+        let last = wb.sheets()[0].rows - 1;
+        wb.sheet_mut(0).unwrap().set_value(last, 0, "edge");
+        let before = wb.revision();
+        let err = wb.structural_edit(0, Axis::Row, 0, 1, false).unwrap_err();
+        assert!(err.contains("past the end"), "got: {}", err);
+        assert_eq!(wb.sheets()[0].get_display(last, 0), "edge", "data untouched");
+        assert_eq!(wb.revision(), before, "refused edits do not bump the revision");
+    }
 
     #[test]
     fn format_only_batch_bumps_revision_without_recalc() {
