@@ -1574,3 +1574,55 @@ impl Spreadsheet {
         crate::links::detect_link(&cell_value)
     }
 }
+
+impl Spreadsheet {
+    /// Copy formula from cell above (Ctrl+')
+    pub fn copy_formula_above(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        let (row, col) = self.view_state.active_cell();
+        if row == 0 {
+            self.status_message = Some("No cell above".to_string());
+            cx.notify();
+            return;
+        }
+        let source = self.sheet(cx).get_raw(row - 1, col);
+        if source.is_empty() {
+            self.status_message = Some("Cell above is empty".to_string());
+            cx.notify();
+            return;
+        }
+        let new_value = if source.starts_with('=') {
+            self.adjust_formula_refs(&source, 1, 0)
+        } else {
+            source
+        };
+        let old_value = self.sheet(cx).get_raw(row, col);
+        self.set_cell_value(row, col, &new_value, cx);
+        self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value);
+        self.is_modified = true;
+        self.status_message = Some("Copied formula from above".to_string());
+        cx.notify();
+    }
+    /// Copy display value from cell above (Ctrl+Shift+")
+    pub fn copy_value_above(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        let (row, col) = self.view_state.active_cell();
+        if row == 0 {
+            self.status_message = Some("No cell above".to_string());
+            cx.notify();
+            return;
+        }
+        let display = self.sheet(cx).get_display(row - 1, col);
+        if display.is_empty() {
+            self.status_message = Some("Cell above is empty".to_string());
+            cx.notify();
+            return;
+        }
+        let old_value = self.sheet(cx).get_raw(row, col);
+        self.set_cell_value(row, col, &display, cx);
+        self.history.record_change(self.sheet_index(cx), row, col, old_value, display);
+        self.is_modified = true;
+        self.status_message = Some("Copied value from above".to_string());
+        cx.notify();
+    }
+}
