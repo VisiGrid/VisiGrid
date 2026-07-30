@@ -1927,6 +1927,13 @@ impl Workbook {
         Ok(rewrites)
     }
 
+    /// Bump the revision for a structural change the recalc path doesn't see
+    /// (sheet add/rename). Optimistic concurrency depends on every visible
+    /// change moving the revision.
+    pub fn bump_revision_for_structure(&mut self) {
+        self.increment_revision();
+    }
+
     /// Record a format-only cell change. Bumps the revision (at end_batch when
     /// batching, immediately otherwise) without triggering recalc — format
     /// changes never affect computed values.

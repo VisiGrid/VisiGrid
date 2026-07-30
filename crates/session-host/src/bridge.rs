@@ -118,6 +118,21 @@ impl SessionBridgeHandle {
             .map_err(|_| BridgeError::ChannelClosed)
     }
 
+    /// Request a structural edit and wait for the host.
+    pub fn structure(
+        &self,
+        op: visigrid_protocol::StructureOp,
+        client: Option<String>,
+    ) -> Result<StructureOutcome, BridgeError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(SessionRequest::Structure { op, client, reply: reply_tx })
+            .map_err(|_| BridgeError::ChannelClosed)?;
+        self.wake();
+        reply_rx.blocking_recv_timeout(std::time::Duration::from_secs(30))
+            .map_err(|_| BridgeError::ChannelClosed)
+    }
+
     /// Request undo/redo and wait for the host.
     pub fn history(&self, redo: bool, steps: u32, client: Option<String>) -> Result<HistoryOutcome, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -189,6 +204,13 @@ pub enum SessionRequest {
         request_id: String,
         reply: oneshot::Sender<SaveOutcome>,
     },
+    /// Structural edit: rows, columns, sheets. Host-dispatched because
+    /// hosts own view state the engine doesn't model.
+    Structure {
+        op: visigrid_protocol::StructureOp,
+        client: Option<String>,
+        reply: oneshot::Sender<StructureOutcome>,
+    },
     /// Undo/redo host-side history (GUI hosts; headless refuses).
     History {
         redo: bool,
@@ -197,6 +219,17 @@ pub enum SessionRequest {
         client: Option<String>,
         reply: oneshot::Sender<HistoryOutcome>,
     },
+}
+
+/// Host reply to a structure request.
+#[derive(Debug, Clone, Default)]
+pub struct StructureOutcome {
+    pub description: String,
+    pub revision: u64,
+    pub sheet_count: usize,
+    pub active_sheet: usize,
+    /// Error (code, message) if the host rejected the op.
+    pub error: Option<(String, String)>,
 }
 
 /// Host reply to an undo/redo request.

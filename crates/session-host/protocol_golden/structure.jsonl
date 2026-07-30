@@ -1,0 +1,6 @@
+{"type":"structure","id":"req-1","op":"insert_rows","at":4,"count":3}
+{"type":"structure_result","id":"req-1","description":"Inserted 3 row(s) at row 5","revision":9,"sheet_count":1,"active_sheet":0}
+{"type":"structure","id":"req-2","op":"delete_cols","sheet":1,"at":2,"count":1}
+{"type":"structure","id":"req-3","op":"add_sheet","name":"Summary"}
+{"type":"structure","id":"req-4","op":"rename_sheet","name":"Q3 Actuals"}
+{"type":"error","id":"req-5","code":"out_of_bounds","message":"1000 rows starting at 65000 would run past the grid edge (65536 rows total) — The last valid start for 1000 rows is 64536"}

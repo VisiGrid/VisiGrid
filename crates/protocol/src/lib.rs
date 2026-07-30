@@ -48,6 +48,69 @@ pub enum ClientMessage {
     PairRequest(PairRequestMessage),
     Save(SaveMessage),
     History(HistoryMessage),
+    Structure(StructureMessage),
+}
+
+/// Structural edit: rows, columns, sheets (added 2026-07-30, additive).
+/// Kept off the ApplyOps batch on purpose: hosts maintain view state the
+/// engine doesn't model (row views, row heights), so structure changes are
+/// host-dispatched rather than applied to the workbook generically.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructureMessage {
+    pub id: String,
+    #[serde(flatten)]
+    pub op: StructureOp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum StructureOp {
+    /// Insert `count` rows so the first new row is at index `at`.
+    InsertRows {
+        /// Sheet index; omit for the active sheet. GUI hosts only support
+        /// the active sheet (row view/height state is per-active-sheet).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
+        at: usize,
+        #[serde(default = "default_count")]
+        count: usize,
+    },
+    DeleteRows {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
+        at: usize,
+        #[serde(default = "default_count")]
+        count: usize,
+    },
+    InsertCols {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
+        at: usize,
+        #[serde(default = "default_count")]
+        count: usize,
+    },
+    DeleteCols {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
+        at: usize,
+        #[serde(default = "default_count")]
+        count: usize,
+    },
+    /// Append a sheet. No delete_sheet op exists: sheet deletion is not
+    /// undoable even in the GUI, so it stays a human-only action.
+    AddSheet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    RenameSheet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
+        name: String,
+    },
+}
+
+fn default_count() -> usize {
+    1
 }
 
 /// Undo or redo host-side history (added 2026-07-30, additive).
@@ -237,6 +300,18 @@ pub enum ServerMessage {
     PairResult(PairResultMessage),
     SaveResult(SaveResultMessage),
     HistoryResult(HistoryResultMessage),
+    StructureResult(StructureResultMessage),
+}
+
+/// Result of a structural edit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructureResultMessage {
+    pub id: String,
+    /// Human-readable summary, e.g. "Inserted 3 rows at row 5".
+    pub description: String,
+    pub revision: u64,
+    pub sheet_count: usize,
+    pub active_sheet: usize,
 }
 
 /// Result of an undo/redo request.

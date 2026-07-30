@@ -130,6 +130,12 @@ impl McpServer {
             "write_cells" => self.tool_write_cells(args),
             "set_format" => self.tool_set_format(args),
             "save_workbook" => self.tool_save(args),
+            "insert_rows" => self.tool_structure(args, "insert_rows"),
+            "delete_rows" => self.tool_structure(args, "delete_rows"),
+            "insert_columns" => self.tool_structure(args, "insert_cols"),
+            "delete_columns" => self.tool_structure(args, "delete_cols"),
+            "add_sheet" => self.tool_structure(args, "add_sheet"),
+            "rename_sheet" => self.tool_structure(args, "rename_sheet"),
             "undo" => self.tool_history(args, false),
             "redo" => self.tool_history(args, true),
             _ => Err(format!("unknown tool: {}", name)),
@@ -379,6 +385,64 @@ impl McpServer {
             "saved": true,
             "path": r.path,
             "revision": r.revision,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    fn tool_structure(&mut self, args: &Value, kind: &str) -> Result<String, String> {
+        use visigrid_protocol::StructureOp;
+
+        let sheet = args.get("sheet").and_then(|v| v.as_u64()).map(|v| v as usize);
+        let count = args.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+
+        // `at` arrives as a 1-based row number or a column letter, matching
+        // what the user sees; the wire is 0-based.
+        let at = |args: &Value, is_col: bool| -> Result<usize, String> {
+            match args.get("at") {
+                Some(Value::Number(n)) => {
+                    let v = n.as_u64().ok_or("`at` must be a positive number")?;
+                    if v == 0 {
+                        return Err("rows and columns are numbered from 1".to_string());
+                    }
+                    Ok((v - 1) as usize)
+                }
+                Some(Value::String(s)) if is_col => {
+                    let (_, col) = parse_cell_ref(&format!("{}1", s.trim()))
+                        .ok_or(format!("invalid column '{}' — use a letter like 'C' or a number", s))?;
+                    Ok(col)
+                }
+                Some(other) => Err(format!("`at` must be a number (got {})", other)),
+                None => Err("missing required argument: at".to_string()),
+            }
+        };
+
+        let op = match kind {
+            "insert_rows" => StructureOp::InsertRows { sheet, at: at(args, false)?, count },
+            "delete_rows" => StructureOp::DeleteRows { sheet, at: at(args, false)?, count },
+            "insert_cols" => StructureOp::InsertCols { sheet, at: at(args, true)?, count },
+            "delete_cols" => StructureOp::DeleteCols { sheet, at: at(args, true)?, count },
+            "add_sheet" => StructureOp::AddSheet {
+                name: args.get("name").and_then(|v| v.as_str()).map(str::to_string),
+            },
+            "rename_sheet" => StructureOp::RenameSheet {
+                sheet,
+                name: require_str(args, "name")?.to_string(),
+            },
+            other => return Err(format!("unknown structure op: {}", other)),
+        };
+
+        if args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return serde_json::to_string_pretty(&json!({ "dry_run": true, "would_apply": op }))
+                .map_err(|e| e.to_string());
+        }
+
+        let mut client = self.connect(args)?;
+        let r = client.structure(op).map_err(session_error_text)?;
+        serde_json::to_string_pretty(&json!({
+            "applied": r.description,
+            "revision": r.revision,
+            "sheet_count": r.sheet_count,
+            "active_sheet": r.active_sheet,
         }))
         .map_err(|e| e.to_string())
     }
@@ -663,6 +727,111 @@ fn tool_definitions() -> Value {
                 "additionalProperties": false
             }
         }
+        ,
+        {
+            "name": "insert_rows",
+            "title": "Insert rows",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false },
+            "description": "Insert rows. Existing rows shift down and formulas referencing them adjust automatically. Applies to the active sheet in a GUI window (its row/column view state is per-sheet); headless sessions accept any sheet index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "at": { "description": "Where to insert: 1-based row number: 5 inserts at row 5" },
+                    "count": { "type": "integer", "description": "How many rows (default 1, max 1000)" },
+                    "sheet": { "type": "integer", "description": "0-based sheet index; omit for the active sheet" },
+                    "dry_run": { "type": "boolean", "description": "Preview without applying" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "required": ["at"],
+                "additionalProperties": false
+            }
+        }        ,
+        {
+            "name": "delete_rows",
+            "title": "Delete rows",
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false },
+            "description": "Delete rows. Rows below shift up. Undoable. Applies to the active sheet in a GUI window (its row/column view state is per-sheet); headless sessions accept any sheet index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "at": { "description": "Where to delete: 1-based row number: 5 inserts at row 5" },
+                    "count": { "type": "integer", "description": "How many rows (default 1, max 1000)" },
+                    "sheet": { "type": "integer", "description": "0-based sheet index; omit for the active sheet" },
+                    "dry_run": { "type": "boolean", "description": "Preview without applying" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "required": ["at"],
+                "additionalProperties": false
+            }
+        }        ,
+        {
+            "name": "insert_columns",
+            "title": "Insert columns",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false },
+            "description": "Insert columns. Existing columns shift right and formulas adjust automatically. Applies to the active sheet in a GUI window (its row/column view state is per-sheet); headless sessions accept any sheet index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "at": { "description": "Where to insert: column letter ('C') or 1-based number" },
+                    "count": { "type": "integer", "description": "How many columns (default 1, max 1000)" },
+                    "sheet": { "type": "integer", "description": "0-based sheet index; omit for the active sheet" },
+                    "dry_run": { "type": "boolean", "description": "Preview without applying" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "required": ["at"],
+                "additionalProperties": false
+            }
+        }        ,
+        {
+            "name": "delete_columns",
+            "title": "Delete columns",
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false },
+            "description": "Delete columns. Columns to the right shift left. Undoable. Applies to the active sheet in a GUI window (its row/column view state is per-sheet); headless sessions accept any sheet index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "at": { "description": "Where to delete: column letter ('C') or 1-based number" },
+                    "count": { "type": "integer", "description": "How many columns (default 1, max 1000)" },
+                    "sheet": { "type": "integer", "description": "0-based sheet index; omit for the active sheet" },
+                    "dry_run": { "type": "boolean", "description": "Preview without applying" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "required": ["at"],
+                "additionalProperties": false
+            }
+        }        ,
+        {
+            "name": "add_sheet",
+            "title": "Add a sheet",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false },
+            "description": "Append a new sheet to the workbook. There is no delete_sheet tool: deleting a sheet cannot be undone, so it stays a human-only action — ask the user.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Sheet name (must be unique, max 64 chars). Omit for Sheet2, Sheet3, …" },
+                    "dry_run": { "type": "boolean", "description": "Preview without applying" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "rename_sheet",
+            "title": "Rename a sheet",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+            "description": "Rename a sheet. Names are unique case-insensitively.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "New name" },
+                    "sheet": { "type": "integer", "description": "0-based sheet index; omit for the active sheet" },
+                    "dry_run": { "type": "boolean", "description": "Preview without applying" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        }
     ])
 }
 
@@ -707,6 +876,8 @@ mod tests {
             vec![
                 "list_sessions", "get_workbook", "read_range", "write_cells", "set_format",
                 "save_workbook", "undo", "redo",
+                "insert_rows", "delete_rows", "insert_columns", "delete_columns",
+                "add_sheet", "rename_sheet",
             ]
         );
         for t in tools {

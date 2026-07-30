@@ -358,6 +358,27 @@ impl SessionClient {
         }
     }
 
+    /// Apply a structural edit (rows, columns, sheets).
+    pub fn structure(
+        &mut self,
+        op: visigrid_protocol::StructureOp,
+    ) -> Result<visigrid_protocol::StructureResultMessage, SessionError> {
+        let msg = ClientMessage::Structure(visigrid_protocol::StructureMessage {
+            id: self.next_request_id(), op,
+        });
+        self.send(&msg)?;
+        match self.receive()? {
+            ServerMessage::StructureResult(r) => {
+                self.revision = r.revision;
+                Ok(r)
+            }
+            ServerMessage::Error(err) => Err(SessionError::ServerError {
+                code: err.code, message: err.message, retry_after_ms: err.retry_after_ms,
+            }),
+            _ => Err(SessionError::ProtocolError("Unexpected response to structure".into())),
+        }
+    }
+
     /// Undo or redo host-side history (GUI sessions).
     pub fn history(&mut self, redo: bool, steps: u32) -> Result<visigrid_protocol::HistoryResultMessage, SessionError> {
         let msg = ClientMessage::History(visigrid_protocol::HistoryMessage {

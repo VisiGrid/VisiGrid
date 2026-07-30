@@ -22,14 +22,15 @@ pub mod wire_ext;
 pub use bridge::{
     ApplyOpsRequest, ApplyOpsResponse, ApplyOpsError, BridgeError,
     InspectRequest, InspectResponse, InspectError,
-    SessionBridgeHandle, SessionRequest, SaveOutcome, HistoryOutcome,
+    SessionBridgeHandle, SessionRequest, SaveOutcome, HistoryOutcome, StructureOutcome,
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
 };
 pub use coalesce::coalesce_cells_to_ranges;
 pub use discovery::{DiscoveryFile, DiscoveryManager, discovery_dir, list_sessions};
 pub use events::{BroadcastEvent, ConnectionSubscriptions, EventBroadcaster, TOPIC_CELLS};
 pub use handlers::{
-    apply_ops, inspect, validate_inspect_target, validate_session_op,
+    apply_ops, apply_structure, inspect, structure_target_sheet, validate_inspect_target,
+    validate_session_op, validate_structure_op, MAX_STRUCTURE_COUNT,
     ApplyOutcome, FormatPatch, ValueChange,
     MAX_SESSION_FORMAT_CELLS, MAX_SESSION_INSPECT_CELLS, NUM_COLS, NUM_ROWS,
 };

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use visigrid_engine::cell::CellFormat;
 use visigrid_engine::cell_id::CellId;
 use visigrid_engine::workbook::Workbook;
-use visigrid_protocol::{InspectResult, InspectTarget, Op, OpError, CellInfo, WorkbookInfo};
+use visigrid_protocol::{InspectResult, InspectTarget, Op, OpError, CellInfo, WorkbookInfo, StructureOp};
 
 use crate::bridge::{ApplyOpsError, ApplyOpsRequest, ApplyOpsResponse, InspectError, InspectRequest, InspectResponse};
 use crate::wire_ext::CellRef;
@@ -244,6 +244,173 @@ pub fn parse_session_number_format(s: &str) -> visigrid_engine::cell::NumberForm
     }
 }
 
+/// Largest row/column count a single structure op may add or remove.
+/// Deletes capture their cells for undo, so this bounds that snapshot.
+pub const MAX_STRUCTURE_COUNT: usize = 1_000;
+
+/// Resolve a structure op's target sheet against the active sheet.
+pub fn structure_target_sheet(op: &StructureOp, active: usize) -> usize {
+    match op {
+        StructureOp::InsertRows { sheet, .. }
+        | StructureOp::DeleteRows { sheet, .. }
+        | StructureOp::InsertCols { sheet, .. }
+        | StructureOp::DeleteCols { sheet, .. }
+        | StructureOp::RenameSheet { sheet, .. } => sheet.unwrap_or(active),
+        StructureOp::AddSheet { .. } => active,
+    }
+}
+
+/// Validate a structure op against the workbook. Returns (code, message,
+/// suggestion) on failure — same taxonomy as the cell write path.
+pub fn validate_structure_op(
+    op: &StructureOp,
+    wb: &Workbook,
+) -> Option<(&'static str, String, Option<String>)> {
+    let sheet_count = wb.sheets().len();
+    let target = structure_target_sheet(op, wb.active_sheet_index());
+    if !matches!(op, StructureOp::AddSheet { .. }) && target >= sheet_count {
+        return Some((
+            "sheet_not_found",
+            format!("sheet index {} does not exist (workbook has {} sheet{})",
+                target, sheet_count, if sheet_count == 1 { "" } else { "s" }),
+            Some("Omit `sheet` to target the active sheet".to_string()),
+        ));
+    }
+
+    let check_span = |at: usize, count: usize, limit: usize, unit: &str| {
+        if count == 0 {
+            return Some((
+                "invalid_op",
+                format!("count must be at least 1 {}", unit),
+                None,
+            ));
+        }
+        if count > MAX_STRUCTURE_COUNT {
+            return Some((
+                "cells_limit_exceeded",
+                format!("{} {}s in one op; the limit is {}", count, unit, MAX_STRUCTURE_COUNT),
+                Some("Split into several calls".to_string()),
+            ));
+        }
+        if at >= limit {
+            return Some((
+                "out_of_bounds",
+                format!("{} index {} is outside the grid (0..={})", unit, at, limit - 1),
+                None,
+            ));
+        }
+        if at + count > limit {
+            return Some((
+                "out_of_bounds",
+                format!("{} {}s starting at {} would run past the grid edge ({} {}s total)",
+                    count, unit, at, limit, unit),
+                Some(format!("The last valid start for {} {}s is {}", count, unit, limit - count)),
+            ));
+        }
+        None
+    };
+
+    let check_name = |name: &str, wb: &Workbook, exclude: Option<usize>| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Some((
+                "invalid_op",
+                "sheet name cannot be empty".to_string(),
+                None,
+            ));
+        }
+        if trimmed.chars().count() > 64 {
+            return Some((
+                "invalid_op",
+                "sheet name is longer than 64 characters".to_string(),
+                None,
+            ));
+        }
+        let clash = wb.sheets().iter().enumerate().any(|(i, s)| {
+            Some(i) != exclude && s.name.eq_ignore_ascii_case(trimmed)
+        });
+        if clash {
+            return Some((
+                "invalid_op",
+                format!("a sheet named \"{}\" already exists", trimmed),
+                Some("Sheet names are compared case-insensitively".to_string()),
+            ));
+        }
+        None
+    };
+
+    match op {
+        StructureOp::InsertRows { at, count, .. } | StructureOp::DeleteRows { at, count, .. } => {
+            check_span(*at, *count, NUM_ROWS, "row")
+        }
+        StructureOp::InsertCols { at, count, .. } | StructureOp::DeleteCols { at, count, .. } => {
+            check_span(*at, *count, NUM_COLS, "column")
+        }
+        StructureOp::AddSheet { name } => match name {
+            Some(n) => check_name(n, wb, None),
+            None => None,
+        },
+        StructureOp::RenameSheet { name, .. } => check_name(name, wb, Some(target)),
+    }
+}
+
+/// Apply a validated structure op directly to the workbook (headless hosts).
+/// GUI hosts route through their own methods instead, so view state — row
+/// views, row heights, undo entries — stays consistent.
+pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, String> {
+    let active = wb.active_sheet_index();
+    let target = structure_target_sheet(op, active);
+    use visigrid_engine::structural::Axis;
+
+    // Row/column edits go through Workbook::structural_edit so formulas,
+    // validations, and named ranges follow the moved cells — and so an
+    // insert that would push data off the grid is refused, not silent.
+    let span = |axis: Axis, at: usize, count: usize, delete: bool, wb: &mut Workbook| {
+        wb.structural_edit(target, axis, at, count, delete)
+    };
+
+    Ok(match op {
+        StructureOp::InsertRows { at, count, .. } => {
+            match span(Axis::Row, *at, *count, false, wb) {
+                Ok(_) => format!("Inserted {} row(s) at row {}", count, at + 1),
+                Err(e) => return Err(e),
+            }
+        }
+        StructureOp::DeleteRows { at, count, .. } => {
+            match span(Axis::Row, *at, *count, true, wb) {
+                Ok(_) => format!("Deleted {} row(s) at row {}", count, at + 1),
+                Err(e) => return Err(e),
+            }
+        }
+        StructureOp::InsertCols { at, count, .. } => {
+            match span(Axis::Col, *at, *count, false, wb) {
+                Ok(_) => format!("Inserted {} column(s) at column {}", count, at + 1),
+                Err(e) => return Err(e),
+            }
+        }
+        StructureOp::DeleteCols { at, count, .. } => {
+            match span(Axis::Col, *at, *count, true, wb) {
+                Ok(_) => format!("Deleted {} column(s) at column {}", count, at + 1),
+                Err(e) => return Err(e),
+            }
+        }
+        StructureOp::AddSheet { name } => {
+            let idx = match name {
+                Some(n) => wb.add_sheet_named(n.trim()).unwrap_or_else(|| wb.add_sheet()),
+                None => wb.add_sheet(),
+            };
+            wb.bump_revision_for_structure();
+            format!("Added sheet \"{}\"", wb.sheets()[idx].name)
+        }
+        StructureOp::RenameSheet { name, .. } => {
+            let old = wb.sheets().get(target).map(|s| s.name.clone()).unwrap_or_default();
+            wb.rename_sheet(target, name.trim());
+            wb.bump_revision_for_structure();
+            format!("Renamed sheet \"{}\" to \"{}\"", old, name.trim())
+        }
+    })
+}
+
 /// Apply an ops batch to the workbook. The whole batch is validated up front
 /// against the real grid bounds and sheet list; any invalid op rejects the
 /// entire request (regardless of `atomic`) before anything is applied — by
@@ -470,6 +637,55 @@ mod tests {
             ops,
             client: None,
         }
+    }
+
+    #[test]
+    fn structure_validation_matrix() {
+        use visigrid_protocol::StructureOp;
+        let mut wb = Workbook::new();
+
+        let ok = |op: &StructureOp, wb: &Workbook| validate_structure_op(op, wb).is_none();
+        let code = |op: &StructureOp, wb: &Workbook| validate_structure_op(op, wb).unwrap().0;
+
+        assert!(ok(&StructureOp::InsertRows { sheet: None, at: 0, count: 1 }, &wb));
+        assert!(ok(&StructureOp::InsertRows { sheet: None, at: NUM_ROWS - 1, count: 1 }, &wb));
+        // Past the grid edge, and the message says where the last valid start is.
+        assert_eq!(code(&StructureOp::InsertRows { sheet: None, at: NUM_ROWS - 1, count: 2 }, &wb), "out_of_bounds");
+        assert_eq!(code(&StructureOp::InsertRows { sheet: None, at: NUM_ROWS, count: 1 }, &wb), "out_of_bounds");
+        assert_eq!(code(&StructureOp::InsertRows { sheet: None, at: 0, count: 0 }, &wb), "invalid_op");
+        assert_eq!(
+            code(&StructureOp::DeleteRows { sheet: None, at: 0, count: MAX_STRUCTURE_COUNT + 1 }, &wb),
+            "cells_limit_exceeded"
+        );
+        assert_eq!(code(&StructureOp::InsertCols { sheet: None, at: NUM_COLS, count: 1 }, &wb), "out_of_bounds");
+        assert_eq!(code(&StructureOp::InsertRows { sheet: Some(7), at: 0, count: 1 }, &wb), "sheet_not_found");
+
+        // Sheet names: unique case-insensitively, non-empty, bounded.
+        assert!(ok(&StructureOp::AddSheet { name: Some("Summary".into()) }, &wb));
+        assert_eq!(code(&StructureOp::AddSheet { name: Some("  ".into()) }, &wb), "invalid_op");
+        assert_eq!(code(&StructureOp::AddSheet { name: Some("sheet1".into()) }, &wb), "invalid_op");
+        // Renaming a sheet to its own name is fine (self is excluded).
+        assert!(ok(&StructureOp::RenameSheet { sheet: Some(0), name: "Sheet1".into() }, &wb));
+
+        // Apply path: insert shifts a formula's target and it recomputes.
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "10");
+        wb.sheet_mut(0).unwrap().set_value(1, 0, "=A1*2");
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+        assert_eq!(wb.sheets()[0].get_display(1, 0), "20");
+
+        let desc = apply_structure(&mut wb, &StructureOp::InsertRows { sheet: None, at: 0, count: 2 }).unwrap();
+        assert!(desc.contains("Inserted 2 row"));
+        assert_eq!(wb.sheets()[0].get_display(2, 0), "10", "value shifted down 2");
+        // Reference adjustment (2026-07-30): the formula follows its content.
+        assert_eq!(wb.sheets()[0].get_raw(3, 0), "=A3*2", "reference adjusted");
+        assert_eq!(wb.sheets()[0].get_display(3, 0), "20");
+
+        let desc = apply_structure(&mut wb, &StructureOp::AddSheet { name: Some("Summary".into()) }).unwrap();
+        assert!(desc.contains("Summary"));
+        assert_eq!(wb.sheets().len(), 2);
+        // The new sheet's name is now taken.
+        assert_eq!(code(&StructureOp::AddSheet { name: Some("SUMMARY".into()) }, &wb), "invalid_op");
     }
 
     #[test]

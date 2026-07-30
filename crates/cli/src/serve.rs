@@ -202,6 +202,53 @@ pub fn cmd_serve(
                 eprintln!("{}", if approved { "approved" } else { "denied" });
                 let _ = reply.send(approved);
             }
+            host::SessionRequest::Structure { op, reply, .. } => {
+                let outcome = match host::validate_structure_op(&op, &wb) {
+                    Some((code, message, suggestion)) => host::StructureOutcome {
+                        revision: wb.revision(),
+                        sheet_count: wb.sheets().len(),
+                        active_sheet: wb.active_sheet_index(),
+                        error: Some((
+                            code.to_string(),
+                            match suggestion {
+                                Some(s) => format!("{} — {}", message, s),
+                                None => message,
+                            },
+                        )),
+                        ..Default::default()
+                    },
+                    None => match host::apply_structure(&mut wb, &op) {
+                        Err(msg) => host::StructureOutcome {
+                            revision: wb.revision(),
+                            sheet_count: wb.sheets().len(),
+                            active_sheet: wb.active_sheet_index(),
+                            error: Some(("invalid_op".to_string(), msg)),
+                            ..Default::default()
+                        },
+                        Ok(description) => {
+                        dirty = true;
+                        // Layout side-cars are keyed by index; a structural
+                        // edit invalidates them, so drop the affected sheet's
+                        // rather than silently mis-mapping widths/heights.
+                        let target = host::structure_target_sheet(&op, wb.active_sheet_index());
+                        if let Some(l) = layouts.get_mut(target) {
+                            *l = SheetLayout::default();
+                        }
+                        while layouts.len() < wb.sheets().len() {
+                            layouts.push(SheetLayout::default());
+                        }
+                        host::StructureOutcome {
+                            description,
+                            revision: wb.revision(),
+                            sheet_count: wb.sheets().len(),
+                            active_sheet: wb.active_sheet_index(),
+                            error: None,
+                        }
+                        }
+                    },
+                };
+                let _ = reply.send(outcome);
+            }
             host::SessionRequest::History { reply, .. } => {
                 // No undo stack headless (history is GUI state) — documented
                 // in the detach design doc as a phase-1 limitation.

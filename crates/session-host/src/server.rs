@@ -748,6 +748,7 @@ fn handle_message_with_rate_limit(
         ClientMessage::PairRequest(p) => Some(p.id.clone()),
         ClientMessage::Save(sv) => Some(sv.id.clone()),
         ClientMessage::History(h) => Some(h.id.clone()),
+        ClientMessage::Structure(st) => Some(st.id.clone()),
     };
 
     // Check rate limit based on message type
@@ -762,6 +763,7 @@ fn handle_message_with_rate_limit(
         ClientMessage::PairRequest(_) => Ok(()), // handled pre-auth; post-auth arm rejects below
         ClientMessage::Save(_) => rate_limiter.try_ping(),
         ClientMessage::History(_) => rate_limiter.try_ping(),
+        ClientMessage::Structure(_) => rate_limiter.try_apply_ops(1),
     };
 
     if let Err(e) = rate_check {
@@ -931,6 +933,28 @@ fn handle_message(
                 retry_after_ms: None,
             }),
         },
+        ClientMessage::Structure(st) => {
+            match bridge.structure(st.op.clone(), client_name.map(str::to_string)) {
+                Ok(outcome) => match outcome.error {
+                    None => ServerMessage::StructureResult(StructureResultMessage {
+                        id: st.id,
+                        description: outcome.description,
+                        revision: outcome.revision,
+                        sheet_count: outcome.sheet_count,
+                        active_sheet: outcome.active_sheet,
+                    }),
+                    Some((code, message)) => ServerMessage::Error(ErrorMessage {
+                        id: Some(st.id), code, message, retry_after_ms: None,
+                    }),
+                },
+                Err(_) => ServerMessage::Error(ErrorMessage {
+                    id: Some(st.id),
+                    code: "internal_error".to_string(),
+                    message: "Bridge communication failed".to_string(),
+                    retry_after_ms: None,
+                }),
+            }
+        }
         ClientMessage::History(h) => {
             match bridge.history(h.redo, h.steps.max(1), client_name.map(str::to_string)) {
                 Ok(outcome) => match outcome.error {
@@ -1032,6 +1056,9 @@ mod tests {
                     SessionRequest::Pair { reply, .. } => {
                         // Test bridge auto-approves pairing
                         let _ = reply.send(true);
+                    }
+                    SessionRequest::Structure { reply, .. } => {
+                        let _ = reply.send(crate::bridge::StructureOutcome::default());
                     }
                     SessionRequest::History { reply, .. } => {
                         let _ = reply.send(crate::bridge::HistoryOutcome::default());

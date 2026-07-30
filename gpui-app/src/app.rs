@@ -1577,6 +1577,10 @@ impl Spreadsheet {
                         current_revision: self.workbook.read(cx).revision(),
                     });
                 }
+                SessionRequest::Structure { op, client, reply } => {
+                    let outcome = self.handle_session_structure(&op, client, cx);
+                    let _ = reply.send(outcome);
+                }
                 SessionRequest::History { redo, steps, client, reply } => {
                     let outcome = self.handle_session_history(redo, steps, client, cx);
                     let _ = reply.send(outcome);
@@ -1754,6 +1758,112 @@ impl Spreadsheet {
         }
 
         outcome.response
+    }
+
+    /// Handle a structural edit from a session client.
+    ///
+    /// Routes through the GUI's own row/column methods rather than the
+    /// engine so per-sheet view state (row view, row heights) and the undo
+    /// entry are recorded exactly as for a human edit — then re-tags that
+    /// entry with the agent's identity so the undo guard can tell them apart.
+    /// Row/column ops only apply to the ACTIVE sheet: the view state they
+    /// maintain is per-active-sheet.
+    fn handle_session_structure(
+        &mut self,
+        op: &visigrid_protocol::StructureOp,
+        client: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> crate::session_server::StructureOutcome {
+        use visigrid_protocol::StructureOp;
+        use crate::history::MutationSource;
+
+        let mut out = crate::session_server::StructureOutcome {
+            revision: self.workbook.read(cx).revision(),
+            sheet_count: self.workbook.read(cx).sheets().len(),
+            active_sheet: self.workbook.read(cx).active_sheet_index(),
+            ..Default::default()
+        };
+
+        // Shared validation (bounds, counts, name clashes).
+        {
+            let wb = self.workbook.read(cx);
+            if let Some((code, message, suggestion)) =
+                visigrid_session_host::validate_structure_op(op, wb)
+            {
+                let msg = match suggestion {
+                    Some(s) => format!("{} — {}", message, s),
+                    None => message,
+                };
+                out.error = Some((code.to_string(), msg));
+                return out;
+            }
+        }
+
+        // Row/column ops are active-sheet only in a GUI window.
+        let active = self.workbook.read(cx).active_sheet_index();
+        let target = visigrid_session_host::structure_target_sheet(op, active);
+        let row_col_op = !matches!(op, StructureOp::AddSheet { .. } | StructureOp::RenameSheet { .. });
+        if row_col_op && target != active {
+            out.error = Some((
+                "invalid_op".to_string(),
+                format!(
+                    "row and column edits apply to the active sheet ({}) in a GUI window; sheet {} is not active",
+                    self.workbook.read(cx).sheets()[active].name, target
+                ),
+            ));
+            return out;
+        }
+
+        let description = match op {
+            StructureOp::InsertRows { at, count, .. } => {
+                self.insert_rows(*at, *count, cx);
+                format!("Inserted {} row(s) at row {}", count, at + 1)
+            }
+            StructureOp::DeleteRows { at, count, .. } => {
+                self.delete_rows(*at, *count, cx);
+                format!("Deleted {} row(s) at row {}", count, at + 1)
+            }
+            StructureOp::InsertCols { at, count, .. } => {
+                self.insert_cols(*at, *count, cx);
+                format!("Inserted {} column(s) at column {}", count, at + 1)
+            }
+            StructureOp::DeleteCols { at, count, .. } => {
+                self.delete_cols(*at, *count, cx);
+                format!("Deleted {} column(s) at column {}", count, at + 1)
+            }
+            StructureOp::AddSheet { name } => {
+                let idx = self.wb_mut(cx, |wb| match name {
+                    Some(n) => wb.add_sheet_named(n.trim()).unwrap_or_else(|| wb.add_sheet()),
+                    None => wb.add_sheet(),
+                });
+                let sheet_name = self.workbook.read(cx).sheets()[idx].name.clone();
+                self.is_modified = true;
+                cx.notify();
+                format!("Added sheet \"{}\"", sheet_name)
+            }
+            StructureOp::RenameSheet { name, .. } => {
+                let old = self.workbook.read(cx).sheets()[target].name.clone();
+                let new_name = name.trim().to_string();
+                self.wb_mut(cx, |wb| { wb.rename_sheet(target, &new_name); });
+                self.is_modified = true;
+                cx.notify();
+                format!("Renamed sheet \"{}\" to \"{}\"", old, new_name)
+            }
+        };
+
+        // Attribute the undo entry the GUI method just recorded (row/col ops
+        // record one; sheet ops record none, matching the GUI's own behavior).
+        if row_col_op {
+            if let Some(client) = client {
+                self.history.retag_last_source(MutationSource::Agent { client });
+            }
+        }
+
+        out.description = description;
+        out.revision = self.workbook.read(cx).revision();
+        out.sheet_count = self.workbook.read(cx).sheets().len();
+        out.active_sheet = self.workbook.read(cx).active_sheet_index();
+        out
     }
 
     /// Handle an undo/redo request from a session client.
