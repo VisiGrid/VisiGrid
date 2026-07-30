@@ -1,0 +1,5 @@
+{"type":"history","id":"req-1","redo":false,"steps":1}
+{"type":"history_result","id":"req-1","applied":1,"descriptions":["Claude Code: 4 ops"],"revision":12,"can_undo":true,"can_redo":true}
+{"type":"history","id":"req-2","redo":true,"steps":3}
+{"type":"error","id":"req-3","code":"history_blocked","message":"the next undo step is a change the user made (Edit A1); Claude Code may only undo its own edits"}
+{"type":"error","id":"req-4","code":"history_unavailable","message":"this is a headless session (vgrid serve) — it has no undo stack; attach a GUI window for undo/redo"}

@@ -468,6 +468,7 @@ mod tests {
             atomic: true,
             expected_revision: None,
             ops,
+            client: None,
         }
     }
 

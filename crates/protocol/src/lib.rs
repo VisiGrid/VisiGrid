@@ -47,6 +47,27 @@ pub enum ClientMessage {
     Stats(StatsMessage),
     PairRequest(PairRequestMessage),
     Save(SaveMessage),
+    History(HistoryMessage),
+}
+
+/// Undo or redo host-side history (added 2026-07-30, additive).
+/// Only hosts with an undo stack support this — headless sessions refuse
+/// with `history_unavailable`. Agent-initiated history NEVER reverts a
+/// human's edits: if the next entry was made by the user, the host refuses
+/// with `history_blocked`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryMessage {
+    pub id: String,
+    /// false = undo, true = redo.
+    #[serde(default)]
+    pub redo: bool,
+    /// How many steps to take (default 1).
+    #[serde(default = "default_steps")]
+    pub steps: u32,
+}
+
+fn default_steps() -> u32 {
+    1
 }
 
 /// Request the host to persist the workbook (added 2026-07-29, additive).
@@ -215,6 +236,21 @@ pub enum ServerMessage {
     StatsResult(StatsResultMessage),
     PairResult(PairResultMessage),
     SaveResult(SaveResultMessage),
+    HistoryResult(HistoryResultMessage),
+}
+
+/// Result of an undo/redo request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryResultMessage {
+    pub id: String,
+    /// Steps actually taken (may be fewer than requested at the stack edge).
+    pub applied: u32,
+    /// Descriptions of the entries reverted/reapplied, most recent first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub descriptions: Vec<String>,
+    pub revision: u64,
+    pub can_undo: bool,
+    pub can_redo: bool,
 }
 
 /// Successful save acknowledgement.

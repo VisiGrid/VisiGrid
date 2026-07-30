@@ -118,6 +118,17 @@ impl SessionBridgeHandle {
             .map_err(|_| BridgeError::ChannelClosed)
     }
 
+    /// Request undo/redo and wait for the host.
+    pub fn history(&self, redo: bool, steps: u32, client: Option<String>) -> Result<HistoryOutcome, BridgeError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(SessionRequest::History { redo, steps, client, reply: reply_tx })
+            .map_err(|_| BridgeError::ChannelClosed)?;
+        self.wake();
+        reply_rx.blocking_recv_timeout(std::time::Duration::from_secs(30))
+            .map_err(|_| BridgeError::ChannelClosed)
+    }
+
     /// Send a subscribe request (fire-and-forget for now).
     pub fn subscribe(&self, req: SubscribeRequest) -> Result<SubscribeResponse, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -178,6 +189,26 @@ pub enum SessionRequest {
         request_id: String,
         reply: oneshot::Sender<SaveOutcome>,
     },
+    /// Undo/redo host-side history (GUI hosts; headless refuses).
+    History {
+        redo: bool,
+        steps: u32,
+        /// Client identity, for the human-edit guard's message.
+        client: Option<String>,
+        reply: oneshot::Sender<HistoryOutcome>,
+    },
+}
+
+/// Host reply to an undo/redo request.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryOutcome {
+    pub applied: u32,
+    pub descriptions: Vec<String>,
+    pub revision: u64,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    /// Error (code, message) if the host could not (fully) comply.
+    pub error: Option<(String, String)>,
 }
 
 /// Host reply to a save request.
@@ -208,6 +239,10 @@ pub struct ApplyOpsRequest {
     pub expected_revision: Option<u64>,
     /// Operations to apply.
     pub ops: Vec<Op>,
+    /// Authenticated client name, for history attribution ("Claude Code").
+    /// None for internal/test callers.
+    #[allow(dead_code)]
+    pub client: Option<String>,
 }
 
 /// Response to apply_ops request.
@@ -332,6 +367,7 @@ mod tests {
                 col: 0,
                 value: "Hello".to_string(),
             }],
+            client: None,
         };
         assert_eq!(req.ops.len(), 1);
         assert!(req.atomic);

@@ -632,6 +632,13 @@ pub enum MutationSource {
     Human,
     /// AI-generated (Ask AI feature)
     Ai(AiMutationMeta),
+    /// Applied by a connected client over the session protocol (agent, CLI).
+    /// Distinct from Ai: that is the in-app Ask AI flow; this is an external
+    /// client acting through MCP or `vgrid apply`.
+    Agent {
+        /// Authenticated client name, e.g. "Claude Code".
+        client: String,
+    },
 }
 
 /// Metadata for AI-generated mutations (minimal, no prompts/context stored)
@@ -758,6 +765,39 @@ impl History {
     /// Record multiple cell value changes as a single undoable operation
     pub fn record_batch(&mut self, sheet_index: usize, changes: Vec<CellChange>) {
         self.record_batch_with_provenance(sheet_index, changes, None);
+    }
+
+    /// Record a value batch attributed to a specific source (session clients).
+    pub fn record_batch_from(&mut self, sheet_index: usize, changes: Vec<CellChange>, source: MutationSource) {
+        self.record_batch_with_provenance(sheet_index, changes, None);
+        if let Some(entry) = self.undo_stack.last_mut() {
+            entry.source = source;
+        }
+    }
+
+    /// Record a format batch attributed to a specific source (session clients).
+    pub fn record_format_from(
+        &mut self,
+        sheet_index: usize,
+        patches: Vec<CellFormatPatch>,
+        kind: FormatActionKind,
+        description: String,
+        source: MutationSource,
+    ) {
+        self.record_format(sheet_index, patches, kind, description);
+        if let Some(entry) = self.undo_stack.last_mut() {
+            entry.source = source;
+        }
+    }
+
+    /// Source of the entry that `undo()` would revert next.
+    pub fn peek_undo_source(&self) -> Option<&MutationSource> {
+        self.undo_stack.last().map(|e| &e.source)
+    }
+
+    /// Description of the entry that `undo()` would revert next.
+    pub fn peek_undo_description(&self) -> Option<String> {
+        self.undo_stack.last().map(|e| e.action.label())
     }
 
     /// Record multiple cell value changes with optional Lua provenance
@@ -991,6 +1031,7 @@ impl History {
         let ai_source = match &entry.source {
             MutationSource::Human => None,
             MutationSource::Ai(meta) => Some(meta.label()),
+            MutationSource::Agent { client } => Some(client.clone()),
         };
 
         HistoryDisplayEntry {

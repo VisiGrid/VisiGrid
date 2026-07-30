@@ -561,6 +561,9 @@ fn handle_connection(
 
     let reader = BufReader::new(stream.try_clone()?);
     let mut authenticated = false;
+    // Set at Hello: the paired client's name when a paired token was used,
+    // else the self-reported client string. Used for history attribution.
+    let mut client_name: Option<String> = None;
     let mut rate_limiter = RateLimiter::new(rate_limiter_config);
     let mut subscriptions = ConnectionSubscriptions::new(event_rx);
     let mut lines = reader.lines();
@@ -670,8 +673,8 @@ fn handle_connection(
                     // Accept the per-launch session token or any paired
                     // client token (re-read from disk each attempt so
                     // revocation applies without a GUI restart).
-                    let token_ok = hello.token == expected_token
-                        || visigrid_protocol::paired::verify_paired_token(&hello.token).is_some();
+                    let paired_as = visigrid_protocol::paired::verify_paired_token(&hello.token);
+                    let token_ok = hello.token == expected_token || paired_as.is_some();
                     if !token_ok {
                         send_error(&mut stream, Some(hello.id), ProtocolError::AuthFailed)?;
                         return Ok(());
@@ -684,6 +687,9 @@ fn handle_connection(
                     }
 
                     authenticated = true;
+                    client_name = Some(sanitize_client_name(
+                        paired_as.as_deref().unwrap_or(&hello.client),
+                    ));
 
                     // Get current revision from engine via inspect
                     let revision = match bridge.inspect(InspectRequest {
@@ -712,7 +718,7 @@ fn handle_connection(
         }
 
         // Check rate limit and handle authenticated messages
-        let response = handle_message_with_rate_limit(msg, conn_id, mode, bridge, &mut rate_limiter, &mut subscriptions, writer_lease, metrics, registry);
+        let response = handle_message_with_rate_limit(msg, conn_id, client_name.as_deref(), mode, bridge, &mut rate_limiter, &mut subscriptions, writer_lease, metrics, registry);
         send_message(&mut stream, &response)?;
     }
 }
@@ -721,6 +727,7 @@ fn handle_connection(
 fn handle_message_with_rate_limit(
     msg: ClientMessage,
     conn_id: u64,
+    client_name: Option<&str>,
     mode: ServerMode,
     bridge: &SessionBridgeHandle,
     rate_limiter: &mut RateLimiter,
@@ -740,6 +747,7 @@ fn handle_message_with_rate_limit(
         ClientMessage::Stats(s) => Some(s.id.clone()),
         ClientMessage::PairRequest(p) => Some(p.id.clone()),
         ClientMessage::Save(sv) => Some(sv.id.clone()),
+        ClientMessage::History(h) => Some(h.id.clone()),
     };
 
     // Check rate limit based on message type
@@ -753,6 +761,7 @@ fn handle_message_with_rate_limit(
         ClientMessage::Stats(_) => rate_limiter.try_ping(), // Stats is cheap like ping
         ClientMessage::PairRequest(_) => Ok(()), // handled pre-auth; post-auth arm rejects below
         ClientMessage::Save(_) => rate_limiter.try_ping(),
+        ClientMessage::History(_) => rate_limiter.try_ping(),
     };
 
     if let Err(e) = rate_check {
@@ -765,13 +774,14 @@ fn handle_message_with_rate_limit(
         return ServerMessage::Error(ProtocolError::rate_limited_error(request_id, e.retry_after_ms));
     }
 
-    handle_message(msg, conn_id, mode, bridge, subscriptions, writer_lease, metrics, registry)
+    handle_message(msg, conn_id, client_name, mode, bridge, subscriptions, writer_lease, metrics, registry)
 }
 
 /// Handle a single message and return the response.
 fn handle_message(
     msg: ClientMessage,
     conn_id: u64,
+    client_name: Option<&str>,
     mode: ServerMode,
     bridge: &SessionBridgeHandle,
     subscriptions: &mut ConnectionSubscriptions,
@@ -810,10 +820,14 @@ fn handle_message(
             // Send through bridge to engine thread
             let req = ApplyOpsRequest {
                 request_id: apply.id.clone(),
-                batch_name: format!("Session: {} ops", apply.ops.len()),
+                batch_name: match client_name {
+                    Some(name) => format!("{}: {} ops", name, apply.ops.len()),
+                    None => format!("Session: {} ops", apply.ops.len()),
+                },
                 atomic: apply.atomic,
                 expected_revision: apply.expected_revision,
                 ops: apply.ops.clone(),
+                client: client_name.map(str::to_string),
             };
 
             match bridge.apply_ops(req) {
@@ -917,6 +931,29 @@ fn handle_message(
                 retry_after_ms: None,
             }),
         },
+        ClientMessage::History(h) => {
+            match bridge.history(h.redo, h.steps.max(1), client_name.map(str::to_string)) {
+                Ok(outcome) => match outcome.error {
+                    None => ServerMessage::HistoryResult(HistoryResultMessage {
+                        id: h.id,
+                        applied: outcome.applied,
+                        descriptions: outcome.descriptions,
+                        revision: outcome.revision,
+                        can_undo: outcome.can_undo,
+                        can_redo: outcome.can_redo,
+                    }),
+                    Some((code, message)) => ServerMessage::Error(ErrorMessage {
+                        id: Some(h.id), code, message, retry_after_ms: None,
+                    }),
+                },
+                Err(_) => ServerMessage::Error(ErrorMessage {
+                    id: Some(h.id),
+                    code: "internal_error".to_string(),
+                    message: "Bridge communication failed".to_string(),
+                    retry_after_ms: None,
+                }),
+            }
+        }
         ClientMessage::Ping(ping) => ServerMessage::Pong(PongMessage { id: ping.id }),
         ClientMessage::Stats(stats) => ServerMessage::StatsResult(StatsResultMessage {
             id: stats.id,
@@ -995,6 +1032,9 @@ mod tests {
                     SessionRequest::Pair { reply, .. } => {
                         // Test bridge auto-approves pairing
                         let _ = reply.send(true);
+                    }
+                    SessionRequest::History { reply, .. } => {
+                        let _ = reply.send(crate::bridge::HistoryOutcome::default());
                     }
                     SessionRequest::Save { reply, .. } => {
                         let _ = reply.send(crate::bridge::SaveOutcome {

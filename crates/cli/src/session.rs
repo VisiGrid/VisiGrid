@@ -358,6 +358,24 @@ impl SessionClient {
         }
     }
 
+    /// Undo or redo host-side history (GUI sessions).
+    pub fn history(&mut self, redo: bool, steps: u32) -> Result<visigrid_protocol::HistoryResultMessage, SessionError> {
+        let msg = ClientMessage::History(visigrid_protocol::HistoryMessage {
+            id: self.next_request_id(), redo, steps,
+        });
+        self.send(&msg)?;
+        match self.receive()? {
+            ServerMessage::HistoryResult(r) => {
+                self.revision = r.revision;
+                Ok(r)
+            }
+            ServerMessage::Error(err) => Err(SessionError::ServerError {
+                code: err.code, message: err.message, retry_after_ms: err.retry_after_ms,
+            }),
+            _ => Err(SessionError::ProtocolError("Unexpected response to history".into())),
+        }
+    }
+
     /// Inspect a single cell.
     pub fn inspect_cell(&mut self, sheet: usize, row: usize, col: usize) -> Result<InspectResultMessage, SessionError> {
         let msg = ClientMessage::Inspect(InspectMessage {

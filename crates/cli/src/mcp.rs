@@ -129,6 +129,9 @@ impl McpServer {
             "read_range" => self.tool_read_range(args),
             "write_cells" => self.tool_write_cells(args),
             "set_format" => self.tool_set_format(args),
+            "save_workbook" => self.tool_save(args),
+            "undo" => self.tool_history(args, false),
+            "redo" => self.tool_history(args, true),
             _ => Err(format!("unknown tool: {}", name)),
         };
         match outcome {
@@ -369,6 +372,31 @@ impl McpServer {
         .map_err(|e| e.to_string())
     }
 
+    fn tool_save(&mut self, args: &Value) -> Result<String, String> {
+        let mut client = self.connect(args)?;
+        let r = client.save().map_err(session_error_text)?;
+        serde_json::to_string_pretty(&json!({
+            "saved": true,
+            "path": r.path,
+            "revision": r.revision,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    fn tool_history(&mut self, args: &Value, redo: bool) -> Result<String, String> {
+        let steps = args.get("steps").and_then(|v| v.as_u64()).unwrap_or(1).clamp(1, 100) as u32;
+        let mut client = self.connect(args)?;
+        let r = client.history(redo, steps).map_err(session_error_text)?;
+        serde_json::to_string_pretty(&json!({
+            "applied": r.applied,
+            "reverted": r.descriptions,
+            "revision": r.revision,
+            "can_undo": r.can_undo,
+            "can_redo": r.can_redo,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
     // ------------------------------------------------------------------
     // Session plumbing
     // ------------------------------------------------------------------
@@ -593,6 +621,48 @@ fn tool_definitions() -> Value {
                 "additionalProperties": false
             }
         }
+        ,
+        {
+            "name": "save_workbook",
+            "title": "Save workbook",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+            "description": "Persist the workbook to disk. Works on headless sessions (vgrid serve); GUI windows own their own save flow and will refuse with save_unsupported — ask the user to press Ctrl+S there.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "undo",
+            "title": "Undo your edits",
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false },
+            "description": "Undo your own recent edits — use this to roll back a mistake instead of rewriting cells by hand. You can ONLY undo edits made by connected clients: if the next step on the stack is a change the user made by hand, the call fails with history_blocked and nothing is reverted. Headless sessions have no undo stack.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "steps": { "type": "integer", "description": "How many steps to undo (default 1, max 100)" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "redo",
+            "title": "Redo",
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false },
+            "description": "Re-apply steps that were just undone.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "steps": { "type": "integer", "description": "How many steps to redo (default 1, max 100)" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "additionalProperties": false
+            }
+        }
     ])
 }
 
@@ -634,7 +704,10 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            vec!["list_sessions", "get_workbook", "read_range", "write_cells", "set_format"]
+            vec![
+                "list_sessions", "get_workbook", "read_range", "write_cells", "set_format",
+                "save_workbook", "undo", "redo",
+            ]
         );
         for t in tools {
             assert!(t["description"].as_str().unwrap().len() > 20);

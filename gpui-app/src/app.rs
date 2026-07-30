@@ -1577,6 +1577,10 @@ impl Spreadsheet {
                         current_revision: self.workbook.read(cx).revision(),
                     });
                 }
+                SessionRequest::History { redo, steps, client, reply } => {
+                    let outcome = self.handle_session_history(redo, steps, client, cx);
+                    let _ = reply.send(outcome);
+                }
                 SessionRequest::Save { reply, .. } => {
                     // The GUI owns its save flow (prompts, cloud sync); the
                     // protocol save op is for headless hosts.
@@ -1691,7 +1695,12 @@ impl Spreadsheet {
         req: &crate::session_server::ApplyOpsRequest,
         cx: &mut Context<Self>,
     ) -> crate::session_server::ApplyOpsResponse {
-        use crate::history::{CellChange, CellFormatPatch, FormatActionKind};
+        use crate::history::{CellChange, CellFormatPatch, FormatActionKind, MutationSource};
+
+        let source = match &req.client {
+            Some(client) => MutationSource::Agent { client: client.clone() },
+            None => MutationSource::Human,
+        };
 
         let outcome = self
             .workbook
@@ -1700,7 +1709,7 @@ impl Spreadsheet {
         if outcome.response.error.is_none() && outcome.response.applied > 0 {
             for (sheet_idx, changes) in &outcome.value_changes {
                 if !changes.is_empty() {
-                    self.history.record_batch(
+                    self.history.record_batch_from(
                         *sheet_idx,
                         changes
                             .iter()
@@ -1711,12 +1720,13 @@ impl Spreadsheet {
                                 new_value: c.new_value.clone(),
                             })
                             .collect(),
+                        source.clone(),
                     );
                 }
             }
             for (sheet_idx, patches) in &outcome.format_patches {
                 if !patches.is_empty() {
-                    self.history.record_format(
+                    self.history.record_format_from(
                         *sheet_idx,
                         patches
                             .iter()
@@ -1729,6 +1739,7 @@ impl Spreadsheet {
                             .collect(),
                         FormatActionKind::PasteFormats,
                         req.batch_name.clone(),
+                        source.clone(),
                     );
                 }
             }
@@ -1743,6 +1754,68 @@ impl Spreadsheet {
         }
 
         outcome.response
+    }
+
+    /// Handle an undo/redo request from a session client.
+    ///
+    /// SAFETY RULE: an agent may only revert entries it (or another session
+    /// client) authored. If the next entry on the stack is a human edit, we
+    /// refuse — "the agent can undo its own mistakes, never your work".
+    /// Redo is unrestricted: it only re-applies what was just undone.
+    fn handle_session_history(
+        &mut self,
+        redo: bool,
+        steps: u32,
+        client: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> crate::session_server::HistoryOutcome {
+        use crate::history::MutationSource;
+
+        let mut out = crate::session_server::HistoryOutcome {
+            revision: self.workbook.read(cx).revision(),
+            can_undo: self.history.can_undo(),
+            can_redo: self.history.can_redo(),
+            ..Default::default()
+        };
+
+        for _ in 0..steps {
+            if redo {
+                if !self.history.can_redo() {
+                    break;
+                }
+                self.redo(cx);
+                out.applied += 1;
+            } else {
+                if !self.history.can_undo() {
+                    break;
+                }
+                // Human-edit guard: stop before reverting the user's work.
+                if matches!(self.history.peek_undo_source(), Some(MutationSource::Human)) {
+                    if out.applied == 0 {
+                        let who = client.as_deref().unwrap_or("this client");
+                        out.error = Some((
+                            "history_blocked".to_string(),
+                            format!(
+                                "the next undo step is a change the user made ({}); {} may only undo its own edits",
+                                self.history.peek_undo_description().unwrap_or_else(|| "manual edit".into()),
+                                who
+                            ),
+                        ));
+                    }
+                    break;
+                }
+                if let Some(desc) = self.history.peek_undo_description() {
+                    out.descriptions.push(desc);
+                }
+                self.undo(cx);
+                out.applied += 1;
+            }
+        }
+
+        out.revision = self.workbook.read(cx).revision();
+        out.can_undo = self.history.can_undo();
+        out.can_redo = self.history.can_redo();
+        out
     }
 
     /// Handle an inspect request: delegate to session-host.

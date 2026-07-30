@@ -255,6 +255,7 @@ pub fn build_diff_since(history: &History, since_entry_id: u64) -> Option<DiffRe
         let ai_touched = matches!(&entry.source, MutationSource::Ai(_));
         let ai_source = match &entry.source {
             MutationSource::Ai(meta) => Some(meta.label()),
+            MutationSource::Agent { client } => Some(client.clone()),
             MutationSource::Human => None,
         };
 

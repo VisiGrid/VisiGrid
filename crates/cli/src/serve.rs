@@ -202,6 +202,18 @@ pub fn cmd_serve(
                 eprintln!("{}", if approved { "approved" } else { "denied" });
                 let _ = reply.send(approved);
             }
+            host::SessionRequest::History { reply, .. } => {
+                // No undo stack headless (history is GUI state) — documented
+                // in the detach design doc as a phase-1 limitation.
+                let _ = reply.send(host::HistoryOutcome {
+                    revision: wb.revision(),
+                    error: Some((
+                        "history_unavailable".to_string(),
+                        "this is a headless session (vgrid serve) — it has no undo stack; attach a GUI window for undo/redo".to_string(),
+                    )),
+                    ..Default::default()
+                });
+            }
             host::SessionRequest::Save { reply, .. } => {
                 let outcome = match save(&wb, &layouts) {
                     Ok(path) => {

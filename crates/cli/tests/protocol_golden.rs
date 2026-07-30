@@ -85,6 +85,41 @@ fn test_pair() {
 }
 
 #[test]
+fn test_history() {
+    let lines = load_golden_lines("history.jsonl");
+    assert_eq!(lines.len(), 5, "history.jsonl should have 5 lines");
+
+    let undo: ClientMessage = serde_json::from_str(&lines[0]).expect("history request should parse");
+    match undo {
+        ClientMessage::History(h) => {
+            assert!(!h.redo);
+            assert_eq!(h.steps, 1);
+        }
+        other => panic!("expected History, got {:?}", other),
+    }
+    let result: ServerMessage = serde_json::from_str(&lines[1]).expect("history_result should parse");
+    match result {
+        ServerMessage::HistoryResult(r) => {
+            assert_eq!(r.applied, 1);
+            assert_eq!(r.descriptions.len(), 1);
+            assert!(r.can_undo && r.can_redo);
+        }
+        other => panic!("expected HistoryResult, got {:?}", other),
+    }
+    let redo: ClientMessage = serde_json::from_str(&lines[2]).expect("redo request should parse");
+    assert!(matches!(redo, ClientMessage::History(h) if h.redo && h.steps == 3));
+
+    // The two refusal paths are plain protocol errors with stable codes.
+    for (line, code) in [(&lines[3], "history_blocked"), (&lines[4], "history_unavailable")] {
+        let err: ServerMessage = serde_json::from_str(line).expect("error should parse");
+        match err {
+            ServerMessage::Error(e) => assert_eq!(e.code, code),
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+}
+
+#[test]
 fn test_save() {
     let lines = load_golden_lines("save.jsonl");
     assert_eq!(lines.len(), 3, "save.jsonl should have 3 lines");
