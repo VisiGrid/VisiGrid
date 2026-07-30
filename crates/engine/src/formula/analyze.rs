@@ -40,6 +40,7 @@ pub fn tally_unknown_functions<S>(expr: &Expr<S>, counts: &mut HashMap<String, u
 /// Walk the AST and call the visitor for each function name encountered.
 fn walk_expr<S, F: FnMut(&str)>(expr: &Expr<S>, visitor: &mut F) {
     match expr {
+        Expr::RefError => {}
         Expr::Function { name, args } => {
             // Visit this function
             visitor(name);

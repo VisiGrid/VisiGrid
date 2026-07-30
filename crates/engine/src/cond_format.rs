@@ -204,6 +204,7 @@ fn offset_expr(expr: &ParsedExpr, dr: i64, dc: i64) -> Option<ParsedExpr> {
         Expr::Text(s) => Expr::Text(s.clone()),
         Expr::Boolean(b) => Expr::Boolean(*b),
         Expr::Empty => Expr::Empty,
+        Expr::RefError => Expr::RefError,
         Expr::NamedRange(name) => Expr::NamedRange(name.clone()),
         Expr::CellRef { sheet, col, row, col_abs, row_abs } => Expr::CellRef {
             sheet: sheet.clone(),

@@ -44,6 +44,13 @@ pub enum Expr<S> {
     },
     /// Named range reference (resolved at evaluation time)
     NamedRange(String),
+    /// A reference whose target no longer exists — the cell or range it
+    /// pointed at was deleted by a structural edit. Excel stores this in the
+    /// formula TEXT (`=A1+B1` becomes `=#REF!+B1`), permanently: re-inserting
+    /// the row does not bring the reference back. Modelling it in the AST
+    /// (rather than as an evaluation-time error) is what keeps undo, save,
+    /// and visigrid-json round-trips agreeing with each other.
+    RefError,
     /// Empty/omitted argument (e.g. the trailing slot in `=IF(a,b,)`)
     Empty,
 }
@@ -103,6 +110,8 @@ enum Token {
     },
     /// Sheet name prefix (e.g., "Sheet1" from "Sheet1!A1")
     SheetPrefix(String),
+    /// The `#REF!` literal (a reference whose target was deleted)
+    RefError,
     Ident(String),
     Plus,
     Minus,
@@ -293,6 +302,26 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
                 let num: f64 = num_str.parse().map_err(|_| format!("Invalid number: {}", num_str))?;
                 tokens.push(Token::Number(num));
+            }
+            // Error literals: only #REF! is representable in the AST — it is
+            // what a structural edit writes over a dead reference.
+            '#' => {
+                let mut lit = String::new();
+                while let Some(&ch) = chars.peek() {
+                    lit.push(ch);
+                    chars.next();
+                    if ch == '!' {
+                        break;
+                    }
+                    if lit.len() > 12 {
+                        break;
+                    }
+                }
+                if lit.eq_ignore_ascii_case("#REF!") {
+                    tokens.push(Token::RefError);
+                } else {
+                    return Err(format!("Unsupported error literal: {}", lit));
+                }
             }
             _ => return Err(format!("Unexpected character: {}", c)),
         }
@@ -514,6 +543,7 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
 
     match &tokens[pos] {
         Token::Number(n) => Ok((Expr::Number(*n), pos + 1)),
+        Token::RefError => Ok((Expr::RefError, pos + 1)),
         Token::StringLit(s) => Ok((Expr::Text(s.clone()), pos + 1)),
         Token::SheetPrefix(sheet_name) => {
             // Sheet prefix must be followed by a cell reference
@@ -684,6 +714,7 @@ where
         Expr::Text(s) => Expr::Text(s.clone()),
         Expr::Boolean(b) => Expr::Boolean(*b),
         Expr::NamedRange(name) => Expr::NamedRange(name.clone()),
+        Expr::RefError => Expr::RefError,
         Expr::CellRef { sheet, col, row, col_abs, row_abs } => {
             let bound_sheet = bind_sheet_ref(sheet, resolver);
             Expr::CellRef {
@@ -754,6 +785,74 @@ pub fn bind_expr_same_sheet(expr: &ParsedExpr) -> BoundExpr {
 // Formula Printing - Convert BoundExpr back to string
 // =============================================================================
 
+/// Format a PARSED expression (sheet references still names) as formula
+/// text, with the leading '='. Used by structural reference adjustment,
+/// which rewrites stored formula text.
+fn format_op(op: Op) -> &'static str {
+    match op {
+                Op::Add => "+",
+                Op::Sub => "-",
+                Op::Mul => "*",
+                Op::Div => "/",
+                Op::Lt => "<",
+                Op::Gt => ">",
+                Op::Eq => "=",
+                Op::LtEq => "<=",
+                Op::GtEq => ">=",
+                Op::NotEq => "<>",
+                Op::Concat => "&",
+                Op::Pow => "^",
+            }
+}
+
+pub fn format_parsed_expr(expr: &ParsedExpr) -> String {
+    format!("={}", format_parsed_expr_inner(expr))
+}
+
+fn format_parsed_expr_inner(expr: &ParsedExpr) -> String {
+    let prefix = |sheet: &UnboundSheetRef| match sheet {
+        UnboundSheetRef::Current => String::new(),
+        UnboundSheetRef::Named(name) => format!("{}!", format_sheet_name(name)),
+    };
+    match expr {
+        Expr::Empty => String::new(),
+        Expr::Number(n) => {
+            if n.fract() == 0.0 && n.abs() < 1e15 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        Expr::Text(s) => format!("\"{}\"", s.replace('"', "\"\"")),
+        Expr::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        Expr::NamedRange(name) => name.clone(),
+        Expr::RefError => "#REF!".to_string(),
+        Expr::CellRef { sheet, col, row, col_abs, row_abs } => {
+            format!("{}{}", prefix(sheet), format_cell_addr(*col, *row, *col_abs, *row_abs))
+        }
+        Expr::Range {
+            sheet, start_col, start_row, end_col, end_row,
+            start_col_abs, start_row_abs, end_col_abs, end_row_abs,
+        } => format!(
+            "{}{}:{}",
+            prefix(sheet),
+            format_cell_addr(*start_col, *start_row, *start_col_abs, *start_row_abs),
+            format_cell_addr(*end_col, *end_row, *end_col_abs, *end_row_abs),
+        ),
+        Expr::Function { name, args } => format!(
+            "{}({})",
+            name,
+            args.iter().map(format_parsed_expr_inner).collect::<Vec<_>>().join(", ")
+        ),
+        Expr::BinaryOp { op, left, right } => format!(
+            "{}{}{}",
+            format_parsed_expr_inner(left),
+            format_op(*op),
+            format_parsed_expr_inner(right)
+        ),
+    }
+}
+
 /// Format a bound expression as a formula string (with leading '=').
 ///
 /// The `name_resolver` function takes a SheetId and returns the current sheet name.
@@ -782,6 +881,7 @@ where
         Expr::Text(s) => format!("\"{}\"", s.replace('"', "\"\"")),
         Expr::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
         Expr::NamedRange(name) => name.clone(),
+        Expr::RefError => "#REF!".to_string(),
         Expr::CellRef { sheet, col, row, col_abs, row_abs } => {
             let prefix = format_sheet_prefix(sheet, name_resolver);
             let addr = format_cell_addr(*col, *row, *col_abs, *row_abs);
@@ -903,8 +1003,10 @@ pub fn extract_cell_refs<S>(expr: &Expr<S>) -> Vec<(usize, usize)> {
 
 fn collect_cell_refs<S>(expr: &Expr<S>, refs: &mut Vec<(usize, usize)>) {
     match expr {
-        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::NamedRange(_) | Expr::Empty => {
-            // NamedRange refs are resolved at evaluation time with access to NamedRangeStore
+        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::NamedRange(_) | Expr::Empty
+        | Expr::RefError => {
+            // NamedRange refs are resolved at evaluation time with access to NamedRangeStore;
+            // RefError has no target by definition.
         }
         Expr::CellRef { col, row, .. } => {
             refs.push((*row, *col));

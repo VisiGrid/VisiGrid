@@ -54,8 +54,8 @@ fn collect_refs<F>(
     use super::parser::Expr;
 
     match expr {
-        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::Empty => {
-            // Literals have no dependencies
+        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::Empty | Expr::RefError => {
+            // Literals have no dependencies; a dead reference has no target
         }
 
         Expr::CellRef { sheet, row, col, .. } => {
@@ -160,6 +160,7 @@ mod tests {
     fn bind_simple(expr: &Expr<crate::sheet::UnboundSheetRef>) -> BoundExpr {
         match expr {
             Expr::Empty => Expr::Empty,
+            Expr::RefError => Expr::RefError,
             Expr::Number(n) => Expr::Number(*n),
             Expr::Text(s) => Expr::Text(s.clone()),
             Expr::Boolean(b) => Expr::Boolean(*b),

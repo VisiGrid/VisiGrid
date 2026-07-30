@@ -526,6 +526,8 @@ impl EvalResult {
 pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
     match expr {
         Expr::Empty => EvalResult::Empty,
+        // Target deleted by a structural edit — stored in the formula text.
+        Expr::RefError => EvalResult::Error("#REF!".to_string()),
         Expr::Number(n) => EvalResult::Number(*n),
         Expr::Text(s) => EvalResult::Text(s.clone()),
         Expr::Boolean(b) => EvalResult::Boolean(*b),
