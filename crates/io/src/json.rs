@@ -146,6 +146,17 @@ pub struct SheetLayout {
     pub filter: Option<FilterSpec>,
     /// Opaque per-sheet charts payload: crates/io doesn't model charts, but
     /// preserves them so a recalc round-trip never strips web-authored charts.
+    ///
+    /// ONE FIELD IS NOT OPAQUE, and it is a load-bearing cross-repo
+    /// convention: each chart entry may carry `data_range`, an **A1 notation
+    /// string** ("B2:D10", "Sheet1!A1:A9"). `SheetLayout::shift_for_structural`
+    /// rewrites it on row/column edits so a chart never silently plots the
+    /// wrong rows. It is produced by the web app's chart UI and consumed here.
+    ///
+    /// Changing its shape (e.g. to `{sheet, start, end}` for multi-sheet
+    /// charts) silently disables that adjustment — charts would keep pointing
+    /// at pre-edit rows with no error anywhere. Any such change must update
+    /// `shift_a1_range` in this file in the same breath.
     pub charts: Option<serde_json::Value>,
 }
 
