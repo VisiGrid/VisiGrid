@@ -44,6 +44,10 @@ impl ShareSession {
         };
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
+            // reqwest sends NO User-Agent by default, and the API's edge
+            // answers a UA-less request with a bare 403 — no body, nothing
+            // Rails ever sees. Identify ourselves.
+            .user_agent(concat!("vgrid/", env!("CARGO_PKG_VERSION")))
             .build()
             .ok()?;
 
