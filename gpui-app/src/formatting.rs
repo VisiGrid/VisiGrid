@@ -4,10 +4,10 @@
 //! and merge/unmerge cell operations.
 
 use gpui::*;
-use visigrid_engine::cell::{Alignment, CellBorder, CellFormat, CellStyle, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::cell::{max_border, Alignment, CellBorder, CellFormat, CellStyle, NumberFormat, TextOverflow, VerticalAlignment};
 use visigrid_engine::sheet::MergedRegion;
 
-use crate::app::{Spreadsheet, TriState, SelectionFormatState};
+use crate::app::{Spreadsheet, TriState, SelectionFormatState, NUM_ROWS, NUM_COLS};
 use crate::history::{CellFormatPatch, FormatActionKind, UndoAction};
 use crate::mode::Mode;
 
@@ -1214,5 +1214,166 @@ impl Spreadsheet {
             if count == 1 { "" } else { "s" }
         ));
         cx.notify();
+    }
+}
+
+impl Spreadsheet {
+    /// Calculate which borders to draw for a selected cell.
+    /// Returns (top, right, bottom, left) indicating which borders to draw.
+    ///
+    /// Strategy:
+    /// - Always draw right+bottom (internal gridlines within selection)
+    /// - Draw top only if cell above is NOT selected (outer edge)
+    /// - Draw left only if cell to left is NOT selected (outer edge)
+    /// This maintains the grid appearance while avoiding double borders at edges.
+    pub fn selection_borders(&self, row: usize, col: usize) -> (bool, bool, bool, bool) {
+        // Check if adjacent cells are also selected
+        let cell_above_selected = row > 0 && self.is_selected(row - 1, col);
+        let cell_left_selected = col > 0 && self.is_selected(row, col - 1);
+
+        // Top/left: only at outer edges of selection
+        let top = !cell_above_selected;
+        let left = !cell_left_selected;
+
+        // Right/bottom: always draw for internal gridlines
+        let right = true;
+        let bottom = true;
+
+        (top, right, bottom, left)
+    }
+    /// Compute which user-defined borders to draw for a cell using adjacency logic.
+    ///
+    /// Returns (top, right, bottom, left) flags indicating which borders to draw.
+    /// Uses the precedence rule: right/bottom takes precedence over left/top of adjacent cell.
+    ///
+    /// - Own right and bottom: always draw if set
+    /// - Own top: only draw if cell above has no bottom border
+    /// - Own left: only draw if cell to left has no right border
+    pub fn cell_user_borders(
+        &self, row: usize, col: usize, cx: &App,
+        boundary_bottom: bool, boundary_right: bool,
+    ) -> (CellBorder, CellBorder, CellBorder, CellBorder) {
+        #[cfg(debug_assertions)]
+        self.debug_border_call_count.set(self.debug_border_call_count.get() + 1);
+
+        // Single-ownership model: each cell draws only its TOP and LEFT borders.
+        // Right/bottom borders are drawn by the neighboring cell as their left/top.
+        // Each edge is resolved as max(own_side, neighbor_opposite_side) so both
+        // cells' border settings contribute, but only one cell draws the line.
+        //
+        // Exception: at the viewport boundary (last visible row/col), this cell
+        // also draws BOTTOM (boundary_bottom) or RIGHT (boundary_right) because
+        // the neighbor that would normally own that edge isn't rendered.
+        //
+        // For merged cells: interior cells draw nothing. Perimeter cells draw only
+        // top (if on merge top edge) and left (if on merge left edge), resolved
+        // with the neighboring cell/merge's opposing border. At viewport boundaries,
+        // perimeter cells also draw bottom/right for merge edges that touch the boundary.
+
+        let sheet = self.sheet(cx);
+
+        // Helper: effective border contribution for a cell on a given side,
+        // accounting for merges (interior cells contribute None, perimeter cells
+        // contribute the merge's resolved edge border).
+        let effective_side = |r: usize, c: usize, side: u8| -> CellBorder {
+            // side: 0=top, 1=right, 2=bottom, 3=left
+            if let Some(m) = sheet.get_merge(r, c) {
+                let on_perimeter = match side {
+                    0 => r == m.start.0,  // top
+                    1 => c == m.end.1,    // right
+                    2 => r == m.end.0,    // bottom
+                    3 => c == m.start.1,  // left
+                    _ => false,
+                };
+                if !on_perimeter {
+                    return CellBorder::default(); // interior: no contribution
+                }
+                let (rt, rr, rb, rl) = sheet.resolve_merge_borders(m);
+                match side {
+                    0 => rt,
+                    1 => rr,
+                    2 => rb,
+                    3 => rl,
+                    _ => CellBorder::default(),
+                }
+            } else {
+                let fmt = sheet.get_format(r, c);
+                match side {
+                    0 => fmt.border_top,
+                    1 => fmt.border_right,
+                    2 => fmt.border_bottom,
+                    3 => fmt.border_left,
+                    _ => CellBorder::default(),
+                }
+            }
+        };
+
+        // Check if this cell is a merge interior (not on any perimeter edge)
+        let none = CellBorder::default();
+        if let Some(m) = sheet.get_merge(row, col) {
+            let on_edge = row == m.start.0 || row == m.end.0
+                       || col == m.start.1 || col == m.end.1;
+            if !on_edge {
+                return (none, none, none, none); // interior: no borders
+            }
+        }
+
+        // Resolve TOP edge: max(my_top, above_neighbor_bottom)
+        let top = {
+            let my_top = effective_side(row, col, 0);
+            let above_bottom = if row > 0 {
+                effective_side(row - 1, col, 2)
+            } else {
+                none
+            };
+            max_border(my_top, above_bottom)
+        };
+
+        // Resolve LEFT edge: max(my_left, left_neighbor_right)
+        let left = {
+            let my_left = effective_side(row, col, 3);
+            let left_right = if col > 0 {
+                effective_side(row, col - 1, 1)
+            } else {
+                none
+            };
+            max_border(my_left, left_right)
+        };
+
+        // Resolve BOTTOM edge: only at viewport boundary (last visible row)
+        let bottom = if boundary_bottom {
+            let my_bottom = effective_side(row, col, 2);
+            let below_top = if row + 1 < NUM_ROWS {
+                effective_side(row + 1, col, 0)
+            } else {
+                none
+            };
+            max_border(my_bottom, below_top)
+        } else {
+            none
+        };
+
+        // Resolve RIGHT edge: only at viewport boundary (last visible col)
+        let right = if boundary_right {
+            let my_right = effective_side(row, col, 1);
+            let right_left = if col + 1 < NUM_COLS {
+                effective_side(row, col + 1, 3)
+            } else {
+                none
+            };
+            max_border(my_right, right_left)
+        } else {
+            none
+        };
+
+        (top, right, bottom, left)
+    }
+    /// Check if any user-defined border is set for this cell
+    pub fn has_user_borders(&self, row: usize, col: usize, cx: &App) -> bool {
+        let format = self.sheet(cx).get_format(row, col);
+        format.border_top.is_set() ||
+        format.border_right.is_set() ||
+        format.border_bottom.is_set() ||
+        format.border_left.is_set()
     }
 }

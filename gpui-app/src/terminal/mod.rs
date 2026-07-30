@@ -3,6 +3,7 @@
 //! Uses `alacritty_terminal` for ANSI parsing and grid state, with a thin
 //! wrapper for PTY lifecycle and GPUI rendering.
 
+mod actions;
 pub mod extract;
 pub mod pty;
 pub mod state;

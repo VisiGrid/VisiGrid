@@ -19,6 +19,7 @@ mod default_app_prompt;
 mod dialogs;
 mod docs_links;
 mod diff;
+mod diff_actions;
 mod diff_view;
 mod editing;
 mod file_ops;
