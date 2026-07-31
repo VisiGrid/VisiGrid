@@ -100,6 +100,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("f4", CycleReference, Some("Spreadsheet")),
         // Alt+= AutoSum (Excel behavior)
         KeyBinding::new("alt-=", AutoSum, Some("Spreadsheet")),
+        // Fit column(s) to content. Excel buries this in a ribbon path
+        // (Alt+H,O,I) and Sheets has no chord at all, so there is no
+        // convention to honour — this mirrors the header double-click.
+        KeyBinding::new(&format!("{}-alt-f", primary_mod(m)), FitColumnWidth, Some("Spreadsheet")),
         // Insert date/time (Excel: Ctrl+;, Ctrl+Shift+;)
         KeyBinding::new(&kb(m, ";"), InsertDate, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, ";"), InsertTime, Some("Spreadsheet")),

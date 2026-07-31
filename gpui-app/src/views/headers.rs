@@ -242,10 +242,11 @@ fn render_column_header(
                 // Hover highlight
                 .hover(move |s| s.bg(accent.opacity(0.25)))
                 // Mouse down to start resize, double-click to auto-fit
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     if event.click_count == 2 {
-                        // Double-click to auto-fit (all selected if part of selection)
-                        this.auto_fit_selected_col_widths(col, cx);
+                        // Double-click to auto-fit (all selected if part of selection).
+                        // The window lets the text actually be shaped.
+                        this.auto_fit_selected_col_widths(col, Some(window), cx);
                     } else {
                         // Start resize drag
                         this.resizing_col = Some(col);

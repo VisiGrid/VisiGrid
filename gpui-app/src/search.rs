@@ -109,6 +109,7 @@ pub enum CommandId {
 
     // Formatting
     ToggleBold,
+    FitColumnWidth,
     AlignLeft,
     AlignCenter,
     AlignRight,
@@ -316,6 +317,7 @@ impl CommandId {
             Self::PasteFormulas => "Paste Formulas",
             Self::PasteFormats => "Paste Formats",
             Self::ToggleBold => "Toggle Bold",
+            Self::FitColumnWidth => "Fit Column to Width",
             Self::AlignLeft => "Align Left",
             Self::AlignCenter => "Align Center",
             Self::AlignRight => "Align Right",
@@ -481,6 +483,7 @@ impl CommandId {
             #[cfg(not(target_os = "macos"))]
             Self::PasteSpecial => Some("Ctrl+Alt+V"),
             Self::ToggleBold => Some("Ctrl+B"),
+            Self::FitColumnWidth => Some("Ctrl+Alt+F"),
             Self::AlignLeft => None,
             Self::AlignCenter => None,
             Self::AlignRight => None,
@@ -569,6 +572,7 @@ impl CommandId {
             Self::PasteFormulas => "clipboard special formulas reference adjust",
             Self::PasteFormats => "clipboard special formatting style",
             Self::ToggleBold => "format style",
+            Self::FitColumnWidth => "autofit auto fit column width resize widen size to content best fit",
             Self::AlignLeft => "format alignment horizontal",
             Self::AlignCenter => "format alignment horizontal middle",
             Self::AlignRight => "format alignment horizontal",
@@ -739,6 +743,7 @@ impl CommandId {
             Self::PasteFormulas,
             Self::PasteFormats,
             Self::ToggleBold,
+            Self::FitColumnWidth,
             Self::AlignLeft,
             Self::AlignCenter,
             Self::AlignRight,
@@ -957,6 +962,7 @@ impl CommandId {
             | Self::ManageConditionalFormats
             | Self::ClearConditionalFormats
             | Self::ToggleBold
+            | Self::FitColumnWidth
             | Self::AlignLeft
             | Self::AlignCenter
             | Self::AlignRight

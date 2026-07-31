@@ -156,6 +156,31 @@ pub type ApprovalStatus = VerificationStatus;
 // Grid configuration
 pub use visigrid_session_host::{NUM_ROWS, NUM_COLS, MAX_SESSION_FORMAT_CELLS, MAX_SESSION_INSPECT_CELLS};
 
+/// Auto-fit bounds. The maximum keeps one pathological cell from pushing a
+/// column off-screen (Excel caps column width similarly).
+pub const MIN_AUTOFIT_WIDTH: f32 = 40.0;
+pub const MAX_AUTOFIT_WIDTH: f32 = 600.0;
+/// Cell padding (px_1 each side) plus a little slack so text is not flush.
+const AUTOFIT_PADDING: f32 = 12.0;
+
+/// Width estimate for paths with no window to shape text with.
+/// Counts CHARACTERS, and counts East-Asian wide characters double — the
+/// previous estimator multiplied byte length, which over-measured every
+/// non-ASCII string.
+fn estimate_text_width(text: &str, font_size: f32, bold: bool) -> f32 {
+    let units: f32 = text
+        .chars()
+        .map(|c| {
+            let wide = matches!(c as u32,
+                0x1100..=0x115F | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 |
+                0xF900..=0xFAFF | 0xFE30..=0xFE6F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6);
+            if wide { 2.0 } else { 1.0 }
+        })
+        .sum();
+    let per_unit = font_size * 0.55 * if bold { 1.06 } else { 1.0 };
+    units * per_unit
+}
+
 /// A pending pairing approval dialog: a client asked to control this
 /// workbook and the user hasn't answered yet.
 pub struct PairingPrompt {
@@ -2259,6 +2284,7 @@ impl Spreadsheet {
 
             // Formatting
             CommandId::ToggleBold => self.toggle_bold(cx),
+            CommandId::FitColumnWidth => self.fit_selection_columns(window, cx),
             CommandId::AlignLeft => self.set_alignment_selection(visigrid_engine::cell::Alignment::Left, cx),
             CommandId::AlignCenter => self.set_alignment_selection(visigrid_engine::cell::Alignment::Center, cx),
             CommandId::AlignRight => self.set_alignment_selection(visigrid_engine::cell::Alignment::Right, cx),
@@ -3291,127 +3317,202 @@ impl Spreadsheet {
     }
 
     /// Auto-fit column width to content
-    pub fn auto_fit_col_width(&mut self, col: usize, cx: &mut Context<Self>) {
-        let old = self.col_widths
-            .get(&self.cached_sheet_id)
-            .and_then(|m| m.get(&col))
-            .copied();
+    /// Measure the width a set of columns needs to show their content.
+    ///
+    /// One pass over the sheet's POPULATED cells (not 65,536 rows per column),
+    /// measuring the same text the grid renders. With a `window` the text is
+    /// really shaped by the font system, honouring size and bold; without one
+    /// (the import-time path has no window) it falls back to an estimate over
+    /// CHARACTERS — the old code multiplied `str::len()`, which is bytes, so
+    /// "café" measured as 5 and CJK as 3× its true width.
+    fn measure_columns(
+        &self,
+        cols: &[usize],
+        window: Option<&Window>,
+        cx: &App,
+    ) -> HashMap<usize, f32> {
+        use std::collections::HashSet;
 
-        let mut max_width: f32 = 40.0; // Minimum width
+        let wanted: HashSet<usize> = cols.iter().copied().collect();
+        let mut widths: HashMap<usize, f32> = cols.iter().map(|c| (*c, MIN_AUTOFIT_WIDTH)).collect();
+        let sheet = self.sheet(cx);
 
-        // Check all rows for content in this column
-        for row in 0..NUM_ROWS {
-            let text = self.sheet(cx).get_text(row, col);
-            if !text.is_empty() {
-                // Estimate width: ~7px per character + padding
-                let estimated_width = text.len() as f32 * 7.5 + 16.0;
-                max_width = max_width.max(estimated_width);
+        let coords: Vec<(usize, usize)> = sheet
+            .cells_iter()
+            .map(|(&rc, _)| rc)
+            .filter(|(_, c)| wanted.contains(c))
+            .collect();
+
+        for (row, col) in coords {
+            let text = sheet.get_formatted_display(row, col);
+            if text.is_empty() {
+                continue;
             }
+            let format = sheet.get_format(row, col);
+            let font_size = format.font_size.unwrap_or(self.metrics.font_size);
+            let width = match window {
+                Some(w) => {
+                    let shared: SharedString = text.into();
+                    let len = shared.len();
+                    let font = Font {
+                        weight: if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
+                        style: if format.italic { FontStyle::Italic } else { FontStyle::Normal },
+                        ..Font::default()
+                    };
+                    let shaped = w.text_system().shape_line(
+                        shared,
+                        px(font_size),
+                        &[TextRun {
+                            len,
+                            font,
+                            color: Hsla::default(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    );
+                    let w: f32 = shaped.width.into();
+                    w
+                }
+                None => estimate_text_width(&text, font_size, format.bold),
+            };
+            let entry = widths.entry(col).or_insert(MIN_AUTOFIT_WIDTH);
+            *entry = entry.max(width + AUTOFIT_PADDING);
         }
 
-        self.set_col_width(col, max_width);
-        self.record_col_width_change(col, old, cx);
+        for w in widths.values_mut() {
+            *w = w.clamp(MIN_AUTOFIT_WIDTH, MAX_AUTOFIT_WIDTH);
+        }
+        widths
+    }
+
+    /// Apply measured widths to `cols`, recording one undo entry for the lot.
+    fn fit_columns(&mut self, cols: Vec<usize>, window: Option<&Window>, cx: &mut Context<Self>) {
+        if cols.is_empty() {
+            return;
+        }
+        let sheet_id = self.cached_sheet_id;
+        let old_widths: Vec<(usize, Option<f32>)> = cols
+            .iter()
+            .map(|&col| (col, self.col_widths.get(&sheet_id).and_then(|m| m.get(&col)).copied()))
+            .collect();
+
+        let measured = self.measure_columns(&cols, window, cx);
+        for (&col, &width) in measured.iter() {
+            self.set_col_width(col, width);
+        }
+
+        let mut actions = Vec::new();
+        for (col, old) in old_widths {
+            let new = self.col_widths.get(&sheet_id).and_then(|m| m.get(&col)).copied();
+            if old != new {
+                actions.push(crate::history::UndoAction::ColumnWidthSet { sheet_id, col, old, new });
+            }
+        }
+        if !actions.is_empty() {
+            let count = actions.len();
+            if count == 1 {
+                self.history.record_action_with_provenance(actions.remove(0), None);
+            } else {
+                self.history.record_action_with_provenance(
+                    crate::history::UndoAction::Group {
+                        actions,
+                        description: "Auto-fit column widths".to_string(),
+                    },
+                    None,
+                );
+            }
+            self.is_modified = true;
+            self.status_message = Some(if count == 1 {
+                "Fit 1 column to its content".to_string()
+            } else {
+                format!("Fit {} columns to their content", count)
+            });
+        } else {
+            self.status_message = Some("Columns already fit their content".to_string());
+        }
         cx.notify();
     }
 
-    /// Auto-fit row height to content (for multi-line text in future)
-    pub fn auto_fit_row_height(&mut self, row: usize, cx: &mut Context<Self>) {
-        // For now, just reset to default since we don't support multi-line
-        self.sheet_row_heights_mut().remove(&row);
-        cx.notify();
+    /// Fit every column touched by the current selection (or the active
+    /// cell's column when nothing wider is selected). The palette and
+    /// keyboard entry point — the header double-click uses
+    /// `auto_fit_selected_col_widths`.
+    pub fn fit_selection_columns(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut cols: Vec<usize> = Vec::new();
+        for ((_, min_col), (_, max_col)) in self.all_selection_ranges() {
+            for col in min_col..=max_col {
+                if !cols.contains(&col) {
+                    cols.push(col);
+                }
+            }
+        }
+        if cols.is_empty() {
+            cols.push(self.view_state.active_cell().1);
+        }
+        // A whole-sheet selection (Ctrl+A) would mean 256 columns; fit only
+        // those that actually hold something.
+        if cols.len() > 1 {
+            let populated: std::collections::HashSet<usize> =
+                self.sheet(cx).cells_iter().map(|(&(_, c), _)| c).collect();
+            cols.retain(|c| populated.contains(c));
+        }
+        self.fit_columns(cols, Some(window), cx);
     }
 
-    /// Auto-fit column width - if column is selected and multiple columns are selected,
+    pub fn auto_fit_col_width(&mut self, col: usize, window: Option<&Window>, cx: &mut Context<Self>) {
+        self.fit_columns(vec![col], window, cx);
+    }
+
+    /// Auto-fit column width - if the clicked column is part of the selection,
     /// auto-fit all selected columns (Excel behavior)
-    pub fn auto_fit_selected_col_widths(&mut self, clicked_col: usize, cx: &mut Context<Self>) {
-        // Check if clicked column is part of selection
-        if self.is_col_header_selected(clicked_col) {
-            // Collect all selected columns
-            let mut cols_to_fit = Vec::new();
+    pub fn auto_fit_selected_col_widths(
+        &mut self,
+        clicked_col: usize,
+        window: Option<&Window>,
+        cx: &mut Context<Self>,
+    ) {
+        let cols = if self.is_col_header_selected(clicked_col) {
+            let mut cols = Vec::new();
             for ((_, min_col), (_, max_col)) in self.all_selection_ranges() {
                 for col in min_col..=max_col {
-                    if !cols_to_fit.contains(&col) {
-                        cols_to_fit.push(col);
+                    if !cols.contains(&col) {
+                        cols.push(col);
                     }
                 }
             }
-            // Capture old widths before auto-fit
-            let sheet_id = self.cached_sheet_id;
-            let old_widths: Vec<(usize, Option<f32>)> = cols_to_fit.iter().map(|&col| {
-                let old = self.col_widths.get(&sheet_id).and_then(|m| m.get(&col)).copied();
-                (col, old)
-            }).collect();
-
-            // Auto-fit each selected column
-            for col in &cols_to_fit {
-                self.auto_fit_col_width_no_notify(*col, cx);
-            }
-
-            // Record undo as a group so Ctrl+Z reverts all at once
-            let mut actions = Vec::new();
-            for (col, old) in old_widths {
-                let new = self.col_widths.get(&sheet_id).and_then(|m| m.get(&col)).copied();
-                if old != new {
-                    actions.push(crate::history::UndoAction::ColumnWidthSet {
-                        sheet_id,
-                        col,
-                        old,
-                        new,
-                    });
-                }
-            }
-            if !actions.is_empty() {
-                if actions.len() == 1 {
-                    self.history.record_action_with_provenance(actions.remove(0), None);
-                } else {
-                    self.history.record_action_with_provenance(
-                        crate::history::UndoAction::Group {
-                            actions,
-                            description: "Auto-fit column widths".to_string(),
-                        },
-                        None,
-                    );
-                }
-                self.is_modified = true;
-            }
-            cx.notify();
+            cols
         } else {
-            // Not part of selection, just auto-fit the clicked column
-            self.auto_fit_col_width(clicked_col, cx);
-        }
+            vec![clicked_col]
+        };
+        self.fit_columns(cols, window, cx);
     }
 
-    /// Auto-fit column width without notifying (for batch operations)
-    fn auto_fit_col_width_no_notify(&mut self, col: usize, cx: &App) {
-        let mut max_width: f32 = 40.0; // Minimum width
-        for row in 0..NUM_ROWS {
-            let text = self.sheet(cx).get_text(row, col);
-            if !text.is_empty() {
-                let estimated_width = text.len() as f32 * 7.5 + 16.0;
-                max_width = max_width.max(estimated_width);
-            }
-        }
-        self.set_col_width(col, max_width);
-    }
-
-    /// Auto-fit all columns that have content (for agent-built sheets)
-    /// Scans all columns up to the rightmost cell with data.
+    /// Auto-fit all columns that have content (for agent-built sheets).
+    /// Runs at import time, where no window is available — see
+    /// `measure_columns` for what that costs.
     pub fn auto_fit_all_data_columns(&mut self, cx: &App) {
-        // Find the rightmost column with data
-        let mut max_col = 0usize;
-        for row in 0..100 {  // Check first 100 rows for content
-            for col in 0..100 {  // Check first 100 columns
-                let text = self.sheet(cx).get_text(row, col);
-                if !text.is_empty() {
-                    max_col = max_col.max(col);
-                }
-            }
+        let cols: Vec<usize> = {
+            let mut seen: Vec<usize> = self.sheet(cx).cells_iter().map(|(&(_, c), _)| c).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            seen
+        };
+        if cols.is_empty() {
+            return;
         }
+        let measured = self.measure_columns(&cols, None, cx);
+        for (&col, &width) in measured.iter() {
+            self.set_col_width(col, width);
+        }
+    }
 
-        // Auto-fit each column with data
-        for col in 0..=max_col {
-            self.auto_fit_col_width_no_notify(col, cx);
-        }
+    /// Auto-fit row height. Rows reset to the default height: VisiGrid has no
+    /// multi-line cell text yet, so there is nothing taller to fit to.
+    pub fn auto_fit_row_height(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.sheet_row_heights_mut().remove(&row);
+        cx.notify();
     }
 
     /// Auto-fit row height - if row is selected and multiple rows are selected,
@@ -4510,6 +4611,55 @@ mod paste_values_tests {
         let expected = format!("\"{}\"", id);
         assert_eq!(expected, "\"12345678901234567890\"");
         // This is valid JSON string format
+    }
+}
+
+#[cfg(test)]
+mod autofit_tests {
+    use super::estimate_text_width;
+
+    // The window-less estimator is what runs at import time. The old one
+    // multiplied str::len() — BYTES — so any non-ASCII text measured far too
+    // wide. These pin the properties that bug violated.
+    #[test]
+    fn counts_characters_not_bytes() {
+        // "café" is 5 bytes, 4 chars. It must not measure wider than "cafe".
+        let accented = estimate_text_width("café", 14.0, false);
+        let ascii = estimate_text_width("cafe", 14.0, false);
+        assert!(
+            (accented - ascii).abs() < 0.01,
+            "accented text measured {} vs plain {} — byte length leaking in",
+            accented, ascii
+        );
+    }
+
+    #[test]
+    fn east_asian_text_is_double_width_not_triple() {
+        // Each CJK char is 3 bytes but renders about 2 columns wide.
+        let cjk = estimate_text_width("日本語", 14.0, false);
+        let three_ascii = estimate_text_width("abc", 14.0, false);
+        let ratio = cjk / three_ascii;
+        assert!(
+            (1.9..=2.1).contains(&ratio),
+            "CJK measured {}x ASCII of the same length; expected ~2x",
+            ratio
+        );
+    }
+
+    #[test]
+    fn scales_with_font_size_and_weight() {
+        let small = estimate_text_width("hello", 10.0, false);
+        let large = estimate_text_width("hello", 20.0, false);
+        assert!(large > small * 1.9, "width should track font size");
+        assert!(
+            estimate_text_width("hello", 14.0, true) > estimate_text_width("hello", 14.0, false),
+            "bold text is wider"
+        );
+    }
+
+    #[test]
+    fn empty_text_has_no_width() {
+        assert_eq!(estimate_text_width("", 14.0, false), 0.0);
     }
 }
 

@@ -143,6 +143,7 @@ actions!(view, [
     ShowPreferences,  // Cmd+, on macOS - currently routes to theme picker
     OpenKeybindings,  // Open keybindings.json for editing
     ToggleProblems,
+    FitColumnWidth,
     ToggleZenMode,
     ToggleLuaConsole, // Alt+F11 - Lua scripting REPL (matches Excel VBA Editor)
     ToggleTerminal,   // Ctrl+` - PTY terminal panel

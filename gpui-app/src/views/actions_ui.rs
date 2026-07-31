@@ -257,6 +257,9 @@ pub(crate) fn bind(
             }
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &FitColumnWidth, window, cx| {
+            this.fit_selection_columns(window, cx);
+        }))
         .on_action(cx.listener(|this, _: &ToggleProblems, _window, cx| {
             use crate::app::BottomPanelTab;
             if this.bottom_panel_visible && this.bottom_panel_tab == BottomPanelTab::Problems {
