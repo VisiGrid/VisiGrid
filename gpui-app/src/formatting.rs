@@ -10,6 +10,7 @@ use visigrid_engine::sheet::MergedRegion;
 use crate::app::{Spreadsheet, TriState, SelectionFormatState, NUM_ROWS, NUM_COLS};
 use crate::history::{CellFormatPatch, FormatActionKind, UndoAction};
 use crate::mode::Mode;
+use crate::repeat::RepeatAction;
 
 /// Format Painter state: captured format + locked flag.
 #[derive(Debug, Clone)]
@@ -151,6 +152,7 @@ impl Spreadsheet {
 
     /// Set bold on all selected cells (explicit value, not toggle)
     pub fn set_bold(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::Bold(value));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -176,6 +178,7 @@ impl Spreadsheet {
 
     /// Set italic on all selected cells (explicit value, not toggle)
     pub fn set_italic(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::Italic(value));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -201,6 +204,7 @@ impl Spreadsheet {
 
     /// Set underline on all selected cells (explicit value, not toggle)
     pub fn set_underline(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::Underline(value));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -226,6 +230,7 @@ impl Spreadsheet {
 
     /// Set strikethrough on all selected cells (explicit value, not toggle)
     pub fn set_strikethrough(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::Strikethrough(value));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -251,6 +256,7 @@ impl Spreadsheet {
 
     /// Set font family on all selected cells
     pub fn set_font_family_selection(&mut self, font: Option<String>, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::FontFamily(font.clone()));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -277,6 +283,7 @@ impl Spreadsheet {
 
     /// Set horizontal alignment on all selected cells
     pub fn set_alignment_selection(&mut self, alignment: Alignment, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::Alignment(alignment));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -329,6 +336,7 @@ impl Spreadsheet {
 
     /// Set vertical alignment on all selected cells
     pub fn set_vertical_alignment_selection(&mut self, valign: VerticalAlignment, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::VerticalAlignment(valign));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -389,6 +397,7 @@ impl Spreadsheet {
 
     /// Set number format on all selected cells
     pub fn set_number_format_selection(&mut self, format: NumberFormat, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::NumberFormat(format.clone()));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -510,6 +519,7 @@ impl Spreadsheet {
 
     /// Set background color on all selected cells
     pub fn set_background_color(&mut self, color: Option<[u8; 4]>, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::BackgroundColor(color));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -535,6 +545,7 @@ impl Spreadsheet {
 
     /// Set font size on all selected cells
     pub fn set_font_size_selection(&mut self, size: Option<f32>, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::FontSize(size));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -564,6 +575,7 @@ impl Spreadsheet {
 
     /// Set font color on all selected cells
     pub fn set_font_color_selection(&mut self, color: Option<[u8; 4]>, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::FontColor(color));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -588,6 +600,7 @@ impl Spreadsheet {
     }
 
     pub fn set_cell_style_selection(&mut self, style: CellStyle, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::CellStyle(style));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
             for row in min_row..=max_row {
@@ -727,6 +740,7 @@ impl Spreadsheet {
     /// Clear all formatting on selected cells, resetting to CellFormat::default().
     /// Records a single undo step regardless of cell count.
     pub fn clear_formatting_selection(&mut self, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::ClearFormatting);
         let mut patches = Vec::new();
         let default = CellFormat::default();
         for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
@@ -758,6 +772,7 @@ impl Spreadsheet {
     /// Canonicalization: UI commands set BOTH sides of every shared edge they touch
     /// to prevent conflicting border states from normal use.
     pub fn apply_borders(&mut self, mode: BorderApplyMode, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::Borders(mode));
         // Use current_border_color if set, otherwise None (Automatic = theme default)
         let thin = CellBorder {
             style: visigrid_engine::cell::BorderStyle::Thin,
@@ -1050,6 +1065,7 @@ impl Spreadsheet {
 
     /// Execute the merge after confirmation (or directly when no data loss).
     pub fn merge_cells_confirmed(&mut self, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::MergeCells);
         let ((min_row, min_col), (max_row, max_col)) = match self.merge_confirm.merge_range.take()
         {
             Some(range) => range,
@@ -1149,6 +1165,7 @@ impl Spreadsheet {
 
     /// Unmerge all merged regions that overlap the current selection.
     pub fn unmerge_cells(&mut self, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::UnmergeCells);
         let sheet_index = self.sheet_index(cx);
 
         // Collect all merges that overlap any selection range

@@ -747,7 +747,13 @@ pub(crate) fn bind(
             }
         }))
         // F4 reference cycling
-        .on_action(cx.listener(|this, _: &CycleReference, _, cx| {
+        // F4 means two things in Excel: cycle a reference's absoluteness
+        // while editing a formula, and repeat the last command otherwise.
+        .on_action(cx.listener(|this, _: &CycleReference, window, cx| {
+            if !this.mode.is_editing() {
+                this.repeat_last_action(window, cx);
+                return;
+            }
             this.cycle_reference(cx);
         }))
         .on_action(cx.listener(|this, _: &ConfirmEditInPlace, _, cx| {

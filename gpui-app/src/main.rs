@@ -8,6 +8,7 @@ mod ai_dialog_state;
 mod rewind_state;
 mod validation_state;
 mod ai_metrics;
+mod repeat;
 mod rewind;
 mod ai_actions;
 mod app;

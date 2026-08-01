@@ -272,6 +272,10 @@ impl Spreadsheet {
             return out;
         }
 
+        // Row/column ops route through the GUI's own methods (so view state
+        // and undo stay right), and those methods record the F4 repeat slot.
+        // An agent's insert must not become what the user's F4 repeats.
+        self.suppress_repeat_capture = true;
         let description = match op {
             StructureOp::InsertRows { at, count, .. } => {
                 self.insert_rows(*at, *count, cx);
@@ -308,6 +312,8 @@ impl Spreadsheet {
                 format!("Renamed sheet \"{}\" to \"{}\"", old, new_name)
             }
         };
+
+        self.suppress_repeat_capture = false;
 
         // Attribute the undo entry the GUI method just recorded (row/col ops
         // record one; sheet ops record none, matching the GUI's own behavior).

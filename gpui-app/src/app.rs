@@ -12,6 +12,7 @@ use crate::find_replace::MatchHit;
 use crate::formatting::BorderApplyMode;
 use crate::history::{History, HistoryFingerprint};
 use crate::mode::Mode;
+use crate::repeat::RepeatAction;
 use crate::search::{SearchEngine, SearchAction, CommandId, CommandSearchProvider, GoToSearchProvider, SearchItem, MenuCategory};
 use crate::settings::{
     user_settings_path, open_settings_file, user_settings, update_user_settings,
@@ -938,6 +939,12 @@ pub struct Spreadsheet {
     pub(crate) session_request_tx: std::sync::mpsc::Sender<crate::session_server::SessionRequest>,
     /// Pending pairing approval dialog (client name + reply channel).
     pub pairing_prompt: Option<PairingPrompt>,
+    /// Last repeatable command, for F4. See repeat.rs for why it is written
+    /// by the mutation methods rather than at a dispatch layer.
+    pub repeat_action: Option<crate::repeat::RepeatAction>,
+    /// Set while re-applying (or while an agent drives a GUI mutation path)
+    /// so the slot is not overwritten by its own replay.
+    pub(crate) suppress_repeat_capture: bool,
 }
 
 /// Cache for cell search results, invalidated by cells_rev
@@ -1391,6 +1398,8 @@ impl Spreadsheet {
             session_server: session_server,
             session_request_rx: session_rx,
             pairing_prompt: None,
+            repeat_action: None,
+            suppress_repeat_capture: false,
             session_request_tx: session_tx,
         };
 
@@ -2284,6 +2293,7 @@ impl Spreadsheet {
 
             // Formatting
             CommandId::ToggleBold => self.toggle_bold(cx),
+            CommandId::RepeatLastAction => self.repeat_last_action(window, cx),
             CommandId::FitColumnWidth => self.fit_selection_columns(window, cx),
             CommandId::AlignLeft => self.set_alignment_selection(visigrid_engine::cell::Alignment::Left, cx),
             CommandId::AlignCenter => self.set_alignment_selection(visigrid_engine::cell::Alignment::Center, cx),
@@ -3440,6 +3450,7 @@ impl Spreadsheet {
     /// keyboard entry point — the header double-click uses
     /// `auto_fit_selected_col_widths`.
     pub fn fit_selection_columns(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_repeat(crate::repeat::RepeatAction::FitColumnWidth);
         let mut cols: Vec<usize> = Vec::new();
         for ((_, min_col), (_, max_col)) in self.all_selection_ranges() {
             for col in min_col..=max_col {
@@ -3818,6 +3829,12 @@ impl Spreadsheet {
                 }
             }
         }
+        // A toggle over a mixed selection has no single "new value", so the
+        // repeat slot takes the ACTIVE cell's resolved state — that is the
+        // one the user was looking at when they pressed the key.
+        let (r, c) = self.view_state.active_cell();
+        let resolved = self.sheet(cx).get_format(r, c).bold;
+        self.set_repeat(RepeatAction::Bold(resolved));
         self.is_modified = true;
         cx.notify();
     }
@@ -3830,6 +3847,9 @@ impl Spreadsheet {
                 }
             }
         }
+        let (r, c) = self.view_state.active_cell();
+        let resolved = self.sheet(cx).get_format(r, c).italic;
+        self.set_repeat(RepeatAction::Italic(resolved));
         self.is_modified = true;
         cx.notify();
     }
@@ -3842,6 +3862,9 @@ impl Spreadsheet {
                 }
             }
         }
+        let (r, c) = self.view_state.active_cell();
+        let resolved = self.sheet(cx).get_format(r, c).underline;
+        self.set_repeat(RepeatAction::Underline(resolved));
         self.is_modified = true;
         cx.notify();
     }
@@ -3854,6 +3877,9 @@ impl Spreadsheet {
                 }
             }
         }
+        let (r, c) = self.view_state.active_cell();
+        let resolved = self.sheet(cx).get_format(r, c).strikethrough;
+        self.set_repeat(RepeatAction::Strikethrough(resolved));
         self.is_modified = true;
         cx.notify();
     }
@@ -3866,6 +3892,7 @@ impl Spreadsheet {
                 }
             }
         }
+        self.set_repeat(RepeatAction::NumberFormat(NumberFormat::currency(2)));
         self.is_modified = true;
         cx.notify();
     }
@@ -3878,6 +3905,7 @@ impl Spreadsheet {
                 }
             }
         }
+        self.set_repeat(RepeatAction::NumberFormat(NumberFormat::Percent { decimals: 2 }));
         self.is_modified = true;
         cx.notify();
     }

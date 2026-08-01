@@ -8,6 +8,7 @@
 
 use gpui::*;
 use crate::app::{Spreadsheet, NUM_ROWS, NUM_COLS};
+use crate::repeat::RepeatAction;
 
 impl Spreadsheet {
     // =========================================================================
@@ -90,6 +91,7 @@ impl Spreadsheet {
 
     /// Insert rows at position with undo support
     pub(crate) fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::InsertRows(count));
         let sheet_index = self.sheet_index(cx);
 
         // Perform the insert through the engine's structural entry point so
@@ -143,6 +145,7 @@ impl Spreadsheet {
 
     /// Delete rows at position with undo support
     pub(crate) fn delete_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::DeleteRows(count));
         let sheet_index = self.sheet_index(cx);
 
         // Capture cells to be deleted for undo
@@ -223,6 +226,7 @@ impl Spreadsheet {
 
     /// Insert columns at position with undo support
     pub(crate) fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::InsertCols(count));
         let sheet_index = self.sheet_index(cx);
 
         // Perform the insert
@@ -270,6 +274,7 @@ impl Spreadsheet {
 
     /// Delete columns at position with undo support
     pub(crate) fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+        self.set_repeat(RepeatAction::DeleteCols(count));
         let sheet_index = self.sheet_index(cx);
 
         // Capture cells to be deleted for undo

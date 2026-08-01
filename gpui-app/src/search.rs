@@ -109,6 +109,7 @@ pub enum CommandId {
 
     // Formatting
     ToggleBold,
+    RepeatLastAction,
     FitColumnWidth,
     AlignLeft,
     AlignCenter,
@@ -317,6 +318,7 @@ impl CommandId {
             Self::PasteFormulas => "Paste Formulas",
             Self::PasteFormats => "Paste Formats",
             Self::ToggleBold => "Toggle Bold",
+            Self::RepeatLastAction => "Repeat Last Action",
             Self::FitColumnWidth => "Fit Column to Width",
             Self::AlignLeft => "Align Left",
             Self::AlignCenter => "Align Center",
@@ -483,6 +485,7 @@ impl CommandId {
             #[cfg(not(target_os = "macos"))]
             Self::PasteSpecial => Some("Ctrl+Alt+V"),
             Self::ToggleBold => Some("Ctrl+B"),
+            Self::RepeatLastAction => Some("F4"),
             Self::FitColumnWidth => Some("Ctrl+Alt+F"),
             Self::AlignLeft => None,
             Self::AlignCenter => None,
@@ -572,6 +575,7 @@ impl CommandId {
             Self::PasteFormulas => "clipboard special formulas reference adjust",
             Self::PasteFormats => "clipboard special formatting style",
             Self::ToggleBold => "format style",
+            Self::RepeatLastAction => "again redo same repeat last command f4 apply again",
             Self::FitColumnWidth => "autofit auto fit column width resize widen size to content best fit",
             Self::AlignLeft => "format alignment horizontal",
             Self::AlignCenter => "format alignment horizontal middle",
@@ -743,6 +747,7 @@ impl CommandId {
             Self::PasteFormulas,
             Self::PasteFormats,
             Self::ToggleBold,
+            Self::RepeatLastAction,
             Self::FitColumnWidth,
             Self::AlignLeft,
             Self::AlignCenter,
@@ -962,6 +967,7 @@ impl CommandId {
             | Self::ManageConditionalFormats
             | Self::ClearConditionalFormats
             | Self::ToggleBold
+            | Self::RepeatLastAction
             | Self::FitColumnWidth
             | Self::AlignLeft
             | Self::AlignCenter
