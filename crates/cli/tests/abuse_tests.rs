@@ -18,8 +18,20 @@ fn vgrid() -> Command {
     cmd
 }
 
+/// Where `ensure_template` writes the workbook it builds.
+///
+/// This is a generated artifact, not a fixture: `ensure_template` constructs
+/// the whole workbook in code and saves it, so writing it into the source
+/// tree would leave `git status` dirty after every `cargo test` — enough to
+/// block the release script's clean-tree pre-flight. Worse, `peek_tests` and
+/// `inspect_tests` read the tracked copy at
+/// `tests/abuse/templates/recon-template.sheet`, and integration test
+/// binaries run in parallel, so writing there raced their reads.
+///
+/// `CARGO_TARGET_TMPDIR` is cargo's per-package scratch directory for
+/// integration tests, and it survives for the whole run.
 fn template_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/abuse/templates/recon-template.sheet")
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("abuse-recon-template.sheet")
 }
 
 fn csv_path(name: &str) -> std::path::PathBuf {
