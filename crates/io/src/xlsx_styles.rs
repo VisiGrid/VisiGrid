@@ -21,6 +21,8 @@ use zip::ZipArchive;
 /// Parsed style table from styles.xml — maps cellXfs index → CellFormat.
 pub struct StyleTable {
     pub styles: Vec<CellFormat>,
+    /// Differential formats (`<dxfs>`), indexed by a CF rule's `dxfId`.
+    pub dxfs: Vec<ParsedDxf>,
 }
 
 impl StyleTable {
@@ -48,6 +50,8 @@ pub struct SheetFormatting {
     pub frozen_rows: usize,
     /// Frozen column count from `<pane xSplit=".."/>`, 0 if the sheet has no freeze
     pub frozen_cols: usize,
+    /// Conditional-formatting rules, in application order.
+    pub cond_rules: Vec<ParsedCondRule>,
 }
 
 /// Stats about style parsing for the import report.
@@ -279,6 +283,14 @@ fn parse_argb_hex(hex: &[u8]) -> Option<[u8; 4]> {
         let r = u8::from_str_radix(&s[2..4], 16).ok()?;
         let g = u8::from_str_radix(&s[4..6], 16).ok()?;
         let b = u8::from_str_radix(&s[6..8], 16).ok()?;
+        // Excel ignores the alpha channel on these colour elements, and
+        // openpyxl (plus anything built on it) writes `00RRGGBB` for every
+        // fill and font colour. Taken literally that is fully transparent, so
+        // an entire workbook's formatting would import invisible. No writer
+        // expresses "transparent" this way — a blank fill is patternType
+        // "none" — so treat a zero alpha as opaque. A partial alpha like
+        // `80RRGGBB` is deliberate and preserved.
+        let a = if a == 0 { 255 } else { a };
         Some([r, g, b, a])
     } else if s.len() == 6 {
         // RRGGBB → RGBA (alpha=255)
@@ -339,7 +351,7 @@ pub fn parse_styles_xml(xml: &str) -> (StyleTable, Vec<String>) {
     // Step 2: Parse cellXfs and resolve each <xf> into a CellFormat
     let styles = parse_cell_xfs(xml, &custom_num_fmts, &fonts, &fills, &borders, &mut unsupported);
 
-    (StyleTable { styles }, unsupported)
+    (StyleTable { styles, dxfs: Vec::new() }, unsupported)
 }
 
 /// Parse <numFmts> section → HashMap<formatId, formatCode>
@@ -1169,6 +1181,7 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
         merged_regions,
         frozen_rows,
         frozen_cols,
+        cond_rules: parse_cond_formatting(xml),
     }
 }
 
@@ -1238,6 +1251,7 @@ pub fn parse_xlsx_formatting(
             return Ok((
                 StyleTable {
                     styles: Vec::new(),
+                    dxfs: Vec::new(),
                 },
                 sheet_names.iter().map(|_| SheetFormatting::default()).collect(),
                 stats,
@@ -1246,6 +1260,13 @@ pub fn parse_xlsx_formatting(
     };
     stats.unsupported_features = unsupported;
     stats.unique_styles = style_table.len();
+
+    // `<dxfs>` lives in styles.xml next to cellXfs; conditional rules index
+    // into it by dxfId.
+    let mut style_table = style_table;
+    if let Ok(xml) = read_zip_file(&mut archive, "xl/styles.xml") {
+        style_table.dxfs = parse_dxfs(&xml, &mut stats.unsupported_features);
+    }
 
     // Step 2: Resolve worksheet paths
     let workbook_xml = read_zip_file(&mut archive, "xl/workbook.xml")
@@ -1856,4 +1877,282 @@ mod pane_and_target_tests {
             "xl/worksheets/sheet1.xml"
         );
     }
+}
+
+// =============================================================================
+// Conditional formatting
+// =============================================================================
+
+/// A conditional-formatting rule lifted out of a worksheet, before it is
+/// translated into the engine's predicate form.
+#[derive(Debug, Clone)]
+pub struct ParsedCondRule {
+    /// Target ranges, from `sqref` (space-separated A1 ranges).
+    pub ranges: Vec<(usize, usize, usize, usize)>,
+    /// `type` attribute: cellIs, expression, containsText, …
+    pub kind: String,
+    /// `operator` attribute for cellIs rules.
+    pub operator: Option<String>,
+    /// `<formula>` children, in document order.
+    pub formulas: Vec<String>,
+    /// `text` attribute for the text-matching rule types.
+    pub text: Option<String>,
+    /// Index into the `<dxfs>` table; the style to apply.
+    pub dxf_id: Option<usize>,
+    /// Lower `priority` wins in Excel. Kept so rule order survives.
+    pub priority: i32,
+}
+
+/// Parse `<dxfs>` — the differential formats conditional rules point at.
+///
+/// A `dxf` is a sparse override, not a full style: it carries only the
+/// properties the rule changes, which is exactly the shape of
+/// `CellFormatOverride`. Note the fill quirk — in a dxf the solid colour
+/// lives in `bgColor`, where a normal `<fill>` puts it in `fgColor`.
+pub fn parse_dxfs(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedDxf> {
+    let mut dxfs = Vec::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+
+    let mut in_dxfs = false;
+    let mut depth_dxf = false;
+    let mut in_font = false;
+    let mut in_fill = false;
+    let mut current = ParsedDxf::default();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                match e.name().as_ref() {
+                    b"dxfs" => in_dxfs = true,
+                    b"dxf" if in_dxfs => {
+                        depth_dxf = true;
+                        current = ParsedDxf::default();
+                    }
+                    b"font" if depth_dxf => in_font = true,
+                    b"fill" if depth_dxf => in_fill = true,
+                    b"b" if in_font => current.bold = Some(bool_attr_or(e, true)),
+                    b"i" if in_font => current.italic = Some(bool_attr_or(e, true)),
+                    b"u" if in_font => current.underline = Some(true),
+                    b"strike" if in_font => current.strikethrough = Some(bool_attr_or(e, true)),
+                    b"sz" if in_font => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"val" {
+                                current.size = std::str::from_utf8(&attr.value)
+                                    .ok()
+                                    .and_then(|s| s.parse().ok());
+                            }
+                        }
+                    }
+                    b"color" if in_font => {
+                        let attrs = collect_attrs(e);
+                        current.font_color = parse_color_attrs(&attrs, unsupported);
+                    }
+                    // bgColor is the solid colour in a dxf; fgColor appears too
+                    // in files written by some tools, so accept either.
+                    b"bgColor" | b"fgColor" if in_fill => {
+                        let attrs = collect_attrs(e);
+                        if let Some(c) = parse_color_attrs(&attrs, unsupported) {
+                            current.fill_color = Some(c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(ref e)) => match e.name().as_ref() {
+                b"dxfs" => in_dxfs = false,
+                b"dxf" if depth_dxf => {
+                    depth_dxf = false;
+                    dxfs.push(std::mem::take(&mut current));
+                }
+                b"font" => in_font = false,
+                b"fill" => in_fill = false,
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    dxfs
+}
+
+/// A differential format: only the properties a CF rule overrides.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ParsedDxf {
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub underline: Option<bool>,
+    pub strikethrough: Option<bool>,
+    pub size: Option<f32>,
+    pub font_color: Option<[u8; 4]>,
+    pub fill_color: Option<[u8; 4]>,
+}
+
+impl ParsedDxf {
+    pub fn is_empty(&self) -> bool {
+        *self == ParsedDxf::default()
+    }
+}
+
+/// `<b/>` means true; `<b val="0"/>` means false.
+fn bool_attr_or(e: &quick_xml::events::BytesStart, default: bool) -> bool {
+    for attr in e.attributes().flatten() {
+        if attr.key.as_ref() == b"val" {
+            return !(attr.value.as_ref() == b"0" || attr.value.as_ref() == b"false");
+        }
+    }
+    default
+}
+
+/// Parse `<conditionalFormatting>` blocks out of a worksheet XML.
+pub fn parse_cond_formatting(xml: &str) -> Vec<ParsedCondRule> {
+    let mut rules = Vec::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+
+    let mut current_ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
+    let mut current: Option<ParsedCondRule> = None;
+    let mut in_formula = false;
+    // quick-xml splits text around entity references, so `LEN(B1)&gt;4`
+    // arrives as Text("LEN(B1)"), GeneralRef("gt"), Text("4"). Taking the
+    // first Text event would silently truncate the predicate at the first
+    // comparison operator — and every useful CF formula has one.
+    let mut formula_buf = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            // A rule with no <formula> children is written self-closing, and a
+            // self-closing element never emits an End event — matching only on
+            // End would silently drop every containsText / duplicateValues /
+            // timePeriod rule in the file.
+            Ok(Event::Empty(ref e)) if e.name().as_ref() == b"cfRule" => {
+                rules.push(build_cf_rule(e, &current_ranges));
+            }
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                match e.name().as_ref() {
+                    b"conditionalFormatting" => {
+                        current_ranges = Vec::new();
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"sqref" {
+                                let sqref = String::from_utf8_lossy(&attr.value);
+                                // sqref is space-separated: "A1:B2 D4:D9"
+                                for part in sqref.split_whitespace() {
+                                    if let Some(r) = parse_sqref_part(part) {
+                                        current_ranges.push(r);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    b"cfRule" => current = Some(build_cf_rule(e, &current_ranges)),
+                    b"formula" => {
+                        in_formula = true;
+                        formula_buf.clear();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(ref t)) if in_formula => {
+                formula_buf.push_str(&String::from_utf8_lossy(t.as_ref()));
+            }
+            Ok(Event::GeneralRef(ref r)) if in_formula => {
+                let name = String::from_utf8_lossy(r.as_ref()).to_string();
+                if let Some(ch) = resolve_xml_entity(&name) {
+                    formula_buf.push(ch);
+                }
+            }
+            Ok(Event::End(ref e)) => match e.name().as_ref() {
+                b"formula" => {
+                    in_formula = false;
+                    if let Some(rule) = current.as_mut() {
+                        rule.formulas.push(std::mem::take(&mut formula_buf));
+                    }
+                }
+                b"cfRule" => {
+                    if let Some(rule) = current.take() {
+                        rules.push(rule);
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    // Excel treats a lower priority number as higher precedence; the engine
+    // applies rules in order with later rules winning per property, so
+    // reverse-sort to preserve which rule actually shows.
+    rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+    rules
+}
+
+/// One entry of an `sqref`: "A1:B2" or a bare "C3".
+fn parse_sqref_part(part: &str) -> Option<(usize, usize, usize, usize)> {
+    if part.contains(':') {
+        parse_merge_ref(part)
+    } else {
+        let (r, c) = parse_cell_ref(part)?;
+        Some((r, c, r, c))
+    }
+}
+
+/// Resolve an XML entity reference name (the part between `&` and `;`).
+fn resolve_xml_entity(name: &str) -> Option<char> {
+    match name {
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "amp" => Some('&'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ => {
+            let num = name.strip_prefix('#')?;
+            let code = match num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => num.parse::<u32>().ok()?,
+            };
+            char::from_u32(code)
+        }
+    }
+}
+
+/// Build a rule from a `<cfRule>` element's attributes.
+fn build_cf_rule(
+    e: &quick_xml::events::BytesStart,
+    ranges: &[(usize, usize, usize, usize)],
+) -> ParsedCondRule {
+    let mut rule = ParsedCondRule {
+        ranges: ranges.to_vec(),
+        kind: String::new(),
+        operator: None,
+        formulas: Vec::new(),
+        text: None,
+        dxf_id: None,
+        priority: 0,
+    };
+    for attr in e.attributes().flatten() {
+        // Attribute values carry entities too: a rule matching `say "hi"` is
+        // written text="say &quot;hi&quot;", and leaving that raw would embed
+        // the literal entity in the generated predicate.
+        let raw = String::from_utf8_lossy(&attr.value);
+        let val = quick_xml::escape::unescape(&raw)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| raw.to_string());
+        match attr.key.as_ref() {
+            b"type" => rule.kind = val,
+            b"operator" => rule.operator = Some(val),
+            b"text" => rule.text = Some(val),
+            b"dxfId" => rule.dxf_id = val.parse().ok(),
+            b"priority" => rule.priority = val.parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    rule
 }

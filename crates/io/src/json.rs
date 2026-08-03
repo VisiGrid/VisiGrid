@@ -334,8 +334,11 @@ struct FullDoc {
     /// v2 workbook form: when non-empty, `body` is unused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sheets: Vec<SheetBody>,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    active_sheet: usize,
+    /// Present whenever `sheets` is (v2 workbook form), including when it is
+    /// 0 — a consumer should never have to infer whether an absent field means
+    /// "sheet 0" or "unknown". Omitted in v1, where it has no meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_sheet: Option<usize>,
 }
 
 /// The per-sheet payload, shared between the v1 top-level body and each
@@ -501,7 +504,7 @@ pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<St
         version: FULL_JSON_VERSION,
         body: sheet_body(sheet, layout),
         sheets: Vec::new(),
-        active_sheet: 0,
+        active_sheet: None,
     };
     serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
 }
@@ -525,7 +528,7 @@ pub fn export_workbook(
         format: FULL_JSON_FORMAT.to_string(),
         version: FULL_JSON_WORKBOOK_VERSION,
         body: SheetBody::default(),
-        active_sheet: active_sheet.min(sheets.len().saturating_sub(1)),
+        active_sheet: Some(active_sheet.min(sheets.len().saturating_sub(1))),
         sheets,
     };
     serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
@@ -714,7 +717,7 @@ pub fn import_any(
         layouts.push(layout);
     }
 
-    let active = doc.active_sheet.min(sheets.len() - 1);
+    let active = doc.active_sheet.unwrap_or(0).min(sheets.len() - 1);
     // Recompute formulas (stored values are only a fallback for engine-less consumers)
     let mut wb = Workbook::from_sheets(sheets, active);
     wb.rebuild_dep_graph();

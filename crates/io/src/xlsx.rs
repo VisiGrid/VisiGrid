@@ -108,6 +108,8 @@ pub struct ImportResult {
     pub value_cells_backfilled: usize,
     /// Total merged cell regions imported
     pub merges_imported: usize,
+    /// Conditional-formatting rules translated into engine rules
+    pub cond_formats_imported: usize,
     /// Merged regions dropped due to overlap with existing merges
     pub merges_dropped_overlap: usize,
     /// Merged regions dropped due to invalid cell references
@@ -824,14 +826,15 @@ fn import_formatting(
     result: &mut ImportResult,
 ) {
     // Parse styles.xml and per-sheet formatting from the XLSX ZIP
-    let (style_table, sheet_formats, stats) = match xlsx_styles::parse_xlsx_formatting(path, sheet_names) {
+    let (style_table, sheet_formats, mut stats) = match xlsx_styles::parse_xlsx_formatting(path, sheet_names) {
         Ok(data) => data,
         Err(_) => return, // Graceful fallback: no formatting
     };
 
-    if style_table.len() == 0 {
-        return; // No styles to apply
-    }
+    // A file can carry layout and conditional formatting without a single cell
+    // style — returning here would drop both, so only the per-cell style work
+    // below is skipped.
+    let has_cell_styles = style_table.len() > 0;
 
     // Build a mapping from xlsx style index → workbook style_table index
     // by interning each parsed style into the workbook's global table
@@ -846,6 +849,9 @@ fn import_formatting(
 
     // Apply per-cell style IDs and handle styled-empty cells
     for (sheet_idx, sheet_fmt) in sheet_formats.iter().enumerate() {
+        if !has_cell_styles {
+            break;
+        }
         let sheet = match workbook.sheet_mut(sheet_idx) {
             Some(s) => s,
             None => continue,
@@ -907,6 +913,23 @@ fn import_formatting(
             }
         }
     }
+
+    // Import conditional formatting. json-full and the native format have
+    // carried `cond_formats` since the tier-1 work; xlsx was the one boundary
+    // that dropped it, so a Google Sheets export lost every rule.
+    let mut cf_unsupported: Vec<String> = Vec::new();
+    for (sheet_idx, sheet_fmt) in sheet_formats.iter().enumerate() {
+        if sheet_fmt.cond_rules.is_empty() {
+            continue;
+        }
+        let dxfs = style_table.dxfs.clone();
+        let rules = sheet_fmt.cond_rules.clone();
+        if let Some(sheet) = workbook.sheet_mut(sheet_idx) {
+            result.cond_formats_imported +=
+                apply_cond_formats(sheet, &rules, &dxfs, &mut cf_unsupported);
+        }
+    }
+    stats.unsupported_features.extend(cf_unsupported);
 
     result.unique_styles = workbook.style_table.len();
     result.unsupported_format_features.extend(stats.unsupported_features);
@@ -4736,5 +4759,267 @@ mod layout_round_trip_tests {
         let imported = &stats.imported_layouts[0];
         assert_eq!(imported.frozen_rows, 3);
         assert_eq!(imported.frozen_cols, 1);
+    }
+}
+
+// =============================================================================
+// Conditional formatting import
+// =============================================================================
+
+/// Translate one xlsx `cfRule` into the engine's predicate form.
+///
+/// The engine models a rule as a **formula predicate anchored at the top-left
+/// of its range**, which is the same anchoring Excel uses for `expression`
+/// rules — so those transfer verbatim. The typed rules (`cellIs`,
+/// `containsText`, …) are sugar over a comparison, and are rewritten into the
+/// equivalent formula against the anchor cell.
+///
+/// Rules with no predicate form — colour scales, data bars, icon sets, and the
+/// ranking rules (`top10`, `aboveAverage`) — are *not* representable: they
+/// compute a gradient or a population statistic rather than a per-cell
+/// boolean. Those are reported as unsupported and skipped, never approximated,
+/// because a wrong colour is worse than an absent one in a financial sheet.
+fn cond_rule_predicate(rule: &xlsx_styles::ParsedCondRule, anchor: &str) -> Option<String> {
+    let f = |i: usize| rule.formulas.get(i).map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    match rule.kind.as_str() {
+        // Already a predicate anchored at the top-left cell.
+        "expression" => f(0).map(|formula| {
+            if let Some(stripped) = formula.strip_prefix('=') {
+                format!("={}", stripped)
+            } else {
+                format!("={}", formula)
+            }
+        }),
+
+        "cellIs" => {
+            let op = rule.operator.as_deref()?;
+            let a = f(0)?;
+            match op {
+                "equal" => Some(format!("={}={}", anchor, a)),
+                "notEqual" => Some(format!("={}<>{}", anchor, a)),
+                "greaterThan" => Some(format!("={}>{}", anchor, a)),
+                "greaterThanOrEqual" => Some(format!("={}>={}", anchor, a)),
+                "lessThan" => Some(format!("={}<{}", anchor, a)),
+                "lessThanOrEqual" => Some(format!("={}<={}", anchor, a)),
+                "between" => {
+                    let b = f(1)?;
+                    Some(format!("=AND({a1}>={lo},{a1}<={hi})", a1 = anchor, lo = a, hi = b))
+                }
+                "notBetween" => {
+                    let b = f(1)?;
+                    Some(format!("=OR({a1}<{lo},{a1}>{hi})", a1 = anchor, lo = a, hi = b))
+                }
+                _ => None,
+            }
+        }
+
+        "containsText" => rule
+            .text
+            .as_ref()
+            .map(|t| format!("=ISNUMBER(SEARCH(\"{}\",{}))", escape_formula_string(t), anchor)),
+        "notContainsText" => rule
+            .text
+            .as_ref()
+            .map(|t| format!("=NOT(ISNUMBER(SEARCH(\"{}\",{})))", escape_formula_string(t), anchor)),
+        "beginsWith" => rule.text.as_ref().map(|t| {
+            let t = escape_formula_string(t);
+            format!("=LEFT({},{})=\"{}\"", anchor, t.chars().count(), t)
+        }),
+        "endsWith" => rule.text.as_ref().map(|t| {
+            let t = escape_formula_string(t);
+            format!("=RIGHT({},{})=\"{}\"", anchor, t.chars().count(), t)
+        }),
+
+        "containsBlanks" => Some(format!("=LEN(TRIM({}))=0", anchor)),
+        "notContainsBlanks" => Some(format!("=LEN(TRIM({}))>0", anchor)),
+        "containsErrors" => Some(format!("=ISERROR({})", anchor)),
+        "notContainsErrors" => Some(format!("=NOT(ISERROR({}))", anchor)),
+
+        _ => None,
+    }
+}
+
+/// A CF rule's text operand is interpolated into a formula string literal.
+fn escape_formula_string(s: &str) -> String {
+    s.replace('"', "\"\"")
+}
+
+/// 0-based (row, col) → an A1 reference like "B3".
+fn a1_ref(row: usize, col: usize) -> String {
+    let mut letters = String::new();
+    let mut n = col;
+    loop {
+        letters.insert(0, (b'A' + (n % 26) as u8) as char);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    format!("{}{}", letters, row + 1)
+}
+
+/// Build the engine style a rule applies from its `dxfId`.
+fn dxf_to_cond_style(dxf: &xlsx_styles::ParsedDxf) -> visigrid_engine::cond_format::CondStyle {
+    use visigrid_engine::cell::CellFormatOverride;
+    use visigrid_engine::cond_format::CondStyle;
+
+    CondStyle::Inline(CellFormatOverride {
+        bold: dxf.bold,
+        italic: dxf.italic,
+        underline: dxf.underline,
+        strikethrough: dxf.strikethrough,
+        font_size: dxf.size.map(Some),
+        font_color: dxf.font_color.map(Some),
+        background_color: dxf.fill_color.map(Some),
+        ..Default::default()
+    })
+}
+
+/// Apply parsed conditional-formatting rules to a sheet.
+fn apply_cond_formats(
+    sheet: &mut visigrid_engine::sheet::Sheet,
+    rules: &[xlsx_styles::ParsedCondRule],
+    dxfs: &[xlsx_styles::ParsedDxf],
+    unsupported: &mut Vec<String>,
+) -> usize {
+    use visigrid_engine::validation::CellRange;
+
+    let mut imported = 0;
+
+    for rule in rules {
+        if rule.ranges.is_empty() {
+            continue;
+        }
+        // The engine anchors a predicate at the top-left of the range, and
+        // Excel writes its formulas relative to the same cell.
+        let (top_row, top_col, _, _) = rule.ranges[0];
+        let anchor = a1_ref(top_row, top_col);
+
+        let Some(predicate) = cond_rule_predicate(rule, &anchor) else {
+            let label = format!("conditional formatting rule type \"{}\"", rule.kind);
+            if !unsupported.contains(&label) {
+                unsupported.push(label);
+            }
+            continue;
+        };
+
+        let style = match rule.dxf_id.and_then(|id| dxfs.get(id)) {
+            Some(dxf) if !dxf.is_empty() => dxf_to_cond_style(dxf),
+            _ => {
+                // A rule whose dxf carries nothing we model would render as a
+                // no-op; skip it rather than add an invisible rule.
+                if !unsupported.iter().any(|s| s.starts_with("conditional formatting style")) {
+                    unsupported
+                        .push("conditional formatting style (no supported properties)".to_string());
+                }
+                continue;
+            }
+        };
+
+        let ranges: Vec<CellRange> = rule
+            .ranges
+            .iter()
+            .map(|&(sr, sc, er, ec)| CellRange {
+                start_row: sr,
+                start_col: sc,
+                end_row: er,
+                end_col: ec,
+            })
+            .collect();
+
+        sheet.cond_formats.add(ranges, predicate, style);
+        imported += 1;
+    }
+
+    imported
+}
+
+#[cfg(test)]
+mod cond_format_import_tests {
+    use super::*;
+    use visigrid_engine::sheet::{Sheet, SheetId};
+
+    const SHEET_XML: &str = r#"<worksheet><sheetData/>
+      <conditionalFormatting sqref="A1:A5">
+        <cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>100</formula></cfRule>
+        <cfRule type="cellIs" dxfId="0" priority="2" operator="between"><formula>40</formula><formula>60</formula></cfRule>
+      </conditionalFormatting>
+      <conditionalFormatting sqref="B1:B3">
+        <cfRule type="expression" dxfId="0" priority="3"><formula>LEN(B1)&gt;4</formula></cfRule>
+      </conditionalFormatting>
+      <conditionalFormatting sqref="C1:C9">
+        <cfRule type="colorScale" priority="4"><colorScale/></cfRule>
+      </conditionalFormatting>
+    </worksheet>"#;
+
+    fn red_dxf() -> xlsx_styles::ParsedDxf {
+        xlsx_styles::ParsedDxf {
+            fill_color: Some([255, 199, 206, 255]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn typed_rules_become_predicates() {
+        let rules = xlsx_styles::parse_cond_formatting(SHEET_XML);
+        let mut sheet = Sheet::new(SheetId(1), 50, 10);
+        let mut unsupported = Vec::new();
+        let n = apply_cond_formats(&mut sheet, &rules, &[red_dxf()], &mut unsupported);
+
+        assert_eq!(n, 3, "three representable rules");
+        let predicates: Vec<&str> = sheet
+            .cond_formats
+            .iter()
+            .map(|r| r.predicate.as_str())
+            .collect();
+        assert!(predicates.contains(&"=A1>100"), "got {:?}", predicates);
+        assert!(predicates.contains(&"=AND(A1>=40,A1<=60)"), "got {:?}", predicates);
+        // The entity-split formula must survive whole — quick-xml delivers
+        // `LEN(B1)&gt;4` as three separate events.
+        assert!(predicates.contains(&"=LEN(B1)>4"), "got {:?}", predicates);
+    }
+
+    #[test]
+    fn color_scales_are_reported_not_approximated() {
+        let rules = xlsx_styles::parse_cond_formatting(SHEET_XML);
+        let mut sheet = Sheet::new(SheetId(1), 50, 10);
+        let mut unsupported = Vec::new();
+        apply_cond_formats(&mut sheet, &rules, &[red_dxf()], &mut unsupported);
+
+        assert!(
+            unsupported.iter().any(|s| s.contains("colorScale")),
+            "colour scales must be reported as unsupported, got {:?}",
+            unsupported
+        );
+        assert!(
+            sheet.cond_formats.iter().all(|r| !r.predicate.contains("colorScale")),
+            "a gradient must never be approximated into a predicate"
+        );
+    }
+
+    /// Excel's priority 1 wins; the engine applies rules in order with later
+    /// ones overriding, so the highest-precedence rule must land last.
+    #[test]
+    fn priority_order_is_preserved() {
+        let rules = xlsx_styles::parse_cond_formatting(SHEET_XML);
+        let priorities: Vec<i32> = rules.iter().map(|r| r.priority).collect();
+        let mut sorted = priorities.clone();
+        sorted.sort_by(|a, b| b.cmp(a));
+        assert_eq!(priorities, sorted, "rules must be ordered highest-priority-last");
+        assert_eq!(*priorities.last().unwrap(), 1);
+    }
+
+    #[test]
+    fn text_rules_quote_safely() {
+        let xml = r#"<worksheet><conditionalFormatting sqref="A1:A2">
+            <cfRule type="containsText" dxfId="0" priority="1" text="say &quot;hi&quot;"/>
+            </conditionalFormatting></worksheet>"#;
+        let rules = xlsx_styles::parse_cond_formatting(xml);
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        let mut unsupported = Vec::new();
+        apply_cond_formats(&mut sheet, &rules, &[red_dxf()], &mut unsupported);
+        let p = &sheet.cond_formats.iter().next().unwrap().predicate;
+        assert!(p.contains("\"\""), "inner quotes must be doubled: {}", p);
     }
 }
