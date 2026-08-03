@@ -131,6 +131,44 @@ pub struct ImportedLayout {
     pub col_widths: HashMap<usize, f64>,
     /// Row index → raw Excel point units
     pub row_heights: HashMap<usize, f64>,
+    /// Frozen row count from the sheet's `<pane>`, 0 if not frozen
+    pub frozen_rows: usize,
+    /// Frozen column count from the sheet's `<pane>`, 0 if not frozen
+    pub frozen_cols: usize,
+}
+
+impl ImportedLayout {
+    /// Convert raw Excel units to the pixel-based `SheetLayout` that
+    /// visigrid-json and the live-session protocol both speak.
+    pub fn to_sheet_layout(&self) -> crate::json::SheetLayout {
+        crate::json::SheetLayout {
+            col_widths: self
+                .col_widths
+                .iter()
+                .map(|(&col, &chars)| (col, excel_width_to_pixels(chars)))
+                .collect(),
+            row_heights: self
+                .row_heights
+                .iter()
+                .map(|(&row, &points)| (row, excel_height_to_pixels(points)))
+                .collect(),
+            frozen_rows: self.frozen_rows,
+            frozen_cols: self.frozen_cols,
+            ..Default::default()
+        }
+    }
+
+    /// The inverse, for handing imported layout back to the xlsx writer.
+    pub fn to_export_layout(&self) -> ExportLayout {
+        let sl = self.to_sheet_layout();
+        ExportLayout {
+            col_widths: sl.col_widths.into_iter().collect(),
+            row_heights: sl.row_heights.into_iter().collect(),
+            frozen_rows: sl.frozen_rows,
+            frozen_cols: sl.frozen_cols,
+            ..Default::default()
+        }
+    }
 }
 
 impl ImportResult {
@@ -884,6 +922,8 @@ fn import_formatting(
         .map(|sf| ImportedLayout {
             col_widths: sf.col_widths,
             row_heights: sf.row_heights,
+            frozen_rows: sf.frozen_rows,
+            frozen_cols: sf.frozen_cols,
         })
         .collect();
 }
@@ -1119,16 +1159,57 @@ pub struct ExportLayout {
     pub hidden_rows: Vec<usize>,
 }
 
-/// Convert pixel width to Excel column width (approximate)
-/// Excel measures column width in characters (based on default font)
-fn pixels_to_excel_width(px: f32) -> f64 {
-    (px / 7.0) as f64 // ~7 pixels per character
+// Column widths: the two directions below are NOT inverses of each other, and
+// that is deliberate. They convert between *different* unit spaces, because
+// import reads raw XML while export feeds a library API:
+//
+//   import ← the `width` attribute in the file. Per ECMA-376 this is
+//            `(chars * MDW + padding) / MDW` — the padding is ALREADY BAKED IN,
+//            so the attribute is not a character count and pixels are just
+//            `attr * MDW`.
+//
+//   export → `rust_xlsxwriter::set_column_width`, which takes the user-facing
+//            character count and re-adds the padding itself when it serialises
+//            (see its `write_col_info`). So it wants `(px - padding) / MDW`.
+//
+// Adding the padding on both sides looks symmetric and is wrong: it inflates
+// every column by 5px per xlsx → json → xlsx cycle. That drift is invisible in
+// a single conversion and only shows up on the second round trip, which is why
+// `round_trip_widths_are_stable` in the test module runs the loop twice.
+const MAX_DIGIT_WIDTH: f32 = 7.0;
+const CELL_PADDING_PX: f32 = 5.0;
+
+/// The raw xlsx `width` attribute → pixels. Padding is already included in the
+/// attribute, so this is a straight scale — do not add `CELL_PADDING_PX` here.
+pub fn excel_width_to_pixels(width_attr: f64) -> f32 {
+    (width_attr as f32 * MAX_DIGIT_WIDTH).round()
 }
 
-/// Convert pixel height to Excel row height
-/// Excel measures row height in points (1/72 inch)
+/// Pixels → the character count `rust_xlsxwriter::set_column_width` expects.
+/// It adds the padding back when writing the attribute.
+///
+/// Mirrors the library's own `set_column_width_pixels`, including its
+/// small-width branch: below one full character the padding dominates, so
+/// Excel divides by `MDW + padding` rather than subtracting first.
+fn pixels_to_excel_width(px: f32) -> f64 {
+    let px = px.max(0.0) as f64;
+    let mdw = MAX_DIGIT_WIDTH as f64;
+    let padding = CELL_PADDING_PX as f64;
+    if px < 12.0 {
+        px / (mdw + padding)
+    } else {
+        (px - padding) / mdw
+    }
+}
+
+/// Excel row height (points) → pixels. 1pt = 1/72in, 1px = 1/96in.
+pub fn excel_height_to_pixels(points: f64) -> f32 {
+    (points / 0.75) as f32
+}
+
+/// Pixels → Excel row height (points).
 fn pixels_to_excel_height(px: f32) -> f64 {
-    (px * 0.75) as f64 // 1 point ≈ 1.33 pixels
+    (px * 0.75) as f64
 }
 
 /// Export a VisiGrid workbook to XLSX format
@@ -2611,9 +2692,13 @@ mod tests {
 
     #[test]
     fn test_pixels_to_excel_width() {
-        // Test conversion - 7 pixels per character (approximate)
-        assert!((pixels_to_excel_width(70.0) - 10.0).abs() < 0.01);
-        assert!((pixels_to_excel_width(7.0) - 1.0).abs() < 0.01);
+        // Excel's column width excludes 5px of cell padding, so 70px of column
+        // is (70-5)/7 characters, not 10. This test previously asserted the
+        // naive 70/7 = 10; that formula is what let widths creep on every
+        // xlsx round trip (see `layout_round_trip_tests`).
+        assert!((pixels_to_excel_width(70.0) - 9.285_714).abs() < 0.01);
+        // Below 12px the padding dominates and Excel divides by MDW+padding.
+        assert!((pixels_to_excel_width(7.0) - 0.583_333).abs() < 0.01);
     }
 
     #[test]
@@ -4561,4 +4646,95 @@ mod tests {
         }
     }
 
+}
+
+#[cfg(test)]
+mod layout_round_trip_tests {
+    use super::*;
+    use visigrid_engine::sheet::{Sheet, SheetId};
+
+    fn wb_with_one_sheet() -> Workbook {
+        let mut sheet = Sheet::new(SheetId(1), 100, 20);
+        sheet.set_value(0, 0, "header");
+        Workbook::from_sheets(vec![sheet], 0)
+    }
+
+    /// Widths must not creep. A single conversion cannot show this — the
+    /// padding error only compounds on the *second* trip — so this runs the
+    /// loop three times and demands the pixel values never move.
+    #[test]
+    fn round_trip_widths_are_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let wb = wb_with_one_sheet();
+
+        let mut layout = ExportLayout::default();
+        layout.col_widths.insert(0, 154.0);
+        layout.col_widths.insert(1, 98.0);
+        layout.row_heights.insert(0, 45.0);
+        layout.frozen_rows = 1;
+        layout.frozen_cols = 2;
+
+        let mut current = layout.clone();
+        let mut observed = Vec::new();
+
+        for trip in 0..3 {
+            let path = dir.path().join(format!("trip{}.xlsx", trip));
+            export(&wb, &path, Some(&[current.clone()])).expect("export");
+            let (_, stats) = import(&path).expect("import");
+            let imported = stats.imported_layouts.first().cloned().unwrap_or_default();
+            let sl = imported.to_sheet_layout();
+
+            observed.push((
+                sl.col_widths.get(&0).copied(),
+                sl.col_widths.get(&1).copied(),
+                sl.frozen_rows,
+                sl.frozen_cols,
+            ));
+            current = imported.to_export_layout();
+        }
+
+        assert_eq!(
+            observed[0], observed[1],
+            "widths drifted between trip 1 and 2: {:?}",
+            observed
+        );
+        assert_eq!(
+            observed[1], observed[2],
+            "widths drifted between trip 2 and 3: {:?}",
+            observed
+        );
+        assert_eq!(observed[0].0, Some(154.0), "width should survive unchanged");
+        assert_eq!(observed[0].2, 1, "frozen_rows should survive");
+        assert_eq!(observed[0].3, 2, "frozen_cols should survive");
+    }
+
+    /// The two width directions are intentionally asymmetric — guard the
+    /// relationship so a future "cleanup" cannot quietly make them symmetric.
+    #[test]
+    fn width_attr_conversion_excludes_padding() {
+        // A stored attribute already contains the padding, so it scales
+        // straight to pixels. 22 chars-with-padding * 7 = 154px.
+        assert_eq!(excel_width_to_pixels(22.0), 154.0);
+        // The writer's API wants the bare character count instead.
+        assert!((pixels_to_excel_width(154.0) - 21.285_714).abs() < 1e-4);
+    }
+
+    #[test]
+    fn frozen_panes_survive_export_and_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frozen.xlsx");
+        let wb = wb_with_one_sheet();
+
+        let layout = ExportLayout {
+            frozen_rows: 3,
+            frozen_cols: 1,
+            ..Default::default()
+        };
+        export(&wb, &path, Some(&[layout])).expect("export");
+
+        let (_, stats) = import(&path).expect("import");
+        let imported = &stats.imported_layouts[0];
+        assert_eq!(imported.frozen_rows, 3);
+        assert_eq!(imported.frozen_cols, 1);
+    }
 }

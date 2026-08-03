@@ -184,40 +184,76 @@ pub(crate) fn cmd_convert(
             .with_hint("--sheet works with .sheet, .xlsx, and json-full inputs"));
     }
 
-    // Full-fidelity passthrough: json-full in, json-full out, no reshaping.
-    // Recomputes all formulas and preserves every sheet, layout side-car,
-    // and the active-sheet index — the server-side recalc primitive
-    // (blob in, recomputed blob out). Workbook-form inputs stay workbook
-    // form; single-sheet inputs stay version 1.
-    if matches!(input_format, Format::JsonFull)
-        && matches!(to, Format::JsonFull)
-        && sheet_arg.is_none()
-        && where_clauses.is_empty()
-        && select_args.is_empty()
-        && rename.is_none()
-    {
-        let content = match &input {
-            Some(path) => std::fs::read_to_string(path).map_err(|e| CliError::io(e.to_string()))?,
-            None => {
-                let mut buf = String::new();
-                io::stdin().read_to_string(&mut buf).map_err(|e| CliError::io(e.to_string()))?;
-                buf
+    // ── Full-fidelity path: keep the whole workbook, never collapse ──
+    //
+    // Everything below this block funnels through `read_file`, which returns a
+    // single `Sheet` and drops the workbook, the per-sheet layout and the
+    // active-sheet index on the floor. That is fine for csv/json/lines, whose
+    // shape is one table anyway, and wrong for the formats that carry a whole
+    // workbook: it silently discarded every sheet but one, plus every column
+    // width, row height and frozen pane.
+    //
+    // So workbook-in/workbook-out conversions are handled here instead, before
+    // the collapse — but only when no reshaping flag is present, since
+    // --sheet/--where/--select/--rename all mean "give me one reshaped table"
+    // and must keep their existing single-sheet semantics.
+    let reshaping = sheet_arg.is_some()
+        || !where_clauses.is_empty()
+        || !select_args.is_empty()
+        || rename.is_some();
+
+    let workbook_in = matches!(
+        input_format,
+        Format::JsonFull | Format::Xlsx | Format::Sheet
+    );
+
+    if !reshaping && workbook_in && matches!(to, Format::JsonFull | Format::Xlsx) {
+        let (wb, layouts, active) = read_workbook_full(input.as_deref(), input_format)?;
+
+        match to {
+            // json-full always emits v2 workbook form — see docs/cli/convert.md.
+            // A shape that varied with the input is what silently dropped
+            // sheet 2 for anyone converting a multi-sheet file.
+            Format::JsonFull => {
+                let out = visigrid_io::json::export_workbook(&wb, &layouts, active)
+                    .map_err(CliError::io)?;
+                match &output {
+                    Some(path) => std::fs::write(path, out.as_bytes())
+                        .map_err(|e| CliError::io(e.to_string()))?,
+                    None => {
+                        let mut stdout = io::stdout();
+                        stdout.write_all(out.as_bytes()).and_then(|_| stdout.write_all(b"\n"))
+                            .map_err(|e| CliError::io(e.to_string()))?;
+                    }
+                }
             }
-        };
-        let workbook_form = visigrid_io::json::is_workbook_form(&content);
-        let (wb, layouts, active) = visigrid_io::json::import_any(&content).map_err(CliError::io)?;
-        let out = if workbook_form {
-            visigrid_io::json::export_workbook(&wb, &layouts, active).map_err(CliError::io)?
-        } else {
-            visigrid_io::json::export_full_with_layout(&wb.sheets()[active], &layouts[active])
-                .map_err(CliError::io)?
-        };
-        match &output {
-            Some(path) => std::fs::write(path, out.as_bytes()).map_err(|e| CliError::io(e.to_string()))?,
-            None => {
-                let mut stdout = io::stdout();
-                stdout.write_all(out.as_bytes()).and_then(|_| stdout.write_all(b"\n"))
-                    .map_err(|e| CliError::io(e.to_string()))?;
+            // Layout has to be threaded here too, or a round trip through
+            // json-full loses the panes and widths on the way back OUT —
+            // import parsing them is only half the trip.
+            Format::Xlsx => {
+                let export_layouts: Vec<visigrid_io::xlsx::ExportLayout> =
+                    layouts.iter().map(sheet_layout_to_export).collect();
+                match &output {
+                    Some(path) => {
+                        visigrid_io::xlsx::export(&wb, path, Some(&export_layouts))
+                            .map_err(CliError::io)?;
+                    }
+                    None => {
+                        let (bytes, _) =
+                            visigrid_io::xlsx::export_to_buffer(&wb, Some(&export_layouts))
+                                .map_err(CliError::io)?;
+                        io::stdout()
+                            .write_all(&bytes)
+                            .map_err(|e| CliError::io(e.to_string()))?;
+                    }
+                }
+            }
+            _ => unreachable!("guarded by the matches! above"),
+        }
+
+        if !quiet {
+            if let Some(path) = &output {
+                eprintln!("Wrote {} ({} sheets)", path.display(), wb.sheets().len());
             }
         }
         return Ok(());
@@ -500,6 +536,106 @@ pub(crate) fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_
                 .map_err(|e| CliError::io(e.to_string()))?;
             parse_lines(&content, 0, 0)
         }
+    }
+}
+
+/// Read an input as a whole workbook: every sheet, per-sheet layout in pixels,
+/// and the active-sheet index. The counterpart to `read_file`, which collapses
+/// to one sheet — see the full-fidelity block in `cmd_convert`.
+fn read_workbook_full(
+    input: Option<&std::path::Path>,
+    format: Format,
+) -> Result<
+    (
+        visigrid_engine::workbook::Workbook,
+        Vec<visigrid_io::json::SheetLayout>,
+        usize,
+    ),
+    CliError,
+> {
+    match format {
+        Format::JsonFull => {
+            let content = match input {
+                Some(path) => std::fs::read_to_string(path)
+                    .map_err(|e| CliError::io(e.to_string()))?,
+                None => {
+                    let mut buf = String::new();
+                    io::stdin()
+                        .read_to_string(&mut buf)
+                        .map_err(|e| CliError::io(e.to_string()))?;
+                    buf
+                }
+            };
+            visigrid_io::json::import_any(&content).map_err(CliError::io)
+        }
+        Format::Xlsx => {
+            let path = input.ok_or_else(|| {
+                CliError::args("xlsx and sheet formats require file input")
+            })?;
+            let (wb, stats) = visigrid_io::xlsx::import(path).map_err(CliError::parse)?;
+            // Raw Excel units (character widths, points) → pixels.
+            let layouts: Vec<_> = stats
+                .imported_layouts
+                .iter()
+                .map(|l| l.to_sheet_layout())
+                .collect();
+            let active = wb.active_sheet_index();
+            let sheet_count = wb.sheets().len();
+            Ok((wb, pad_layouts(layouts, sheet_count), active))
+        }
+        Format::Sheet => {
+            let path = input.ok_or_else(|| {
+                CliError::args("xlsx and sheet formats require file input")
+            })?;
+            let wb = visigrid_io::native::load_workbook(path).map_err(CliError::io)?;
+            // .sheet stores layout workbook-wide, keyed by sheet index, and
+            // already in pixels. It has no frozen-pane column.
+            let native_layout = visigrid_io::native::load_layout(path);
+            let layouts: Vec<_> = (0..wb.sheets().len())
+                .map(|i| visigrid_io::json::SheetLayout {
+                    col_widths: native_layout
+                        .col_widths
+                        .get(&i)
+                        .map(|m| m.iter().map(|(&c, &w)| (c, w)).collect())
+                        .unwrap_or_default(),
+                    row_heights: native_layout
+                        .row_heights
+                        .get(&i)
+                        .map(|m| m.iter().map(|(&r, &h)| (r, h)).collect())
+                        .unwrap_or_default(),
+                    ..Default::default()
+                })
+                .collect();
+            let active = wb.active_sheet_index();
+            Ok((wb, layouts, active))
+        }
+        _ => Err(CliError::format(
+            "input format does not carry a workbook".to_string(),
+        )),
+    }
+}
+
+/// `export_workbook` indexes layouts positionally, so a short vector would
+/// silently give later sheets a default layout. Pad to the sheet count.
+fn pad_layouts(
+    mut layouts: Vec<visigrid_io::json::SheetLayout>,
+    sheet_count: usize,
+) -> Vec<visigrid_io::json::SheetLayout> {
+    while layouts.len() < sheet_count {
+        layouts.push(Default::default());
+    }
+    layouts
+}
+
+fn sheet_layout_to_export(
+    layout: &visigrid_io::json::SheetLayout,
+) -> visigrid_io::xlsx::ExportLayout {
+    visigrid_io::xlsx::ExportLayout {
+        col_widths: layout.col_widths.iter().map(|(&c, &w)| (c, w)).collect(),
+        row_heights: layout.row_heights.iter().map(|(&r, &h)| (r, h)).collect(),
+        frozen_rows: layout.frozen_rows,
+        frozen_cols: layout.frozen_cols,
+        ..Default::default()
     }
 }
 

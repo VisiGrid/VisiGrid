@@ -34,6 +34,7 @@ impl StyleTable {
 }
 
 /// Per-cell style references extracted from a worksheet XML.
+#[derive(Debug, Default, Clone)]
 pub struct SheetFormatting {
     /// (row, col, style_id) triples
     pub cell_styles: Vec<(usize, usize, usize)>,
@@ -43,6 +44,10 @@ pub struct SheetFormatting {
     pub row_heights: HashMap<usize, f64>,
     /// Merged cell regions: (start_row, start_col, end_row, end_col)
     pub merged_regions: Vec<(usize, usize, usize, usize)>,
+    /// Frozen row count from `<pane ySplit=".."/>`, 0 if the sheet has no freeze
+    pub frozen_rows: usize,
+    /// Frozen column count from `<pane xSplit=".."/>`, 0 if the sheet has no freeze
+    pub frozen_cols: usize,
 }
 
 /// Stats about style parsing for the import report.
@@ -972,6 +977,8 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
     let mut col_widths = HashMap::new();
     let mut row_heights = HashMap::new();
     let mut merged_regions = Vec::new();
+    let mut frozen_rows = 0usize;
+    let mut frozen_cols = 0usize;
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -1089,6 +1096,46 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
                             }
                         }
                     }
+                    b"pane" => {
+                        // <pane xSplit="1" ySplit="1" state="frozen"/> inside
+                        // <sheetView>. `state` matters: "split" is a draggable
+                        // splitter whose xSplit/ySplit are measured in twips,
+                        // not cells, so reading those as counts would produce
+                        // nonsense like 2415 frozen columns. Only "frozen" and
+                        // "frozenSplit" carry cell counts.
+                        let mut x_split = 0usize;
+                        let mut y_split = 0usize;
+                        let mut frozen = false;
+
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"xSplit" => {
+                                    x_split = std::str::from_utf8(&attr.value)
+                                        .ok()
+                                        .and_then(|s| s.parse::<f64>().ok())
+                                        .map(|v| v.max(0.0) as usize)
+                                        .unwrap_or(0);
+                                }
+                                b"ySplit" => {
+                                    y_split = std::str::from_utf8(&attr.value)
+                                        .ok()
+                                        .and_then(|s| s.parse::<f64>().ok())
+                                        .map(|v| v.max(0.0) as usize)
+                                        .unwrap_or(0);
+                                }
+                                b"state" => {
+                                    frozen = attr.value.as_ref() == b"frozen"
+                                        || attr.value.as_ref() == b"frozenSplit";
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        if frozen {
+                            frozen_rows = y_split;
+                            frozen_cols = x_split;
+                        }
+                    }
                     b"mergeCell" => {
                         // Parse ref="A1:C3" attribute
                         for attr in e.attributes().flatten() {
@@ -1120,6 +1167,8 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
         col_widths,
         row_heights,
         merged_regions,
+        frozen_rows,
+        frozen_cols,
     }
 }
 
@@ -1190,12 +1239,7 @@ pub fn parse_xlsx_formatting(
                 StyleTable {
                     styles: Vec::new(),
                 },
-                sheet_names.iter().map(|_| SheetFormatting {
-                    cell_styles: Vec::new(),
-                    col_widths: HashMap::new(),
-                    row_heights: HashMap::new(),
-                    merged_regions: Vec::new(),
-                }).collect(),
+                sheet_names.iter().map(|_| SheetFormatting::default()).collect(),
                 stats,
             ));
         }
@@ -1219,24 +1263,14 @@ pub fn parse_xlsx_formatting(
                 stats.styles_imported += sf.cell_styles.len();
                 sf
             }
-            Err(_) => SheetFormatting {
-                cell_styles: Vec::new(),
-                col_widths: HashMap::new(),
-                row_heights: HashMap::new(),
-                merged_regions: Vec::new(),
-            },
+            Err(_) => SheetFormatting::default(),
         };
         sheet_formats.push(formatting);
     }
 
     // Pad with empty formatting if we have fewer worksheet paths than sheets
     while sheet_formats.len() < sheet_names.len() {
-        sheet_formats.push(SheetFormatting {
-            cell_styles: Vec::new(),
-            col_widths: HashMap::new(),
-            row_heights: HashMap::new(),
-            merged_regions: Vec::new(),
-        });
+        sheet_formats.push(SheetFormatting::default());
     }
 
     Ok((style_table, sheet_formats, stats))
@@ -1365,10 +1399,31 @@ fn resolve_worksheet_paths_for_sheets(
             name_rid_map
                 .get(name.as_str())
                 .and_then(|rid| rid_to_target.get(*rid))
-                .map(|target| format!("xl/{}", target))
+                .map(|target| resolve_rel_target(target))
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// Resolve a relationship `Target` to a path inside the xlsx ZIP.
+///
+/// OPC allows two forms and both appear in the wild:
+///
+/// - **relative** to the containing part's directory — `worksheets/sheet1.xml`,
+///   which is what Excel and Google Sheets write, resolving under `xl/`
+/// - **package-absolute**, with a leading slash — `/xl/worksheets/sheet1.xml`,
+///   which is what openpyxl (and anything built on it) writes
+///
+/// Blindly prefixing `xl/` turns the second form into `xl//xl/worksheets/…`,
+/// which no ZIP entry matches. The lookup then fails *silently* — the caller
+/// falls back to `SheetFormatting::default()` — so the file imports with its
+/// cell values intact and every style, merge, column width and frozen pane
+/// quietly gone. That is why this needs to be exactly right.
+fn resolve_rel_target(target: &str) -> String {
+    match target.strip_prefix('/') {
+        Some(absolute) => absolute.to_string(),
+        None => format!("xl/{}", target),
+    }
 }
 
 // =============================================================================
@@ -1750,5 +1805,55 @@ mod tests {
         assert_eq!(sf.merged_regions.len(), 2);
         assert_eq!(sf.merged_regions[0], (0, 0, 2, 2));   // A1:C3
         assert_eq!(sf.merged_regions[1], (4, 4, 9, 5));   // E5:F10
+    }
+}
+
+#[cfg(test)]
+mod pane_and_target_tests {
+    use super::*;
+
+    #[test]
+    fn frozen_pane_is_parsed() {
+        let xml = r#"<worksheet><sheetViews><sheetView workbookViewId="0">
+            <pane xSplit="1" ySplit="2" topLeftCell="B3" activePane="bottomRight" state="frozen"/>
+            </sheetView></sheetViews><sheetData/></worksheet>"#;
+        let sf = parse_sheet_formatting(xml);
+        assert_eq!(sf.frozen_rows, 2);
+        assert_eq!(sf.frozen_cols, 1);
+    }
+
+    /// A split pane measures its offsets in twips, not cells. Reading those as
+    /// counts would claim thousands of frozen rows.
+    #[test]
+    fn split_pane_is_not_a_freeze() {
+        let xml = r#"<worksheet><sheetViews><sheetView workbookViewId="0">
+            <pane xSplit="2415" ySplit="1200" topLeftCell="C5" activePane="bottomRight" state="split"/>
+            </sheetView></sheetViews><sheetData/></worksheet>"#;
+        let sf = parse_sheet_formatting(xml);
+        assert_eq!(sf.frozen_rows, 0);
+        assert_eq!(sf.frozen_cols, 0);
+    }
+
+    #[test]
+    fn no_pane_means_no_freeze() {
+        let xml = r#"<worksheet><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetData/></worksheet>"#;
+        let sf = parse_sheet_formatting(xml);
+        assert_eq!(sf.frozen_rows, 0);
+        assert_eq!(sf.frozen_cols, 0);
+    }
+
+    /// openpyxl writes package-absolute targets. Prefixing "xl/" to those
+    /// produced "xl//xl/worksheets/sheet1.xml", which matched no ZIP entry, so
+    /// styles, merges, widths and panes were all dropped without a warning.
+    #[test]
+    fn rel_targets_resolve_in_both_forms() {
+        assert_eq!(
+            resolve_rel_target("worksheets/sheet1.xml"),
+            "xl/worksheets/sheet1.xml"
+        );
+        assert_eq!(
+            resolve_rel_target("/xl/worksheets/sheet1.xml"),
+            "xl/worksheets/sheet1.xml"
+        );
     }
 }
