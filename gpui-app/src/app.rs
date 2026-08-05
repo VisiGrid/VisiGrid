@@ -3825,7 +3825,7 @@ impl Spreadsheet {
 
     // Formatting (applies to all discontiguous selection ranges)
     pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     self.active_sheet_mut(cx, |s| s.toggle_bold(row, col));
@@ -3843,7 +3843,7 @@ impl Spreadsheet {
     }
 
     pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     self.active_sheet_mut(cx, |s| s.toggle_italic(row, col));
@@ -3858,7 +3858,7 @@ impl Spreadsheet {
     }
 
     pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     self.active_sheet_mut(cx, |s| s.toggle_underline(row, col));
@@ -3873,7 +3873,7 @@ impl Spreadsheet {
     }
 
     pub fn toggle_strikethrough(&mut self, cx: &mut Context<Self>) {
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     self.active_sheet_mut(cx, |s| s.toggle_strikethrough(row, col));
@@ -3888,7 +3888,7 @@ impl Spreadsheet {
     }
 
     pub fn format_currency(&mut self, cx: &mut Context<Self>) {
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     self.active_sheet_mut(cx, |s| s.set_number_format(row, col, NumberFormat::currency(2)));
@@ -3901,7 +3901,7 @@ impl Spreadsheet {
     }
 
     pub fn format_percent(&mut self, cx: &mut Context<Self>) {
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     self.active_sheet_mut(cx, |s| s.set_number_format(row, col, NumberFormat::Percent { decimals: 2 }));

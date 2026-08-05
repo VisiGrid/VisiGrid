@@ -50,7 +50,58 @@ pub enum BorderApplyMode {
 /// for a fresh select-all).
 const MAX_FORMAT_STATE_CELLS: usize = 10_000;
 
+/// Above this many selected cells, a formatting command is clamped to the
+/// cells that actually hold something. See `format_apply_ranges`.
+///
+/// Deliberately the same number as the read-side cap. A first draft used
+/// 100_000, which looked generous until a test pointed out that one whole
+/// column is 65_536 cells — so clicking a column header and pressing Ctrl+B,
+/// an everyday gesture, still sat under the cap and materialised 65_536 cells
+/// plus 65_536 undo patches.
+const MAX_FORMAT_APPLY_CELLS: usize = MAX_FORMAT_STATE_CELLS;
+
 impl Spreadsheet {
+    /// The bounding box of every populated cell, or None on an empty sheet.
+    ///
+    /// Cheap regardless of grid size: the cell map is sparse, so this walks
+    /// what exists, not the 16.7M coordinates that could exist.
+    fn populated_bounds(&self, cx: &App) -> Option<(usize, usize, usize, usize)> {
+        let mut bounds: Option<(usize, usize, usize, usize)> = None;
+        for (&(row, col), _) in self.sheet(cx).cells_iter() {
+            bounds = Some(match bounds {
+                None => (row, col, row, col),
+                Some((r0, c0, r1, c1)) => (r0.min(row), c0.min(col), r1.max(row), c1.max(col)),
+            });
+        }
+        bounds
+    }
+
+    /// The ranges a formatting command should actually write to.
+    ///
+    /// Formatting lives on the cell, and the cell map is sparse — so writing
+    /// a format to a coordinate MATERIALISES a cell there. Ctrl+A then Ctrl+B
+    /// meant inserting 16.7M cells, cloning two `CellFormat`s per cell into an
+    /// undo patch, and then saving all of it to disk. The app hung, and the
+    /// file would have grown by orders of magnitude. This is the write-side
+    /// counterpart to `MAX_FORMAT_STATE_CELLS`, which capped the read-side
+    /// scan for the same reason (issue #5).
+    ///
+    /// Selections below the cap are applied exactly as given, so the ordinary
+    /// case is untouched: format an empty block, type into it, and the text is
+    /// still formatted. Past the cap — select-all, or a column header click —
+    /// the clamped result is visually identical anyway, because a format on a
+    /// cell with no content and no neighbours renders nothing.
+    ///
+    /// The limitation this accepts: after a clamped apply, typing into a cell
+    /// that was outside the populated area does not inherit the format.
+    /// Excel would inherit it, because Excel stores row/column/sheet-level
+    /// defaults. Doing that properly needs a format hierarchy in the engine,
+    /// not a bigger loop here.
+    pub(crate) fn format_apply_ranges(&self, cx: &App) -> Vec<((usize, usize), (usize, usize))> {
+        // The sparse scan is lazy: it only runs when the selection is over the
+        // cap, so the ordinary path costs nothing.
+        plan_format_ranges(self.all_selection_ranges(), || self.populated_bounds(cx))
+    }
     /// Compute format state for the current selection (tri-state resolution)
     pub fn selection_format_state(&self, cx: &App) -> SelectionFormatState {
         let mut state = SelectionFormatState::default();
@@ -154,7 +205,7 @@ impl Spreadsheet {
     pub fn set_bold(&mut self, value: bool, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::Bold(value));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -180,7 +231,7 @@ impl Spreadsheet {
     pub fn set_italic(&mut self, value: bool, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::Italic(value));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -206,7 +257,7 @@ impl Spreadsheet {
     pub fn set_underline(&mut self, value: bool, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::Underline(value));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -232,7 +283,7 @@ impl Spreadsheet {
     pub fn set_strikethrough(&mut self, value: bool, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::Strikethrough(value));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -258,7 +309,7 @@ impl Spreadsheet {
     pub fn set_font_family_selection(&mut self, font: Option<String>, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::FontFamily(font.clone()));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -285,7 +336,7 @@ impl Spreadsheet {
     pub fn set_alignment_selection(&mut self, alignment: Alignment, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::Alignment(alignment));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -320,7 +371,7 @@ impl Spreadsheet {
     /// and formulas keep working because no cells are actually merged.
     pub fn center_across_selection_toggle(&mut self, cx: &mut Context<Self>) {
         let mut all_cas = true;
-        'outer: for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        'outer: for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     if self.sheet(cx).get_format(row, col).alignment != Alignment::CenterAcrossSelection {
@@ -338,7 +389,7 @@ impl Spreadsheet {
     pub fn set_vertical_alignment_selection(&mut self, valign: VerticalAlignment, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::VerticalAlignment(valign));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -368,7 +419,7 @@ impl Spreadsheet {
     /// Set text overflow on all selected cells
     pub fn set_text_overflow_selection(&mut self, overflow: TextOverflow, cx: &mut Context<Self>) {
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -399,7 +450,7 @@ impl Spreadsheet {
     pub fn set_number_format_selection(&mut self, format: NumberFormat, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::NumberFormat(format.clone()));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     // Safety net: convert text "X%" to number when applying Percent format
@@ -478,7 +529,7 @@ impl Spreadsheet {
     /// Adjust decimal places on selected cells - uses DecimalPlaces kind for coalescing
     pub fn adjust_decimals_selection(&mut self, delta: i8, cx: &mut Context<Self>) {
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -521,7 +572,7 @@ impl Spreadsheet {
     pub fn set_background_color(&mut self, color: Option<[u8; 4]>, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::BackgroundColor(color));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -547,7 +598,7 @@ impl Spreadsheet {
     pub fn set_font_size_selection(&mut self, size: Option<f32>, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::FontSize(size));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -577,7 +628,7 @@ impl Spreadsheet {
     pub fn set_font_color_selection(&mut self, color: Option<[u8; 4]>, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::FontColor(color));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -602,7 +653,7 @@ impl Spreadsheet {
     pub fn set_cell_style_selection(&mut self, style: CellStyle, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::CellStyle(style));
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -707,7 +758,7 @@ impl Spreadsheet {
     /// Shared helper: apply a format snapshot to all selected cells with undo.
     fn apply_format_to_selection(&mut self, format: &CellFormat, cx: &mut Context<Self>) {
         let mut patches = Vec::new();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -743,7 +794,7 @@ impl Spreadsheet {
         self.set_repeat(RepeatAction::ClearFormatting);
         let mut patches = Vec::new();
         let default = CellFormat::default();
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     let before = self.sheet(cx).get_format(row, col);
@@ -782,7 +833,7 @@ impl Spreadsheet {
         let mut patches = Vec::new();
 
         // For each selection range, apply borders with proper canonicalization
-        for ((min_row, min_col), (max_row, max_col)) in self.all_selection_ranges() {
+        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             match mode {
                 BorderApplyMode::All => {
                     // Set all 4 edges on each cell to Thin
@@ -1392,5 +1443,113 @@ impl Spreadsheet {
         format.border_right.is_set() ||
         format.border_bottom.is_set() ||
         format.border_left.is_set()
+    }
+}
+
+/// Decide which ranges a formatting command writes to.
+///
+/// Split out from `Spreadsheet::format_apply_ranges` so the clamping maths is
+/// testable without a Window: everything here is arithmetic over the
+/// selection and the populated bounding box.
+///
+/// `populated` is a closure because computing it walks the cell map, and the
+/// common case (a normal-sized selection) never needs it.
+fn plan_format_ranges(
+    ranges: Vec<((usize, usize), (usize, usize))>,
+    populated: impl FnOnce() -> Option<(usize, usize, usize, usize)>,
+) -> Vec<((usize, usize), (usize, usize))> {
+    let total: usize = ranges
+        .iter()
+        .map(|((r0, c0), (r1, c1))| {
+            (r1.saturating_sub(*r0) + 1).saturating_mul(c1.saturating_sub(*c0) + 1)
+        })
+        .sum();
+
+    if total <= MAX_FORMAT_APPLY_CELLS {
+        return ranges;
+    }
+
+    let Some((ur0, uc0, ur1, uc1)) = populated() else {
+        // Nothing on the sheet: formatting empty space would be invisible and
+        // unbounded, so there is nothing worth writing.
+        return Vec::new();
+    };
+
+    ranges
+        .iter()
+        .filter_map(|((r0, c0), (r1, c1))| {
+            let a0 = (*r0).max(ur0);
+            let b0 = (*c0).max(uc0);
+            let a1 = (*r1).min(ur1);
+            let b1 = (*c1).min(uc1);
+            (a0 <= a1 && b0 <= b1).then_some(((a0, b0), (a1, b1)))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod format_apply_range_tests {
+    // Explicit import: this module glob-imports gpui, whose `test` attribute
+    // macro would otherwise shadow the built-in one.
+    use super::{plan_format_ranges, MAX_FORMAT_APPLY_CELLS};
+
+    const SHEET: (usize, usize) = (65_536, 256);
+
+    fn select_all() -> Vec<((usize, usize), (usize, usize))> {
+        vec![((0, 0), (SHEET.0 - 1, SHEET.1 - 1))]
+    }
+
+    /// The whole point: Ctrl+A then Ctrl+B must not touch 16.7M coordinates.
+    #[test]
+    fn select_all_clamps_to_populated_cells() {
+        let planned = plan_format_ranges(select_all(), || Some((0, 0, 9, 3)));
+        assert_eq!(planned, vec![((0, 0), (9, 3))]);
+    }
+
+    /// A selection a human could plausibly drag is applied exactly as given,
+    /// so formatting an empty block then typing into it still works.
+    #[test]
+    fn ordinary_selections_are_untouched() {
+        let ranges = vec![((0, 0), (99, 9)), ((200, 0), (204, 2))];
+        let planned = plan_format_ranges(ranges.clone(), || {
+            panic!("must not scan the cell map for a small selection")
+        });
+        assert_eq!(planned, ranges);
+    }
+
+    /// Exactly at the cap is still "ordinary" — the clamp is strictly above.
+    #[test]
+    fn cap_boundary_is_inclusive() {
+        let rows = MAX_FORMAT_APPLY_CELLS / 10;
+        let ranges = vec![((0, 0), (rows - 1, 9))];
+        assert_eq!(
+            plan_format_ranges(ranges.clone(), || panic!("should not scan at the cap")),
+            ranges
+        );
+    }
+
+    #[test]
+    fn empty_sheet_writes_nothing() {
+        assert!(plan_format_ranges(select_all(), || None).is_empty());
+    }
+
+    /// A discontiguous selection keeps only the parts that overlap content,
+    /// and drops ranges that lie entirely outside it.
+    #[test]
+    fn disjoint_ranges_are_clipped_individually() {
+        let ranges = vec![
+            ((0, 0), (SHEET.0 - 1, 5)),   // overlaps content
+            ((50_000, 100), (60_000, 120)), // far below/right of everything
+        ];
+        let planned = plan_format_ranges(ranges, || Some((2, 1, 40, 4)));
+        assert_eq!(planned, vec![((2, 1), (40, 4))]);
+    }
+
+    /// Whole-column select (a real gesture: click the column header) is over
+    /// the cap on its own and clamps to the rows that hold data.
+    #[test]
+    fn whole_column_clamps_to_its_data() {
+        let planned = plan_format_ranges(vec![((0, 2), (SHEET.0 - 1, 2))], || Some((0, 0, 500, 8)));
+        assert_eq!(planned, vec![((0, 2), (500, 2))]);
     }
 }
