@@ -32,6 +32,7 @@ fn scope_name(scope: &PaletteScope) -> &'static str {
 pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let results = app.palette_results();
     let selected_idx = app.palette_selected;
+    let scroll_offset = app.palette_scroll_offset;
     let query = app.palette_query.clone();
     let has_query = !query.is_empty();
     let is_previewing = app.palette_previewing;
@@ -48,6 +49,7 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let text_muted = app.token(TokenKey::TextMuted);
     let text_disabled = app.token(TokenKey::TextDisabled);
     let selection_bg = app.token(TokenKey::SelectionBg);
+    let selection_text = app.token(TokenKey::SelectionText);
     let toolbar_hover = app.token(TokenKey::ToolbarButtonHoverBg);
 
     div()
@@ -120,7 +122,7 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                             .bg(selection_bg)
                                             .rounded_sm()
                                             .text_size(px(11.0))
-                                            .text_color(text_primary)
+                                            .text_color(selection_text)
                                             .font_weight(FontWeight::MEDIUM)
                                             .child(format!("{} \u{25B8}", scope_text))  // "FILE ▸"
                                     )
@@ -228,11 +230,17 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                         );
                     }
 
-                    // Add search results
+                    // Add search results — windowed so keyboard navigation
+                    // scrolls instead of walking off the visible panel.
+                    let visible_end = (scroll_offset
+                        + crate::app::Spreadsheet::PALETTE_VISIBLE)
+                        .min(results.len());
+                    let window = scroll_offset.min(results.len())..visible_end;
                     list = list.children(
-                        results.iter().enumerate().map(|(idx, item)| {
+                        results[window.clone()].iter().enumerate().map(|(i, item)| {
+                            let idx = window.start + i;
                             let is_selected = idx == selected_idx;
-                            render_search_item(item, is_selected, idx, text_primary, text_muted, selection_bg, toolbar_hover, cx)
+                            render_search_item(item, is_selected, idx, text_primary, text_muted, selection_bg, selection_text, toolbar_hover, cx)
                         })
                     );
 
@@ -475,6 +483,7 @@ fn render_search_item(
     text_primary: Hsla,
     text_muted: Hsla,
     selection_bg: Hsla,
+    selection_text: Hsla,
     hover_bg: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
@@ -488,8 +497,16 @@ fn render_search_item(
     // Icon based on result kind (use the centralized icon from SearchKind)
     let icon = kind.icon();
 
-    // Highlight color: brighter version of primary
-    let highlight_color = hsla(0.55, 0.8, 0.65, 1.0);  // Bright cyan/teal for highlights
+    // On an opaque selection row (VisiCalc inverse video), all text flips to
+    // the selection text color — the hardcoded cyan drowned in the block.
+    let title_color = if is_selected { selection_text } else { text_primary };
+    let icon_color = if is_selected { selection_text.opacity(0.7) } else { text_muted };
+    let sub_color = if is_selected { selection_text.opacity(0.7) } else { text_muted };
+    let highlight_color = if is_selected {
+        selection_text
+    } else {
+        hsla(0.55, 0.8, 0.65, 1.0) // bright cyan for matched characters
+    };
 
     let mut row = div()
         .id(ElementId::NamedInteger("palette-item".into(), idx as u64))
@@ -513,14 +530,14 @@ fn render_search_item(
                 // Kind icon
                 .child(
                     div()
-                        .text_color(text_muted)
+                        .text_color(icon_color)
                         .text_size(px(12.0))
                         .w(px(12.0))
                         .child(icon)
                 )
                 // Title with highlighted matches
                 .child(
-                    render_highlighted_text(&title, &highlights, text_primary, highlight_color)
+                    render_highlighted_text(&title, &highlights, title_color, highlight_color)
                 )
         );
 
@@ -532,7 +549,7 @@ fn render_search_item(
     if let Some(sub) = subtitle {
         row = row.child(
             div()
-                .text_color(text_muted)
+                .text_color(sub_color)
                 .text_size(px(12.0))
                 .child(sub)
         );

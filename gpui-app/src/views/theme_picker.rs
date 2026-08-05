@@ -26,6 +26,7 @@ pub fn render_theme_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> 
     let text_muted = app.token(TokenKey::TextMuted);
     let text_disabled = app.token(TokenKey::TextDisabled);
     let selection_bg = app.token(TokenKey::SelectionBg);
+    let selection_text = app.token(TokenKey::SelectionText);
     let toolbar_hover = app.token(TokenKey::ToolbarButtonHoverBg);
     let accent = app.token(TokenKey::Accent);
 
@@ -133,7 +134,7 @@ pub fn render_theme_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> 
                             filtered.iter().enumerate().take(12).map(|(idx, theme)| {
                                 let is_selected = idx == selected_idx;
                                 let is_current = theme.meta.id == current_theme_id.as_str();
-                                render_theme_item(theme, is_selected, is_current, idx, text_primary, text_muted, selection_bg, toolbar_hover, accent, cx)
+                                render_theme_item(theme, is_selected, is_current, idx, text_primary, text_muted, selection_bg, selection_text, toolbar_hover, accent, cx)
                             })
                         );
                     if filtered.is_empty() {
@@ -195,6 +196,7 @@ fn render_theme_item(
     text_primary: Hsla,
     text_muted: Hsla,
     selection_bg: Hsla,
+    selection_text: Hsla,
     hover_bg: Hsla,
     accent: Hsla,
     cx: &mut Context<Spreadsheet>,
@@ -208,6 +210,11 @@ fn render_theme_item(
     };
 
     let bg_color = if is_selected { selection_bg } else { hsla(0.0, 0.0, 0.0, 0.0) };
+    // Opaque-selection themes (VisiCalc inverse video) need the selection
+    // text color on highlighted rows — green-on-green otherwise.
+    let name_color = if is_selected { selection_text } else { text_primary };
+    let sub_color = if is_selected { selection_text.opacity(0.7) } else { text_muted };
+    let badge_color = if is_selected { selection_text } else { accent };
 
     // Get some theme colors for preview
     let preview_bg = theme.get(TokenKey::AppBg);
@@ -267,13 +274,13 @@ fn render_theme_item(
                         .flex_col()
                         .child(
                             div()
-                                .text_color(text_primary)
+                                .text_color(name_color)
                                 .text_size(px(13.0))
                                 .child(theme_name)
                         )
                         .child(
                             div()
-                                .text_color(text_muted)
+                                .text_color(sub_color)
                                 .text_size(px(11.0))
                                 .child(theme_appearance)
                         )
@@ -287,7 +294,7 @@ fn render_theme_item(
     if is_current {
         item = item.child(
             div()
-                .text_color(accent)
+                .text_color(badge_color)
                 .text_size(px(12.0))
                 .child("Active")
         );

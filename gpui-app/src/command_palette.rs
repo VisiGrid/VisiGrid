@@ -52,6 +52,7 @@ impl Spreadsheet {
         self.mode = Mode::Command;
         self.palette_query.clear();
         self.palette_selected = 0;
+        self.palette_scroll_offset = 0;
         self.palette_scope = scope;
         self.update_palette_results(cx);
         cx.notify();
@@ -153,6 +154,7 @@ impl Spreadsheet {
         self.mode = Mode::Command;
         self.palette_query = format!("References to {}", source_cell_ref);
         self.palette_selected = 0;
+        self.palette_scroll_offset = 0;
         self.palette_total_results = results.len();
         self.palette_results = results;
         cx.notify();
@@ -215,6 +217,7 @@ impl Spreadsheet {
         self.mode = Mode::Command;
         self.palette_query = format!("Precedents of {}", source_cell_ref);
         self.palette_selected = 0;
+        self.palette_scroll_offset = 0;
         self.palette_total_results = results.len();
         self.palette_results = results;
         cx.notify();
@@ -334,6 +337,7 @@ impl Spreadsheet {
         self.mode = Mode::Command;
         self.palette_query = format!("References to ${}", name);
         self.palette_selected = 0;
+        self.palette_scroll_offset = 0;
         self.palette_total_results = results.len();
         self.palette_results = results;
         cx.notify();
@@ -351,6 +355,7 @@ impl Spreadsheet {
         self.mode = Mode::Navigation;
         self.palette_query.clear();
         self.palette_selected = 0;
+        self.palette_scroll_offset = 0;
         self.palette_scope = None;  // Clear scope on close
         self.palette_results.clear();
         self.palette_previewing = false;
@@ -509,9 +514,23 @@ impl Spreadsheet {
         }
     }
 
+    /// Rows rendered at once; the window slides to keep the selection visible
+    /// (same pattern as the font picker).
+    pub(crate) const PALETTE_VISIBLE: usize = 6; // panel max_h 380px fits ~6 rows after chrome
+
+    fn palette_follow_selection(&mut self) {
+        if self.palette_selected < self.palette_scroll_offset {
+            self.palette_scroll_offset = self.palette_selected;
+        } else if self.palette_selected >= self.palette_scroll_offset + Self::PALETTE_VISIBLE {
+            self.palette_scroll_offset =
+                self.palette_selected + 1 - Self::PALETTE_VISIBLE;
+        }
+    }
+
     pub fn palette_up(&mut self, cx: &mut Context<Self>) {
         if self.palette_selected > 0 {
             self.palette_selected -= 1;
+            self.palette_follow_selection();
             cx.notify();
         }
     }
@@ -520,13 +539,15 @@ impl Spreadsheet {
         let count = self.palette_results.len();
         if self.palette_selected + 1 < count {
             self.palette_selected += 1;
+            self.palette_follow_selection();
             cx.notify();
         }
     }
 
     pub fn palette_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
         self.palette_query.push(c);
-        self.palette_selected = 0;  // Reset selection on filter change
+        self.palette_selected = 0;
+        self.palette_scroll_offset = 0;  // Reset selection on filter change
         self.update_palette_results(cx);
         cx.notify();
     }
@@ -549,13 +570,15 @@ impl Spreadsheet {
                 }
             }
             self.palette_query.pop();
-            self.palette_selected = 0;  // Reset selection on filter change
+            self.palette_selected = 0;
+        self.palette_scroll_offset = 0;  // Reset selection on filter change
             self.update_palette_results(cx);
             cx.notify();
         } else if self.palette_scope.is_some() {
             // Query empty but scoped - clear scope, return to full palette
             self.palette_scope = None;
             self.palette_selected = 0;
+        self.palette_scroll_offset = 0;
             self.update_palette_results(cx);
             cx.notify();
         }
@@ -567,6 +590,7 @@ impl Spreadsheet {
             // Clear palette state - don't restore since we're executing
             self.palette_query.clear();
             self.palette_selected = 0;
+        self.palette_scroll_offset = 0;
             self.palette_results.clear();
             self.palette_previewing = false;  // Clear previewing flag
 
@@ -588,6 +612,7 @@ impl Spreadsheet {
                 // Clear palette state
                 self.palette_query.clear();
                 self.palette_selected = 0;
+        self.palette_scroll_offset = 0;
                 self.palette_results.clear();
                 self.palette_previewing = false;
 

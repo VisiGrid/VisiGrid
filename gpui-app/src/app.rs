@@ -447,6 +447,8 @@ pub struct Spreadsheet {
     // Command palette
     pub palette_query: String,
     pub palette_selected: usize,
+    /// First visible row of the palette results (windowed list scroll).
+    pub palette_scroll_offset: usize,
     pub palette_scope: Option<PaletteScope>,  // Menu scope for Alt accelerators
     pub(crate) search_engine: SearchEngine,
     pub(crate) palette_results: Vec<SearchItem>,
@@ -1089,6 +1091,7 @@ impl Spreadsheet {
             find_focus_replace: false,
             palette_query: String::new(),
             palette_selected: 0,
+            palette_scroll_offset: 0,
             palette_scope: None,
             search_engine: Self::create_search_engine(),
             palette_results: Vec::new(),
