@@ -791,15 +791,18 @@ pub fn ledger_light_theme() -> Theme {
 pub fn visicalc_theme() -> Theme {
     let mut tokens = HashMap::new();
 
-    let black = rgb(0x000000);
-    let green = rgb(0x00ff66);
-    let green_dim = rgb(0x009944);
-    let green_bright = rgb(0x00ffaa);
-    let green_bg = rgb(0x003300);
+    let black = rgb(0x000000); // inverse-video text stays true black
+    // Palette aligned with the iPad app's VisiCalc theme: a green-tinted
+    // near-black (phosphor glow, not LCD void) and a warmer, less neon green.
+    let bg = rgb(0x061206);
+    let green = rgb(0x4af626);
+    let green_dim = rgb(0x2e9e2e);
+    let green_bright = rgb(0x7cfc00);
+    let green_bg = rgb(0x0e260e);
 
     // App surfaces
-    tokens.insert(TokenKey::AppBg, black);
-    tokens.insert(TokenKey::PanelBg, black);
+    tokens.insert(TokenKey::AppBg, bg);
+    tokens.insert(TokenKey::PanelBg, bg);
     tokens.insert(TokenKey::PanelBorder, green_dim);
     tokens.insert(TokenKey::TextPrimary, green);
     tokens.insert(TokenKey::TextMuted, green_dim);
@@ -807,29 +810,29 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::TextInverse, black);
 
     // Grid surfaces
-    tokens.insert(TokenKey::GridBg, black);
-    tokens.insert(TokenKey::GridLines, rgba(0x00990030));  // Faint green gridlines (18% opacity)
-    tokens.insert(TokenKey::GridLinesBold, rgb(0x004400));
+    tokens.insert(TokenKey::GridBg, bg);
+    tokens.insert(TokenKey::GridLines, rgb(0x1d4d1d));  // solid dim green — alpha over bright green read as graph paper
+    tokens.insert(TokenKey::GridLinesBold, rgb(0x275f27));
 
     // Headers
-    tokens.insert(TokenKey::HeaderBg, black);
-    tokens.insert(TokenKey::HeaderText, green);
-    tokens.insert(TokenKey::HeaderTextMuted, green_dim);
-    tokens.insert(TokenKey::HeaderBorder, green_dim);
+    tokens.insert(TokenKey::HeaderBg, green_bg); // distinct surface — headers were melting into the grid
+    tokens.insert(TokenKey::HeaderText, green_dim); // headers recede; content carries the brightness (matches iPad)
+    tokens.insert(TokenKey::HeaderTextMuted, rgb(0x1d661d));
+    tokens.insert(TokenKey::HeaderBorder, rgb(0x1d4d1d)); // gridline-weight, not a bright frame
     tokens.insert(TokenKey::HeaderHoverBg, green_bg);
     tokens.insert(TokenKey::HeaderActiveBg, green);
     tokens.insert(TokenKey::HeaderActiveText, black);
 
     // Cells
-    tokens.insert(TokenKey::CellBg, black);
-    tokens.insert(TokenKey::CellBgAlt, black);
+    tokens.insert(TokenKey::CellBg, bg);
+    tokens.insert(TokenKey::CellBgAlt, bg);
     tokens.insert(TokenKey::CellText, green);
     tokens.insert(TokenKey::CellTextMuted, green_dim);
     tokens.insert(TokenKey::CellBorderFocus, green);
-    tokens.insert(TokenKey::CellHoverBg, rgb(0x001100));
+    tokens.insert(TokenKey::CellHoverBg, rgb(0x0a1f0a));
 
     // Selection + cursor — original VisiCalc: inverse video (solid green block, black text)
-    tokens.insert(TokenKey::SelectionBg, rgba(0x00ff66ff));  // Fully opaque green — true inverse video
+    tokens.insert(TokenKey::SelectionBg, rgba(0x4af626ff));  // Fully opaque green — true inverse video
     tokens.insert(TokenKey::SelectionBorder, green);
     tokens.insert(TokenKey::SelectionText, black);           // Black text on green (inverse video)
     tokens.insert(TokenKey::SelectionHandle, green);
@@ -837,7 +840,7 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::CursorText, black);
 
     // Formula bar + editor (slightly lifted from pure black to indicate editing)
-    tokens.insert(TokenKey::FormulaBarBg, rgb(0x061206));  // Subtle green tint above black
+    tokens.insert(TokenKey::FormulaBarBg, rgb(0x0a1f0a));  // lifted above the (now tinted) grid bg
     tokens.insert(TokenKey::EditorBg, rgb(0x0a1a0a));  // Very dark green tint
     tokens.insert(TokenKey::EditorBorder, green);
     tokens.insert(TokenKey::EditorText, green_bright);
@@ -846,10 +849,10 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::EditorSelectionText, green_bright);
 
     // Status + chrome
-    tokens.insert(TokenKey::StatusBg, black);
+    tokens.insert(TokenKey::StatusBg, bg);
     tokens.insert(TokenKey::StatusText, green);
     tokens.insert(TokenKey::StatusTextMuted, green_dim);
-    tokens.insert(TokenKey::ToolbarBg, black);
+    tokens.insert(TokenKey::ToolbarBg, bg);
     tokens.insert(TokenKey::ToolbarBorder, green_dim);
     tokens.insert(TokenKey::ToolbarButtonHoverBg, green_bg);
     tokens.insert(TokenKey::ToolbarButtonActiveBg, green_bg);
