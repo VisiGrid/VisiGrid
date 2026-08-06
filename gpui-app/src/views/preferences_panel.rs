@@ -30,6 +30,11 @@ pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
         Setting::Inherit => EnterBehavior::MoveDown,
     };
 
+    let paste_values_by_default = match &user_settings.editing.paste_values_by_default {
+        Setting::Value(v) => *v,
+        Setting::Inherit => false, // Default: Ctrl+V pastes everything
+    };
+
     let keyboard_hints = match &user_settings.navigation.keyboard_hints {
         Setting::Value(v) => *v,
         Setting::Inherit => false, // Default
@@ -203,6 +208,26 @@ pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                                                 .child(enter_option("Down", EnterBehavior::MoveDown, enter_behavior, accent, text_primary, text_muted, cx))
                                                 .child(enter_option("Right", EnterBehavior::MoveRight, enter_behavior, accent, text_primary, text_muted, cx))
                                                 .child(enter_option("Stay", EnterBehavior::Stay, enter_behavior, accent, text_primary, text_muted, cx))
+                                        )
+                                )
+                                // Ctrl+V row. The behaviour has existed since
+                                // the purist cycle and was reachable only from
+                                // the command palette — but "make paste-values
+                                // the default" is a settings question, and
+                                // people look for it in settings.
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(row_label("Paste with Ctrl+V", text_muted))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(paste_default_option("Everything", false, paste_values_by_default, accent, text_primary, text_muted, cx))
+                                                .child(paste_default_option("Values only", true, paste_values_by_default, accent, text_primary, text_muted, cx))
                                         )
                                 )
                         )
@@ -533,6 +558,45 @@ fn enter_option(
         .on_click(cx.listener(move |_this, _, _, cx| {
             cx.update_global::<SettingsStore, _>(|store, _| {
                 store.user_settings_mut().editing.enter_behavior = Setting::Value(behavior);
+                store.save();
+            });
+            cx.notify();
+        }))
+        .child(label)
+}
+
+/// Default-paste option button.
+///
+/// Whichever way this is set, the other paste is always one shortcut away:
+/// Ctrl+Alt+Shift+V pastes values, and Paste Special (Ctrl+Alt+V) offers All,
+/// Values, Formulas and Formats. The preference only decides which one the
+/// bare Ctrl+V reaches for.
+fn paste_default_option(
+    label: &'static str,
+    value: bool,
+    current: bool,
+    accent: Hsla,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    let is_selected = current == value;
+    let bg = if is_selected { accent.opacity(0.2) } else { gpui::transparent_black() };
+    let text = if is_selected { text_primary } else { text_muted };
+
+    div()
+        .id(SharedString::from(format!("paste-default-{}", value)))
+        .px_2()
+        .py(px(3.0))
+        .rounded_sm()
+        .bg(bg)
+        .cursor_pointer()
+        .text_size(px(11.0))
+        .text_color(text)
+        .hover(|s| s.bg(accent.opacity(0.1)))
+        .on_click(cx.listener(move |_this, _, _, cx| {
+            cx.update_global::<SettingsStore, _>(|store, _| {
+                store.user_settings_mut().editing.paste_values_by_default = Setting::Value(value);
                 store.save();
             });
             cx.notify();
