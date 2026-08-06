@@ -635,6 +635,8 @@ fn sheet_layout_to_export(
         row_heights: layout.row_heights.iter().map(|(&r, &h)| (r, h)).collect(),
         frozen_rows: layout.frozen_rows,
         frozen_cols: layout.frozen_cols,
+        hidden_rows: layout.hidden_rows.iter().copied().collect(),
+        hidden_cols: layout.hidden_cols.iter().copied().collect(),
         ..Default::default()
     }
 }

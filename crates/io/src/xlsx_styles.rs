@@ -52,6 +52,10 @@ pub struct SheetFormatting {
     pub frozen_cols: usize,
     /// Conditional-formatting rules, in application order.
     pub cond_rules: Vec<ParsedCondRule>,
+    /// Rows carrying hidden="1".
+    pub hidden_rows: Vec<usize>,
+    /// Columns carrying hidden="1", expanded from each <col> span.
+    pub hidden_cols: Vec<usize>,
 }
 
 /// Stats about style parsing for the import report.
@@ -991,6 +995,8 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
     let mut merged_regions = Vec::new();
     let mut frozen_rows = 0usize;
     let mut frozen_cols = 0usize;
+    let mut hidden_rows: Vec<usize> = Vec::new();
+    let mut hidden_cols: Vec<usize> = Vec::new();
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -1005,6 +1011,7 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
                     b"row" => {
                         let mut row_idx: Option<usize> = None;
                         let mut custom_height = false;
+                        let mut row_hidden = false;
                         let mut ht: Option<f64> = None;
 
                         for attr in e.attributes().flatten() {
@@ -1024,6 +1031,10 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
                                     custom_height = attr.value.as_ref() == b"1"
                                         || attr.value.as_ref() == b"true";
                                 }
+                                b"hidden" => {
+                                    row_hidden = attr.value.as_ref() == b"1"
+                                        || attr.value.as_ref() == b"true";
+                                }
                                 _ => {}
                             }
                         }
@@ -1033,6 +1044,11 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
                         if custom_height {
                             if let (Some(row), Some(height)) = (row_idx, ht) {
                                 row_heights.insert(row, height);
+                            }
+                        }
+                        if row_hidden {
+                            if let Some(row) = row_idx {
+                                hidden_rows.push(row);
                             }
                         }
                     }
@@ -1072,6 +1088,7 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
                         let mut max_col: Option<usize> = None;
                         let mut width: Option<f64> = None;
                         let mut custom_width = false;
+                        let mut col_hidden = false;
 
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
@@ -1092,6 +1109,10 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
                                         .ok()
                                         .and_then(|s| s.parse().ok());
                                 }
+                                b"hidden" => {
+                                    col_hidden = attr.value.as_ref() == b"1"
+                                        || attr.value.as_ref() == b"true";
+                                }
                                 b"customWidth" => {
                                     custom_width = attr.value.as_ref() == b"1"
                                         || attr.value.as_ref() == b"true";
@@ -1105,6 +1126,13 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
                                 for col in min..=max {
                                     col_widths.insert(col, w);
                                 }
+                            }
+                        }
+                        // A <col> element covers a span, so one hidden="1"
+                        // can hide many columns at once.
+                        if col_hidden {
+                            if let (Some(min), Some(max)) = (min_col, max_col) {
+                                hidden_cols.extend(min..=max);
                             }
                         }
                     }
@@ -1182,6 +1210,8 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
         frozen_rows,
         frozen_cols,
         cond_rules: parse_cond_formatting(xml),
+        hidden_rows,
+        hidden_cols,
     }
 }
 
@@ -2155,4 +2185,45 @@ fn build_cf_rule(
         }
     }
     rule
+}
+
+#[cfg(test)]
+mod hidden_parsing_tests {
+    use super::*;
+
+    #[test]
+    fn hidden_rows_and_columns_are_parsed() {
+        let xml = r#"<worksheet>
+            <cols>
+                <col min="3" max="3" hidden="1"/>
+                <col min="5" max="5" width="12" customWidth="1"/>
+            </cols>
+            <sheetData>
+                <row r="1"/>
+                <row r="3" hidden="1"/>
+                <row r="4" hidden="true"/>
+            </sheetData></worksheet>"#;
+        let sf = parse_sheet_formatting(xml);
+        assert_eq!(sf.hidden_rows, vec![2, 3], "1-based rows 3,4 → 0-based 2,3");
+        assert_eq!(sf.hidden_cols, vec![2], "1-based col 3 → 0-based 2");
+        // A visible column with a custom width must not be swept up.
+        assert!(sf.col_widths.contains_key(&4));
+    }
+
+    /// One `<col>` element covers a span, so a single hidden="1" can hide a
+    /// whole block of columns.
+    #[test]
+    fn a_hidden_col_span_expands() {
+        let xml = r#"<worksheet><cols><col min="2" max="5" hidden="1"/></cols><sheetData/></worksheet>"#;
+        let sf = parse_sheet_formatting(xml);
+        assert_eq!(sf.hidden_cols, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn nothing_hidden_means_empty() {
+        let xml = r#"<worksheet><cols><col min="1" max="1" width="9"/></cols>
+            <sheetData><row r="1"/></sheetData></worksheet>"#;
+        let sf = parse_sheet_formatting(xml);
+        assert!(sf.hidden_rows.is_empty() && sf.hidden_cols.is_empty());
+    }
 }

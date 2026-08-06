@@ -96,6 +96,7 @@ mod tests {
 //   ],
 //   "merges": [{"start_row":0,"start_col":0,"end_row":0,"end_col":2}],
 //   "col_widths": {"0": 120.0},          // added 2026-07-28 (additive)
+//   "hidden_rows": [4, 5], "hidden_cols": [2],  // added 2026-08-05 (additive)
 //   "row_heights": {"3": 40.0},
 //   "frozen_rows": 1,
 //   "frozen_cols": 0,
@@ -123,7 +124,7 @@ mod tests {
 // consumers without an engine still see data. On import, formulas are
 // recomputed; the stored value is a fallback only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use visigrid_engine::cell::{Alignment, CellStyle, CellValue, VerticalAlignment};
@@ -142,6 +143,16 @@ pub struct SheetLayout {
     pub row_heights: BTreeMap<usize, f32>,
     pub frozen_rows: usize,
     pub frozen_cols: usize,
+    /// Rows the user collapsed out of view. BTreeSet for deterministic
+    /// serialization, like the maps above.
+    pub hidden_rows: BTreeSet<usize>,
+    /// Columns the user collapsed out of view.
+    ///
+    /// Worth carrying even though it looks cosmetic: a hidden column is
+    /// usually a scratch column full of intermediates, so losing the flag
+    /// doesn't just change the look — it dumps working notes into the middle
+    /// of the sheet.
+    pub hidden_cols: BTreeSet<usize>,
     /// AutoFilter/sort state (engine-backed on the web side).
     pub filter: Option<FilterSpec>,
     /// Opaque per-sheet charts payload: crates/io doesn't model charts, but
@@ -181,8 +192,14 @@ impl SheetLayout {
                 .filter_map(|(k, v)| shift_span(*k, *k, at, count, delete).map(|(nk, _)| (nk, *v)))
                 .collect()
         };
+        let shift_set = |set: &BTreeSet<usize>| -> BTreeSet<usize> {
+            set.iter()
+                .filter_map(|k| shift_span(*k, *k, at, count, delete).map(|(nk, _)| nk))
+                .collect()
+        };
         if is_row {
             self.row_heights = shift_keys(&self.row_heights);
+            self.hidden_rows = shift_set(&self.hidden_rows);
             if at < self.frozen_rows {
                 self.frozen_rows = if delete {
                     self.frozen_rows.saturating_sub(count.min(self.frozen_rows - at))
@@ -192,6 +209,7 @@ impl SheetLayout {
             }
         } else {
             self.col_widths = shift_keys(&self.col_widths);
+            self.hidden_cols = shift_set(&self.hidden_cols);
             if at < self.frozen_cols {
                 self.frozen_cols = if delete {
                     self.frozen_cols.saturating_sub(count.min(self.frozen_cols - at))
@@ -246,7 +264,9 @@ impl SheetLayout {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.col_widths.is_empty()
+        self.hidden_rows.is_empty()
+            && self.hidden_cols.is_empty()
+            && self.col_widths.is_empty()
             && self.row_heights.is_empty()
             && self.frozen_rows == 0
             && self.frozen_cols == 0
@@ -357,6 +377,12 @@ struct SheetBody {
     col_widths: BTreeMap<String, f32>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     row_heights: BTreeMap<String, f32>,
+    // Sorted index arrays rather than string-keyed maps: there is no value to
+    // carry, only membership.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hidden_rows: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hidden_cols: Vec<usize>,
     #[serde(default, skip_serializing_if = "is_zero")]
     frozen_rows: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -643,6 +669,8 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
         merges,
         col_widths: keys_to_string(&layout.col_widths),
         row_heights: keys_to_string(&layout.row_heights),
+        hidden_rows: layout.hidden_rows.iter().copied().collect(),
+        hidden_cols: layout.hidden_cols.iter().copied().collect(),
         frozen_rows: layout.frozen_rows,
         frozen_cols: layout.frozen_cols,
         cond_formats: if sheet.cond_formats.is_empty() {
@@ -825,6 +853,8 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
     let layout = SheetLayout {
         col_widths: keys_to_usize(&body.col_widths),
         row_heights: keys_to_usize(&body.row_heights),
+        hidden_rows: body.hidden_rows.iter().copied().collect(),
+        hidden_cols: body.hidden_cols.iter().copied().collect(),
         frozen_rows: body.frozen_rows,
         frozen_cols: body.frozen_cols,
         filter: body.filter.clone(),
@@ -949,6 +979,8 @@ mod full_json_tests {
         let mut layout = SheetLayout {
             col_widths: [(0, 100.0), (3, 150.0)].into_iter().collect(),
             row_heights: [(1, 30.0), (5, 40.0)].into_iter().collect(),
+            hidden_rows: Default::default(),
+            hidden_cols: Default::default(),
             frozen_rows: 2,
             frozen_cols: 1,
             filter: Some(FilterSpec {
@@ -1079,5 +1111,51 @@ mod full_json_tests {
         assert!(import_full("[[1,2],[3,4]]").is_err());
         assert!(import_full("{\"format\":\"other\",\"version\":1}").is_err());
         assert!(import_full("{\"format\":\"visigrid-json\",\"version\":99}").is_err());
+    }
+}
+
+#[cfg(test)]
+mod hidden_layout_tests {
+    use super::*;
+
+    fn layout_with_hidden() -> SheetLayout {
+        SheetLayout {
+            hidden_rows: [2, 5].into_iter().collect(),
+            hidden_cols: [1].into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Hidden indices are positions, so a structural edit has to move them —
+    /// otherwise inserting a row above a hidden one hides the wrong row.
+    #[test]
+    fn hidden_rows_shift_on_insert() {
+        let mut l = layout_with_hidden();
+        l.shift_for_structural(0, 1, false, true);
+        assert_eq!(l.hidden_rows.iter().copied().collect::<Vec<_>>(), vec![3, 6]);
+        assert_eq!(l.hidden_cols.iter().copied().collect::<Vec<_>>(), vec![1], "columns untouched");
+    }
+
+    #[test]
+    fn deleting_a_hidden_row_drops_it() {
+        let mut l = layout_with_hidden();
+        l.shift_for_structural(2, 1, true, true);
+        assert_eq!(l.hidden_rows.iter().copied().collect::<Vec<_>>(), vec![4]);
+    }
+
+    #[test]
+    fn hidden_cols_shift_on_column_insert() {
+        let mut l = layout_with_hidden();
+        l.shift_for_structural(0, 2, false, false);
+        assert_eq!(l.hidden_cols.iter().copied().collect::<Vec<_>>(), vec![3]);
+        assert_eq!(l.hidden_rows.iter().copied().collect::<Vec<_>>(), vec![2, 5], "rows untouched");
+    }
+
+    /// A layout that only carries hidden state is not "empty" — treating it as
+    /// empty would drop the side-car and silently unhide everything.
+    #[test]
+    fn hidden_only_layout_is_not_empty() {
+        assert!(!layout_with_hidden().is_empty());
+        assert!(SheetLayout::default().is_empty());
     }
 }

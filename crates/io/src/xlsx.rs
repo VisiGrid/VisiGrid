@@ -137,6 +137,10 @@ pub struct ImportedLayout {
     pub frozen_rows: usize,
     /// Frozen column count from the sheet's `<pane>`, 0 if not frozen
     pub frozen_cols: usize,
+    /// Rows hidden in the source file
+    pub hidden_rows: Vec<usize>,
+    /// Columns hidden in the source file
+    pub hidden_cols: Vec<usize>,
 }
 
 impl ImportedLayout {
@@ -156,6 +160,8 @@ impl ImportedLayout {
                 .collect(),
             frozen_rows: self.frozen_rows,
             frozen_cols: self.frozen_cols,
+            hidden_rows: self.hidden_rows.iter().copied().collect(),
+            hidden_cols: self.hidden_cols.iter().copied().collect(),
             ..Default::default()
         }
     }
@@ -168,6 +174,8 @@ impl ImportedLayout {
             row_heights: sl.row_heights.into_iter().collect(),
             frozen_rows: sl.frozen_rows,
             frozen_cols: sl.frozen_cols,
+            hidden_rows: sl.hidden_rows.iter().copied().collect(),
+            hidden_cols: sl.hidden_cols.iter().copied().collect(),
             ..Default::default()
         }
     }
@@ -947,6 +955,8 @@ fn import_formatting(
             row_heights: sf.row_heights,
             frozen_rows: sf.frozen_rows,
             frozen_cols: sf.frozen_cols,
+            hidden_rows: sf.hidden_rows.clone(),
+            hidden_cols: sf.hidden_cols.clone(),
         })
         .collect();
 }
@@ -1178,8 +1188,11 @@ pub struct ExportLayout {
     pub frozen_cols: usize,
     /// AutoFilter range: (min_row, min_col, max_row, max_col)
     pub autofilter_range: Option<(usize, usize, usize, usize)>,
-    /// Hidden data rows (from filter visibility mask)
+    /// Hidden data rows (from filter visibility mask, or an imported file)
     pub hidden_rows: Vec<usize>,
+    /// Hidden columns. Export could already hide rows but not columns, so a
+    /// hidden scratch column came back visible after a round trip.
+    pub hidden_cols: Vec<usize>,
 }
 
 // Column widths: the two directions below are NOT inverses of each other, and
@@ -1341,6 +1354,11 @@ fn build_export(
                 worksheet
                     .set_row_hidden(row as u32)
                     .map_err(|e| format!("Failed to hide row {}: {}", row, e))?;
+            }
+            for &col in &layout.hidden_cols {
+                worksheet
+                    .set_column_hidden(col as u16)
+                    .map_err(|e| format!("Failed to hide column {}: {}", col, e))?;
             }
             result.hidden_rows_exported += layout.hidden_rows.len();
         }
