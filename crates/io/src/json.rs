@@ -383,6 +383,9 @@ struct SheetBody {
     hidden_rows: Vec<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     hidden_cols: Vec<usize>,
+    /// Sheet tab colour as "#RRGGBB".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tab_color: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     frozen_rows: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -665,6 +668,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
 
     SheetBody {
         name: sheet.name.clone(),
+        tab_color: sheet.tab_color.map(|[r, g, b, _]| format!("#{:02X}{:02X}{:02X}", r, g, b)),
         cells,
         merges,
         col_widths: keys_to_string(&layout.col_widths),
@@ -757,6 +761,7 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
     let mut sheet = Sheet::new(id, 65536, 256);
     if !body.name.is_empty() {
         sheet.set_name(&body.name);
+        sheet.tab_color = body.tab_color.as_deref().and_then(parse_hex_rgb);
     } else if index > 0 {
         sheet.set_name(&format!("Sheet{}", index + 1));
     }
@@ -1158,4 +1163,19 @@ mod hidden_layout_tests {
         assert!(!layout_with_hidden().is_empty());
         assert!(SheetLayout::default().is_empty());
     }
+}
+
+/// Parse "#RRGGBB" (or bare "RRGGBB") into RGBA. Alpha is always opaque —
+/// visigrid-json writes tab colours without one.
+fn parse_hex_rgb(s: &str) -> Option<[u8; 4]> {
+    let h = s.trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    Some([
+        u8::from_str_radix(&h[0..2], 16).ok()?,
+        u8::from_str_radix(&h[2..4], 16).ok()?,
+        u8::from_str_radix(&h[4..6], 16).ok()?,
+        255,
+    ])
 }

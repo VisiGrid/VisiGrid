@@ -925,6 +925,14 @@ fn import_formatting(
     // Import conditional formatting. json-full and the native format have
     // carried `cond_formats` since the tier-1 work; xlsx was the one boundary
     // that dropped it, so a Google Sheets export lost every rule.
+    for (sheet_idx, sheet_fmt) in sheet_formats.iter().enumerate() {
+        if let Some(color) = sheet_fmt.tab_color {
+            if let Some(sheet) = workbook.sheet_mut(sheet_idx) {
+                sheet.tab_color = Some(color);
+            }
+        }
+    }
+
     let mut cf_unsupported: Vec<String> = Vec::new();
     for (sheet_idx, sheet_fmt) in sheet_formats.iter().enumerate() {
         if sheet_fmt.cond_rules.is_empty() {
@@ -1300,6 +1308,12 @@ fn build_export(
             .add_worksheet()
             .set_name(&sheet.name)
             .map_err(|e| format!("Failed to create sheet '{}': {}", sheet.name, e))?;
+
+        if let Some([r, g, b, _a]) = sheet.tab_color {
+            worksheet.set_tab_color(rust_xlsxwriter::Color::RGB(
+                (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b),
+            ));
+        }
 
         // Get layout for this sheet if provided
         let layout = layouts.and_then(|l| l.get(sheet_idx));

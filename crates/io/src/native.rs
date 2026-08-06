@@ -932,6 +932,7 @@ pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
     }
 
     save_cond_formats(&conn, workbook)?;
+    save_tab_colors(&conn, workbook)?;
 
     conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
 
@@ -1098,6 +1099,7 @@ pub fn save_workbook_with_metadata(
     }
 
     save_cond_formats(&conn, workbook)?;
+    save_tab_colors(&conn, workbook)?;
 
     conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
 
@@ -1378,6 +1380,7 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
 
     // Load conditional formatting rules (stored as JSON blobs in meta)
     load_cond_formats(&conn, &mut workbook);
+    load_tab_colors(&conn, &mut workbook);
 
     // Rebuild dependency graph and compute all formulas after loading
     workbook.rebuild_dep_graph();
@@ -1405,6 +1408,46 @@ fn save_cond_formats_sheet(
 }
 
 /// Persist conditional formatting rules for every sheet in the workbook.
+/// Tab colours live in `meta` rather than a `sheets` column so that opening a
+/// file written by an older build needs no schema migration — the key is
+/// simply absent and the tab renders with the theme default.
+fn save_tab_colors(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
+    for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
+        let Some([r, g, b, a]) = sheet.tab_color else {
+            continue;
+        };
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![
+                format!("tab_color_{}", sheet_idx),
+                format!("{},{},{},{}", r, g, b, a)
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn load_tab_colors(conn: &Connection, workbook: &mut Workbook) {
+    let sheet_count = workbook.sheets().len();
+    for sheet_idx in 0..sheet_count {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![format!("tab_color_{}", sheet_idx)],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(raw) = raw else { continue };
+        let parts: Vec<u8> = raw.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if parts.len() == 4 {
+            if let Some(sheet) = workbook.sheet_mut(sheet_idx) {
+                sheet.tab_color = Some([parts[0], parts[1], parts[2], parts[3]]);
+            }
+        }
+    }
+}
+
 fn save_cond_formats(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
     for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
         save_cond_formats_sheet(conn, sheet_idx, &sheet.cond_formats)?;

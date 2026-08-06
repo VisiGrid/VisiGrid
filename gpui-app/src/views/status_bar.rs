@@ -328,6 +328,19 @@ fn sheet_tab_wrapper(
 
 /// Render a single sheet tab (normal mode)
 fn sheet_tab(app: &Spreadsheet, name: String, index: usize, is_active: bool, cx: &mut Context<Spreadsheet>) -> Stateful<Div> {
+    // Excel and Sheets draw the tab colour as an underline rather than
+    // flooding the tab, which keeps the label readable whatever colour the
+    // user picked — including against a dark theme.
+    let tab_color: Option<Hsla> = app
+        .wb(cx)
+        .sheet(index)
+        .and_then(|s| s.tab_color)
+        .map(|[r, g, b, a]| {
+            gpui::rgba(
+                (u32::from(r) << 24) | (u32::from(g) << 16) | (u32::from(b) << 8) | u32::from(a),
+            )
+            .into()
+        });
     let app_bg = app.token(TokenKey::AppBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
@@ -364,7 +377,24 @@ fn sheet_tab(app: &Spreadsheet, name: String, index: usize, is_active: bool, cx:
         .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
             this.show_sheet_context_menu(index, cx);
         }))
-        .child(name)
+        // A leading chip rather than an underline. Two earlier attempts
+        // failed for structural reasons worth recording: a bottom border
+        // colours all four sides (GPUI has one border_color), which turned
+        // the active tab — the only one with a full border — into a coloured
+        // box; and a stacked colour bar is clipped, because the tab strip is
+        // a fixed-height centre-aligned row with no vertical room to give.
+        // A chip needs only horizontal space, which the row has.
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .when_some(tab_color, |d, color| {
+                    d.child(div().size(px(7.0)).rounded_full().bg(color))
+                })
+                .child(name),
+        )
 }
 
 /// Render a sheet tab in editing/rename mode

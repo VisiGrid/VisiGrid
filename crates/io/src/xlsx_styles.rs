@@ -56,6 +56,8 @@ pub struct SheetFormatting {
     pub hidden_rows: Vec<usize>,
     /// Columns carrying hidden="1", expanded from each <col> span.
     pub hidden_cols: Vec<usize>,
+    /// `<sheetPr><tabColor/>` as RGBA.
+    pub tab_color: Option<[u8; 4]>,
 }
 
 /// Stats about style parsing for the import report.
@@ -997,6 +999,8 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
     let mut frozen_cols = 0usize;
     let mut hidden_rows: Vec<usize> = Vec::new();
     let mut hidden_cols: Vec<usize> = Vec::new();
+    let mut tab_color: Option<[u8; 4]> = None;
+    let mut unsupported_sink: Vec<String> = Vec::new();
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -1136,6 +1140,10 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
                             }
                         }
                     }
+                    b"tabColor" => {
+                        let attrs = collect_attrs(e);
+                        tab_color = parse_color_attrs(&attrs, &mut unsupported_sink);
+                    }
                     b"pane" => {
                         // <pane xSplit="1" ySplit="1" state="frozen"/> inside
                         // <sheetView>. `state` matters: "split" is a draggable
@@ -1212,6 +1220,7 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
         cond_rules: parse_cond_formatting(xml),
         hidden_rows,
         hidden_cols,
+        tab_color,
     }
 }
 
@@ -2225,5 +2234,30 @@ mod hidden_parsing_tests {
             <sheetData><row r="1"/></sheetData></worksheet>"#;
         let sf = parse_sheet_formatting(xml);
         assert!(sf.hidden_rows.is_empty() && sf.hidden_cols.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tab_color_tests {
+    use super::*;
+
+    #[test]
+    fn tab_color_is_parsed() {
+        let xml = r#"<worksheet><sheetPr><tabColor rgb="FFFF0000"/></sheetPr><sheetData/></worksheet>"#;
+        assert_eq!(parse_sheet_formatting(xml).tab_color, Some([255, 0, 0, 255]));
+    }
+
+    /// openpyxl and friends write a zero alpha; the same opaque-alpha rule the
+    /// fill colours use has to apply here or the tab renders invisible.
+    #[test]
+    fn zero_alpha_tab_color_is_opaque() {
+        let xml = r#"<worksheet><sheetPr><tabColor rgb="0000B050"/></sheetPr><sheetData/></worksheet>"#;
+        assert_eq!(parse_sheet_formatting(xml).tab_color, Some([0, 176, 80, 255]));
+    }
+
+    #[test]
+    fn no_sheet_pr_means_no_tab_color() {
+        let xml = r#"<worksheet><sheetData/></worksheet>"#;
+        assert!(parse_sheet_formatting(xml).tab_color.is_none());
     }
 }

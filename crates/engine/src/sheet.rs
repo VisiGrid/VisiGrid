@@ -280,6 +280,11 @@ pub struct Sheet {
     /// Merged cell regions
     #[serde(default)]
     pub merged_regions: Vec<MergedRegion>,
+    /// Tab colour as RGBA, None for the theme default. Purely presentational,
+    /// but users colour-code tabs to mean something (red = don't touch,
+    /// green = reconciled), so losing it on import loses information.
+    #[serde(default)]
+    pub tab_color: Option<[u8; 4]>,
     /// Fast lookup: (row, col) → index into merged_regions
     #[serde(skip)]
     merge_index: HashMap<(usize, usize), usize>,
@@ -398,6 +403,7 @@ impl Sheet {
             computed_cache: RefCell::new(HashMap::new()),
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
+            tab_color: None,
             merged_regions: Vec::new(),
             merge_index: HashMap::new(),
             has_any_borders: false,
@@ -419,6 +425,7 @@ impl Sheet {
             computed_cache: RefCell::new(HashMap::new()),
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
+            tab_color: None,
             merged_regions: Vec::new(),
             merge_index: HashMap::new(),
             has_any_borders: false,
