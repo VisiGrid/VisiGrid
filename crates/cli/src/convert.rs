@@ -603,6 +603,18 @@ fn read_workbook_full(
                         .get(&i)
                         .map(|m| m.iter().map(|(&r, &h)| (r, h)).collect())
                         .unwrap_or_default(),
+                    // .sheet persists hidden state too; dropping it here would
+                    // unhide everything on a .sheet → json-full conversion.
+                    hidden_rows: native_layout
+                        .hidden_rows
+                        .get(&i)
+                        .map(|s| s.iter().copied().collect())
+                        .unwrap_or_default(),
+                    hidden_cols: native_layout
+                        .hidden_cols
+                        .get(&i)
+                        .map(|s| s.iter().copied().collect())
+                        .unwrap_or_default(),
                     ..Default::default()
                 })
                 .collect();

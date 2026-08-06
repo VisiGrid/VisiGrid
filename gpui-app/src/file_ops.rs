@@ -875,7 +875,11 @@ impl Spreadsheet {
     /// Converts raw Excel units to pixel values used by the app.
     fn apply_imported_layouts(&mut self, result: &xlsx::ImportResult, cx: &mut Context<Self>) {
         for (sheet_idx, layout) in result.imported_layouts.iter().enumerate() {
-            if layout.col_widths.is_empty() && layout.row_heights.is_empty() {
+            if layout.col_widths.is_empty()
+                && layout.row_heights.is_empty()
+                && layout.hidden_rows.is_empty()
+                && layout.hidden_cols.is_empty()
+            {
                 continue;
             }
             // Get the SheetId for this sheet index
@@ -884,13 +888,15 @@ impl Spreadsheet {
                 None => continue,
             };
 
-            // Apply column widths: Excel character width → pixels
-            // Excel formula: pixels = width * max_digit_width + padding
-            // For Calibri 11pt at 96 DPI: max_digit_width ≈ 7, padding ≈ 5
+            // Column widths use the shared converter rather than a local
+            // formula. This used to compute `width * 7 + 5`, which double-counts
+            // the padding: the xlsx `width` attribute already includes it, so
+            // every imported column came in 5px wider here than the same file
+            // converted through the CLI. One conversion, one place.
             if !layout.col_widths.is_empty() {
                 let widths = self.col_widths.entry(sheet_id).or_insert_with(HashMap::new);
                 for (&col, &excel_width) in &layout.col_widths {
-                    let px_width = (excel_width * 7.0 + 5.0) as f32;
+                    let px_width = visigrid_io::xlsx::excel_width_to_pixels(excel_width);
                     let clamped = px_width.max(20.0).min(500.0);
                     if (clamped - crate::app::CELL_WIDTH).abs() >= 1.0 {
                         widths.insert(col, clamped);
@@ -902,12 +908,29 @@ impl Spreadsheet {
             if !layout.row_heights.is_empty() {
                 let heights = self.row_heights.entry(sheet_id).or_insert_with(HashMap::new);
                 for (&row, &excel_height) in &layout.row_heights {
-                    let px_height = (excel_height / 0.75) as f32;
+                    let px_height = visigrid_io::xlsx::excel_height_to_pixels(excel_height);
                     let clamped = px_height.max(12.0).min(200.0);
                     if (clamped - crate::app::CELL_HEIGHT).abs() >= 1.0 {
                         heights.insert(row, clamped);
                     }
                 }
+            }
+
+            // Hidden rows and columns. Without this the import parses the flag
+            // and then throws it away at the last step, so a hidden scratch
+            // column still arrives visible in the app — the whole point of
+            // carrying it.
+            if !layout.hidden_rows.is_empty() {
+                self.hidden_rows
+                    .entry(sheet_id)
+                    .or_default()
+                    .extend(layout.hidden_rows.iter().copied());
+            }
+            if !layout.hidden_cols.is_empty() {
+                self.hidden_cols
+                    .entry(sheet_id)
+                    .or_default()
+                    .extend(layout.hidden_cols.iter().copied());
             }
         }
     }
