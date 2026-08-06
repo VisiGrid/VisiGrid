@@ -37,7 +37,7 @@
   <url type="homepage">https://visigrid.app</url>
   <url type="bugtracker">https://github.com/VisiGrid/VisiGrid/issues</url>
   <url type="vcs-browser">https://github.com/VisiGrid/VisiGrid</url>
-  <url type="help">https://visigrid.app/docs</url>
+  <url type="help">https://docs.visigrid.app</url>
 
   <branding>
     <color type="primary" scheme_preference="light">#4a90d9</color>
@@ -76,16 +76,31 @@
 
   <content_rating type="oars-1.1" />
 
-  <requires>
+  <supports>
     <control>keyboard</control>
     <control>pointing</control>
-  </requires>
+  </supports>
 
   <recommends>
     <display_length compare="ge">768</display_length>
   </recommends>
 
   <releases>
+    <release version="0.19.0" date="2026-08-05">
+      <description>
+        <p>Select-all followed by a formatting command no longer hangs. Hidden rows and columns survive xlsx import and round trip. The Ctrl+V paste default is now in Preferences. VisiCalc theme repainted, with contrast fixes for themes that use opaque selection.</p>
+      </description>
+    </release>
+    <release version="0.18.0" date="2026-08-04">
+      <description>
+        <p>Conditional formatting now imports from xlsx. Files written by other tools keep their formatting, and frozen panes survive a round trip. vgrid convert -t json-full emits the whole workbook with layout.</p>
+      </description>
+    </release>
+    <release version="0.17.0" date="2026-08-01">
+      <description>
+        <p>Formula references now follow row and column insertions and deletions across every sheet. Repeat last action with F4. Fit column to width.</p>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-02-07">
       <description>
         <p>New CLI peek command: interactive TUI file viewer for CSV/TSV with column packing, cursor navigation, unicode-aware alignment, --shape/--plain modes, and help overlay. Native ARM CI builds (replaces QEMU emulation).</p>
