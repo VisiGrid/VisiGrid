@@ -109,7 +109,7 @@ winresource = "0.1"
 
 # Linux packaging (cargo-deb)
 [package.metadata.deb]
-maintainer = "RegAtlas, LLC <hello@visigrid.com>"
+maintainer = "RegAtlas, LLC <hello@visigrid.app>"
 copyright = "2025, RegAtlas, LLC"
 license-file = ["../LICENSE", "0"]
 extended-description = """
