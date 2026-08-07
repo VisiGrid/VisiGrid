@@ -83,10 +83,21 @@ fn build_workbook(sheets: &[InSheet]) -> Workbook {
 
     for (i, sheet_in) in sheets.iter().enumerate() {
         let sheet = &mut wb.sheets_mut()[i];
+
+        // Widen the sheet to cover the incoming data before writing it. Cells
+        // are stored sparsely, so a write past the recorded dimensions lands
+        // either way — but `rows`/`cols` bound whole-column references like
+        // SUM(A:A). Left at the 65536x256 default, such a formula would total
+        // only part of the data and the shortfall would be reported as an
+        // engine divergence, blaming the engine for a setup mistake.
+        let (needed_rows, needed_cols) = sheet_in
+            .cells
+            .iter()
+            .fold((0, 0), |(r, c), cell| (r.max(cell.row + 1), c.max(cell.col + 1)));
+        sheet.rows = sheet.rows.max(needed_rows);
+        sheet.cols = sheet.cols.max(needed_cols);
+
         for cell in &sheet_in.cells {
-            if cell.row >= 65536 || cell.col >= 256 {
-                continue; // canonical grid bounds; mapper clamps the same way
-            }
             sheet.set_value(cell.row, cell.col, &cell.raw);
         }
     }
@@ -102,13 +113,23 @@ pub fn recompute(input: JsValue) -> Result<JsValue, JsValue> {
     let sheets: Vec<InSheet> =
         serde_wasm_bindgen::from_value(input).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    let wb = build_workbook(&sheets);
+    let output = recompute_core(&sheets);
+    serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// The verification itself, free of `JsValue` so its coverage can be asserted
+/// in an ordinary test. Every formula cell handed in must come back out: the
+/// chip in the web editor reports "engine-verified" against this list, so a
+/// cell skipped here is a cell the badge silently vouches for without having
+/// checked it.
+fn recompute_core(sheets: &[InSheet]) -> Output {
+    let wb = build_workbook(sheets);
 
     let mut results = Vec::new();
     for (i, sheet_in) in sheets.iter().enumerate() {
         let sheet = &wb.sheets()[i];
         for cell in &sheet_in.cells {
-            if !cell.raw.starts_with('=') || cell.row >= 65536 || cell.col >= 256 {
+            if !cell.raw.starts_with('=') {
                 continue;
             }
             let (value, error) = match sheet.get_computed_value(cell.row, cell.col) {
@@ -129,11 +150,10 @@ pub fn recompute(input: JsValue) -> Result<JsValue, JsValue> {
         }
     }
 
-    let output = Output {
+    Output {
         engine_version: engine_version(),
         results,
-    };
-    serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,9 +266,6 @@ fn evaluate_extras_core(extras: Vec<ExtrasSheet>) -> ExtrasOutput {
     for (i, sheet_in) in extras.iter().enumerate() {
         let sheet = &wb.sheets()[i];
         for cell in &sheet_in.cells {
-            if cell.row >= 65536 || cell.col >= 256 {
-                continue;
-            }
             if let Some(over) = sheet.cond_formats.override_for_cell(cell.row, cell.col, sheet) {
                 let style = CondStyleOut {
                     background_color: over.background_color.flatten().map(hex_of),
@@ -393,6 +410,66 @@ mod tests {
             Value::Number(n) => assert_eq!(n, 84.0),
             other => panic!("expected 84, got {:?}", other),
         }
+    }
+
+    // The web editor shows an "engine-verified" shield built from this list.
+    // It used to skip every cell past column 256 and row 65536 — Excel 2003's
+    // limits, which this engine does not share — so on a wide sheet the shield
+    // appeared having checked none of the columns in question. Nothing asserted
+    // what the badge actually covered, which is how it survived.
+    #[test]
+    fn a_formula_past_column_256_is_verified_not_skipped() {
+        let sheets = vec![InSheet {
+            name: Some("Wide".into()),
+            cells: vec![
+                InCell { row: 0, col: 0, raw: "21".into() },
+                InCell { row: 0, col: 300, raw: "=A1*2".into() },
+            ],
+        }];
+
+        let out = recompute_core(&sheets);
+
+        let checked = out
+            .results
+            .iter()
+            .find(|r| r.col == 300)
+            .expect("a formula at column 300 must be verified, not silently skipped");
+        assert_eq!(checked.value, Some(serde_json::json!(42.0)));
+    }
+
+    #[test]
+    fn a_formula_past_row_65536_is_verified_not_skipped() {
+        let sheets = vec![InSheet {
+            name: Some("Tall".into()),
+            cells: vec![
+                InCell { row: 0, col: 0, raw: "21".into() },
+                InCell { row: 70_000, col: 0, raw: "=A1*2".into() },
+            ],
+        }];
+
+        let out = recompute_core(&sheets);
+
+        let checked = out
+            .results
+            .iter()
+            .find(|r| r.row == 70_000)
+            .expect("a formula at row 70000 must be verified, not silently skipped");
+        assert_eq!(checked.value, Some(serde_json::json!(42.0)));
+    }
+
+    // Writes land sparsely whatever the recorded dimensions say, so this is
+    // not about storage: `rows`/`cols` bound whole-column references, and a
+    // sheet left at the default would evaluate SUM(A:A) over part of its own
+    // data and the gap would surface as an engine divergence.
+    #[test]
+    fn the_sheet_is_widened_to_cover_its_data() {
+        let wb = build_workbook(&[InSheet {
+            name: None,
+            cells: vec![InCell { row: 100_000, col: 300, raw: "1".into() }],
+        }]);
+
+        assert!(wb.sheets()[0].cols > 300, "columns must cover the data");
+        assert!(wb.sheets()[0].rows > 100_000, "rows must cover the data");
     }
 
     #[test]
