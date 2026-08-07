@@ -8,6 +8,19 @@ description = "WASM build of the formula engine for client-side verification"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# rustc emits bulk-memory instructions (memory.copy and friends) by default.
+# wasm-pack pins its own wasm-opt — version 117 here — which rejects them, and
+# passing --enable-bulk-memory does not help because that build predates the
+# support. The release build then dies in the optimizer *after* writing a valid
+# .wasm, which is the dangerous shape: the file looks finished.
+#
+# So the optimizer is off rather than fatal. The unoptimized bundle is 599 KB,
+# smaller than the 625 KB one it replaces, so nothing regresses by turning it
+# off today. Re-enable with a modern binaryen (Arch ships 130) once the build
+# can be pointed at one; expect roughly 10-20% off the wire.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [dependencies]
 visigrid-engine = { path = "../engine" }
 wasm-bindgen = "0.2"
