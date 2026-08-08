@@ -476,7 +476,7 @@ mod tests {
     fn cond_format_and_validation_evaluate() {
         use visigrid_engine::cell::CellFormatOverride;
         use visigrid_engine::cond_format::{CondFormatStore, CondStyle};
-        use visigrid_engine::validation::{CellRange, ValidationRule, ValidationStore};
+        use visigrid_engine::validation::{CellRange, ValidationRule};
 
         // Build the stores with engine APIs, serialize them — exactly what
         // the web will send once vg-json carries the schema fields.
