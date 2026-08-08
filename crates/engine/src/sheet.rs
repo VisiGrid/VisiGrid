@@ -483,6 +483,18 @@ impl Sheet {
         self.evaluate_and_spill(row, col);
     }
 
+    /// Set a cell to text without inferring a type from it.
+    ///
+    /// For values arriving from a source that already declared them as strings
+    /// — see `Cell::set_text`. No spill evaluation, because text cannot spill.
+    pub fn set_text(&mut self, row: usize, col: usize, text: &str) {
+        let (row, col) = self.merge_origin_coord(row, col);
+        self.clear_spill_from(row, col);
+        self.computed_cache.borrow_mut().remove(&(row, col));
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.set_text(text);
+    }
+
     /// Mark a cell as having a cycle error.
     ///
     /// Used when loading workbooks with circular references to mark

@@ -1283,6 +1283,22 @@ impl Cell {
         self.frozen_formula = None; // User edit clears freeze provenance
     }
 
+    /// Store text as text, whatever it looks like.
+    ///
+    /// `set` infers a type from the string, which is correct for something a
+    /// person typed: `007` typed into a general cell is 7 in Excel and Sheets
+    /// too. It is wrong for a value whose source already declared its type.
+    /// An xlsx string cell holding a zip code arrives as characters, and
+    /// re-inferring a number from it destroys the leading zeros with no error
+    /// and no warning — a plausible number where a postcode used to be.
+    ///
+    /// Trims to match `from_input`, so ordinary text imports unchanged.
+    pub fn set_text(&mut self, text: &str) {
+        self.value = CellValue::Text(text.trim().to_string());
+        self.clear_spill_state();
+        self.frozen_formula = None;
+    }
+
     /// Clear formula runtime/computed state (spill chains, caches).
     /// Does NOT touch frozen_formula — that's provenance metadata managed
     /// separately by freeze_cell() and set().

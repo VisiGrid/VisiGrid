@@ -421,8 +421,15 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                         // millions of phantom cells in the dense calamine range.
                     }
                     Data::String(s) => {
-                        if !s.is_empty() {
-                            sheet.set_value(target_row, target_col, s);
+                        // Stored as text, not re-inferred. calamine reports
+                        // Data::String only when the file declared the cell a
+                        // string, so the type is not ours to second-guess:
+                        // "007" in a zip-code column is characters, and
+                        // set_value would parse it back to 7 and lose the
+                        // zeros silently. Formulas arrive separately from
+                        // <f>, so nothing here needs the '=' branch.
+                        if !s.trim().is_empty() {
+                            sheet.set_text(target_row, target_col, s);
                             stats.cells_imported += 1;
                             total_cells += 1;
                         }
@@ -2782,6 +2789,52 @@ mod tests {
         // Verify file has content (XLSX is a ZIP, should have meaningful size)
         let metadata = std::fs::metadata(&export_path).unwrap();
         assert!(metadata.len() > 100); // XLSX files have significant overhead
+    }
+
+    // A zip code exported and read back must still be a zip code.
+    //
+    // Until the reader stopped re-inferring a type for cells the file already
+    // declared as strings, VisiGrid could not round-trip its own document:
+    // Text("007") was written out as a string cell and came back as the number
+    // 7, with no error and no warning — a plausible number where a postcode
+    // used to be, found when the mail goes to the wrong place.
+    #[test]
+    fn text_cells_that_look_numeric_survive_a_round_trip() {
+        use visigrid_engine::cell::CellValue;
+
+        let mut workbook = Workbook::new();
+        {
+            let sheet = workbook.active_sheet_mut();
+            sheet.set_text(0, 0, "007"); // zip code
+            sheet.set_text(1, 0, "0123456789"); // account number
+            sheet.set_text(2, 0, "label"); // ordinary text, must be unaffected
+            sheet.set_value(3, 0, "7"); // a real number, must stay a number
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("text_typed.xlsx");
+        export(&workbook, &path, None).unwrap();
+
+        let (reimported, _) = import(&path).unwrap();
+        let sheet = &reimported.sheets()[0];
+
+        let text_at = |row: usize, expected: &str| {
+            let value = &sheet.get_cell(row, 0).value;
+            assert!(
+                matches!(value, CellValue::Text(s) if s == expected),
+                "row {row} should have stayed the text {expected:?}, got {value:?}"
+            );
+        };
+
+        text_at(0, "007");
+        text_at(1, "0123456789");
+        text_at(2, "label");
+
+        let number = &sheet.get_cell(3, 0).value;
+        assert!(
+            matches!(number, CellValue::Number(n) if *n == 7.0),
+            "a real number must stay a number, got {number:?}"
+        );
     }
 
     #[test]
