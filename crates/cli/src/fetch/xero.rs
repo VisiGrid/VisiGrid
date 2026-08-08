@@ -819,6 +819,7 @@ pub fn cmd_fetch_xero(
             source_id: r.source_id.clone(),
             group_id: String::new(),
             description: r.description.clone(),
+            btxn_id: String::new(),
         })
         .collect();
 

@@ -288,6 +288,7 @@ pub fn cmd_fetch_ramp_bank(
             source_id: txn.source_id.clone(),
             group_id: String::new(),
             description: txn.description.clone(),
+            btxn_id: String::new(),
         })
         .collect();
 

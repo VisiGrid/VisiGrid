@@ -276,6 +276,7 @@ pub fn cmd_fetch_brex_card(
             source_id: txn.source_id.clone(),
             group_id: txn.card_id.clone(),
             description: txn.description.clone(),
+            btxn_id: String::new(),
         })
         .collect();
 

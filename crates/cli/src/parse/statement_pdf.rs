@@ -95,6 +95,7 @@ pub(super) fn cmd_parse_statement_pdf(
             source_id,
             group_id: group_id.clone(),
             description: String::new(),
+            btxn_id: String::new(),
         });
     }
 

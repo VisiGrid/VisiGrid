@@ -2,7 +2,7 @@
 //!
 //! Each adapter (stripe, mercury, http, …) reuses:
 //! - `FetchClient` — HTTP client with retry / backoff / error classification
-//! - `CanonicalRow` — the 9-column CSV schema all adapters emit
+//! - `CanonicalRow` — the 10-column CSV schema all adapters emit
 //! - `resolve_api_key` — flag > env > error
 //! - `parse_date_range` — parse + validate `--from` / `--to`
 //! - `write_csv` — open output, write header + rows, flush
@@ -23,9 +23,10 @@
 //! | 4  | `currency`       | `String` | Yes      | ISO 4217 uppercase (USD, EUR, GBP)   |
 //! | 5  | `type`           | `String` | Yes      | Transaction type (charge, refund, …)  |
 //! | 6  | `source`         | `String` | Yes      | Adapter name (stripe, mercury, …)     |
-//! | 7  | `source_id`      | `String` | Yes      | Unique ID from the upstream system    |
+//! | 7  | `source_id`      | `String` | Yes      | Upstream id of the SUBJECT (charge, payment). NOT unique — several transactions can share one |
 //! | 8  | `group_id`       | `String` | No       | Grouping key (payout ID, invoice, …)  |
 //! | 9  | `description`    | `String` | No       | Human-readable memo                   |
+//! | 10 | `btxn_id`        | `String` | No       | Provider's per-transaction id, when it has one |
 //!
 //! ## Invariants
 //!
@@ -42,7 +43,11 @@
 //!   decimal-to-cents conversion (integer math, no floats, max 2 decimal
 //!   places). Negative values for refunds/credits.
 //! - **Optional columns**: Empty string `""` when absent. Never `null`,
-//!   never omitted. CSV always has 9 columns per row.
+//!   never omitted. CSV always has 10 columns per row.
+//! - **Identity**: `btxn_id` where non-empty, else `source_id`. `source_id`
+//!   alone is NOT an identity — Stripe posts a charge, its ACH return and a
+//!   later dispute against the same source, and a consumer keying on it drops
+//!   all but the first while reporting success.
 //! - **Encoding**: UTF-8. The `csv` crate handles quoting/escaping.
 
 use std::io::Write;
@@ -74,6 +79,23 @@ pub(crate) struct CanonicalRow {
     pub source_id: String,
     pub group_id: String,
     pub description: String,
+    /// Provider's own id for this transaction, where the provider has one.
+    ///
+    /// `source_id` names the *thing the transaction is about* — a charge, a
+    /// payment — and is NOT unique: Stripe posts a charge, then its ACH
+    /// return, then a dispute, all against the same source. Keying on it made
+    /// the importer treat the second row as already-seen and drop it,
+    /// reporting success. Fees escaped only because they were special-cased
+    /// into `{source_id}_fee`.
+    ///
+    /// Empty for rows the provider never assigned an id to — synthetic fee
+    /// rows, and adapters whose API exposes no per-transaction identifier.
+    /// Consumers fall back to `source_id` when this is blank.
+    ///
+    /// APPEND-ONLY. New fields go after this one, never between existing
+    /// ones. Serde derives the CSV header from this order, and the empty-rows
+    /// header below is written by hand — they must agree.
+    pub btxn_id: String,
 }
 
 // ── FetchClient ─────────────────────────────────────────────────────
@@ -508,6 +530,10 @@ pub(crate) fn write_csv(
                 "source_id",
                 "group_id",
                 "description",
+                // Must match CanonicalRow's field order exactly: serde writes
+                // the header for non-empty output, this list writes it for
+                // empty output, and nothing checks that the two agree.
+                "btxn_id",
             ])
             .map_err(|e| CliError::io(format!("CSV write error: {}", e)))?;
     }
@@ -614,5 +640,48 @@ mod tests {
         assert_eq!(parse_money_string("  42  ").unwrap(), 4200);
         assert!(parse_money_string("10.123").is_err());
         assert!(parse_money_string("abc").is_err());
+    }
+
+    /// The header is produced two ways: serde derives it from CanonicalRow
+    /// when there are rows, and the empty case writes a hand-typed list. Two
+    /// copies of one truth, with nothing keeping them in step — adding
+    /// btxn_id updated the struct and left the literal stale until this was
+    /// noticed. A consumer reading an empty fetch would have seen a schema
+    /// that no longer existed.
+    #[test]
+    fn empty_and_populated_output_agree_on_the_header() {
+        let dir = std::env::temp_dir().join(format!("vgrid_hdr_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty_path = dir.join("empty.csv");
+        let full_path = dir.join("full.csv");
+
+        write_csv(&[], &Some(empty_path.clone())).unwrap();
+        write_csv(
+            &[CanonicalRow {
+                effective_date: "2026-01-01".into(),
+                posted_date: "2026-01-02".into(),
+                amount_minor: 1,
+                currency: "USD".into(),
+                r#type: "charge".into(),
+                source: "test".into(),
+                source_id: "src_1".into(),
+                group_id: String::new(),
+                description: "x".into(),
+                btxn_id: "txn_1".into(),
+            }],
+            &Some(full_path.clone()),
+        )
+        .unwrap();
+
+        let empty_header = std::fs::read_to_string(&empty_path).unwrap();
+        let full = std::fs::read_to_string(&full_path).unwrap();
+        let empty_header = empty_header.lines().next().unwrap().trim().to_string();
+        let full_header = full.lines().next().unwrap().trim().to_string();
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            empty_header, full_header,
+            "the hand-written empty-case header has drifted from CanonicalRow"
+        );
     }
 }

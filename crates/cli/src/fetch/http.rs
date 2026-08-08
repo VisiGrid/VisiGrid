@@ -409,6 +409,7 @@ fn item_to_row(
         source_id: extract_column(item, "source_id", col(config, "source_id")?)?,
         group_id: extract_column(item, "group_id", col(config, "group_id")?)?,
         description: extract_column(item, "description", col(config, "description")?)?,
+        btxn_id: String::new(),
     })
 }
 
@@ -1014,6 +1015,7 @@ mod tests {
                 source_id: "b".into(),
                 group_id: "".into(),
                 description: "".into(),
+                btxn_id: String::new(),
             },
             CanonicalRow {
                 effective_date: "2026-01-15".into(),
@@ -1025,6 +1027,7 @@ mod tests {
                 source_id: "a".into(),
                 group_id: "".into(),
                 description: "".into(),
+                btxn_id: String::new(),
             },
         ];
 
@@ -1047,6 +1050,7 @@ mod tests {
                 source_id: "b".into(),
                 group_id: "g2".into(),
                 description: "".into(),
+                btxn_id: String::new(),
             },
             CanonicalRow {
                 effective_date: "2026-01-15".into(),
@@ -1058,6 +1062,7 @@ mod tests {
                 source_id: "a".into(),
                 group_id: "g1".into(),
                 description: "".into(),
+                btxn_id: String::new(),
             },
         ];
 
@@ -1220,12 +1225,16 @@ mod tests {
         //
         // If you change CanonicalRow fields, column order, sort logic, or
         // transform behavior, this test MUST be updated deliberately.
+        // btxn_id was appended in 2026-08 and is empty here: the HTTP adapter
+        // maps arbitrary provider payloads and has no per-transaction id to
+        // carry. Appended last so the columns ingestion indexes by position
+        // (0 effective_date, 6 source_id, 7 group_id) did not move.
         let expected = "\
-effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,description
-2026-01-15,2026-01-17,108047,USD,charge,billing_api,txn_001,inv_100,Invoice payment
-2026-01-15,,25075,USD,refund,billing_api,txn_002,inv_100,Refund for overbilling
-2026-01-15,,5000,USD,charge,billing_api,txn_003,,Ad-hoc charge
-2026-01-18,2026-01-20,10000,EUR,adjustment,billing_api,txn_004,inv_200,Goodwill credit
+effective_date,posted_date,amount_minor,currency,type,source,source_id,group_id,description,btxn_id
+2026-01-15,2026-01-17,108047,USD,charge,billing_api,txn_001,inv_100,Invoice payment,
+2026-01-15,,25075,USD,refund,billing_api,txn_002,inv_100,Refund for overbilling,
+2026-01-15,,5000,USD,charge,billing_api,txn_003,,Ad-hoc charge,
+2026-01-18,2026-01-20,10000,EUR,adjustment,billing_api,txn_004,inv_200,Goodwill credit,
 ";
 
         assert_eq!(

@@ -528,6 +528,7 @@ pub fn cmd_fetch_gusto(
             source_id: r.source_id.clone(),
             group_id: r.group_id.clone(),
             description: r.description.clone(),
+            btxn_id: String::new(),
         })
         .collect();
 

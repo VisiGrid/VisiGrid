@@ -359,6 +359,7 @@ pub fn cmd_fetch_authorizenet(
             source_id: txn.trans_id.clone(),
             group_id: txn.batch_id.clone(),
             description: txn.description.clone(),
+            btxn_id: String::new(),
         })
         .collect();
 

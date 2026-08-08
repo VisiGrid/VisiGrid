@@ -469,6 +469,10 @@ pub fn cmd_fetch_stripe(
             source_id: txn.source_id.clone(),
             group_id: txn.group_id.clone(),
             description: txn.description.clone(),
+            // Stripe's own id for this balance transaction, unique where
+            // source_id is not. Blank on synthetic fee rows, which keep
+            // relying on the "{source_id}_fee" suffix.
+            btxn_id: txn.btxn_id.clone(),
         })
         .collect();
 
@@ -549,6 +553,79 @@ mod tests {
         assert_eq!(fee_row.amount_minor, -175);
         assert_eq!(fee_row.group_id, "", "propagated from parent later");
         assert_eq!(fee_row.source_id, "ch_123_fee");
+    }
+
+    /// Two balance transactions can name the same source: a charge, then its
+    /// ACH return days later. `source_id` is therefore not an identity, and a
+    /// consumer keying on it treats the second as already-seen and drops it —
+    /// silently, reporting success. One such return cost $500 before anyone
+    /// noticed the ledger drifting from Stripe.
+    ///
+    /// Only `btxn_id` separates them, so it has to reach the CSV.
+    #[test]
+    fn same_source_two_transactions_are_distinguishable() {
+        let charge = serde_json::json!({
+            "id": "txn_charge", "source": "py_shared", "created": 1_700_000_000,
+            "available_on": 1_700_086_400, "amount": 50_000, "fee": 0,
+            "currency": "usd", "type": "charge", "description": "Deposit"
+        });
+        let reversal = serde_json::json!({
+            "id": "txn_reversal", "source": "py_shared", "created": 1_700_400_000,
+            "available_on": 1_700_486_400, "amount": -50_000, "fee": 0,
+            "currency": "usd", "type": "payment_failure_refund",
+            "description": "ACH return"
+        });
+
+        let a = &parse_transaction(&charge).unwrap()[0];
+        let b = &parse_transaction(&reversal).unwrap()[0];
+
+        assert_eq!(a.source_id, b.source_id, "same source — this is the collision");
+        assert_ne!(a.btxn_id, b.btxn_id, "btxn_id is what tells them apart");
+        assert_eq!(a.btxn_id, "txn_charge");
+        assert_eq!(b.btxn_id, "txn_reversal");
+    }
+
+    /// The CSV is the contract. A btxn_id that exists in memory but never
+    /// reaches the file leaves the importer with nothing to key on — which is
+    /// exactly how this shipped: RawTransaction carried the id, CanonicalRow
+    /// had no column for it.
+    #[test]
+    fn btxn_id_reaches_the_csv_and_is_appended_last() {
+        let item = serde_json::json!({
+            "id": "txn_abc", "source": "py_shared", "created": 1_700_000_000,
+            "available_on": 1_700_086_400, "amount": 1_000, "fee": 0,
+            "currency": "usd", "type": "charge", "description": "x"
+        });
+        let txn = &parse_transaction(&item).unwrap()[0];
+        let row = CanonicalRow {
+            effective_date: epoch_to_date(txn.created_epoch),
+            posted_date: epoch_to_date(txn.available_on_epoch),
+            amount_minor: txn.amount_minor,
+            currency: txn.currency.clone(),
+            r#type: txn.canonical_type.clone(),
+            source: "stripe".to_string(),
+            source_id: txn.source_id.clone(),
+            group_id: txn.group_id.clone(),
+            description: txn.description.clone(),
+            btxn_id: txn.btxn_id.clone(),
+        };
+
+        let mut wtr = csv::Writer::from_writer(vec![]);
+        wtr.serialize(&row).unwrap();
+        wtr.flush().unwrap();
+        let out = String::from_utf8(wtr.into_inner().unwrap()).unwrap();
+        let mut lines = out.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let values: Vec<&str> = lines.next().unwrap().split(',').collect();
+
+        // Appended, never inserted: existing consumers index into this.
+        assert_eq!(header.last(), Some(&"btxn_id"), "btxn_id must be the LAST column");
+        assert_eq!(header.len(), 10);
+        assert_eq!(values[header.iter().position(|h| *h == "btxn_id").unwrap()], "txn_abc");
+        // The three indices ingestion sorts by must not have moved.
+        assert_eq!(header[0], "effective_date");
+        assert_eq!(header[6], "source_id");
+        assert_eq!(header[7], "group_id");
     }
 
     #[test]
@@ -862,6 +939,7 @@ mod tests {
                     source: "stripe".to_string(),
                     group_id: txn.group_id.clone(),
                     description: txn.description.clone(),
+                    btxn_id: txn.btxn_id.clone(),
                 };
                 wtr.serialize(&row).unwrap();
             }

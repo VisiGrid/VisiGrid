@@ -332,6 +332,7 @@ pub fn cmd_fetch_netsuite(
                 source_id: id_str,
                 group_id: tranid,
                 description: memo,
+                btxn_id: String::new(),
             }
         })
         .collect();

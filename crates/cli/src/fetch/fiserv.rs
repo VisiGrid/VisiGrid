@@ -650,6 +650,7 @@ fn cmd_fetch_fiserv_funding(
             source_id: d.funding_id.clone(),
             group_id: String::new(),
             description: d.description.clone(),
+            btxn_id: String::new(),
         })
         .collect();
 
@@ -803,6 +804,7 @@ fn cmd_fetch_fiserv_settlestat(
             source_id: txn.retref.clone(),
             group_id: txn.batch_id.clone(),
             description: txn.description.clone(),
+            btxn_id: String::new(),
         })
         .collect();
 
@@ -1069,6 +1071,7 @@ mod tests {
             source_id: deposit.funding_id.clone(),
             group_id: String::new(),
             description: deposit.description.clone(),
+            btxn_id: String::new(),
         };
 
         assert_eq!(row.r#type, "funding");
