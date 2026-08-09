@@ -1631,6 +1631,102 @@ mod tests {
     // is exact. Those three carried their own comparison — a plain equality —
     // while COUNTIF, SUMIF and XLOOKUP shared a real matcher, so the same
     // formula found a row in one function and nothing in another.
+    /// 10 / 20 / 30 in column A, labels in B.
+    fn spaced_values_lookup() -> TestLookup {
+        let mut lookup = TestLookup::new();
+        for (i, (v, label)) in [("10", "ten"), ("20", "twenty"), ("30", "thirty")]
+            .iter()
+            .enumerate()
+        {
+            lookup.set(i, 0, v);
+            lookup.set(i, 1, label);
+        }
+        lookup
+    }
+
+    // match_mode -1 and 1 used to fall back to exact, so a value between two
+    // rows found nothing at all rather than the row below or above it.
+    #[test]
+    fn test_xlookup_match_mode_finds_next_smaller_and_larger() {
+        let lookup = spaced_values_lookup();
+
+        let smaller = evaluate(&parse_and_bind("=XLOOKUP(25, A1:A3, B1:B3, , -1)"), &lookup);
+        let larger = evaluate(&parse_and_bind("=XLOOKUP(25, A1:A3, B1:B3, , 1)"), &lookup);
+
+        assert_eq!(smaller, EvalResult::Text("twenty".to_string()));
+        assert_eq!(larger, EvalResult::Text("thirty".to_string()));
+    }
+
+    // The nearest value is a fallback, not a replacement: an exact hit still wins.
+    #[test]
+    fn test_xlookup_match_mode_prefers_an_exact_match() {
+        let lookup = spaced_values_lookup();
+
+        let smaller = evaluate(&parse_and_bind("=XLOOKUP(20, A1:A3, B1:B3, , -1)"), &lookup);
+        let larger = evaluate(&parse_and_bind("=XLOOKUP(20, A1:A3, B1:B3, , 1)"), &lookup);
+
+        assert_eq!(smaller, EvalResult::Text("twenty".to_string()));
+        assert_eq!(larger, EvalResult::Text("twenty".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_match_mode_misses_when_nothing_lies_that_way() {
+        let lookup = spaced_values_lookup();
+
+        let below = evaluate(&parse_and_bind(r#"=XLOOKUP(5, A1:A3, B1:B3, "MISS", -1)"#), &lookup);
+        let above = evaluate(&parse_and_bind(r#"=XLOOKUP(35, A1:A3, B1:B3, "MISS", 1)"#), &lookup);
+
+        assert_eq!(below, EvalResult::Text("MISS".to_string()));
+        assert_eq!(above, EvalResult::Text("MISS".to_string()));
+    }
+
+    // Unlike VLOOKUP's approximate match, XLOOKUP makes no sortedness promise,
+    // so the scan has to consider every cell rather than stopping early.
+    #[test]
+    fn test_xlookup_match_mode_works_on_unsorted_data() {
+        let mut lookup = TestLookup::new();
+        for (i, (v, label)) in [("30", "thirty"), ("10", "ten"), ("20", "twenty")]
+            .iter()
+            .enumerate()
+        {
+            lookup.set(i, 0, v);
+            lookup.set(i, 1, label);
+        }
+
+        let smaller = evaluate(&parse_and_bind("=XLOOKUP(25, A1:A3, B1:B3, , -1)"), &lookup);
+
+        assert_eq!(smaller, EvalResult::Text("twenty".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_match_mode_orders_text_too() {
+        let mut lookup = TestLookup::new();
+        for (i, (v, label)) in [("apple", "A"), ("cherry", "C"), ("mango", "M")].iter().enumerate() {
+            lookup.set(i, 0, v);
+            lookup.set(i, 1, label);
+        }
+
+        let smaller = evaluate(&parse_and_bind(r#"=XLOOKUP("banana", A1:A3, B1:B3, , -1)"#), &lookup);
+        let larger = evaluate(&parse_and_bind(r#"=XLOOKUP("banana", A1:A3, B1:B3, , 1)"#), &lookup);
+
+        assert_eq!(smaller, EvalResult::Text("A".to_string()));
+        assert_eq!(larger, EvalResult::Text("C".to_string()));
+    }
+
+    // An empty cell is not "the smallest value" — Excel passes over it.
+    #[test]
+    fn test_xlookup_match_mode_skips_empty_cells() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "10");
+        lookup.set(0, 1, "ten");
+        lookup.set(2, 0, "30");
+        lookup.set(2, 1, "thirty");
+
+        let result = evaluate(&parse_and_bind("=XLOOKUP(25, A1:A3, B1:B3, , -1)"), &lookup);
+
+        assert_eq!(result, EvalResult::Text("ten".to_string()));
+    }
+
     #[test]
     fn test_vlookup_exact_supports_wildcards() {
         let lookup = duplicate_key_lookup();

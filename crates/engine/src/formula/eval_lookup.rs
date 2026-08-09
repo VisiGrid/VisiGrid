@@ -5,6 +5,23 @@ use super::eval::{evaluate, Array2D, CellLookup, EvalResult, Value};
 use super::eval_helpers::{get_text_for_sheet, wildcard_match};
 use super::parser::{BoundExpr, Expr};
 use crate::sheet::SheetRef;
+use std::cmp::Ordering;
+
+/// Order two cell values, or report that they are not comparable.
+///
+/// Numbers order numerically and text case-insensitively, but a number and a
+/// string have no order — Excel treats them as different types rather than
+/// coercing one to the other, so an approximate lookup skips the mismatched
+/// cell instead of inventing a position for it.
+fn compare_values(a: &EvalResult, b: &EvalResult) -> Option<Ordering> {
+    match (a, b) {
+        (EvalResult::Number(x), EvalResult::Number(y)) => x.partial_cmp(y),
+        (EvalResult::Text(x), EvalResult::Text(y)) => {
+            Some(x.to_lowercase().cmp(&y.to_lowercase()))
+        }
+        _ => None,
+    }
+}
 
 pub(crate) fn try_evaluate<L: CellLookup>(
     name: &str, args: &[BoundExpr], lookup: &L,
@@ -219,6 +236,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
 
             // Search for match
             let mut found_idx: Option<usize> = None;
+            let approximate = match_mode == -1 || match_mode == 1;
+            // Best fallback seen so far, as (index, value), for the approximate modes.
+            let mut nearest: Option<(usize, EvalResult)> = None;
 
             let xl_get = |sheet: &SheetRef, r: usize, c: usize| -> String {
                 match get_text_for_sheet(lookup, sheet, r, c) {
@@ -241,7 +261,8 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 };
 
                 let cell_text = xl_get(xl_lookup_sheet, r, c);
-                let cell_value = if cell_text.is_empty() {
+                let cell_is_empty = cell_text.is_empty();
+                let cell_value = if cell_is_empty {
                     EvalResult::Text(String::new())
                 } else if let Ok(n) = cell_text.parse::<f64>() {
                     EvalResult::Number(n)
@@ -273,7 +294,8 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                         }
                     }
                     _ => {
-                        // For -1 (next smaller) and 1 (next larger), fall back to exact for simplicity
+                        // -1 and 1 still prefer an exact match; the nearest value is
+                        // only a fallback, handled after the scan.
                         match (&lookup_value, &cell_value) {
                             (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
                             (EvalResult::Text(a), EvalResult::Text(b)) => a.eq_ignore_ascii_case(b),
@@ -286,6 +308,38 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     found_idx = Some(idx);
                     break;
                 }
+
+                // Approximate modes cannot stop at the first non-match: the nearest
+                // value below (or above) is only known once every cell has been seen.
+                // Empty cells are not candidates — Excel skips them rather than
+                // treating them as the smallest possible value.
+                if approximate && !cell_is_empty {
+                    let eligible = match compare_values(&cell_value, &lookup_value) {
+                        Some(Ordering::Less) => match_mode == -1,
+                        Some(Ordering::Greater) => match_mode == 1,
+                        _ => false,
+                    };
+                    if eligible {
+                        let improves = match &nearest {
+                            None => true,
+                            Some((_, best)) => match compare_values(&cell_value, best) {
+                                // -1 wants the largest of the smaller values; 1 the
+                                // smallest of the larger ones.
+                                Some(Ordering::Greater) => match_mode == -1,
+                                Some(Ordering::Less) => match_mode == 1,
+                                _ => false,
+                            },
+                        };
+                        if improves {
+                            nearest = Some((idx, cell_value));
+                        }
+                    }
+                }
+            }
+
+            // Only reached when no exact match was found.
+            if found_idx.is_none() {
+                found_idx = nearest.map(|(idx, _)| idx);
             }
 
             match found_idx {
