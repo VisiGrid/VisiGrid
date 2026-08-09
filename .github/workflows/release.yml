@@ -13,6 +13,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Tells the build these binaries are a real release, so the version string
+  # omits its "unreleased" marker. Set here rather than inferred from git:
+  # actions/checkout does a shallow clone, so the tag object may be absent and
+  # a git-based check would label released binaries unreleased — a false claim
+  # worse than the ambiguity it replaces. This workflow only runs on a tag
+  # push, so ref_name is that tag.
+  VGRID_RELEASE_TAG: ${{ github.ref_name }}
 
 jobs:
   build-linux:

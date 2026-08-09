@@ -1721,7 +1721,7 @@ pub(crate) fn long_version() -> &'static str {
     if cfg!(debug_assertions) {
         concat!(
             env!("CARGO_PKG_VERSION"),
-            " (", env!("GIT_COMMIT_HASH"), ")",
+            " (", env!("GIT_COMMIT_HASH"), env!("VGRID_RELEASE_STATE"), ")",
             "\nengine:  visigrid-engine ", env!("CARGO_PKG_VERSION"),
             "\nbuild:   debug",
             "\ntarget:  ", env!("TARGET"),
@@ -1730,7 +1730,7 @@ pub(crate) fn long_version() -> &'static str {
     } else {
         concat!(
             env!("CARGO_PKG_VERSION"),
-            " (", env!("GIT_COMMIT_HASH"), ")",
+            " (", env!("GIT_COMMIT_HASH"), env!("VGRID_RELEASE_STATE"), ")",
             "\nengine:  visigrid-engine ", env!("CARGO_PKG_VERSION"),
             "\nbuild:   release",
             "\ntarget:  ", env!("TARGET"),
