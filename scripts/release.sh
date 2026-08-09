@@ -135,6 +135,37 @@ green "Version bump complete."
 
 bold "=== Phase 3: Tag and wait for CI ==="
 
+# Re-check the branch here, not just in pre-flight.
+#
+# Several people and agents share this working directory, and a checkout
+# anywhere in it moves HEAD for everyone. During the v0.21.0 release something
+# checked out the release commit while CI was running, leaving the tree
+# detached — harmless that time, because the commit already matched main, but
+# only by luck. Pre-flight passed twenty minutes earlier and had nothing left
+# to say about it.
+#
+# The tag is the point of no return, so the assertion belongs immediately
+# before it rather than at the start.
+# `branch --show-current` is empty when detached, which is the case that
+# actually happened; `rev-parse --abbrev-ref` reports the literal "HEAD" there
+# and reads like a branch name in an error message.
+BRANCH_NOW="$(git branch --show-current)"
+if [[ "$BRANCH_NOW" != "main" ]]; then
+    WHERE="${BRANCH_NOW:-a detached HEAD}"
+    die "HEAD is on $WHERE, not main — something checked out this working
+     directory since pre-flight passed. Nothing has been tagged. Restore with
+     'git checkout main', confirm it still points at what you meant to ship,
+     and re-run. Use a git worktree for parallel checkouts."
+fi
+
+HEAD_NOW="$(git rev-parse HEAD)"
+REMOTE_NOW="$(git rev-parse origin/main 2>/dev/null || echo "")"
+if [[ -n "$REMOTE_NOW" && "$HEAD_NOW" != "$REMOTE_NOW" ]]; then
+    die "main and origin/main diverged since pre-flight (local ${HEAD_NOW:0:7},
+     remote ${REMOTE_NOW:0:7}) — someone pushed while this release was running.
+     Nothing has been tagged. Reconcile, then re-run."
+fi
+
 run git tag "v$VERSION"
 run git push origin "v$VERSION"
 
