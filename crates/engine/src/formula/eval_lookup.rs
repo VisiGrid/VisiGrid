@@ -101,7 +101,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                             found_row = Some(r);
                             break;
                         }
-                    } else if cell_lower == search_text {
+                    } else if wildcard_match(&search_text, &cell_lower) {
                         found_row = Some(r);
                         break;
                     }
@@ -397,7 +397,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                             found_col = Some(c);
                             break;
                         }
-                    } else if cell_lower == search_text {
+                    } else if wildcard_match(&search_text, &cell_lower) {
                         found_col = Some(c);
                         break;
                     }
@@ -512,7 +512,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                                 found_pos = Some(i + 1);
                                 break;
                             }
-                        } else if cell_lower == search_text {
+                        } else if wildcard_match(&search_text, &cell_lower) {
                             found_pos = Some(i + 1);
                             break;
                         }
@@ -559,7 +559,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                                 found_pos = Some(i + 1);
                                 break;
                             }
-                        } else if cell_lower == search_text {
+                        } else if wildcard_match(&search_text, &cell_lower) {
                             found_pos = Some(i + 1);
                             break;
                         }

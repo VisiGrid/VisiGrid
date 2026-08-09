@@ -1627,6 +1627,52 @@ mod tests {
         assert_eq!(result, EvalResult::Text("MISS".to_string()));
     }
 
+    // Excel supports wildcards in VLOOKUP, HLOOKUP and MATCH whenever the match
+    // is exact. Those three carried their own comparison — a plain equality —
+    // while COUNTIF, SUMIF and XLOOKUP shared a real matcher, so the same
+    // formula found a row in one function and nothing in another.
+    #[test]
+    fn test_vlookup_exact_supports_wildcards() {
+        let lookup = duplicate_key_lookup();
+
+        let star = evaluate(&parse_and_bind(r#"=VLOOKUP("be*", B1:B3, 1, FALSE)"#), &lookup);
+        let question = evaluate(&parse_and_bind(r#"=VLOOKUP("?eta", B1:B3, 1, FALSE)"#), &lookup);
+
+        assert_eq!(star, EvalResult::Text("beta".to_string()));
+        assert_eq!(question, EvalResult::Text("beta".to_string()));
+    }
+
+    #[test]
+    fn test_match_exact_supports_wildcards() {
+        let lookup = duplicate_key_lookup();
+
+        let result = evaluate(&parse_and_bind(r#"=MATCH("be*", B1:B3, 0)"#), &lookup);
+
+        assert_eq!(result, EvalResult::Number(2.0));
+    }
+
+    #[test]
+    fn test_vlookup_wildcard_still_misses_when_nothing_matches() {
+        let lookup = duplicate_key_lookup();
+
+        let result = evaluate(&parse_and_bind(r#"=VLOOKUP("zz*", B1:B3, 1, FALSE)"#), &lookup);
+
+        assert_eq!(result, EvalResult::Error("#N/A".to_string()));
+    }
+
+    // Wildcards belong to exact match only; the approximate path must keep
+    // finding the next smaller value rather than acquiring pattern behaviour.
+    #[test]
+    fn test_vlookup_approximate_match_is_unaffected() {
+        let lookup = duplicate_key_lookup();
+
+        let explicit = evaluate(&parse_and_bind("=VLOOKUP(101.5, A1:B3, 2, TRUE)"), &lookup);
+        let omitted = evaluate(&parse_and_bind("=VLOOKUP(101.5, A1:B3, 2)"), &lookup);
+
+        assert_eq!(explicit, EvalResult::Text("alpha".to_string()));
+        assert_eq!(omitted, EvalResult::Text("alpha".to_string()));
+    }
+
     #[test]
     fn test_xlookup_case_insensitive() {
         let mut lookup = TestLookup::new();
