@@ -344,21 +344,33 @@ pub(crate) fn try_evaluate<L: CellLookup>(
 
             match found_idx {
                 Some(idx) => {
-                    // Return value from return_array at same position
-                    let (r, c) = if lookup_array.4 {
-                        (return_array.0, return_array.1 + idx)
+                    // The whole matching row — or column — of the return array,
+                    // not just its first cell. XLOOKUP(102, A2:A4, B2:D4) is a
+                    // three-cell answer in Excel; returning B alone dropped C and
+                    // D with nothing to indicate they had been discarded.
+                    //
+                    // range_to_result yields a scalar for a 1x1 region, so an
+                    // ordinary single-column lookup is unaffected.
+                    let (start_row, start_col, height, width) = if lookup_array.4 {
+                        // Horizontal lookup: the match picks a column, so the
+                        // answer runs the full height of the return array.
+                        (
+                            return_array.0,
+                            return_array.1 + idx,
+                            return_array.2 - return_array.0 + 1,
+                            1,
+                        )
                     } else {
-                        (return_array.0 + idx, return_array.1)
+                        // Vertical lookup: the match picks a row, so the answer
+                        // runs the full width.
+                        (
+                            return_array.0 + idx,
+                            return_array.1,
+                            1,
+                            return_array.3 - return_array.1 + 1,
+                        )
                     };
-
-                    let result_text = xl_get(xl_return_sheet, r, c);
-                    if result_text.is_empty() {
-                        EvalResult::Empty
-                    } else if let Ok(n) = result_text.parse::<f64>() {
-                        EvalResult::Number(n)
-                    } else {
-                        EvalResult::Text(result_text)
-                    }
+                    range_to_result(lookup, xl_return_sheet, start_row, start_col, height, width)
                 }
                 None => {
                     // Not found - return if_not_found or #N/A

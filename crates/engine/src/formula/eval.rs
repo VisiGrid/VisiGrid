@@ -1631,6 +1631,45 @@ mod tests {
     // is exact. Those three carried their own comparison — a plain equality —
     // while COUNTIF, SUMIF and XLOOKUP shared a real matcher, so the same
     // formula found a row in one function and nothing in another.
+    // A multi-column return array is a multi-cell answer in Excel. Returning
+    // only its first column dropped the rest with nothing to say so — the
+    // caller got a plausible single value where a row was asked for.
+    #[test]
+    fn test_xlookup_returns_the_whole_matching_row() {
+        let mut lookup = TestLookup::new();
+        for (i, (id, name, extra)) in
+            [("101", "alpha", "x"), ("102", "beta", "y"), ("103", "gamma", "z")]
+                .iter()
+                .enumerate()
+        {
+            lookup.set(i, 0, id);
+            lookup.set(i, 1, name);
+            lookup.set(i, 2, extra);
+        }
+
+        let result = evaluate(&parse_and_bind("=XLOOKUP(102, A1:A3, B1:C3)"), &lookup);
+
+        match result {
+            EvalResult::Array(arr) => {
+                assert_eq!((arr.rows(), arr.cols()), (1, 2));
+                assert_eq!(arr.get(0, 0).map(|v| v.to_text()), Some("beta".to_string()));
+                assert_eq!(arr.get(0, 1).map(|v| v.to_text()), Some("y".to_string()));
+            }
+            other => panic!("expected a 1x2 array, got {other:?}"),
+        }
+    }
+
+    // A single-column return must stay a scalar, not become a 1x1 array —
+    // that is the common case and nothing about it should change.
+    #[test]
+    fn test_xlookup_single_column_return_stays_scalar() {
+        let lookup = duplicate_key_lookup();
+
+        let result = evaluate(&parse_and_bind("=XLOOKUP(102, A1:A3, B1:B3)"), &lookup);
+
+        assert_eq!(result, EvalResult::Text("beta".to_string()));
+    }
+
     /// 10 / 20 / 30 in column A, labels in B.
     fn spaced_values_lookup() -> TestLookup {
         let mut lookup = TestLookup::new();
