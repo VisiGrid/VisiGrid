@@ -2,7 +2,7 @@
 // ROW, COLUMN, ROWS, COLUMNS
 
 use super::eval::{evaluate, Array2D, CellLookup, EvalResult, Value};
-use super::eval_helpers::get_text_for_sheet;
+use super::eval_helpers::{get_text_for_sheet, wildcard_match};
 use super::parser::{BoundExpr, Expr};
 use crate::sheet::SheetRef;
 
@@ -195,6 +195,28 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 0
             };
 
+            // Optional: search_mode (1 = first to last, default; -1 = last to first).
+            //
+            // Previously the arity check accepted this argument and nothing ever read
+            // it, so XLOOKUP(...,-1) quietly returned the first match instead of the
+            // last — the answer a user asked not to get, with no indication the
+            // argument had been disregarded.
+            //
+            // Excel's 2 and -2 select a binary search over data the caller promises is
+            // sorted. On sorted input that finds the same row as a scan in the same
+            // direction, so they map onto the forward and reverse scans here; on
+            // unsorted input Excel's own result is undefined, which is not a behaviour
+            // worth reproducing.
+            let search_mode = if args.len() >= 6 {
+                match evaluate(&args[5], lookup).to_number() {
+                    Ok(n) => n as i32,
+                    Err(_) => 1,
+                }
+            } else {
+                1
+            };
+            let reverse = search_mode < 0;
+
             // Search for match
             let mut found_idx: Option<usize> = None;
 
@@ -205,7 +227,13 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 }
             };
 
-            for idx in 0..lookup_size {
+            let scan: Box<dyn Iterator<Item = usize>> = if reverse {
+                Box::new((0..lookup_size).rev())
+            } else {
+                Box::new(0..lookup_size)
+            };
+
+            for idx in scan {
                 let (r, c) = if lookup_array.4 {
                     (lookup_array.0, lookup_array.1 + idx)
                 } else {
@@ -231,17 +259,14 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                         }
                     }
                     2 => {
-                        // Wildcard match (simplified: just exact for now)
+                        // The same matcher COUNTIF/SUMIF criteria use, rather than a
+                        // second implementation. The previous one took the text before
+                        // the first `*` and asked whether the cell started with it,
+                        // which made "*eta" an empty prefix — matching every row and
+                        // returning the first. A wrong answer, not a missed one.
                         match (&lookup_value, &cell_value) {
                             (EvalResult::Text(pattern), EvalResult::Text(text)) => {
-                                let pattern_lower = pattern.to_lowercase();
-                                let text_lower = text.to_lowercase();
-                                if pattern_lower.contains('*') || pattern_lower.contains('?') {
-                                    let prefix = pattern_lower.split('*').next().unwrap_or("");
-                                    text_lower.starts_with(prefix) || text_lower == pattern_lower
-                                } else {
-                                    pattern_lower == text_lower
-                                }
+                                wildcard_match(pattern, text)
                             }
                             (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
                             _ => false,

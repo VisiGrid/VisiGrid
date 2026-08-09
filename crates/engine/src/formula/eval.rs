@@ -1527,6 +1527,106 @@ mod tests {
         assert_eq!(result, EvalResult::Error("#N/A".to_string()));
     }
 
+    /// Three rows, two of which match, so first and last are distinguishable.
+    fn duplicate_key_lookup() -> TestLookup {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "101");
+        lookup.set(0, 1, "alpha");
+        lookup.set(1, 0, "102");
+        lookup.set(1, 1, "beta");
+        lookup.set(2, 0, "102");
+        lookup.set(2, 1, "gamma");
+        lookup
+    }
+
+    // search_mode used to be accepted by the arity check and read by nothing, so
+    // asking for the last match returned the first — the answer the caller
+    // explicitly asked not to get, with no sign the argument was dropped.
+    #[test]
+    fn test_xlookup_search_mode_reverse_finds_last_match() {
+        let lookup = duplicate_key_lookup();
+
+        let first = evaluate(&parse_and_bind("=XLOOKUP(102, A1:A3, B1:B3, , 0, 1)"), &lookup);
+        let last = evaluate(&parse_and_bind("=XLOOKUP(102, A1:A3, B1:B3, , 0, -1)"), &lookup);
+
+        assert_eq!(first, EvalResult::Text("beta".to_string()));
+        assert_eq!(last, EvalResult::Text("gamma".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_search_mode_defaults_to_first() {
+        let lookup = duplicate_key_lookup();
+
+        let omitted = evaluate(&parse_and_bind("=XLOOKUP(102, A1:A3, B1:B3)"), &lookup);
+
+        assert_eq!(omitted, EvalResult::Text("beta".to_string()));
+    }
+
+    // Excel's binary-search modes promise sorted input, where a binary search
+    // lands on the same row as a scan in the same direction.
+    #[test]
+    fn test_xlookup_binary_search_modes_follow_their_direction() {
+        let lookup = duplicate_key_lookup();
+
+        let forward = evaluate(&parse_and_bind("=XLOOKUP(102, A1:A3, B1:B3, , 0, 2)"), &lookup);
+        let backward = evaluate(&parse_and_bind("=XLOOKUP(102, A1:A3, B1:B3, , 0, -2)"), &lookup);
+
+        assert_eq!(forward, EvalResult::Text("beta".to_string()));
+        assert_eq!(backward, EvalResult::Text("gamma".to_string()));
+    }
+
+    // The old matcher took the text before the first `*` and asked whether the
+    // cell started with it. A leading `*` made that prefix empty, so every row
+    // matched and the first was returned — a confidently wrong answer rather
+    // than a miss, which is the failure worth pinning down.
+    #[test]
+    fn test_xlookup_wildcard_leading_star_matches_the_right_row() {
+        let lookup = duplicate_key_lookup();
+
+        let result = evaluate(
+            &parse_and_bind(r#"=XLOOKUP("*eta", B1:B3, A1:A3, "MISS", 2)"#),
+            &lookup,
+        );
+
+        assert_eq!(result, EvalResult::Number(102.0));
+    }
+
+    #[test]
+    fn test_xlookup_wildcard_question_mark_matches_one_character() {
+        let lookup = duplicate_key_lookup();
+
+        let result = evaluate(
+            &parse_and_bind(r#"=XLOOKUP("?eta", B1:B3, A1:A3, "MISS", 2)"#),
+            &lookup,
+        );
+
+        assert_eq!(result, EvalResult::Number(102.0));
+    }
+
+    #[test]
+    fn test_xlookup_wildcard_still_misses_when_nothing_matches() {
+        let lookup = duplicate_key_lookup();
+
+        let result = evaluate(
+            &parse_and_bind(r#"=XLOOKUP("zz*", B1:B3, A1:A3, "MISS", 2)"#),
+            &lookup,
+        );
+
+        assert_eq!(result, EvalResult::Text("MISS".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_wildcard_tilde_escapes_to_a_literal() {
+        let lookup = duplicate_key_lookup();
+
+        let result = evaluate(
+            &parse_and_bind(r#"=XLOOKUP("~*eta", B1:B3, A1:A3, "MISS", 2)"#),
+            &lookup,
+        );
+
+        assert_eq!(result, EvalResult::Text("MISS".to_string()));
+    }
+
     #[test]
     fn test_xlookup_case_insensitive() {
         let mut lookup = TestLookup::new();
