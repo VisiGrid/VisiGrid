@@ -271,6 +271,14 @@ pub struct Sheet {
     /// Getters NEVER evaluate on cache miss — only the topo recalc pass populates this.
     #[serde(skip)]
     computed_cache: RefCell<HashMap<(usize, usize), Value>>,
+    /// Arrays produced during an ordered recompute, awaiting placement.
+    ///
+    /// Spilling cannot happen while cells are being evaluated: evaluation holds
+    /// the sheet immutably, and more importantly a spill must not be placed
+    /// until every value it might collide with exists. Recorded here, applied
+    /// once the pass is done.
+    #[serde(skip)]
+    pending_spills: RefCell<Vec<(usize, usize, crate::formula::eval::Array2D)>>,
     /// Data validation rules for cells
     #[serde(default)]
     pub validations: ValidationStore,
@@ -401,6 +409,7 @@ impl Sheet {
             cols,
             spill_values: HashMap::new(),
             computed_cache: RefCell::new(HashMap::new()),
+            pending_spills: RefCell::new(Vec::new()),
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
             tab_color: None,
@@ -423,6 +432,7 @@ impl Sheet {
             cols,
             spill_values: HashMap::new(),
             computed_cache: RefCell::new(HashMap::new()),
+            pending_spills: RefCell::new(Vec::new()),
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
             tab_color: None,
@@ -493,6 +503,45 @@ impl Sheet {
         self.computed_cache.borrow_mut().remove(&(row, col));
         let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
         cell.set_text(text);
+    }
+
+    /// Set a cell without evaluating it.
+    ///
+    /// `set_value` evaluates as it writes, which is right for a person typing
+    /// into a cell. During a bulk load it is wrong twice over: the cell's
+    /// dependencies may not have been loaded yet, so the result is wrong and is
+    /// discarded by the ordered recompute that follows — and any spill it
+    /// produces is placed against a half-built sheet, which is how the same
+    /// document could mean different things depending on the order its cells
+    /// happened to be listed in.
+    ///
+    /// Callers must run an ordered recompute afterwards.
+    pub fn set_value_deferred(&mut self, row: usize, col: usize, value: &str) {
+        let (row, col) = self.merge_origin_coord(row, col);
+        self.clear_spill_from(row, col);
+        self.computed_cache.borrow_mut().remove(&(row, col));
+        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        cell.set(value);
+    }
+
+    /// Note that a formula evaluated to an array, for placement after the pass.
+    pub fn record_pending_spill(
+        &self,
+        row: usize,
+        col: usize,
+        array: crate::formula::eval::Array2D,
+    ) {
+        self.pending_spills.borrow_mut().push((row, col, array));
+    }
+
+    /// Take the recorded arrays, ordered so placement never depends on the
+    /// order cells were inserted or on hash iteration. Top-left first, so when
+    /// two spills contend the earlier cell wins and the later one reports
+    /// #SPILL! — arbitrary, but the same every time.
+    pub fn take_pending_spills(&mut self) -> Vec<(usize, usize, crate::formula::eval::Array2D)> {
+        let mut pending = std::mem::take(&mut *self.pending_spills.borrow_mut());
+        pending.sort_by_key(|(row, col, _)| (*row, *col));
+        pending
     }
 
     /// Mark a cell as having a cycle error.
@@ -586,17 +635,25 @@ impl Sheet {
             let rows = array.rows();
             let cols = array.cols();
 
-            // Check for collision before applying
-            match self.check_spill_collision(row, col, rows, cols) {
-                Ok(()) => {
-                    // Apply the spill
-                    self.apply_spill(row, col, &array);
-                }
-                Err(blocked_by) => {
-                    // Record the spill error
-                    if let Some(cell) = self.cells.get_mut(&(row, col)) {
-                        cell.spill_error = Some(SpillError { blocked_by });
-                    }
+            let _ = (rows, cols);
+            self.place_spill(row, col, &array);
+        }
+    }
+
+    /// Put an array on the sheet, or report that it cannot go there.
+    ///
+    /// Collision is checked first: a spill never overwrites an occupied cell,
+    /// it reports #SPILL! and leaves the occupant alone. Shared by the insert
+    /// path and by the ordered recompute, so both answer the question the same
+    /// way — placing an array is one rule and belongs in one place.
+    pub fn place_spill(&mut self, row: usize, col: usize, array: &crate::formula::eval::Array2D) {
+        match self.check_spill_collision(row, col, array.rows(), array.cols()) {
+            Ok(()) => {
+                self.apply_spill(row, col, array);
+            }
+            Err(blocked_by) => {
+                if let Some(cell) = self.cells.get_mut(&(row, col)) {
+                    cell.spill_error = Some(SpillError { blocked_by });
                 }
             }
         }

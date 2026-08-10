@@ -774,7 +774,10 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
     for cell in &body.cells {
         // Content: formula wins; else typed value
         if let Some(f) = &cell.formula {
-            sheet.set_value(cell.row, cell.col, f);
+            // Deferred: import_any runs an ordered recompute afterwards, which
+            // evaluates once with every dependency present and places spills
+            // against a finished sheet.
+            sheet.set_value_deferred(cell.row, cell.col, f);
         } else if let Some(v) = &cell.value {
             match v {
                 // A quoted value is text, and stays text even when it reads
@@ -793,13 +796,13 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
                     sheet.set_text(cell.row, cell.col, s);
                 }
                 serde_json::Value::Number(n) => {
-                    sheet.set_value(cell.row, cell.col, &n.to_string());
+                    sheet.set_value_deferred(cell.row, cell.col, &n.to_string());
                 }
                 serde_json::Value::Bool(b) => {
-                    sheet.set_value(cell.row, cell.col, if *b { "TRUE" } else { "FALSE" });
+                    sheet.set_value_deferred(cell.row, cell.col, if *b { "TRUE" } else { "FALSE" });
                 }
                 other => {
-                    sheet.set_value(cell.row, cell.col, &other.to_string());
+                    sheet.set_value_deferred(cell.row, cell.col, &other.to_string());
                 }
             }
         }
@@ -906,6 +909,87 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
 mod full_json_tests {
     use super::*;
     use visigrid_engine::sheet::SheetId;
+
+    /// Render a sheet's top-left corner as the user would see it.
+    fn render(sheet: &Sheet, rows: usize, cols: usize) -> String {
+        (0..rows)
+            .map(|r| {
+                (0..cols)
+                    .map(|c| sheet.get_display(r, c))
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn import_cells(cells: &[&str]) -> Sheet {
+        let doc = format!(
+            r#"{{"format":"visigrid-json","version":2,"active_sheet":0,"sheets":[{{"name":"S","cells":[{}]}}]}}"#,
+            cells.join(",")
+        );
+        import_full(&doc).unwrap()
+    }
+
+    /// A document means the same thing whichever order its cells are listed in.
+    ///
+    /// Spills are applied as each cell is inserted, so whether a spill lands
+    /// before or after the cell it would overwrite decides the outcome — and
+    /// which one a user gets depends on the order their writer happened to
+    /// emit. Listed one way a spill silently destroys an occupied cell; listed
+    /// the other it correctly refuses with #SPILL! and the value survives.
+    ///
+    /// Deliberately not a characterization test. Pinning today's output would
+    /// pin the bug; order independence is checkable without knowing which of
+    /// the two answers is right.
+    #[test]
+    fn spilling_does_not_depend_on_the_order_cells_are_listed() {
+        let corpus: Vec<(&str, Vec<&str>)> = vec![
+            (
+                "spill onto an occupied cell",
+                vec![
+                    r#"{"row":0,"col":0,"formula":"=SEQUENCE(3,1,10,5)"}"#,
+                    r#"{"row":1,"col":0,"value":"keep me"}"#,
+                ],
+            ),
+            (
+                "spill reading cells declared later",
+                vec![
+                    r#"{"row":0,"col":2,"formula":"=SORT(A1:A3)"}"#,
+                    r#"{"row":0,"col":0,"value":30}"#,
+                    r#"{"row":1,"col":0,"value":10}"#,
+                    r#"{"row":2,"col":0,"value":20}"#,
+                ],
+            ),
+            (
+                "two spills whose ranges overlap",
+                vec![
+                    r#"{"row":0,"col":0,"formula":"=SEQUENCE(3,1,1,1)"}"#,
+                    r#"{"row":1,"col":0,"formula":"=SEQUENCE(3,1,100,1)"}"#,
+                ],
+            ),
+            (
+                "a spill feeding a non-array formula",
+                vec![
+                    r#"{"row":0,"col":0,"formula":"=SEQUENCE(3,1,10,5)"}"#,
+                    r#"{"row":0,"col":2,"formula":"=SUM(A1:A3)"}"#,
+                ],
+            ),
+        ];
+
+        for (label, cells) in corpus {
+            let forward = import_cells(&cells);
+            let reversed: Vec<&str> = cells.iter().rev().copied().collect();
+            let backward = import_cells(&reversed);
+
+            assert_eq!(
+                render(&forward, 4, 4),
+                render(&backward, 4, 4),
+                "{label}: the same document read in a different cell order produced \
+                 different results"
+            );
+        }
+    }
 
     // A quoted value is text, and survives being read back as text.
     //

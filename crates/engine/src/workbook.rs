@@ -1630,6 +1630,18 @@ impl Workbook {
 
         report.phase_eval_us = phase_start.elapsed().as_micros() as u64;
 
+        // --- Phase 4: Place spills ---
+        //
+        // Every value now exists, so an array can be placed against a finished
+        // sheet rather than a half-built one, and a collision is a real
+        // collision rather than an accident of load order. apply_spill reports
+        // #SPILL! and leaves the occupying cell alone when it cannot fit.
+        for sheet in &mut self.sheets {
+            for (row, col, array) in sheet.take_pending_spills() {
+                sheet.place_spill(row, col, &array);
+            }
+        }
+
         report.duration_ms = start.elapsed().as_millis() as u64;
 
         // Phase timing invariants — catch bogus data before it reaches the UI.
@@ -1696,6 +1708,14 @@ impl Workbook {
                 ),
             };
             let result = evaluate(&bound, &lookup);
+
+            // An array answer is noted, not placed. Placing it here would mean
+            // spilling into a sheet whose other cells may not be evaluated yet,
+            // which is the behaviour that made a document's meaning depend on
+            // the order its cells were listed in.
+            if let EvalResult::Array(array) = &result {
+                sheet.record_pending_spill(cell_id.row, cell_id.col, array.clone());
+            }
 
             // Cache the typed Value so subsequent lookups use the topo-consistent value
             // This is the ONLY place values are written to the cache.
@@ -5073,13 +5093,13 @@ mod recompute_benchmarks {
             sheet.rows = n + 2;
             sheet.cols = 4;
             for i in 0..n {
-                sheet.set_value(i, 0, &((i % 97) + 1).to_string());
+                sheet.set_value_deferred(i, 0, &((i % 97) + 1).to_string());
                 let formula = if chained && i > 0 {
                     format!("=A{}*2+B{}", i + 1, i)
                 } else {
                     format!("=A{}*2", i + 1)
                 };
-                sheet.set_value(i, 1, &formula);
+                sheet.set_value_deferred(i, 1, &formula);
             }
         }
         (wb, start.elapsed())
@@ -5157,6 +5177,55 @@ dep_graph {:>6.1}ms  recompute {:>7.1}ms",
         );
     }
 
+    /// Same workbook, built both ways, in one run.
+    ///
+    /// Absolute timings drift with whatever else the machine is doing — a run
+    /// taken minutes apart moved every number including dep_graph, which
+    /// neither path touches. Measuring both in the same process makes the
+    /// comparison survive that.
+    #[test]
+    #[ignore]
+    fn recompute_benchmark_deferred_vs_evaluating_insert() {
+        println!();
+        for &n in &[10_000usize, 50_000] {
+            let mut line = format!("  {n:>7} cells  ");
+            for deferred in [false, true] {
+                let start = Instant::now();
+                let mut wb = Workbook::new();
+                {
+                    let sheet = &mut wb.sheets_mut()[0];
+                    sheet.rows = n + 2;
+                    sheet.cols = 4;
+                    for i in 0..n {
+                        let v = ((i % 97) + 1).to_string();
+                        let f = format!("=A{}*2", i + 1);
+                        if deferred {
+                            sheet.set_value_deferred(i, 0, &v);
+                            sheet.set_value_deferred(i, 1, &f);
+                        } else {
+                            sheet.set_value(i, 0, &v);
+                            sheet.set_value(i, 1, &f);
+                        }
+                    }
+                }
+                let construct = start.elapsed();
+                let t = Instant::now();
+                wb.rebuild_dep_graph();
+                wb.recompute_full_ordered();
+                let rest = t.elapsed();
+                line.push_str(&format!(
+                    "{:<9} construct {:>7.1}ms  graph+recompute {:>7.1}ms  total {:>7.1}ms   ",
+                    if deferred { "deferred" } else { "evaluating" },
+                    construct.as_secs_f64() * 1000.0,
+                    rest.as_secs_f64() * 1000.0,
+                    (construct + rest).as_secs_f64() * 1000.0,
+                ));
+            }
+            println!("{line}");
+        }
+        println!();
+    }
+
     /// Is the construction phase actually evaluating?
     ///
     /// set_value calls evaluate_and_spill on every insert, so building a
@@ -5173,37 +5242,38 @@ dep_graph {:>6.1}ms  recompute {:>7.1}ms",
             ("costly =SUM(A1:A200)", 1usize),
         ] {
             let n = 10_000usize;
-            let start = Instant::now();
-            let mut wb = Workbook::new();
-            {
-                let sheet = &mut wb.sheets_mut()[0];
-                sheet.rows = n + 300;
-                sheet.cols = 4;
-                for i in 0..n {
-                    sheet.set_value(i, 0, &((i % 97) + 1).to_string());
+            let mut timings = [std::time::Duration::ZERO; 2];
+            for (slot, deferred) in [(0usize, false), (1usize, true)] {
+                let start = Instant::now();
+                let mut wb = Workbook::new();
+                {
+                    let sheet = &mut wb.sheets_mut()[0];
+                    sheet.rows = n + 300;
+                    sheet.cols = 4;
+                    for i in 0..n {
+                        let v = ((i % 97) + 1).to_string();
+                        let f = if make == 0 {
+                            format!("=A{}*2", i + 1)
+                        } else {
+                            "=SUM(A1:A200)".to_string()
+                        };
+                        if deferred {
+                            sheet.set_value_deferred(i, 0, &v);
+                            sheet.set_value_deferred(i, 1, &f);
+                        } else {
+                            sheet.set_value(i, 0, &v);
+                            sheet.set_value(i, 1, &f);
+                        }
+                    }
                 }
-                for i in 0..n {
-                    let f = if make == 0 {
-                        format!("=A{}*2", i + 1)
-                    } else {
-                        "=SUM(A1:A200)".to_string()
-                    };
-                    sheet.set_value(i, 1, &f);
-                }
+                timings[slot] = start.elapsed();
             }
-            let construct = start.elapsed();
-            let t = Instant::now();
-            wb.rebuild_dep_graph();
-            let graph = t.elapsed();
-            let t = Instant::now();
-            wb.recompute_full_ordered();
-            let recompute = t.elapsed();
             println!(
-                "  {:<22} construct {:>8.1}ms  dep_graph {:>6.1}ms  recompute {:>8.1}ms",
+                "  {:<22} construct: evaluating {:>8.1}ms   deferred {:>8.1}ms   saved {:>5.0}%",
                 label,
-                construct.as_secs_f64() * 1000.0,
-                graph.as_secs_f64() * 1000.0,
-                recompute.as_secs_f64() * 1000.0,
+                timings[0].as_secs_f64() * 1000.0,
+                timings[1].as_secs_f64() * 1000.0,
+                100.0 * (1.0 - timings[1].as_secs_f64() / timings[0].as_secs_f64()),
             );
         }
         println!();
