@@ -5039,3 +5039,92 @@ mod tests {
         );
     }
 }
+
+// ============================================================================
+// Recompute cost: rebuild versus recalculate
+//
+// Run with:
+//   cargo test -p visigrid-engine --release -- recompute_benchmark --nocapture --ignored
+//
+// This exists to answer one question, from the real-time collaboration spec:
+// if every edit costs a full recompute, is that affordable at realistic sizes?
+//
+// The measurement is split deliberately. The WASM entry point rebuilds the
+// whole workbook from JSON on every call before recomputing, so a single
+// number for "recompute" would be mostly construction cost attributed to
+// recalculation — and the fix for each is a different project. Rebuilding
+// dominating means keeping a resident workbook across calls, which is WASM
+// plumbing. Recalculation dominating means incremental recalc in the engine,
+// which is considerably more work. The split says which.
+// ============================================================================
+#[cfg(test)]
+mod recompute_benchmarks {
+    use super::*;
+    use std::time::Instant;
+
+    /// A sheet of `n` formula cells. `chained` makes each formula depend on the
+    /// previous one, which forces a deep topological order; otherwise they are
+    /// independent, which is the friendlier shape. Real sheets sit between.
+    fn build(n: usize, chained: bool) -> (Workbook, std::time::Duration) {
+        let start = Instant::now();
+        let mut wb = Workbook::new();
+        {
+            let sheet = &mut wb.sheets_mut()[0];
+            sheet.rows = n + 2;
+            sheet.cols = 4;
+            for i in 0..n {
+                sheet.set_value(i, 0, &((i % 97) + 1).to_string());
+                let formula = if chained && i > 0 {
+                    format!("=A{}*2+B{}", i + 1, i)
+                } else {
+                    format!("=A{}*2", i + 1)
+                };
+                sheet.set_value(i, 1, &formula);
+            }
+        }
+        (wb, start.elapsed())
+    }
+
+    fn run(n: usize, chained: bool) {
+        let (mut wb, construct) = build(n, chained);
+
+        let t = Instant::now();
+        wb.rebuild_dep_graph();
+        let graph = t.elapsed();
+
+        let t = Instant::now();
+        let report = wb.recompute_full_ordered();
+        let recompute = t.elapsed();
+
+        let t = Instant::now();
+        wb.recompute_full_ordered();
+        let recompute_warm = t.elapsed();
+
+        let total = construct + graph + recompute;
+        println!(
+            "  {:>7} {:<12} construct {:>8.1}ms  dep_graph {:>7.1}ms  recompute {:>8.1}ms  \
+             (warm {:>7.1}ms)  total {:>8.1}ms  [{} evaluated]",
+            n,
+            if chained { "chained" } else { "independent" },
+            construct.as_secs_f64() * 1000.0,
+            graph.as_secs_f64() * 1000.0,
+            recompute.as_secs_f64() * 1000.0,
+            recompute_warm.as_secs_f64() * 1000.0,
+            total.as_secs_f64() * 1000.0,
+            report.cells_recomputed,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn recompute_benchmark() {
+        println!();
+        println!("Formula cells, timed by phase. A frame is 16.7ms.");
+        println!();
+        for &n in &[10_000usize, 50_000, 200_000] {
+            run(n, false);
+            run(n, true);
+        }
+        println!();
+    }
+}
