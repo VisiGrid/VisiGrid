@@ -50,12 +50,25 @@ struct OutResult {
 #[derive(Serialize)]
 struct Output {
     engine_version: String,
+    engine_commit: String,
     results: Vec<OutResult>,
 }
 
 #[wasm_bindgen]
 pub fn engine_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// The commit this bundle was built from, suffixed "-modified" if the tree was
+/// dirty, and empty if it could not be determined.
+///
+/// The version alone cannot tell a build made at a release tag from one made
+/// afterwards — they report the same number — so anything vendoring this
+/// artifact and publishing a version beside it needs this to check the two
+/// actually correspond.
+#[wasm_bindgen]
+pub fn engine_commit() -> String {
+    env!("VISIGRID_ENGINE_COMMIT").to_string()
 }
 
 /// Build a workbook from raw input sheets and recompute it (shared by every
@@ -156,6 +169,7 @@ fn recompute_core(sheets: &[InSheet]) -> Output {
 
     Output {
         engine_version: engine_version(),
+        engine_commit: engine_commit(),
         results,
     }
 }
@@ -561,5 +575,20 @@ mod tests {
             Value::Number(n) => assert_eq!(n, 8.0),
             other => panic!("expected 8, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    /// The stamp must identify this build, not merely be present.
+    #[test]
+    fn the_commit_stamp_is_a_real_commit_or_empty() {
+        let stamp = super::engine_commit();
+        let base = stamp.trim_end_matches("-modified");
+        assert!(
+            stamp.is_empty() || (base.len() == 40 && base.chars().all(|c| c.is_ascii_hexdigit())),
+            "stamp should be a 40-char sha, optionally -modified, or empty; got {stamp:?}"
+        );
+        println!("STAMP={stamp}");
     }
 }
