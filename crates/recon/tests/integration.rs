@@ -797,9 +797,24 @@ fn assert_golden(name: &str, result: &ReconResult) {
     if path.exists() {
         let expected = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read golden file {}: {e}", path.display()));
+
+        // Compare the parsed documents, not the text.
+        //
+        // crates/cli asks serde_json for "preserve_order", and cargo unifies
+        // features across a workspace build — so the same struct serializes
+        // with its keys in declaration order under `cargo test --workspace`
+        // and in alphabetical order under `cargo test -p visigrid-recon`.
+        // A golden file written by one therefore fails the other, with a diff
+        // showing every key present and identical, which reads as a data
+        // change and is not one.
+        let actual: serde_json::Value = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("generated golden JSON is not valid JSON: {e}"));
+        let expected_value: serde_json::Value = serde_json::from_str(&expected)
+            .unwrap_or_else(|e| panic!("golden file {} is not valid JSON: {e}", path.display()));
+
         assert_eq!(
-            json.trim(),
-            expected.trim(),
+            actual,
+            expected_value,
             "golden JSON mismatch for '{}'. If the schema change is intentional, delete {} and re-run.",
             name,
             path.display()
