@@ -5115,6 +5115,119 @@ mod recompute_benchmarks {
         );
     }
 
+    /// A sheet of `literals` plain cells and `formulas` formula cells.
+    ///
+    /// Construction should scale with the total; recompute only with the
+    /// formulas. If that holds, the phases can be separated from outside the
+    /// WASM boundary by varying the mix, without needing a timer inside it.
+    fn build_mixed(literals: usize, formulas: usize) -> (Workbook, std::time::Duration) {
+        let start = Instant::now();
+        let mut wb = Workbook::new();
+        {
+            let sheet = &mut wb.sheets_mut()[0];
+            sheet.rows = literals + formulas + 2;
+            sheet.cols = 4;
+            for i in 0..literals {
+                sheet.set_value(i, 0, &((i % 97) + 1).to_string());
+            }
+            for i in 0..formulas {
+                sheet.set_value(literals + i, 0, &((i % 97) + 1).to_string());
+                sheet.set_value(literals + i, 1, &format!("=A{}*2", literals + i + 1));
+            }
+        }
+        (wb, start.elapsed())
+    }
+
+    fn run_mixed(literals: usize, formulas: usize) {
+        let (mut wb, construct) = build_mixed(literals, formulas);
+        let t = Instant::now();
+        wb.rebuild_dep_graph();
+        let graph = t.elapsed();
+        let t = Instant::now();
+        wb.recompute_full_ordered();
+        let recompute = t.elapsed();
+        let total_cells = literals + formulas * 2;
+        println!(
+            "  {:>7} literal + {:>7} formula ({:>7} cells)  construct {:>7.1}ms  \
+dep_graph {:>6.1}ms  recompute {:>7.1}ms",
+            literals, formulas, total_cells,
+            construct.as_secs_f64() * 1000.0,
+            graph.as_secs_f64() * 1000.0,
+            recompute.as_secs_f64() * 1000.0,
+        );
+    }
+
+    /// Is the construction phase actually evaluating?
+    ///
+    /// set_value calls evaluate_and_spill on every insert, so building a
+    /// workbook may be evaluating every formula once — with dependencies still
+    /// incomplete, so the results are discarded — before recompute_full_ordered
+    /// evaluates them all again in the right order. If so, construction cost
+    /// tracks formula *expense*, not just formula count.
+    #[test]
+    #[ignore]
+    fn recompute_benchmark_is_construction_evaluating() {
+        println!();
+        for (label, make) in [
+            ("cheap  =A{i}*2", 0usize),
+            ("costly =SUM(A1:A200)", 1usize),
+        ] {
+            let n = 10_000usize;
+            let start = Instant::now();
+            let mut wb = Workbook::new();
+            {
+                let sheet = &mut wb.sheets_mut()[0];
+                sheet.rows = n + 300;
+                sheet.cols = 4;
+                for i in 0..n {
+                    sheet.set_value(i, 0, &((i % 97) + 1).to_string());
+                }
+                for i in 0..n {
+                    let f = if make == 0 {
+                        format!("=A{}*2", i + 1)
+                    } else {
+                        "=SUM(A1:A200)".to_string()
+                    };
+                    sheet.set_value(i, 1, &f);
+                }
+            }
+            let construct = start.elapsed();
+            let t = Instant::now();
+            wb.rebuild_dep_graph();
+            let graph = t.elapsed();
+            let t = Instant::now();
+            wb.recompute_full_ordered();
+            let recompute = t.elapsed();
+            println!(
+                "  {:<22} construct {:>8.1}ms  dep_graph {:>6.1}ms  recompute {:>8.1}ms",
+                label,
+                construct.as_secs_f64() * 1000.0,
+                graph.as_secs_f64() * 1000.0,
+                recompute.as_secs_f64() * 1000.0,
+            );
+        }
+        println!();
+    }
+
+    /// Does construction scale with all cells and recompute only with formulas?
+    /// If so, the browser can attribute the WASM boundary cost by varying the
+    /// mix, rather than waiting for a resident workbook to separate the phases.
+    #[test]
+    #[ignore]
+    fn recompute_benchmark_phase_model() {
+        println!();
+        println!("Holding one dimension fixed while varying the other:");
+        println!();
+        run_mixed(0, 50_000);
+        run_mixed(50_000, 50_000);
+        run_mixed(100_000, 50_000);
+        println!();
+        run_mixed(50_000, 0);
+        run_mixed(50_000, 25_000);
+        run_mixed(50_000, 50_000);
+        println!();
+    }
+
     #[test]
     #[ignore]
     fn recompute_benchmark() {
