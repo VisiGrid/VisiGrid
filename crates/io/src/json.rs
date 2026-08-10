@@ -759,6 +759,11 @@ pub fn import_any(
 
 fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usize) -> Result<(Sheet, SheetLayout), String> {
     let mut sheet = Sheet::new(id, 65536, 256);
+    // Quoted values that read as numbers. Ours are deliberate — the writer only
+    // quotes text — but a foreign document may have quoted a number by accident,
+    // and it now stays text. Said out loud so that is discoverable rather than
+    // something to deduce from a total that came out wrong.
+    let mut quoted_numerics = 0usize;
     if !body.name.is_empty() {
         sheet.set_name(&body.name);
         sheet.tab_color = body.tab_color.as_deref().and_then(parse_hex_rgb);
@@ -771,13 +776,32 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
         if let Some(f) = &cell.formula {
             sheet.set_value(cell.row, cell.col, f);
         } else if let Some(v) = &cell.value {
-            let text = match v {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Bool(b) => if *b { "TRUE".into() } else { "FALSE".into() },
-                other => other.to_string(),
-            };
-            sheet.set_value(cell.row, cell.col, &text);
+            match v {
+                // A quoted value is text, and stays text even when it reads
+                // like a number. The document already told us the type; this
+                // used to flatten it to a string and hand it to set_value,
+                // which inferred the type over again — so "007" came back as
+                // 7 with nothing to say a zip code had become an integer.
+                //
+                // Writers only quote what was text, so our own round trips are
+                // exact. A foreign document quoting a number gets text, which
+                // is visible and fixable; the previous behaviour was neither.
+                serde_json::Value::String(s) => {
+                    if !s.is_empty() && s.parse::<f64>().is_ok() {
+                        quoted_numerics += 1;
+                    }
+                    sheet.set_text(cell.row, cell.col, s);
+                }
+                serde_json::Value::Number(n) => {
+                    sheet.set_value(cell.row, cell.col, &n.to_string());
+                }
+                serde_json::Value::Bool(b) => {
+                    sheet.set_value(cell.row, cell.col, if *b { "TRUE" } else { "FALSE" });
+                }
+                other => {
+                    sheet.set_value(cell.row, cell.col, &other.to_string());
+                }
+            }
         }
 
         if let Some(f) = &cell.fmt {
@@ -865,6 +889,16 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
         filter: body.filter.clone(),
         charts: body.charts.clone(),
     };
+
+    if quoted_numerics > 0 {
+        eprintln!(
+            "[JSON import] {} quoted value(s) in {:?} read as numbers and were kept as text \
+             (a quoted value is text in visigrid-json)",
+            quoted_numerics,
+            sheet.name
+        );
+    }
+
     Ok((sheet, layout))
 }
 
@@ -872,6 +906,43 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
 mod full_json_tests {
     use super::*;
     use visigrid_engine::sheet::SheetId;
+
+    // A quoted value is text, and survives being read back as text.
+    //
+    // The reader used to match on the JSON type and then flatten it to a string
+    // for set_value, which inferred the type over again — so a zip code written
+    // as "007" returned as the number 7. Every server-side recalc goes through
+    // this path, which is why the xlsx reader's fix was undone the first time
+    // anyone saved.
+    #[test]
+    fn quoted_values_stay_text_through_a_round_trip() {
+        use visigrid_engine::cell::CellValue;
+
+        let mut sheet = Sheet::new(SheetId(1), 100, 100);
+        sheet.set_text(0, 0, "007");
+        sheet.set_text(1, 0, "0123456789");
+        sheet.set_value(2, 0, "42"); // a real number, must stay one
+        sheet.set_text(3, 0, "label"); // ordinary text, unaffected
+
+        let restored = import_full(&export_full(&sheet).unwrap()).unwrap();
+
+        let text_at = |row: usize, expected: &str| {
+            let value = &restored.get_cell(row, 0).value;
+            assert!(
+                matches!(value, CellValue::Text(s) if s == expected),
+                "row {row} should still be the text {expected:?}, got {value:?}"
+            );
+        };
+        text_at(0, "007");
+        text_at(1, "0123456789");
+        text_at(3, "label");
+
+        let number = &restored.get_cell(2, 0).value;
+        assert!(
+            matches!(number, CellValue::Number(n) if *n == 42.0),
+            "a real number must stay a number, got {number:?}"
+        );
+    }
 
     #[test]
     fn full_json_roundtrip() {
