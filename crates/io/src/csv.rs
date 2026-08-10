@@ -132,7 +132,7 @@ fn import_from_string(content: &str, delimiter: u8) -> Result<Sheet, String> {
         let record = result.map_err(|e| e.to_string())?;
         for (col_idx, field) in record.iter().enumerate() {
             if !field.is_empty() {
-                sheet.set_value(row_idx, col_idx, field);
+                sheet.set_value_deferred(row_idx, col_idx, field);
                 max_col = max_col.max(col_idx);
             }
         }
@@ -143,7 +143,17 @@ fn import_from_string(content: &str, delimiter: u8) -> Result<Sheet, String> {
     sheet.rows = (max_row + 1).max(1000);
     sheet.cols = (max_col + 1).max(26);
 
-    Ok(sheet)
+    // Evaluate in dependency order rather than in the order the rows happened
+    // to be read. Cells were inserted without evaluating, and previously each
+    // was evaluated on arrival: a formula naming a row further down the file
+    // was computed against a cell that did not exist yet, came out as zero, and
+    // nothing ever revisited it — so anything referring to that formula was
+    // wrong too, including formulas pointing safely backwards.
+    let mut wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
+    wb.rebuild_dep_graph();
+    wb.recompute_full_ordered();
+
+    Ok(wb.sheets()[0].clone())
 }
 
 pub fn export(sheet: &Sheet, path: &Path) -> Result<(), String> {
@@ -192,6 +202,27 @@ fn export_with_delimiter(sheet: &Sheet, path: &Path, delimiter: u8) -> Result<()
 
 #[cfg(test)]
 mod tests {
+
+    /// A formula may name a row further down the file.
+    ///
+    /// Cells used to be evaluated as they were read, so a reference pointing
+    /// forward was computed against a cell that had not been reached yet and
+    /// came out as zero — and stayed zero, because nothing recomputed. The
+    /// third row here is what made it worse than a single wrong cell: it points
+    /// safely backwards and was still wrong, having inherited the first row's
+    /// bad value.
+    #[test]
+    fn formulas_referring_to_later_rows_are_still_evaluated() {
+        let sheet = import_from_string("=A2*2\n5\n=A1+1\n", b',').unwrap();
+
+        assert_eq!(sheet.get_display(0, 0), "10", "a forward reference must resolve");
+        assert_eq!(sheet.get_display(1, 0), "5");
+        assert_eq!(
+            sheet.get_display(2, 0),
+            "11",
+            "and a backward reference must not inherit a wrong one"
+        );
+    }
     use super::*;
     use std::fs;
     use tempfile::tempdir;
