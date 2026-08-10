@@ -1237,7 +1237,7 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
             };
 
             if !value_str.is_empty() {
-                sheet.set_value(row, col, &value_str);
+                sheet.set_value_deferred(row, col, &value_str);
             }
 
             // Set formatting

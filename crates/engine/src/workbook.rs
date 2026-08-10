@@ -1638,6 +1638,14 @@ impl Workbook {
         // #SPILL! and leaves the occupying cell alone when it cannot fit.
         for sheet in &mut self.sheets {
             for (row, col, array) in sheet.take_pending_spills() {
+                // Drop anything this cell spilled earlier before placing again.
+                // A caller that still inserts eagerly will have spilled once
+                // already, against a half-built sheet, and those receivers
+                // outlive the cells written after them — so without this, a
+                // refusal here leaves the error sitting beside the leftovers of
+                // the spill it just declined. This pass is the authority on
+                // where an array goes, whatever happened on the way in.
+                sheet.clear_spill_from(row, col);
                 sheet.place_spill(row, col, &array);
             }
         }
@@ -5077,6 +5085,54 @@ mod tests {
 // plumbing. Recalculation dominating means incremental recalc in the engine,
 // which is considerably more work. The split says which.
 // ============================================================================
+#[cfg(test)]
+mod spill_placement_tests {
+    use super::*;
+
+    /// An eager caller must not be able to corrupt the result.
+    ///
+    /// set_value spills as it writes. A bulk loader that still uses it will
+    /// spill against a half-built sheet, and those receivers survive the cells
+    /// written afterwards — which produced, in a real xlsx import, a #SPILL!
+    /// beside the leftovers of the spill it had just refused, with the user's
+    /// value hidden underneath. The ordered recompute has to be able to undo
+    /// that, because callers get converted one at a time and the one that
+    /// hasn't been is exactly where this bites.
+    #[test]
+    fn a_recompute_repairs_a_spill_placed_eagerly() {
+        let mut wb = Workbook::new();
+        {
+            let sheet = &mut wb.sheets_mut()[0];
+            // Order matters: the array is written first and spills into A2,
+            // then A2 is written over the top of a receiver.
+            sheet.set_value(0, 0, "=SEQUENCE(3,1,10,5)");
+            sheet.set_value(1, 0, "keep me");
+        }
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+
+        let sheet = &wb.sheets()[0];
+        assert_eq!(sheet.get_display(0, 0), "#SPILL!", "the spill cannot fit and must say so");
+        assert_eq!(sheet.get_display(1, 0), "keep me", "the obstructing value must survive");
+        assert_eq!(sheet.get_display(2, 0), "", "no leftover receiver from the eager spill");
+    }
+
+    /// The same sheet with nothing in the way still spills.
+    #[test]
+    fn an_unobstructed_spill_still_lands_after_recompute() {
+        let mut wb = Workbook::new();
+        wb.sheets_mut()[0].set_value(0, 0, "=SEQUENCE(3,1,10,5)");
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+
+        let sheet = &wb.sheets()[0];
+        assert_eq!(
+            (sheet.get_display(0, 0), sheet.get_display(1, 0), sheet.get_display(2, 0)),
+            ("10".to_string(), "15".to_string(), "20".to_string()),
+        );
+    }
+}
+
 #[cfg(test)]
 mod recompute_benchmarks {
     use super::*;

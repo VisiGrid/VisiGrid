@@ -98,7 +98,11 @@ fn build_workbook(sheets: &[InSheet]) -> Workbook {
         sheet.cols = sheet.cols.max(needed_cols);
 
         for cell in &sheet_in.cells {
-            sheet.set_value(cell.row, cell.col, &cell.raw);
+            // Deferred: the ordered recompute below evaluates each formula once
+            // with its dependencies present, and places spills afterwards.
+            // Inserting eagerly would evaluate every formula here as well, and
+            // spill against a half-built sheet for the recompute to then undo.
+            sheet.set_value_deferred(cell.row, cell.col, &cell.raw);
         }
     }
 
