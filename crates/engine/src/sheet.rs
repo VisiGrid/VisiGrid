@@ -2111,6 +2111,55 @@ mod tests {
         assert_eq!(sheet.get_display(2, 0), "20");
     }
 
+    // XLOOKUP with a multi-column return array became a spilling formula in
+    // 0.22.0, where it previously returned only the first column. That is the
+    // one change in that release able to turn a formula that appeared to work
+    // into a visible error, so the behaviour when the landing cells are already
+    // occupied is worth pinning down: it must refuse, not overwrite, and not
+    // quietly fall back to a single value.
+    #[test]
+    fn test_xlookup_multi_column_return_refuses_to_overwrite() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        // A1:C2 — ids in A, two columns of data to return.
+        sheet.set_value(0, 0, "101");
+        sheet.set_value(0, 1, "West");
+        sheet.set_value(0, 2, "Bo");
+        sheet.set_value(1, 0, "102");
+        sheet.set_value(1, 1, "East");
+        sheet.set_value(1, 2, "Ana");
+
+        // Something already sitting where the second returned cell would land.
+        sheet.set_value(5, 1, "occupied");
+        sheet.set_value(5, 0, "=XLOOKUP(102, A1:A2, B1:C2)");
+
+        assert!(sheet.has_spill_error(5, 0), "a blocked spill must report an error");
+        assert_eq!(sheet.get_display(5, 0), "#SPILL!");
+        assert_eq!(
+            sheet.get_display(5, 1),
+            "occupied",
+            "the blocking cell must keep its value"
+        );
+    }
+
+    #[test]
+    fn test_xlookup_multi_column_return_spills_when_clear() {
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+
+        sheet.set_value(0, 0, "101");
+        sheet.set_value(0, 1, "West");
+        sheet.set_value(0, 2, "Bo");
+        sheet.set_value(1, 0, "102");
+        sheet.set_value(1, 1, "East");
+        sheet.set_value(1, 2, "Ana");
+
+        sheet.set_value(5, 0, "=XLOOKUP(102, A1:A2, B1:C2)");
+
+        assert!(!sheet.has_spill_error(5, 0));
+        assert_eq!(sheet.get_display(5, 0), "East");
+        assert_eq!(sheet.get_display(5, 1), "Ana");
+    }
+
     #[test]
     fn test_spill_collision_shows_error() {
         let mut sheet = Sheet::new(SheetId(1), 10, 10);
