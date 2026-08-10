@@ -411,6 +411,16 @@ struct FullCell {
     formula: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fmt: Option<FullFormat>,
+    /// Set on cells a formula spilled into, naming the cell it came from.
+    ///
+    /// These carry a value for readers without an engine, which otherwise see
+    /// a one-cell answer where the sheet shows a range. The marker is what
+    /// makes that safe to write down: on the way back in these are skipped and
+    /// regenerated, because a spill cannot be placed into cells that are
+    /// already occupied — writing them as ordinary cells turns every spilling
+    /// workbook into #SPILL! on its own round trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spill_from: Option<[usize; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -652,7 +662,36 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
             None
         };
 
-        cells.push(FullCell { row, col, value, formula, fmt });
+        cells.push(FullCell { row, col, value, formula, fmt, spill_from: None });
+    }
+
+    // Cells a formula spilled into. They hold no Cell of their own, so the loop
+    // above never sees them.
+    for row in 0..sheet.rows {
+        for col in 0..sheet.cols {
+            if !sheet.is_spill_receiver(row, col) {
+                continue;
+            }
+            let Some(parent) = sheet.get_spill_parent(row, col) else {
+                continue;
+            };
+            use visigrid_engine::formula::eval::Value as EvalValue;
+            let value = match sheet.get_spill_value(row, col) {
+                Some(EvalValue::Number(n)) => Some(serde_json::json!(n)),
+                Some(EvalValue::Text(t)) => Some(serde_json::json!(t)),
+                Some(EvalValue::Boolean(b)) => Some(serde_json::json!(b)),
+                Some(EvalValue::Error(e)) => Some(serde_json::json!(e)),
+                Some(EvalValue::Empty) | None => None,
+            };
+            cells.push(FullCell {
+                row,
+                col,
+                value,
+                formula: None,
+                fmt: None,
+                spill_from: Some([parent.0, parent.1]),
+            });
+        }
     }
 
     let merges = sheet
@@ -772,6 +811,13 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
     }
 
     for cell in &body.cells {
+        // Spill receivers are written for readers without an engine. Loading
+        // them would occupy the range the spill needs and turn it into #SPILL!,
+        // so they are skipped and the recompute puts them back.
+        if cell.spill_from.is_some() {
+            continue;
+        }
+
         // Content: formula wins; else typed value
         if let Some(f) = &cell.formula {
             // Deferred: import_any runs an ordered recompute afterwards, which
@@ -929,6 +975,44 @@ mod full_json_tests {
             cells.join(",")
         );
         import_full(&doc).unwrap()
+    }
+
+    /// A reader without an engine sees the whole spilled range, and the file
+    /// still survives being read back.
+    ///
+    /// These two pull against each other, which is the only interesting thing
+    /// here. Writing the spilled cells down is what the format promises — its
+    /// stored values exist for consumers that cannot recompute. But a spill
+    /// cannot be placed into cells that are already occupied, so writing them
+    /// as ordinary cells makes the document refuse its own spill with #SPILL!
+    /// the moment it is reopened. The marker is what lets both be true.
+    #[test]
+    fn spilled_values_are_written_down_and_do_not_block_the_reload() {
+        let mut sheet = Sheet::new(SheetId(1), 100, 10);
+        sheet.set_value(0, 0, "=SEQUENCE(3,1,10,5)");
+
+        let exported = export_full(&sheet).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        let cells = doc["cells"].as_array().unwrap();
+
+        let spilled: Vec<_> = cells.iter().filter(|c| c.get("spill_from").is_some()).collect();
+        assert_eq!(spilled.len(), 2, "both cells the array spilled into should be written");
+        assert_eq!(spilled[0]["value"], 15.0);
+        assert_eq!(spilled[1]["value"], 20.0);
+        assert_eq!(spilled[0]["spill_from"], serde_json::json!([0, 0]));
+
+        // Reading it back must reproduce the sheet, not a refusal.
+        let restored = import_full(&exported).unwrap();
+        assert_eq!(
+            (restored.get_display(0, 0), restored.get_display(1, 0), restored.get_display(2, 0)),
+            ("10".to_string(), "15".to_string(), "20".to_string()),
+            "reopening the file must not turn its own spill into #SPILL!"
+        );
+
+        // And again, since the second write is the one that would carry any
+        // damage forward.
+        let twice = import_full(&export_full(&restored).unwrap()).unwrap();
+        assert_eq!(twice.get_display(2, 0), "20");
     }
 
     /// A document means the same thing whichever order its cells are listed in.
