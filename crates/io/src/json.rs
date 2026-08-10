@@ -989,6 +989,35 @@ mod full_json_tests {
                  different results"
             );
         }
+
+        // Agreement is not correctness: two runs agreeing on a wrong answer
+        // satisfies the property completely. An earlier version of this fix
+        // passed everything above while silently dropping the #SPILL! — both
+        // orders reported the array's first value as though nothing had gone
+        // wrong. So at least one case states outright what the answer should be.
+        let blocked = import_cells(&[
+            r#"{"row":0,"col":0,"formula":"=SEQUENCE(3,1,10,5)"}"#,
+            r#"{"row":1,"col":0,"value":"keep me"}"#,
+        ]);
+        assert_eq!(
+            blocked.get_display(0, 0),
+            "#SPILL!",
+            "a spill that cannot fit must say so"
+        );
+        assert_eq!(
+            blocked.get_display(1, 0),
+            "keep me",
+            "and must not overwrite what was in its way"
+        );
+
+        // The unobstructed case must still spill, or the assertion above could
+        // be satisfied by never spilling at all.
+        let clear = import_cells(&[r#"{"row":0,"col":0,"formula":"=SEQUENCE(3,1,10,5)"}"#]);
+        assert_eq!(
+            (clear.get_display(0, 0), clear.get_display(1, 0), clear.get_display(2, 0)),
+            ("10".to_string(), "15".to_string(), "20".to_string()),
+            "an unobstructed spill must still land"
+        );
     }
 
     // A quoted value is text, and survives being read back as text.

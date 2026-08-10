@@ -609,7 +609,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                                     );
                                 }
 
-                                sheet.set_value(target_row, target_col, &formula_str);
+                                sheet.set_value_deferred(target_row, target_col, &formula_str);
                                 sheet.set_format(target_row, target_col, existing_format);
                             }
 
@@ -678,7 +678,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                     };
                     eprintln!("[XLSX backfill] {}{}: ={}",
                         col_to_letter(*col), *row + 1, formula_text);
-                    sheet.set_value(*row, *col, &formula_str);
+                    sheet.set_value_deferred(*row, *col, &formula_str);
                     formula_backfill_count += 1;
                 }
             }
@@ -770,9 +770,12 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         }
 
         // Recompute all formulas in topological order.
-        // Individual set_value() calls during import evaluated formulas at sheet level
-        // without proper dependency ordering — upstream cells may not have existed yet.
-        // This full ordered recompute clears stale caches and evaluates everything correctly.
+        //
+        // Formulas are inserted without being evaluated, because evaluating one
+        // as it arrives means evaluating it against cells that may not have been
+        // read yet. This pass evaluates each once with its dependencies present,
+        // and places any spills afterwards — which is also what stops a spill
+        // overwriting a cell purely because it happened to be listed first.
         let recalc_report = workbook.recompute_full_ordered();
         eprintln!("[XLSX import] Recomputed {} formulas in topo order (cycles: {})",
             recalc_report.cells_recomputed, recalc_report.had_cycles);
