@@ -39,6 +39,111 @@ fn numeric_key(key: &EvalResult) -> Option<f64> {
     }
 }
 
+
+/// Find the index matching `lookup_value`, by XLOOKUP's rules.
+///
+/// Shared by XLOOKUP and XMATCH. They differ only in what they do with the
+/// answer — one reads a return array at that index, the other reports the
+/// index itself — so the matching rules live in one place. Keeping them apart
+/// is how XLOOKUP's wildcard mode and its search_mode each came to be wrong
+/// on their own.
+///
+/// `cell_text_at` reads position `idx` of the lookup array as text; the caller
+/// owns the geometry.
+fn scan_for_match(
+    lookup_value: &EvalResult,
+    size: usize,
+    match_mode: i32,
+    reverse: bool,
+    cell_text_at: impl Fn(usize) -> String,
+) -> Option<usize> {
+    let approximate = match_mode == -1 || match_mode == 1;
+    let mut found_idx: Option<usize> = None;
+    // Best fallback seen so far, as (index, value), for the approximate modes.
+    let mut nearest: Option<(usize, EvalResult)> = None;
+
+    let scan: Box<dyn Iterator<Item = usize>> = if reverse {
+        Box::new((0..size).rev())
+    } else {
+        Box::new(0..size)
+    };
+
+    for idx in scan {
+        let cell_text = cell_text_at(idx);
+        let cell_is_empty = cell_text.is_empty();
+        let cell_value = if cell_is_empty {
+            EvalResult::Text(String::new())
+        } else if let Ok(n) = cell_text.parse::<f64>() {
+            EvalResult::Number(n)
+        } else {
+            EvalResult::Text(cell_text)
+        };
+
+        let is_match = match match_mode {
+            0 => match (lookup_value, &cell_value) {
+                (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
+                (EvalResult::Text(a), EvalResult::Text(b)) => a.eq_ignore_ascii_case(b),
+                _ => false,
+            },
+            2 => {
+                // The same matcher COUNTIF/SUMIF criteria use, rather than a
+                // second implementation.
+                match (lookup_value, &cell_value) {
+                    (EvalResult::Text(pattern), EvalResult::Text(text)) => {
+                        wildcard_match(pattern, text)
+                    }
+                    (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
+                    _ => false,
+                }
+            }
+            _ => {
+                // -1 and 1 still prefer an exact match; the nearest value is
+                // only a fallback, handled after the scan.
+                match (lookup_value, &cell_value) {
+                    (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
+                    (EvalResult::Text(a), EvalResult::Text(b)) => a.eq_ignore_ascii_case(b),
+                    _ => false,
+                }
+            }
+        };
+
+        if is_match {
+            found_idx = Some(idx);
+            break;
+        }
+
+        // Approximate modes cannot stop at the first non-match: the nearest
+        // value below (or above) is only known once every cell has been seen.
+        // Empty cells are not candidates — Excel skips them rather than
+        // treating them as the smallest possible value.
+        if approximate && !cell_is_empty {
+            let eligible = match compare_values(&cell_value, lookup_value) {
+                Some(Ordering::Less) => match_mode == -1,
+                Some(Ordering::Greater) => match_mode == 1,
+                _ => false,
+            };
+            if eligible {
+                let improves = match &nearest {
+                    None => true,
+                    Some((_, best)) => match compare_values(&cell_value, best) {
+                        // -1 wants the largest of the smaller values; 1 the
+                        // smallest of the larger ones.
+                        Some(Ordering::Greater) => match_mode == -1,
+                        Some(Ordering::Less) => match_mode == 1,
+                        _ => false,
+                    },
+                };
+                if improves {
+                    nearest = Some((idx, cell_value));
+                }
+            }
+        }
+    }
+
+    // Only reached when no exact match was found.
+    found_idx.or_else(|| nearest.map(|(idx, _)| idx))
+}
+
 pub(crate) fn try_evaluate<L: CellLookup>(
     name: &str, args: &[BoundExpr], lookup: &L,
 ) -> Option<EvalResult> {
@@ -160,6 +265,77 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 None => EvalResult::Error("#N/A".to_string()),
             }
         }
+        "XMATCH" => {
+            // XMATCH(lookup_value, lookup_array, [match_mode], [search_mode])
+            //
+            // MATCH's modern form: the same modes as XLOOKUP, reporting the
+            // position rather than reading a second array at it. It shares
+            // XLOOKUP's scan so the two cannot disagree about what matches.
+            if args.len() < 2 || args.len() > 4 {
+                return Some(EvalResult::Error("XMATCH requires 2 to 4 arguments".to_string()));
+            }
+
+            let lookup_value = evaluate(&args[0], lookup);
+
+            let (array, array_sheet) = match &args[1] {
+                Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
+                    let (min_row, min_col, max_row, max_col) = (
+                        (*start_row).min(*end_row), (*start_col).min(*end_col),
+                        (*start_row).max(*end_row), (*start_col).max(*end_col)
+                    );
+                    let is_row = min_row == max_row;
+                    if !is_row && min_col != max_col {
+                        return Some(EvalResult::Error(
+                            "XMATCH lookup_array must be a single row or column".to_string(),
+                        ));
+                    }
+                    ((min_row, min_col, max_row, max_col, is_row), sheet)
+                }
+                _ => return Some(EvalResult::Error("XMATCH lookup_array must be a range".to_string())),
+            };
+
+            let size = if array.4 {
+                array.3 - array.1 + 1
+            } else {
+                array.2 - array.0 + 1
+            };
+
+            let match_mode = if args.len() >= 3 {
+                match evaluate(&args[2], lookup).to_number() {
+                    Ok(n) => n as i32,
+                    Err(_) => 0,
+                }
+            } else {
+                0
+            };
+            let search_mode = if args.len() >= 4 {
+                match evaluate(&args[3], lookup).to_number() {
+                    Ok(n) => n as i32,
+                    Err(_) => 1,
+                }
+            } else {
+                1
+            };
+
+            let found = scan_for_match(&lookup_value, size, match_mode, search_mode < 0, |idx| {
+                let (r, c) = if array.4 {
+                    (array.0, array.1 + idx)
+                } else {
+                    (array.0 + idx, array.1)
+                };
+                match get_text_for_sheet(lookup, array_sheet, r, c) {
+                    Ok(t) => t,
+                    Err(_) => String::new(),
+                }
+            });
+
+            match found {
+                // Positions are 1-based and count from the start of the array,
+                // not from where a reverse scan happened to begin.
+                Some(idx) => EvalResult::Number((idx + 1) as f64),
+                None => EvalResult::Error("#N/A".to_string()),
+            }
+        }
         "XLOOKUP" => {
             // XLOOKUP(lookup_value, lookup_array, return_array, [if_not_found], [match_mode], [search_mode])
             if args.len() < 3 || args.len() > 6 {
@@ -254,12 +430,6 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             };
             let reverse = search_mode < 0;
 
-            // Search for match
-            let mut found_idx: Option<usize> = None;
-            let approximate = match_mode == -1 || match_mode == 1;
-            // Best fallback seen so far, as (index, value), for the approximate modes.
-            let mut nearest: Option<(usize, EvalResult)> = None;
-
             let xl_get = |sheet: &SheetRef, r: usize, c: usize| -> String {
                 match get_text_for_sheet(lookup, sheet, r, c) {
                     Ok(t) => t,
@@ -267,100 +437,14 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 }
             };
 
-            let scan: Box<dyn Iterator<Item = usize>> = if reverse {
-                Box::new((0..lookup_size).rev())
-            } else {
-                Box::new(0..lookup_size)
-            };
-
-            for idx in scan {
+            let found_idx = scan_for_match(&lookup_value, lookup_size, match_mode, reverse, |idx| {
                 let (r, c) = if lookup_array.4 {
                     (lookup_array.0, lookup_array.1 + idx)
                 } else {
                     (lookup_array.0 + idx, lookup_array.1)
                 };
-
-                let cell_text = xl_get(xl_lookup_sheet, r, c);
-                let cell_is_empty = cell_text.is_empty();
-                let cell_value = if cell_is_empty {
-                    EvalResult::Text(String::new())
-                } else if let Ok(n) = cell_text.parse::<f64>() {
-                    EvalResult::Number(n)
-                } else {
-                    EvalResult::Text(cell_text)
-                };
-
-                let is_match = match match_mode {
-                    0 => {
-                        // Exact match
-                        match (&lookup_value, &cell_value) {
-                            (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
-                            (EvalResult::Text(a), EvalResult::Text(b)) => a.eq_ignore_ascii_case(b),
-                            _ => false,
-                        }
-                    }
-                    2 => {
-                        // The same matcher COUNTIF/SUMIF criteria use, rather than a
-                        // second implementation. The previous one took the text before
-                        // the first `*` and asked whether the cell started with it,
-                        // which made "*eta" an empty prefix — matching every row and
-                        // returning the first. A wrong answer, not a missed one.
-                        match (&lookup_value, &cell_value) {
-                            (EvalResult::Text(pattern), EvalResult::Text(text)) => {
-                                wildcard_match(pattern, text)
-                            }
-                            (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
-                            _ => false,
-                        }
-                    }
-                    _ => {
-                        // -1 and 1 still prefer an exact match; the nearest value is
-                        // only a fallback, handled after the scan.
-                        match (&lookup_value, &cell_value) {
-                            (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
-                            (EvalResult::Text(a), EvalResult::Text(b)) => a.eq_ignore_ascii_case(b),
-                            _ => false,
-                        }
-                    }
-                };
-
-                if is_match {
-                    found_idx = Some(idx);
-                    break;
-                }
-
-                // Approximate modes cannot stop at the first non-match: the nearest
-                // value below (or above) is only known once every cell has been seen.
-                // Empty cells are not candidates — Excel skips them rather than
-                // treating them as the smallest possible value.
-                if approximate && !cell_is_empty {
-                    let eligible = match compare_values(&cell_value, &lookup_value) {
-                        Some(Ordering::Less) => match_mode == -1,
-                        Some(Ordering::Greater) => match_mode == 1,
-                        _ => false,
-                    };
-                    if eligible {
-                        let improves = match &nearest {
-                            None => true,
-                            Some((_, best)) => match compare_values(&cell_value, best) {
-                                // -1 wants the largest of the smaller values; 1 the
-                                // smallest of the larger ones.
-                                Some(Ordering::Greater) => match_mode == -1,
-                                Some(Ordering::Less) => match_mode == 1,
-                                _ => false,
-                            },
-                        };
-                        if improves {
-                            nearest = Some((idx, cell_value));
-                        }
-                    }
-                }
-            }
-
-            // Only reached when no exact match was found.
-            if found_idx.is_none() {
-                found_idx = nearest.map(|(idx, _)| idx);
-            }
+                xl_get(xl_lookup_sheet, r, c)
+            });
 
             match found_idx {
                 Some(idx) => {
@@ -911,7 +995,8 @@ mod strict_type_tests {
     use crate::formula::eval::{evaluate, CellLookup, EvalResult};
     use crate::formula::parser::{bind_expr_same_sheet, parse};
 
-    /// A1 holds the number 7, B1 a label; A2 holds 99.
+    /// A1 holds 7 and A2 holds 99, for the strict-matching cases.
+    /// C1:C4 hold 10, 20, 30, 40 and D1:D4 alpha, beta, gamma, beta.
     struct Sheet;
     impl CellLookup for Sheet {
         fn get_value(&self, row: usize, col: usize) -> f64 {
@@ -927,6 +1012,14 @@ mod strict_type_tests {
                 (0, 1) => "seven-row".into(),
                 (1, 0) => "99".into(),
                 (1, 1) => "other".into(),
+                // Column C for the numeric XMATCH cases: 10, 20, 30, 40.
+                (r, 2) if r < 4 => ((r + 1) * 10).to_string(),
+                // Column D for the text ones, with a repeat so a reverse
+                // search has something different to find.
+                (0, 3) => "alpha".into(),
+                (1, 3) => "beta".into(),
+                (2, 3) => "gamma".into(),
+                (3, 3) => "beta".into(),
                 _ => String::new(),
             }
         }
@@ -958,6 +1051,32 @@ mod strict_type_tests {
             eval(r#"=XLOOKUP("007",A1:A2,B1:B2,"MISS")"#),
             EvalResult::Text("MISS".into())
         );
+    }
+
+    /// XMATCH reports a position using XLOOKUP's rules.
+    ///
+    /// Both call the same scan, so a change to what counts as a match reaches
+    /// them together. Written separately they would have drifted the way
+    /// XLOOKUP's own wildcard mode and search_mode each did.
+    #[test]
+    fn xmatch_shares_xlookups_modes() {
+        assert_eq!(eval(r#"=XMATCH("beta",D1:D4)"#), EvalResult::Number(2.0));
+        // Reverse search finds the last occurrence, still numbered from the start.
+        assert_eq!(eval(r#"=XMATCH("beta",D1:D4,0,-1)"#), EvalResult::Number(4.0));
+        assert_eq!(eval(r#"=XMATCH("BETA",D1:D4)"#), EvalResult::Number(2.0));
+        // Mode 2 is the shared wildcard matcher.
+        assert_eq!(eval(r#"=XMATCH("b*a",D1:D4,2)"#), EvalResult::Number(2.0));
+        assert!(is_na(r#"=XMATCH("delta",D1:D4)"#));
+        // A text key still does not match numeric cells.
+        assert!(is_na(r#"=XMATCH("007",C1:C4,0)"#));
+    }
+
+    #[test]
+    fn xmatch_approximate_modes_pick_the_nearest() {
+        assert_eq!(eval("=XMATCH(25,C1:C4,-1)"), EvalResult::Number(2.0));
+        assert_eq!(eval("=XMATCH(25,C1:C4,1)"), EvalResult::Number(3.0));
+        // An exact hit still wins over the fallback.
+        assert_eq!(eval("=XMATCH(30,C1:C4,0)"), EvalResult::Number(3.0));
     }
 
     /// Matching numbers to numbers is untouched.
