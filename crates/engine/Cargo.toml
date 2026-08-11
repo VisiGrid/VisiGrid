@@ -6,6 +6,10 @@ license.workspace = true
 description = "Spreadsheet engine - cells, sheets, formulas"
 
 [dependencies]
+# Local timezone for TODAY/NOW. Already compiled for five other crates in this
+# workspace, so this costs no build time. "clock" brings Local; on wasm the
+# wasmbind feature reads the browser's zone.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ordered-float = { workspace = true }

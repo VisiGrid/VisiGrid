@@ -13,11 +13,16 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if !args.is_empty() {
                 return Some(EvalResult::Error("TODAY takes no arguments".to_string()));
             }
-            // Return Excel-style date serial number (days since 1899-12-30)
-                        let now = crate::timing::now_since_epoch();
-            let days_since_unix = now.as_secs() / 86400;
-            // Excel epoch is 1899-12-30, Unix epoch is 1970-01-01
-            // Difference is 25569 days
+            // Excel-style date serial (days since 1899-12-30), for the
+            // user's own calendar day rather than UTC's — TODAY() is local in
+            // Excel, and a UTC rollover puts anyone west of it a day ahead all
+            // evening.
+            let now = crate::timing::now_since_epoch();
+            let local_secs =
+                now.as_secs() as i64 + crate::timing::local_utc_offset_seconds();
+            // div_euclid, not /: west of UTC before 1970 the offset can push
+            // this negative, and truncating division rounds that the wrong way.
+            let days_since_unix = local_secs.div_euclid(86400);
             let excel_date = days_since_unix as f64 + 25569.0;
             EvalResult::Number(excel_date)
         }
@@ -25,8 +30,10 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if !args.is_empty() {
                 return Some(EvalResult::Error("NOW takes no arguments".to_string()));
             }
-                        let now = crate::timing::now_since_epoch();
-            let secs = now.as_secs() as f64 + now.subsec_nanos() as f64 / 1_000_000_000.0;
+            let now = crate::timing::now_since_epoch();
+            let secs = now.as_secs() as f64
+                + now.subsec_nanos() as f64 / 1_000_000_000.0
+                + crate::timing::local_utc_offset_seconds() as f64;
             let days_since_unix = secs / 86400.0;
             let excel_datetime = days_since_unix + 25569.0;
             EvalResult::Number(excel_datetime)

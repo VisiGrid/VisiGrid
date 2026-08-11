@@ -65,3 +65,17 @@ pub(crate) fn now_since_epoch() -> std::time::Duration {
 pub(crate) fn system_now() -> std::time::SystemTime {
     std::time::UNIX_EPOCH + now_since_epoch()
 }
+
+/// Seconds to add to UTC to reach local wall-clock time.
+///
+/// Excel's TODAY and NOW are local, not UTC. Without this the serial rolls
+/// over at midnight UTC, so anyone west of it gets tomorrow's date for the
+/// last hours of their evening — five hours a day in US Central, eight in
+/// Pacific — and a rule like `=A1<TODAY()` marks work overdue a day early.
+///
+/// chrono reads the system zone on native and the browser's on wasm, so both
+/// targets agree with the machine the user is looking at.
+pub(crate) fn local_utc_offset_seconds() -> i64 {
+    use chrono::Offset;
+    chrono::Local::now().offset().fix().local_minus_utc() as i64
+}

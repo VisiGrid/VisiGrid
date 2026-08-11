@@ -7541,6 +7541,7 @@ dependencies = [
 name = "visigrid-engine"
 version = "0.23.0"
 dependencies = [
+ "chrono",
  "js-sys",
  "ordered-float 4.6.0",
  "rustc-hash 2.1.3",
