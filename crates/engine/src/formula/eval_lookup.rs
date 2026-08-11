@@ -71,41 +71,11 @@ fn scan_for_match(
     for idx in scan {
         let cell_text = cell_text_at(idx);
         let cell_is_empty = cell_text.is_empty();
-        let cell_value = if cell_is_empty {
-            EvalResult::Text(String::new())
-        } else if let Ok(n) = cell_text.parse::<f64>() {
-            EvalResult::Number(n)
-        } else {
-            EvalResult::Text(cell_text)
-        };
+        let cell_value = typed_cell(&cell_text);
 
-        let is_match = match match_mode {
-            0 => match (lookup_value, &cell_value) {
-                (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
-                (EvalResult::Text(a), EvalResult::Text(b)) => a.eq_ignore_ascii_case(b),
-                _ => false,
-            },
-            2 => {
-                // The same matcher COUNTIF/SUMIF criteria use, rather than a
-                // second implementation.
-                match (lookup_value, &cell_value) {
-                    (EvalResult::Text(pattern), EvalResult::Text(text)) => {
-                        wildcard_match(pattern, text)
-                    }
-                    (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
-                    _ => false,
-                }
-            }
-            _ => {
-                // -1 and 1 still prefer an exact match; the nearest value is
-                // only a fallback, handled after the scan.
-                match (lookup_value, &cell_value) {
-                    (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
-                    (EvalResult::Text(a), EvalResult::Text(b)) => a.eq_ignore_ascii_case(b),
-                    _ => false,
-                }
-            }
-        };
+        // Mode 2 is the wildcard one; -1 and 1 still prefer an exact hit and
+        // fall back to the nearest value after the scan.
+        let is_match = matches_exactly(lookup_value, &cell_value, match_mode == 2);
 
         if is_match {
             found_idx = Some(idx);
@@ -144,6 +114,45 @@ fn scan_for_match(
     found_idx.or_else(|| nearest.map(|(idx, _)| idx))
 }
 
+
+/// A cell's text as a typed value, by the same rule everywhere.
+fn typed_cell(cell_text: &str) -> EvalResult {
+    if cell_text.is_empty() {
+        EvalResult::Text(String::new())
+    } else if let Ok(n) = cell_text.parse::<f64>() {
+        EvalResult::Number(n)
+    } else {
+        EvalResult::Text(cell_text.to_string())
+    }
+}
+
+/// Does `lookup_value` exactly match `cell_value`?
+///
+/// Types must agree. A text value and a number are never equal, however alike
+/// they look — which is Excel's rule, and the one XLOOKUP here always had.
+///
+/// VLOOKUP, HLOOKUP and MATCH used to answer this differently: they compared
+/// the key against the cell's *text*, so the key "7" matched a cell holding
+/// the number 7 (whose text is "7") while "007", "7.0" and " 7" did not. That
+/// is comparison by spelling — it gets the canonical form right and everything
+/// else wrong, which is worse than either being strict or being lenient,
+/// because the rule cannot be stated.
+fn matches_exactly(lookup_value: &EvalResult, cell_value: &EvalResult, wildcards: bool) -> bool {
+    match (lookup_value, cell_value) {
+        (EvalResult::Number(a), EvalResult::Number(b)) => (a - b).abs() < 1e-10,
+        (EvalResult::Text(a), EvalResult::Text(b)) => {
+            if wildcards {
+                // The matcher COUNTIF, SUMIF and XLOOKUP share.
+                wildcard_match(a, b)
+            } else {
+                a.eq_ignore_ascii_case(b)
+            }
+        }
+        (EvalResult::Boolean(a), EvalResult::Boolean(b)) => a == b,
+        _ => false,
+    }
+}
+
 pub(crate) fn try_evaluate<L: CellLookup>(
     name: &str, args: &[BoundExpr], lookup: &L,
 ) -> Option<EvalResult> {
@@ -180,12 +189,12 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
 
             // Search for the key in the first column
-            let search_text = search_key.to_text().to_lowercase();
             // A number only when it *is* one. to_number() would parse the
             // text "007" into 7 and match it against a numeric cell, which
             // Excel does not do — text and numbers are different types, and a
             // zip code stored as text is not the integer it resembles.
             let search_num = numeric_key(&search_key);
+            let search_text = search_key.to_text().to_lowercase();
 
             let mut found_row: Option<usize> = None;
 
@@ -232,18 +241,10 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     found_row = best_row;
                 }
             } else {
-                // Exact match
+                // Exact match, by the same rule XLOOKUP uses: the types must
+                // agree, and wildcards apply between two texts.
                 for r in min_row..=max_row {
-                    let cell_text = get(r, min_col);
-                    let cell_lower = cell_text.to_lowercase();
-
-                    // Try numeric comparison first
-                    if let (Some(search_n), Ok(cell_n)) = (search_num, cell_text.parse::<f64>()) {
-                        if (search_n - cell_n).abs() < f64::EPSILON {
-                            found_row = Some(r);
-                            break;
-                        }
-                    } else if wildcard_match(&search_text, &cell_lower) {
+                    if matches_exactly(&search_key, &typed_cell(&get(r, min_col)), true) {
                         found_row = Some(r);
                         break;
                     }
@@ -514,12 +515,12 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("#REF!".to_string()));
             }
 
-            let search_text = search_key.to_text().to_lowercase();
             // A number only when it *is* one. to_number() would parse the
             // text "007" into 7 and match it against a numeric cell, which
             // Excel does not do — text and numbers are different types, and a
             // zip code stored as text is not the integer it resembles.
             let search_num = numeric_key(&search_key);
+            let search_text = search_key.to_text().to_lowercase();
 
             let mut found_col: Option<usize> = None;
 
@@ -563,15 +564,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 }
             } else {
                 for c in min_col..=max_col {
-                    let cell_text = hget(min_row, c);
-                    let cell_lower = cell_text.to_lowercase();
-
-                    if let (Some(search_n), Ok(cell_n)) = (search_num, cell_text.parse::<f64>()) {
-                        if (search_n - cell_n).abs() < f64::EPSILON {
-                            found_col = Some(c);
-                            break;
-                        }
-                    } else if wildcard_match(&search_text, &cell_lower) {
+                    if matches_exactly(&search_key, &typed_cell(&hget(min_row, c)), true) {
                         found_col = Some(c);
                         break;
                     }
@@ -662,7 +655,6 @@ pub(crate) fn try_evaluate<L: CellLookup>(
 
             // Determine if it's a row vector or column vector
             let is_row = min_row == max_row;
-            let search_text = search_key.to_text().to_lowercase();
             // A number only when it *is* one. to_number() would parse the
             // text "007" into 7 and match it against a numeric cell, which
             // Excel does not do — text and numbers are different types, and a
@@ -681,16 +673,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if is_row {
                 // Search horizontally
                 if match_type == 0 {
-                    // Exact match
+                    // Exact match, sharing XLOOKUP's rule.
                     for (i, c) in (min_col..=max_col).enumerate() {
-                        let cell_text = mget(min_row, c);
-                        let cell_lower = cell_text.to_lowercase();
-                        if let (Some(sn), Ok(cn)) = (search_num, cell_text.parse::<f64>()) {
-                            if (sn - cn).abs() < f64::EPSILON {
-                                found_pos = Some(i + 1);
-                                break;
-                            }
-                        } else if wildcard_match(&search_text, &cell_lower) {
+                        if matches_exactly(&search_key, &typed_cell(&mget(min_row, c)), true) {
                             found_pos = Some(i + 1);
                             break;
                         }
@@ -730,14 +715,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 // Search vertically
                 if match_type == 0 {
                     for (i, r) in (min_row..=max_row).enumerate() {
-                        let cell_text = mget(r, min_col);
-                        let cell_lower = cell_text.to_lowercase();
-                        if let (Some(sn), Ok(cn)) = (search_num, cell_text.parse::<f64>()) {
-                            if (sn - cn).abs() < f64::EPSILON {
-                                found_pos = Some(i + 1);
-                                break;
-                            }
-                        } else if wildcard_match(&search_text, &cell_lower) {
+                        if matches_exactly(&search_key, &typed_cell(&mget(r, min_col)), true) {
                             found_pos = Some(i + 1);
                             break;
                         }
@@ -1051,6 +1029,24 @@ mod strict_type_tests {
             eval(r#"=XLOOKUP("007",A1:A2,B1:B2,"MISS")"#),
             EvalResult::Text("MISS".into())
         );
+    }
+
+    /// Strictness is about types, not spelling.
+    ///
+    /// The first attempt at this only stopped the numeric path, so a text key
+    /// still reached a text-vs-text comparison against the cell's *stringified*
+    /// value: "7" matched a cell holding the number 7, while "007", "7.0" and
+    /// " 7" did not. Right for the canonical spelling and wrong for every other
+    /// one — a rule that cannot be stated, which is worse than either extreme.
+    #[test]
+    fn every_spelling_of_a_number_fails_against_a_numeric_cell() {
+        // A1 holds the number 7.
+        assert!(is_na(r#"=VLOOKUP("7",A1:B2,2,FALSE)"#), "the case that was wrong");
+        assert!(is_na(r#"=VLOOKUP("007",A1:B2,2,FALSE)"#));
+        assert!(is_na(r#"=VLOOKUP("7.0",A1:B2,2,FALSE)"#));
+        assert!(is_na(r#"=VLOOKUP(" 7",A1:B2,2,FALSE)"#));
+        assert!(is_na(r#"=MATCH("7",A1:A2,0)"#));
+        assert!(is_na(r#"=HLOOKUP("7",A1:B1,1,FALSE)"#));
     }
 
     /// XMATCH reports a position using XLOOKUP's rules.
