@@ -133,6 +133,23 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             let (_, _, day) = serial_to_date(serial);
             EvalResult::Number(day as f64)
         }
+        "DAYS" => {
+            // DAYS(end, start) — plain subtraction, but Excel has it and a
+            // reader reaching for it should not meet "Unknown function".
+            if args.len() != 2 {
+                return Some(EvalResult::Error("DAYS requires exactly 2 arguments".to_string()));
+            }
+            let end = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n.trunc(),
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let start = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) => n.trunc(),
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            // Negative when the end precedes the start, as Excel does.
+            EvalResult::Number(end - start)
+        }
         "NETWORKDAYS" | "WORKDAY" => {
             if args.len() < 2 || args.len() > 3 {
                 return Some(EvalResult::Error(format!("{name} requires 2 or 3 arguments")));
@@ -412,6 +429,16 @@ mod time_tests {
             EvalResult::Number(n) => n,
             other => panic!("{formula} gave {other:?}, expected a number"),
         }
+    }
+
+    /// DAYS is subtraction, and exists so that reaching for it works.
+    #[test]
+    fn days_is_the_difference_between_two_dates() {
+        assert_eq!(number("=DAYS(DATE(2026,8,7),DATE(2026,8,3))"), 4.0);
+        // Four days apart, five working days inclusive — which is the
+        // distinction NETWORKDAYS exists to make.
+        assert_eq!(number("=NETWORKDAYS(DATE(2026,8,3),DATE(2026,8,7))"), 5.0);
+        assert_eq!(number("=DAYS(DATE(2026,8,3),DATE(2026,8,7))"), -4.0);
     }
 
     /// Business days: weekends skipped, holidays skipped, both ends counted.

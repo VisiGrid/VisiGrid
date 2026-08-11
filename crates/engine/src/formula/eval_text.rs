@@ -36,6 +36,26 @@ fn find_chars(needle: &str, haystack: &str, start: usize, ignore_case: bool) -> 
     (start..=hay.len() - pat.len()).find(|&i| hay[i..i + pat.len()] == pat[..])
 }
 
+/// Position of the first place `pattern` matches, counted in characters from
+/// `start`, with `*`, `?` and `~` behaving as they do everywhere else.
+///
+/// `wildcard_match` anchors at both ends because criteria in COUNTIF and
+/// friends match a whole cell. SEARCH matches anywhere, so this asks the same
+/// matcher whether the pattern matches a *prefix* of each tail — appending `*`
+/// is what turns one question into the other. Reusing it is the point: the
+/// wildcard rules then cannot drift between the functions that offer them.
+fn search_chars(pattern: &str, haystack: &str, start: usize) -> Option<usize> {
+    let hay: Vec<char> = haystack.chars().collect();
+    if start > hay.len() {
+        return None;
+    }
+    let prefix_pattern = format!("{pattern}*");
+    (start..=hay.len()).find(|&i| {
+        let tail: String = hay[i..].iter().collect();
+        crate::formula::eval_helpers::wildcard_match(&prefix_pattern, &tail)
+    })
+}
+
 pub(crate) fn try_evaluate<L: CellLookup>(
     name: &str, args: &[BoundExpr], lookup: &L,
 ) -> Option<EvalResult> {
@@ -215,7 +235,15 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 0
             };
-            match find_chars(&needle, &haystack, start, name == "SEARCH") {
+            // FIND is literal; SEARCH takes Excel's wildcards. Both use the
+            // matcher COUNTIF and XLOOKUP already share, rather than a second
+            // one written to look the same.
+            let found = if name == "SEARCH" {
+                search_chars(&needle, &haystack, start)
+            } else {
+                find_chars(&needle, &haystack, start, false)
+            };
+            match found {
                 Some(pos) => EvalResult::Number((pos + 1) as f64),
                 None => EvalResult::Error("#VALUE!".to_string()),
             }
@@ -400,6 +428,30 @@ mod newly_added_tests {
 
     fn is_error(formula: &str) -> bool {
         matches!(eval(formula), EvalResult::Error(_))
+    }
+
+    /// SEARCH takes wildcards; FIND does not. That is Excel's split, and
+    /// half of why the two functions both exist.
+    ///
+    /// The rules come from the matcher COUNTIF and XLOOKUP already use. When
+    /// SEARCH was added it matched patterns literally instead, so the engine
+    /// had wildcards that worked in one place and not another — the same rule
+    /// with two implementations, which is how they drift.
+    #[test]
+    fn search_takes_wildcards_and_find_does_not() {
+        assert_eq!(number(r#"=SEARCH("s?eet","Spreadsheet")"#), 7.0);
+        assert_eq!(number(r#"=SEARCH("*sheet","Spreadsheet")"#), 1.0);
+        assert_eq!(number(r#"=SEARCH("sp*et","Spreadsheet")"#), 1.0);
+        // ~ escapes, so this looks for a literal question mark.
+        assert_eq!(number(r#"=SEARCH("~?","a?b")"#), 2.0);
+        assert!(is_error(r#"=SEARCH("z?z","abc")"#));
+
+        // FIND treats the same pattern as characters to find.
+        assert!(is_error(r#"=FIND("s?eet","Spreadsheet")"#));
+
+        // Wildcards did not cost the plain cases their behaviour.
+        assert_eq!(number(r#"=SEARCH("e","Spreadsheet",5)"#), 9.0);
+        assert_eq!(number(r#"=SEARCH("é","caFÉ")"#), 4.0);
     }
 
     /// FIND counts characters, like every other function in this family.
