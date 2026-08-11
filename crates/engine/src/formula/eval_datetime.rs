@@ -133,6 +133,74 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             let (_, _, day) = serial_to_date(serial);
             EvalResult::Number(day as f64)
         }
+        "NETWORKDAYS" | "WORKDAY" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Some(EvalResult::Error(format!("{name} requires 2 or 3 arguments")));
+            }
+            let start = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n.trunc() as i64,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let second = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) => n.trunc() as i64,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+
+            // Holidays are skipped like weekends. Excel accepts a range here;
+            // a single date is the common case and both arrive as values.
+            let mut holidays: Vec<i64> = Vec::new();
+            if args.len() == 3 {
+                match evaluate(&args[2], lookup) {
+                    EvalResult::Array(array) => {
+                        for row in 0..array.rows() {
+                            for col in 0..array.cols() {
+                                if let Some(value) = array.get(row, col) {
+                                    if let Ok(n) = value.to_number() {
+                                        holidays.push(n.trunc() as i64);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    other => {
+                        if let Ok(n) = other.to_number() {
+                            holidays.push(n.trunc() as i64);
+                        }
+                    }
+                }
+            }
+
+            // Same weekday derivation as WEEKDAY above: 0 is Sunday.
+            let is_working = |serial: i64| {
+                let weekday = (serial + 6).rem_euclid(7);
+                weekday != 0 && weekday != 6 && !holidays.contains(&serial)
+            };
+
+            if name == "NETWORKDAYS" {
+                // Inclusive of both ends, and a reversed range counts negative
+                // rather than erroring, which is what Excel does.
+                let (lo, hi, sign) = if start <= second {
+                    (start, second, 1i64)
+                } else {
+                    (second, start, -1i64)
+                };
+                let count = (lo..=hi).filter(|d| is_working(*d)).count() as i64;
+                EvalResult::Number((count * sign) as f64)
+            } else {
+                // WORKDAY steps over non-working days; day zero returns the
+                // start unchanged even when it is itself a weekend.
+                let step = if second >= 0 { 1i64 } else { -1i64 };
+                let mut remaining = second.abs();
+                let mut cursor = start;
+                while remaining > 0 {
+                    cursor += step;
+                    if is_working(cursor) {
+                        remaining -= 1;
+                    }
+                }
+                EvalResult::Number(cursor as f64)
+            }
+        }
         "WEEKDAY" => {
             // WEEKDAY(date, [type]) - returns day of week
             if args.is_empty() || args.len() > 2 {
@@ -344,6 +412,28 @@ mod time_tests {
             EvalResult::Number(n) => n,
             other => panic!("{formula} gave {other:?}, expected a number"),
         }
+    }
+
+    /// Business days: weekends skipped, holidays skipped, both ends counted.
+    #[test]
+    fn networkdays_and_workday_skip_weekends_and_holidays() {
+        // 2026-08-03 is a Monday, 08-07 the Friday, 08-08/09 the weekend.
+        assert_eq!(number("=NETWORKDAYS(DATE(2026,8,3),DATE(2026,8,7))"), 5.0);
+        assert_eq!(number("=NETWORKDAYS(DATE(2026,8,3),DATE(2026,8,9))"), 5.0);
+        assert_eq!(number("=NETWORKDAYS(DATE(2026,8,8),DATE(2026,8,9))"), 0.0);
+        // Both ends are counted, so a single working day is 1, not 0.
+        assert_eq!(number("=NETWORKDAYS(DATE(2026,8,3),DATE(2026,8,3))"), 1.0);
+        // Excel returns a negative count for a reversed range rather than an error.
+        assert_eq!(number("=NETWORKDAYS(DATE(2026,8,7),DATE(2026,8,3))"), -5.0);
+        assert_eq!(number("=NETWORKDAYS(DATE(2026,8,3),DATE(2026,8,7),DATE(2026,8,5))"), 4.0);
+
+        let aug10 = number("=DATE(2026,8,10)");
+        assert_eq!(number("=WORKDAY(DATE(2026,8,3),5)"), aug10);
+        assert_eq!(number("=WORKDAY(DATE(2026,8,7),1)"), aug10);
+        // Zero days returns the start unchanged.
+        assert_eq!(number("=WORKDAY(DATE(2026,8,3),0)"), number("=DATE(2026,8,3)"));
+        assert_eq!(number("=WORKDAY(DATE(2026,8,10),-1)"), number("=DATE(2026,8,7)"));
+        assert_eq!(number("=WORKDAY(DATE(2026,8,7),1,DATE(2026,8,10))"), number("=DATE(2026,8,11)"));
     }
 
     /// TIME is a fraction of a day, which is what makes it addable to a date.

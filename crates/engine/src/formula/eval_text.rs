@@ -4,6 +4,38 @@
 use super::eval::{evaluate, CellLookup, EvalResult};
 use super::parser::{BoundExpr, Expr};
 
+
+/// Position of `needle` in `haystack`, counted in characters from `start`.
+///
+/// Excel measures strings in characters, so this does too — a byte offset
+/// disagrees with LEN, LEFT, MID and RIGHT as soon as a string contains an
+/// accent or an emoji, and silently returns a position one or more too far
+/// along rather than failing.
+fn find_chars(needle: &str, haystack: &str, start: usize, ignore_case: bool) -> Option<usize> {
+    let hay: Vec<char> = if ignore_case {
+        haystack.to_lowercase().chars().collect()
+    } else {
+        haystack.chars().collect()
+    };
+    let pat: Vec<char> = if ignore_case {
+        needle.to_lowercase().chars().collect()
+    } else {
+        needle.chars().collect()
+    };
+
+    if start > hay.len() {
+        return None;
+    }
+    // Excel finds an empty needle at the start position rather than nowhere.
+    if pat.is_empty() {
+        return Some(start);
+    }
+    if pat.len() > hay.len() {
+        return None;
+    }
+    (start..=hay.len() - pat.len()).find(|&i| hay[i..i + pat.len()] == pat[..])
+}
+
 pub(crate) fn try_evaluate<L: CellLookup>(
     name: &str, args: &[BoundExpr], lookup: &L,
 ) -> Option<EvalResult> {
@@ -164,40 +196,16 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 Err(_) => EvalResult::Error("#VALUE!".to_string()),
             }
         }
-        "FIND" => {
+        "FIND" | "SEARCH" => {
+            // One implementation, because these differ only in whether case
+            // matters. FIND used to be separate and indexed by bytes, which
+            // made it disagree with LEN, LEFT, MID and RIGHT the moment a
+            // string held anything outside ASCII.
             if args.len() < 2 || args.len() > 3 {
-                return Some(EvalResult::Error("FIND requires 2 or 3 arguments".to_string()));
+                return Some(EvalResult::Error(format!("{name} requires 2 or 3 arguments")));
             }
-            let find_text = evaluate(&args[0], lookup).to_text();
-            let within_text = evaluate(&args[1], lookup).to_text();
-            let start_pos = if args.len() == 3 {
-                match evaluate(&args[2], lookup).to_number() {
-                    Ok(n) if n < 1.0 => return Some(EvalResult::Error("#VALUE!".to_string())),
-                    Ok(n) => (n as usize).saturating_sub(1),
-                    Err(e) => return Some(EvalResult::Error(e)),
-                }
-            } else {
-                0
-            };
-            let search_area = &within_text[start_pos.min(within_text.len())..];
-            match search_area.find(&find_text) {
-                Some(pos) => EvalResult::Number((pos + start_pos + 1) as f64), // 1-indexed
-                None => EvalResult::Error("#VALUE!".to_string()),
-            }
-        }
-        // Excel counts characters, not bytes. These index by chars throughout,
-        // so a name with an accent in it behaves the same as one without.
-        "SEARCH" => {
-            // FIND's case-insensitive twin. Excel also accepts ? and *
-            // wildcards here; this does not, and a pattern using them simply
-            // fails to match rather than matching something approximate.
-            if args.len() < 2 || args.len() > 3 {
-                return Some(EvalResult::Error("SEARCH requires 2 or 3 arguments".to_string()));
-            }
-            let needle = evaluate(&args[0], lookup).to_text().to_lowercase();
+            let needle = evaluate(&args[0], lookup).to_text();
             let haystack = evaluate(&args[1], lookup).to_text();
-            let folded: Vec<char> = haystack.to_lowercase().chars().collect();
-            let needle_chars: Vec<char> = needle.chars().collect();
             let start = if args.len() == 3 {
                 match evaluate(&args[2], lookup).to_number() {
                     Ok(n) if n < 1.0 => return Some(EvalResult::Error("#VALUE!".to_string())),
@@ -207,20 +215,13 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 0
             };
-            if start > folded.len() {
-                return Some(EvalResult::Error("#VALUE!".to_string()));
-            }
-            let found = if needle_chars.is_empty() {
-                Some(start)
-            } else {
-                (start..=folded.len().saturating_sub(needle_chars.len()))
-                    .find(|&i| folded[i..i + needle_chars.len()] == needle_chars[..])
-            };
-            match found {
+            match find_chars(&needle, &haystack, start, name == "SEARCH") {
                 Some(pos) => EvalResult::Number((pos + 1) as f64),
                 None => EvalResult::Error("#VALUE!".to_string()),
             }
         }
+        // Excel counts characters, not bytes. These index by chars throughout,
+        // so a name with an accent in it behaves the same as one without.
         "REPLACE" => {
             if args.len() != 4 {
                 return Some(EvalResult::Error("REPLACE requires exactly 4 arguments".to_string()));
@@ -399,6 +400,42 @@ mod newly_added_tests {
 
     fn is_error(formula: &str) -> bool {
         matches!(eval(formula), EvalResult::Error(_))
+    }
+
+    /// FIND counts characters, like every other function in this family.
+    ///
+    /// It used to slice the string by bytes. That made it disagree with LEN,
+    /// LEFT, MID and RIGHT the moment a string held anything outside ASCII —
+    /// so the standard split idiom, MID(text, FIND("-", text) + 1, ...),
+    /// returned a slice starting one or more characters too far along. No
+    /// error, just the wrong field. It could also panic outright when a start
+    /// position landed inside a multi-byte character, which in the browser
+    /// takes down the whole wasm instance rather than reddening one cell.
+    #[test]
+    fn find_counts_characters_not_bytes() {
+        assert_eq!(number(r#"=FIND("-","aé-cd")"#), 3.0);
+        // The composition is the point: these are what the split idiom does.
+        assert_eq!(text(r#"=MID("aé-cd",FIND("-","aé-cd")+1,10)"#), "cd");
+        assert_eq!(text(r#"=LEFT("aé-cd",FIND("-","aé-cd")-1)"#), "aé");
+        // Agrees with LEN, which was always character-based.
+        assert_eq!(number(r#"=LEN("café")"#), 4.0);
+        assert_eq!(number(r#"=FIND("é","café")"#), 4.0);
+    }
+
+    /// A start position inside a multi-byte character returns an error.
+    #[test]
+    fn find_does_not_panic_on_a_character_boundary() {
+        assert!(is_error(r#"=FIND("x","héllo",3)"#));
+        assert_eq!(number(r#"=FIND("l","héllo",3)"#), 3.0);
+        assert_eq!(text(r#"=IFERROR(FIND("x","héllo",3),"handled")"#), "handled");
+    }
+
+    /// FIND is case-sensitive and SEARCH is not; nothing else differs.
+    #[test]
+    fn find_and_search_differ_only_in_case() {
+        assert!(is_error(r#"=FIND("B","abc")"#));
+        assert_eq!(number(r#"=SEARCH("B","abc")"#), 2.0);
+        assert_eq!(number(r#"=FIND("b","abc")"#), 2.0);
     }
 
     /// SEARCH is FIND without the case sensitivity.
