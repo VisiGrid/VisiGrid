@@ -29,6 +29,25 @@ yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 
 die() { red "ERROR: $*" >&2; exit 1; }
 
+# Set when a post-publish step fails. The run continues so the summary can
+# report what landed, then exits non-zero.
+AUR_FAILED=false
+
+
+# Update the AUR package. Returns non-zero on any failure rather than exiting,
+# because this phase runs after the release is published and the caller needs
+# to report the partial state rather than stop mid-way.
+aur_update() {
+    git pull --rebase || return 1
+    sed_i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD || return 1
+    sed_i "s/^sha256sums=.*/sha256sums=('$SHA256')/" PKGBUILD || return 1
+    bold "Generating .SRCINFO..."
+    makepkg --printsrcinfo > .SRCINFO || return 1
+    git add PKGBUILD .SRCINFO || return 1
+    git commit -m "Bump to v$VERSION" || return 1
+    git push || return 1
+}
+
 run() {
     if $DRY_RUN; then
         yellow "[dry-run] $*"
@@ -286,22 +305,19 @@ if $IS_LINUX; then
 
         cd "$AUR_DIR"
 
-        git pull --rebase || die "Failed to pull AUR repo. Resolve conflicts manually."
-
-        sed_i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
-        sed_i "s/^sha256sums=.*/sha256sums=('$SHA256')/" PKGBUILD
-
-        bold "Generating .SRCINFO..."
-        makepkg --printsrcinfo > .SRCINFO
-
-        git add PKGBUILD .SRCINFO
-        git commit -m "Bump to v$VERSION"
-        git push
+        # Everything from here on is recoverable and happens AFTER the release
+        # is published, so a failure must not abort the run: the operator still
+        # needs the summary telling them what did and did not land. The failure
+        # is carried to the end and the script exits non-zero there.
+        if aur_update; then
+            green "AUR updated."
+        else
+            AUR_FAILED=true
+            red "AUR was NOT updated. The release itself is published and unaffected."
+        fi
 
         cd "$REPO_ROOT"
     fi
-
-    green "AUR updated."
 else
     bold "=== Phase 5: Update AUR (skipped — not on Linux) ==="
     yellow "Run this script on Linux to update AUR, or update manually."
@@ -334,5 +350,22 @@ green "Release:     https://github.com/$GITHUB_REPO/releases/tag/v$VERSION"
 if $IS_MACOS; then
     yellow "AUR:         skipped (run on Linux to update)"
 fi
+
+if $AUR_FAILED; then
+    echo ""
+    red "=== AUR NOT UPDATED ==="
+    red "The release is published and every other channel is current; only the"
+    red "AUR package is still on its previous version. To finish it later:"
+    echo ""
+    echo "  cd $AUR_DIR"
+    echo "  git pull --rebase"
+    echo "  # set pkgver=$VERSION and sha256sums=('$SHA256') in PKGBUILD"
+    echo "  makepkg --printsrcinfo > .SRCINFO"
+    echo "  git add PKGBUILD .SRCINFO && git commit -m 'Bump to v$VERSION' && git push"
+    echo ""
+    red "Exiting non-zero: the release succeeded, this run did not fully complete."
+    exit 1
+fi
+
 echo ""
 bold "Done!"
