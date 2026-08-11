@@ -1,45 +1,50 @@
-//! `Instant` that compiles on wasm32.
+//! `Instant` and wall-clock that compile on wasm32.
 //!
-//! `std::time::Instant::now()` panics ("time not implemented") on
-//! wasm32-unknown-unknown, which turns every recompute into an
-//! `unreachable` trap in the browser. Recalc timing is diagnostics-only
-//! (RecalcReport durations), so on wasm it reports zero. Native targets
-//! get the real `std::time::Instant`, re-exported — behavior unchanged.
+//! `std::time::Instant::now()` and `SystemTime::now()` both panic ("time not
+//! implemented") on wasm32-unknown-unknown, so this module supplies them. On
+//! native it re-exports the real thing; on wasm it reads the JS clock.
+//!
+//! These used to return zero on wasm, on the reasoning that the only caller
+//! was the web verify layer and it never verified volatile formulas. That
+//! stopped being true — conditional formatting and validation evaluate through
+//! the same bundle, so a rule like `=A1>TODAY()` compared against 1970 and
+//! flagged every row, with no error and nothing in the divergence report.
+//!
+//! A stub is only invisible while its callers stay the ones you had in mind,
+//! and nothing tells you when that changes.
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use std::time::Instant;
 
+/// Milliseconds since the Unix epoch, from the JS clock.
+#[cfg(target_arch = "wasm32")]
+fn js_epoch_millis() -> f64 {
+    let ms = js_sys::Date::now();
+    if ms.is_finite() && ms > 0.0 { ms } else { 0.0 }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Instant;
+pub(crate) struct Instant(f64);
 
 #[cfg(target_arch = "wasm32")]
 impl Instant {
     pub(crate) fn now() -> Self {
-        Instant
+        Instant(js_epoch_millis())
     }
 
+    /// Resolution is the browser's, typically a millisecond and sometimes
+    /// coarsened further for fingerprinting reasons. Fine for the phase
+    /// timings in RecalcReport, which are tens of milliseconds and up, and
+    /// far better than the zero this used to report — a recompute in the
+    /// browser previously claimed every phase took no time at all.
     pub(crate) fn elapsed(&self) -> std::time::Duration {
-        std::time::Duration::ZERO
-    }
-}
-
-/// Wall-clock for RecalcReport metadata: real on native, UNIX_EPOCH on wasm
-/// (SystemTime::now panics there; the field is diagnostics-only).
-pub(crate) fn system_now() -> std::time::SystemTime {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::time::SystemTime::now()
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        std::time::SystemTime::UNIX_EPOCH
+        let ms = (js_epoch_millis() - self.0).max(0.0);
+        std::time::Duration::from_secs_f64(ms / 1000.0)
     }
 }
 
 /// Duration since the Unix epoch, for volatile functions (NOW/TODAY/RAND).
-/// Zero on wasm — the web verify layer never verifies volatile formulas,
-/// so the stub value is never user-visible.
 pub(crate) fn now_since_epoch() -> std::time::Duration {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -49,6 +54,14 @@ pub(crate) fn now_since_epoch() -> std::time::Duration {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        std::time::Duration::ZERO
+        std::time::Duration::from_secs_f64(js_epoch_millis() / 1000.0)
     }
+}
+
+/// Wall-clock for RecalcReport metadata.
+///
+/// Derived from `now_since_epoch` rather than read separately, so the two can
+/// never disagree about what time it is on one platform and not the other.
+pub(crate) fn system_now() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + now_since_epoch()
 }
