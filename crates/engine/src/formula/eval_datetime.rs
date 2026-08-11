@@ -38,6 +38,31 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             let excel_datetime = days_since_unix + 25569.0;
             EvalResult::Number(excel_datetime)
         }
+        "TIME" => {
+            if args.len() != 3 {
+                return Some(EvalResult::Error("TIME requires exactly 3 arguments".to_string()));
+            }
+            let mut nums = [0i64; 3];
+            for (slot, arg) in nums.iter_mut().zip(args.iter()) {
+                match evaluate(arg, lookup).to_number() {
+                    Ok(n) => *slot = n.trunc() as i64,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                }
+            }
+            let (hours, minutes, seconds) = (nums[0], nums[1], nums[2]);
+            // Excel carries minutes and seconds past their range into hours —
+            // TIME(0,90,0) is 01:30 — then keeps only the fractional day, so
+            // TIME(25,0,0) is 01:00 rather than an error.
+            let total = hours
+                .saturating_mul(3600)
+                .saturating_add(minutes.saturating_mul(60))
+                .saturating_add(seconds);
+            if total < 0 {
+                return Some(EvalResult::Error("#NUM!".to_string()));
+            }
+            let day_fraction = (total % 86400) as f64 / 86400.0;
+            EvalResult::Number(day_fraction)
+        }
         "DATE" => {
             // DATE(year, month, day) - returns Excel date serial
             if args.len() != 3 {
@@ -301,4 +326,34 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         _ => return None,
     };
     Some(result)
+}
+
+#[cfg(test)]
+mod time_tests {
+    use crate::formula::eval::{evaluate, CellLookup, EvalResult};
+    use crate::formula::parser::{bind_expr_same_sheet, parse};
+
+    struct Empty;
+    impl CellLookup for Empty {
+        fn get_value(&self, _r: usize, _c: usize) -> f64 { 0.0 }
+        fn get_text(&self, _r: usize, _c: usize) -> String { String::new() }
+    }
+
+    fn number(formula: &str) -> f64 {
+        match evaluate(&bind_expr_same_sheet(&parse(formula).unwrap()), &Empty) {
+            EvalResult::Number(n) => n,
+            other => panic!("{formula} gave {other:?}, expected a number"),
+        }
+    }
+
+    /// TIME is a fraction of a day, which is what makes it addable to a date.
+    #[test]
+    fn time_is_a_day_fraction_and_carries_overflow() {
+        assert!((number("=TIME(18,30,0)") - 0.770_833_333_333_333_4).abs() < 1e-12);
+        assert_eq!(number("=TIME(0,0,0)"), 0.0);
+        // 90 minutes is an hour and a half, not an error.
+        assert!((number("=TIME(0,90,0)") - 0.0625).abs() < 1e-12);
+        // Past a full day it wraps, so 25:00 is 01:00.
+        assert!((number("=TIME(25,0,0)") - 1.0 / 24.0).abs() < 1e-12);
+    }
 }

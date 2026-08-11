@@ -185,6 +185,128 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 None => EvalResult::Error("#VALUE!".to_string()),
             }
         }
+        // Excel counts characters, not bytes. These index by chars throughout,
+        // so a name with an accent in it behaves the same as one without.
+        "SEARCH" => {
+            // FIND's case-insensitive twin. Excel also accepts ? and *
+            // wildcards here; this does not, and a pattern using them simply
+            // fails to match rather than matching something approximate.
+            if args.len() < 2 || args.len() > 3 {
+                return Some(EvalResult::Error("SEARCH requires 2 or 3 arguments".to_string()));
+            }
+            let needle = evaluate(&args[0], lookup).to_text().to_lowercase();
+            let haystack = evaluate(&args[1], lookup).to_text();
+            let folded: Vec<char> = haystack.to_lowercase().chars().collect();
+            let needle_chars: Vec<char> = needle.chars().collect();
+            let start = if args.len() == 3 {
+                match evaluate(&args[2], lookup).to_number() {
+                    Ok(n) if n < 1.0 => return Some(EvalResult::Error("#VALUE!".to_string())),
+                    Ok(n) => (n as usize) - 1,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                }
+            } else {
+                0
+            };
+            if start > folded.len() {
+                return Some(EvalResult::Error("#VALUE!".to_string()));
+            }
+            let found = if needle_chars.is_empty() {
+                Some(start)
+            } else {
+                (start..=folded.len().saturating_sub(needle_chars.len()))
+                    .find(|&i| folded[i..i + needle_chars.len()] == needle_chars[..])
+            };
+            match found {
+                Some(pos) => EvalResult::Number((pos + 1) as f64),
+                None => EvalResult::Error("#VALUE!".to_string()),
+            }
+        }
+        "REPLACE" => {
+            if args.len() != 4 {
+                return Some(EvalResult::Error("REPLACE requires exactly 4 arguments".to_string()));
+            }
+            let text: Vec<char> = evaluate(&args[0], lookup).to_text().chars().collect();
+            let start = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) if n < 1.0 => return Some(EvalResult::Error("#VALUE!".to_string())),
+                Ok(n) => (n as usize) - 1,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let count = match evaluate(&args[2], lookup).to_number() {
+                Ok(n) if n < 0.0 => return Some(EvalResult::Error("#VALUE!".to_string())),
+                Ok(n) => n as usize,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let new_text = evaluate(&args[3], lookup).to_text();
+            // Starting past the end appends, which is what Excel does rather
+            // than erroring.
+            let head: String = text.iter().take(start).collect();
+            let tail: String = text.iter().skip(start.saturating_add(count)).collect();
+            EvalResult::Text(format!("{head}{new_text}{tail}"))
+        }
+        "PROPER" => {
+            if args.len() != 1 {
+                return Some(EvalResult::Error("PROPER requires exactly one argument".to_string()));
+            }
+            let text = evaluate(&args[0], lookup).to_text();
+            // A letter starts a word when what precedes it is not a letter, so
+            // "o'neill" becomes "O'Neill" and "2nd place" becomes "2Nd Place",
+            // both of which are what Excel produces.
+            let mut out = String::with_capacity(text.len());
+            let mut prev_alpha = false;
+            for ch in text.chars() {
+                if ch.is_alphabetic() {
+                    if prev_alpha {
+                        out.extend(ch.to_lowercase());
+                    } else {
+                        out.extend(ch.to_uppercase());
+                    }
+                    prev_alpha = true;
+                } else {
+                    out.push(ch);
+                    prev_alpha = false;
+                }
+            }
+            EvalResult::Text(out)
+        }
+        "EXACT" => {
+            if args.len() != 2 {
+                return Some(EvalResult::Error("EXACT requires exactly 2 arguments".to_string()));
+            }
+            let a = evaluate(&args[0], lookup).to_text();
+            let b = evaluate(&args[1], lookup).to_text();
+            EvalResult::Boolean(a == b)
+        }
+        "TEXTBEFORE" | "TEXTAFTER" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Some(EvalResult::Error(format!("{name} requires 2 or 3 arguments")));
+            }
+            let text = evaluate(&args[0], lookup).to_text();
+            let delimiter = evaluate(&args[1], lookup).to_text();
+            let instance = if args.len() == 3 {
+                match evaluate(&args[2], lookup).to_number() {
+                    Ok(n) => n as i64,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                }
+            } else {
+                1
+            };
+            if delimiter.is_empty() || instance == 0 {
+                return Some(EvalResult::Error("#VALUE!".to_string()));
+            }
+            let hits: Vec<usize> = text.match_indices(&delimiter).map(|(i, _)| i).collect();
+            // A negative instance counts from the end, as Excel does.
+            let chosen = if instance > 0 {
+                hits.get((instance - 1) as usize).copied()
+            } else {
+                let from_end = (-instance) as usize;
+                hits.len().checked_sub(from_end).and_then(|i| hits.get(i).copied())
+            };
+            match chosen {
+                None => EvalResult::Error("#N/A".to_string()),
+                Some(at) if name == "TEXTBEFORE" => EvalResult::Text(text[..at].to_string()),
+                Some(at) => EvalResult::Text(text[at + delimiter.len()..].to_string()),
+            }
+        }
         "SUBSTITUTE" => {
             if args.len() < 3 || args.len() > 4 {
                 return Some(EvalResult::Error("SUBSTITUTE requires 3 or 4 arguments".to_string()));
@@ -244,4 +366,87 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         _ => return None,
     };
     Some(result)
+}
+
+#[cfg(test)]
+mod newly_added_tests {
+    use crate::formula::eval::{evaluate, CellLookup, EvalResult};
+    use crate::formula::parser::{bind_expr_same_sheet, parse};
+
+    struct Empty;
+    impl CellLookup for Empty {
+        fn get_value(&self, _r: usize, _c: usize) -> f64 { 0.0 }
+        fn get_text(&self, _r: usize, _c: usize) -> String { String::new() }
+    }
+
+    fn eval(formula: &str) -> EvalResult {
+        evaluate(&bind_expr_same_sheet(&parse(formula).unwrap()), &Empty)
+    }
+
+    fn text(formula: &str) -> String {
+        match eval(formula) {
+            EvalResult::Text(t) => t,
+            other => panic!("{formula} gave {other:?}, expected text"),
+        }
+    }
+
+    fn number(formula: &str) -> f64 {
+        match eval(formula) {
+            EvalResult::Number(n) => n,
+            other => panic!("{formula} gave {other:?}, expected a number"),
+        }
+    }
+
+    fn is_error(formula: &str) -> bool {
+        matches!(eval(formula), EvalResult::Error(_))
+    }
+
+    /// SEARCH is FIND without the case sensitivity.
+    #[test]
+    fn search_ignores_case_and_counts_from_one() {
+        assert_eq!(number(r#"=SEARCH("b","ABC")"#), 2.0);
+        assert_eq!(number(r#"=SEARCH("B","abc")"#), 2.0);
+        assert_eq!(number(r#"=SEARCH("c","abcabc",4)"#), 6.0);
+        // Excel reports #VALUE! when there is no match, not zero.
+        assert!(is_error(r#"=SEARCH("z","abc")"#));
+        // Counted in characters, so an accent earlier in the string does not
+        // shift the answer the way byte offsets would.
+        assert_eq!(number(r#"=SEARCH("é","caFÉ")"#), 4.0);
+    }
+
+    #[test]
+    fn replace_works_on_character_positions() {
+        assert_eq!(text(r#"=REPLACE("abcdef",2,3,"XY")"#), "aXYef");
+        // Zero characters is an insert.
+        assert_eq!(text(r#"=REPLACE("abcdef",2,0,"XY")"#), "aXYbcdef");
+        // Starting past the end appends rather than erroring.
+        assert_eq!(text(r#"=REPLACE("abc",10,2,"Z")"#), "abcZ");
+    }
+
+    #[test]
+    fn proper_capitalises_after_every_non_letter() {
+        assert_eq!(text(r#"=PROPER("hello world")"#), "Hello World");
+        assert_eq!(text(r#"=PROPER("o'neill")"#), "O'Neill");
+        // Excel really does produce "2Nd" here; the digit ends the word.
+        assert_eq!(text(r#"=PROPER("2nd PLACE")"#), "2Nd Place");
+        assert_eq!(text(r#"=PROPER("")"#), "");
+    }
+
+    #[test]
+    fn exact_is_the_case_sensitive_comparison() {
+        assert_eq!(eval(r#"=EXACT("a","A")"#), EvalResult::Boolean(false));
+        assert_eq!(eval(r#"=EXACT("abc","abc")"#), EvalResult::Boolean(true));
+    }
+
+    #[test]
+    fn textbefore_and_textafter_take_an_instance() {
+        assert_eq!(text(r#"=TEXTBEFORE("a-b-c","-")"#), "a");
+        assert_eq!(text(r#"=TEXTAFTER("a-b-c","-")"#), "b-c");
+        assert_eq!(text(r#"=TEXTBEFORE("a-b-c","-",2)"#), "a-b");
+        // A negative instance counts back from the end.
+        assert_eq!(text(r#"=TEXTAFTER("a-b-c","-",-1)"#), "c");
+        // Missing delimiter is #N/A, not an empty string — an empty string
+        // would be indistinguishable from a delimiter at position one.
+        assert!(is_error(r#"=TEXTBEFORE("abc","-")"#));
+    }
 }
