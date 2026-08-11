@@ -4159,9 +4159,18 @@ impl Render for Spreadsheet {
             if let Some(start) = self.startup_instant {
                 let ms = start.elapsed().as_millis();
                 self.cold_start_ms = Some(ms);
-                // Show for empty launches (no file loaded yet)
-                if self.current_file.is_none() && self.status_message.is_none() {
-                    self.status_message = Some(format!("Ready in {}ms", ms));
+                // Show for empty launches (no file loaded yet).
+                //
+                // Alongside whatever else has something to say, rather than
+                // instead of it: this used to require status_message to be
+                // empty, so any restore message won and the number vanished.
+                // A fresh profile showed it and a machine in daily use never
+                // did — which is the wrong way round for a measurement.
+                if self.current_file.is_none() {
+                    self.status_message = Some(match self.status_message.take() {
+                        Some(existing) => format!("{} · Ready in {}ms", existing, ms),
+                        None => format!("Ready in {}ms", ms),
+                    });
                 }
             }
         }

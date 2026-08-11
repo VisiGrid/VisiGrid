@@ -548,6 +548,40 @@ impl SessionManager {
         self.dirty_since = None;
     }
 
+    /// Forget files that no longer exist, and persist that immediately.
+    ///
+    /// Restoring a window whose file has been deleted used to set an error
+    /// status and leave the entry untouched, so the same error returned on
+    /// every cold start. Nothing pruned it, and the session is only written on
+    /// the Quit action — closing the window instead never rewrites it — so an
+    /// entry could outlive the file by months. One machine here was still
+    /// pointing at a CSV deleted in May, from a session stamped 0.10.1.
+    ///
+    /// The window is kept, since its position and layout are still wanted;
+    /// only the dead path is dropped.
+    ///
+    /// Marks the session dirty but does not write it — persisting belongs to
+    /// the caller, which also keeps this callable from a test without writing
+    /// to the user's real config. Writing from here did exactly that: a test
+    /// for not carrying dead paths forward put one into a live session.
+    ///
+    /// Returns the paths forgotten, so the caller can mention them once.
+    pub fn forget_missing_files(&mut self) -> Vec<std::path::PathBuf> {
+        let mut forgotten = Vec::new();
+        for window in &mut self.session.windows {
+            if let Some(path) = window.file.clone() {
+                if !path.exists() {
+                    window.file = None;
+                    forgotten.push(path);
+                }
+            }
+        }
+        if !forgotten.is_empty() {
+            self.dirty = true;
+        }
+        forgotten
+    }
+
     /// Clear session (for fresh start)
     pub fn clear(&mut self) {
         self.session = Session {
@@ -724,6 +758,50 @@ impl Spreadsheet {
 
 #[cfg(test)]
 mod tests {
+
+    /// A file that has been deleted must not be carried into the next launch.
+    ///
+    /// The restore path reported the missing file and left the entry in place,
+    /// so the same error appeared on every cold start — and because the
+    /// session is only written on the Quit action, a user who closes the
+    /// window rather than quitting never rewrote it. One machine here was
+    /// still chasing a CSV deleted months earlier.
+    #[test]
+    fn a_deleted_file_is_forgotten_and_does_not_come_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let alive = dir.path().join("still-here.sheet");
+        std::fs::write(&alive, b"x").unwrap();
+        let gone = dir.path().join("deleted.csv");
+
+        let mut mgr = SessionManager::new_empty_for_test(Duration::from_secs(0));
+        mgr.session.windows = vec![
+            WindowSession { file: Some(gone.clone()), ..Default::default() },
+            WindowSession { file: Some(alive.clone()), ..Default::default() },
+        ];
+
+        let forgotten = mgr.forget_missing_files();
+
+        assert_eq!(forgotten, vec![gone], "only the missing file is reported");
+        assert_eq!(
+            mgr.session.windows[0].file, None,
+            "the dead path is dropped so it cannot report itself again"
+        );
+        assert_eq!(
+            mgr.session.windows[1].file,
+            Some(alive),
+            "a file that still exists is untouched"
+        );
+        // The window itself survives — its position and layout are still wanted.
+        assert_eq!(mgr.session.windows.len(), 2);
+
+        // Running again finds nothing to do, which is what makes the message
+        // appear once rather than on every launch.
+        assert!(mgr.forget_missing_files().is_empty());
+
+        // Dirty so the caller knows to persist, but nothing was written here —
+        // a test must not be able to reach the user's real session file.
+        assert!(mgr.dirty);
+    }
     use super::*;
 
     #[test]

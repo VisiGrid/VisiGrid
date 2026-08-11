@@ -655,7 +655,23 @@ fn main() {
         #[cfg(target_os = "macos")]
         menus::set_app_menus(cx);
 
-        // Restore session or open fresh window
+        // Restore session or open fresh window.
+        //
+        // Drop references to files that have since been deleted before any
+        // window is built, so a vanished file cannot keep reporting itself on
+        // every launch. Persisted immediately, because the session is only
+        // written on the Quit action and a user who closes the window instead
+        // would never clear it.
+        let forgotten_files = cx.update_global::<SessionManager, _>(|mgr, _| {
+            let forgotten = mgr.forget_missing_files();
+            if !forgotten.is_empty() {
+                // Written now rather than at quit: the session is only saved on
+                // the Quit action, so a user who closes the window would carry
+                // the same dead path into every future launch.
+                mgr.save_now();
+            }
+            forgotten
+        });
         let session = SessionManager::global(cx).session().clone();
         let should_restore = !no_restore && !session.windows.is_empty() && cli_files.is_empty();
 
@@ -666,8 +682,10 @@ fn main() {
             let restored_count = session.windows.len();
 
             // Restore each window from session with smart bounds clamping
-            for window_session in &session.windows {
+            for (window_index, window_session) in session.windows.iter().enumerate() {
                 let window_session = window_session.clone();
+                let is_first_window = window_index == 0;
+                let forgotten_files = forgotten_files.clone();
                 let session_server_started = session_server_started.clone();
 
                 // Get restored bounds (if any)
@@ -714,6 +732,19 @@ fn main() {
                             // Apply session state (scroll, selection, panels)
                             // This is safe even if file didn't load - clamping handles it
                             app.apply(&window_session, cx);
+
+                            // Said once, on the first window: the entries are
+                            // already pruned, so this cannot recur next launch.
+                            if is_first_window && !forgotten_files.is_empty() {
+                                let names: Vec<String> = forgotten_files
+                                    .iter()
+                                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                                    .collect();
+                                app.status_message = Some(format!(
+                                    "No longer on disk, so not reopened: {}",
+                                    names.join(", ")
+                                ));
+                            }
 
                             // Set "Session restored" status (only if we actually restored windows)
                             if restored_count > 0 && app.status_message.is_none() {
