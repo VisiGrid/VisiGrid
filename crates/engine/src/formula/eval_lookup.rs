@@ -23,6 +23,22 @@ fn compare_values(a: &EvalResult, b: &EvalResult) -> Option<Ordering> {
     }
 }
 
+
+/// The search key as a number, but only when it genuinely is one.
+///
+/// Excel never matches text against a number in a lookup. Deriving this with
+/// `to_number()` instead parses any numeric-looking text, so VLOOKUP("007", …)
+/// would find a cell holding 7 — a match Excel reports as #N/A, and one that
+/// quietly returns the wrong row rather than saying nothing was found.
+///
+/// Booleans stay out too: Excel does not match TRUE against 1 here.
+fn numeric_key(key: &EvalResult) -> Option<f64> {
+    match key {
+        EvalResult::Number(n) => Some(*n),
+        _ => None,
+    }
+}
+
 pub(crate) fn try_evaluate<L: CellLookup>(
     name: &str, args: &[BoundExpr], lookup: &L,
 ) -> Option<EvalResult> {
@@ -60,7 +76,11 @@ pub(crate) fn try_evaluate<L: CellLookup>(
 
             // Search for the key in the first column
             let search_text = search_key.to_text().to_lowercase();
-            let search_num = search_key.to_number().ok();
+            // A number only when it *is* one. to_number() would parse the
+            // text "007" into 7 and match it against a numeric cell, which
+            // Excel does not do — text and numbers are different types, and a
+            // zip code stored as text is not the integer it resembles.
+            let search_num = numeric_key(&search_key);
 
             let mut found_row: Option<usize> = None;
 
@@ -411,7 +431,11 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
 
             let search_text = search_key.to_text().to_lowercase();
-            let search_num = search_key.to_number().ok();
+            // A number only when it *is* one. to_number() would parse the
+            // text "007" into 7 and match it against a numeric cell, which
+            // Excel does not do — text and numbers are different types, and a
+            // zip code stored as text is not the integer it resembles.
+            let search_num = numeric_key(&search_key);
 
             let mut found_col: Option<usize> = None;
 
@@ -555,7 +579,11 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             // Determine if it's a row vector or column vector
             let is_row = min_row == max_row;
             let search_text = search_key.to_text().to_lowercase();
-            let search_num = search_key.to_number().ok();
+            // A number only when it *is* one. to_number() would parse the
+            // text "007" into 7 and match it against a numeric cell, which
+            // Excel does not do — text and numbers are different types, and a
+            // zip code stored as text is not the integer it resembles.
+            let search_num = numeric_key(&search_key);
 
             let mut found_pos: Option<usize> = None;
 
@@ -875,5 +903,76 @@ fn parse_a1_ref(s: &str) -> Option<(usize, usize, usize, usize)> {
             let (r, c) = parse_a1_cell(s)?;
             Some((r, c, r, c))
         }
+    }
+}
+
+#[cfg(test)]
+mod strict_type_tests {
+    use crate::formula::eval::{evaluate, CellLookup, EvalResult};
+    use crate::formula::parser::{bind_expr_same_sheet, parse};
+
+    /// A1 holds the number 7, B1 a label; A2 holds 99.
+    struct Sheet;
+    impl CellLookup for Sheet {
+        fn get_value(&self, row: usize, col: usize) -> f64 {
+            match (row, col) {
+                (0, 0) => 7.0,
+                (1, 0) => 99.0,
+                _ => 0.0,
+            }
+        }
+        fn get_text(&self, row: usize, col: usize) -> String {
+            match (row, col) {
+                (0, 0) => "7".into(),
+                (0, 1) => "seven-row".into(),
+                (1, 0) => "99".into(),
+                (1, 1) => "other".into(),
+                _ => String::new(),
+            }
+        }
+    }
+
+    fn eval(formula: &str) -> EvalResult {
+        evaluate(&bind_expr_same_sheet(&parse(formula).unwrap()), &Sheet)
+    }
+
+    fn is_na(formula: &str) -> bool {
+        matches!(eval(formula), EvalResult::Error(ref e) if e.contains("#N/A"))
+    }
+
+    /// Text never matches a number, which is Excel's rule and was already
+    /// XLOOKUP's here.
+    ///
+    /// The others derived the search key with to_number(), which parses any
+    /// numeric-looking text — so looking up the zip code "007" found a cell
+    /// holding 7 and returned its row. Not an error, just the wrong answer,
+    /// and only in the five functions that took that route.
+    #[test]
+    fn a_text_key_does_not_match_a_numeric_cell() {
+        assert!(is_na(r#"=VLOOKUP("007",A1:B2,2,FALSE)"#));
+        assert!(is_na(r#"=HLOOKUP("007",A1:B1,1,FALSE)"#));
+        assert!(is_na(r#"=MATCH("007",A1:A2,0)"#));
+        // XLOOKUP already behaved this way; it is the reference, not an
+        // exception.
+        assert_eq!(
+            eval(r#"=XLOOKUP("007",A1:A2,B1:B2,"MISS")"#),
+            EvalResult::Text("MISS".into())
+        );
+    }
+
+    /// Matching numbers to numbers is untouched.
+    #[test]
+    fn numeric_keys_still_match_numeric_cells() {
+        assert_eq!(
+            eval("=VLOOKUP(7,A1:B2,2,FALSE)"),
+            EvalResult::Text("seven-row".into())
+        );
+        assert_eq!(eval("=MATCH(7,A1:A2,0)"), EvalResult::Number(1.0));
+        assert_eq!(eval("=MATCH(99,A1:A2,0)"), EvalResult::Number(2.0));
+        // Approximate matching orders numerically as before.
+        assert_eq!(
+            eval("=VLOOKUP(7,A1:B2,2,TRUE)"),
+            EvalResult::Text("seven-row".into())
+        );
     }
 }
