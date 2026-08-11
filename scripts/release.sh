@@ -32,6 +32,10 @@ die() { red "ERROR: $*" >&2; exit 1; }
 # Set when a post-publish step fails. The run continues so the summary can
 # report what landed, then exits non-zero.
 AUR_FAILED=false
+# Computed in phase 5. Declared here so the summary can quote it without
+# depending on how far the run got — under `set -u` an unset variable there
+# would abort the very report that explains what went wrong.
+SHA256=""
 
 
 # Update the AUR package. Returns non-zero on any failure rather than exiting,
@@ -359,7 +363,12 @@ if $AUR_FAILED; then
     echo ""
     echo "  cd $AUR_DIR"
     echo "  git pull --rebase"
-    echo "  # set pkgver=$VERSION and sha256sums=('$SHA256') in PKGBUILD"
+    if [[ -n "$SHA256" ]]; then
+        echo "  # set pkgver=$VERSION and sha256sums=('$SHA256') in PKGBUILD"
+    else
+        echo "  # set pkgver=$VERSION in PKGBUILD, and sha256sums to the sha256 of"
+        echo "  #   https://github.com/$GITHUB_REPO/releases/download/v$VERSION/VisiGrid-linux-x86_64.tar.gz"
+    fi
     echo "  makepkg --printsrcinfo > .SRCINFO"
     echo "  git add PKGBUILD .SRCINFO && git commit -m 'Bump to v$VERSION' && git push"
     echo ""
