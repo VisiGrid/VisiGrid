@@ -1001,6 +1001,128 @@ mod symbol_font_tests {
         );
     }
 
+    /// Characters the bundled font must carry.
+    ///
+    /// Kept identical to `in_scope` in scripts/build-symbol-font.py. That
+    /// script decides what gets built; this decides what must be there. When
+    /// they disagree this test fails, which is the safe direction.
+    fn is_in_scope(cp: u32) -> bool {
+        if cp < 0x80 {
+            return false; // ASCII: every font has it
+        }
+        if cp >= 0x1F000 {
+            return false; // emoji live in a colour font, not this one
+        }
+        if cp == 0x2601 || cp == 0x2615 {
+            return false; // the source font lacks these; see the script
+        }
+        if (0x3000..=0x9FFF).contains(&cp) || (0xFE00..=0xFE0F).contains(&cp) {
+            return false; // CJK and variation selectors need their own fonts
+        }
+        true
+    }
+
+    /// Codepoints the font can actually render, read from its `cmap`.
+    ///
+    /// Formats 4 and 12 only, which is what a subset of a modern font emits.
+    /// Parsed rather than assumed: the point of this test is to know what the
+    /// file contains, and "the build produced a file" is not that.
+    fn covered_codepoints(bytes: &[u8]) -> std::collections::HashSet<u32> {
+        let be16 = |o: usize| u16::from_be_bytes([bytes[o], bytes[o + 1]]) as usize;
+        let be32 = |o: usize| {
+            u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) as usize
+        };
+
+        let mut cmap = None;
+        for i in 0..be16(4) {
+            let rec = 12 + i * 16;
+            if &bytes[rec..rec + 4] == b"cmap" {
+                cmap = Some(be32(rec + 8));
+            }
+        }
+        let cmap = cmap.expect("font has no cmap table");
+
+        let mut out = std::collections::HashSet::new();
+        for i in 0..be16(cmap + 2) {
+            let sub = cmap + be32(cmap + 4 + i * 8 + 4);
+            match be16(sub) {
+                4 => {
+                    let seg_x2 = be16(sub + 6);
+                    let ends = sub + 14;
+                    let starts = ends + seg_x2 + 2;
+                    for s in (0..seg_x2).step_by(2) {
+                        let (start, end) = (be16(starts + s), be16(ends + s));
+                        if start == 0xFFFF {
+                            continue;
+                        }
+                        for cp in start..=end {
+                            out.insert(cp as u32);
+                        }
+                    }
+                }
+                12 => {
+                    let groups = be32(sub + 12);
+                    for g in 0..groups {
+                        let rec = sub + 16 + g * 12;
+                        for cp in be32(rec)..=be32(rec + 4) {
+                            out.insert(cp as u32);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Every character the UI uses is in the bundled font.
+    ///
+    /// This is what stops the fix from decaying. Adding an icon whose glyph the
+    /// UI font lacks used to mean it silently depended on the machine having a
+    /// font that had it — fine on macOS, a box on Linux, and nothing anywhere
+    /// said so. Now it fails here, naming the character, and the fix is to run
+    /// scripts/build-symbol-font.py.
+    #[test]
+    fn the_bundled_font_covers_every_character_the_ui_uses() {
+        let bytes: &[u8] =
+            include_bytes!("../assets/fonts/visigrid-symbols/VisiGridSymbols-Regular.ttf");
+        let covered = covered_codepoints(bytes);
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut missing: Vec<(u32, String)> = Vec::new();
+        let mut stack = vec![src];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src dir").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    for ch in text.chars() {
+                        let cp = ch as u32;
+                        if is_in_scope(cp) && !covered.contains(&cp) {
+                            let where_ = path.file_name().unwrap().to_string_lossy().to_string();
+                            if !missing.iter().any(|(c, _)| *c == cp) {
+                                missing.push((cp, where_));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "the UI uses characters the bundled font cannot render: {}\n\
+             Run: python3 scripts/build-symbol-font.py",
+            missing
+                .iter()
+                .map(|(cp, f)| format!("U+{cp:04X} {:?} (in {f})", char::from_u32(*cp).unwrap()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
     /// The glyphs this was bundled for are actually in it.
     #[test]
     fn the_bundled_font_covers_the_glyphs_it_exists_for() {
