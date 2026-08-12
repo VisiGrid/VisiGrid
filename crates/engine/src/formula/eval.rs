@@ -593,25 +593,20 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
             // read as EMPTY — only the merge origin holds the value. This
             // also matches range semantics (hidden cells are empty in
             // storage), which the previous redirect-to-origin diverged from.
-            let text = match sheet {
-                SheetRef::Current => lookup.get_text(*row, *col),
-                SheetRef::Id(sheet_id) => lookup.get_text_sheet(*sheet_id, *row, *col),
+            // Ask the cell what it holds. Reading it as text and inferring the
+            // type back cannot tell the number 102 from the text "102" — the
+            // reason LEN("007") was 1 while the cell plainly showed three
+            // characters, and the reason ISTEXT disagreed with the lookup
+            // functions once those learned to read types.
+            //
+            // Arithmetic still coerces: "007" + 1 is 8, here and in Excel.
+            // That happens in the operators, not here.
+            let value = match sheet {
+                SheetRef::Current => lookup.get_typed(*row, *col),
+                SheetRef::Id(sheet_id) => lookup.get_typed_sheet(*sheet_id, *row, *col),
                 SheetRef::RefError { .. } => return EvalResult::Error("#REF!".to_string()),
             };
-            if text.is_empty() {
-                EvalResult::Empty
-            } else if text.starts_with('#') {
-                // Propagate errors (e.g., #CIRC!, #REF!, #VALUE!)
-                EvalResult::Error(text)
-            } else if let Ok(n) = text.parse::<f64>() {
-                EvalResult::Number(n)
-            } else if text.to_uppercase() == "TRUE" {
-                EvalResult::Boolean(true)
-            } else if text.to_uppercase() == "FALSE" {
-                EvalResult::Boolean(false)
-            } else {
-                EvalResult::Text(text)
-            }
+            EvalResult::from_value(&value)
         }
         Expr::Range { .. } => {
             // Ranges can't be evaluated directly, only within functions

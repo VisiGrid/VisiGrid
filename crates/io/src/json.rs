@@ -1104,6 +1104,36 @@ mod full_json_tests {
         );
     }
 
+    // A text-typed number stays text everywhere a formula can see it.
+    //
+    // The last piece of this. Import kept "007" as text, saving kept it, and
+    // lookups learned to tell it from the number — but every other formula
+    // read cells through get_text and re-derived the type by parsing, so
+    // LEN("007") was 1 and ISTEXT was FALSE. Two answers to what a cell holds,
+    // visible as ISTEXT saying FALSE about a cell the lookups treated as text.
+    //
+    // Arithmetic still coerces, which is Excel's behaviour and not the same
+    // question: "007" + 1 is 8 there too.
+    #[test]
+    fn a_text_typed_number_reads_as_text_in_every_formula() {
+        let doc = r#"{"format":"visigrid-json","version":2,"active_sheet":0,"sheets":[{"name":"S","cells":[
+            {"row":0,"col":0,"value":"007"},
+            {"row":1,"col":0,"formula":"=LEN(A1)"},
+            {"row":2,"col":0,"formula":"=ISTEXT(A1)"},
+            {"row":3,"col":0,"formula":"=ISNUMBER(A1)"},
+            {"row":4,"col":0,"formula":"=A1&\"|\""},
+            {"row":5,"col":0,"formula":"=A1+1"}
+        ]}]}"#;
+        let sheet = import_full(doc).unwrap();
+
+        assert_eq!(sheet.get_display(1, 0), "3", "LEN counts the leading zeros");
+        assert_eq!(sheet.get_display(2, 0), "TRUE");
+        assert_eq!(sheet.get_display(3, 0), "FALSE");
+        assert_eq!(sheet.get_display(4, 0), "007|", "concatenation keeps them too");
+        // Arithmetic is the deliberate exception.
+        assert_eq!(sheet.get_display(5, 0), "8");
+    }
+
     // A text cell and a numeric cell holding the same digits are different
     // rows, and every lookup function agrees which is which.
     //
