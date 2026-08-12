@@ -339,10 +339,32 @@ else
     BREW_STATUS="$(gh run list --repo "$HOMEBREW_REPO" --limit=1 --json status,conclusion --jq '.[0].conclusion' 2>/dev/null || echo "unknown")"
     echo "Homebrew workflow conclusion: $BREW_STATUS"
 
-    if $IS_LINUX; then
-        bold "Checking AUR..."
-        AUR_VER="$(curl -s "https://aur.archlinux.org/rpc/v5/info?arg[]=visigrid-bin" | jq -r '.results[0].Version' 2>/dev/null || echo "unknown")"
-        echo "AUR version: $AUR_VER"
+    if $IS_LINUX && ! $AUR_FAILED; then
+        # The AUR's RPC lags a successful push by a few minutes, so a single
+        # read straight afterwards reports the previous version — it did so on
+        # both 0.25.0 and 0.25.1, each time saying "not done" about something
+        # that was. A check that is wrong in a predictable direction is worse
+        # than no check: it stays in the summary looking authoritative while
+        # everyone learns to disregard it. Poll, and say plainly when the wait
+        # expires rather than printing whatever the last read happened to be.
+        bold "Checking AUR (its RPC lags a push by a few minutes)..."
+        AUR_VER="unknown"
+        AUR_CONFIRMED=false
+        for _ in $(seq 1 10); do
+            AUR_VER="$(curl -s "https://aur.archlinux.org/rpc/v5/info?arg[]=visigrid-bin" | jq -r '.results[0].Version' 2>/dev/null || echo "unknown")"
+            if [[ "$AUR_VER" == "$VERSION"* ]]; then
+                AUR_CONFIRMED=true
+                break
+            fi
+            sleep 30
+        done
+        if $AUR_CONFIRMED; then
+            echo "AUR version: $AUR_VER"
+        else
+            yellow "AUR still reports $AUR_VER after 5 minutes."
+            yellow "The push succeeded; this is the RPC lagging, or it needs checking by hand:"
+            yellow "  https://aur.archlinux.org/packages/visigrid-bin"
+        fi
     fi
 fi
 
