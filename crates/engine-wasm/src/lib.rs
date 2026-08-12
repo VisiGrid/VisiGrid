@@ -111,11 +111,31 @@ fn build_workbook(sheets: &[InSheet]) -> Workbook {
         sheet.cols = sheet.cols.max(needed_cols);
 
         for cell in &sheet_in.cells {
-            // Deferred: the ordered recompute below evaluates each formula once
-            // with its dependencies present, and places spills afterwards.
-            // Inserting eagerly would evaluate every formula here as well, and
-            // spill against a half-built sheet for the recompute to then undo.
-            sheet.set_value_deferred(cell.row, cell.col, &cell.raw);
+            // A leading apostrophe forces text, as it does in every
+            // spreadsheet, and is not part of the value.
+            //
+            // Two reasons. It was already wrong without it: '102 arrived as the
+            // four-character string "'102", so any consumer of this API reading
+            // a user's typed apostrophe got the marker back as data. And these
+            // cells are plain strings with no type channel, so there was no way
+            // to express "text that looks like a number" — which is exactly the
+            // case the lookup functions now distinguish, and therefore exactly
+            // the case a caller needs to be able to construct.
+            //
+            // Deliberately scoped to this entry point, which carries what a
+            // person typed. visigrid-json states types directly and needs no
+            // marker; a bare apostrophe in a CSV field is ambiguous and is left
+            // alone rather than guessed at.
+            if let Some(forced_text) = cell.raw.strip_prefix('\'') {
+                sheet.set_text(cell.row, cell.col, forced_text);
+            } else {
+                // Deferred: the ordered recompute below evaluates each formula
+                // once with its dependencies present, and places spills
+                // afterwards. Inserting eagerly would evaluate every formula
+                // here as well, and spill against a half-built sheet for the
+                // recompute to then undo.
+                sheet.set_value_deferred(cell.row, cell.col, &cell.raw);
+            }
         }
     }
 
@@ -418,6 +438,39 @@ mod tests {
     // Host-side test of the core path (wasm-bindgen types work natively too,
     // but we test through the plain structs to keep it toolchain-independent).
     #[test]
+    /// A leading apostrophe forces text and is not part of the value.
+    ///
+    /// This is the only way a caller can express "text that looks like a
+    /// number" through this API — the cells are plain strings — and it is the
+    /// case the lookup functions distinguish, so it has to be constructible.
+    /// It also fixes '102 arriving as a four-character string.
+    #[test]
+    fn a_leading_apostrophe_forces_text_and_is_dropped() {
+        use visigrid_engine::cell::CellValue;
+
+        let sheets = vec![InSheet {
+            name: None,
+            cells: vec![
+                InCell { row: 0, col: 0, raw: "'102".into() },
+                InCell { row: 1, col: 0, raw: "102".into() },
+                InCell { row: 2, col: 0, raw: "'hello".into() },
+            ],
+        }];
+        let wb = build_workbook(&sheets);
+        let sheet = &wb.sheets()[0];
+
+        // Text, and the marker is gone.
+        assert!(
+            matches!(&sheet.get_cell(0, 0).value, CellValue::Text(t) if t == "102"),
+            "'102 should be the text 102, got {:?}",
+            sheet.get_cell(0, 0).value
+        );
+        // Without the marker it is still a number.
+        assert!(matches!(sheet.get_cell(1, 0).value, CellValue::Number(n) if n == 102.0));
+        // The marker works on ordinary text too, and is still dropped.
+        assert!(matches!(&sheet.get_cell(2, 0).value, CellValue::Text(t) if t == "hello"));
+    }
+
     fn recompute_core_path() {
         let mut wb = Workbook::new();
         wb.sheets_mut()[0].set_value(0, 1, "42");
