@@ -14,6 +14,46 @@ pub trait CellLookup {
     fn get_value(&self, row: usize, col: usize) -> f64;
     fn get_text(&self, row: usize, col: usize) -> String;
 
+    /// A cell's value with its type intact.
+    ///
+    /// `get_text` flattens everything to a string, so a caller has to guess the
+    /// type back by parsing — which cannot tell the number 102 from the text
+    /// "102", and so cannot tell whether a lookup should match. That guess is
+    /// why the strict rule currently only holds for text written directly into
+    /// a formula.
+    ///
+    /// The default preserves the old guess, so an implementor that has no
+    /// better answer behaves exactly as before. Sheet and WorkbookLookup
+    /// override it with the type they actually hold.
+    fn get_typed(&self, row: usize, col: usize) -> Value {
+        let text = self.get_text(row, col);
+        if text.is_empty() {
+            Value::Empty
+        } else if text.starts_with('#') {
+            Value::Error(text)
+        } else if let Ok(n) = text.parse::<f64>() {
+            Value::Number(n)
+        } else if text.eq_ignore_ascii_case("TRUE") {
+            Value::Boolean(true)
+        } else if text.eq_ignore_ascii_case("FALSE") {
+            Value::Boolean(false)
+        } else {
+            Value::Text(text)
+        }
+    }
+
+    /// A cell's typed value on another sheet. Defaults to the same guess.
+    fn get_typed_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Value {
+        let text = self.get_text_sheet(sheet_id, row, col);
+        if text.is_empty() {
+            Value::Empty
+        } else if let Ok(n) = text.parse::<f64>() {
+            Value::Number(n)
+        } else {
+            Value::Text(text)
+        }
+    }
+
     /// Get a cell's value from another sheet by SheetId.
     /// Returns Value::Error("#REF!") if sheet doesn't exist.
     /// Default implementation returns #REF! (cross-sheet not supported).
@@ -107,6 +147,14 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup 
         self.inner.get_text(row, col)
     }
 
+    fn get_typed(&self, row: usize, col: usize) -> Value {
+        self.inner.get_typed(row, col)
+    }
+
+    fn get_typed_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Value {
+        self.inner.get_typed_sheet(sheet_id, row, col)
+    }
+
     fn get_value_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Value {
         self.inner.get_value_sheet(sheet_id, row, col)
     }
@@ -160,6 +208,14 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
 
     fn get_text(&self, row: usize, col: usize) -> String {
         self.inner.get_text(row, col)
+    }
+
+    fn get_typed(&self, row: usize, col: usize) -> Value {
+        self.inner.get_typed(row, col)
+    }
+
+    fn get_typed_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Value {
+        self.inner.get_typed_sheet(sheet_id, row, col)
     }
 
     fn get_value_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Value {

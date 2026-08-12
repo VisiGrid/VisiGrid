@@ -2329,6 +2329,20 @@ impl<'a> WorkbookLookup<'a> {
 }
 
 impl<'a> CellLookup for WorkbookLookup<'a> {
+    /// The sheet's own typed value, not a guess reconstructed from its text.
+    fn get_typed(&self, row: usize, col: usize) -> Value {
+        self.current_sheet()
+            .map(|sheet| sheet.get_computed_value(row, col))
+            .unwrap_or(Value::Empty)
+    }
+
+    fn get_typed_sheet(&self, sheet_id: SheetId, row: usize, col: usize) -> Value {
+        match self.workbook.sheet_by_id(sheet_id) {
+            Some(sheet) => sheet.get_computed_value(row, col),
+            None => Value::Error("#REF!".to_string()),
+        }
+    }
+
     fn get_value(&self, row: usize, col: usize) -> f64 {
         self.current_sheet()
             .map(|sheet| sheet.get_value(row, col))

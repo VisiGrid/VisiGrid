@@ -296,6 +296,23 @@ pub(crate) fn matches_criteria(value: &EvalResult, criteria: &EvalResult) -> boo
 }
 
 /// Helper to get text from a cell, handling cross-sheet references
+/// A cell's typed value, honouring a sheet reference.
+///
+/// The counterpart to `get_text_for_sheet`, for callers that need to know
+/// whether a cell holds text or a number rather than what it looks like.
+pub(crate) fn get_typed_for_sheet<L: CellLookup>(
+    lookup: &L,
+    sheet: &SheetRef,
+    row: usize,
+    col: usize,
+) -> Result<crate::formula::eval::Value, String> {
+    match sheet {
+        SheetRef::Current => Ok(lookup.get_typed(row, col)),
+        SheetRef::Id(id) => Ok(lookup.get_typed_sheet(*id, row, col)),
+        SheetRef::RefError { .. } => Err("#REF!".to_string()),
+    }
+}
+
 pub(crate) fn get_text_for_sheet<L: CellLookup>(lookup: &L, sheet: &SheetRef, row: usize, col: usize) -> Result<String, String> {
     match sheet {
         SheetRef::Current => Ok(lookup.get_text(row, col)),

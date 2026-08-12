@@ -2,7 +2,7 @@
 // ROW, COLUMN, ROWS, COLUMNS
 
 use super::eval::{evaluate, Array2D, CellLookup, EvalResult, Value};
-use super::eval_helpers::{get_text_for_sheet, wildcard_match};
+use super::eval_helpers::{get_typed_for_sheet, get_text_for_sheet, wildcard_match};
 use super::parser::{BoundExpr, Expr};
 use crate::sheet::SheetRef;
 use std::cmp::Ordering;
@@ -55,7 +55,7 @@ fn scan_for_match(
     size: usize,
     match_mode: i32,
     reverse: bool,
-    cell_text_at: impl Fn(usize) -> String,
+    cell_at: impl Fn(usize) -> EvalResult,
 ) -> Option<usize> {
     let approximate = match_mode == -1 || match_mode == 1;
     let mut found_idx: Option<usize> = None;
@@ -69,9 +69,9 @@ fn scan_for_match(
     };
 
     for idx in scan {
-        let cell_text = cell_text_at(idx);
-        let cell_is_empty = cell_text.is_empty();
-        let cell_value = typed_cell(&cell_text);
+        let cell_value = cell_at(idx);
+        let cell_is_empty = matches!(cell_value, EvalResult::Empty)
+            || matches!(&cell_value, EvalResult::Text(t) if t.is_empty());
 
         // Mode 2 is the wildcard one; -1 and 1 still prefer an exact hit and
         // fall back to the nearest value after the scan.
@@ -114,17 +114,6 @@ fn scan_for_match(
     found_idx.or_else(|| nearest.map(|(idx, _)| idx))
 }
 
-
-/// A cell's text as a typed value, by the same rule everywhere.
-fn typed_cell(cell_text: &str) -> EvalResult {
-    if cell_text.is_empty() {
-        EvalResult::Text(String::new())
-    } else if let Ok(n) = cell_text.parse::<f64>() {
-        EvalResult::Number(n)
-    } else {
-        EvalResult::Text(cell_text.to_string())
-    }
-}
 
 /// Does `lookup_value` exactly match `cell_value`?
 ///
@@ -205,6 +194,13 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     Err(_) => String::new(),
                 }
             };
+            // Exact matching asks what the cell *is*, not what it looks like.
+            let get_typed = |r: usize, c: usize| -> EvalResult {
+                match get_typed_for_sheet(lookup, sheet_ref, r, c) {
+                    Ok(v) => EvalResult::from_value(&v),
+                    Err(_) => EvalResult::Text(String::new()),
+                }
+            };
 
             if is_sorted {
                 // Approximate match (find largest value <= search_key)
@@ -244,7 +240,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 // Exact match, by the same rule XLOOKUP uses: the types must
                 // agree, and wildcards apply between two texts.
                 for r in min_row..=max_row {
-                    if matches_exactly(&search_key, &typed_cell(&get(r, min_col)), true) {
+                    if matches_exactly(&search_key, &get_typed(r, min_col), true) {
                         found_row = Some(r);
                         break;
                     }
@@ -324,9 +320,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 } else {
                     (array.0 + idx, array.1)
                 };
-                match get_text_for_sheet(lookup, array_sheet, r, c) {
-                    Ok(t) => t,
-                    Err(_) => String::new(),
+                match get_typed_for_sheet(lookup, array_sheet, r, c) {
+                    Ok(v) => EvalResult::from_value(&v),
+                    Err(_) => EvalResult::Text(String::new()),
                 }
             });
 
@@ -431,20 +427,18 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             };
             let reverse = search_mode < 0;
 
-            let xl_get = |sheet: &SheetRef, r: usize, c: usize| -> String {
-                match get_text_for_sheet(lookup, sheet, r, c) {
-                    Ok(t) => t,
-                    Err(_) => String::new(),
-                }
-            };
-
             let found_idx = scan_for_match(&lookup_value, lookup_size, match_mode, reverse, |idx| {
                 let (r, c) = if lookup_array.4 {
                     (lookup_array.0, lookup_array.1 + idx)
                 } else {
                     (lookup_array.0 + idx, lookup_array.1)
                 };
-                xl_get(xl_lookup_sheet, r, c)
+                // Typed, so XLOOKUP and the older functions agree about what a
+                // cell holds rather than one of them guessing from its text.
+                match get_typed_for_sheet(lookup, xl_lookup_sheet, r, c) {
+                    Ok(v) => EvalResult::from_value(&v),
+                    Err(_) => EvalResult::Text(String::new()),
+                }
             });
 
             match found_idx {
@@ -530,6 +524,13 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     Err(_) => String::new(),
                 }
             };
+            // Exact matching asks what the cell *is*, not what it looks like.
+            let hget_typed = |r: usize, c: usize| -> EvalResult {
+                match get_typed_for_sheet(lookup, hlookup_sheet, r, c) {
+                    Ok(v) => EvalResult::from_value(&v),
+                    Err(_) => EvalResult::Text(String::new()),
+                }
+            };
 
             if is_sorted {
                 if let Some(search_n) = search_num {
@@ -564,7 +565,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 }
             } else {
                 for c in min_col..=max_col {
-                    if matches_exactly(&search_key, &typed_cell(&hget(min_row, c)), true) {
+                    if matches_exactly(&search_key, &hget_typed(min_row, c), true) {
                         found_col = Some(c);
                         break;
                     }
@@ -669,13 +670,20 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     Err(_) => String::new(),
                 }
             };
+            // Exact matching asks what the cell *is*, not what it looks like.
+            let mget_typed = |r: usize, c: usize| -> EvalResult {
+                match get_typed_for_sheet(lookup, match_sheet, r, c) {
+                    Ok(v) => EvalResult::from_value(&v),
+                    Err(_) => EvalResult::Text(String::new()),
+                }
+            };
 
             if is_row {
                 // Search horizontally
                 if match_type == 0 {
                     // Exact match, sharing XLOOKUP's rule.
                     for (i, c) in (min_col..=max_col).enumerate() {
-                        if matches_exactly(&search_key, &typed_cell(&mget(min_row, c)), true) {
+                        if matches_exactly(&search_key, &mget_typed(min_row, c), true) {
                             found_pos = Some(i + 1);
                             break;
                         }
@@ -715,7 +723,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 // Search vertically
                 if match_type == 0 {
                     for (i, r) in (min_row..=max_row).enumerate() {
-                        if matches_exactly(&search_key, &typed_cell(&mget(r, min_col)), true) {
+                        if matches_exactly(&search_key, &mget_typed(r, min_col), true) {
                             found_pos = Some(i + 1);
                             break;
                         }

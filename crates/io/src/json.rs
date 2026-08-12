@@ -1104,6 +1104,43 @@ mod full_json_tests {
         );
     }
 
+    // A text cell and a numeric cell holding the same digits are different
+    // rows, and every lookup function agrees which is which.
+    //
+    // This is the other half of the strict rule. The key's type was respected
+    // first, which made a text key stop matching a numeric cell — but cells
+    // were still read as text and re-typed by parsing, so a *numeric* key
+    // happily matched a text cell. The rule only held for text written into a
+    // formula, which is not a rule anyone could state.
+    //
+    // The test lives here rather than in the engine because a genuinely
+    // text-typed numeric cell can only arrive through a file: writing one into
+    // a cell gets it re-read as a number.
+    #[test]
+    fn a_text_cell_and_a_numeric_cell_are_told_apart_by_every_lookup() {
+        let doc = r#"{"format":"visigrid-json","version":2,"active_sheet":0,"sheets":[{"name":"S","cells":[
+            {"row":0,"col":0,"value":"102"},{"row":0,"col":1,"value":"text-row"},
+            {"row":1,"col":0,"value":102},{"row":1,"col":1,"value":"number-row"},
+            {"row":3,"col":3,"formula":"=VLOOKUP(102,A1:B2,2,FALSE)"},
+            {"row":4,"col":3,"formula":"=VLOOKUP(\"102\",A1:B2,2,FALSE)"},
+            {"row":5,"col":3,"formula":"=MATCH(102,A1:A2,0)"},
+            {"row":6,"col":3,"formula":"=MATCH(\"102\",A1:A2,0)"},
+            {"row":7,"col":3,"formula":"=XLOOKUP(102,A1:A2,B1:B2,\"MISS\")"},
+            {"row":8,"col":3,"formula":"=XLOOKUP(\"102\",A1:A2,B1:B2,\"MISS\")"}
+        ]}]}"#;
+        let sheet = import_full(doc).unwrap();
+
+        // A numeric key skips the text row and finds the number.
+        assert_eq!(sheet.get_display(3, 3), "number-row");
+        assert_eq!(sheet.get_display(5, 3), "2");
+        assert_eq!(sheet.get_display(7, 3), "number-row");
+
+        // A text key does the opposite. Both directions, not just the one.
+        assert_eq!(sheet.get_display(4, 3), "text-row");
+        assert_eq!(sheet.get_display(6, 3), "1");
+        assert_eq!(sheet.get_display(8, 3), "text-row");
+    }
+
     // A quoted value is text, and survives being read back as text.
     //
     // The reader used to match on the JSON type and then flatten it to a string

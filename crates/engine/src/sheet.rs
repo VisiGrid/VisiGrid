@@ -304,6 +304,17 @@ pub struct Sheet {
 }
 
 impl CellLookup for Sheet {
+    /// The value with its type, rather than its text.
+    ///
+    /// get_computed_value already returns a typed Value and handles spill
+    /// receivers, so this is the type the sheet actually holds — a text cell
+    /// containing "102" stays text here, where get_text would render it
+    /// indistinguishable from the number.
+    fn get_typed(&self, row: usize, col: usize) -> crate::formula::eval::Value {
+        self.get_computed_value(row, col)
+    }
+
+
     fn get_value(&self, row: usize, col: usize) -> f64 {
         // Check for circular reference
         let is_cycle = EVALUATING.with(|eval| {
