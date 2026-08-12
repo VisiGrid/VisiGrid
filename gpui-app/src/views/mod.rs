@@ -118,6 +118,23 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
 
     // Build element with action handlers from extracted modules
     let el = div()
+        // Symbols the UI font lacks come from the bundled subset rather than
+        // from whatever the machine happens to have. Set here so it cascades:
+        // font_family() on a child replaces the family and keeps this chain.
+        //
+        // Without it, ✕ on close buttons, ▾ on dropdowns and ⌥ in shortcut
+        // hints depend on a system font carrying them. On Linux that often
+        // fails and they render as a missing-glyph box, which the VisiCalc
+        // theme makes obvious by drawing it on bright green.
+        .font(gpui::Font {
+            family: ".SystemUIFont".into(),
+            features: Default::default(),
+            fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+                crate::SYMBOL_FONT_FAMILY.to_string(),
+            ])),
+            weight: Default::default(),
+            style: Default::default(),
+        })
         .relative()
         .key_context("Spreadsheet")
         .track_focus(&app.focus_handle);

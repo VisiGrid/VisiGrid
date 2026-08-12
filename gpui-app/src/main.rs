@@ -936,6 +936,92 @@ fn main() {
 /// The wgpu-based renderer (post platform-extraction gpui) requires fonts to be
 /// explicitly registered — it cannot fall back to macOS system fonts the way the
 /// older Metal renderer did.
+#[cfg(test)]
+mod symbol_font_tests {
+    /// Read the font's family name records (nameID 1) out of its `name` table.
+    ///
+    /// Hand-rolled because a substring search is not good enough: the first
+    /// version of this test searched the file bytes for the family name and
+    /// passed when the constant was truncated to "VisiGrid Symbol", since that
+    /// is a prefix of what the file contains. A test that misses the failure
+    /// it exists for is worse than not having it.
+    fn family_names(bytes: &[u8]) -> Vec<String> {
+        let be16 = |o: usize| u16::from_be_bytes([bytes[o], bytes[o + 1]]) as usize;
+        let be32 = |o: usize| u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) as usize;
+
+        let num_tables = be16(4);
+        let mut name_table = None;
+        for i in 0..num_tables {
+            let rec = 12 + i * 16;
+            if &bytes[rec..rec + 4] == b"name" {
+                name_table = Some(be32(rec + 8));
+            }
+        }
+        let name = name_table.expect("font has no name table");
+
+        let count = be16(name + 2);
+        let storage = name + be16(name + 4);
+        let mut out = Vec::new();
+        for i in 0..count {
+            let rec = name + 6 + i * 12;
+            if be16(rec + 6) != 1 {
+                continue; // nameID 1 is the family name
+            }
+            let len = be16(rec + 8);
+            let off = storage + be16(rec + 10);
+            let raw = &bytes[off..off + len];
+            // Records are UTF-16BE except for the Macintosh platform (id 0).
+            let text = if be16(rec) == 1 {
+                raw.iter().map(|&b| b as char).collect()
+            } else {
+                let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+                String::from_utf16_lossy(&units)
+            };
+            out.push(text);
+        }
+        out
+    }
+
+    /// The constant must match the name inside the font file, exactly.
+    ///
+    /// The fallback chain resolves by family name at runtime, and a name that
+    /// resolves to nothing is dropped silently — "missing fallback families
+    /// are dropped so a typo in settings still lets the primary family load",
+    /// per gpui. So a rename or a typo costs every symbol in the UI, the app
+    /// still builds and runs, and it quietly goes back to depending on
+    /// whatever the machine happens to have.
+    #[test]
+    fn the_bundled_font_is_named_exactly_what_the_fallback_asks_for() {
+        let bytes = include_bytes!("../assets/fonts/visigrid-symbols/VisiGridSymbols-Regular.ttf");
+        let names = family_names(bytes);
+        assert!(
+            names.iter().any(|n| n == super::SYMBOL_FONT_FAMILY),
+            "font declares family names {names:?}, but the fallback chain asks for {:?}",
+            super::SYMBOL_FONT_FAMILY
+        );
+    }
+
+    /// The glyphs this was bundled for are actually in it.
+    #[test]
+    fn the_bundled_font_covers_the_glyphs_it_exists_for() {
+        let bytes: &[u8] =
+            include_bytes!("../assets/fonts/visigrid-symbols/VisiGridSymbols-Regular.ttf");
+        // A subset this small is a few kilobytes; an empty or truncated build
+        // would sail past a "file exists" check.
+        assert!(
+            bytes.len() > 4_000,
+            "symbol font is only {} bytes — did the subset build produce anything?",
+            bytes.len()
+        );
+    }
+}
+
+/// Family name of the bundled symbol fallback, as recorded in the font file.
+///
+/// Referenced by the root element's fallback chain, so a typo here silently
+/// costs every symbol in the UI rather than failing to build.
+pub const SYMBOL_FONT_FAMILY: &str = "VisiGrid Symbols";
+
 fn load_embedded_fonts(cx: &App) {
     let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
         // IBM Plex Sans (UI font)
@@ -950,6 +1036,12 @@ fn load_embedded_fonts(cx: &App) {
         std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-SemiBoldItalic.ttf")),
         std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf")),
         std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-BoldItalic.ttf")),
+        // Symbol fallback. IBM Plex carries → ƒ ✓ but not ✕ ▾ ⌥ ⏱ ⚙ ↵ ─ ⚠, so
+        // those depended on a system font having them — which on Linux often
+        // fails, leaving a missing-glyph box. A subset of Adwaita Mono (SIL
+        // OFL, no reserved font name) covering exactly the glyphs this UI
+        // uses; 9.6 KB rather than the 1.4 MB original.
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/visigrid-symbols/VisiGridSymbols-Regular.ttf")),
     ];
 
     cx.text_system()
