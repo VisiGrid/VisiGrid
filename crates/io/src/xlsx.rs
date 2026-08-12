@@ -54,6 +54,7 @@ pub struct SheetStats {
 
 /// Result of an Excel import operation
 #[derive(Debug, Default)]
+
 pub struct ImportResult {
     /// Per-sheet statistics
     pub sheet_stats: Vec<SheetStats>,
@@ -125,6 +126,22 @@ pub struct ImportResult {
     /// Empty unless values_only is true.
     pub formula_strings: HashMap<(usize, usize, usize), String>,
 }
+
+/// Is this the legacy binary .xls format rather than an xlsx?
+///
+/// Checked by magic number, not by extension: plenty of files named .xls are
+/// actually xlsx, HTML or TSV, and a file named .xlsx is occasionally a real
+/// .xls. An OLE2 compound document starts with this signature.
+fn is_legacy_xls(path: &Path) -> bool {
+    use std::io::Read;
+    const OLE2_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    let mut header = [0u8; 8];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut header))
+        .map(|_| header == OLE2_MAGIC)
+        .unwrap_or(false)
+}
+
 
 /// Column/row dimension data imported from XLSX, in raw Excel units.
 #[derive(Debug, Default, Clone)]
@@ -843,10 +860,28 @@ fn import_formatting(
     workbook: &mut Workbook,
     result: &mut ImportResult,
 ) {
+    // Everything below reads XML out of a ZIP. A legacy .xls is an OLE2
+    // compound document with no such XML, so none of it can work — every fill,
+    // font, border, merge, column width and frozen pane is dropped and the
+    // file opens looking like a plain grid.
+    //
+    // Checked here rather than relying on the parse failing, because it does
+    // not fail: the ZIP reader accepts an OLE2 file and returns an empty style
+    // table, so the error path this used to sit in was never taken. A silent
+    // success is not something a fallback branch can catch.
+    if is_legacy_xls(path) {
+        let note = "Legacy .xls: cell formatting, merges, column widths and frozen panes were \
+                    not imported — the format stores them in a way this importer does not read. \
+                    Values and number formats were imported. Re-saving as .xlsx keeps formatting.";
+        result.warnings.push(note.to_string());
+        eprintln!("[XLSX import] {note}");
+        return;
+    }
+
     // Parse styles.xml and per-sheet formatting from the XLSX ZIP
     let (style_table, sheet_formats, mut stats) = match xlsx_styles::parse_xlsx_formatting(path, sheet_names) {
         Ok(data) => data,
-        Err(_) => return, // Graceful fallback: no formatting
+        Err(_) => return, // Graceful fallback: an xlsx with no styles
     };
 
     // A file can carry layout and conditional formatting without a single cell
@@ -4150,6 +4185,37 @@ mod tests {
         assert!(h1 > h2 * 2.0,
             "Sheet1 row 0 height ({:.1}) should be much taller than Sheet2 row 0 ({:.1})",
             h1, h2);
+    }
+
+    /// A legacy .xls says that its formatting was dropped.
+    ///
+    /// The formatting importer reads XML out of a ZIP, which an OLE2 document
+    /// does not contain — so a .xls opens with values and nothing else. Worth
+    /// a warning rather than a silent fallback because the result is
+    /// indistinguishable from a file that never had any formatting.
+    ///
+    /// The failure being guarded is a silent success, not an error: the ZIP
+    /// reader accepts an OLE2 file and hands back an empty style table, so an
+    /// error branch never runs. That is why the check precedes the parse.
+    #[test]
+    fn a_legacy_xls_is_recognised_by_content_not_extension() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let xls = dir.path().join("legacy.xls");
+        let mut bytes = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        bytes.extend_from_slice(&[0u8; 64]);
+        std::fs::write(&xls, &bytes).unwrap();
+        assert!(is_legacy_xls(&xls));
+
+        // Plenty of files named .xls are really something else.
+        let zipish = dir.path().join("actually-a-zip.xls");
+        std::fs::write(&zipish, b"PK\x03\x04rest of the file").unwrap();
+        assert!(!is_legacy_xls(&zipish), "detection is by content, not extension");
+
+        // A file too short to have a header is not one either.
+        let tiny = dir.path().join("tiny.xls");
+        std::fs::write(&tiny, b"no").unwrap();
+        assert!(!is_legacy_xls(&tiny));
     }
 
     #[test]
