@@ -124,7 +124,9 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                                             .text_size(px(11.0))
                                             .text_color(selection_text)
                                             .font_weight(FontWeight::MEDIUM)
-                                            .child(format!("{} \u{25B8}", scope_text))  // "FILE ▸"
+                                            // ASCII rather than U+25B8: that triangle is in seven fonts on a
+// stock Linux install and rendered as an empty badge here.
+.child(format!("{} >", scope_text))  // "FILE >"
                                     )
                                 })
                                 // Query text or placeholder

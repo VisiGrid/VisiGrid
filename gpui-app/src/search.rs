@@ -1103,11 +1103,17 @@ impl SearchKind {
     pub fn icon(&self) -> &'static str {
         match self {
             Self::Command => ">",
-            Self::RecentFile => "⏱",
+            // Glyphs here must be ones a plain Linux font stack actually has.
+            // ⏱ and ⚙ exist in about four fonts on a stock Arch install, so
+            // they fell back to a missing-glyph box — obvious on the VisiCalc
+            // theme, where the box sits on bright green, and easy to miss
+            // everywhere else. macOS ships fonts covering them, which is why
+            // this only showed on Linux.
+            Self::RecentFile => "~",
             Self::Formula => "ƒ",
             Self::Cell => "@",
             Self::NamedRange => "$",
-            Self::Setting => "⚙",
+            Self::Setting => "*",
             Self::GoTo => ":",
             Self::Reference => "→",   // Arrow pointing to dependents
             Self::Precedent => "←",   // Arrow pointing to precedents
@@ -2573,5 +2579,42 @@ mod tests {
         // It's a contract marker. The behavior is tested via integration tests,
         // but this ensures the contract is documented in the test suite.
         assert!(true, "Alt+Down priority: validation > filter > nothing");
+    }
+}
+
+#[cfg(test)]
+mod icon_glyph_tests {
+    use super::SearchKind;
+
+    /// Every palette icon is a character a plain font stack actually has.
+    ///
+    /// Not a style rule — a rendering one. ⏱ and ⚙ are present in about four
+    /// fonts on a stock Linux install, so they fell back to a missing-glyph
+    /// box. It went unnoticed because macOS ships fonts that cover them, and
+    /// because on a dark theme a box looks like an icon; the VisiCalc theme
+    /// puts it on bright green and it becomes obvious.
+    ///
+    /// ASCII is the safe range. The wider fix is a bundled fallback font, at
+    /// which point this test stops being the thing holding the line.
+    #[test]
+    fn palette_icons_stay_within_ascii() {
+        use SearchKind::*;
+
+        // ASCII, or one of these — each measured on a stock Arch install and
+        // carried by 40+ fonts, against the four or seven that carried the
+        // glyphs this replaced. Adding to this list should mean counting
+        // first, not assuming: `fc-list :charset=<hex> family | wc -l`.
+        const MEASURED_SAFE: [char; 3] = ['ƒ', '→', '←'];
+
+        for kind in [Command, RecentFile, Formula, Cell, NamedRange, Setting, GoTo, Reference, Precedent] {
+            let icon = kind.icon();
+            for ch in icon.chars() {
+                assert!(
+                    ch.is_ascii() || MEASURED_SAFE.contains(&ch),
+                    "{kind:?} uses {ch:?}, which is not known to render on Linux — \
+                     count the fonts carrying it before adding it here"
+                );
+            }
+        }
     }
 }
