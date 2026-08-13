@@ -1338,7 +1338,11 @@ impl Spreadsheet {
         }
     }
 
-    fn commit_current_edit(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Commit the in-progress edit without moving the selection.
+    ///
+    /// pub(crate) so the Escape handler can reach it: vim mode commits in
+    /// place there, where the spreadsheet default abandons the edit.
+    pub(crate) fn commit_current_edit(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.mode.is_editing() {
             return false;
         }

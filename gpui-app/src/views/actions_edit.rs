@@ -459,6 +459,19 @@ pub(crate) fn bind(
                 // Esc clears copy/cut border overlay
                 this.clipboard_visual_range = None;
                 cx.notify();
+            } else if this.mode.is_editing() && this.vim_mode_enabled(cx) {
+                // Vim's Escape leaves insert mode and keeps what you typed.
+                // The spreadsheet default is Excel's — Escape abandons the
+                // edit — so someone who pressed i, typed a value and hit Esc
+                // out of habit lost it. Reported from the outside, which is
+                // where a mismatch between two sets of muscle memory tends to
+                // be noticed.
+                //
+                // Committed in place rather than through confirm_edit, which
+                // moves down like Enter; vim leaves the cursor where it is.
+                this.commit_current_edit(cx);
+                this.mode = Mode::Navigation;
+                cx.notify();
             } else {
                 this.cancel_edit(cx);
             }
