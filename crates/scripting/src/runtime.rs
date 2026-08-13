@@ -230,15 +230,62 @@ impl OutputState {
 /// The Lua runtime for VisiGrid.
 ///
 /// Owns the mlua::Lua instance and provides evaluation with output capture.
+/// What bounds an evaluation.
+///
+/// The instruction budget is the real limit and the wall clock is a backstop,
+/// deliberately in that order. An instruction count is a property of the script
+/// and the sheet: the same run gives the same answer on a loaded CI runner as
+/// on an idle laptop. A wall-clock limit is a property of the machine, so
+/// making it primary would mean a build going red because something else was
+/// busy — indistinguishable from a flake, in a product whose claim is that
+/// identical inputs give identical outputs.
+///
+/// The clock is still needed for a script blocked on something that burns no
+/// instructions, which the budget cannot see.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub instructions: i64,
+    pub wall_clock: Duration,
+}
+
+impl Default for Limits {
+    /// The interactive defaults: someone is watching a window, so 30 seconds of
+    /// no response is already too long.
+    fn default() -> Self {
+        Self { instructions: INSTRUCTION_LIMIT, wall_clock: DEFAULT_TIMEOUT }
+    }
+}
+
+impl Limits {
+    /// Bounds for a non-interactive run.
+    ///
+    /// Same instruction budget — that is the deterministic part and there is no
+    /// reason for it to differ. A far longer clock, because nobody is watching
+    /// and the 30-second figure exists for a human staring at a window.
+    pub fn batch() -> Self {
+        Self { instructions: INSTRUCTION_LIMIT, wall_clock: Duration::from_secs(300) }
+    }
+}
+
 pub struct LuaRuntime {
     lua: Lua,
     /// Captured output from print() calls during evaluation
     output_state: Rc<RefCell<OutputState>>,
+    limits: Limits,
 }
 
 impl LuaRuntime {
-    /// Create a new Lua runtime with sandboxed globals.
+    /// Create a new Lua runtime with sandboxed globals and interactive limits.
     pub fn new() -> LuaResult<Self> {
+        Self::with_limits(Limits::default())
+    }
+
+    /// Create a new Lua runtime with sandboxed globals and explicit limits.
+    ///
+    /// There is deliberately no way to ask for no limit at all. An escape hatch
+    /// that turns bounds off recreates the unbounded runtime in a form that
+    /// looks sanctioned, which is worse than never having had one.
+    pub fn with_limits(limits: Limits) -> LuaResult<Self> {
         let lua = Lua::new();
 
         // Create output state that print() will write to
@@ -274,7 +321,7 @@ impl LuaRuntime {
         // Also remove load() which can execute arbitrary bytecode
         globals.set("load", Value::Nil)?;
 
-        Ok(Self { lua, output_state })
+        Ok(Self { lua, output_state, limits })
     }
 
     /// Evaluate a Lua chunk with REPL-style behavior (no sheet access).
@@ -391,7 +438,9 @@ impl LuaRuntime {
 
         // Set up instruction limit hook (also checks cancel flag and timeout)
         let start_time = Instant::now();
-        let budget = Arc::new(AtomicI64::new(INSTRUCTION_LIMIT));
+        let wall_clock = self.limits.wall_clock;
+        let instruction_limit = self.limits.instructions;
+        let budget = Arc::new(AtomicI64::new(instruction_limit));
         let budget_clone = budget.clone();
         let cancel_clone = cancel.clone();
         let was_cancelled = Arc::new(AtomicBool::new(false));
@@ -411,10 +460,10 @@ impl LuaRuntime {
                 }
 
                 // Check wall-clock timeout
-                if start_time.elapsed() > DEFAULT_TIMEOUT {
+                if start_time.elapsed() > wall_clock {
                     was_timed_out_clone.store(true, Ordering::Relaxed);
                     return Err(mlua::Error::RuntimeError(
-                        format!("execution timeout ({}s limit)", DEFAULT_TIMEOUT.as_secs())
+                        format!("execution timeout ({}s limit)", wall_clock.as_secs())
                     ));
                 }
 
@@ -422,7 +471,7 @@ impl LuaRuntime {
                 let remaining = budget_clone.fetch_sub(INSTRUCTION_HOOK_INTERVAL as i64, Ordering::Relaxed);
                 if remaining <= 0 {
                     Err(mlua::Error::RuntimeError(
-                        format!("instruction limit exceeded ({} instructions)", INSTRUCTION_LIMIT)
+                        format!("instruction limit exceeded ({} instructions)", instruction_limit)
                     ))
                 } else {
                     Ok(VmState::Continue)

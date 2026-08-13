@@ -26,6 +26,7 @@ shellexpand = "3"
 which = "6"
 
 # Provenance replay (Phase 9B)
+visigrid-scripting = { path = "../scripting" }
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 blake3 = "1"
 sha2 = { workspace = true }

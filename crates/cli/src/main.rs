@@ -46,6 +46,11 @@ pub const EXIT_ARGS_ERROR: u8 = EXIT_USAGE;
 pub const EXIT_IO_ERROR: u8 = 3;     // TODO: migrate to specific codes
 pub const EXIT_PARSE_ERROR: u8 = 4;  // TODO: migrate to specific codes
 pub const EXIT_FORMAT_ERROR: u8 = 5; // TODO: migrate to specific codes
+/// A script hit its instruction or wall-clock budget.
+///
+/// Distinct from EXIT_EVAL_ERROR so a pipeline can tell "this script is too
+/// expensive" from "this script is wrong" without parsing the message.
+pub const EXIT_SCRIPT_BUDGET: u8 = 6;
 
 #[derive(Parser)]
 #[command(name = "vgrid")]
@@ -2152,6 +2157,15 @@ impl CliError {
 
     pub fn eval(msg: impl Into<String>) -> Self {
         Self { code: EXIT_EVAL_ERROR, message: msg.into(), hint: None }
+    }
+
+    /// A script exceeded its instruction or wall-clock budget.
+    pub fn budget(msg: impl Into<String>) -> Self {
+        Self {
+            code: EXIT_SCRIPT_BUDGET,
+            message: msg.into(),
+            hint: Some("raise the budget with --max-instructions, or make the script cheaper".into()),
+        }
     }
 
     /// Create error from session error with proper exit code.

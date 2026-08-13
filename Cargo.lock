@@ -7514,6 +7514,7 @@ dependencies = [
  "visigrid-io",
  "visigrid-protocol",
  "visigrid-recon",
+ "visigrid-scripting",
  "visigrid-session-host",
  "which 6.0.3",
  "windows-sys 0.59.0",

@@ -196,9 +196,16 @@ pub fn cmd_scripts_run(
     let sheet = workbook.active_sheet();
     let snapshot = create_cli_snapshot(sheet);
 
-    // Create Lua runtime and evaluate
-    let lua = mlua::Lua::new();
-    sandbox_globals(&lua)?;
+    // The shared runtime from crates/scripting: same sandbox and the same
+    // instruction/wall-clock enforcement the GUI uses, so the two cannot drift
+    // into two sets of rules about what a script may do.
+    //
+    // Batch limits rather than the interactive ones: the instruction budget is
+    // identical, since that is the deterministic part, but the clock is five
+    // minutes instead of thirty seconds. Nobody is watching a window here.
+    let runtime = visigrid_scripting::LuaRuntime::with_limits(visigrid_scripting::Limits::batch())
+        .map_err(|e| CliError::eval(format!("failed to create Lua runtime: {}", e)))?;
+    let lua = runtime.lua();
 
     // Register sheet global with capabilities
     use visigrid_io::scripting::Capability;
@@ -211,16 +218,24 @@ pub fn cmd_scripts_run(
     let sink_clone = sink.clone();
 
     // Register sheet userdata
-    register_cli_sheet(&lua, sink_clone)
+    register_cli_sheet(lua, sink_clone)
         .map_err(|e| CliError::eval(format!("failed to register sheet: {}", e)))?;
 
-    // Evaluate
+    // Evaluate through the runtime so the instruction and clock bounds apply.
+    // Calling lua.load(...).exec() directly would skip them, which is exactly
+    // how this ran unbounded before.
     let start = std::time::Instant::now();
-    let result = lua.load(&resolved.meta.source).exec();
+    let outcome = runtime.eval(&resolved.meta.source);
     let elapsed = start.elapsed();
 
-    if let Err(ref e) = result {
-        return Err(CliError::eval(format!("script error: {}", e)));
+    if let Some(err) = outcome.error {
+        // A script that ran out of budget is a different thing from a script
+        // that is wrong, and a pipeline should be able to tell without reading
+        // the message.
+        if err.contains("instruction limit exceeded") || err.contains("execution timeout") {
+            return Err(CliError::budget(format!("script exceeded its budget: {}", err)));
+        }
+        return Err(CliError::eval(format!("script error: {}", err)));
     }
 
     let borrowed = sink.borrow();
@@ -942,6 +957,55 @@ fn lua_value_to_string(value: &mlua::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A runaway script is stopped, and says which budget it hit.
+    ///
+    /// The CLI used to run `lua.load(src).exec()` with no hook at all, so
+    /// `while true do end` in a script attached to a sheet ran forever. It now
+    /// evaluates through the shared runtime, which is the only thing that
+    /// installs the bounds — calling load().exec() directly would silently skip
+    /// them again.
+    #[test]
+    fn a_runaway_script_is_stopped_by_the_instruction_budget() {
+        // A small budget so the test is quick; the CLI ships Limits::batch().
+        let limits = visigrid_scripting::Limits {
+            instructions: 200_000,
+            wall_clock: std::time::Duration::from_secs(60),
+        };
+        let rt = visigrid_scripting::LuaRuntime::with_limits(limits).unwrap();
+
+        let out = rt.eval("while true do end");
+        let err = out.error.expect("an endless loop should not complete");
+        assert!(
+            err.contains("instruction limit exceeded"),
+            "expected the instruction budget to stop it, got: {err}"
+        );
+
+        // And an ordinary script is unaffected by the presence of the bound.
+        let ok = rt.eval("return 6 * 7");
+        assert!(ok.error.is_none(), "a normal script should still run: {:?}", ok.error);
+    }
+
+    /// The wall clock is a backstop, not the primary bound.
+    ///
+    /// Batch runs get the same instruction budget as the GUI — that is the
+    /// deterministic part, and the same script over the same sheet must give
+    /// the same verdict on a busy CI runner as on an idle laptop. Only the
+    /// clock differs, because nobody is watching a window in CI.
+    #[test]
+    fn batch_limits_keep_the_instruction_budget_and_loosen_only_the_clock() {
+        let batch = visigrid_scripting::Limits::batch();
+        let interactive = visigrid_scripting::Limits::default();
+
+        assert_eq!(
+            batch.instructions, interactive.instructions,
+            "the deterministic bound must not depend on where the script runs"
+        );
+        assert!(
+            batch.wall_clock > interactive.wall_clock,
+            "batch should get a longer clock than a window someone is watching"
+        );
+    }
+
     /// A script cannot reach the machine.
     ///
     /// Scripts can be attached to a .sheet file, so running one means running
