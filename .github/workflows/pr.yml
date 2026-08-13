@@ -1,0 +1,61 @@
+# Build and test every pull request.
+#
+# Until this existed, nothing verified an incoming PR: the release workflow
+# runs on tags, so an outside contribution was reviewed on trust and whatever
+# a maintainer happened to run locally. #10 was checked by hand, which does not
+# scale past the first contributor — and a contributor could not see their own
+# change was green without asking.
+name: PR
+
+on:
+  pull_request:
+    branches: [main]
+
+# A new push to the same PR makes the previous run irrelevant.
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Same set the release build installs — the GUI crate needs them even to
+      # compile, so a leaner list fails confusingly rather than quickly.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfuse2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-pr-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-pr-
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      # Warnings only. A first contribution failing on a lint the project has
+      # hundreds of already would be a poor welcome, and the existing warnings
+      # are not this PR's fault.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets || true
