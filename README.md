@@ -1,6 +1,6 @@
 # VisiGrid
 
-<img width="1897" height="1030" alt="screenshot-2026-02-07_15-44-09" src="https://github.com/user-attachments/assets/a4674b48-09e2-4ca1-9131-dce45a6b73b5" />
+<img width="1897" height="1030" alt="VisiGrid editing a sales spreadsheet, with the formula autocomplete open" src="assets/screenshots/hero.png" />
 
 
 **The spreadsheet built like a code editor.**
