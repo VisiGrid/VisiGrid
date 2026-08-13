@@ -28,6 +28,7 @@ SIGN=false
 NOTARIZE=false
 CREATE_DMG=false
 UNIVERSAL=true
+APPSTORE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -56,6 +57,13 @@ while [[ $# -gt 0 ]]; do
         --arm-only)
             UNIVERSAL=false
             ARCH="aarch64-apple-darwin"
+            shift
+            ;;
+        --appstore)
+            # Mac App Store build: App Sandbox entitlements, MAS bundle id,
+            # no DMG/notarization (MAS distributes; upload as signed .pkg).
+            APPSTORE=true
+            BUNDLE_ID="com.visigrid.mac"
             shift
             ;;
         --help)
@@ -175,6 +183,21 @@ cp "$PROJECT_DIR/macos/Info.plist" "$BUNDLE_DIR/Contents/Info.plist"
 grep -q "<string>$VERSION</string>" "$BUNDLE_DIR/Contents/Info.plist" \
     || { echo "ERROR: Info.plist version stamp failed"; exit 1; }
 
+if $APPSTORE; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" \
+        "$BUNDLE_DIR/Contents/Info.plist"
+    # MAS requires an app category on the record and in the bundle.
+    /usr/libexec/PlistBuddy -c "Add :LSApplicationCategoryType string public.app-category.productivity" \
+        "$BUNDLE_DIR/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :LSApplicationCategoryType public.app-category.productivity" \
+        "$BUNDLE_DIR/Contents/Info.plist"
+    # Embedded provisioning profile (required for App Store distribution
+    # signing; not needed for local sandbox testing with a dev cert).
+    if [[ -n "${MAS_PROVISIONING_PROFILE:-}" ]]; then
+        cp "$MAS_PROVISIONING_PROFILE" "$BUNDLE_DIR/Contents/embedded.provisionprofile"
+    fi
+fi
+
 # Generate .icns from iconset if needed
 if [[ ! -f "$PROJECT_DIR/assets/AppIcon.icns" && -d "$PROJECT_DIR/assets/AppIcon.iconset" ]]; then
     echo "Generating AppIcon.icns from iconset..."
@@ -216,17 +239,36 @@ if $SIGN; then
     echo ""
     echo -e "${YELLOW}Code signing...${NC}"
 
-    codesign --force --deep --sign "$APPLE_SIGNING_IDENTITY" \
-        --entitlements "$PROJECT_DIR/macos/entitlements.plist" \
-        --options runtime \
-        --timestamp \
-        "$BUNDLE_DIR"
+    if $APPSTORE; then
+        # Sandbox entitlements; App Store signing does not use the
+        # hardened-runtime flag (the sandbox is the containment story).
+        codesign --force --deep --sign "$APPLE_SIGNING_IDENTITY" \
+            --entitlements "$PROJECT_DIR/macos/entitlements-appstore.plist" \
+            --timestamp \
+            "$BUNDLE_DIR"
+    else
+        codesign --force --deep --sign "$APPLE_SIGNING_IDENTITY" \
+            --entitlements "$PROJECT_DIR/macos/entitlements.plist" \
+            --options runtime \
+            --timestamp \
+            "$BUNDLE_DIR"
+    fi
 
     # Verify signature
     echo "Verifying signature..."
     codesign --verify --deep --strict --verbose=2 "$BUNDLE_DIR"
 
     echo -e "${GREEN}Code signing complete${NC}"
+fi
+
+# App Store package (upload with Transporter.app or App Store Connect API)
+if $APPSTORE && $SIGN && [[ -n "${MAS_INSTALLER_IDENTITY:-}" ]]; then
+    echo ""
+    echo -e "${YELLOW}Building signed installer package...${NC}"
+    PKG_PATH="$BUILD_DIR/$APP_NAME-$VERSION.pkg"
+    productbuild --component "$BUNDLE_DIR" /Applications \
+        --sign "$MAS_INSTALLER_IDENTITY" "$PKG_PATH"
+    echo -e "${GREEN}Package: $PKG_PATH${NC}"
 fi
 
 # Notarization
