@@ -18,6 +18,32 @@ use visigrid_io::scripting::{
 use crate::CliError;
 
 /// Global scripts directory (~/.config/visigrid/scripts/)
+/// Remove the parts of Lua's standard library that reach outside the sheet.
+///
+/// `Lua::new()` loads the full standard library, so a script had `os.execute`
+/// and `io.open` — verified, not assumed: it ran a shell command and read
+/// /etc/hostname. Scripts can be attached to a .sheet file and are resolved
+/// from the file being opened, so this was arbitrary code execution from a
+/// document, and `vgrid` runs in CI where the document is often the least
+/// trusted thing present.
+///
+/// The capability system did not cover this and was never meant to: SheetRead
+/// and SheetWriteValues describe access to the *workbook*, not to the machine.
+/// A script declaring only SheetRead still had a shell. That gap is the
+/// dangerous kind, because the capability list reads like a sandbox.
+///
+/// Same set the GUI runtime removes, so the two agree while the CLI is
+/// migrated onto the shared crate.
+fn sandbox_globals(lua: &mlua::Lua) -> Result<(), CliError> {
+    let globals = lua.globals();
+    for name in ["os", "io", "debug", "package", "require", "loadfile", "dofile", "load"] {
+        globals
+            .set(name, mlua::Value::Nil)
+            .map_err(|e| CliError::io(format!("failed to sandbox Lua global {name}: {e}")))?;
+    }
+    Ok(())
+}
+
 fn global_scripts_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -172,6 +198,7 @@ pub fn cmd_scripts_run(
 
     // Create Lua runtime and evaluate
     let lua = mlua::Lua::new();
+    sandbox_globals(&lua)?;
 
     // Register sheet global with capabilities
     use visigrid_io::scripting::Capability;
@@ -915,6 +942,38 @@ fn lua_value_to_string(value: &mlua::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A script cannot reach the machine.
+    ///
+    /// Scripts can be attached to a .sheet file, so running one means running
+    /// code that arrived with a document. Before this, `Lua::new()` gave them
+    /// the full standard library: os.execute ran shell commands and io.open
+    /// read arbitrary files. Verified by doing both, not by reading the docs.
+    ///
+    /// The capability system does not cover this. SheetRead and
+    /// SheetWriteValues describe access to the workbook; a script declaring
+    /// only SheetRead still had a shell.
+    #[test]
+    fn a_script_cannot_reach_the_filesystem_or_shell() {
+        let lua = mlua::Lua::new();
+        super::sandbox_globals(&lua).unwrap();
+
+        for (what, src) in [
+            ("os", "return type(os)"),
+            ("io", "return type(io)"),
+            ("debug", "return type(debug)"),
+            ("require", "return type(require)"),
+            ("load", "return type(load)"),
+            ("dofile", "return type(dofile)"),
+        ] {
+            let ty: String = lua.load(src).eval().unwrap();
+            assert_eq!(ty, "nil", "{what} is still reachable from a script");
+        }
+
+        // The things a script legitimately needs are untouched.
+        let n: i64 = lua.load("return math.floor(4.7) + #('abcd') + table.concat({1,2}):len()").eval().unwrap();
+        assert_eq!(n, 4 + 4 + 2);
+    }
+
     use super::*;
     use std::collections::HashSet;
 
