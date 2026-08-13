@@ -162,6 +162,9 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &ToggleVerifiedMode, _, cx| {
             this.toggle_verified_mode(cx);
         }))
+        .on_action(cx.listener(|this, _: &ToggleVimMode, _, cx| {
+            this.toggle_vim_mode(cx);
+        }))
         .on_action(cx.listener(|this, _: &Recalculate, _, cx| {
             this.recalculate(cx);
         }))

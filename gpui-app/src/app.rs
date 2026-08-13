@@ -2405,6 +2405,7 @@ impl Spreadsheet {
             CommandId::CycleTraceDependent => self.cycle_trace_dependent(false, cx),
             CommandId::ReturnToTraceSource => self.return_to_trace_source(cx),
             CommandId::ToggleVerifiedMode => self.toggle_verified_mode(cx),
+            CommandId::ToggleVimMode => self.toggle_vim_mode(cx),
             CommandId::Recalculate => self.recalculate(cx),
             CommandId::ReloadCustomFunctions => self.reload_custom_functions(cx),
             CommandId::ApproveModel => self.approve_model(None, cx),

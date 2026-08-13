@@ -767,15 +767,42 @@ pub(crate) fn handle_key_down(
 
     // Handle Navigation mode with keyboard hints or vim mode enabled
     // (before Names tab filter and before regular text input)
+    // Shift is allowed through for vim mode, which needs it for Shift+hjkl
+    // (extend selection) and for the shifted motions G ^ { }. It stays excluded
+    // for the hint path below, which has no shifted commands.
+    //
+    // Shift used to be excluded here outright, which meant every shifted vim
+    // key was unreachable — including Shift+hjkl, which the docs have listed
+    // as working since the feature shipped.
     if this.mode == Mode::Navigation
         && !event.keystroke.modifiers.control
         && !event.keystroke.modifiers.alt
         && !event.keystroke.modifiers.platform
-        && !event.keystroke.modifiers.shift
+        && (!event.keystroke.modifiers.shift || this.vim_mode_enabled(cx))
     {
         let key = event.keystroke.key.as_str();
         let hints_enabled = this.keyboard_hints_enabled(cx);
         let vim_enabled = this.vim_mode_enabled(cx);
+
+        // Shifted vim keys: extend-selection on hjkl, and the motions that
+        // need a shifted character. Dispatched on key_char because that is what
+        // carries the produced glyph — Shift+6 is "^" only after the layout has
+        // had its say.
+        if vim_enabled && event.keystroke.modifiers.shift {
+            let handled = match key {
+                "h" => { this.extend_selection(0, -1, cx); true }
+                "j" => { this.extend_selection(1, 0, cx); true }
+                "k" => { this.extend_selection(-1, 0, cx); true }
+                "l" => { this.extend_selection(0, 1, cx); true }
+                _ => match event.keystroke.key_char.as_deref() {
+                    Some(ch) => this.apply_vim_key(ch, cx),
+                    None => false,
+                },
+            };
+            if handled {
+                return;
+            }
+        }
 
         // 'g' enters command/hint mode (if hints OR vim mode enabled)
         // - With hints: shows cell labels + g-commands (gg)

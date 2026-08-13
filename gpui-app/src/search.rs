@@ -190,6 +190,7 @@ pub enum CommandId {
     CycleTraceDependent,
     ReturnToTraceSource,
     ToggleVerifiedMode,
+    ToggleVimMode,
     Recalculate,
     ReloadCustomFunctions,
     ApproveModel,
@@ -390,6 +391,7 @@ impl CommandId {
             Self::CycleTraceDependent => "Jump to Dependent",
             Self::ReturnToTraceSource => "Return to Trace Source",
             Self::ToggleVerifiedMode => "Toggle Verified Mode",
+            Self::ToggleVimMode => "Toggle Vim Mode",
             Self::Recalculate => "Recalculate All",
             Self::ReloadCustomFunctions => "Reload Custom Functions",
             Self::ApproveModel => "Approve Model",
@@ -703,6 +705,10 @@ impl CommandId {
             Self::CycleTraceDependent => "trace dependent output jump navigate cycle next previous",
             Self::ReturnToTraceSource => "trace back return source origin home",
             Self::ToggleVerifiedMode => "verified deterministic recalc audit trust",
+            // "vim" first: it is what someone types, and the feature was
+            // reported missing by a user who had it installed and could not
+            // find it.
+            Self::ToggleVimMode => "vim hjkl modal navigation keys motions keyboard",
             Self::Recalculate => "recalc refresh calculate formulas f9",
             Self::ReloadCustomFunctions => "lua functions reload custom scripting",
             Self::ApproveModel => "approve model fingerprint semantic logic verify lock sign-off audit",
@@ -819,6 +825,7 @@ impl CommandId {
             Self::CycleTraceDependent,
             Self::ReturnToTraceSource,
             Self::ToggleVerifiedMode,
+            Self::ToggleVimMode,
             Self::Recalculate,
             Self::ReloadCustomFunctions,
             Self::ApproveModel,
@@ -949,6 +956,7 @@ impl CommandId {
             | Self::CycleTraceDependent
             | Self::ReturnToTraceSource
             | Self::ToggleVerifiedMode
+            | Self::ToggleVimMode
             | Self::ApproveModel
             | Self::ClearApproval
             | Self::InsertFormulaAI

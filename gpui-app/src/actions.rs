@@ -152,6 +152,7 @@ actions!(view, [
     ToggleMinimap,
     ToggleShowZeros,
     ToggleVerifiedMode, // Toggle verified/deterministic recalc mode
+    ToggleVimMode,      // Toggle vim-style navigation
     ToggleProfiler,
     ProfileNextRecalc,
     ClearProfiler,

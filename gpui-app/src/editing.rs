@@ -341,6 +341,29 @@ impl Spreadsheet {
     }
 
     /// Toggle verified mode on/off.
+    /// Turn vim-style navigation on or off, and say which it now is.
+    ///
+    /// Reachable from the command palette because the preferences panel was
+    /// the only way in: a user filed an issue asking for vim keybindings while
+    /// running a build that had them, having searched and not found the
+    /// toggle. A feature nobody can find is indistinguishable from one that
+    /// does not exist.
+    pub fn toggle_vim_mode(&mut self, cx: &mut Context<Self>) {
+        use crate::settings::{Setting, SettingsStore};
+
+        let enabled = !self.vim_mode_enabled(cx);
+        cx.update_global::<SettingsStore, _>(|store, _| {
+            store.user_settings_mut().navigation.vim_mode = Setting::Value(enabled);
+            store.save();
+        });
+        self.status_message = Some(if enabled {
+            "Vim mode on — h j k l to move, i to edit, gg to jump home".to_string()
+        } else {
+            "Vim mode off".to_string()
+        });
+        cx.notify();
+    }
+
     pub fn toggle_verified_mode(&mut self, cx: &mut Context<Self>) {
         self.verified_mode = !self.verified_mode;
         if self.verified_mode {

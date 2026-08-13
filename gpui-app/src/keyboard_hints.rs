@@ -192,8 +192,21 @@ impl Spreadsheet {
                 true
             }
             "i" => {
-                // Enter edit mode (like F2 - edit without replacing)
+                // Insert before: vim puts the cursor at the start. start_edit
+                // leaves it at the end, which is `a`'s job — so this was
+                // behaving as `a` and `a` did not exist.
                 self.start_edit(cx);
+                self.edit_cursor = 0;
+                true
+            }
+            "a" => {
+                // Append: cursor at the end, which is where start_edit leaves it.
+                self.start_edit(cx);
+                true
+            }
+            "f" => {
+                // Jump to a cell by label, the same hint mode `g` opens.
+                self.enter_hint_mode_with_labels(true, cx);
                 true
             }
             "0" => {
@@ -224,11 +237,71 @@ impl Spreadsheet {
                 self.jump_selection(0, -1, cx);
                 true
             }
+            "G" => {
+                // Last row holding data in this column, mirroring how $ finds
+                // the last filled cell in a row rather than the sheet edge —
+                // jumping to row 65536 is never what anyone means.
+                let col = self.view_state.selected.1;
+                let row = self.find_last_data_row_in_col(col, cx);
+                self.view_state.selected = (row, col);
+                self.view_state.selection_end = None;
+                self.ensure_cell_visible(row, col);
+                cx.notify();
+                true
+            }
+            "^" => {
+                // First filled cell in the row. Vim's ^ is "first non-blank",
+                // and a leading run of empty cells is this grid's version of
+                // leading whitespace.
+                let row = self.view_state.selected.0;
+                let col = self.find_first_data_col_in_row(row, cx);
+                self.view_state.selected = (row, col);
+                self.view_state.selection_end = None;
+                self.ensure_cell_visible(row, col);
+                cx.notify();
+                true
+            }
+            "}" => {
+                // Vertical counterpart of w: next block of data downward.
+                self.jump_selection(1, 0, cx);
+                true
+            }
+            "{" => {
+                // Vertical counterpart of b.
+                self.jump_selection(-1, 0, cx);
+                true
+            }
             _ => false,
         }
     }
 
     /// Find the last column with data in a given row.
+    /// First column holding data in a row, for `^`.
+    fn find_first_data_col_in_row(&self, row: usize, cx: &App) -> usize {
+        let sheet = self.sheet(cx);
+        for col in 0..NUM_COLS {
+            if !sheet.get_cell(row, col).value.raw_display().is_empty() {
+                return col;
+            }
+        }
+        0 // An empty row leaves you where the row starts
+    }
+
+    /// Last row holding data in a column, for `G`.
+    ///
+    /// Bounded by the sheet's data extent rather than its dimensions: scanning
+    /// 65,536 rows to find nothing is both slow and the wrong answer.
+    fn find_last_data_row_in_col(&self, col: usize, cx: &App) -> usize {
+        let sheet = self.sheet(cx);
+        let (last_row, _) = sheet.data_extent();
+        for row in (0..=last_row).rev() {
+            if !sheet.get_cell(row, col).value.raw_display().is_empty() {
+                return row;
+            }
+        }
+        0 // An empty column leaves you at the top
+    }
+
     fn find_last_data_col_in_row(&self, row: usize, cx: &App) -> usize {
         let sheet = self.sheet(cx);
         for col in (0..NUM_COLS).rev() {
