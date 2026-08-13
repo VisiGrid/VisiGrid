@@ -67,6 +67,11 @@ pub(crate) fn bind(
                 Mode::ThemePicker => this.theme_picker_up(cx),
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
                 Mode::Edit => this.confirm_edit_up(cx),
+                // Any other overlay swallows it. The arms above are the
+                // overlays that want Up/Down; everything else is a dialog with
+                // the grid behind it, and the selection moving out of sight is
+                // the same bug as #9 — you only notice once the dialog closes.
+                m if m.is_overlay() => {}
                 _ => {
                     // Batch: accumulate for flush at render start
                     this.pending_nav_dy -= 1;
@@ -131,6 +136,11 @@ pub(crate) fn bind(
                 Mode::ThemePicker => this.theme_picker_down(cx),
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
                 Mode::Edit => this.confirm_edit(cx),
+                // Any other overlay swallows it. The arms above are the
+                // overlays that want Up/Down; everything else is a dialog with
+                // the grid behind it, and the selection moving out of sight is
+                // the same bug as #9 — you only notice once the dialog closes.
+                m if m.is_overlay() => {}
                 _ => {
                     // Batch: accumulate for flush at render start
                     this.pending_nav_dy += 1;
@@ -183,6 +193,13 @@ pub(crate) fn bind(
                 this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.confirm_edit_and_move_left(cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
@@ -236,6 +253,13 @@ pub(crate) fn bind(
                 this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.confirm_edit_and_move_right(cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
@@ -250,6 +274,13 @@ pub(crate) fn bind(
                     return; // no-op: single-line editor
                 }
                 this.formula_jump_ref(-1, 0, cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.jump_selection(-1, 0, cx);
             }
@@ -260,6 +291,13 @@ pub(crate) fn bind(
                     return; // no-op: single-line editor
                 }
                 this.formula_jump_ref(1, 0, cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.jump_selection(1, 0, cx);
             }
@@ -273,6 +311,13 @@ pub(crate) fn bind(
                 }
             } else if this.mode == Mode::Edit {
                 this.move_edit_cursor_word_left(cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.jump_selection(0, -1, cx);
             }
@@ -287,18 +332,27 @@ pub(crate) fn bind(
                 }
             } else if this.mode == Mode::Edit {
                 this.move_edit_cursor_word_right(cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.jump_selection(0, 1, cx);
             }
             this.update_edit_scroll(window);
         }))
         .on_action(cx.listener(|this, _: &MoveToStart, _, cx| {
+            if this.mode.is_overlay() { return; }
             this.view_state.selected = (0, 0);
             this.view_state.scroll_row = 0;
             this.view_state.scroll_col = 0;
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &MoveToEnd, _, cx| {
+            if this.mode.is_overlay() { return; }
             // Excel behavior: Ctrl+End goes to the last used cell, not sheet edge
             let (max_row, max_col) = this.sheet(cx).data_extent();
             this.view_state.selected = (max_row, max_col);
@@ -315,6 +369,8 @@ pub(crate) fn bind(
                 }
                 return;
             }
+            // Any other overlay: the grid must not page behind it.
+            if this.mode.is_overlay() { return; }
             this.page_up(cx);
         }))
         .on_action(cx.listener(|this, _: &PageDown, window, cx| {
@@ -327,6 +383,8 @@ pub(crate) fn bind(
                 }
                 return;
             }
+            // Any other overlay: the grid must not page behind it.
+            if this.mode.is_overlay() { return; }
             this.page_down(cx);
         }))
         // Selection extension (formula mode: extend range reference)
@@ -336,6 +394,13 @@ pub(crate) fn bind(
                     return; // no-op: single-line editor
                 }
                 this.formula_extend_ref(-1, 0, cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.extend_selection(-1, 0, cx);
             }
@@ -346,6 +411,13 @@ pub(crate) fn bind(
                     return; // no-op: single-line editor
                 }
                 this.formula_extend_ref(1, 0, cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.extend_selection(1, 0, cx);
             }
@@ -359,6 +431,13 @@ pub(crate) fn bind(
                 }
             } else if this.mode == Mode::Edit {
                 this.select_edit_cursor_left(cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.extend_selection(0, -1, cx);
             }
@@ -373,6 +452,13 @@ pub(crate) fn bind(
                 }
             } else if this.mode == Mode::Edit {
                 this.select_edit_cursor_right(cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.extend_selection(0, 1, cx);
             }
@@ -384,6 +470,13 @@ pub(crate) fn bind(
                     return; // no-op: single-line editor
                 }
                 this.formula_extend_jump_ref(-1, 0, cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.extend_jump_selection(-1, 0, cx);
             }
@@ -394,6 +487,13 @@ pub(crate) fn bind(
                     return; // no-op: single-line editor
                 }
                 this.formula_extend_jump_ref(1, 0, cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.extend_jump_selection(1, 0, cx);
             }
@@ -407,6 +507,13 @@ pub(crate) fn bind(
                 }
             } else if this.mode == Mode::Edit {
                 this.select_edit_cursor_word_left(cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.extend_jump_selection(0, -1, cx);
             }
@@ -421,17 +528,24 @@ pub(crate) fn bind(
                 }
             } else if this.mode == Mode::Edit {
                 this.select_edit_cursor_word_right(cx);
+            } else if this.mode.is_overlay() {
+                // An overlay is open: the grid must not move behind it.
+                // Placed here rather than at the top of the handler because
+                // the branches above belong to dialogs that do want these
+                // keys — the validation dropdown and the Lua console among
+                // them — and those run first.
+                return;
             } else {
                 this.extend_jump_selection(0, 1, cx);
             }
             this.update_edit_scroll(window);
         }))
         .on_action(cx.listener(|this, _: &ExtendToStart, _, cx| {
-            if this.mode.is_formula() { return; }
+            if this.mode.is_formula() || this.mode.is_overlay() { return; }
             this.extend_to_start(cx);
         }))
         .on_action(cx.listener(|this, _: &ExtendToEnd, _, cx| {
-            if this.mode.is_formula() { return; }
+            if this.mode.is_formula() || this.mode.is_overlay() { return; }
             this.extend_to_end(cx);
         }))
         .on_action(cx.listener(|this, _: &SelectCurrentRegion, _, cx| {
