@@ -7595,6 +7595,7 @@ dependencies = [
  "visigrid-io",
  "visigrid-license",
  "visigrid-protocol",
+ "visigrid-scripting",
  "visigrid-session-host",
  "which 7.0.3",
  "windows-sys 0.59.0",
@@ -7671,6 +7672,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "visigrid-scripting"
+version = "0.27.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "dirs 5.0.1",
+ "mlua",
+ "serde_json",
+ "visigrid-engine",
+ "visigrid-io",
 ]
 
 [[package]]
