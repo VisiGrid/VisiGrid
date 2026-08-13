@@ -2164,7 +2164,16 @@ impl CliError {
         Self {
             code: EXIT_SCRIPT_BUDGET,
             message: msg.into(),
-            hint: Some("raise the budget with --max-instructions, or make the script cheaper".into()),
+            // Says what the reader can actually do. The first version pointed
+            // at --max-instructions, which does not exist — a message that
+            // sends someone to a flag they cannot use, at the moment they most
+            // need it to be straight. Same species as the help text that
+            // promised enforcement there wasn't.
+            hint: Some(
+                "make the script cheaper or split the work across runs; \
+                 there is no flag to raise this budget"
+                    .into(),
+            ),
         }
     }
 
