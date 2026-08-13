@@ -518,12 +518,16 @@ impl LuaRuntime {
         prepare_code(&self.lua, input)
     }
 
-    /// Get a reference to the Lua instance (for M2 extension).
+    /// Get a reference to the Lua instance.
     ///
-    /// This should only be used to register the `sheet` userdata, not to
-    /// give direct workbook access.
-    #[allow(dead_code)]
-    pub(crate) fn lua(&self) -> &Lua {
+    /// This should only be used to register the `sheet` userdata, not to give
+    /// direct workbook access.
+    ///
+    /// `pub` rather than `pub(crate)` because the host lives in another crate
+    /// now. That is a real widening of the surface, not a formality: anything
+    /// holding this can reach the whole VM, so the constraint above stops
+    /// being enforced by the compiler and starts being enforced by reading.
+    pub fn lua(&self) -> &Lua {
         &self.lua
     }
 }

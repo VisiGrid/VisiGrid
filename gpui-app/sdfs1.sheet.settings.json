@@ -1,0 +1,11 @@
+{
+  "display": {
+    "show_zeros": true,
+    "show_headers": true
+  },
+  "calculation": {
+    "mode": "automatic",
+    "max_iterations": 100,
+    "iteration_tolerance": 1e-9
+  }
+}

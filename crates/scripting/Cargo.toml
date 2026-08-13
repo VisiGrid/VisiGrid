@@ -1,0 +1,25 @@
+[package]
+name = "visigrid-scripting"
+version.workspace = true
+edition.workspace = true
+
+# The Lua runtime for custom functions and the script console.
+#
+# It lives here rather than in crates/engine on purpose. mlua compiles Lua's C
+# source, which does not build for wasm32-unknown-unknown — the browser target
+# refuses it outright. Keeping it in a separate crate makes "the engine has no C
+# dependencies" structural rather than a policy: crates/engine's manifest simply
+# never names mlua, and no combination of features can change that. A feature
+# flag on the engine would have made it a rule someone has to keep.
+#
+# So: gpui-app and cli depend on this; engine-wasm does not, and that is the
+# whole reason the browser has no Lua.
+
+[dependencies]
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+visigrid-engine = { path = "../engine" }
+visigrid-io = { path = "../io" }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+blake3 = "1"
+dirs = { workspace = true }

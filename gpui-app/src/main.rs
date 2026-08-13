@@ -49,7 +49,10 @@ mod minimap;
 mod user_keybindings;
 mod mode;
 mod navigation;
-mod scripting;
+// The Lua runtime now lives in crates/scripting, shared with the CLI so the
+// two stop implementing the same language twice. Re-exported under the old
+// path so the several hundred `crate::scripting::` references keep working.
+use visigrid_scripting as scripting;
 mod terminal;
 mod named_ranges;
 mod perf;

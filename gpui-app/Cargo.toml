@@ -66,6 +66,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], def
 blake3 = "1"
 
 # Lua scripting (always compiled — runtime is free, tooling is Pro)
+visigrid-scripting = { path = "../crates/scripting" }
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 sha2 = { workspace = true }
 
