@@ -445,6 +445,8 @@ pub(crate) fn bind(
             }
             if this.mode == Mode::Edit {
                 this.select_all_edit(cx);
+            } else if this.mode.is_overlay() {
+                return;
             } else {
                 this.select_all(cx);
             }
