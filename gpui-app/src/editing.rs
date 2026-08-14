@@ -622,34 +622,44 @@ impl Spreadsheet {
     /// - Refreshing volatile functions (NOW, TODAY, RAND, etc.)
     /// - Forcing recalc after external data changes
     /// - Verifying formula results match expectations
+    /// Recompute everything, using custom functions when this build has them.
+    ///
+    /// The load path used to call `recompute_full_ordered` directly, with no
+    /// handler, so opening a .sheet containing a custom function turned every
+    /// such cell into "Unknown function" until someone pressed F9. Two things
+    /// were wrong with that: the document looked live and was not, with nothing
+    /// on screen to suggest it — and once the loaders learned to keep values
+    /// they could not recompute, this second pass threw them away again.
+    ///
+    /// Falls back to the plain recompute when no functions are loaded, which
+    /// is the common case and avoids paying for a handler nobody will call.
+    pub fn recompute_with_custom_fns(&mut self, cx: &mut Context<Self>) -> visigrid_engine::recalc::RecalcReport {
+        if self.custom_fn_registry.functions.is_empty() {
+            return self.wb_mut(cx, |wb| wb.recompute_full_ordered());
+        }
+
+        use visigrid_engine::formula::eval::{EvalArg, EvalResult};
+        let memo_cache = std::cell::RefCell::new(crate::scripting::MemoCache::new());
+        let registry = &self.custom_fn_registry;
+        let lua = self.lua_runtime.lua();
+        let handler = |name: &str, args: &[EvalArg]| -> Option<EvalResult> {
+            if !registry.functions.contains_key(name) {
+                return None;
+            }
+            Some(crate::scripting::custom_functions::call_custom_function(
+                lua, name, args, &memo_cache,
+            ))
+        };
+        self.workbook
+            .update(cx, |wb, _| wb.recompute_full_ordered_with_custom_fns(&handler))
+    }
+
     pub fn recalculate(&mut self, cx: &mut Context<Self>) {
         self.in_smoke_recalc = true;
 
-        let has_custom_fns = !self.custom_fn_registry.functions.is_empty();
-        let report = if !has_custom_fns {
-            self.wb_mut(cx, |wb| wb.recompute_full_ordered())
-        } else {
-            {
-                use visigrid_engine::formula::eval::{EvalArg, EvalResult};
-
-                let memo_cache = std::cell::RefCell::new(crate::scripting::MemoCache::new());
-                let registry = &self.custom_fn_registry;
-                let lua = self.lua_runtime.lua();
-
-                let handler = |name: &str, args: &[EvalArg]| -> Option<EvalResult> {
-                    if !registry.functions.contains_key(name) {
-                        return None;
-                    }
-                    Some(crate::scripting::custom_functions::call_custom_function(
-                        lua, name, args, &memo_cache,
-                    ))
-                };
-
-                self.workbook.update(cx, |wb, _| {
-                    wb.recompute_full_ordered_with_custom_fns(&handler)
-                })
-            }
-        };
+        // Same recompute the load path uses, so F9 and opening a file cannot
+        // disagree about whether custom functions are in play.
+        let report = self.recompute_with_custom_fns(cx);
 
         self.in_smoke_recalc = false;
 

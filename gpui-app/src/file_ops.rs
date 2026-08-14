@@ -110,10 +110,14 @@ impl Spreadsheet {
                 self.wb_mut(cx, |wb| *wb = workbook);
                 // Rebuild dependency graph and recompute all formulas
                 // This ensures formula cells have computed values, not just raw text
-                self.wb_mut(cx, |wb| {
-                    wb.rebuild_dep_graph();
-                    wb.recompute_full_ordered();
-                });
+                //
+                // With custom functions when this build has them: without the
+                // handler, a sheet using one showed "Unknown function" until
+                // somebody pressed F9, and this pass also discarded the values
+                // the loader had kept precisely because they could not be
+                // recomputed.
+                self.wb_mut(cx, |wb| wb.rebuild_dep_graph());
+                self.recompute_with_custom_fns(cx);
                 self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                 self.debug_assert_sheet_cache_sync(cx);
                 self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
