@@ -1107,7 +1107,9 @@ pub fn save_workbook_with_metadata(
 }
 
 /// Load workbook from v2 multi-sheet format
-fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
+fn load_workbook_v2(
+    conn: &Connection,
+) -> Result<(Workbook, Vec<(usize, usize, usize, crate::CachedFormulaValue)>), String> {
     // Load active sheet index from meta
     let active_sheet: usize = conn
         .query_row(
@@ -1142,6 +1144,7 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
 
     // Create sheets
     let mut sheets: Vec<Sheet> = Vec::new();
+    let mut cached_formula_values: Vec<(usize, usize, usize, crate::CachedFormulaValue)> = Vec::new();
     for (idx, name, rows, cols) in &sheets_data {
         let mut sheet = Sheet::new(SheetId(*idx as u64 + 1), *rows, *cols);
         // Must use set_name() to update both name and name_key for correct lookup
@@ -1225,6 +1228,22 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
 
             let sheet = &mut sheets[sheet_idx];
 
+            // A formula's cached result, kept aside before the value columns are
+            // consumed below. Restored after the recompute only if this build
+            // could not evaluate the formula — see keep_uncomputable_values.
+            if value_type == TYPE_FORMULA && formula_source.is_some() {
+                let cached = match (value_num, value_text.as_deref()) {
+                    (Some(n), _) => Some(crate::CachedFormulaValue::Number(n)),
+                    (None, Some(t)) if !t.is_empty() => {
+                        Some(crate::CachedFormulaValue::Text(t.to_string()))
+                    }
+                    _ => None,
+                };
+                if let Some(cached) = cached {
+                    cached_formula_values.push((sheet_idx, row, col, cached));
+                }
+            }
+
             // Set cell value
             // For formulas: prefer formula_source (v9+), fall back to value_text (pre-v9)
             let value_str = match value_type {
@@ -1265,7 +1284,7 @@ fn load_workbook_v2(conn: &Connection) -> Result<Workbook, String> {
     }
 
     let workbook = Workbook::from_sheets(sheets, active_sheet);
-    Ok(workbook)
+    Ok((workbook, cached_formula_values))
 }
 
 /// Load a complete workbook including all sheets and named ranges
@@ -1280,13 +1299,15 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
         .prepare("SELECT sheet_idx FROM sheets LIMIT 1")
         .is_ok();
 
-    let mut workbook = if has_sheets_table {
+    // The v1 loader has no cached results to keep: pre-v9 files stored a
+    // formula's text in the value column, so there is no separate value.
+    let (mut workbook, cached_formula_values) = if has_sheets_table {
         // New multi-sheet format
         load_workbook_v2(&conn)?
     } else {
         // Legacy single-sheet format - use existing load function
         let sheet = load(path)?;
-        Workbook::from_sheets(vec![sheet], 0)
+        (Workbook::from_sheets(vec![sheet], 0), Vec::new())
     };
 
     // Check if named_ranges table exists (for backward compatibility)
@@ -1385,6 +1406,11 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
     // Rebuild dependency graph and compute all formulas after loading
     workbook.rebuild_dep_graph();
     workbook.recompute_full_ordered();
+    // A .sheet stores each formula's result but the loader recomputes and
+    // discards it, so a custom function became "Unknown function" on every
+    // open — in the desktop's own format, where the models people care about
+    // live.
+    crate::keep_uncomputable_values(&mut workbook, &cached_formula_values);
 
     Ok(workbook)
 }

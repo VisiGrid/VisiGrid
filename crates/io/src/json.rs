@@ -82,8 +82,23 @@ mod tests {
 // through the engine without parsing xlsx or the native SQLite format.
 //
 // Contract: fields may be ADDED in later versions; existing fields keep
-// their meaning. Consumers must ignore unknown fields. `version` bumps only
-// on breaking changes.
+// their meaning. `version` bumps only on breaking changes.
+//
+// UNKNOWN FIELDS ARE DROPPED, NOT PRESERVED. A reader ignores what it does not
+// recognise, and a writer emits only what it knows, so anything this build has
+// no field for is gone after a round trip. That matters more than it sounds:
+// `vgrid convert -f json-full -t json-full` is what the server runs on every
+// web save, so an annotation added by any other layer survives until the next
+// save and no longer.
+//
+// "Consumers must ignore unknown fields" was the old wording, and both a
+// browser converter and this one were written on the assumption that ignoring
+// meant tolerating rather than discarding. If you are extending the format,
+// add a field here — a passenger will not survive.
+//
+// Making passengers survive would mean the engine carrying opaque per-cell
+// JSON through a Sheet, which does not currently hold any. SheetLayout::charts
+// is the precedent for doing that deliberately at the sheet level.
 //
 // Single-sheet form (version 1):
 // {
@@ -807,44 +822,19 @@ pub fn import_any(
     let mut wb = Workbook::from_sheets(sheets, active);
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
-    keep_values_this_engine_cannot_compute(&doc, &mut wb);
+    let cached = cached_formula_values(&doc, &wb);
+    crate::keep_uncomputable_values(&mut wb, &cached);
     Ok((wb, layouts, active))
 }
 
 
-/// Restore stored values for formulas this build has no definition for.
+/// Collect stored results for formula cells, for the shared restore step.
 ///
-/// Custom functions live in the host, not the engine: the desktop app loads
-/// them from functions.lua, and nothing else does — not the CLI, and not the
-/// browser, where the toolchain cannot currently produce a Lua at all. So a
-/// sheet using =ACCRUED_INTEREST(...) recomputes to "Unknown function" here,
-/// and writing that back replaces the value the desktop computed with an
-/// error string.
-///
-/// That is not hypothetical. `vgrid convert -f json-full -t json-full` is
-/// exactly what the server runs on every web save, so a scripted sheet in the
-/// cloud lost its computed values on save — one bug reached from two
-/// directions, which is why the fix belongs here rather than in either caller.
-///
-/// The formula is never touched, so a build that *does* have the definitions
-/// still recomputes normally and overwrites whatever was kept here. This keeps
-/// a value alive; it does not pin it.
-///
-/// Deliberately narrow:
-///
-/// - only unknown-function errors. #REF! and #VALUE! are answers this engine
-///   is perfectly capable of computing, and preserving a stale value over a
-///   real new error would be worse than the bug being fixed.
-/// - only where the stored formula matches the one just evaluated, so a value
-///   is never carried across a formula that changed.
-/// - only where a stored value existed. Nothing is invented.
-///
-/// The kept value can still be stale: unchanged formula, changed inputs. That
-/// is a worse-looking trade than it is — the alternative destroys the value
-/// outright, where this leaves something a build with the definitions can
-/// correct. Callers that need to know should compare the formula's result
-/// against the stored value themselves.
-fn keep_values_this_engine_cannot_compute(doc: &FullDoc, wb: &mut visigrid_engine::workbook::Workbook) {
+/// See `crate::keep_uncomputable_values` for why: a custom function has no
+/// definition here, so recomputing replaces a real value with an error and
+/// writes it back. `vgrid convert -f json-full -t json-full` is what the
+/// server runs on every web save, so this reached the cloud as well as the CLI.
+fn cached_formula_values(doc: &FullDoc, wb: &visigrid_engine::workbook::Workbook) -> Vec<(usize, usize, usize, crate::CachedFormulaValue)> {
     // v2 keeps its sheets in `sheets`; v1 flattens a single body at the top
     // level, so an empty `sheets` means the v1 shape rather than no sheets.
     let bodies: Vec<&SheetBody> = if doc.sheets.is_empty() {
@@ -853,44 +843,31 @@ fn keep_values_this_engine_cannot_compute(doc: &FullDoc, wb: &mut visigrid_engin
         doc.sheets.iter().collect()
     };
 
+    let mut cached = Vec::new();
     for (index, body) in bodies.iter().enumerate() {
-        let mut kept: Vec<(usize, usize)> = Vec::new();
         let Some(sheet) = wb.sheets().get(index) else { continue };
         for cell in &body.cells {
             let (Some(stored_formula), Some(stored_value)) = (&cell.formula, &cell.value) else {
                 continue;
             };
-            // Only if this build actually failed to resolve the function.
-            let computed = sheet.get_display(cell.row, cell.col);
-            if !computed.starts_with("Unknown function") {
-                continue;
-            }
-            // And only if the formula is still the one the value belongs to.
+            // Only if the formula is still the one this value belongs to.
             if sheet.get_raw(cell.row, cell.col) != *stored_formula {
                 continue;
             }
-            match stored_value {
-                serde_json::Value::Number(n) => {
-                    if let Some(f) = n.as_f64() {
-                        sheet.cache_computed(cell.row, cell.col, visigrid_engine::formula::eval::Value::Number(f));
-                        kept.push((cell.row, cell.col));
-                    }
-                }
-                serde_json::Value::String(t) => {
-                    sheet.cache_computed(cell.row, cell.col, visigrid_engine::formula::eval::Value::Text(t.clone()));
-                    kept.push((cell.row, cell.col));
-                }
+            let value = match stored_value {
+                serde_json::Value::Number(n) => n.as_f64().map(crate::CachedFormulaValue::Number),
+                serde_json::Value::String(t) => Some(crate::CachedFormulaValue::Text(t.clone())),
                 serde_json::Value::Bool(b) => {
-                    sheet.cache_computed(cell.row, cell.col, visigrid_engine::formula::eval::Value::Boolean(*b));
-                    kept.push((cell.row, cell.col));
+                    Some(crate::CachedFormulaValue::Text(if *b { "TRUE".into() } else { "FALSE".into() }))
                 }
-                _ => {}
+                _ => None,
+            };
+            if let Some(value) = value {
+                cached.push((index, cell.row, cell.col, value));
             }
         }
-        if let Some(sheet) = wb.sheet_mut(index) {
-            sheet.kept_uncomputable.extend(kept);
-        }
     }
+    cached
 }
 
 fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usize) -> Result<(Sheet, SheetLayout), String> {
