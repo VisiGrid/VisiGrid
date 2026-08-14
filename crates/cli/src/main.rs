@@ -36,7 +36,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use exit_codes::{
     EXIT_SUCCESS, EXIT_ERROR, EXIT_USAGE,
     EXIT_AI_DISABLED, EXIT_AI_MISSING_KEY,
-    EXIT_DIFF_DUPLICATE, EXIT_DIFF_AMBIGUOUS, EXIT_DIFF_PARSE,
+    EXIT_DIFF_DIFFS, EXIT_DIFF_DUPLICATE, EXIT_DIFF_AMBIGUOUS, EXIT_DIFF_PARSE,
     session_exit_code,
 };
 
@@ -2891,7 +2891,7 @@ fn cmd_diff(
         let s = &result.summary;
         let diff_count = if strict_exit { s.diff } else { s.diff_outside_tolerance };
         if s.only_left > 0 || s.only_right > 0 || diff_count > 0 {
-            return Err(CliError { code: EXIT_EVAL_ERROR, message: String::new(), hint: None });
+            return Err(CliError { code: EXIT_DIFF_DIFFS, message: String::new(), hint: None });
         }
     }
 

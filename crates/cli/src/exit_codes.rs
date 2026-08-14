@@ -258,3 +258,34 @@ impl SessionErrorOutput {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// These numbers are a published interface. `vgrid diff` documents
+    /// "like `diff(1)`, exit 1 means files differ", and CI scripts branch on
+    /// it, so the value is not free to move even though it looks like an
+    /// internal constant. Pinned here because the comment on the constant
+    /// cannot fail a build.
+    #[test]
+    fn documented_exit_codes_do_not_move() {
+        assert_eq!(EXIT_SUCCESS, 0);
+        assert_eq!(EXIT_DIFF_DIFFS, 1, "diff(1) compatibility");
+        assert_eq!(EXIT_USAGE, 2);
+        assert_eq!(EXIT_DIFF_DUPLICATE, 3);
+        assert_eq!(EXIT_DIFF_AMBIGUOUS, 4);
+        assert_eq!(EXIT_DIFF_PARSE, 5);
+    }
+
+    /// `EXIT_DIFF_DIFFS` and the generic `EXIT_ERROR` are both 1 today, which
+    /// is why `diff` returning the wrong one went unnoticed. If someone gives
+    /// the generic error its own number — a reasonable thing to want — this
+    /// test failing is the reminder that `diff`'s contract is the constrained
+    /// one and has to stay at 1.
+    #[test]
+    fn diff_differences_are_not_the_generic_error() {
+        assert_eq!(EXIT_DIFF_DIFFS, EXIT_ERROR,
+            "if these have diverged, check that diff still exits 1");
+    }
+}
