@@ -411,6 +411,18 @@ struct FullCell {
     formula: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fmt: Option<FullFormat>,
+    /// True when this value was kept rather than recomputed, because the build
+    /// that wrote the file had no definition for the formula's function.
+    ///
+    /// The value came from somewhere that could compute it — the desktop — and
+    /// its inputs may have changed since, so it does not necessarily follow
+    /// from the cells around it. A consumer should recalculate it when able,
+    /// and say so meanwhile. Written rather than restored silently, because a
+    /// number that no longer follows from its inputs and carries no sign of it
+    /// is worse than a visible error.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    stale_custom_fn: bool,
+
     /// Set on cells a formula spilled into, naming the cell it came from.
     ///
     /// These carry a value for readers without an engine, which otherwise see
@@ -662,7 +674,8 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
             None
         };
 
-        cells.push(FullCell { row, col, value, formula, fmt, spill_from: None });
+        let stale_custom_fn = sheet.kept_uncomputable.contains(&(row, col));
+        cells.push(FullCell { row, col, value, formula, fmt, spill_from: None, stale_custom_fn });
     }
 
     // Cells a formula spilled into. They hold no Cell of their own, so the loop
@@ -690,6 +703,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
                 formula: None,
                 fmt: None,
                 spill_from: Some([parent.0, parent.1]),
+                stale_custom_fn: false,
             });
         }
     }
@@ -793,7 +807,7 @@ pub fn import_any(
     let mut wb = Workbook::from_sheets(sheets, active);
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
-    keep_values_this_engine_cannot_compute(&doc, &wb);
+    keep_values_this_engine_cannot_compute(&doc, &mut wb);
     Ok((wb, layouts, active))
 }
 
@@ -830,7 +844,7 @@ pub fn import_any(
 /// outright, where this leaves something a build with the definitions can
 /// correct. Callers that need to know should compare the formula's result
 /// against the stored value themselves.
-fn keep_values_this_engine_cannot_compute(doc: &FullDoc, wb: &visigrid_engine::workbook::Workbook) {
+fn keep_values_this_engine_cannot_compute(doc: &FullDoc, wb: &mut visigrid_engine::workbook::Workbook) {
     // v2 keeps its sheets in `sheets`; v1 flattens a single body at the top
     // level, so an empty `sheets` means the v1 shape rather than no sheets.
     let bodies: Vec<&SheetBody> = if doc.sheets.is_empty() {
@@ -840,6 +854,7 @@ fn keep_values_this_engine_cannot_compute(doc: &FullDoc, wb: &visigrid_engine::w
     };
 
     for (index, body) in bodies.iter().enumerate() {
+        let mut kept: Vec<(usize, usize)> = Vec::new();
         let Some(sheet) = wb.sheets().get(index) else { continue };
         for cell in &body.cells {
             let (Some(stored_formula), Some(stored_value)) = (&cell.formula, &cell.value) else {
@@ -858,16 +873,22 @@ fn keep_values_this_engine_cannot_compute(doc: &FullDoc, wb: &visigrid_engine::w
                 serde_json::Value::Number(n) => {
                     if let Some(f) = n.as_f64() {
                         sheet.cache_computed(cell.row, cell.col, visigrid_engine::formula::eval::Value::Number(f));
+                        kept.push((cell.row, cell.col));
                     }
                 }
                 serde_json::Value::String(t) => {
                     sheet.cache_computed(cell.row, cell.col, visigrid_engine::formula::eval::Value::Text(t.clone()));
+                    kept.push((cell.row, cell.col));
                 }
                 serde_json::Value::Bool(b) => {
                     sheet.cache_computed(cell.row, cell.col, visigrid_engine::formula::eval::Value::Boolean(*b));
+                    kept.push((cell.row, cell.col));
                 }
                 _ => {}
             }
+        }
+        if let Some(sheet) = wb.sheet_mut(index) {
+            sheet.kept_uncomputable.extend(kept);
         }
     }
 }
@@ -1208,6 +1229,42 @@ mod full_json_tests {
         assert_eq!(sheet.get_display(4, 0), "007|", "concatenation keeps them too");
         // Arithmetic is the deliberate exception.
         assert_eq!(sheet.get_display(5, 0), "8");
+    }
+
+    // A kept value says that it was kept.
+    //
+    // Restoring it silently would hand back a number whose inputs may have
+    // moved since it was computed, with nothing to indicate it does not follow
+    // from the cells around it. The flag is what lets a consumer recalculate it
+    // when able, and mark it meanwhile.
+    #[test]
+    fn a_kept_value_is_marked_and_a_recomputed_one_is_not() {
+        let doc = r#"{"format":"visigrid-json","version":2,"active_sheet":0,"sheets":[{"name":"S","cells":[
+            {"row":0,"col":0,"formula":"=ACCRUED_INTEREST(1,2,3)","value":12.33},
+            {"row":1,"col":0,"formula":"=SUM(1,2)","value":999}
+        ]}]}"#;
+        let sheet = import_full(doc).unwrap();
+
+        assert!(
+            sheet.kept_uncomputable.contains(&(0, 0)),
+            "the cell whose function is unknown should be recorded as kept"
+        );
+        assert!(
+            !sheet.kept_uncomputable.contains(&(1, 0)),
+            "a cell the engine recomputed is not stale"
+        );
+
+        // And it reaches the wire, so the next consumer can act on it.
+        let out = export_full(&sheet).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let cells = doc["cells"].as_array().unwrap();
+        let kept = cells.iter().find(|c| c["row"] == 0).unwrap();
+        let fresh = cells.iter().find(|c| c["row"] == 1).unwrap();
+        assert_eq!(kept["stale_custom_fn"], serde_json::json!(true));
+        assert!(
+            fresh.get("stale_custom_fn").is_none(),
+            "a recomputed cell should carry no marker at all, not a false one"
+        );
     }
 
     // A value this build cannot recompute survives the round trip.

@@ -271,6 +271,15 @@ pub struct Sheet {
     /// Getters NEVER evaluate on cache miss — only the topo recalc pass populates this.
     #[serde(skip)]
     computed_cache: RefCell<HashMap<(usize, usize), Value>>,
+    /// Cells whose value was kept because this build could not recompute the
+    /// formula — a custom function it has no definition for.
+    ///
+    /// Recorded so it can be reported rather than restored silently: the value
+    /// was computed elsewhere and its inputs may have moved since, so a
+    /// consumer needs to know it does not follow from the cells around it.
+    #[serde(skip)]
+    pub kept_uncomputable: std::collections::HashSet<(usize, usize)>,
+
     /// Arrays produced during an ordered recompute, awaiting placement.
     ///
     /// Spilling cannot happen while cells are being evaluated: evaluation holds
@@ -420,6 +429,7 @@ impl Sheet {
             cols,
             spill_values: HashMap::new(),
             computed_cache: RefCell::new(HashMap::new()),
+            kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
@@ -443,6 +453,7 @@ impl Sheet {
             cols,
             spill_values: HashMap::new(),
             computed_cache: RefCell::new(HashMap::new()),
+            kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
