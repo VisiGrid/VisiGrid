@@ -73,10 +73,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("TEXTJOIN requires at least 3 arguments".to_string()));
             }
             let delimiter = evaluate(&args[0], lookup).to_text();
-            let ignore_empty = match evaluate(&args[1], lookup).to_bool() {
-                Ok(b) => b,
-                Err(_) => true, // default to TRUE
-            };
+            let ignore_empty = evaluate(&args[1], lookup).to_bool().unwrap_or(true);
 
             let mut parts: Vec<String> = Vec::new();
 

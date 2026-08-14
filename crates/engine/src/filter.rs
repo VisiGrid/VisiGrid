@@ -801,14 +801,14 @@ impl FilterState {
 
     /// Check if a column is within filter range
     pub fn contains_column(&self, col: usize) -> bool {
-        self.filter_range.map_or(false, |(_, min_c, _, max_c)| {
+        self.filter_range.is_some_and(|(_, min_c, _, max_c)| {
             col >= min_c && col <= max_c
         })
     }
 
     /// Check if a data row is within filter data range
     pub fn contains_data_row(&self, row: usize) -> bool {
-        self.data_range().map_or(false, |(min_r, _, max_r, _)| {
+        self.data_range().is_some_and(|(min_r, _, max_r, _)| {
             row >= min_r && row <= max_r
         })
     }

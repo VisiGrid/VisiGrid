@@ -162,10 +162,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 Err(e) => return Some(EvalResult::Error(e)),
             };
             let is_sorted = if args.len() == 4 {
-                match evaluate(&args[3], lookup).to_bool() {
-                    Ok(b) => b,
-                    Err(_) => true, // default to TRUE
-                }
+                evaluate(&args[3], lookup).to_bool().unwrap_or(true)
             } else {
                 true
             };

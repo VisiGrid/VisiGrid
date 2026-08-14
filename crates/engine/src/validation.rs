@@ -777,7 +777,7 @@ impl ValidationStore {
             let (s, e) = if is_row { (range.start_row, range.end_row) } else { (range.start_col, range.end_col) };
             let span = crate::structural::shift_span(s, e, at, count, delete);
             if let Some((ns, ne)) = span {
-                let mut r = range.clone();
+                let mut r = range;
                 if is_row {
                     r.start_row = ns;
                     r.end_row = ne;
@@ -794,7 +794,7 @@ impl ValidationStore {
         for range in std::mem::take(&mut self.exclusions) {
             let (s, e) = if is_row { (range.start_row, range.end_row) } else { (range.start_col, range.end_col) };
             if let Some((ns, ne)) = crate::structural::shift_span(s, e, at, count, delete) {
-                let mut r = range.clone();
+                let mut r = range;
                 if is_row { r.start_row = ns; r.end_row = ne; } else { r.start_col = ns; r.end_col = ne; }
                 ex.insert(r);
             }

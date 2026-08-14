@@ -51,7 +51,7 @@ pub fn parse_delimited_text(text: &str) -> Vec<Vec<String>> {
 /// For each candidate (tab, semicolon, comma, pipe), count fields per line. The delimiter
 /// that produces the most consistent field count (>1 field) wins.
 pub fn sniff_delimiter(content: &str) -> u8 {
-    let candidates: &[u8] = &[b'\t', b';', b',', b'|'];
+    let candidates: &[u8] = b"\t;,|";
     let sample_lines: Vec<&str> = content.lines().take(10).collect();
 
     if sample_lines.is_empty() {

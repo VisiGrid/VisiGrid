@@ -360,7 +360,7 @@ fn looks_like_cell_ref(s: &str) -> bool {
 
     // Check if row is within valid range (1 to 1048576 for Excel, we'll use reasonable limit)
     if let Ok(row_num) = row_str.parse::<u32>() {
-        row_num >= 1 && row_num <= 1048576
+        (1..=1048576).contains(&row_num)
     } else {
         false // Number too large to parse
     }

@@ -238,10 +238,10 @@ impl MergedRegion {
         col_width: impl Fn(usize) -> f32,
         row_height: impl Fn(usize) -> f32,
     ) -> (f32, f32, f32, f32) {
-        let x: f32 = (scroll_col..self.start.1).map(|c| col_width(c)).sum();
-        let y: f32 = (scroll_row..self.start.0).map(|r| row_height(r)).sum();
-        let w: f32 = (self.start.1..=self.end.1).map(|c| col_width(c)).sum();
-        let h: f32 = (self.start.0..=self.end.0).map(|r| row_height(r)).sum();
+        let x: f32 = (scroll_col..self.start.1).map(&col_width).sum();
+        let y: f32 = (scroll_row..self.start.0).map(&row_height).sum();
+        let w: f32 = (self.start.1..=self.end.1).map(col_width).sum();
+        let h: f32 = (self.start.0..=self.end.0).map(row_height).sum();
         (x, y, w, h)
     }
 }
@@ -508,7 +508,7 @@ impl Sheet {
         // Invalidate computed cache (cell changed, dependents may need recompute)
         self.computed_cache.borrow_mut().remove(&(row, col));
 
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.set(value);
 
         // If this is a formula, evaluate it and apply spill if it returns an array
@@ -523,7 +523,7 @@ impl Sheet {
         let (row, col) = self.merge_origin_coord(row, col);
         self.clear_spill_from(row, col);
         self.computed_cache.borrow_mut().remove(&(row, col));
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.set_text(text);
     }
 
@@ -542,7 +542,7 @@ impl Sheet {
         let (row, col) = self.merge_origin_coord(row, col);
         self.clear_spill_from(row, col);
         self.computed_cache.borrow_mut().remove(&(row, col));
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.set(value);
     }
 
@@ -577,14 +577,14 @@ impl Sheet {
         // Store #CYCLE! as the cell value while preserving the formula source
         // For now, we just set a text value - the original formula is lost
         // A future improvement could preserve the formula for editing
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.value = CellValue::Text("#CYCLE!".to_string());
     }
 
     /// Replace a formula cell with a static cached value, preserving the
     /// original formula as audit metadata. Used during cycle freeze on import.
     pub fn freeze_cell(&mut self, row: usize, col: usize, cached: CellValue, formula_source: String) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.value = cached;
         cell.clear_spill_state(); // Runtime state only — must not touch frozen_formula
         cell.frozen_formula = Some(formula_source); // Set AFTER clearing runtime state
@@ -756,7 +756,7 @@ impl Sheet {
                 }
 
                 // Check if there's a spill value from another parent
-                if let Some(_) = self.spill_values.get(&(r, c)) {
+                if self.spill_values.get(&(r, c)).is_some() {
                     // Check if this spill is from us or another parent
                     if let Some(cell) = self.cells.get(&(r, c)) {
                         if cell.spill_parent != Some((parent_row, parent_col)) {
@@ -799,12 +799,12 @@ impl Sheet {
                 if let Some(value) = array.get(dr, dc) {
                     if dr == 0 && dc == 0 {
                         // Parent cell - just set spill_info
-                        let cell = self.cells.entry((r, c)).or_insert_with(Cell::new);
+                        let cell = self.cells.entry((r, c)).or_default();
                         cell.spill_info = Some(SpillInfo { rows, cols });
                     } else {
                         // Receiving cell
                         self.spill_values.insert((r, c), value.clone());
-                        let cell = self.cells.entry((r, c)).or_insert_with(Cell::new);
+                        let cell = self.cells.entry((r, c)).or_default();
                         cell.spill_parent = Some((parent_row, parent_col));
                     }
                 }
@@ -1035,13 +1035,13 @@ impl Sheet {
         if !self.has_any_borders && format.has_any_border() {
             self.has_any_borders = true;
         }
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format = format;
     }
 
     /// Set the style_id on a cell (imported style provenance).
     pub fn set_style_id(&mut self, row: usize, col: usize, style_id: u32) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.style_id = Some(style_id);
     }
 
@@ -1051,67 +1051,67 @@ impl Sheet {
         if !self.has_any_borders && format.has_any_border() {
             self.has_any_borders = true;
         }
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format = format;
     }
 
     pub fn toggle_bold(&mut self, row: usize, col: usize) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.bold = !cell.format.bold;
     }
 
     pub fn toggle_italic(&mut self, row: usize, col: usize) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.italic = !cell.format.italic;
     }
 
     pub fn toggle_underline(&mut self, row: usize, col: usize) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.underline = !cell.format.underline;
     }
 
     pub fn toggle_strikethrough(&mut self, row: usize, col: usize) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.strikethrough = !cell.format.strikethrough;
     }
 
     pub fn set_bold(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.bold = value;
     }
 
     pub fn set_italic(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.italic = value;
     }
 
     pub fn set_underline(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.underline = value;
     }
 
     pub fn set_strikethrough(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.strikethrough = value;
     }
 
     pub fn set_alignment(&mut self, row: usize, col: usize, alignment: Alignment) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.alignment = alignment;
     }
 
     pub fn set_vertical_alignment(&mut self, row: usize, col: usize, vertical_alignment: VerticalAlignment) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.vertical_alignment = vertical_alignment;
     }
 
     pub fn set_text_overflow(&mut self, row: usize, col: usize, text_overflow: TextOverflow) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.text_overflow = text_overflow;
     }
 
     pub fn set_number_format(&mut self, row: usize, col: usize, number_format: NumberFormat) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.number_format = number_format;
     }
 
@@ -1123,7 +1123,7 @@ impl Sheet {
     }
 
     pub fn set_font_family(&mut self, row: usize, col: usize, font_family: Option<String>) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.font_family = font_family;
     }
 
@@ -1134,7 +1134,7 @@ impl Sheet {
     }
 
     pub fn set_background_color(&mut self, row: usize, col: usize, color: Option<[u8; 4]>) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.background_color = color;
     }
 
@@ -1145,17 +1145,17 @@ impl Sheet {
     }
 
     pub fn set_font_size(&mut self, row: usize, col: usize, size: Option<f32>) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.font_size = size;
     }
 
     pub fn set_font_color(&mut self, row: usize, col: usize, color: Option<[u8; 4]>) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.font_color = color;
     }
 
     pub fn set_cell_style(&mut self, row: usize, col: usize, style: CellStyle) {
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.cell_style = style;
     }
 
@@ -1172,7 +1172,7 @@ impl Sheet {
         if !self.has_any_borders && (top.is_set() || right.is_set() || bottom.is_set() || left.is_set()) {
             self.has_any_borders = true;
         }
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.border_top = top;
         cell.format.border_right = right;
         cell.format.border_bottom = bottom;
@@ -1182,28 +1182,28 @@ impl Sheet {
     /// Set the top border on a cell
     pub fn set_border_top(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.border_top = border;
     }
 
     /// Set the right border on a cell
     pub fn set_border_right(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.border_right = border;
     }
 
     /// Set the bottom border on a cell
     pub fn set_border_bottom(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.border_bottom = border;
     }
 
     /// Set the left border on a cell
     pub fn set_border_left(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cells.entry((row, col)).or_insert_with(Cell::new);
+        let cell = self.cells.entry((row, col)).or_default();
         cell.format.border_left = border;
     }
 

@@ -390,7 +390,7 @@ pub fn write_transactions_csv(
         .map_err(|e| format!("CSV write error: {e}"))?;
 
     for tx in &sorted {
-        csv.write_record(&[
+        csv.write_record([
             &tx.source,
             &tx.source_account,
             &tx.source_id,

@@ -91,11 +91,10 @@ impl ConnectionSubscriptions {
     pub fn subscribe(&mut self, topics: &[String]) -> Vec<String> {
         let mut subscribed = Vec::new();
         for topic in topics {
-            if VALID_TOPICS.contains(&topic.as_str()) {
-                if self.topics.insert(topic.clone()) {
+            if VALID_TOPICS.contains(&topic.as_str())
+                && self.topics.insert(topic.clone()) {
                     subscribed.push(topic.clone());
                 }
-            }
         }
         subscribed
     }
@@ -181,7 +180,7 @@ impl SubscriptionFactory {
     /// same channel. In production, we'd use a proper broadcast channel.
     pub fn create_subscription(&self) -> ConnectionSubscriptions {
         // Create a new channel for this connection
-        let (tx, rx) = mpsc::channel();
+        let (_tx, rx) = mpsc::channel();
         // Note: We'd need to register this tx somewhere to receive broadcasts.
         // For now, create independent channel (will be wired in server.rs)
         ConnectionSubscriptions::new(rx)

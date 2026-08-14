@@ -43,7 +43,7 @@ pub fn tokenize_lua(input: &str) -> Vec<(Range<usize>, LuaTokenType)> {
                 chars.next(); // second -
                 // Check for long bracket comment: --[=*[
                 if let Some(level) = try_long_bracket_open(input, chars.peek().map(|&(j, _)| j).unwrap_or(input.len()), input) {
-                    let bracket_start = chars.peek().map(|&(j, _)| j).unwrap_or(input.len());
+                    let _bracket_start = chars.peek().map(|&(j, _)| j).unwrap_or(input.len());
                     // Skip past the opening [=*[
                     let open_len = 2 + level; // [ + N equals + [
                     for _ in 0..open_len {
@@ -208,9 +208,9 @@ fn find_long_bracket_close(input: &str, from: usize, level: usize) -> usize {
     let remaining = &input[from..];
     let mut iter = remaining.char_indices().peekable();
 
-    while let Some((offset, ch)) = iter.next() {
+    for (offset, ch) in iter {
         if ch == ']' {
-            let close_start = from + offset;
+            let _close_start = from + offset;
             // Try to match =*]
             let mut eq_count = 0;
             let mut inner = remaining[offset..].char_indices().skip(1); // skip the first ]
@@ -376,7 +376,7 @@ fn scan_operator(
     input: &str,
     chars: &mut std::iter::Peekable<std::str::CharIndices>,
 ) -> usize {
-    let &(i, ch) = chars.peek().unwrap();
+    let &(_i, ch) = chars.peek().unwrap();
     chars.next();
 
     match ch {

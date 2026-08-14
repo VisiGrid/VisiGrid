@@ -26,8 +26,10 @@ use mlua::{
     VmState,
 };
 
-use super::custom_functions::load_custom_functions;
+// LuaOp is used by the tests below; clippy --fix removed it because the
+// non-test build does not reference it.
 use super::ops::LuaOp;
+use super::custom_functions::load_custom_functions;
 use super::runtime::{
     format_lua_error, lua_value_to_string, prepare_code, LuaEvalResult, DEFAULT_TIMEOUT,
     INSTRUCTION_HOOK_INTERVAL, INSTRUCTION_LIMIT,
@@ -1263,7 +1265,7 @@ fn format_return_values(values: &MultiValue, is_expression: bool) -> Option<Stri
         return None;
     }
     if is_expression || !values.iter().all(|v| matches!(v, Value::Nil)) {
-        let parts: Vec<String> = values.iter().map(|v| lua_value_to_string(v)).collect();
+        let parts: Vec<String> = values.iter().map(lua_value_to_string).collect();
         let joined = parts.join(", ");
         if joined == "nil" && !is_expression {
             None

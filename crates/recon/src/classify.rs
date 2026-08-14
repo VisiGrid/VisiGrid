@@ -342,7 +342,7 @@ pub fn merge_three_way(
 fn is_ambiguous_match(m: &MatchedPair) -> bool {
     m.proof
         .as_ref()
-        .map_or(false, |p| p.ambiguous || p.cap_hit)
+        .is_some_and(|p| p.ambiguous || p.cap_hit)
 }
 
 fn bucket_for_only_role(role: &str) -> ReconBucket {

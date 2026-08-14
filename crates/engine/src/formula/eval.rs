@@ -256,7 +256,9 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
 // =============================================================================
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub enum Value {
+    #[default]
     Empty,
     Number(f64),
     Text(String),
@@ -264,11 +266,6 @@ pub enum Value {
     Error(String),
 }
 
-impl Default for Value {
-    fn default() -> Self {
-        Value::Empty
-    }
-}
 
 impl Value {
     pub fn to_number(&self) -> Result<f64, String> {

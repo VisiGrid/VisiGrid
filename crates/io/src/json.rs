@@ -753,7 +753,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
         validations: sheet
             .validations
             .iter()
-            .map(|(range, rule)| ValidationSpec { range: range.clone(), rule: rule.clone() })
+            .map(|(range, rule)| ValidationSpec { range: *range, rule: rule.clone() })
             .collect(),
         filter: layout.filter.clone(),
         charts: layout.charts.clone(),
@@ -999,7 +999,7 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
         sheet.cond_formats = store;
     }
     for v in &body.validations {
-        sheet.validations.set(v.range.clone(), v.rule.clone());
+        sheet.validations.set(v.range, v.rule.clone());
     }
 
     let layout = SheetLayout {
@@ -1584,7 +1584,7 @@ mod full_json_tests {
             ..SheetLayout::default()
         };
 
-        let json = export_workbook(&wb, &[layout.clone()], 0).unwrap();
+        let json = export_workbook(&wb, std::slice::from_ref(&layout), 0).unwrap();
         assert!(json.contains("cond_formats") && json.contains("validations"));
         assert!(json.contains("\"filter\"") && json.contains("web_only"));
 

@@ -513,7 +513,9 @@ impl CellFormatOverride {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum CellValue {
+    #[default]
     Empty,
     Text(String),
     Number(f64),
@@ -521,11 +523,6 @@ pub enum CellValue {
     Formula { source: String, ast: Option<ParsedExpr> },
 }
 
-impl Default for CellValue {
-    fn default() -> Self {
-        CellValue::Empty
-    }
-}
 
 // Excel serial date epoch: December 30, 1899 (day 0)
 // Excel has a famous bug: it treats 1900 as a leap year (it wasn't).
@@ -824,7 +821,7 @@ fn strip_format_quotes(code: &str) -> String {
         match c {
             '"' => {
                 // Consume everything until closing quote
-                while let Some(inner) = chars.next() {
+                for inner in chars.by_ref() {
                     if inner == '"' {
                         break;
                     }
@@ -928,7 +925,7 @@ fn format_with_thousands(n: f64, decimals: usize) -> String {
     // Insert commas every 3 digits from the right
     let mut with_commas = String::with_capacity(int_str.len() + int_str.len() / 3);
     for (i, ch) in int_str.chars().enumerate() {
-        if i > 0 && (int_str.len() - i) % 3 == 0 {
+        if i > 0 && (int_str.len() - i).is_multiple_of(3) {
             with_commas.push(',');
         }
         with_commas.push(ch);
@@ -953,7 +950,7 @@ pub fn parse_date(input: &str) -> Option<f64> {
     if let Some((year, rest)) = trimmed.split_once('-') {
         if let Some((month, day)) = rest.split_once('-') {
             if let (Ok(y), Ok(m), Ok(d)) = (year.parse::<i32>(), month.parse::<u32>(), day.parse::<u32>()) {
-                if m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 1900 && y <= 9999 {
+                if (1..=12).contains(&m) && (1..=31).contains(&d) && (1900..=9999).contains(&y) {
                     return Some(date_to_serial(y, m, d));
                 }
             }
@@ -964,7 +961,7 @@ pub fn parse_date(input: &str) -> Option<f64> {
     if let Some((month, rest)) = trimmed.split_once('/') {
         if let Some((day, year)) = rest.split_once('/') {
             if let (Ok(m), Ok(d), Ok(y)) = (month.parse::<u32>(), day.parse::<u32>(), year.parse::<i32>()) {
-                if m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 1900 && y <= 9999 {
+                if (1..=12).contains(&m) && (1..=31).contains(&d) && (1900..=9999).contains(&y) {
                     return Some(date_to_serial(y, m, d));
                 }
             }
@@ -1638,7 +1635,7 @@ mod tests {
         };
         let ovr = CellFormatOverride::default();
         let merged = base.merge_override(&ovr);
-        assert_eq!(merged.bold, true);
+        assert!(merged.bold);
         assert_eq!(merged.font_size, Some(14.0));
         assert_eq!(merged.font_color, Some([255, 0, 0, 255]));
     }
@@ -1657,7 +1654,7 @@ mod tests {
             ..Default::default()
         };
         let merged = base.merge_override(&ovr);
-        assert_eq!(merged.bold, false);
+        assert!(!merged.bold);
         assert_eq!(merged.font_size, Some(18.0));
         assert_eq!(merged.font_color, Some([0, 0, 255, 255]));
     }

@@ -528,7 +528,7 @@ impl LuaRuntime {
                 } else if is_expression || !values.iter().all(|v| matches!(v, Value::Nil)) {
                     // Show non-nil returns, or any return if it was an expression
                     let parts: Vec<String> =
-                        values.iter().map(|v| lua_value_to_string(v)).collect();
+                        values.iter().map(lua_value_to_string).collect();
                     let joined = parts.join(", ");
                     if joined == "nil" && !is_expression {
                         None

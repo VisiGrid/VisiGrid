@@ -49,6 +49,12 @@ fn normalize_newlines_owned(text: String) -> String {
     }
 }
 
+impl Default for TextBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TextBuffer {
     pub fn new() -> Self {
         Self {

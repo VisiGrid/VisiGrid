@@ -122,7 +122,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         }
         "IFS" => {
             // IFS(condition1, value1, [condition2, value2], ...)
-            if args.len() < 2 || args.len() % 2 != 0 {
+            if args.len() < 2 || !args.len().is_multiple_of(2) {
                 return Some(EvalResult::Error("IFS requires pairs of condition, value arguments".to_string()));
             }
             for i in (0..args.len()).step_by(2) {

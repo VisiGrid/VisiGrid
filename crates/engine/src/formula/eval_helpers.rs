@@ -125,7 +125,7 @@ pub fn try_parse_date_string(s: &str) -> Option<f64> {
     // Try ISO format: YYYY-MM-DD or YYYY/MM/DD
     if s.len() >= 8 && s.len() <= 10 {
         // Check for ISO pattern (starts with 4-digit year)
-        if let Some(sep_pos) = s.find(|c| c == '-' || c == '/') {
+        if let Some(sep_pos) = s.find(['-', '/']) {
             if sep_pos == 4 {
                 let sep = s.chars().nth(sep_pos).unwrap();
                 let parts: Vec<&str> = s.split(sep).collect();
@@ -135,7 +135,7 @@ pub fn try_parse_date_string(s: &str) -> Option<f64> {
                         parts[1].parse::<i32>(),
                         parts[2].parse::<i32>(),
                     ) {
-                        if month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 1900 && year <= 9999 {
+                        if (1..=12).contains(&month) && (1..=31).contains(&day) && (1900..=9999).contains(&year) {
                             return Some(date_to_serial(year, month, day));
                         }
                     }
@@ -152,7 +152,7 @@ pub fn try_parse_date_string(s: &str) -> Option<f64> {
                     parts[1].parse::<i32>(),
                     parts[2].parse::<i32>(),
                 ) {
-                    if month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 1900 && year <= 9999 {
+                    if (1..=12).contains(&month) && (1..=31).contains(&day) && (1900..=9999).contains(&year) {
                         return Some(date_to_serial(year, month, day));
                     }
                 }
@@ -360,9 +360,9 @@ pub(crate) fn collect_numbers<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> 
                             }
                         }
                     }
-                    result => match result.to_number() {
-                        Ok(n) => values.push(n),
-                        Err(e) => return Err(e),
+                    result => {
+                        let n = result.to_number()?;
+                        values.push(n)
                     },
                 }
             }

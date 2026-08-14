@@ -237,6 +237,12 @@ enum MemoArg {
     Range(u64),    // blake3 fingerprint
 }
 
+impl Default for MemoCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoCache {
     pub fn new() -> Self {
         Self { cache: HashMap::new() }
@@ -429,11 +435,9 @@ fn setup_formula_env(lua: &Lua, func: &mlua::Function) -> mlua::Result<mlua::Fun
             // Strip math.random and math.randomseed
             if *lib_name == "math" {
                 let filtered = lua.create_table()?;
-                for pair in original.pairs::<String, mlua::Value>() {
-                    if let Ok((key, val)) = pair {
-                        if key != "random" && key != "randomseed" {
-                            filtered.set(key, val)?;
-                        }
+                for (key, val) in original.pairs::<String, mlua::Value>().flatten() {
+                    if key != "random" && key != "randomseed" {
+                        filtered.set(key, val)?;
                     }
                 }
                 let frozen_filtered = freeze_table(lua, &filtered)?;
@@ -507,7 +511,7 @@ fn scrub_lua_runtime_error(err: &mlua::Error, func_name: &str) -> String {
 
     // Extract just the message part (after last colon in first line)
     let first_line = raw.lines().next().unwrap_or(&raw);
-    let core_msg = first_line.rsplitn(2, ": ").next().unwrap_or(first_line).trim();
+    let core_msg = first_line.rsplit(": ").next().unwrap_or(first_line).trim();
 
     let msg = format!("{}: {}", func_name, core_msg);
     if msg.len() > 100 {

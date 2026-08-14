@@ -191,7 +191,7 @@ mod tests {
             Expr::Function { name, args } => {
                 Expr::Function {
                     name: name.clone(),
-                    args: args.iter().map(|a| bind_simple(a)).collect(),
+                    args: args.iter().map(bind_simple).collect(),
                 }
             }
             Expr::BinaryOp { op, left, right } => {

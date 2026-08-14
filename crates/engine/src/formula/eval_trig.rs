@@ -114,7 +114,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("ASIN requires exactly one argument".to_string()));
             }
             match evaluate(&args[0], lookup).to_number() {
-                Ok(n) if n < -1.0 || n > 1.0 => EvalResult::Error("#NUM!".to_string()),
+                Ok(n) if !(-1.0..=1.0).contains(&n) => EvalResult::Error("#NUM!".to_string()),
                 Ok(n) => EvalResult::Number(n.asin()),
                 Err(e) => EvalResult::Error(e),
             }
@@ -124,7 +124,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("ACOS requires exactly one argument".to_string()));
             }
             match evaluate(&args[0], lookup).to_number() {
-                Ok(n) if n < -1.0 || n > 1.0 => EvalResult::Error("#NUM!".to_string()),
+                Ok(n) if !(-1.0..=1.0).contains(&n) => EvalResult::Error("#NUM!".to_string()),
                 Ok(n) => EvalResult::Number(n.acos()),
                 Err(e) => EvalResult::Error(e),
             }

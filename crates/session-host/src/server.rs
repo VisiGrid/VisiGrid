@@ -12,13 +12,12 @@ use std::time::{Duration, Instant};
 
 use crate::bridge::{
     SessionBridgeHandle, ApplyOpsRequest, InspectRequest,
-    SubscribeRequest, UnsubscribeRequest,
 };
 use crate::discovery::DiscoveryManager;
-use crate::events::{BroadcastEvent, ConnectionSubscriptions, TOPIC_CELLS};
+use crate::events::{BroadcastEvent, ConnectionSubscriptions};
 use visigrid_protocol::*;
 use crate::wire_ext::{CellRef, ProtocolError, MAX_MESSAGE_SIZE};
-use crate::rate_limiter::{RateLimiter, RateLimiterConfig, RateLimitedError};
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 
 /// Server operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

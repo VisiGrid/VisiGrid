@@ -472,7 +472,7 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
     {
         let mut guard = wb.batch_guard();
 
-        let mut push_patch = |acc: &mut HashMap<usize, (Vec<FormatPatch>, HashMap<(usize, usize), usize>)>,
+        let push_patch = |acc: &mut HashMap<usize, (Vec<FormatPatch>, HashMap<(usize, usize), usize>)>,
                               sheet_idx: usize,
                               patch: FormatPatch| {
             let (patches, index) = acc.entry(sheet_idx).or_default();

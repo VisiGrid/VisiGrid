@@ -403,7 +403,7 @@ impl UserData for SheetUserData {
         // ====================================================================
         methods.add_method("get_value", |lua, this, (row, col): (usize, usize)| {
             let mut sink = this.sink.borrow_mut();
-            let val = sink.get_value(row, col).map_err(|e| mlua::Error::RuntimeError(e))?;
+            let val = sink.get_value(row, col).map_err(mlua::Error::RuntimeError)?;
             cell_value_to_lua(lua, val)
         });
 
@@ -413,7 +413,7 @@ impl UserData for SheetUserData {
         methods.add_method("set_value", |_, this, (row, col, val): (usize, usize, Value)| {
             let value = lua_to_cell_value(val);
             this.sink.borrow_mut().set_value(row, col, value)
-                .map_err(|e| mlua::Error::RuntimeError(e))
+                .map_err(mlua::Error::RuntimeError)
         });
 
         // ====================================================================
@@ -421,7 +421,7 @@ impl UserData for SheetUserData {
         // ====================================================================
         methods.add_method("get_formula", |_, this, (row, col): (usize, usize)| {
             let mut sink = this.sink.borrow_mut();
-            sink.get_formula(row, col).map_err(|e| mlua::Error::RuntimeError(e))
+            sink.get_formula(row, col).map_err(mlua::Error::RuntimeError)
         });
 
         // ====================================================================
@@ -429,7 +429,7 @@ impl UserData for SheetUserData {
         // ====================================================================
         methods.add_method("set_formula", |_, this, (row, col, formula): (usize, usize, String)| {
             this.sink.borrow_mut().set_formula(row, col, formula)
-                .map_err(|e| mlua::Error::RuntimeError(e))
+                .map_err(mlua::Error::RuntimeError)
         });
 
         // ====================================================================
@@ -438,7 +438,7 @@ impl UserData for SheetUserData {
         methods.add_method("get_a1", |lua, this, a1: String| {
             if let Some((row, col)) = parse_a1(&a1) {
                 let mut sink = this.sink.borrow_mut();
-                let val = sink.get_value(row, col).map_err(|e| mlua::Error::RuntimeError(e))?;
+                let val = sink.get_value(row, col).map_err(mlua::Error::RuntimeError)?;
                 cell_value_to_lua(lua, val)
             } else {
                 Ok(Value::Nil)
@@ -452,7 +452,7 @@ impl UserData for SheetUserData {
             if let Some((row, col)) = parse_a1(&a1) {
                 let value = lua_to_cell_value(val);
                 this.sink.borrow_mut().set_value(row, col, value)
-                    .map_err(|e| mlua::Error::RuntimeError(e))?;
+                    .map_err(mlua::Error::RuntimeError)?;
             }
             Ok(())
         });
@@ -463,7 +463,7 @@ impl UserData for SheetUserData {
         methods.add_method("get", |lua, this, a1: String| {
             if let Some((row, col)) = parse_a1(&a1) {
                 let mut sink = this.sink.borrow_mut();
-                let val = sink.get_value(row, col).map_err(|e| mlua::Error::RuntimeError(e))?;
+                let val = sink.get_value(row, col).map_err(mlua::Error::RuntimeError)?;
                 cell_value_to_lua(lua, val)
             } else {
                 Ok(Value::Nil)
@@ -477,7 +477,7 @@ impl UserData for SheetUserData {
             if let Some((row, col)) = parse_a1(&a1) {
                 let value = lua_to_cell_value(val);
                 this.sink.borrow_mut().set_value(row, col, value)
-                    .map_err(|e| mlua::Error::RuntimeError(e))?;
+                    .map_err(mlua::Error::RuntimeError)?;
             }
             Ok(())
         });
@@ -486,14 +486,14 @@ impl UserData for SheetUserData {
         // rows() -> number of rows with data
         // ====================================================================
         methods.add_method("rows", |_, this, ()| {
-            this.sink.borrow().rows().map_err(|e| mlua::Error::RuntimeError(e))
+            this.sink.borrow().rows().map_err(mlua::Error::RuntimeError)
         });
 
         // ====================================================================
         // cols() -> number of columns with data
         // ====================================================================
         methods.add_method("cols", |_, this, ()| {
-            this.sink.borrow().cols().map_err(|e| mlua::Error::RuntimeError(e))
+            this.sink.borrow().cols().map_err(mlua::Error::RuntimeError)
         });
 
         // ====================================================================
@@ -501,7 +501,7 @@ impl UserData for SheetUserData {
         // ====================================================================
         methods.add_method("selection", |lua, this, ()| {
             let sink = this.sink.borrow();
-            let sel = sink.selection().map_err(|e| mlua::Error::RuntimeError(e))?;
+            let sel = sink.selection().map_err(mlua::Error::RuntimeError)?;
 
             // Return as Lua table with named fields (1-indexed for Lua)
             let table = lua.create_table()?;
@@ -554,7 +554,7 @@ impl UserData for SheetUserData {
                 .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
             let style = parse_style_arg(style_val)?;
             this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, style)
-                .map_err(|e| mlua::Error::RuntimeError(e))
+                .map_err(mlua::Error::RuntimeError)
         });
 
         // ====================================================================
@@ -564,49 +564,49 @@ impl UserData for SheetUserData {
             let ((r1, c1), (r2, c2)) = parse_range(&range_str)
                 .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
             this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 1)
-                .map_err(|e| mlua::Error::RuntimeError(e))
+                .map_err(mlua::Error::RuntimeError)
         });
 
         methods.add_method("warning", |_, this, range_str: String| {
             let ((r1, c1), (r2, c2)) = parse_range(&range_str)
                 .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
             this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 2)
-                .map_err(|e| mlua::Error::RuntimeError(e))
+                .map_err(mlua::Error::RuntimeError)
         });
 
         methods.add_method("success", |_, this, range_str: String| {
             let ((r1, c1), (r2, c2)) = parse_range(&range_str)
                 .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
             this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 3)
-                .map_err(|e| mlua::Error::RuntimeError(e))
+                .map_err(mlua::Error::RuntimeError)
         });
 
         methods.add_method("input", |_, this, range_str: String| {
             let ((r1, c1), (r2, c2)) = parse_range(&range_str)
                 .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
             this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 4)
-                .map_err(|e| mlua::Error::RuntimeError(e))
+                .map_err(mlua::Error::RuntimeError)
         });
 
         methods.add_method("total", |_, this, range_str: String| {
             let ((r1, c1), (r2, c2)) = parse_range(&range_str)
                 .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
             this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 5)
-                .map_err(|e| mlua::Error::RuntimeError(e))
+                .map_err(mlua::Error::RuntimeError)
         });
 
         methods.add_method("note", |_, this, range_str: String| {
             let ((r1, c1), (r2, c2)) = parse_range(&range_str)
                 .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
             this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 6)
-                .map_err(|e| mlua::Error::RuntimeError(e))
+                .map_err(mlua::Error::RuntimeError)
         });
 
         methods.add_method("clear_style", |_, this, range_str: String| {
             let ((r1, c1), (r2, c2)) = parse_range(&range_str)
                 .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{}'", range_str)))?;
             this.sink.borrow_mut().push_style_op(r1, c1, r2, c2, 0)
-                .map_err(|e| mlua::Error::RuntimeError(e))
+                .map_err(mlua::Error::RuntimeError)
         });
 
         // ====================================================================
@@ -657,7 +657,7 @@ impl UserData for RangeUserData {
                 let inner = lua.create_table()?;
                 for col in this.start_col..=this.end_col {
                     let value = sink.get_value(row, col)
-                        .map_err(|e| mlua::Error::RuntimeError(e))?;
+                        .map_err(mlua::Error::RuntimeError)?;
                     let lua_value = cell_value_to_lua(lua, value)?;
                     // Use 1-indexed within the range (Lua convention)
                     inner.set(col - this.start_col + 1, lua_value)?;
@@ -684,7 +684,7 @@ impl UserData for RangeUserData {
                             let actual_row = this.start_row + row_idx - 1;
                             let actual_col = this.start_col + col_idx - 1;
                             sink.set_value(actual_row, actual_col, cell_value)
-                                .map_err(|e| mlua::Error::RuntimeError(e))?;
+                                .map_err(mlua::Error::RuntimeError)?;
                         }
                     }
                 }
@@ -775,7 +775,7 @@ fn cell_value_to_lua(lua: &Lua, value: LuaCellValue) -> LuaResult<Value> {
         LuaCellValue::Bool(b) => Ok(Value::Boolean(b)),
         LuaCellValue::Error(e) => {
             // Return error string so Lua can see what went wrong
-            let lua_str = lua.create_string(&format!("#ERROR: {}", e))?;
+            let lua_str = lua.create_string(format!("#ERROR: {}", e))?;
             Ok(Value::String(lua_str))
         }
     }
@@ -884,6 +884,8 @@ fn register_styles_table(lua: &Lua) -> LuaResult<()> {
 // Workbook Adapter (for actual VisiGrid sheets)
 // ============================================================================
 
+// SheetId is used by the tests below; clippy --fix removed it because the
+// non-test build does not reference it.
 use visigrid_engine::sheet::{Sheet, SheetId};
 use visigrid_engine::cell::CellValue;
 

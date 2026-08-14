@@ -54,17 +54,14 @@ pub struct SettlementConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SettlementClock {
+    #[default]
     Processor,
     Ledger,
     Bank,
 }
 
-impl Default for SettlementClock {
-    fn default() -> Self {
-        Self::Processor
-    }
-}
 
 impl SettlementClock {
     /// The role name this clock corresponds to in aggregates.
@@ -222,6 +219,7 @@ fn default_strategy() -> MatchStrategy {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
 pub struct ToleranceConfig {
     #[serde(default)]
     pub amount_cents: i64,
@@ -229,14 +227,6 @@ pub struct ToleranceConfig {
     pub date_window_days: u32,
 }
 
-impl Default for ToleranceConfig {
-    fn default() -> Self {
-        Self {
-            amount_cents: 0,
-            date_window_days: 0,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct OutputConfig {

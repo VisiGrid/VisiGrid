@@ -9,8 +9,10 @@ use std::path::PathBuf;
 /// Theme source - where to load theme from
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
+#[derive(Default)]
 pub enum ThemeSource {
     /// Auto-detect: Use Omarchy if available, otherwise use dark
+    #[default]
     Auto,
     /// Built-in dark theme
     Dark,
@@ -22,11 +24,6 @@ pub enum ThemeSource {
     Custom(String),
 }
 
-impl Default for ThemeSource {
-    fn default() -> Self {
-        ThemeSource::Auto
-    }
-}
 
 /// JSON-serializable theme colors
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -587,7 +587,7 @@ pub fn global_scripts_dir() -> PathBuf {
 /// Build a human-readable diff summary.
 ///
 /// Format: "[Sheet!]Range action (count)", comma-separated, capped at 500 chars.
-pub fn build_diff_summary(lines: &[PatchLine], sheet_names: &[String]) -> Option<String> {
+pub fn build_diff_summary(lines: &[PatchLine], _sheet_names: &[String]) -> Option<String> {
     if lines.is_empty() {
         return None;
     }

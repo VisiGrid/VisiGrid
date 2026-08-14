@@ -307,11 +307,11 @@ impl DepGraph {
                     let w = frame.neighbours[frame.next_idx];
                     frame.next_idx += 1;
 
-                    if !indices.contains_key(&w) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = indices.entry(w) {
                         // Recurse into w
                         let w_idx = index_counter;
                         index_counter += 1;
-                        indices.insert(w, w_idx);
+                        e.insert(w_idx);
                         lowlinks.insert(w, w_idx);
                         stack.push(w);
                         on_stack.insert(w);
@@ -361,7 +361,7 @@ impl DepGraph {
                             result.extend(scc);
                         } else if scc.len() == 1 {
                             let cell = scc[0];
-                            if self.preds.get(&cell).map_or(false, |p| p.contains(&cell)) {
+                            if self.preds.get(&cell).is_some_and(|p| p.contains(&cell)) {
                                 result.insert(cell);
                             }
                         }
@@ -444,10 +444,10 @@ impl DepGraph {
                     let w = frame.neighbours[frame.next_idx];
                     frame.next_idx += 1;
 
-                    if !indices.contains_key(&w) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = indices.entry(w) {
                         let w_idx = index_counter;
                         index_counter += 1;
-                        indices.insert(w, w_idx);
+                        e.insert(w_idx);
                         lowlinks.insert(w, w_idx);
                         stack.push(w);
                         on_stack.insert(w);
@@ -493,7 +493,7 @@ impl DepGraph {
                         } else {
                             // size == 1: only a cycle if self-loop
                             let cell = scc[0];
-                            self.preds.get(&cell).map_or(false, |p| p.contains(&cell))
+                            self.preds.get(&cell).is_some_and(|p| p.contains(&cell))
                         };
 
                         if is_cycle {
@@ -674,7 +674,7 @@ impl DepGraph {
         for (formula_cell, preds) in &self.preds {
             for pred in preds {
                 assert!(
-                    self.succs.get(pred).map_or(false, |s| s.contains(formula_cell)),
+                    self.succs.get(pred).is_some_and(|s| s.contains(formula_cell)),
                     "Missing succ edge: {:?} should have {:?} in dependents",
                     pred,
                     formula_cell
@@ -686,7 +686,7 @@ impl DepGraph {
         for (cell, dependents) in &self.succs {
             for dep in dependents {
                 assert!(
-                    self.preds.get(dep).map_or(false, |s| s.contains(cell)),
+                    self.preds.get(dep).is_some_and(|s| s.contains(cell)),
                     "Missing pred edge: {:?} should have {:?} in precedents",
                     dep,
                     cell
@@ -1381,7 +1381,7 @@ mod tests {
                 let cell_i = order[i];
                 let cell_j = order[j];
                 assert!(
-                    !graph.preds.get(&cell_i).map_or(false, |p| p.contains(&cell_j)),
+                    !graph.preds.get(&cell_i).is_some_and(|p| p.contains(&cell_j)),
                     "{:?} at position {} depends on {:?} at position {}",
                     cell_i, i, cell_j, j
                 );

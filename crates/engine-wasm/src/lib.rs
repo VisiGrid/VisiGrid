@@ -295,7 +295,7 @@ fn evaluate_extras_core(extras: Vec<ExtrasSheet>) -> ExtrasOutput {
             }
         }
         for entry in &sheet_in.validations {
-            sheet.validations.set(entry.range.clone(), entry.rule.clone());
+            sheet.validations.set(entry.range, entry.rule.clone());
         }
     }
 
@@ -588,7 +588,7 @@ mod tests {
         );
         assert_eq!(out.violations.len(), 1, "exactly the off-list cell violates");
         assert_eq!((out.violations[0].row, out.violations[0].col), (0, 1));
-        assert!(out.violations[0].reason.len() > 0);
+        assert!(!out.violations[0].reason.is_empty());
     }
 
     #[test]

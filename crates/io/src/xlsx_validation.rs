@@ -44,12 +44,11 @@ pub fn rule_to_xlsx(rule: &ValidationRule) -> Option<DataValidation> {
     // VisiGrid: show_dropdown=true means SHOW the dropdown
     // rust_xlsxwriter: show_dropdown(true) sets Excel's showDropDown="1" (hide)
     // So we pass the OPPOSITE of our value
-    if matches!(rule.rule_type, ValidationType::List(_)) {
-        if !rule.show_dropdown {
+    if matches!(rule.rule_type, ValidationType::List(_))
+        && !rule.show_dropdown {
             // VisiGrid wants to hide -> tell rust_xlsxwriter to "show" (which sets Excel's hide flag)
             dv = dv.show_dropdown(true);
         }
-    }
 
     // Input message (if present)
     if let Some(msg) = &rule.input_message {
@@ -110,7 +109,7 @@ fn whole_number_to_xlsx(constraint: &NumericConstraint) -> Option<DataValidation
 
     // Check if any constraint value is a cell reference or formula
     let uses_formula = is_formula_constraint(&constraint.value1)
-        || constraint.value2.as_ref().map_or(false, is_formula_constraint);
+        || constraint.value2.as_ref().is_some_and(is_formula_constraint);
 
     if uses_formula {
         // Use formula-based validation
@@ -137,7 +136,7 @@ fn decimal_to_xlsx(constraint: &NumericConstraint) -> Option<DataValidation> {
 
     // Check if any constraint value is a cell reference or formula
     let uses_formula = is_formula_constraint(&constraint.value1)
-        || constraint.value2.as_ref().map_or(false, is_formula_constraint);
+        || constraint.value2.as_ref().is_some_and(is_formula_constraint);
 
     if uses_formula {
         // Use formula-based validation
@@ -250,9 +249,9 @@ fn constraint_value_to_formula(value: &ConstraintValue) -> Formula {
         ConstraintValue::Number(n) => {
             // Format integers without decimal point
             if n.fract() == 0.0 && n.abs() < 1e15 {
-                Formula::new(&format!("{}", *n as i64))
+                Formula::new(format!("{}", *n as i64))
             } else {
-                Formula::new(&format!("{}", n))
+                Formula::new(format!("{}", n))
             }
         }
         ConstraintValue::CellRef(cell_ref) => {
@@ -712,7 +711,7 @@ fn is_cell_reference(s: &str) -> bool {
 fn parse_sqref(sqref: &str) -> Vec<CellRange> {
     sqref
         .split_whitespace()
-        .filter_map(|part| parse_single_range(part))
+        .filter_map(parse_single_range)
         .collect()
 }
 
@@ -842,7 +841,7 @@ mod tests {
 
         for op in operators {
             let constraint = NumericConstraint {
-                operator: op.clone(),
+                operator: op,
                 value1: ConstraintValue::Number(1.0),
                 value2: if matches!(op, ComparisonOperator::Between | ComparisonOperator::NotBetween) {
                     Some(ConstraintValue::Number(100.0))

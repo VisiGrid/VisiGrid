@@ -191,7 +191,7 @@ impl MutationOp {
                 let escaped = escape_lua_string(value);
                 // Sort cells for determinism
                 let mut sorted_cells = cells.clone();
-                sorted_cells.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+                sorted_cells.sort_by_key(|a| (a.0, a.1));
 
                 let cells_lua: Vec<String> = sorted_cells
                     .iter()

@@ -597,13 +597,12 @@ impl ConsoleState {
         let input = self.input_buffer.consume();
 
         // Add to history if non-empty and different from last entry
-        if !input.trim().is_empty() {
-            if self.history.last().map(|s| s.as_str()) != Some(&input) {
+        if !input.trim().is_empty()
+            && self.history.last().map(|s| s.as_str()) != Some(&input) {
                 self.history.push(input.clone());
                 // Persist immediately (crash-safe)
                 append_history_entry(&input);
             }
-        }
 
         // Reset history browsing
         self.history_index = None;

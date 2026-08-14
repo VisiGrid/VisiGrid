@@ -3415,7 +3415,7 @@ mod tests {
             (1, 45292.25, "6:00 AM"),
             (2, 45292.5, "Noon"),
             (3, 45292.75, "6:00 PM"),
-            (4, 45292.999988425926, "23:59:59 (almost midnight)"),
+            (4, 45_292.999_988_425_92, "23:59:59 (almost midnight)"),
         ];
 
         for (row, serial, _desc) in test_datetimes.iter() {

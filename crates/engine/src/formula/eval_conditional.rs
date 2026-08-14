@@ -252,7 +252,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         }
         "SUMIFS" => {
             // SUMIFS(sum_range, criteria_range1, criteria1, [criteria_range2, criteria2], ...)
-            if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+            if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
                 return Some(EvalResult::Error("SUMIFS requires sum_range and pairs of criteria_range and criteria".to_string()));
             }
 
@@ -315,7 +315,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         }
         "AVERAGEIFS" => {
             // AVERAGEIFS(average_range, criteria_range1, criteria1, [criteria_range2, criteria2], ...)
-            if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+            if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
                 return Some(EvalResult::Error("AVERAGEIFS requires average_range and pairs of criteria_range and criteria".to_string()));
             }
 
@@ -387,7 +387,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         }
         "COUNTIFS" => {
             // COUNTIFS(criteria_range1, criteria1, [criteria_range2, criteria2], ...)
-            if args.len() < 2 || args.len() % 2 != 0 {
+            if args.len() < 2 || !args.len().is_multiple_of(2) {
                 return Some(EvalResult::Error("COUNTIFS requires pairs of criteria_range and criteria".to_string()));
             }
 

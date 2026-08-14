@@ -9,6 +9,8 @@
 //! - Includes retry_after_ms for well-behaved agents
 //! - Clock trait for deterministic testing
 
+// Duration is used by the tests below; clippy --fix removed it because the
+// non-test build does not reference it.
 use std::time::{Duration, Instant};
 
 /// Clock abstraction for testability.
