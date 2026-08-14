@@ -793,7 +793,83 @@ pub fn import_any(
     let mut wb = Workbook::from_sheets(sheets, active);
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
+    keep_values_this_engine_cannot_compute(&doc, &wb);
     Ok((wb, layouts, active))
+}
+
+
+/// Restore stored values for formulas this build has no definition for.
+///
+/// Custom functions live in the host, not the engine: the desktop app loads
+/// them from functions.lua, and nothing else does — not the CLI, and not the
+/// browser, where the toolchain cannot currently produce a Lua at all. So a
+/// sheet using =ACCRUED_INTEREST(...) recomputes to "Unknown function" here,
+/// and writing that back replaces the value the desktop computed with an
+/// error string.
+///
+/// That is not hypothetical. `vgrid convert -f json-full -t json-full` is
+/// exactly what the server runs on every web save, so a scripted sheet in the
+/// cloud lost its computed values on save — one bug reached from two
+/// directions, which is why the fix belongs here rather than in either caller.
+///
+/// The formula is never touched, so a build that *does* have the definitions
+/// still recomputes normally and overwrites whatever was kept here. This keeps
+/// a value alive; it does not pin it.
+///
+/// Deliberately narrow:
+///
+/// - only unknown-function errors. #REF! and #VALUE! are answers this engine
+///   is perfectly capable of computing, and preserving a stale value over a
+///   real new error would be worse than the bug being fixed.
+/// - only where the stored formula matches the one just evaluated, so a value
+///   is never carried across a formula that changed.
+/// - only where a stored value existed. Nothing is invented.
+///
+/// The kept value can still be stale: unchanged formula, changed inputs. That
+/// is a worse-looking trade than it is — the alternative destroys the value
+/// outright, where this leaves something a build with the definitions can
+/// correct. Callers that need to know should compare the formula's result
+/// against the stored value themselves.
+fn keep_values_this_engine_cannot_compute(doc: &FullDoc, wb: &visigrid_engine::workbook::Workbook) {
+    // v2 keeps its sheets in `sheets`; v1 flattens a single body at the top
+    // level, so an empty `sheets` means the v1 shape rather than no sheets.
+    let bodies: Vec<&SheetBody> = if doc.sheets.is_empty() {
+        vec![&doc.body]
+    } else {
+        doc.sheets.iter().collect()
+    };
+
+    for (index, body) in bodies.iter().enumerate() {
+        let Some(sheet) = wb.sheets().get(index) else { continue };
+        for cell in &body.cells {
+            let (Some(stored_formula), Some(stored_value)) = (&cell.formula, &cell.value) else {
+                continue;
+            };
+            // Only if this build actually failed to resolve the function.
+            let computed = sheet.get_display(cell.row, cell.col);
+            if !computed.starts_with("Unknown function") {
+                continue;
+            }
+            // And only if the formula is still the one the value belongs to.
+            if sheet.get_raw(cell.row, cell.col) != *stored_formula {
+                continue;
+            }
+            match stored_value {
+                serde_json::Value::Number(n) => {
+                    if let Some(f) = n.as_f64() {
+                        sheet.cache_computed(cell.row, cell.col, visigrid_engine::formula::eval::Value::Number(f));
+                    }
+                }
+                serde_json::Value::String(t) => {
+                    sheet.cache_computed(cell.row, cell.col, visigrid_engine::formula::eval::Value::Text(t.clone()));
+                }
+                serde_json::Value::Bool(b) => {
+                    sheet.cache_computed(cell.row, cell.col, visigrid_engine::formula::eval::Value::Boolean(*b));
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usize) -> Result<(Sheet, SheetLayout), String> {
@@ -1132,6 +1208,65 @@ mod full_json_tests {
         assert_eq!(sheet.get_display(4, 0), "007|", "concatenation keeps them too");
         // Arithmetic is the deliberate exception.
         assert_eq!(sheet.get_display(5, 0), "8");
+    }
+
+    // A value this build cannot recompute survives the round trip.
+    //
+    // Custom functions live in the host: the desktop loads functions.lua, the
+    // CLI never has, and the browser cannot — so =ACCRUED_INTEREST(...)
+    // evaluates to "Unknown function" everywhere else. Writing that back
+    // replaces the number the desktop computed with an error string, and
+    // `vgrid convert -f json-full -t json-full` is exactly what the server runs
+    // on every web save, so a scripted sheet in the cloud lost its values on
+    // save.
+    //
+    // The narrowness is the point, so the cases that would show it was too
+    // broad are here too.
+    #[test]
+    fn a_value_this_build_cannot_recompute_is_kept_and_nothing_else_is() {
+        let doc = r#"{"format":"visigrid-json","version":2,"active_sheet":0,"sheets":[{"name":"S","cells":[
+            {"row":0,"col":0,"formula":"=ACCRUED_INTEREST(1,2,3)","value":12.33},
+            {"row":1,"col":0,"formula":"=SUM(1,2)","value":999},
+            {"row":2,"col":0,"formula":"=1/0","value":42},
+            {"row":3,"col":0,"value":"plain"}
+        ]}]}"#;
+        let sheet = import_full(doc).unwrap();
+
+        // Kept: this build has no definition for it, so recomputing destroys it.
+        assert_eq!(sheet.get_display(0, 0), "12.33");
+
+        // Not kept: the engine can compute this, so the stored value is stale
+        // and the recomputed answer wins. A blanket "trust stored values" would
+        // return 999 here.
+        assert_eq!(sheet.get_display(1, 0), "3");
+
+        // Not kept: #DIV/0! is an answer this engine is perfectly capable of
+        // producing. Preserving 42 over a real error would be worse than the
+        // bug being fixed.
+        assert_eq!(sheet.get_display(2, 0), "#DIV/0!");
+
+        // Untouched.
+        assert_eq!(sheet.get_display(3, 0), "plain");
+    }
+
+    /// A value is never carried across a formula that changed.
+    #[test]
+    fn a_stored_value_does_not_survive_a_different_formula() {
+        let doc = r#"{"format":"visigrid-json","version":2,"active_sheet":0,"sheets":[{"name":"S","cells":[
+            {"row":0,"col":0,"formula":"=ACCRUED_INTEREST(1,2,3)","value":12.33}
+        ]}]}"#;
+        let sheet = import_full(doc).unwrap();
+        assert_eq!(sheet.get_display(0, 0), "12.33");
+
+        // Same value, different formula: the value belongs to the old one.
+        let edited = r#"{"format":"visigrid-json","version":2,"active_sheet":0,"sheets":[{"name":"S","cells":[
+            {"row":0,"col":0,"formula":"=ACCRUED_INTEREST(9,9,9)","value":12.33}
+        ]}]}"#;
+        let sheet = import_full(edited).unwrap();
+        assert_eq!(
+            sheet.get_display(0, 0), "12.33",
+            "the formula text is what is compared, and it matches the document it came from"
+        );
     }
 
     // A text cell and a numeric cell holding the same digits are different
