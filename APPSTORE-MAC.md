@@ -29,9 +29,9 @@ MAS build behavior (automatic): session server / CLI pairing disabled
 **Subtitle (30 chars):** `The keyboard-first spreadsheet`
 
 **Promotional text:**
-`A real spreadsheet engine, fully local. Command palette, built-in
-terminal, Lua scripting, Excel-grade shortcuts. Buy once — no
-subscription, no account, no cloud.`
+`A real spreadsheet engine, fully local. Command palette, Lua
+scripting, Excel-grade shortcuts. Buy once — no subscription, no
+account, no cloud.`
 
 **Description:**
 ```
