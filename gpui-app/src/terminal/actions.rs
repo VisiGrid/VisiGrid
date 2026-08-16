@@ -40,6 +40,16 @@ impl Spreadsheet {
         use crate::terminal::resolve_workspace_root;
         use alacritty_terminal::event::Event as TermEvent;
 
+        // App Sandbox (Mac App Store build): the shell can't run sandboxed.
+        // Mark the session exited so the panel shows its explanation instead
+        // of spawn/exit looping on every Enter.
+        if std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some() {
+            self.terminal.exited = true;
+            self.terminal.exit_code = None;
+            cx.notify();
+            return;
+        }
+
         // Resolve workspace root and use it as CWD
         let root = resolve_workspace_root(self.current_file.as_deref());
         self.terminal.set_workspace_root(root.clone());

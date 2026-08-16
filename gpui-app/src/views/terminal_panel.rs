@@ -273,9 +273,19 @@ pub fn render_terminal_panel(
             .into_any_element(),
         display_offset)
     } else if exited {
-        let msg = match exit_code {
-            Some(code) => format!("Process exited with code {}. Press Enter to restart.", code),
-            None => "Process exited. Press Enter to restart.".to_string(),
+        // App Sandbox (Mac App Store build): the shell can't run in the
+        // sandbox, so say that instead of an endless exit/restart loop.
+        let msg = if std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some() {
+            "The terminal isn't available in the App Store version. \
+             The free build at visigrid.app includes it."
+                .to_string()
+        } else {
+            match exit_code {
+                Some(code) => {
+                    format!("Process exited with code {}. Press Enter to restart.", code)
+                }
+                None => "Process exited. Press Enter to restart.".to_string(),
+            }
         };
         (div()
             .flex()
