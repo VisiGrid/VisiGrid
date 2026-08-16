@@ -49,7 +49,7 @@ A REAL ENGINE
 
 BUILT LIKE A CODE EDITOR
 • Command palette (⌘K) — every action, fuzzy-searchable
-• Built-in terminal and a Lua console with live sheet access
+• A Lua console with live sheet access — scriptable like an editor
 • Minimap, problems panel, configurable keybindings
 • Excel-grade navigation: ⌘-arrows, ⇧-extension, point mode, AutoSum
 
@@ -84,8 +84,8 @@ inside the app process; it operates only on the open workbook, and the
 app provides no mechanism to download or install code. Try:
 sheet:set("A1", 42).
 
-The built-in terminal panel runs the user's shell inside the app
-sandbox, like other sandboxed developer tools on the store.
+The terminal panel from the open-source build is disabled in this App
+Store build (the panel explains this if opened); no shell is spawned.
 ```
 
 ## Screenshots (Mac sizes: 2880×1800 or 2560×1600, up to 10)
@@ -93,7 +93,7 @@ sandbox, like other sandboxed developer tools on the store.
 1. HERO — light theme, small model, =SUM in the formula bar
 2. VISICALC THEME — green phosphor (the scroll-stopper)
 3. COMMAND PALETTE — ⌘K open over the grid
-4. LUA CONSOLE + TERMINAL — split view of both panels
+4. LUA CONSOLE — script running, cells filled above
 5. 100K ROWS — large file open, minimap visible
 
 ## Questionnaires
