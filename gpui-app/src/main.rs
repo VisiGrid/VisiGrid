@@ -458,8 +458,14 @@ fn main() {
 
     let cli = parse_args();
 
+    // Under the App Sandbox (Mac App Store build), file-open permissions from
+    // the powerbox don't survive relaunch, so restoring the previous session's
+    // files would silently fail. Start fresh until security-scoped bookmarks
+    // are implemented. The env var is set by the sandbox for every process.
+    let sandboxed = std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some();
+
     // Move cli values out for use in closure
-    let no_restore = cli.no_restore;
+    let no_restore = cli.no_restore || sandboxed;
     let cli_files = cli.files;
     let start_session_server = cli.session_server;
 
