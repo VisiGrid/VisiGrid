@@ -244,6 +244,11 @@ if $SIGN; then
     echo ""
     echo -e "${YELLOW}Code signing...${NC}"
 
+    # Strip extended attributes (com.apple.quarantine rides in on
+    # browser-downloaded files like the provisioning profile and is
+    # rejected by App Store validation, error 91109).
+    xattr -cr "$BUNDLE_DIR"
+
     if $APPSTORE; then
         # Sandbox entitlements; App Store signing does not use the
         # hardened-runtime flag (the sandbox is the containment story).
