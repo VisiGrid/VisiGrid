@@ -6,6 +6,14 @@
     <key>com.apple.security.app-sandbox</key>
     <true/>
 
+    <!-- App Store signing requires the identifiers to be signed into the
+         bundle, matching the provisioning profile (Xcode does this
+         implicitly; manual codesign must state them). -->
+    <key>com.apple.application-identifier</key>
+    <string>8KKQG868XP.com.visigrid.mac</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>8KKQG868XP</string>
+
     <!-- Files: whatever the user picks in the native open/save panels
          (powerbox), plus app-scoped bookmarks so session restore and the
          recents list survive relaunch. -->

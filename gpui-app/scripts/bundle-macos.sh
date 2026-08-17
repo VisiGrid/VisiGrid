@@ -186,6 +186,11 @@ grep -q "<string>$VERSION</string>" "$BUNDLE_DIR/Contents/Info.plist" \
 if $APPSTORE; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" \
         "$BUNDLE_DIR/Contents/Info.plist"
+    # Re-uploads of the same marketing version need a distinct build number.
+    if [[ -n "${MAS_BUILD_NUMBER:-}" ]]; then
+        /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $MAS_BUILD_NUMBER" \
+            "$BUNDLE_DIR/Contents/Info.plist"
+    fi
     # MAS requires an app category on the record and in the bundle.
     /usr/libexec/PlistBuddy -c "Add :LSApplicationCategoryType string public.app-category.productivity" \
         "$BUNDLE_DIR/Contents/Info.plist" 2>/dev/null || \
