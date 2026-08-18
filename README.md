@@ -7,7 +7,18 @@
 
 Native, keyboard-first, and ~300ms from launch to first cell. An under-30 MB download in a category where the incumbent install is 50× bigger. For macOS, Windows, and Linux.
 
-Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)).
+**One engine, three ways to run it.** The desktop app, the `vgrid` CLI, and headless mode share the same Rust formula engine, so a formula computes identically in all three. A sheet built by hand can be recalculated, diffed, and verified in CI with no spreadsheet application anywhere in the pipeline.
+
+**Deterministic by design.** Same inputs, same outputs, every time — and you can assert on it rather than trust it:
+
+```bash
+vgrid sheet fingerprint model.sheet --json
+# → {"fingerprint":"v1:42:abc123...","ops":42}
+
+vgrid sheet verify model.sheet --fingerprint v1:42:abc123...
+```
+
+132 built-in functions. Local-only files, no accounts, no cloud. Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)). AGPLv3.
 
 ## Why VisiGrid
 
@@ -42,7 +53,7 @@ VisiGrid was influenced by keyboard-first environments such as [Omarchy](https:/
 - Conditional formatting as typed rules with live grid preview and match counts
 - Multi-select editing across non-adjacent cells
 - Format Painter (single-shot and locked mode)
-- 120+ formula functions with autocomplete
+- 132 formula functions with autocomplete
 - Instant startup and smooth scrolling
 - 5 built-in themes including System (follows OS dark/light)
 
@@ -352,7 +363,11 @@ rails runner 'Ledger.export_csv' | vgrid diff - expected.csv --key id --quiet
 vgrid replay audit-trail.lua --verify --quiet
 ```
 
-## Known Limitations (v0.12)
+## Known Limitations
+
+> **Stale.** These were written for v0.12 and have not been re-checked against
+> v0.28.1. Several may already be fixed — `vgrid convert -t xlsx` gained full
+> multi-sheet fidelity in the 0.13 CLI convergence, for one.
 
 - **Conditional formatting** is new in 0.12: rules are add/clear via the typed dialog; a full rules-management panel (edit/reorder existing rules) is in progress
 - **Replay**: layout operations (sort, column widths, merge) are hashed for fingerprint but not applied to workbook data
