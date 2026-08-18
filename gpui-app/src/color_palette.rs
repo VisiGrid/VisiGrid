@@ -131,6 +131,11 @@ pub fn shade(color: [u8; 4], factor: f32) -> [u8; 4] {
 /// Row 5: 50% shade (darkest)
 ///
 /// Returns 60 colors in row-major order: grid[row * 10 + col]
+// `0 * 10 + col` trips clippy::erasing_op, which is deny-by-default. It is
+// written that way on purpose: all six rows share the documented
+// `grid[row * 10 + col]` shape, and collapsing the first to `col` would break
+// the column of literals that makes the mapping checkable by eye.
+#[allow(clippy::erasing_op)]
 pub fn theme_grid() -> [[u8; 4]; 60] {
     let mut grid = [[0u8; 4]; 60];
     for col in 0..10 {

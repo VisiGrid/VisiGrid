@@ -1135,6 +1135,10 @@ mod tests {
     // ========================================================================
 
     #[test]
+    // 3.14 and -2.718 here are arbitrary decimals for a number-parsing test,
+    // not approximations of PI or E. `clippy::approx_constant` is deny-by-default,
+    // so without this a cold `cargo clippy --all-targets` fails rather than warns.
+    #[allow(clippy::approx_constant)]
     fn test_parse_numeric_input_basic() {
         // Basic parsing
         assert_eq!(parse_numeric_input("5", true).unwrap(), 5.0);

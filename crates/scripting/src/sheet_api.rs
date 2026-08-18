@@ -1066,6 +1066,10 @@ mod tests {
     }
 
     #[test]
+    // 3.14 is an arbitrary decimal for a value-conversion test, not an
+    // approximation of PI. `clippy::approx_constant` is deny-by-default, so
+    // without this a cold `cargo clippy --all-targets` errors rather than warns.
+    #[allow(clippy::approx_constant)]
     fn test_lua_to_cell_value() {
         assert!(matches!(lua_to_cell_value(Value::Nil), LuaCellValue::Nil));
         assert!(matches!(lua_to_cell_value(Value::Boolean(true)), LuaCellValue::Bool(true)));

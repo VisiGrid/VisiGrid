@@ -1307,6 +1307,10 @@ mod tests {
     }
 
     #[test]
+    // 3.14 and -2.718 here are arbitrary decimals for a number-parsing test,
+    // not approximations of PI or E. `clippy::approx_constant` is deny-by-default,
+    // so without this a cold `cargo clippy --all-targets` fails rather than warns.
+    #[allow(clippy::approx_constant)]
     fn test_gui_cli_numeric_value_parity() {
         // The GUI converts Lua numbers via lua_cell_value_to_string:
         //   integer (fract==0, abs<1e15): format!("{:.0}", n) → "42"

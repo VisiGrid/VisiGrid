@@ -2036,6 +2036,10 @@ mod tests {
     }
 
     #[test]
+    // 3.14 and -2.718 here are arbitrary decimals for a number-parsing test,
+    // not approximations of PI or E. `clippy::approx_constant` is deny-by-default,
+    // so without this a cold `cargo clippy --all-targets` fails rather than warns.
+    #[allow(clippy::approx_constant)]
     fn test_try_parse_number() {
         // Basic thousands
         assert_eq!(try_parse_number("1,234"), Some(1234.0));

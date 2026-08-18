@@ -4530,6 +4530,10 @@ mod paste_values_tests {
     }
 
     #[test]
+    // -3.14 is an arbitrary decimal for a parsing test, not an approximation of
+    // PI. `clippy::approx_constant` is deny-by-default, so without this a cold
+    // `cargo clippy --all-targets` errors rather than warns.
+    #[allow(clippy::approx_constant)]
     fn test_parse_external_value_number() {
         // Regular numbers
         assert!(matches!(Spreadsheet::parse_external_value("42"), Value::Number(n) if n == 42.0));
@@ -4569,6 +4573,10 @@ mod paste_values_tests {
     // =========================================================================
 
     #[test]
+    // 3.14159 is an arbitrary decimal for a formatting test, not an
+    // approximation of PI. `clippy::approx_constant` is deny-by-default, so
+    // without this a cold `cargo clippy --all-targets` errors rather than warns.
+    #[allow(clippy::approx_constant)]
     fn test_value_to_canonical_string_number() {
         // Integers should not have decimal places
         assert_eq!(Spreadsheet::value_to_canonical_string(&Value::Number(42.0)), "42");

@@ -54,8 +54,16 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
-      # Warnings only. A first contribution failing on a lint the project has
-      # hundreds of already would be a poor welcome, and the existing warnings
-      # are not this PR's fault.
+      # A first contribution should not fail on a lint the project has hundreds
+      # of already, and it will not: clippy exits 0 when it only has warnings.
+      # So `|| true` never protected anyone from the backlog — its only effect
+      # was hiding clippy's deny-by-default lints, which are the correctness
+      # class, and it did. `approx_constant` and `erasing_op` were failing this
+      # step while it reported success, because a cold run dies before
+      # gpui-app and a warm one never rechecks it.
+      #
+      # Without the `|| true` this fails on deny-by-default lints and real
+      # compile errors, and still never on the ~590 warnings. Verified: a cold
+      # `cargo clippy --workspace --all-targets` in a clean target dir exits 0.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets || true
+        run: cargo clippy --workspace --all-targets
