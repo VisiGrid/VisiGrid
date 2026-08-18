@@ -1131,101 +1131,35 @@ impl Spreadsheet {
                     }
                     self.status_message = Some(format!("Redo: {}", description));
                 }
-                UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
-                    // Re-insert the rows
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.insert_rows(at_row, count);
-                        }
-                    });
-                    // Shift row heights down (per-sheet)
-                    let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
-                    let heights_to_shift: Vec<_> = sheet_heights
-                        .iter()
-                        .filter(|(r, _)| **r >= at_row)
-                        .map(|(r, h)| (*r, *h))
-                        .collect();
-                    for (r, _) in &heights_to_shift {
-                        sheet_heights.remove(r);
-                    }
-                    for (r, h) in heights_to_shift {
-                        if r + count < NUM_ROWS {
-                            sheet_heights.insert(r + count, h);
-                        }
-                    }
-                    self.bump_cells_rev();
-                    self.status_message = Some(format!("Redo: insert {} row(s)", count));
-                }
-                UndoAction::RowsDeleted { sheet_index, at_row, count, .. } => {
-                    // Re-delete the rows
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.delete_rows(at_row, count);
-                        }
-                    });
-                    // Shift row heights up (per-sheet)
-                    let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
-                    let heights_to_shift: Vec<_> = sheet_heights
-                        .iter()
-                        .filter(|(r, _)| **r >= at_row + count)
-                        .map(|(r, h)| (*r, *h))
-                        .collect();
-                    for r in at_row..NUM_ROWS {
-                        sheet_heights.remove(&r);
-                    }
-                    for (r, h) in heights_to_shift {
-                        sheet_heights.insert(r - count, h);
-                    }
-                    self.bump_cells_rev();
-                    self.status_message = Some(format!("Redo: delete {} row(s)", count));
-                }
-                UndoAction::ColsInserted { sheet_index, at_col, count, formula_rewrites } => {
-                    // Re-insert the columns
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.insert_cols(at_col, count);
-                        }
-                    });
-                    // Shift column widths right (per-sheet)
-                    let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
-                    let widths_to_shift: Vec<_> = sheet_widths
-                        .iter()
-                        .filter(|(c, _)| **c >= at_col)
-                        .map(|(c, w)| (*c, *w))
-                        .collect();
-                    for (c, _) in &widths_to_shift {
-                        sheet_widths.remove(c);
-                    }
-                    for (c, w) in widths_to_shift {
-                        if c + count < NUM_COLS {
-                            sheet_widths.insert(c + count, w);
-                        }
-                    }
-                    self.bump_cells_rev();
-                    self.status_message = Some(format!("Redo: insert {} column(s)", count));
-                }
-                UndoAction::ColsDeleted { sheet_index, at_col, count, .. } => {
-                    // Re-delete the columns
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.delete_cols(at_col, count);
-                        }
-                    });
-                    // Shift column widths left (per-sheet)
-                    let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
-                    let widths_to_shift: Vec<_> = sheet_widths
-                        .iter()
-                        .filter(|(c, _)| **c >= at_col + count)
-                        .map(|(c, w)| (*c, *w))
-                        .collect();
-                    for c in at_col..NUM_COLS {
-                        sheet_widths.remove(&c);
-                    }
-                    for (c, w) in widths_to_shift {
-                        sheet_widths.insert(c - count, w);
-                    }
-                    self.bump_cells_rev();
-                    self.status_message = Some(format!("Redo: delete {} column(s)", count));
+                // These four route through apply_redo_action, which redoes the
+                // edit via Workbook::structural_edit, so formula references,
+                // validations and named ranges are re-adjusted.
+                //
+                // There used to be a second implementation here calling
+                // sheet.insert_rows()/delete_cols() directly. Those shift cells
+                // and leave formula text alone, so redo from the menu, a
+                // keybinding, the palette or the session protocol put the rows
+                // back and left every formula pointing at the wrong cell —
+                // while the same action nested in a Group came out correct,
+                // because Group already delegated here. Two implementations of
+                // one operation is what let them drift; the unused
+                // `formula_rewrites` binding was the only outward sign.
+                action @ (UndoAction::RowsInserted { .. }
+                    | UndoAction::RowsDeleted { .. }
+                    | UndoAction::ColsInserted { .. }
+                    | UndoAction::ColsDeleted { .. }) => {
+                    // Built before the move, and named for the axis rather than
+                    // the variant so a future variant cannot silently borrow
+                    // the wrong wording.
+                    let message = match &action {
+                        UndoAction::RowsInserted { count, .. } => format!("Redo: insert {} row(s)", count),
+                        UndoAction::RowsDeleted { count, .. } => format!("Redo: delete {} row(s)", count),
+                        UndoAction::ColsInserted { count, .. } => format!("Redo: insert {} column(s)", count),
+                        UndoAction::ColsDeleted { count, .. } => format!("Redo: delete {} column(s)", count),
+                        _ => unreachable!("the outer pattern admits only these four"),
+                    };
+                    self.apply_redo_action(action, cx);
+                    self.status_message = Some(message);
                 }
                 UndoAction::ColumnWidthSet { sheet_id, col, new, .. } => {
                     // Redo: apply new width (or remove if resetting to default)

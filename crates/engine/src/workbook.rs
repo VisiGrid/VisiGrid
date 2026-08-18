@@ -2426,6 +2426,45 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
 mod tests {
     use super::*;
 
+    /// Redo of a structural edit has to go through `structural_edit`, never
+    /// `Sheet::insert_rows`. These two halves are the reason, and they are
+    /// asserted together so the contrast cannot rot: the sheet-level call moves
+    /// cells and leaves formula text alone, so a redo built on it puts the rows
+    /// back and leaves every formula pointing at the wrong cell — silently,
+    /// which in a spreadsheet is the worst kind.
+    ///
+    /// This does not exercise `SpreadsheetApp::redo` itself; that needs a gpui
+    /// context and the app has no harness for one. It pins the engine-level
+    /// distinction the fix in `undo_redo.rs` depends on. If `insert_rows` ever
+    /// learns to adjust references, the first half fails and says so, rather
+    /// than leaving a now-pointless indirection in place.
+    #[test]
+    fn only_structural_edit_adjusts_formula_references() {
+        use crate::structural::Axis;
+
+        // A1 holds =A5. Inserting one row above row 5 should make it =A6.
+        let mut sheet_level = Workbook::new();
+        sheet_level.sheet_mut(0).unwrap().set_value(0, 0, "=A5");
+        sheet_level.sheet_mut(0).unwrap().insert_rows(2, 1);
+        assert_eq!(
+            sheet_level.sheets()[0].get_raw(0, 0),
+            "=A5",
+            "Sheet::insert_rows leaves the reference stale — this is why redo \
+             must not use it"
+        );
+
+        let mut workbook_level = Workbook::new();
+        workbook_level.sheet_mut(0).unwrap().set_value(0, 0, "=A5");
+        workbook_level
+            .structural_edit(0, Axis::Row, 2, 1, false)
+            .expect("inserting one row must succeed");
+        assert_eq!(
+            workbook_level.sheets()[0].get_raw(0, 0),
+            "=A6",
+            "structural_edit must adjust the reference"
+        );
+    }
+
     #[test]
     fn structural_edit_keeps_everything_pointing_at_its_content() {
         use crate::structural::Axis;
