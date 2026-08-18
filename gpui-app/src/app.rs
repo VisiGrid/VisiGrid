@@ -3031,7 +3031,13 @@ impl Spreadsheet {
 
     /// Set column width for the current sheet
     pub fn set_col_width(&mut self, col: usize, width: f32) {
-        let width = width.max(20.0).min(500.0); // Clamp between 20-500px
+        // Deliberately not `clamp`. For a NaN input `max(20.0)` yields
+        // 20.0, because f32::max prefers the non-NaN operand, while
+        // `clamp` propagates NaN — and the test below sends NaN down the
+        // `insert` arm rather than `remove`, writing NaN into the size map.
+        // Sizes are persisted with the session, so it would outlive a restart.
+        #[allow(clippy::manual_clamp)]
+        let width = width.max(20.0).min(500.0); // 20-500px
         let sheet_widths = self.col_widths.entry(self.cached_sheet_id).or_insert_with(HashMap::new);
         if (width - CELL_WIDTH).abs() < 1.0 {
             sheet_widths.remove(&col); // Remove if close to default
@@ -3042,7 +3048,13 @@ impl Spreadsheet {
 
     /// Set row height for the current sheet
     pub fn set_row_height(&mut self, row: usize, height: f32) {
-        let height = height.max(12.0).min(200.0); // Clamp between 12-200px
+        // Deliberately not `clamp`. For a NaN input `max(12.0)` yields
+        // 12.0, because f32::max prefers the non-NaN operand, while
+        // `clamp` propagates NaN — and the test below sends NaN down the
+        // `insert` arm rather than `remove`, writing NaN into the size map.
+        // Sizes are persisted with the session, so it would outlive a restart.
+        #[allow(clippy::manual_clamp)]
+        let height = height.max(12.0).min(200.0); // 12-200px
         let sheet_heights = self.row_heights.entry(self.cached_sheet_id).or_insert_with(HashMap::new);
         if (height - CELL_HEIGHT).abs() < 1.0 {
             sheet_heights.remove(&row); // Remove if close to default
@@ -3763,7 +3775,7 @@ impl Spreadsheet {
             return 1;
         }
         let rows = (available / self.metrics.cell_h).floor() as usize;
-        rows.max(1).min(NUM_ROWS)
+        rows.clamp(1, NUM_ROWS)
     }
 
     /// Calculate visible columns based on window width and actual column widths.
@@ -3797,7 +3809,7 @@ impl Spreadsheet {
 
         // Add 1 extra for partially visible columns at the edge
         count = count.saturating_add(1);
-        count.max(1).min(NUM_COLS)
+        count.clamp(1, NUM_COLS)
     }
 
     /// Update window size (called on resize)

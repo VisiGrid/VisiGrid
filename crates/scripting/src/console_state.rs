@@ -357,6 +357,12 @@ impl ConsoleState {
     }
 
     /// Set height from drag resize. Exits maximize mode.
+    ///
+    /// The fold below is deliberately `max().min()` and not `clamp`: a NaN drag
+    /// delta folds to the minimum here, where `clamp` would propagate NaN into
+    /// the panel height. (The attribute sits on the fn because attributes on
+    /// expression statements are still unstable.)
+    #[allow(clippy::manual_clamp)]
     pub fn set_height_from_drag(&mut self, new_height: f32) {
         self.height = new_height.max(MIN_CONSOLE_HEIGHT).min(MAX_CONSOLE_HEIGHT);
         self.is_maximized = false;

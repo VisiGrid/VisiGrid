@@ -901,6 +901,12 @@ impl Spreadsheet {
                 let widths = self.col_widths.entry(sheet_id).or_insert_with(HashMap::new);
                 for (&col, &excel_width) in &layout.col_widths {
                     let px_width = visigrid_io::xlsx::excel_width_to_pixels(excel_width);
+                    // Deliberately not `clamp`. These come from the file:
+                    // `width="NaN"` parses to a real NaN, and `max()` folds it
+                    // to the minimum while `clamp` would propagate it. Harmless
+                    // today only because the `>=` below happens to reject NaN;
+                    // that is a thin reason to depend on, so keep the fold.
+                    #[allow(clippy::manual_clamp)]
                     let clamped = px_width.max(20.0).min(500.0);
                     if (clamped - crate::app::CELL_WIDTH).abs() >= 1.0 {
                         widths.insert(col, clamped);
@@ -913,6 +919,12 @@ impl Spreadsheet {
                 let heights = self.row_heights.entry(sheet_id).or_insert_with(HashMap::new);
                 for (&row, &excel_height) in &layout.row_heights {
                     let px_height = visigrid_io::xlsx::excel_height_to_pixels(excel_height);
+                    // Deliberately not `clamp`. These come from the file:
+                    // `width="NaN"` parses to a real NaN, and `max()` folds it
+                    // to the minimum while `clamp` would propagate it. Harmless
+                    // today only because the `>=` below happens to reject NaN;
+                    // that is a thin reason to depend on, so keep the fold.
+                    #[allow(clippy::manual_clamp)]
                     let clamped = px_height.max(12.0).min(200.0);
                     if (clamped - crate::app::CELL_HEIGHT).abs() >= 1.0 {
                         heights.insert(row, clamped);

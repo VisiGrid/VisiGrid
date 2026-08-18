@@ -2672,6 +2672,30 @@ fn apply_layout(worksheet: &mut Worksheet, layout: &ExportLayout) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+    /// A width attribute is a string in the file, and `"NaN".parse::<f64>()`
+    /// succeeds — so a hand-edited or hostile xlsx can hand us a real NaN, and
+    /// these conversions carry it through unchanged.
+    ///
+    /// Nothing is wrong with that here; it is pinned because the callers in
+    /// gpui-app depend on it. They fold the value with `max(min_px).min(max_px)`
+    /// rather than `clamp`, precisely because `f32::max` prefers the non-NaN
+    /// operand and so turns NaN into the minimum, while `clamp` would propagate
+    /// it into a persisted layout size. If this ever starts returning a finite
+    /// default instead, that fold becomes unnecessary and the `#[allow]`s at
+    /// those call sites should go.
+    #[test]
+    // The fold is the subject of the test, so clippy's suggestion to replace it
+    // with `clamp` would delete what is being asserted.
+    #[allow(clippy::manual_clamp)]
+    fn size_conversions_propagate_nan_so_callers_must_fold_it() {
+        assert!(super::excel_width_to_pixels(f64::NAN).is_nan());
+        assert!(super::excel_height_to_pixels(f64::NAN).is_nan());
+
+        // And the fold the callers rely on does what they need.
+        assert_eq!(f32::NAN.max(20.0).min(500.0), 20.0);
+        assert!(f32::NAN.clamp(20.0, 500.0).is_nan());
+    }
+
     use super::*;
 
     #[test]

@@ -664,7 +664,7 @@ pub fn format_f64_display(n: f64) -> String {
     // Calculate decimal places needed for 15 significant digits
     // For 1234.5, magnitude=3, we want 15-4=11 decimals
     // For 0.001234, magnitude=-3, we want 15-(-2)=17 decimals (but cap at 15)
-    let decimal_places = (14 - magnitude).max(0).min(15) as usize;
+    let decimal_places = (14 - magnitude).clamp(0, 15) as usize;
 
     let formatted = format!("{:.*}", decimal_places, n);
 
