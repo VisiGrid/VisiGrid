@@ -244,7 +244,7 @@ fn arb_contains_dataset(
 
         // 3. Only-left: left key that won't match any right key
         if bases.len() >= 3 {
-            let unique_key = format!("ZZZUNIQUE{}", &bases[2]);
+            let unique_key = format!("ZZZUNIQUE{}", bases[2]);
             let (a, l, q) = next_val(&mut val_idx);
             left.push(make_row(&unique_key, &a, &l, &q));
             // Don't add to right — no right key contains "ZZZUNIQUE..."
@@ -252,7 +252,7 @@ fn arb_contains_dataset(
 
         // Add some extra right-only rows
         for i in 3..bases.len().min(6) {
-            let right_key = format!("RONLY{}", &bases[i]);
+            let right_key = format!("RONLY{}", bases[i]);
             let (a, l, q) = next_val(&mut val_idx);
             right.push(make_row(&right_key, &a, &l, &q));
         }

@@ -63,15 +63,13 @@ fn oauth_header(
         .as_secs()
         .to_string();
 
-    let mut params = vec![
-        ("oauth_consumer_key", consumer_key.to_string()),
+    let mut params = [("oauth_consumer_key", consumer_key.to_string()),
         ("oauth_token", token_id.to_string()),
         ("oauth_nonce", nonce.clone()),
         ("oauth_timestamp", timestamp.clone()),
         ("oauth_signature_method", "HMAC-SHA256".to_string()),
-        ("oauth_version", "1.0".to_string()),
-    ];
-    params.sort_by(|a, b| a.0.cmp(&b.0));
+        ("oauth_version", "1.0".to_string())];
+    params.sort_by(|a, b| a.0.cmp(b.0));
 
     let sorted_str: String = params
         .iter()

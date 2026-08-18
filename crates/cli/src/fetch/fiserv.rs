@@ -705,7 +705,7 @@ fn cmd_fetch_fiserv_settlestat(
                     let effective_date = txn["authdate"]
                         .as_str()
                         .filter(|s| !s.is_empty())
-                        .map(|s| parse_authdate(s))
+                        .map(parse_authdate)
                         .unwrap_or_else(|| current.to_string());
 
                     let posted_date = current.to_string();

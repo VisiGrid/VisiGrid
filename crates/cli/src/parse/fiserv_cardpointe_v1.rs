@@ -208,12 +208,12 @@ fn extract_last_dollar_amount(line: &str, money_re: &Regex) -> Option<i64> {
         let cleaned = if is_paren_negative {
             // ($1,234.56) → -1234.56
             let inner = s.trim_start_matches('(').trim_end_matches(')');
-            let stripped = inner.replace('$', "").replace(',', "");
+            let stripped = inner.replace(['$', ','], "");
             format!("-{}", stripped)
         } else {
             // -$1,234.56 or $1,234.56 → -1234.56 or 1234.56
             let negative = s.starts_with('-');
-            let stripped = s.replace('$', "").replace(',', "").replace('-', "");
+            let stripped = s.replace(['$', ',', '-'], "");
             if negative {
                 format!("-{}", stripped)
             } else {

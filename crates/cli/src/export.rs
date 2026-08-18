@@ -149,7 +149,7 @@ fn cmd_export_truth(
 
     // Compute hashes
     let tx_hash = hash_raw_row(&tx_bytes);
-    let dt_hash = hash_daily_totals(&totals).map_err(|e| CliError::io(e))?;
+    let dt_hash = hash_daily_totals(&totals).map_err(CliError::io)?;
 
     // Extract metadata
     let source_account = transactions.first().map(|t| t.source_account.clone());
@@ -214,7 +214,7 @@ fn export_daily_totals_only(
         CliError::io(format!("write error: {e}"))
     })?;
 
-    let dt_hash = hash_daily_totals(&totals).map_err(|e| CliError::io(e))?;
+    let dt_hash = hash_daily_totals(&totals).map_err(CliError::io)?;
 
     let source_account = totals.first().map(|t| t.source_account.clone());
     let date_range = if !totals.is_empty() {

@@ -129,7 +129,7 @@ pub fn list_sessions() -> std::io::Result<Vec<DiscoveryFile>> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "json") {
+        if path.extension().is_some_and(|ext| ext == "json") {
             if let Ok(contents) = fs::read_to_string(&path) {
                 if let Ok(discovery) = serde_json::from_str::<DiscoveryFile>(&contents) {
                     if is_process_alive(discovery.pid) {

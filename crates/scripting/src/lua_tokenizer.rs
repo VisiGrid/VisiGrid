@@ -206,7 +206,7 @@ fn try_long_bracket_open(input: &str, pos: usize, _src: &str) -> Option<usize> {
 /// Returns byte position after the close bracket.
 fn find_long_bracket_close(input: &str, from: usize, level: usize) -> usize {
     let remaining = &input[from..];
-    let mut iter = remaining.char_indices().peekable();
+    let iter = remaining.char_indices().peekable();
 
     for (offset, ch) in iter {
         if ch == ']' {

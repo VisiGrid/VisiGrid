@@ -91,7 +91,7 @@ fn print_scripts_table(entries: &[ScriptEntry]) {
         return;
     }
 
-    println!("{:<20} {:<12} {:<12} {}", "NAME", "ORIGIN", "CAPS", "HASH");
+    println!("{:<20} {:<12} {:<12} HASH", "NAME", "ORIGIN", "CAPS");
     println!("{}", "-".repeat(72));
 
     for entry in entries {
@@ -240,7 +240,7 @@ pub fn cmd_scripts_run(
 
     let borrowed = sink.borrow();
     let ops = borrowed.ops();
-    let cells_read = borrowed.cells_read;
+    let _cells_read = borrowed.cells_read;
 
     if plan {
         // Dry run: show what would change
@@ -462,8 +462,8 @@ pub fn cmd_runs_list(file: PathBuf, json: bool, limit: usize, offset: usize) -> 
             println!("No records at offset {} (total: {}).", offset, total);
         }
     } else {
-        println!("{:<10} {:<20} {:<8} {:<8} {:<8} {}",
-            "RUN ID", "SCRIPT", "STATUS", "CELLS", "MS", "RAN AT");
+        println!("{:<10} {:<20} {:<8} {:<8} {:<8} RAN AT",
+            "RUN ID", "SCRIPT", "STATUS", "CELLS", "MS");
         println!("{}", "-".repeat(72));
         for r in &records {
             let short_id = if r.run_id.len() > 8 { &r.run_id[..8] } else { &r.run_id };
@@ -489,7 +489,7 @@ pub fn cmd_runs_show(run_id: String, file: PathBuf, json: bool) -> Result<(), Cl
     }
 
     let record = native::load_run_record(&file, &run_id)
-        .map_err(|e| CliError::io(e))?
+        .map_err(CliError::io)?
         .ok_or_else(|| CliError::args(format!("run record not found: '{}'", run_id)))?;
 
     if json {

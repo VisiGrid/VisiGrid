@@ -170,11 +170,10 @@ impl ReplayState {
         let upper = value.to_uppercase();
         for func in NONDETERMINISTIC_FUNCTIONS {
             // Check for function call pattern: FUNC( or FUNC (
-            if upper.contains(&format!("{}(", func)) || upper.contains(&format!("{} (", func)) {
-                if !self.nondeterministic_found.contains(&func.to_string()) {
+            if (upper.contains(&format!("{}(", func)) || upper.contains(&format!("{} (", func)))
+                && !self.nondeterministic_found.contains(&func.to_string()) {
                     self.nondeterministic_found.push(func.to_string());
                 }
-            }
         }
     }
 }
@@ -663,7 +662,7 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
             };
 
             state.workbook.named_ranges_mut().set(named_range)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
             state.hash_operation(&format!("define_name:{}:{}:{}", name, sheet, range));
 
             Ok(())

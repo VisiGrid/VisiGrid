@@ -223,7 +223,7 @@ fn parse_bank_transaction(entity: &serde_json::Value) -> Result<RawXeroTransacti
 
     let date_str = entity["Date"]
         .as_str()
-        .and_then(|s| parse_xero_date(s))
+        .and_then(parse_xero_date)
         .or_else(|| entity["DateString"].as_str().map(|s| s[..10].to_string()))
         .unwrap_or_default();
 
@@ -277,7 +277,7 @@ fn parse_bank_transfer(
 
     let date_str = entity["Date"]
         .as_str()
-        .and_then(|s| parse_xero_date(s))
+        .and_then(parse_xero_date)
         .or_else(|| entity["DateString"].as_str().map(|s| s[..10].to_string()))
         .unwrap_or_default();
 

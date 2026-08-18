@@ -745,7 +745,7 @@ pub fn cmd_fetch_http(
                     hint: None,
                 })?;
                 let new_cursor = json_extract(&response_body, cursor_path)
-                    .map(|v| json_value_to_string(v))
+                    .map(json_value_to_string)
                     .filter(|s| !s.is_empty());
                 match new_cursor {
                     Some(ref nc) if cursor.as_deref() == Some(nc.as_str()) => {
@@ -772,19 +772,17 @@ pub fn cmd_fetch_http(
     }
 
     // Check if we hit the max-pages cap with more data remaining
-    if pagination.is_some() && all_items.len() > 0 {
+    if pagination.is_some() && !all_items.is_empty() {
         let pag = pagination.as_ref().unwrap();
         // If the last page was full-sized and we consumed all allowed pages, warn
-        if all_items.len() % (pag.page_size as usize) == 0
+        if all_items.len().is_multiple_of(pag.page_size as usize)
             && (all_items.len() / pag.page_size as usize) >= page_limit as usize
-        {
-            if !quiet {
+            && !quiet {
                 eprintln!(
                     "Warning: reached --max-pages limit ({}). There may be more data.",
                     page_limit
                 );
             }
-        }
     }
 
     // Drop the last raw response to free memory

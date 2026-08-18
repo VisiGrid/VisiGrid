@@ -2070,7 +2070,7 @@ pub(crate) fn cmd_sign(
         eprintln!(
             "Signed: {} (key {}, blake3 {}...)",
             file_name,
-            &envelope.key_id,
+            envelope.key_id,
             &file_hash[..16],
         );
     }
@@ -2123,7 +2123,7 @@ pub(crate) fn cmd_sign_payload(
         eprintln!(
             "Signed payload: schema={} (key {}, payload_blake3 {}...)",
             schema,
-            &envelope.key_id,
+            envelope.key_id,
             &envelope.payload_blake3[..16],
         );
     }
@@ -2641,19 +2641,19 @@ fn cmd_diff(
             .collect()
     } else {
         // Generate A, B, C, ... headers
-        (0..max_cols).map(|c| col_letter(c)).collect()
+        (0..max_cols).map(col_letter).collect()
     };
 
     // Extract per-side headers (for column validation when real headers exist)
     let left_headers: Vec<String> = if let Some(hr) = hdr_row {
         (0..left_bounds_cols).map(|c| left_sheet.get_display(hr, c)).collect()
     } else {
-        (0..left_bounds_cols).map(|c| col_letter(c)).collect()
+        (0..left_bounds_cols).map(col_letter).collect()
     };
     let right_headers: Vec<String> = if let Some(hr) = hdr_row {
         (0..right_bounds_cols).map(|c| right_sheet.get_display(hr, c)).collect()
     } else {
-        (0..right_bounds_cols).map(|c| col_letter(c)).collect()
+        (0..right_bounds_cols).map(col_letter).collect()
     };
 
     // Resolve key columns (against merged headers — key mismatches are self-correcting
@@ -3188,7 +3188,7 @@ fn format_diff_csv(
     let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
 
     // Header
-    writer.write_record(&[
+    writer.write_record([
         "status", "key", "column", "left_value", "right_value",
         "delta", "within_tolerance", "match_mode", "match_explain",
     ]).map_err(|e| CliError::io(e.to_string()))?;
@@ -3201,7 +3201,7 @@ fn format_diff_csv(
                     Some(e) => format!("{} left={:?} right={:?}", e.mode, e.left_key_raw, e.right_key_raw),
                     None => String::new(),
                 };
-                writer.write_record(&[
+                writer.write_record([
                     row.status.as_str(),
                     &row.key,
                     &d.column,
@@ -3219,7 +3219,7 @@ fn format_diff_csv(
                 Some(e) => format!("{} left={:?} right={:?}", e.mode, e.left_key_raw, e.right_key_raw),
                 None => String::new(),
             };
-            writer.write_record(&[
+            writer.write_record([
                 row.status.as_str(),
                 &row.key,
                 "",
@@ -3239,7 +3239,7 @@ fn format_diff_csv(
 fn write_ambiguous_csv(path: &PathBuf, ambiguous_keys: &[diff::AmbiguousKey]) -> Result<(), CliError> {
     let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
 
-    writer.write_record(&[
+    writer.write_record([
         "left_key", "candidate_count", "candidate_keys",
     ]).map_err(|e| CliError::io(e.to_string()))?;
 
@@ -3247,7 +3247,7 @@ fn write_ambiguous_csv(path: &PathBuf, ambiguous_keys: &[diff::AmbiguousKey]) ->
         let candidate_keys: Vec<&str> = ak.candidates.iter()
             .map(|c| c.right_key_raw.as_str())
             .collect();
-        writer.write_record(&[
+        writer.write_record([
             &ak.key,
             &ak.candidates.len().to_string(),
             &candidate_keys.join("|"),
@@ -3796,8 +3796,8 @@ fn cmd_sessions(json: bool) -> Result<(), CliError> {
         println!("{}", output);
     } else {
         // Table format
-        println!("{:<12} {:>6} {:>8} {:<24} {}",
-            "SESSION", "PORT", "PID", "CREATED", "WORKBOOK");
+        println!("{:<12} {:>6} {:>8} {:<24} WORKBOOK",
+            "SESSION", "PORT", "PID", "CREATED");
         println!("{}", "-".repeat(80));
 
         for s in &sessions {
@@ -4134,7 +4134,7 @@ fn cmd_peek_json(
     if ext == "sheet" {
         let effective_max = if max_rows == 0 && !force { PEEK_FORCE_CAP + 1 } else { max_rows };
         let sheets = tui::data::load_sheet(&file, effective_max, 0)
-            .map_err(|e| CliError::io(e))?;
+            .map_err(CliError::io)?;
         // Select sheet
         let data = if let Some(ref name) = sheet {
             if let Ok(idx) = name.parse::<usize>() {
@@ -4152,7 +4152,7 @@ fn cmd_peek_json(
     if ext == "xlsx" || ext == "ods" {
         let effective_max = if max_rows == 0 && !force { PEEK_FORCE_CAP + 1 } else { max_rows };
         let sheets = tui::data::load_workbook_peek(&file, effective_max, 0, false, force)
-            .map_err(|e| CliError::io(e))?;
+            .map_err(CliError::io)?;
         let data = if let Some(ref name) = sheet {
             if let Ok(idx) = name.parse::<usize>() {
                 sheets.into_iter().nth(idx)
@@ -4181,7 +4181,7 @@ fn cmd_peek_json(
 
     let effective_max = if max_rows == 0 && !force { PEEK_FORCE_CAP + 1 } else { max_rows };
     let data = tui::data::load_csv(&file, delimiter, headers, effective_max, 0)
-        .map_err(|e| CliError::io(e))?;
+        .map_err(CliError::io)?;
 
     if max_rows == 0 && !force && data.num_rows > PEEK_FORCE_CAP {
         return Err(CliError::args(format!(
@@ -4260,7 +4260,7 @@ fn cmd_peek(
     };
 
     let data = tui::data::load_csv(&file, delimiter, headers, effective_max, width_scan_rows)
-        .map_err(|e| CliError::io(e))?;
+        .map_err(CliError::io)?;
 
     if max_rows == 0 && !force && data.num_rows > PEEK_FORCE_CAP {
         return Err(CliError::args(format!(
@@ -4275,7 +4275,7 @@ fn cmd_peek(
     }
 
     if !interactive {
-        return tui::print_plain(&data, 0).map_err(|e| CliError::io(e));
+        return tui::print_plain(&data, 0).map_err(CliError::io);
     }
 
     let file_name = file
@@ -4284,7 +4284,7 @@ fn cmd_peek(
         .unwrap_or("unknown")
         .to_string();
 
-    tui::run(data, file_name).map_err(|e| CliError::io(e))
+    tui::run(data, file_name).map_err(CliError::io)
 }
 
 fn cmd_peek_sheet(
@@ -4304,7 +4304,7 @@ fn cmd_peek_sheet(
     };
 
     let sheets = tui::data::load_sheet(&file, effective_max, width_scan_rows)
-        .map_err(|e| CliError::io(e))?;
+        .map_err(CliError::io)?;
 
     if sheets.is_empty() {
         return Err(CliError::io("workbook has no sheets".to_string()));
@@ -4337,11 +4337,11 @@ fn cmd_peek_sheet(
                     println!();
                 }
                 println!("--- {} ---", sd.name);
-                tui::print_plain(&sd.data, 0).map_err(|e| CliError::io(e))?;
+                tui::print_plain(&sd.data, 0).map_err(CliError::io)?;
             }
             return Ok(());
         }
-        return tui::print_plain(&sheets[initial_sheet].data, 0).map_err(|e| CliError::io(e));
+        return tui::print_plain(&sheets[initial_sheet].data, 0).map_err(CliError::io);
     }
 
     let file_name = file
@@ -4350,7 +4350,7 @@ fn cmd_peek_sheet(
         .unwrap_or("unknown")
         .to_string();
 
-    tui::run_multi(sheets, file_name, initial_sheet).map_err(|e| CliError::io(e))
+    tui::run_multi(sheets, file_name, initial_sheet).map_err(CliError::io)
 }
 
 fn cmd_peek_workbook(
@@ -4375,7 +4375,7 @@ fn cmd_peek_workbook(
     };
 
     let sheets = tui::data::load_workbook_peek(&file, effective_max, width_scan_rows, recompute, force)
-        .map_err(|e| CliError::io(e))?;
+        .map_err(CliError::io)?;
 
     if sheets.is_empty() {
         return Err(CliError::io("workbook has no sheets".to_string()));
@@ -4410,11 +4410,11 @@ fn cmd_peek_workbook(
                     println!();
                 }
                 println!("--- {} ---", sd.name);
-                tui::print_plain(&sd.data, 0).map_err(|e| CliError::io(e))?;
+                tui::print_plain(&sd.data, 0).map_err(CliError::io)?;
             }
             return Ok(());
         }
-        return tui::print_plain(&sheets[initial_sheet].data, 0).map_err(|e| CliError::io(e));
+        return tui::print_plain(&sheets[initial_sheet].data, 0).map_err(CliError::io);
     }
 
     let file_name = file
@@ -4423,7 +4423,7 @@ fn cmd_peek_workbook(
         .unwrap_or("unknown")
         .to_string();
 
-    tui::run_multi(sheets, file_name, initial_sheet).map_err(|e| CliError::io(e))
+    tui::run_multi(sheets, file_name, initial_sheet).map_err(CliError::io)
 }
 
 fn cmd_peek_workbook_shape(sheets: &[tui::data::SheetData], file: &std::path::Path, ext: &str) -> Result<(), CliError> {
@@ -4661,7 +4661,7 @@ fn print_grid_from_cells(
     for row in start_row..=end_row {
         print!("{:>5} ", row + 1); // 1-indexed row numbers
         for col in start_col..=end_col {
-            let value = grid.get(&(row, col)).map(|s| *s).unwrap_or("");
+            let value = grid.get(&(row, col)).copied().unwrap_or("");
             let display = truncate_display(value, col_width);
             print!("{:>width$}", display, width = col_width);
         }
@@ -4949,7 +4949,7 @@ fn cmd_sheet_inspect_range_lightweight(
             } else {
                 // Look up by name via lightweight sheet list
                 let sheets = visigrid_io::native::inspect_sheets_lightweight(file)
-                    .map_err(|e| CliError::io(e))?;
+                    .map_err(CliError::io)?;
                 let lower = arg.to_ascii_lowercase();
                 sheets.iter()
                     .find(|s| s.name.to_ascii_lowercase() == lower)
@@ -5183,17 +5183,17 @@ fn cmd_sheet_inspect(
             let sheet = if let Some(ref d) = delimiter {
                 let delim = parse_delimiter(d)?;
                 visigrid_io::csv::import_with_delimiter(&file, delim)
-                    .map_err(|e| CliError::parse(e))?
+                    .map_err(CliError::parse)?
             } else {
                 visigrid_io::csv::import(&file)
-                    .map_err(|e| CliError::parse(e))?
+                    .map_err(CliError::parse)?
             };
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
             (wb, false, vec![], HashMap::new())
         }
         InspectFormat::Tsv => {
             let sheet = visigrid_io::csv::import_tsv(&file)
-                .map_err(|e| CliError::parse(e))?;
+                .map_err(CliError::parse)?;
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
             (wb, false, vec![], HashMap::new())
         }
@@ -5928,10 +5928,10 @@ fn cmd_sheet_import(
             let sheet = if let Some(ref d) = delimiter {
                 let delim = parse_delimiter(d)?;
                 visigrid_io::csv::import_with_delimiter(&source, delim)
-                    .map_err(|e| CliError::parse(e))?
+                    .map_err(CliError::parse)?
             } else {
                 visigrid_io::csv::import(&source)
-                    .map_err(|e| CliError::parse(e))?
+                    .map_err(CliError::parse)?
             };
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
             (wb, visigrid_io::xlsx::ImportResult::default())
@@ -5939,7 +5939,7 @@ fn cmd_sheet_import(
         InspectFormat::Tsv => {
             format_str = "tsv";
             let sheet = visigrid_io::csv::import_tsv(&source)
-                .map_err(|e| CliError::parse(e))?;
+                .map_err(CliError::parse)?;
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
             (wb, visigrid_io::xlsx::ImportResult::default())
         }

@@ -242,7 +242,7 @@ fn calc_json_boolean_produces_valid_json() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let val = assert_single_json(&stdout);
     assert!(val.is_boolean(), "comparison should produce boolean, got: {}", val);
-    assert_eq!(val.as_bool().unwrap(), true);
+    assert!(val.as_bool().unwrap());
 
     std::fs::remove_file(&csv).ok();
 }

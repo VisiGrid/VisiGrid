@@ -165,7 +165,7 @@ pub fn cmd_publish(
     let byte_size = std::fs::metadata(&file)
         .map_err(|e| CliError { code: EXIT_ERROR, message: e.to_string(), hint: None })?
         .len();
-    let content_hash = hash_file(&file).map_err(|e| hub_error(e))?;
+    let content_hash = hash_file(&file).map_err(hub_error)?;
     if !json_output { eprintln!("{} ({} bytes)", &content_hash[..15], byte_size); }
 
     // Step 2: Find or create dataset
@@ -255,19 +255,19 @@ pub fn cmd_publish(
     };
     let (revision_id, upload_url, upload_headers) = client
         .create_revision(&dataset_id, &content_hash, byte_size, &opts)
-        .map_err(|e| hub_error(e))?;
+        .map_err(hub_error)?;
     if !json_output { eprintln!("#{}", revision_id); }
 
     // Step 4: Upload
     if !json_output { eprint!("Uploading {} bytes... ", byte_size); }
     let data = std::fs::read(&file)
         .map_err(|e| CliError { code: EXIT_ERROR, message: e.to_string(), hint: None })?;
-    client.upload_bytes(&upload_url, data, &upload_headers).map_err(|e| hub_error(e))?;
+    client.upload_bytes(&upload_url, data, &upload_headers).map_err(hub_error)?;
     if !json_output { eprintln!("done"); }
 
     // Step 5: Complete
     if !json_output { eprint!("Finalizing... "); }
-    client.complete_revision(&revision_id, &content_hash).map_err(|e| hub_error(e))?;
+    client.complete_revision(&revision_id, &content_hash).map_err(hub_error)?;
     if !json_output { eprintln!("done"); }
 
     // Step 6: Poll (optional)
@@ -290,7 +290,7 @@ pub fn cmd_publish(
     if !json_output { eprint!("Waiting for import... "); }
     let result = client
         .poll_run(owner, slug, &revision_id, Duration::from_secs(120))
-        .map_err(|e| hub_error(e))?;
+        .map_err(hub_error)?;
     if !json_output { eprintln!("{}", result.status); }
 
     // Step 7: Output results
@@ -643,7 +643,7 @@ pub fn cmd_hub_publish(
     let byte_size = std::fs::metadata(&file)
         .map_err(|e| CliError { code: EXIT_ERROR, message: e.to_string(), hint: None })?
         .len();
-    let content_hash = hash_file(&file).map_err(|e| hub_error(e))?;
+    let content_hash = hash_file(&file).map_err(hub_error)?;
     if !json_output { eprintln!("{} ({} bytes)", &content_hash[..15], byte_size); }
 
     // 13. Resolve dataset by repo
@@ -683,7 +683,7 @@ pub fn cmd_hub_publish(
     let app_base = "https://app.visihub.app";
     let dataset_url = format!("{}/{}/{}", app_base, owner, slug);
 
-    let status = client.get_dataset_status(&dataset_id).map_err(|e| hub_error(e))?;
+    let status = client.get_dataset_status(&dataset_id).map_err(hub_error)?;
     if let Some(ref sm) = status.source_metadata {
         if sm["type"].as_str() == Some("trust_pipeline")
             && sm["fingerprint"].as_str() == Some(&fingerprint)
@@ -727,19 +727,19 @@ pub fn cmd_hub_publish(
     };
     let (revision_id, upload_url, upload_headers) = client
         .create_revision(&dataset_id, &content_hash, byte_size, &opts)
-        .map_err(|e| hub_error(e))?;
+        .map_err(hub_error)?;
     if !json_output { eprintln!("#{}", revision_id); }
 
     // 16. Upload
     if !json_output { eprint!("Uploading {} bytes... ", byte_size); }
     let data = std::fs::read(&file)
         .map_err(|e| CliError { code: EXIT_ERROR, message: e.to_string(), hint: None })?;
-    client.upload_bytes(&upload_url, data, &upload_headers).map_err(|e| hub_error(e))?;
+    client.upload_bytes(&upload_url, data, &upload_headers).map_err(hub_error)?;
     if !json_output { eprintln!("done"); }
 
     // 17. Complete
     if !json_output { eprint!("Finalizing... "); }
-    client.complete_revision(&revision_id, &content_hash).map_err(|e| hub_error(e))?;
+    client.complete_revision(&revision_id, &content_hash).map_err(hub_error)?;
     if !json_output { eprintln!("done"); }
 
     let revision_url = format!("{}/{}/{}/revisions/{}", app_base, owner, slug, revision_id);
@@ -776,7 +776,7 @@ pub fn cmd_hub_publish(
     if !json_output { eprint!("Waiting for processing... "); }
     let result = client
         .poll_run(owner, slug, &revision_id, Duration::from_secs(timeout))
-        .map_err(|e| hub_error(e))?;
+        .map_err(hub_error)?;
     if !json_output { eprintln!("{}", result.status); }
 
     // 20. Output
@@ -870,7 +870,7 @@ pub fn cmd_pipeline_publish(
     let owner = parts[0];
     let slug = parts[1];
 
-    let is_csv = ext == "csv" || ext == "";
+    let is_csv = ext == "csv" || ext.is_empty();
     let is_tsv = ext == "tsv";
     let is_xlsx = ext == "xlsx";
 
@@ -948,7 +948,7 @@ pub fn cmd_pipeline_publish(
         "tsv" => {
             format_str = "tsv";
             let sheet = visigrid_io::csv::import_tsv(&source)
-                .map_err(|e| CliError::parse(e))?;
+                .map_err(CliError::parse)?;
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
             (wb, visigrid_io::xlsx::ImportResult::default())
         }
@@ -957,10 +957,10 @@ pub fn cmd_pipeline_publish(
             let sheet = if let Some(ref d) = delimiter {
                 let delim = util::parse_delimiter(d)?;
                 visigrid_io::csv::import_with_delimiter(&source, delim)
-                    .map_err(|e| CliError::parse(e))?
+                    .map_err(CliError::parse)?
             } else {
                 visigrid_io::csv::import(&source)
-                    .map_err(|e| CliError::parse(e))?
+                    .map_err(CliError::parse)?
             };
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
             (wb, visigrid_io::xlsx::ImportResult::default())
@@ -1272,7 +1272,7 @@ pub fn cmd_pipeline_publish(
     let byte_size = std::fs::metadata(&sheet_path)
         .map_err(|e| CliError { code: EXIT_ERROR, message: e.to_string(), hint: None })?
         .len();
-    let content_hash = hash_file(&sheet_path).map_err(|e| hub_error(e))?;
+    let content_hash = hash_file(&sheet_path).map_err(hub_error)?;
     if !json_output { eprintln!("{} ({} bytes)", &content_hash[..15], byte_size); }
 
     // Resolve dataset
@@ -1312,7 +1312,7 @@ pub fn cmd_pipeline_publish(
     let app_base = "https://app.visihub.app";
     let dataset_url = format!("{}/{}/{}", app_base, owner, slug);
 
-    let status = client.get_dataset_status(&dataset_id).map_err(|e| hub_error(e))?;
+    let status = client.get_dataset_status(&dataset_id).map_err(hub_error)?;
     if let Some(ref sm) = status.source_metadata {
         if sm["type"].as_str() == Some("trust_pipeline")
             && sm["fingerprint"].as_str() == Some(&fingerprint)
@@ -1353,14 +1353,14 @@ pub fn cmd_pipeline_publish(
     };
     let (revision_id, upload_url, upload_headers) = client
         .create_revision(&dataset_id, &content_hash, byte_size, &opts)
-        .map_err(|e| hub_error(e))?;
+        .map_err(hub_error)?;
     if !json_output { eprintln!("#{}", revision_id); }
 
     // Upload
     if !json_output { eprint!("  Uploading {} bytes... ", byte_size); }
     let data = std::fs::read(&sheet_path)
         .map_err(|e| CliError { code: EXIT_ERROR, message: e.to_string(), hint: None })?;
-    client.upload_bytes(&upload_url, data, &upload_headers).map_err(|e| hub_error(e))?;
+    client.upload_bytes(&upload_url, data, &upload_headers).map_err(hub_error)?;
     if !json_output { eprintln!("done"); }
 
     // Clean up temp file after upload
@@ -1368,7 +1368,7 @@ pub fn cmd_pipeline_publish(
 
     // Complete
     if !json_output { eprint!("  Finalizing... "); }
-    client.complete_revision(&revision_id, &content_hash).map_err(|e| hub_error(e))?;
+    client.complete_revision(&revision_id, &content_hash).map_err(hub_error)?;
     if !json_output { eprintln!("done"); }
 
     let revision_url = format!("{}/{}/{}/revisions/{}", app_base, owner, slug, revision_id);
@@ -1402,7 +1402,7 @@ pub fn cmd_pipeline_publish(
     if !json_output { eprint!("  Waiting for processing... "); }
     let result = client
         .poll_run(owner, slug, &revision_id, Duration::from_secs(timeout))
-        .map_err(|e| hub_error(e))?;
+        .map_err(hub_error)?;
     if !json_output { eprintln!("{}", result.status); }
 
     // Output
@@ -1445,12 +1445,12 @@ pub fn cmd_pipeline_publish(
 fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let mut year = 1970u64;
     loop {
-        let dy = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 366 } else { 365 };
+        let dy = if (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400) { 366 } else { 365 };
         if days < dy { break; }
         days -= dy;
         year += 1;
     }
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
     let md: &[u64] = if leap {
         &[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {

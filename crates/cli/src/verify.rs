@@ -686,7 +686,7 @@ fn cmd_verify_proof_envelope(
             checks.push(ProofCheck {
                 name: "signature".to_string(),
                 status: "pass",
-                detail: format!("ed25519 key_id={}", &envelope.key_id),
+                detail: format!("ed25519 key_id={}", envelope.key_id),
             });
         }
         Err(e) => {

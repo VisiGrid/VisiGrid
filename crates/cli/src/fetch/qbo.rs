@@ -634,8 +634,7 @@ impl QboClient {
             .iter()
             .filter(|e| {
                 e["DepositToAccountRef"]["value"]
-                    .as_str()
-                    .map_or(false, |v| v == account_id)
+                    .as_str() == Some(account_id)
             })
             .collect();
         filtered.iter().map(|e| parse_deposit(e)).collect()
@@ -661,8 +660,7 @@ impl QboClient {
             .iter()
             .filter(|e| {
                 e["AccountRef"]["value"]
-                    .as_str()
-                    .map_or(false, |v| v == account_id)
+                    .as_str() == Some(account_id)
             })
             .collect();
         filtered.iter().map(|e| parse_purchase(e)).collect()

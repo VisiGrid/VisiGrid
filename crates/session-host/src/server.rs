@@ -1822,12 +1822,11 @@ mod tests {
             });
             writeln!(stream, "{}", inspect).unwrap();
             response.clear();
-            if reader.read_line(&mut response).is_ok() {
-                if response.contains("rate_limited") {
+            if reader.read_line(&mut response).is_ok()
+                && response.contains("rate_limited") {
                     rate_limited = true;
                     break;
                 }
-            }
         }
 
         assert!(rate_limited, "Rate limiter should have triggered");
@@ -2211,7 +2210,7 @@ mod tests {
 
         // Attempt to open one more - should be refused
         let result = TcpStream::connect(addr);
-        if let Ok(mut stream) = result {
+        if let Ok(stream) = result {
             stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
 
             // Try to read - connection should be immediately closed

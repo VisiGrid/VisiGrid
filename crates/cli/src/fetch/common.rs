@@ -179,7 +179,7 @@ impl FetchClient {
                     }
 
                     // Other 4xx (not 429): fail immediately
-                    if status >= 400 && status < 500 && status != 429 {
+                    if (400..500).contains(&status) && status != 429 {
                         let body: serde_json::Value =
                             resp.json().unwrap_or(serde_json::Value::Null);
                         let msg = (self.error_extractor)(&body, status);
@@ -341,7 +341,7 @@ impl FetchClient {
                         });
                     }
 
-                    if status >= 400 && status < 500 && status != 429 {
+                    if (400..500).contains(&status) && status != 429 {
                         let body: serde_json::Value =
                             resp.json().unwrap_or(serde_json::Value::Null);
                         let msg = (self.error_extractor)(&body, status);

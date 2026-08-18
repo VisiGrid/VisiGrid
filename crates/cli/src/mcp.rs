@@ -101,9 +101,7 @@ impl McpServer {
                 Ok(self.call_tool(name, &args))
             }
             _ => {
-                if id.is_none() {
-                    return None; // unknown notification — ignore per spec
-                }
+                id.as_ref()?;
                 Err((-32601, format!("method not found: {}", method)))
             }
         };

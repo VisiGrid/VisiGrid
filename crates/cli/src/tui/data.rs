@@ -113,7 +113,7 @@ pub fn load_csv(
         first_data_file_row = 2; // header was file row 1, data starts at 2
         data_rows = all_rows;
     } else {
-        col_names = (0..max_cols).map(|i| util::col_to_letter(i)).collect();
+        col_names = (0..max_cols).map(util::col_to_letter).collect();
         first_data_file_row = 1;
         data_rows = all_rows;
     }
@@ -240,7 +240,7 @@ pub fn load_sheet(
         let num_rows = rows.len();
 
         // Generate column names (A, B, C, ...)
-        let col_names: Vec<String> = (0..num_cols).map(|c| util::col_to_letter(c)).collect();
+        let col_names: Vec<String> = (0..num_cols).map(util::col_to_letter).collect();
 
         let col_widths = PeekData::compute_widths(&col_names, &rows, num_cols, width_scan_rows);
 
@@ -373,7 +373,7 @@ pub fn load_workbook_peek(
         }
 
         let num_rows = rows.len();
-        let col_names: Vec<String> = (0..num_cols).map(|c| util::col_to_letter(c)).collect();
+        let col_names: Vec<String> = (0..num_cols).map(util::col_to_letter).collect();
         let col_widths = PeekData::compute_widths(&col_names, &rows, num_cols, width_scan_rows);
 
         let total_rows = if effective_rows < total_rows_in_sheet {
@@ -429,7 +429,7 @@ mod tests {
     fn headers_consumed_file_row_mapping() {
         let f = write_csv("Name,Value\nAlice,100\nBob,200\n");
         let data = load_csv(f.path(), b',', true, 0, 0).unwrap();
-        assert_eq!(data.has_headers, true);
+        assert!(data.has_headers);
         assert_eq!(data.num_rows, 2); // header consumed, 2 data rows
         assert_eq!(data.col_names, vec!["Name", "Value"]);
         assert_eq!(data.first_data_file_row, 2);
@@ -442,7 +442,7 @@ mod tests {
     fn no_headers_file_row_mapping() {
         let f = write_csv("1,2\n3,4\n");
         let data = load_csv(f.path(), b',', false, 0, 0).unwrap();
-        assert_eq!(data.has_headers, false);
+        assert!(!data.has_headers);
         assert_eq!(data.first_data_file_row, 1);
         assert_eq!(data.file_row(0), 1);
         assert_eq!(data.col_names, vec!["A", "B"]);

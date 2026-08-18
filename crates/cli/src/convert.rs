@@ -365,11 +365,11 @@ pub(crate) fn cmd_convert(
             match output {
                 Some(path) => {
                     visigrid_io::xlsx::export(&wb, &path, None)
-                        .map_err(|e| CliError::io(e))?;
+                        .map_err(CliError::io)?;
                 }
                 None => {
                     let (bytes, _) = visigrid_io::xlsx::export_to_buffer(&wb, None)
-                        .map_err(|e| CliError::io(e))?;
+                        .map_err(CliError::io)?;
                     io::stdout()
                         .write_all(&bytes)
                         .map_err(|e| CliError::io(e.to_string()))?;
@@ -388,7 +388,7 @@ pub(crate) fn cmd_convert(
                 sheet.clone()
             };
             visigrid_io::native::save(&out_sheet, &path)
-                .map_err(|e| CliError::io(e))?;
+                .map_err(CliError::io)?;
             return Ok(());
         }
         _ => {}
@@ -496,21 +496,21 @@ pub(crate) fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_
     match format {
         Format::Csv => {
             visigrid_io::csv::import(path)
-                .map_err(|e| CliError::parse(e))
+                .map_err(CliError::parse)
         }
         Format::Tsv => {
             visigrid_io::csv::import_tsv(path)
-                .map_err(|e| CliError::parse(e))
+                .map_err(CliError::parse)
         }
         Format::Xlsx => {
             let (workbook, _stats) = visigrid_io::xlsx::import(path)
-                .map_err(|e| CliError::parse(e))?;
+                .map_err(CliError::parse)?;
             let (_, sheet) = resolve_sheet(&workbook, sheet_arg)?;
             Ok(sheet.clone())
         }
         Format::Sheet => {
             let workbook = visigrid_io::native::load_workbook(path)
-                .map_err(|e| CliError::io(e))?;
+                .map_err(CliError::io)?;
             let (_, sheet) = resolve_sheet(&workbook, sheet_arg)?;
             Ok(sheet.clone())
         }
@@ -518,13 +518,13 @@ pub(crate) fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_
             let content = std::fs::read_to_string(path)
                 .map_err(|e| CliError::io(e.to_string()))?;
             let (workbook, _, active) = visigrid_io::json::import_any(&content).map_err(CliError::io)?;
-            return match sheet_arg {
+            match sheet_arg {
                 Some(_) => {
                     let (_, sheet) = resolve_sheet(&workbook, sheet_arg)?;
                     Ok(sheet.clone())
                 }
                 None => Ok(workbook.sheets()[active].clone()),
-            };
+            }
         }
         Format::Json => {
             let content = std::fs::read_to_string(path)

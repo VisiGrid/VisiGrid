@@ -1752,9 +1752,7 @@ return captured";
 
     #[test]
     fn test_value_truncation() {
-        let code = format!(
-            "local s = string.rep('x', 500)\nreturn s"
-        );
+        let code = "local s = string.rep('x', 500)\nreturn s".to_string();
         let session = spawn_debug_session(config_with_breakpoints(
             &code,
             vec![(CONSOLE_SOURCE, 2)],

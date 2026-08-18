@@ -770,7 +770,7 @@ fn discover_files(
         // Since filter
         if let Some(since) = since_ts {
             match mtime {
-                Some(t) if (t as u64) < since => continue,
+                Some(t) if t < since => continue,
                 None => continue,
                 _ => {}
             }
@@ -779,7 +779,7 @@ fn discover_files(
         // Min-age filter
         match mtime {
             Some(t) => {
-                let age = now.saturating_sub(t as u64);
+                let age = now.saturating_sub(t);
                 if age < min_age {
                     continue;
                 }
@@ -814,7 +814,7 @@ fn discover_files(
             path: full_path,
             filename,
             size,
-            mtime: mtime.map(|t| t as u64),
+            mtime: mtime.map(|t| t),
         });
     }
 
