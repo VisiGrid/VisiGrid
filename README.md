@@ -5,7 +5,7 @@
 
 **The spreadsheet built like a code editor.**
 
-Native, keyboard-first, and ~300ms from launch to first cell. A 16 MB download in a category where the incumbent install is 50× bigger. For macOS, Windows, and Linux.
+Native, keyboard-first, and ~300ms from launch to first cell. An under-30 MB download in a category where the incumbent install is 50× bigger. For macOS, Windows, and Linux.
 
 Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)).
 
