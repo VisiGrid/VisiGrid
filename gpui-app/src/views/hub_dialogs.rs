@@ -573,7 +573,8 @@ pub fn render_publish_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreads
         "publish-confirm-dialog",
         |this, cx| this.hub_cancel_publish_confirm(cx),
         DialogFrame::new(body, panel_bg, panel_border)
-            .width(px(400.0)),
+            .width(px(400.0))
+            .footer(footer),
         cx,
     )
 }
