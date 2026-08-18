@@ -18,7 +18,7 @@ vgrid sheet fingerprint model.sheet --json
 vgrid sheet verify model.sheet --fingerprint v1:42:abc123...
 ```
 
-132 built-in functions. Local-only files, no accounts, no cloud. Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)). AGPLv3.
+123 built-in functions. Local-only files, no accounts, no cloud. Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)). AGPLv3.
 
 ## Why VisiGrid
 
@@ -53,7 +53,7 @@ VisiGrid was influenced by keyboard-first environments such as [Omarchy](https:/
 - Conditional formatting as typed rules with live grid preview and match counts
 - Multi-select editing across non-adjacent cells
 - Format Painter (single-shot and locked mode)
-- 132 formula functions with autocomplete
+- 123 formula functions with autocomplete
 - Instant startup and smooth scrolling
 - 5 built-in themes including System (follows OS dark/light)
 
