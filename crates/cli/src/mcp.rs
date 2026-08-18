@@ -56,6 +56,43 @@ struct McpServer {
     client_name: String,
 }
 
+/// Resolve a structure op's `at` argument to a 0-based index.
+///
+/// Callers pass what the user sees — a 1-based row number, or a column letter —
+/// and the wire is 0-based. A stringified number is accepted on both axes. It
+/// used to work for columns and fail for rows, and since the tool schema
+/// declared no type for `at`, a client sending `"5"` was not ignoring a
+/// contract, it simply could not insert rows. The schema now names the types.
+fn structure_at(args: &Value, is_col: bool) -> Result<usize, String> {
+    let one_based = |v: u64| -> Result<usize, String> {
+        if v == 0 {
+            return Err("rows and columns are numbered from 1".to_string());
+        }
+        Ok((v - 1) as usize)
+    };
+    match args.get("at") {
+        Some(Value::Number(n)) => {
+            let v = n.as_u64().ok_or("`at` must be a positive number")?;
+            one_based(v)
+        }
+        Some(Value::String(s)) => {
+            let s = s.trim();
+            if let Ok(v) = s.parse::<u64>() {
+                one_based(v)
+            } else if is_col {
+                let (_, col) = parse_cell_ref(&format!("{}1", s))
+                    .ok_or(format!("invalid column '{}' — use a letter like 'C' or a number", s))?;
+                Ok(col)
+            } else {
+                Err(format!("`at` must be a row number (got '{}')", s))
+            }
+        }
+        Some(other) => Err(format!("`at` must be a number (got {})", other)),
+        None => Err("missing required argument: at".to_string()),
+    }
+}
+
+
 impl McpServer {
     /// Handle one JSON-RPC line. Returns None for notifications (no reply).
     fn handle_line(&mut self, line: &str) -> Option<Value> {
@@ -395,30 +432,12 @@ impl McpServer {
 
         // `at` arrives as a 1-based row number or a column letter, matching
         // what the user sees; the wire is 0-based.
-        let at = |args: &Value, is_col: bool| -> Result<usize, String> {
-            match args.get("at") {
-                Some(Value::Number(n)) => {
-                    let v = n.as_u64().ok_or("`at` must be a positive number")?;
-                    if v == 0 {
-                        return Err("rows and columns are numbered from 1".to_string());
-                    }
-                    Ok((v - 1) as usize)
-                }
-                Some(Value::String(s)) if is_col => {
-                    let (_, col) = parse_cell_ref(&format!("{}1", s.trim()))
-                        .ok_or(format!("invalid column '{}' — use a letter like 'C' or a number", s))?;
-                    Ok(col)
-                }
-                Some(other) => Err(format!("`at` must be a number (got {})", other)),
-                None => Err("missing required argument: at".to_string()),
-            }
-        };
 
         let op = match kind {
-            "insert_rows" => StructureOp::InsertRows { sheet, at: at(args, false)?, count },
-            "delete_rows" => StructureOp::DeleteRows { sheet, at: at(args, false)?, count },
-            "insert_cols" => StructureOp::InsertCols { sheet, at: at(args, true)?, count },
-            "delete_cols" => StructureOp::DeleteCols { sheet, at: at(args, true)?, count },
+            "insert_rows" => StructureOp::InsertRows { sheet, at: structure_at(args, false)?, count },
+            "delete_rows" => StructureOp::DeleteRows { sheet, at: structure_at(args, false)?, count },
+            "insert_cols" => StructureOp::InsertCols { sheet, at: structure_at(args, true)?, count },
+            "delete_cols" => StructureOp::DeleteCols { sheet, at: structure_at(args, true)?, count },
             "add_sheet" => StructureOp::AddSheet {
                 name: args.get("name").and_then(|v| v.as_str()).map(str::to_string),
             },
@@ -734,7 +753,7 @@ fn tool_definitions() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "at": { "description": "Where to insert: 1-based row number: 5 inserts at row 5" },
+                    "at": { "type": ["integer", "string"], "description": "Where to insert: 1-based row number: 5 inserts at row 5" },
                     "count": { "type": "integer", "description": "How many rows (default 1, max 1000)" },
                     "sheet": { "type": "integer", "description": "0-based sheet index; omit for the active sheet" },
                     "dry_run": { "type": "boolean", "description": "Preview without applying" },
@@ -752,7 +771,7 @@ fn tool_definitions() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "at": { "description": "Where to delete: 1-based row number: 5 inserts at row 5" },
+                    "at": { "type": ["integer", "string"], "description": "Where to delete: 1-based row number: 5 deletes row 5" },
                     "count": { "type": "integer", "description": "How many rows (default 1, max 1000)" },
                     "sheet": { "type": "integer", "description": "0-based sheet index; omit for the active sheet" },
                     "dry_run": { "type": "boolean", "description": "Preview without applying" },
@@ -770,7 +789,7 @@ fn tool_definitions() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "at": { "description": "Where to insert: column letter ('C') or 1-based number" },
+                    "at": { "type": ["integer", "string"], "description": "Where to insert: column letter ('C') or 1-based number" },
                     "count": { "type": "integer", "description": "How many columns (default 1, max 1000)" },
                     "sheet": { "type": "integer", "description": "0-based sheet index; omit for the active sheet" },
                     "dry_run": { "type": "boolean", "description": "Preview without applying" },
@@ -788,7 +807,7 @@ fn tool_definitions() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "at": { "description": "Where to delete: column letter ('C') or 1-based number" },
+                    "at": { "type": ["integer", "string"], "description": "Where to delete: column letter ('C') or 1-based number" },
                     "count": { "type": "integer", "description": "How many columns (default 1, max 1000)" },
                     "sheet": { "type": "integer", "description": "0-based sheet index; omit for the active sheet" },
                     "dry_run": { "type": "boolean", "description": "Preview without applying" },
@@ -836,6 +855,36 @@ fn tool_definitions() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The row/column asymmetry this pins: a stringified number used to work
+    /// for columns and fail for rows, so `insert_rows` was unreachable from any
+    /// client that sends `at` as a string — and the schema declared no type, so
+    /// such a client was not doing anything it had been warned against.
+    #[test]
+    fn structure_at_accepts_a_stringified_number_on_both_axes() {
+        let row_num = serde_json::json!({ "at": 5 });
+        let row_str = serde_json::json!({ "at": "5" });
+        assert_eq!(structure_at(&row_num, false), Ok(4));
+        assert_eq!(structure_at(&row_str, false), Ok(4), "rows must accept \"5\"");
+        assert_eq!(structure_at(&row_num, true), Ok(4));
+        assert_eq!(structure_at(&row_str, true), Ok(4));
+    }
+
+    #[test]
+    fn structure_at_still_takes_column_letters() {
+        let c = serde_json::json!({ "at": "C" });
+        assert_eq!(structure_at(&c, true), Ok(2));
+        // A letter is meaningless for a row, and saying so beats guessing.
+        assert!(structure_at(&c, false).is_err());
+    }
+
+    #[test]
+    fn structure_at_rejects_zero_and_missing() {
+        assert!(structure_at(&serde_json::json!({ "at": 0 }), false).is_err());
+        assert!(structure_at(&serde_json::json!({ "at": "0" }), false).is_err());
+        assert!(structure_at(&serde_json::json!({}), false).is_err());
+        assert!(structure_at(&serde_json::json!({ "at": true }), false).is_err());
+    }
 
     fn server() -> McpServer {
         McpServer { session_pref: None, client_name: "Test Client".to_string() }
