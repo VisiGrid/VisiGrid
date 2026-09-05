@@ -493,14 +493,63 @@ fn cell_save_values(
     }
 }
 
-pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
-    // Delete existing file if present (SQLite will create fresh)
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+/// Sibling temp path for an atomic rewrite of `path` (same directory, so the
+/// final rename never crosses a filesystem).
+fn fresh_temp_path(path: &Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "workbook.sheet".to_string());
+    path.with_file_name(format!(".{}.tmp-{}", name, std::process::id()))
+}
+
+/// Build a fresh SQLite database at `path` atomically.
+///
+/// The database is written to a sibling temp file and renamed over the target
+/// only after it is complete and closed. A crash, kill, or error mid-save
+/// therefore leaves the previous file untouched instead of the 0-byte or
+/// half-written file the old delete-then-rewrite left behind (seen when a
+/// headless session was SIGTERMed during autosave).
+fn write_fresh_db(
+    path: &Path,
+    build: impl FnOnce(&Connection) -> Result<(), String>,
+) -> Result<(), String> {
+    let tmp = fresh_temp_path(path);
+    let _ = std::fs::remove_file(&tmp);
+
+    let result = (|| {
+        let conn = Connection::open(&tmp).map_err(|e| e.to_string())?;
+        build(&conn)?;
+        conn.close().map_err(|(_, e)| e.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+        // Make the rename itself durable, best effort.
+        #[cfg(unix)]
+        if let Some(dir) = path.parent() {
+            let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        let journal = tmp.with_file_name(format!(
+            "{}-journal",
+            tmp.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        ));
+        let _ = std::fs::remove_file(journal);
     }
+    result
+}
 
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
+    write_fresh_db(path, |conn| write_sheet(conn, sheet))
+}
 
+/// Populate a fresh database with a single sheet. See [`save`].
+fn write_sheet(conn: &Connection, sheet: &Sheet) -> Result<(), String> {
     // Create schema
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
@@ -792,13 +841,11 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
 
 /// Save a complete workbook including all sheets and named ranges
 pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
-    // Delete existing file if present (SQLite will create fresh)
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|e| e.to_string())?;
-    }
+    write_fresh_db(path, |conn| write_workbook(conn, workbook))
+}
 
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
-
+/// Populate a fresh database with the workbook. See [`save_workbook`].
+fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
     // Create schema (includes named_ranges table)
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
@@ -948,13 +995,15 @@ pub fn save_workbook_with_metadata(
     metadata: &CellMetadata,
     path: &Path,
 ) -> Result<(), String> {
-    // Delete existing file if present (SQLite will create fresh)
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|e| e.to_string())?;
-    }
+    write_fresh_db(path, |conn| write_workbook_with_metadata(conn, workbook, metadata))
+}
 
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
-
+/// Populate a fresh database with the workbook and its semantic metadata.
+fn write_workbook_with_metadata(
+    conn: &Connection,
+    workbook: &Workbook,
+    metadata: &CellMetadata,
+) -> Result<(), String> {
     // Create schema (includes cell_metadata table)
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
@@ -2299,13 +2348,17 @@ pub fn save_workbook_full(
     run_records: &[RunRecord],
     path: &Path,
 ) -> Result<(), String> {
-    // Delete existing file if present (SQLite will create fresh)
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|e| e.to_string())?;
-    }
+    write_fresh_db(path, |conn| write_workbook_full(conn, workbook, metadata, scripts, run_records))
+}
 
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
-
+/// Populate a fresh database with workbook, metadata, scripts and run records.
+fn write_workbook_full(
+    conn: &Connection,
+    workbook: &Workbook,
+    metadata: &CellMetadata,
+    scripts: &[ScriptMeta],
+    run_records: &[RunRecord],
+) -> Result<(), String> {
     // Create schema (includes scripts + run_records tables)
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
@@ -2757,6 +2810,39 @@ pub fn upgrade_sheet(path: &Path, out_path: Option<&Path>) -> Result<UpgradeResu
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_save_is_atomic_and_keeps_previous_file_on_failure() {
+        let mut workbook = Workbook::new();
+        workbook.active_sheet_mut().set_value(0, 0, "keep");
+
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path().to_path_buf();
+        save_workbook(&workbook, &path).expect("first save");
+        let before = std::fs::read(&path).unwrap();
+        assert!(!before.is_empty());
+
+        // A build that fails must leave the previous file byte-identical and
+        // no temp or journal files behind.
+        let err = write_fresh_db(&path, |_conn| Err("simulated crash".to_string()));
+        assert!(err.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let stem = path.file_name().unwrap().to_string_lossy().into_owned();
+        let leftovers: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(&format!("{}.tmp-", stem)))
+            .collect();
+        assert!(leftovers.is_empty(), "temp leftovers: {:?}", leftovers);
+
+        // A later save still replaces the contents.
+        workbook.active_sheet_mut().set_value(0, 0, "new");
+        save_workbook(&workbook, &path).expect("second save");
+        let loaded = load_workbook(&path).expect("load");
+        assert_eq!(loaded.active_sheet().get_raw(0, 0), "new");
+        assert!(leftovers.is_empty());
+    }
 
     #[test]
     fn test_named_range_persistence_cell() {
