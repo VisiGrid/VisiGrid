@@ -44,7 +44,7 @@ When correctness matters, VisiGrid also makes failure visible:
 
 For advanced workflows, VisiGrid also includes a CLI and headless mode built on the same engine.
 
-VisiGrid was influenced by keyboard-first environments such as [Omarchy](https://omarchy.com) — prioritizing speed, minimal friction, and staying in flow.
+VisiGrid was influenced by keyboard-first environments such as [Omarchy](https://github.com/omacom/omarchy) — prioritizing speed, minimal friction, and staying in flow.
 
 ## Editing and Navigation
 
