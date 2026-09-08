@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# gh here is a mise shim, and mise prints "mise <config> tools: gh@x.y.z" to
+# stdout the first time a shim runs in a process. Every `gh ... | jq` in this
+# script parses that banner as JSON and dies, which is how v0.31.0 stopped
+# at Phase 3 with the tag already pushed. Quiet mode drops the banner.
+export MISE_QUIET=1
+
 VERSION="${1:-}"
 DRY_RUN=false
 [[ "${2:-}" == "--dry-run" ]] && DRY_RUN=true
