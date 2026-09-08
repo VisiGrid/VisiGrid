@@ -341,9 +341,18 @@ jobs:
 
       - name: Install OpenSSL for x86_64 cross-compilation
         run: |
-          # Install x86_64 Homebrew and OpenSSL for cross-compilation
+          # Install x86_64 Homebrew and OpenSSL for cross-compilation.
+          # `brew install` exits 1 when only its post-install hook fails. That
+          # happened on 2026-09-08 (v0.31.0): openssl@3 3.6.4 had no x86_64
+          # bottle, built from source under Rosetta for 20 minutes, installed
+          # completely, and then its cert-rehash hook failed. The build needs
+          # the headers and dylibs, not the hook, so tolerate the exit code and
+          # assert the artefacts we actually link against are present.
           arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/null || true
-          arch -x86_64 /usr/local/bin/brew install openssl@3
+          arch -x86_64 /usr/local/bin/brew install openssl@3 \
+            || echo "brew install exited non-zero; checking for the library anyway"
+          test -f /usr/local/opt/openssl@3/lib/libssl.dylib || { echo "x86_64 OpenSSL library missing"; exit 1; }
+          test -f /usr/local/opt/openssl@3/include/openssl/ssl.h || { echo "x86_64 OpenSSL headers missing"; exit 1; }
 
       - name: Build universal binary
         run: |
