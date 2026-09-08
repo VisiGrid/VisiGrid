@@ -65,6 +65,7 @@ Complete reference for keyboard shortcuts.
 | Shortcut | Action |
 |----------|--------|
 | Ctrl+C | Copy |
+| Alt, H, C, P | Copy selected range as a picture (PNG) |
 | Ctrl+X | Cut |
 | Ctrl+V | Paste |
 
@@ -114,6 +115,7 @@ Complete reference for keyboard shortcuts.
 
 | Shortcut | Action |
 |----------|--------|
+| Alt, W, V, G | Toggle gridlines |
 | Ctrl+Shift+P | Command Palette |
 | Ctrl+P | Fuzzy Finder (cells, ranges, files) |
 | Ctrl+Shift+I | Inspector Panel |

@@ -127,6 +127,9 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &ToggleFormulaView, _, cx| {
             this.toggle_show_formulas(cx);
         }))
+        .on_action(cx.listener(|this, _: &ToggleGridlines, _, cx| {
+            this.toggle_gridlines(cx);
+        }))
         .on_action(cx.listener(|this, _: &ToggleShowZeros, _, cx| {
             this.toggle_show_zeros(cx);
         }))

@@ -16,7 +16,7 @@ use crate::repeat::RepeatAction;
 use crate::search::{SearchEngine, SearchAction, CommandId, CommandSearchProvider, GoToSearchProvider, SearchItem, MenuCategory};
 use crate::settings::{
     user_settings_path, open_settings_file, user_settings, update_user_settings,
-    observe_settings, TipId,
+    observe_settings, SettingsStore, TipId,
 };
 use crate::theme::{Theme, TokenKey, default_theme, get_theme, SYSTEM_THEME_ID, resolve_system_theme_id};
 use crate::views;
@@ -1918,6 +1918,25 @@ impl Spreadsheet {
         let current = self.show_zeros();
         self.doc_settings.display.show_zeros = Setting::Value(!current);
         self.save_doc_settings_if_needed();
+        cx.notify();
+    }
+
+    /// Toggle gridlines using the same persisted user setting as Preferences.
+    pub fn toggle_gridlines(&mut self, cx: &mut Context<Self>) {
+        use crate::settings::Setting;
+        let current = match &user_settings(cx).appearance.show_gridlines {
+            Setting::Value(value) => *value,
+            Setting::Inherit => true,
+        };
+        cx.update_global::<SettingsStore, _>(|store, _| {
+            store.user_settings_mut().appearance.show_gridlines = Setting::Value(!current);
+            store.save();
+        });
+        self.status_message = Some(if current {
+            "Gridlines hidden".to_string()
+        } else {
+            "Gridlines shown".to_string()
+        });
         cx.notify();
     }
 

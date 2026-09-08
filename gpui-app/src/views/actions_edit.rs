@@ -29,6 +29,12 @@ pub(crate) fn bind(
             }
             this.copy(cx);
         }))
+        .on_action(cx.listener(|this, _: &CopyAsPicture, window, cx| {
+            if this.terminal_has_focus(window) || this.mode.is_editing() {
+                return;
+            }
+            this.copy_as_picture(cx);
+        }))
         .on_action(cx.listener(|this, _: &Cut, window, cx| {
             // Terminal handles its own input
             if this.terminal_has_focus(window) { return; }

@@ -146,6 +146,13 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&format!("{}-alt-shift-v", primary_mod(m)), PasteValues, Some("Spreadsheet")),
         KeyBinding::new(&format!("{}-alt-v", primary_mod(m)), PasteSpecial, Some("Spreadsheet")),
 
+        // Excel ribbon sequences. GPUI represents sequential keystrokes with
+        // spaces: hold Alt for the first key, then release it for the rest.
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-w v g", ToggleGridlines, Some("Spreadsheet")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-h c p", CopyAsPicture, Some("Spreadsheet")),
+
         // File
         // Note: NewWindow and OpenFile are handled at App level (main.rs) to work
         // even when no windows are open. We bind in both Spreadsheet context (for
@@ -394,6 +401,9 @@ pub fn register_alt_accelerators(cx: &mut App) {
         KeyBinding::new("alt-t", AltTools, Some("Spreadsheet")),   // Tools: trace, explain
         KeyBinding::new("alt-o", AltFormat, Some("Spreadsheet")),
         KeyBinding::new("alt-h", AltHelp, Some("Spreadsheet")),
+        // Only active when Option accelerators are explicitly enabled.
+        KeyBinding::new("alt-w v g", ToggleGridlines, Some("Spreadsheet")),
+        KeyBinding::new("alt-h c p", CopyAsPicture, Some("Spreadsheet")),
     ]);
 }
 

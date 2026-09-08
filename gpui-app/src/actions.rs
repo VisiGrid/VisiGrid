@@ -109,6 +109,7 @@ actions!(selection, [
 // Clipboard actions
 actions!(clipboard, [
     Copy,
+    CopyAsPicture,  // Alt+H, C, P - copy the selected range as a PNG image
     Cut,
     Paste,
     PasteValues,
@@ -152,6 +153,7 @@ actions!(view, [
     ToggleTerminal,   // Ctrl+` - PTY terminal panel
     ToggleFormatBar,
     ToggleFormulaView,
+    ToggleGridlines,  // Alt+W, V, G - Excel ribbon sequence
     ToggleMinimap,
     ToggleShowZeros,
     ToggleVerifiedMode, // Toggle verified/deterministic recalc mode

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.31.0
+
+### Keyboard
+
+- **Excel ribbon sequences** — `Alt, W, V, G` toggles gridlines, and `Alt, H, C, P` copies the selected range to the system clipboard as a PNG picture. Copy as Picture includes off-screen cells and preserves gridlines, fills, borders, alignment, and common font formatting.
+- **Vim mode operators** — `x`, `y` and `p` cut, copy and paste the selection in normal mode, matching `Ctrl+X` / `Ctrl+C` / `Ctrl+V`.
+
 ## 0.7.4
 
 ### Data Import

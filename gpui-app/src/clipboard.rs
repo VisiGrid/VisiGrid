@@ -7,7 +7,7 @@
 //! - Delete selection
 
 use gpui::*;
-use visigrid_engine::cell::CellFormat;
+use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, CellStyle, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
 use visigrid_engine::provenance::{MutationOp, PasteMode, ClearMode};
 use visigrid_engine::sheet::MergedRegion;
@@ -21,6 +21,64 @@ use crate::history::{CellChange, CellFormatPatch, FormatActionKind, UndoAction};
 const NUM_ROWS: usize = 1_000_000;
 /// Maximum columns in the spreadsheet
 const NUM_COLS: usize = 16_384;
+
+/// Avoid accidental multi-gigabyte allocations when a whole row/column is selected.
+const MAX_PICTURE_CELLS: usize = 10_000;
+const MAX_PICTURE_DIMENSION: f32 = 8_192.0;
+const MAX_PICTURE_PIXELS: f32 = 32_000_000.0;
+
+pub(crate) fn svg_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+pub(crate) fn opaque_rgb(rgba: [u8; 4]) -> [u8; 3] {
+    let alpha = rgba[3] as u16;
+    let blend =
+        |channel: u8| -> u8 { (((channel as u16 * alpha) + (255 * (255 - alpha))) / 255) as u8 };
+    [blend(rgba[0]), blend(rgba[1]), blend(rgba[2])]
+}
+
+fn css_rgb(rgb: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+}
+
+fn semantic_fill(style: CellStyle) -> Option<[u8; 3]> {
+    match style {
+        CellStyle::None | CellStyle::Total => None,
+        CellStyle::Error => Some([254, 226, 226]),
+        CellStyle::Warning => Some([254, 243, 199]),
+        CellStyle::Success => Some([220, 252, 231]),
+        CellStyle::Input => Some([219, 234, 254]),
+        CellStyle::Note => Some([249, 250, 251]),
+    }
+}
+
+fn border_width(style: BorderStyle) -> f32 {
+    match style {
+        BorderStyle::None => 0.0,
+        BorderStyle::Thin => 1.0,
+        BorderStyle::Medium => 2.0,
+        BorderStyle::Thick => 3.0,
+    }
+}
+
+fn push_svg_border(svg: &mut String, border: CellBorder, x1: f32, y1: f32, x2: f32, y2: f32) {
+    let width = border_width(border.style);
+    if width == 0.0 {
+        return;
+    }
+    let color = css_rgb(border.color.map(opaque_rgb).unwrap_or([0, 0, 0]));
+    use std::fmt::Write as _;
+    let _ = write!(
+        svg,
+        r#"<line x1="{x1:.2}" y1="{y1:.2}" x2="{x2:.2}" y2="{y2:.2}" stroke="{color}" stroke-width="{width:.2}"/>"#,
+    );
+}
 
 /// Internal clipboard for tracking copied cell data.
 /// Stores both raw formulas (for normal paste) and typed values (for paste values).
@@ -49,6 +107,255 @@ pub struct InternalClipboard {
 
 impl Spreadsheet {
     // Clipboard
+    /// Copy the selected range as a portable PNG image.
+    ///
+    /// The picture is rebuilt from the sheet model instead of cropping the
+    /// viewport, so off-screen cells and the current selection highlight are
+    /// handled correctly.
+    pub fn copy_as_picture(&mut self, cx: &mut Context<Self>) {
+        use std::fmt::Write as _;
+
+        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+        let row_count = max_row.saturating_sub(min_row) + 1;
+        let col_count = max_col.saturating_sub(min_col) + 1;
+        if row_count.saturating_mul(col_count) > MAX_PICTURE_CELLS {
+            self.status_message = Some(format!(
+                "Selection is too large to copy as a picture (maximum {MAX_PICTURE_CELLS} cells)"
+            ));
+            cx.notify();
+            return;
+        }
+
+        let rows: Vec<(usize, usize, f32)> = (min_row..=max_row)
+            .filter(|view_row| self.row_view.is_view_row_visible(*view_row))
+            .map(|view_row| {
+                let data_row = self.row_view.view_to_data(view_row);
+                (view_row, data_row, self.row_height(view_row).max(1.0))
+            })
+            .collect();
+        let cols: Vec<(usize, f32)> = (min_col..=max_col)
+            .map(|col| (col, self.col_width(col).max(1.0)))
+            .collect();
+
+        let width: f32 = cols.iter().map(|(_, width)| width).sum();
+        let height: f32 = rows.iter().map(|(_, _, height)| height).sum();
+        if rows.is_empty() || cols.is_empty() || width <= 0.0 || height <= 0.0 {
+            self.status_message = Some("Nothing to copy as a picture".to_string());
+            cx.notify();
+            return;
+        }
+
+        let show_gridlines = match &crate::settings::user_settings(cx).appearance.show_gridlines {
+            crate::settings::Setting::Value(value) => *value,
+            crate::settings::Setting::Inherit => true,
+        };
+        let mut svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width:.2}" height="{height:.2}" viewBox="0 0 {width:.2} {height:.2}"><rect width="100%" height="100%" fill="#ffffff"/><g shape-rendering="crispEdges">"##,
+        );
+
+        let mut y = 0.0;
+        for (row_index, (_, data_row, cell_height)) in rows.iter().enumerate() {
+            let mut x = 0.0;
+            for (col_index, (col, cell_width)) in cols.iter().enumerate() {
+                let sheet = self.sheet(cx);
+                let merge = sheet.get_merge(*data_row, *col).cloned();
+                let (format_row, format_col) = merge
+                    .as_ref()
+                    .map(|region| region.start)
+                    .unwrap_or((*data_row, *col));
+                let format = self.effective_format_cached(format_row, format_col, cx);
+                let fill = format
+                    .background_color
+                    .map(opaque_rgb)
+                    .or_else(|| semantic_fill(format.cell_style))
+                    .unwrap_or([255, 255, 255]);
+                let _ = write!(
+                    svg,
+                    r##"<rect x="{x:.2}" y="{y:.2}" width="{cell_width:.2}" height="{cell_height:.2}" fill="{}"/>"##,
+                    css_rgb(fill),
+                );
+
+                let same_merge_right = merge.as_ref().is_some_and(|region| *col < region.end.1);
+                let same_merge_bottom = merge
+                    .as_ref()
+                    .is_some_and(|region| *data_row < region.end.0);
+                if show_gridlines {
+                    let grid = "#d9d9d9";
+                    if !same_merge_right {
+                        let _ = write!(
+                            svg,
+                            r#"<line x1="{:.2}" y1="{y:.2}" x2="{:.2}" y2="{:.2}" stroke="{grid}" stroke-width="1"/>"#,
+                            x + cell_width,
+                            x + cell_width,
+                            y + cell_height
+                        );
+                    }
+                    if !same_merge_bottom {
+                        let _ = write!(
+                            svg,
+                            r#"<line x1="{x:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}" stroke="{grid}" stroke-width="1"/>"#,
+                            y + cell_height,
+                            x + cell_width,
+                            y + cell_height
+                        );
+                    }
+                    if row_index == 0 {
+                        let _ = write!(
+                            svg,
+                            r#"<line x1="{x:.2}" y1="{y:.2}" x2="{:.2}" y2="{y:.2}" stroke="{grid}" stroke-width="1"/>"#,
+                            x + cell_width
+                        );
+                    }
+                    if col_index == 0 {
+                        let _ = write!(
+                            svg,
+                            r#"<line x1="{x:.2}" y1="{y:.2}" x2="{x:.2}" y2="{:.2}" stroke="{grid}" stroke-width="1"/>"#,
+                            y + cell_height
+                        );
+                    }
+                }
+
+                push_svg_border(&mut svg, format.border_top, x, y, x + cell_width, y);
+                push_svg_border(
+                    &mut svg,
+                    format.border_right,
+                    x + cell_width,
+                    y,
+                    x + cell_width,
+                    y + cell_height,
+                );
+                push_svg_border(
+                    &mut svg,
+                    format.border_bottom,
+                    x,
+                    y + cell_height,
+                    x + cell_width,
+                    y + cell_height,
+                );
+                push_svg_border(&mut svg, format.border_left, x, y, x, y + cell_height);
+
+                let is_merge_hidden = sheet.is_merge_hidden(*data_row, *col);
+                if !is_merge_hidden {
+                    let mut display = if self.show_formulas() {
+                        sheet.get_raw(*data_row, *col)
+                    } else {
+                        sheet.get_formatted_display(*data_row, *col)
+                    };
+                    if !self.show_zeros() && display == "0" {
+                        display.clear();
+                    }
+                    if !display.is_empty() {
+                        let text_width = merge.as_ref().map_or(*cell_width, |region| {
+                            cols.iter()
+                                .filter(|(candidate, _)| {
+                                    *candidate >= region.start.1 && *candidate <= region.end.1
+                                })
+                                .map(|(_, width)| *width)
+                                .sum::<f32>()
+                                .max(*cell_width)
+                        });
+                        let text_height = merge.as_ref().map_or(*cell_height, |region| {
+                            rows.iter()
+                                .filter(|(_, candidate, _)| {
+                                    *candidate >= region.start.0 && *candidate <= region.end.0
+                                })
+                                .map(|(_, _, height)| *height)
+                                .sum::<f32>()
+                                .max(*cell_height)
+                        });
+                        let computed = sheet.get_computed_value(*data_row, *col);
+                        let alignment = match format.alignment {
+                            Alignment::General if matches!(computed, Value::Number(_)) => {
+                                Alignment::Right
+                            }
+                            Alignment::General => Alignment::Left,
+                            other => other,
+                        };
+                        let (text_x, anchor) = match alignment {
+                            Alignment::Right => (text_width - 4.0, "end"),
+                            Alignment::Center | Alignment::CenterAcrossSelection => {
+                                (text_width / 2.0, "middle")
+                            }
+                            Alignment::Left | Alignment::General => (4.0, "start"),
+                        };
+                        let font_size = format.font_size.unwrap_or(13.0);
+                        let (text_y, baseline) = match format.vertical_alignment {
+                            VerticalAlignment::Top => (3.0, "hanging"),
+                            VerticalAlignment::Middle => (text_height / 2.0, "central"),
+                            VerticalAlignment::Bottom => (text_height - 3.0, "auto"),
+                        };
+                        let color =
+                            css_rgb(format.font_color.map(opaque_rgb).unwrap_or([32, 32, 32]));
+                        let family = svg_escape(format.font_family.as_deref().unwrap_or("Arial"));
+                        let weight = if format.bold || format.cell_style == CellStyle::Total {
+                            "700"
+                        } else {
+                            "400"
+                        };
+                        let italic = if format.italic { "italic" } else { "normal" };
+                        let decoration = match (format.underline, format.strikethrough) {
+                            (true, true) => "underline line-through",
+                            (true, false) => "underline",
+                            (false, true) => "line-through",
+                            (false, false) => "none",
+                        };
+                        let text = svg_escape(&display.replace(['\n', '\r'], " "));
+                        let _ = write!(
+                            svg,
+                            r#"<svg x="{x:.2}" y="{y:.2}" width="{text_width:.2}" height="{text_height:.2}" overflow="hidden"><text x="{text_x:.2}" y="{text_y:.2}" text-anchor="{anchor}" dominant-baseline="{baseline}" font-family="{family}" font-size="{font_size:.2}" font-weight="{weight}" font-style="{italic}" text-decoration="{decoration}" fill="{color}">{text}</text></svg>"#,
+                        );
+                    }
+                }
+
+                x += cell_width;
+            }
+            y += cell_height;
+        }
+        svg.push_str("</g></svg>");
+
+        let mut options = resvg::usvg::Options::default();
+        options.fontdb_mut().load_system_fonts();
+        let tree = match resvg::usvg::Tree::from_str(&svg, &options) {
+            Ok(tree) => tree,
+            Err(error) => {
+                self.status_message = Some(format!("Could not render selection picture: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let scale = (MAX_PICTURE_DIMENSION / width)
+            .min(MAX_PICTURE_DIMENSION / height)
+            .min((MAX_PICTURE_PIXELS / (width * height)).sqrt())
+            .min(1.0);
+        let pixel_width = (width * scale).ceil().max(1.0) as u32;
+        let pixel_height = (height * scale).ceil().max(1.0) as u32;
+        let Some(mut pixmap) = resvg::tiny_skia::Pixmap::new(pixel_width, pixel_height) else {
+            self.status_message = Some("Could not allocate selection picture".to_string());
+            cx.notify();
+            return;
+        };
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
+        match pixmap.encode_png() {
+            Ok(bytes) => {
+                let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes);
+                cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                self.status_message = Some(format!(
+                    "Copied {} x {} selection as picture",
+                    rows.len(),
+                    cols.len()
+                ));
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Could not encode selection picture: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
     pub fn copy(&mut self, cx: &mut Context<Self>) {
         // If editing, copy selected text (or all if no selection)
         // This is text-only copy, not cell copy - no internal clipboard needed

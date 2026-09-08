@@ -1981,6 +1981,31 @@ fn test_keybinding_maps_ctrl_w_to_close_window() {
     );
 }
 
+/// Excel ribbon sequences must remain exact, sequential GPUI chords.
+#[test]
+fn test_excel_ribbon_sequences_are_bound() {
+    let keybindings_source = include_str!("keybindings.rs");
+
+    assert!(
+        keybindings_source.contains("\"alt-w v g\", ToggleGridlines"),
+        "Alt, W, V, G should toggle gridlines"
+    );
+    assert!(
+        keybindings_source.contains("\"alt-h c p\", CopyAsPicture"),
+        "Alt, H, C, P should copy the selection as a picture"
+    );
+}
+
+#[test]
+fn test_copy_as_picture_svg_helpers() {
+    assert_eq!(
+        crate::clipboard::svg_escape("Revenue < Cost & \"Risk\""),
+        "Revenue &lt; Cost &amp; &quot;Risk&quot;"
+    );
+    assert_eq!(crate::clipboard::opaque_rgb([0, 0, 0, 0]), [255, 255, 255]);
+    assert_eq!(crate::clipboard::opaque_rgb([12, 34, 56, 255]), [12, 34, 56]);
+}
+
 /// Test that NewWindow handler does NOT call new_in_place or mutate workbook state.
 /// This verifies the architectural separation: NewWindow opens a new window,
 /// it doesn't touch the current workbook.
