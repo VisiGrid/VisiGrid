@@ -5,3 +5,7 @@
 # rustc >= 1.95 on their own.
 [toolchain]
 channel = "1.95.0"
+# CI runs clippy against this pinned toolchain, not the `stable` the
+# workflow installs, so the component has to be declared here or the
+# Clippy step fails with "'cargo-clippy' is not installed for 1.95.0".
+components = ["clippy"]
