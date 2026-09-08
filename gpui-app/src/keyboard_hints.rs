@@ -209,6 +209,23 @@ impl Spreadsheet {
                 self.enter_hint_mode_with_labels(true, cx);
                 true
             }
+            // Operators with an obvious grid meaning, normal mode only (this
+            // table is only consulted in Navigation). They act on the current
+            // selection the same way Ctrl+X / Ctrl+C / Ctrl+V do; `dd` and
+            // visual mode wait on a decision about what a "line" is in a grid
+            // (see issue #6).
+            "x" => {
+                self.cut(cx);
+                true
+            }
+            "y" => {
+                self.copy(cx);
+                true
+            }
+            "p" => {
+                self.paste(cx);
+                true
+            }
             "0" => {
                 // Move to first column
                 self.view_state.selected = (self.view_state.selected.0, 0);

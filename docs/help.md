@@ -132,6 +132,9 @@ VisiGrid supports optional Vim-style navigation for power users. Enable it in se
 | `i` | Enter insert/edit mode |
 | `a` | Append (edit with cursor at end) |
 | `f` | Enter hint mode (jump to cell) |
+| `x` | Cut the selection |
+| `y` | Copy the selection |
+| `p` | Paste at the cursor |
 | `Escape` | Return to normal mode |
 
 **Note:** When Vim mode is enabled, pressing letter keys in navigation mode executes Vim commands instead of starting cell edit. Press `i` to start typing.
