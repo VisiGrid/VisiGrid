@@ -34,6 +34,7 @@ mod formula_refs;
 mod grid_ops;
 mod hints;
 mod history;
+mod ime;
 mod hub;
 mod cloud;
 mod impact_preview;

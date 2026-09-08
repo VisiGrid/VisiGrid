@@ -417,6 +417,9 @@ pub struct Spreadsheet {
     pub edit_value: String,
     pub edit_cursor: usize,  // Cursor position within edit_value (byte offset, 0..=len)
     pub edit_selection_anchor: Option<usize>,  // Selection start (None = no selection)
+    /// Provisional IME text, as a byte range into `edit_value` (None = not composing).
+    /// The next composition keystroke replaces this range instead of appending after it.
+    pub edit_marked_range: Option<std::ops::Range<usize>>,
     pub edit_original: String,
     pub edit_scroll_x: f32,  // Horizontal scroll offset for in-cell editor (<=0, updated by ensure_caret_visible)
     pub(crate) edit_scroll_dirty: bool, // True when caret/text changed; triggers ensure_caret_visible once
@@ -1077,6 +1080,7 @@ impl Spreadsheet {
             edit_value: String::new(),
             edit_cursor: 0,
             edit_selection_anchor: None,
+            edit_marked_range: None,
             edit_original: String::new(),
             edit_scroll_x: 0.0,
             edit_scroll_dirty: false,
@@ -2220,6 +2224,7 @@ impl Spreadsheet {
                 } else {
                     // Grid navigation: start formula edit with =FUNC(
                     self.edit_original = self.sheet(cx).get_raw(self.view_state.selected.0, self.view_state.selected.1);
+                    self.clear_edit_marks();
                     self.edit_value = format!("={}(", name);
                     self.edit_cursor = self.edit_value.len();  // Byte offset at end
                     self.mode = Mode::Formula;
@@ -4058,6 +4063,7 @@ impl Spreadsheet {
             // Start editing then insert newline
             let (row, col) = self.view_state.selected;
             self.edit_original = self.sheet(cx).get_raw(row, col);
+            self.clear_edit_marks();
             self.edit_value = self.edit_original.clone();
             self.edit_cursor = self.edit_value.len();
             self.mode = Mode::Edit;
@@ -4351,7 +4357,32 @@ impl Render for Spreadsheet {
             }
         }
 
-        views::render_spreadsheet(self, window, cx)
+        let root = views::render_spreadsheet(self, window, cx);
+
+        // Register the IME input handler for this frame.
+        //
+        // `Window::handle_input` has to run during paint, and it only takes effect while
+        // the handle is focused, so it rides along on a zero-size canvas rather than a
+        // full-size overlay: an overlay that covers the grid would sit in front of every
+        // click. The candidate-window rectangle comes from `bounds_for_range` instead of
+        // from these bounds, so the canvas having no area costs nothing.
+        let ime_entity = cx.entity();
+        let ime_focus = self.focus_handle.clone();
+        let ime_hook = gpui::canvas(
+            |_bounds, _window, _cx| {},
+            move |bounds, _prepaint, window, cx| {
+                window.handle_input(
+                    &ime_focus,
+                    gpui::ElementInputHandler::new(bounds, ime_entity),
+                    cx,
+                );
+            },
+        )
+        .absolute()
+        .w(gpui::px(0.0))
+        .h(gpui::px(0.0));
+
+        gpui::div().size_full().child(root).child(ime_hook)
     }
 }
 

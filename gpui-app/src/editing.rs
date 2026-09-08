@@ -33,6 +33,7 @@ impl Spreadsheet {
 
     /// Reset formula/edit transient state. Called on every exit from edit mode.
     fn reset_edit_state(&mut self) {
+        self.clear_edit_marks();
         self.formula_nav_mode = crate::mode::FormulaNavMode::Point;
         self.formula_nav_manual_override = None;
         self.formula_ref_cell = None;
@@ -41,6 +42,17 @@ impl Spreadsheet {
         self.formula_edit_cell = None;
         self.formula_ref_sheet = None;
         self.formula_cross_sheet_name = None;
+    }
+
+    /// Forget any selection and any IME composition that belonged to a previous edit.
+    ///
+    /// Called by every path that starts or ends an edit, including the ones that assign
+    /// `edit_value` and `mode` directly instead of going through `start_edit`. A range
+    /// left over from an earlier buffer would otherwise point into the new one, and the
+    /// IME handler would treat it as a live composition or selection.
+    pub(crate) fn clear_edit_marks(&mut self) {
+        self.edit_selection_anchor = None;
+        self.edit_marked_range = None;
     }
 
     /// Recompute edit mode based on current edit buffer content.
@@ -111,7 +123,7 @@ impl Spreadsheet {
         self.formula_bar_cache_dirty = true;  // Rebuild hit-test cache
         self.formula_bar_scroll_x = 0.0;
         self.active_editor = EditorSurface::Cell;  // Default to cell editor
-        self.edit_selection_anchor = None;
+        self.clear_edit_marks();
 
         // Debug assert: cursor must be valid
         debug_assert!(
@@ -188,7 +200,7 @@ impl Spreadsheet {
         self.formula_bar_cache_dirty = true;  // Rebuild hit-test cache
         self.formula_bar_scroll_x = 0.0;
         self.active_editor = EditorSurface::Cell;  // Default to cell editor
-        self.edit_selection_anchor = None;
+        self.clear_edit_marks();
         // Record home sheet and cell for cross-sheet formula references
         self.formula_home_sheet = Some(self.wb(cx).active_sheet_index());
         self.formula_edit_cell = Some((row, col));
@@ -1286,6 +1298,7 @@ impl Spreadsheet {
             }
 
             self.edit_original = self.sheet(cx).get_raw(row, col);
+            self.clear_edit_marks();
             self.edit_value = c.to_string();
             self.edit_cursor = c.len_utf8();  // Byte offset after first char
 
@@ -1321,7 +1334,7 @@ impl Spreadsheet {
     }
 
     /// Finalize the current formula reference (clear the active reference state)
-    fn finalize_formula_reference(&mut self) {
+    pub(crate) fn finalize_formula_reference(&mut self) {
         self.formula_ref_cell = None;
         self.formula_ref_end = None;
     }
