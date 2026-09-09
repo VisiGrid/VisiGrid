@@ -1668,14 +1668,25 @@ impl Workbook {
                     .unwrap_or(false)
             })
             .collect();
+        // What each cell was given this recalc. A dynamic formula is
+        // re-evaluated every round, and one that returns an array queues that
+        // array every time; placing the same array again is not a change, and
+        // treating it as one would touch its readers forever and exhaust the
+        // rounds with nothing left to settle.
+        let mut placed_this_recalc: FxHashMap<CellId, crate::formula::eval::Array2D> = FxHashMap::default();
         for _round in 0..MAX_SPILL_SETTLE_ROUNDS {
             let mut touched: FxHashSet<CellId> = FxHashSet::default();
             for sheet in &mut self.sheets {
                 let sheet_id = sheet.id;
                 for (row, col, array) in sheet.take_pending_spills() {
+                    let id = CellId { sheet: sheet_id, row, col };
+                    if placed_this_recalc.get(&id) == Some(&array) {
+                        continue;
+                    }
+                    placed_this_recalc.insert(id, array.clone());
                     // The parent's own reading changes too: it may have become
                     // #SPILL!, or stopped being one.
-                    touched.insert(CellId { sheet: sheet_id, row, col });
+                    touched.insert(id);
                     // Receivers of the previous extent lose their value.
                     if let Some(info) = sheet.cells.get(&(row, col)).and_then(|c| c.spill_info.clone()) {
                         for dr in 0..info.rows {
@@ -1714,8 +1725,10 @@ impl Workbook {
             }
             // Everything that reads a touched cell, transitively, plus the
             // formulas the graph cannot see.
-            let mut readers: FxHashSet<CellId> = FxHashSet::default();
-            let mut stack: Vec<CellId> = touched.into_iter().collect();
+            // The dynamic readers are seeds, not an afterthought: what reads
+            // an INDIRECT that just changed is as stale as the INDIRECT.
+            let mut readers: FxHashSet<CellId> = dynamic_readers.iter().copied().collect();
+            let mut stack: Vec<CellId> = touched.into_iter().chain(dynamic_readers.iter().copied()).collect();
             while let Some(cell) = stack.pop() {
                 for dependent in self.dep_graph.dependents(cell) {
                     if readers.insert(dependent) {
@@ -1723,7 +1736,6 @@ impl Workbook {
                     }
                 }
             }
-            readers.extend(dynamic_readers.iter().copied());
             let order = match self.dep_graph.topo_order_subset(&readers) {
                 Ok(order) => order,
                 Err(_) => break, // a cycle among the readers is already reported above
@@ -2894,6 +2906,33 @@ mod tests {
         wb.rebuild_dep_graph();
         wb.recompute_full_ordered_with_custom_fns(&spill_handler);
         assert_eq!(wb.active_sheet().get_display(0, 2), "3");
+    }
+
+    #[test]
+    fn test_dependents_of_a_dynamic_reader_are_settled_too() {
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "=MY_SPILL()");
+        wb.active_sheet_mut().set_value(0, 2, "=INDIRECT(\"A3\")");
+        wb.active_sheet_mut().set_value(0, 3, "=C1*2");
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered_with_custom_fns(&spill_handler);
+        assert_eq!(wb.active_sheet().get_display(0, 2), "3");
+        assert_eq!(wb.active_sheet().get_display(0, 3), "6", "reader of the dynamic reader");
+    }
+
+    #[test]
+    fn test_dynamic_formula_returning_an_array_settles_once() {
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "=MY_SPILL()");
+        wb.active_sheet_mut().set_value(0, 1, "=SPILL_FROM(INDIRECT(\"A3\"))");
+        wb.active_sheet_mut().set_value(0, 2, "=B3");
+        wb.rebuild_dep_graph();
+        let report = wb.recompute_full_ordered_with_custom_fns(&spill_handler);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let sheet = wb.active_sheet();
+        assert_eq!(sheet.get_display(0, 1), "3");
+        assert_eq!(sheet.get_display(2, 1), "5");
+        assert_eq!(sheet.get_display(0, 2), "5");
     }
 
     #[test]
