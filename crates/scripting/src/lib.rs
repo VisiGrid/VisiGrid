@@ -26,6 +26,7 @@
 
 mod console_state;
 pub mod custom_functions;
+pub mod lua_cell;
 pub mod debugger;
 pub mod examples;
 pub mod lua_tokenizer;

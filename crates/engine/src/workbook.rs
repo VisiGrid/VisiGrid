@@ -3121,6 +3121,20 @@ mod tests {
         assert_eq!(sheet.get_display(0, 6), "13");
     }
 
+    /// Reference rewriting shifts the argument and leaves the code alone,
+    /// even when the code mentions a cell by name.
+    #[test]
+    fn test_row_insert_rewrites_lua_cell_arguments_but_not_its_code() {
+        use crate::structural::Axis;
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(4, 0, "=LUA(\"return \"\"A1\"\" .. args[1]\", A3)");
+        wb.structural_edit(0, Axis::Row, 0, 2, false).unwrap();
+        assert_eq!(
+            wb.active_sheet().get_raw(6, 0),
+            "=LUA(\"return \"\"A1\"\" .. args[1]\", A5)"
+        );
+    }
+
     #[test]
     fn test_new_workbook() {
         let wb = Workbook::new();

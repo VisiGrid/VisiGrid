@@ -124,7 +124,7 @@ pub fn load_custom_functions(lua: &Lua) -> Result<CustomFunctionRegistry, String
 
 /// RAII guard that sets a tighter instruction limit for formula evaluation
 /// and restores the previous state on drop.
-struct FormulaLimitGuard<'a> {
+pub(crate) struct FormulaLimitGuard<'a> {
     lua: &'a Lua,
 }
 
@@ -138,7 +138,7 @@ const FORMULA_HOOK_INTERVAL: u32 = 1_000;
 const FORMULA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl<'a> FormulaLimitGuard<'a> {
-    fn new(lua: &'a Lua) -> Self {
+    pub(crate) fn new(lua: &'a Lua) -> Self {
         use std::sync::atomic::{AtomicI64, Ordering};
 
         let counter = std::sync::Arc::new(AtomicI64::new(0));
@@ -222,7 +222,7 @@ pub struct MemoCache {
 }
 
 #[derive(Hash, Eq, PartialEq)]
-struct MemoKey {
+pub(crate) struct MemoKey {
     name: String,
     args: Vec<MemoArg>,
 }
@@ -244,6 +244,12 @@ impl Default for MemoCache {
 }
 
 impl MemoCache {
+    pub(crate) fn lookup(&self, key: &MemoKey) -> Option<&EvalResult> {
+        self.get(key)
+    }
+    pub(crate) fn store(&mut self, key: MemoKey, result: EvalResult) {
+        self.insert(key, result)
+    }
     pub fn new() -> Self {
         Self { cache: HashMap::new() }
     }
@@ -264,7 +270,7 @@ fn canon_f64_bits(n: f64) -> u64 {
 }
 
 /// Build a memo key from function name and evaluated args.
-fn build_memo_key(name: &str, args: &[EvalArg]) -> MemoKey {
+pub(crate) fn build_memo_key(name: &str, args: &[EvalArg]) -> MemoKey {
     let memo_args: Vec<MemoArg> = args.iter().map(|arg| {
         match arg {
             EvalArg::Scalar(v) => match v {
@@ -383,7 +389,7 @@ pub fn call_custom_function(
 }
 
 /// Convert an EvalArg to a Lua value.
-fn eval_arg_to_lua(lua: &Lua, arg: &EvalArg) -> mlua::Result<mlua::Value> {
+pub(crate) fn eval_arg_to_lua(lua: &Lua, arg: &EvalArg) -> mlua::Result<mlua::Value> {
     match arg {
         EvalArg::Scalar(v) => value_to_lua(lua, v),
         EvalArg::Range { values, .. } => {
@@ -394,7 +400,7 @@ fn eval_arg_to_lua(lua: &Lua, arg: &EvalArg) -> mlua::Result<mlua::Value> {
 }
 
 /// Convert a Lua return value to EvalResult.
-fn lua_return_to_eval_result(val: &mlua::Value) -> EvalResult {
+pub(crate) fn lua_return_to_eval_result(val: &mlua::Value) -> EvalResult {
     match val {
         mlua::Value::Number(n) => EvalResult::Number(*n),
         mlua::Value::Integer(i) => EvalResult::Number(*i as f64),
@@ -535,6 +541,17 @@ fn lua_table_to_eval_result(t: &mlua::Table) -> EvalResult {
 /// - The function itself (via upvalue capture)
 /// - Read-only __newindex that blocks global mutation
 fn setup_formula_env(lua: &Lua, func: &mlua::Function) -> mlua::Result<mlua::Function> {
+    let env = sandbox_globals(lua)?;
+    let wrapper = freeze_env(lua, env)?;
+    // Set the function's environment
+    func.set_environment(wrapper)?;
+    Ok(func.clone())
+}
+
+/// The globals a formula may see: read-only stdlib proxies (math without
+/// random) and a handful of pure functions. Shared by custom functions and by
+/// `=LUA` cells, which add their `args` before the table is frozen.
+pub(crate) fn sandbox_globals(lua: &Lua) -> mlua::Result<mlua::Table> {
     // Build environment table with allowed globals
     let env = lua.create_table()?;
 
@@ -565,23 +582,22 @@ fn setup_formula_env(lua: &Lua, func: &mlua::Function) -> mlua::Result<mlua::Fun
         }
     }
 
-    // Wrap env in read-only metatable
+    Ok(env)
+}
+
+/// Wrap a globals table so nothing can be assigned through it.
+pub(crate) fn freeze_env(lua: &Lua, env: mlua::Table) -> mlua::Result<mlua::Table> {
     let mt = lua.create_table()?;
-    mt.set("__index", env.clone())?;
+    mt.set("__index", env)?;
     mt.set("__newindex", lua.create_function(|_, (_t, key, _val): (mlua::Value, String, mlua::Value)| {
         Err::<(), _>(mlua::Error::RuntimeError(
             format!("Global state mutation is not allowed (attempted to set '{}')", key),
         ))
     })?)?;
     mt.set("__metatable", false)?;
-
     let wrapper = lua.create_table()?;
     wrapper.set_metatable(Some(mt));
-
-    // Set the function's environment
-    func.set_environment(wrapper)?;
-
-    Ok(func.clone())
+    Ok(wrapper)
 }
 
 /// Create a read-only proxy table via metatable.
@@ -615,7 +631,7 @@ fn scrub_lua_load_error(err: &mlua::Error, source_path: &std::path::Path) -> Str
 }
 
 /// Scrub a Lua runtime error for display as a cell error.
-fn scrub_lua_runtime_error(err: &mlua::Error, func_name: &str) -> String {
+pub(crate) fn scrub_lua_runtime_error(err: &mlua::Error, func_name: &str) -> String {
     let raw = err.to_string();
 
     // Extract just the message part (after last colon in first line)

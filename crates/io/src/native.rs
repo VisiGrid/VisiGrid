@@ -2811,6 +2811,32 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
+    /// A formula carrying a string with quotes, newlines and non-ASCII text
+    /// (what a =LUA cell is) must come back from the file byte-identical, and
+    /// the fingerprint must not move across the round trip while it does move
+    /// when the code changes.
+    #[test]
+    fn test_quoted_multiline_formula_survives_save_and_reopen_with_a_stable_fingerprint() {
+        let formula = "=LUA(\"local s = \"\"한글 ✓\"\"\nreturn s .. \"\"!\"\"\", A1)";
+        let mut workbook = Workbook::new();
+        workbook.active_sheet_mut().set_value(0, 0, "x");
+        workbook.active_sheet_mut().set_value(0, 1, formula);
+        assert_eq!(workbook.active_sheet().get_raw(0, 1), formula);
+        let before = compute_semantic_fingerprint(&workbook);
+
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        save_workbook(&workbook, temp_file.path()).expect("save");
+        let reopened = load_workbook(temp_file.path()).expect("load");
+        assert_eq!(reopened.active_sheet().get_raw(0, 1), formula, "formula text preserved");
+        assert_eq!(compute_semantic_fingerprint(&reopened), before, "fingerprint stable across reopen");
+
+        // The code is part of the formula, so changing it changes the workbook.
+        let mut edited = Workbook::new();
+        edited.active_sheet_mut().set_value(0, 0, "x");
+        edited.active_sheet_mut().set_value(0, 1, "=LUA(\"return 1\", A1)");
+        assert_ne!(compute_semantic_fingerprint(&edited), before);
+    }
+
     #[test]
     fn test_save_is_atomic_and_keeps_previous_file_on_failure() {
         let mut workbook = Workbook::new();

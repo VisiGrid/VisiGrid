@@ -176,12 +176,22 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             }
             '=' => { tokens.push(Token::Eq); chars.next(); }
             '"' => {
-                // String literal
+                // String literal. A doubled quote inside is one literal quote,
+                // the Excel convention and what the formatter writes; without
+                // this the formatter's output could not be read back, and any
+                // formula carrying a quote in its text broke on reload.
                 chars.next(); // consume opening quote
                 let mut s = String::new();
                 loop {
                     match chars.next() {
-                        Some('"') => break,
+                        Some('"') => {
+                            if let Some(&'"') = chars.peek() {
+                                chars.next();
+                                s.push('"');
+                            } else {
+                                break;
+                            }
+                        }
                         Some(ch) => s.push(ch),
                         None => return Err("Unterminated string literal".to_string()),
                     }
@@ -1459,6 +1469,41 @@ mod tests {
     }
 
     // ── Dotted function name tests ───────────────────────────────
+
+    #[test]
+    fn test_string_literals_round_trip_through_the_formatter() {
+        // A formatted formula must parse back to the same expression, and
+        // format identically again: this is what reference rewriting, native
+        // save/reopen and the fingerprint all rely on.
+        let cases = [
+            "=\"say \"\"hi\"\"\"",
+            "=LUA(\"return args[1] * 2\", A1)",
+            "=LUA(\"local s = \"\"x\"\"\nreturn s .. \"\"y\"\"\", A1:B3)",
+            "=LUA(\"return \"\"한글 ✓\"\"\")",
+            "=\"\"\"\"",
+            "=\"\"",
+        ];
+        for src in cases {
+            let parsed = parse(src).unwrap_or_else(|e| panic!("{}: {}", src, e));
+            let formatted = format_parsed_expr(&parsed);
+            assert_eq!(formatted, src, "canonical form is stable");
+            let again = parse(&formatted).unwrap();
+            assert_eq!(format_parsed_expr(&again), src);
+        }
+        match parse("=\"say \"\"hi\"\"\"").unwrap() {
+            Expr::Text(s) => assert_eq!(s, "say \"hi\""),
+            other => panic!("{:?}", other),
+        }
+        // Text is opaque to the reference machinery: a quoted A1 is not a reference.
+        match parse("=LUA(\"return A1\", B2)").unwrap() {
+            Expr::Function { args, .. } => {
+                assert!(matches!(args[0], Expr::Text(_)));
+                assert!(matches!(args[1], Expr::CellRef { .. }));
+            }
+            other => panic!("{:?}", other),
+        }
+        assert!(parse("=\"unterminated").is_err());
+    }
 
     #[test]
     fn test_cell_reference_shaped_name_before_paren_is_a_call() {
