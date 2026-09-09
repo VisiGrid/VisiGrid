@@ -2901,7 +2901,7 @@ mod tests {
 
         // Same formula, the function now answers with a scalar.
         let scalar = |name: &str, _: &[EvalArg]| -> Option<EvalResult> {
-            (name == "MY_SPILL").then(|| EvalResult::Number(42.0))
+            (name == "MY_SPILL").then_some(EvalResult::Number(42.0))
         };
         wb.recompute_full_ordered_with_custom_fns(&scalar);
         let sheet = wb.active_sheet();
