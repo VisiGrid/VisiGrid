@@ -671,6 +671,10 @@ impl Sheet {
     pub fn place_spill(&mut self, row: usize, col: usize, array: &crate::formula::eval::Array2D) {
         match self.check_spill_collision(row, col, array.rows(), array.cols()) {
             Ok(()) => {
+                // A collision reported earlier is over once the array fits.
+                // Nothing else clears it on the recalc path, so a #SPILL!
+                // would otherwise outlive the obstruction that caused it.
+                self.clear_spill_error(row, col);
                 self.apply_spill(row, col, array);
             }
             Err(blocked_by) => {
@@ -684,6 +688,18 @@ impl Sheet {
     // =========================================================================
     // Spill Management
     // =========================================================================
+
+    /// Forget a #SPILL! on a cell, whatever it currently holds.
+    pub fn clear_spill_error(&mut self, row: usize, col: usize) {
+        if let Some(cell) = self.cells.get_mut(&(row, col)) {
+            cell.spill_error = None;
+        }
+    }
+
+    /// Whether any array recorded during evaluation is still waiting to be placed.
+    pub fn has_pending_spills(&self) -> bool {
+        !self.pending_spills.borrow().is_empty()
+    }
 
     /// Clear spill data originating from a specific cell
     pub fn clear_spill_from(&mut self, parent_row: usize, parent_col: usize) {

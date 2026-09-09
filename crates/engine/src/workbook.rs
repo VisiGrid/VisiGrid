@@ -1647,13 +1647,36 @@ impl Workbook {
         // reads a touched receiver is evaluated again, in dependency order,
         // and if that produces new arrays the round repeats. Bounded, because
         // a formula whose array grows on every read is a cycle by another name.
-        const MAX_SPILL_SETTLE_ROUNDS: usize = 4;
+        // Each round of placement can only settle one layer of a chain in
+        // which an array's inputs come from another array's receivers, so the
+        // bound is the deepest such chain that settles silently. A real
+        // workbook rarely nests two; sixteen is far past design and still
+        // cheap, and exhausting it is reported rather than swallowed.
+        const MAX_SPILL_SETTLE_ROUNDS: usize = 16;
+        // Formulas whose references are only known at evaluation time
+        // (INDIRECT, OFFSET) have no edge from the receivers they read, so
+        // the graph cannot find them. They are re-evaluated in every round
+        // that placed something, the same way Phase 3 evaluates them last.
+        let dynamic_readers: Vec<CellId> = self
+            .dep_graph
+            .formula_cells()
+            .filter(|cell_id| {
+                self.sheet_by_id(cell_id.sheet)
+                    .and_then(|sheet| sheet.cells.get(&(cell_id.row, cell_id.col)))
+                    .and_then(|cell| cell.value.formula_ast())
+                    .map(crate::formula::analyze::has_dynamic_deps)
+                    .unwrap_or(false)
+            })
+            .collect();
         for _round in 0..MAX_SPILL_SETTLE_ROUNDS {
             let mut touched: FxHashSet<CellId> = FxHashSet::default();
             for sheet in &mut self.sheets {
                 let sheet_id = sheet.id;
                 for (row, col, array) in sheet.take_pending_spills() {
-                    // Receivers of the previous extent lose their value too.
+                    // The parent's own reading changes too: it may have become
+                    // #SPILL!, or stopped being one.
+                    touched.insert(CellId { sheet: sheet_id, row, col });
+                    // Receivers of the previous extent lose their value.
                     if let Some(info) = sheet.cells.get(&(row, col)).and_then(|c| c.spill_info.clone()) {
                         for dr in 0..info.rows {
                             for dc in 0..info.cols {
@@ -1671,6 +1694,11 @@ impl Workbook {
                     // the spill it just declined. This pass is the authority on
                     // where an array goes, whatever happened on the way in.
                     sheet.clear_spill_from(row, col);
+                    if array.rows() == 0 || array.cols() == 0 {
+                        // The retire marker: the cell no longer spills.
+                        sheet.clear_spill_error(row, col);
+                        continue;
+                    }
                     sheet.place_spill(row, col, &array);
                     for dr in 0..array.rows() {
                         for dc in 0..array.cols() {
@@ -1684,7 +1712,8 @@ impl Workbook {
             if touched.is_empty() {
                 break;
             }
-            // Everything that reads a touched receiver, transitively.
+            // Everything that reads a touched cell, transitively, plus the
+            // formulas the graph cannot see.
             let mut readers: FxHashSet<CellId> = FxHashSet::default();
             let mut stack: Vec<CellId> = touched.into_iter().collect();
             while let Some(cell) = stack.pop() {
@@ -1694,6 +1723,7 @@ impl Workbook {
                     }
                 }
             }
+            readers.extend(dynamic_readers.iter().copied());
             let order = match self.dep_graph.topo_order_subset(&readers) {
                 Ok(order) => order,
                 Err(_) => break, // a cycle among the readers is already reported above
@@ -1702,12 +1732,31 @@ impl Workbook {
                 break;
             }
             for cell_id in order {
+                // A settled cell's earlier verdict is stale either way: an
+                // error it raised while its input was still unplaced is not
+                // an error, and a fresh one must not sit beside the old.
+                report.errors.retain(|e| e.cell != cell_id);
                 if let Err(e) = self.evaluate_cell_with_handler(cell_id, custom_fn_handler) {
                     if report.errors.len() < 100 {
                         report.errors.push(RecalcError::new(cell_id, e));
                     }
                 }
                 report.cells_recomputed += 1;
+            }
+        }
+        // Say so if the bound was hit with arrays still waiting: those cells
+        // and their readers are stale, and silence here would look like a
+        // correct recalc.
+        for sheet in &mut self.sheets {
+            if sheet.has_pending_spills() {
+                for (row, col, _) in sheet.take_pending_spills() {
+                    if report.errors.len() < 100 {
+                        report.errors.push(RecalcError::new(
+                            CellId { sheet: sheet.id, row, col },
+                            format!("spill not settled after {} rounds; values may be stale", MAX_SPILL_SETTLE_ROUNDS),
+                        ));
+                    }
+                }
             }
         }
 
@@ -1784,6 +1833,12 @@ impl Workbook {
             // the order its cells were listed in.
             if let EvalResult::Array(array) = &result {
                 sheet.record_pending_spill(cell_id.row, cell_id.col, array.clone());
+            } else if cell.spill_info.is_some() || cell.spill_error.is_some() {
+                // This cell spilled (or tried to) last time and no longer
+                // answers with an array. Its old receivers and any #SPILL!
+                // must go, and they go in the placement phase like everything
+                // else, so an empty array is the marker for "retire".
+                sheet.record_pending_spill(cell_id.row, cell_id.col, crate::formula::eval::Array2D::new(0, 0));
             }
 
             // Cache the typed Value so subsequent lookups use the topo-consistent value
@@ -2754,6 +2809,112 @@ mod tests {
         assert_eq!(sheet.get_display(2, 0), "3");
         // A dependent of a spilled cell sees the spilled value.
         assert_eq!(sheet.get_display(0, 1), "30");
+    }
+
+    /// Handler standing in for the Lua bridge: MY_SPILL() -> {1,2,3};
+    /// SPILL_FROM(n) -> {n, n+1, n+2}; anything else is unknown.
+    fn spill_handler(name: &str, args: &[crate::formula::eval::EvalArg]) -> Option<crate::formula::eval::EvalResult> {
+        use crate::formula::eval::{Array2D, EvalArg, EvalResult, Value};
+        let column = |first: f64| {
+            let mut a = Array2D::new(3, 1);
+            for i in 0..3 {
+                a.set(i, 0, Value::Number(first + i as f64));
+            }
+            EvalResult::Array(a)
+        };
+        match name {
+            "MY_SPILL" => Some(column(1.0)),
+            "SPILL_FROM" => match args.first() {
+                Some(EvalArg::Scalar(Value::Number(n))) => Some(column(*n)),
+                _ => Some(EvalResult::Error("#VALUE!".to_string())),
+            },
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_spill_retires_when_the_result_stops_being_an_array() {
+        use crate::formula::eval::{EvalArg, EvalResult};
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "=MY_SPILL()");
+        wb.active_sheet_mut().set_value(0, 1, "=A3");
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered_with_custom_fns(&spill_handler);
+        assert_eq!(wb.active_sheet().get_display(2, 0), "3");
+        assert_eq!(wb.active_sheet().get_display(0, 1), "3");
+
+        // Same formula, the function now answers with a scalar.
+        let scalar = |name: &str, _: &[EvalArg]| -> Option<EvalResult> {
+            (name == "MY_SPILL").then(|| EvalResult::Number(42.0))
+        };
+        wb.recompute_full_ordered_with_custom_fns(&scalar);
+        let sheet = wb.active_sheet();
+        assert_eq!(sheet.get_display(0, 0), "42");
+        assert!(!sheet.is_spill_parent(0, 0), "no longer a spill parent");
+        assert_eq!(sheet.get_display(1, 0), "", "old receiver cleared");
+        assert_eq!(sheet.get_display(2, 0), "", "old receiver cleared");
+        assert!(sheet.get_cell(2, 0).spill_parent.is_none(), "receiver mark removed");
+        assert_eq!(sheet.get_display(0, 1), "", "reader of the old receiver re-evaluated");
+    }
+
+    #[test]
+    fn test_blocked_spill_reaches_readers_of_the_parent_and_clears_when_unblocked() {
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(1, 0, "blocker");
+        wb.active_sheet_mut().set_value(0, 0, "=MY_SPILL()");
+        wb.active_sheet_mut().set_value(0, 1, "=A1");
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered_with_custom_fns(&spill_handler);
+        {
+            let sheet = wb.active_sheet();
+            assert!(sheet.has_spill_error(0, 0));
+            assert_eq!(sheet.get_display(0, 0), "#SPILL!");
+            assert_eq!(sheet.get_display(1, 0), "blocker", "obstruction untouched");
+            assert_eq!(sheet.get_display(0, 1), "#SPILL!", "a reader of the parent sees the collision");
+        }
+
+        // Remove the obstruction; the next recalc must place the array and
+        // forget the error, without anyone touching A1.
+        wb.active_sheet_mut().set_value(1, 0, "");
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered_with_custom_fns(&spill_handler);
+        let sheet = wb.active_sheet();
+        assert!(!sheet.has_spill_error(0, 0), "collision is over");
+        assert_eq!(sheet.get_display(0, 0), "1");
+        assert_eq!(sheet.get_display(1, 0), "2");
+        assert_eq!(sheet.get_display(2, 0), "3");
+        assert_eq!(sheet.get_display(0, 1), "1", "reader of the parent sees the value again");
+    }
+
+    #[test]
+    fn test_dynamic_reader_of_a_fresh_spill_is_settled() {
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "=MY_SPILL()");
+        wb.active_sheet_mut().set_value(0, 2, "=INDIRECT(\"A3\")");
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered_with_custom_fns(&spill_handler);
+        assert_eq!(wb.active_sheet().get_display(0, 2), "3");
+    }
+
+    #[test]
+    fn test_spill_chain_deeper_than_a_few_rounds_settles() {
+        // A1 spills 1..3; B1 spills from A3; C1 from B3; ... F1 from E3; G1 reads F3.
+        // Each array's input is the previous array's last receiver, so each
+        // layer can only be placed one round after the one before it.
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "=MY_SPILL()");
+        let cols = ["A", "B", "C", "D", "E"];
+        for (i, prev) in cols.iter().enumerate() {
+            wb.active_sheet_mut().set_value(0, i + 1, &format!("=SPILL_FROM({}3)", prev));
+        }
+        wb.active_sheet_mut().set_value(0, 6, "=F3");
+        wb.rebuild_dep_graph();
+        let report = wb.recompute_full_ordered_with_custom_fns(&spill_handler);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let sheet = wb.active_sheet();
+        // A3=3, B=3..5, C=5..7, D=7..9, E=9..11, F=11..13
+        assert_eq!(sheet.get_display(2, 5), "13");
+        assert_eq!(sheet.get_display(0, 6), "13");
     }
 
     #[test]

@@ -13,7 +13,7 @@
 
 ### Engine
 
-- **Readers of a fresh spill no longer lag a recalc** — a formula that reads a cell inside an array's spill area read it before the array was placed, so it showed the stale value until the next recalc. Built-ins mostly hid this because the insert path spills eagerly; a custom function's first spill, and any array that changes shape during a recalc, did not. The ordered recalc now re-evaluates the readers of every receiver it touched, in dependency order.
+- **Spill lifecycle during a recalc** — a formula that read a cell inside an array's spill area read it before the array was placed and showed a stale value until the next recalc; an array that shrank to a scalar, empty or error left its old receivers on the sheet; a `#SPILL!` stayed on a cell after the obstruction was removed; and readers of a blocked parent kept the array's first value instead of `#SPILL!`. Built-ins mostly hid these because the insert path spills eagerly; a custom function's spill only exists at recalc time. The ordered recalc now retires old extents, clears resolved collisions, and re-evaluates the readers of every cell it touched, including `INDIRECT` and `OFFSET` readers the dependency graph cannot see, for as many rounds as a chain of arrays needs, and reports if the bound is reached.
 
 ### Editing
 

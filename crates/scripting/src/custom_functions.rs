@@ -452,6 +452,12 @@ fn lua_table_to_eval_result(t: &mlua::Table) -> EvalResult {
     if len == 0 {
         return EvalResult::Empty;
     }
+    // Refuse before copying anything: the guard exists to keep a runaway
+    // result from costing memory, so it has to run on the table's shape, not
+    // on the copy of it.
+    if len > MAX_ARRAY_CELLS {
+        return EvalResult::Error(format!("#LUA! array larger than {} cells", MAX_ARRAY_CELLS));
+    }
 
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(len);
     let mut nested: Option<bool> = None;
@@ -474,6 +480,11 @@ fn lua_table_to_eval_result(t: &mlua::Table) -> EvalResult {
         }
         let row: Vec<Value> = if let mlua::Value::Table(inner) = &item {
             let n = inner.raw_len();
+            // Widest row seen so far times the number of rows the table has:
+            // checked on lengths alone, before this row's cells are copied.
+            if len.saturating_mul(width.max(n)) > MAX_ARRAY_CELLS {
+                return EvalResult::Error(format!("#LUA! array larger than {} cells", MAX_ARRAY_CELLS));
+            }
             let mut row = Vec::with_capacity(n);
             for j in 1..=n {
                 let cell: mlua::Value = match inner.raw_get(j) {
@@ -683,6 +694,17 @@ mod tests {
         let src = format!(
             "local t = {{}} for i = 1, {} do t[i] = i end return t",
             MAX_ARRAY_CELLS + 1
+        );
+        match eval_return(&src) {
+            EvalResult::Error(e) => assert!(e.contains("larger than"), "{}", e),
+            other => panic!("expected error, got {:?}", other),
+        }
+        // A single very wide row is refused on its length, before any of its
+        // cells are converted: the values are functions, which would fail
+        // conversion with a different message if they were ever visited.
+        let src = format!(
+            "local row = {{}} for i = 1, {} do row[i] = function() end end return {{row, row}}",
+            MAX_ARRAY_CELLS
         );
         match eval_return(&src) {
             EvalResult::Error(e) => assert!(e.contains("larger than"), "{}", e),
