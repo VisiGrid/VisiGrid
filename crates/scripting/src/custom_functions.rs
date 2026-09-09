@@ -639,8 +639,12 @@ pub(crate) fn scrub_lua_runtime_error(err: &mlua::Error, func_name: &str) -> Str
     let core_msg = first_line.rsplit(": ").next().unwrap_or(first_line).trim();
 
     let msg = format!("{}: {}", func_name, core_msg);
-    if msg.len() > 100 {
-        format!("{}...", &msg[..97])
+    // Truncate on characters, not bytes: slicing at a fixed byte offset lands
+    // inside a multi-byte character for any non-ASCII message and panics the
+    // process where a #LUA! cell was owed.
+    if msg.chars().count() > 100 {
+        let head: String = msg.chars().take(97).collect();
+        format!("{}...", head)
     } else {
         msg
     }
@@ -660,6 +664,21 @@ mod tests {
         match r {
             EvalResult::Array(a) => a,
             other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn long_non_ascii_errors_are_truncated_on_character_boundaries() {
+        let lua = Lua::new();
+        lua.load("function BOOM() error(string.rep('한', 100)) end").exec().unwrap();
+        let memo = RefCell::new(MemoCache::new());
+        match call_custom_function(&lua, "BOOM", &[], &memo) {
+            EvalResult::Error(e) => {
+                assert!(e.starts_with("#LUA! BOOM: 한"), "{}", e);
+                assert!(e.ends_with("..."), "{}", e);
+                assert!(e.chars().count() <= 106, "{}", e.chars().count());
+            }
+            other => panic!("{:?}", other),
         }
     }
 

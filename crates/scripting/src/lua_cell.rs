@@ -9,8 +9,8 @@
 //! instruction limit. That is what keeps a cell pure, and purity is what lets
 //! the engine order and memoise it like any other formula.
 //!
-//! Compiled chunks are cached by code hash. A workbook with a thousand copies
-//! of one formula compiles it once; the environment is set per call.
+//! Compiled chunks are cached by their source. A workbook with a thousand
+//! copies of one formula compiles it once; the environment is set per call.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -27,10 +27,18 @@ use crate::custom_functions::{
 /// past this belongs in an attached script.
 pub const MAX_CELL_CODE_BYTES: usize = 64 * 1024;
 
-/// Compiled chunks by code hash, so repeated formulas compile once.
+/// How many distinct chunks stay compiled. Past this the cache is emptied
+/// and rebuilt on demand: an editor session that rewrites one cell two
+/// hundred times must not retain two hundred dead functions for the life of
+/// the runtime, and a compile is cheap next to a recalc.
+pub const MAX_CACHED_CHUNKS: usize = 256;
+
+/// Compiled chunks by their source text, so repeated formulas compile once.
+/// Keyed by the text itself rather than a hash of it: a map already checks
+/// equality, and a hash collision here would run another cell's code.
 #[derive(Default)]
 pub struct ChunkCache {
-    chunks: HashMap<u64, mlua::Function>,
+    chunks: HashMap<String, mlua::Function>,
 }
 
 impl ChunkCache {
@@ -47,8 +55,7 @@ impl ChunkCache {
     }
 
     fn get_or_compile(&mut self, lua: &Lua, code: &str) -> Result<mlua::Function, String> {
-        let hash = hash_code(code);
-        if let Some(f) = self.chunks.get(&hash) {
+        if let Some(f) = self.chunks.get(code) {
             return Ok(f.clone());
         }
         let f = lua
@@ -56,19 +63,12 @@ impl ChunkCache {
             .set_name("=LUA")
             .into_function()
             .map_err(|e| format!("#LUA! {}", scrub_lua_runtime_error(&e, "LUA")))?;
-        self.chunks.insert(hash, f.clone());
+        if self.chunks.len() >= MAX_CACHED_CHUNKS {
+            self.chunks.clear();
+        }
+        self.chunks.insert(code.to_string(), f.clone());
         Ok(f)
     }
-}
-
-fn hash_code(code: &str) -> u64 {
-    // FNV-1a: cheap, deterministic, and this is a cache key, not a fingerprint.
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in code.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
 }
 
 /// Evaluate `=LUA(...)` from its formula arguments: `args[0]` is the code,
@@ -251,6 +251,21 @@ mod tests {
             assert_eq!(r, EvalResult::Number(n as f64 + 1.0));
         }
         assert_eq!(chunks.borrow().len(), 1);
+    }
+
+    #[test]
+    fn the_chunk_cache_is_bounded() {
+        let lua = Lua::new();
+        let chunks = RefCell::new(ChunkCache::new());
+        let memo = RefCell::new(MemoCache::new());
+        for n in 0..(MAX_CACHED_CHUNKS + 10) {
+            let code = format!("return {}", n);
+            assert_eq!(eval_cell_chunk(&lua, &code, &[], &chunks, &memo), EvalResult::Number(n as f64));
+            assert!(chunks.borrow().len() <= MAX_CACHED_CHUNKS);
+        }
+        // Distinct source is distinct code, whatever it hashes to.
+        assert_eq!(eval_cell_chunk(&lua, "return 1", &[], &chunks, &memo), EvalResult::Number(1.0));
+        assert_eq!(eval_cell_chunk(&lua, "return 2", &[], &chunks, &memo), EvalResult::Number(2.0));
     }
 
     #[test]
