@@ -1,11 +1,348 @@
 # Changelog
 
+## Unreleased
+
+### Editing
+
+- **Composing input methods** — Korean, Japanese, Chinese and dead-key layouts now compose inside the cell editor. Typing `g k s r m f` on a 2-Set Korean keyboard lands `한글` (two syllables) instead of six separate jamo, which could not be repaired afterwards. Provisional text is shown in the cell and the formula bar while a syllable is being composed, and the input method's candidate window is anchored to the active cell. Committed text still goes through the normal typing path, so `=` entry, reference picking and autocomplete behave the same for every layout. Contributed by PLUTO-NIX in #15.
+- **Hangul in the bundled symbol font scope** — the symbol-font build now excludes Hangul the way it excludes the other CJK blocks, so source files that mention Korean no longer fail the font-scope test.
+
 ## 0.31.0
 
 ### Keyboard
 
 - **Excel ribbon sequences** — `Alt, W, V, G` toggles gridlines, and `Alt, H, C, P` copies the selected range to the system clipboard as a PNG picture. Copy as Picture includes off-screen cells and preserves gridlines, fills, borders, alignment, and common font formatting.
 - **Vim mode operators** — `x`, `y` and `p` cut, copy and paste the selection in normal mode, matching `Ctrl+X` / `Ctrl+C` / `Ctrl+V`.
+
+## 0.30.0
+
+### Desktop Integration
+
+- **New app icon** — the quadrant-and-diamond mark, now consistent across macOS, Windows and Linux. The artwork previously existed only as macOS iconsets while every other surface still carried the old placeholder.
+- **Window identity on Linux** (#13) — windows now advertise an `app_id` on Wayland and `WM_CLASS` on X11, so compositors can match the window to its icon and rules like `class:visigrid` work in Hyprland and sway. Flatpak builds claim their own `FLATPAK_ID`.
+- **Windows are named the moment they open** — a fresh window is titled `Book1 — unsaved — VisiGrid` immediately, instead of sitting untitled in alt-tab, the taskbar and the window switcher until its first edit.
+- **Default-app registration on macOS** now calls Launch Services directly with the running app's bundle ID, so Homebrew and App Store builds each register themselves. `.sheet` and `.vgrid` map to their own exported UTIs rather than both claiming `.sheet`'s.
+- **Hide VisiGrid / Hide Others / Show All** in the app menu, with the standard `cmd-h` / `cmd-alt-h` bindings.
+- Files opened from Finder via `file://localhost/...` now resolve correctly, and `.vgrid` loads through the native reader.
+
+### Reliability
+
+- **No more silent data loss on close or quit.** The red traffic light and system Close destroyed dirty windows with no prompt — gpui answers yes to `windowShouldClose` when no callback is registered. Every window now installs a close guard, and Quit walks all open windows, surfacing a save prompt for each dirty one until everything is saved, discarded, or the quit is cancelled.
+- **Ask AI and hub sign-in no longer block the UI thread.**
+
+### Performance
+
+- **Per-edit recalculation orders only the dirty subgraph** instead of sorting the whole sheet on every edit.
+- **Recalc now reports which cells it re-evaluated**, so callers mirroring the document no longer have to re-read and diff the entire workbook after every keystroke.
+- Keystroke and workbook-phase timing are measured separately.
+
+### Cloud Sync
+
+- **Uploads the visigrid-json representation rather than the SQLite file.** Blobs are sniffed by content, since the key's extension can lie after a cross-client save; older clients stay on the previous path.
+
+### macOS / App Store
+
+- gpui now builds from the VisiGrid fork with private CGS blur APIs removed, for App Store review compliance.
+- License menu entries appear only in commercial builds; shipped OSS builds never consult a license.
+
+## 0.28.1
+
+A data-loss fix for sheets that use custom functions. If you use them, this
+release matters; if you do not, nothing here affects you.
+
+### Fixed
+
+**A sheet using a custom function lost its computed values on every round
+trip.** The desktop app loads `functions.lua`. Nothing else does — not the CLI,
+which never has, and not the browser, where the toolchain cannot currently
+produce a Lua at all. So `=ACCRUED_INTEREST(1000,0.05,90)` recomputed to
+`Unknown function` and that string was written back over the `12.33` that had
+been there.
+
+This was reachable from two directions that turned out to be one code path.
+`vgrid convert -f json-full -t json-full` corrupted any file containing a custom
+function, and `convert` is also what runs on every save from the web app — so
+the server-side data loss and the CLI data loss were the same bug in the same
+place.
+
+Both the `visigrid-json` and `.sheet` loaders now keep a stored value when the
+formula calls a function this build has no definition for. It is deliberately
+narrow, and the tests cover each way it could have been too broad:
+
+- only for `Unknown function` — a `#DIV/0!` is an answer this engine can
+  produce, and preserving a stale number over a real error would be worse than
+  the original bug
+- only when the stored formula still matches, so nothing carries across an edit
+- only where a value already existed; nothing is invented
+- a stale value for a formula this build *can* compute is still discarded —
+  `=SUM(1,2)` stored as `999` still comes back as `3`
+
+The formula itself is never touched, so a build that does have the definitions
+recomputes and overwrites what was kept. This keeps a value alive; it does not
+pin one.
+
+**Files already damaged by this are mostly recoverable.** The formula was never
+the thing that got overwritten, so opening an affected file in the desktop app
+with your `functions.lua` present will recompute those cells normally.
+
+**Custom functions now apply when a file is opened, not only after pressing
+F9.** Opening a `.sheet` containing a custom function showed `Unknown function`
+in every such cell until somebody pressed F9 — the load path called recompute
+directly with no handler, seconds after the app had loaded `functions.lua`.
+This also defeated the loader fix above: the loaders kept the values they could
+not recompute, and then this second pass recomputed without the definitions and
+threw them away again.
+
+### Changed
+
+Cells whose value was kept rather than recomputed are now marked
+`stale_custom_fn` on the wire. A kept value came from a build that could compute
+the formula, and its inputs may have moved since, so it does not necessarily
+follow from the cells around it — handing that back with no sign would be the
+same invisible wrongness the fix exists to avoid, just relocated. A recomputed
+cell carries no marker at all rather than a false one, so presence means
+something.
+
+Nothing consumes the marker yet. The desktop should recalculate those cells on
+open, and a viewer should mark them. Until then it is a record rather than a
+mechanism, which is worth stating plainly.
+
+## 0.16.0
+
+### `vgrid serve` — your workbook, no window required
+
+Host a workbook headless: the engine and the session server, with nothing on screen.
+
+```bash
+vgrid serve budget.sheet --autosave 30
+```
+
+Everything that can talk to a VisiGrid window can talk to a served session, unchanged: `vgrid mcp` (AI agents), `vgrid apply`, `inspect`, `view --follow`. Paired credentials work as-is — approve a client once in the GUI and it's authorized for headless sessions too; new pairing requests prompt on the serving terminal. Serve `.sheet`, visigrid-json, or `.xlsx` (read-only unless `--save-as`), start empty with `--new`, and persist via `--autosave`, Ctrl+C, or the new **`vgrid save`** command — the protocol gained a `save` operation, so agents and scripts can checkpoint a served workbook remotely.
+
+This is the answer to a question native spreadsheets have never had a good answer for: how does a spreadsheet do work when no one has it open?
+
+### visigrid-json carries everything now
+
+Conditional formatting rules, data validations, filter/sort state, and charts now travel through the interchange format — and survive recalculation round-trips (including server-side recalc) instead of being stripped. All additive: existing documents and older readers are unaffected.
+
+### Protocol
+
+- New additive `save` / `save_result` messages, with golden vectors.
+- Fixed: server errors without a request id (e.g. malformed-message rejections) were unparseable by CLI clients.
+
+### Internals
+
+The session server and its request handlers now live in a dedicated `session-host` crate shared by the GUI and `vgrid serve` — one implementation, two hosts — and the historical duplicated protocol-type copy is gone. Large-file refactors in the GUI and CLI (pure moves, no behavior change).
+
+## 0.15.0
+
+### For spreadsheet purists
+
+Three of the most-requested features Excel and Sheets have never shipped:
+
+- **Problems panel (F10)** — every formula error in the workbook (`#DIV/0!`, `#REF!`, `#CYCLE!`, unknown functions…) in one list: grouped by sheet, click a row to jump to the cell. Lives alongside the Lua console and Terminal in the bottom panel.
+- **Paste values by default** — a setting Excel users have begged for for decades: flip `Paste Values by Default` in the command palette and Ctrl+V stops destroying your formatting. Full paste stays one step away in Paste Special → All.
+- **Center Across Selection, findable** — center a title over several columns *without merging*, so sorting, filtering, and formulas keep working. Now in the command palette (as a toggle) and the Format menu — along with Align Left/Center/Right, all palette-searchable for the first time.
+
+### Merged cells now match Excel
+
+Reading a hidden cell inside a merged region now returns empty, exactly like Excel: `=B1` with A1:B1 merged returns empty, agreeing with `=SUM(A1:B1)` for the first time. Previously single-cell references redirected to the merge origin while ranges didn't — an inconsistency we've removed. **This can change results on sheets that referenced merged interiors directly.** The full merged-cell contract is now documented in `docs/merge-semantics.md`.
+
+### visigrid-json v2 — workbooks, layout, and styling
+
+The stable JSON interchange grows up:
+
+- **Workbook form** (`"version": 2`): multi-sheet documents with `active_sheet`, used as canonical storage by [app.visigrid.app](https://app.visigrid.app). Older readers reject v2 loudly instead of silently reading one sheet.
+- **Layout side-car**: column widths, row heights, and frozen panes now travel with the data.
+- **Borders and text wrap** round-trip per cell.
+- `vgrid convert blob.json -f json-full -t json-full` is a full-fidelity recompute — every sheet, layout, and the active-sheet index preserved, all formulas recalculated. `--sheet <name|index>` extracts a single sheet from workbook documents.
+
+### The engine, everywhere
+
+New `visigrid-engine-wasm` crate: the entire formula engine compiles to ~140 KB gzipped of WebAssembly. It already powers the "engine-verified" chip on app.visigrid.app — every save is recomputed by the same Rust engine that runs this desktop app, in your browser, and any divergence is flagged. Internal timing now cfg-gates to support wasm32 with native behavior byte-identical.
+
+## 0.14.0
+
+### VisiGrid is now an MCP server
+
+Any MCP host — Claude Code, Claude Desktop — can drive a live VisiGrid window:
+
+```
+claude mcp add visigrid -- vgrid mcp
+```
+
+That's the entire setup. The first time an agent touches your spreadsheet, VisiGrid asks — a pairing dialog names the client and waits for your click. Approval issues a credential that survives restarts; revoke any client at any time with `vgrid pair --revoke <name>`. No tokens, no config files, no copy-paste.
+
+Five tools: `list_sessions`, `get_workbook`, `read_range`, `write_cells`, `set_format`. Every agent edit renders immediately in your window, lands in your undo history as a single step per batch, and respects optimistic concurrency — an agent can't silently clobber cells you're editing.
+
+- **Pairing** — `vgrid pair` (+ `--list`, `--revoke`) manages access from the terminal; `VISIGRID_SESSION_TOKEN` still overrides for CI.
+- **Session server on by default** — the control socket is inert until you approve a client, so it now starts with the GUI. Opt out with `--no-session-server`.
+
+### Session protocol hardening
+
+The write path behind the MCP surface (and `vgrid apply`) got a correctness pass:
+
+- Every ops batch is validated up front against the real grid bounds and sheet list — out-of-range writes are rejected with precise errors instead of silently creating unreachable cells, invalid sheet indexes error instead of redirecting to whatever sheet you're viewing, and `atomic` is now enforced by construction.
+- `set_number_format` and `set_style` ops are implemented (they previously reported success without doing anything): named formats (`currency:2`, `percent:1`, …) or raw Excel codes, applied per-cell with full undo.
+- Inspect requests validate the same way, and range reads are capped at 65,536 cells per request.
+- Protocol requests are served immediately even when the window is unfocused or in the background (previously they could stall until the next repaint).
+
+### CLI fixes
+
+- `vgrid inspect B3` inspected the wrong cell (row/column swapped) and `vgrid view --range` rendered a transposed window — both fixed.
+- `vgrid apply` sessions authenticate with the paired credential automatically.
+
+## 0.13.0
+
+### Conditional Formatting is complete
+
+v0.12.0 introduced typed conditional formatting rules with live preview. This release finishes the feature:
+
+- **Rules panel** (`Format → Manage Rules…` or the command palette): every rule on the sheet listed in the typed syntax — toggle on/off, reorder precedence (later rules win), edit in place with live preview, delete. No modal dialogs, and every change is a single undo step.
+- **Inspector answers "why is this cell styled?"**: the Format tab lists each rule covering the active cell with its predicate resolved to that cell's coordinates (`=A1>100` reads as `=A7>100` on row 7), its style, and whether it matched — plus a one-click jump to the rules panel.
+- **Performance**: rule evaluation is cached per cell and invalidated on edits or rule changes — heavy predicates (COUNTIF over large ranges) no longer re-evaluate every frame.
+
+### CLI
+
+- **`vgrid convert -t xlsx`** — full-fidelity XLSX export (formulas and formats preserved), to a file or streamed to stdout for pipelines. `--where`/`--select` filters compose (filtered exports are value-only, like the CSV writer).
+- **`visigrid-json`** — a new stable, versioned JSON interchange format carrying values, formulas, formats, and merges: `vgrid convert model.xlsx -t json-full`. Built for scripts and services that round-trip sheets through the engine; formulas are always recomputed on import.
+- Fixed `-t sheet -o out.sheet` erroring even when an output path was given.
+
+## 0.12.2
+
+### Selection & editing fixes (field-reported)
+- Fixed overflowing text rendering **bold/doubled** inside selections (two render layers both drew it)
+- Fixed the **doubled selection edge** — a gridline no longer draws beside the selection border or pokes past its corner
+- **Excel-parity text overflow**: selecting a cell no longer clips its spilled text; the full text renders over the selection highlight, exactly like Excel
+- **Ctrl+A + Delete is instant**: clearing a selection now costs proportional to your actual data, not the selection area (select-all + Delete previously walked 16.7M coordinates and could hang for seconds)
+
+### Lua console
+- Errors no longer leak internal paths — they now read `console:1: syntax error near ...`
+- Output history is bottom-anchored (terminal style) with syntax-highlighted command echoes
+- Statements run silently; only expressions echo results (like Lua's own REPL)
+- CLI compatibility: scripts written for `vgrid sheet apply --lua` (bare `set()`/`clear()`/`style()`) now run in the console — exact aliases where semantics match, graceful one-time notes where they don't
+
+### CLI
+- **Fixed `vgrid` failing to launch on macOS** when Homebrew's openssl@3 wasn't present (or failed code-signature validation): OpenSSL is now statically linked. No runtime TLS dependencies.
+
+## 0.12.1
+
+- Fixed: the macOS app bundle now reports its actual version in About / Get Info. A hardcoded value in Info.plist had silently defeated version stamping since v0.6.0, so every DMG from 0.6.0 through 0.12.0 self-identified as 0.6.0. Stamping is now done by key name with a build-time verification so it can't silently regress.
+
+No functional changes — this is v0.12.0 with a correct version stamp. See the [v0.12.0 notes](https://github.com/VisiGrid/VisiGrid/releases/tag/v0.12.0) for the conditional formatting release.
+
+## 0.12.0
+
+### Conditional Formatting (experimental)
+Formula-first, menuless: select a range, run **Add Conditional Format Rule** (command palette or Format menu), and type a rule — no dialogs to click through, no limit on rule count.
+
+```
+=A1>100 -> warning
+=$C1="overdue" -> bold, fg=#B71C1C, bg=#FDE2E2
+=ISBLANK(A1) -> like(Z1)
+```
+
+- The grid **previews matches live while you type**, with a match count in the dialog — see the result before you commit
+- Styles: named presets (`good`, `bad`, `neutral`, `note`, …), inline properties (`bold`, `bg=#RRGGBB`, `fg=#RRGGBB`), or `like(A1)` to copy a template cell's formatting
+- Predicates are real formulas with Excel-style relative anchoring (`$` behaves as you expect)
+- Rules are undoable, persist in the file, and shift correctly when rows/columns are inserted or deleted
+- Feedback welcome — the rules management panel (edit/reorder existing rules) is coming next
+
+### Excel muscle-memory fixes
+- **Smart Ctrl+A**: first press selects the current data region, second press selects the whole sheet
+- **Safe multi-selection editing**: Enter/Tab commit only the active cell; applying a value to the whole selection is now exclusively Ctrl+Enter — a stray keystroke after Ctrl+A can no longer overwrite your data
+
+### Platform
+- **Updated to the current GPUI generation** (Zed v1.12.0) — brings months of upstream Wayland and rendering fixes. If you saw window flickering on Sway/wlroots, update your compositor (the fix landed in wlroots) and this release — the combination should resolve it (#5)
+- Rust toolchain now pinned (1.95.0) for reproducible builds
+
+## 0.10.0
+
+### Cloud Sync
+
+- **Auto-sync to cloud** — Sign in and move any sheet to cloud. After every save, the file is automatically uploaded to your VisiHub account. No manual "Save to Cloud" button needed.
+- **Status bar indicator** — Shows sync state: `Synced`, `Syncing...`, `Offline`, or `Error`, along with your account name. Click to open the sheet in your browser.
+- **Open Cloud / Move to Cloud** — New menu items under File (Alt+L / Alt+M) to open cloud sheets or move a local file to cloud.
+- **Non-guessable sheet URLs** — Cloud sheets use random public IDs instead of sequential numbers.
+
+### UI Polish
+
+- **Formula bar redesign** — Elevated surface, `ƒ` symbol prefix, flat name box, accent color editing indicator.
+- **Autocomplete popup** — Width now matches the formula bar, height capped to 8 rows.
+
+### Bug Fixes
+
+- **Fix paste splitting formatted numbers** — Pasting values like `1,234.56` no longer splits on the comma delimiter.
+
+## 0.9.6
+
+### Reconciliation Engine
+
+- **Composite control type** — Run multiple recon configs as a single logical unit with a unified verdict. Enables daily-close workflows (e.g., `stripe_qbo` + `stripe_mercury` + `clearing_qbo`) via `.composite.toml` configs. Includes `--fail-fast` flag, per-step status tracking, and `exit_code` in JSON output for downstream ingestion.
+- **Settlement classification** — Recon results now include settlement state (matched/pending/stale/error) based on SLA windows and a configurable clock role. Stale items exit with code 61, preserving warn as a first-class signal.
+- **DerivedOutputs contract** — Recon results include a `derived` section with typed dataset slots (payout rollup, clearing delta, revenue roll-forward) for computed analyses.
+
+## 0.9.4
+
+### New features
+
+- **Generic HTTP fetch adapter** — `vgrid fetch http` connects any REST API that returns JSON. A mapping file tells VisiGrid how to extract the 9 canonical columns from each JSON item. Supports cursor and offset pagination, date format conversion, value mapping, and transforms (`dollars_to_cents`, `upper`, `lower`, `cents`).
+- **Signed request fingerprinting** — `vgrid fetch http --fingerprint <path>` emits a signed JSON sidecar recording the request URL, auth method, date range, mapping file hash, and output CSV hash. Uses the existing Ed25519 + BLAKE3 `SignedEnvelope` infrastructure for tamper-evident audit trails.
+
+### Improvements
+
+- Recon template labels are now formulas so they survive `vgrid fill --clear`
+- Summary amounts display in dollars (divide by 100 from `amount_minor`)
+- New 3-way `stripe-qbo-mercury-recon.sheet` template builder
+
+### Bug fixes
+
+- Fix QBO deposit fetch: filter by account client-side when the API doesn't support server-side filtering
+- Fix QBO fetch: client-side filter for non-queryable ref fields
+
+## 0.8.0
+
+- **Stripe adapter: emit synthetic fee rows** — Stripe's Balance Transaction API embeds processing fees as a field on each charge rather than as separate balance transactions. The adapter now emits a synthetic fee row for each transaction with a non-zero `fee` field, making payout-group rollups balance correctly (`charges + fees + payout = 0`). Transactions already typed as `stripe_fee` or `application_fee` are skipped to avoid double-counting.
+- **`vgrid sheet inspect --value`** — New flag that prints just the cell's display value for a single-cell target, replacing the need for `jq` or other JSON parsing in CI pipelines. Errors on ranges or when combined with `--json`/`--ndjson`.
+- **Period-aware date filtering for recon templates** — Settlement matching and rollup integrity checks now gate on a Period Start cell (`summary!B42`), so buffer-period payouts from a widened Stripe fetch window are excluded from pass/fail checks. When the cell is empty the filter is a no-op, preserving backward compatibility.
+- **Balance check removed from overall verdict** — The Stripe balance check is inherently non-zero for date-windowed views due to unsettled charges at period boundaries. It remains visible in the summary but no longer contributes to the PASS/FAIL verdict.
+
+## 0.7.9
+
+- **Fix AI CLI detection when launched from desktop entry** — AI commands ("Build Model with Lua", "Explain Selection", etc.) now find `claude`, `codex`, and `gemini` even when VisiGrid is launched from a `.desktop` file. The app now probes nvm, fnm, volta, `~/.local/bin`, and Homebrew paths in addition to the process PATH.
+- **Upgrade Stripe-Mercury recon to forensic audit** — Enhanced the Stripe-Mercury reconciliation template with forensic audit capabilities and fixed the Mercury CSV adapter.
+- **Fix AUR checksum mismatch on updates** — The release script now verifies CDN consistency by downloading the tarball twice and comparing checksums before publishing to AUR, preventing the recurring "FAILED validity check" errors.
+
+## 0.7.6
+
+### Integrated Terminal Panel
+- **PTY terminal** built into VisiGrid (Ctrl+\`) — run CLI commands without leaving your spreadsheet
+- **Drag-and-drop CSV files** onto the terminal to auto-generate `vgrid peek` (1 file) or `vgrid diff` (2 files) commands
+- Smart key column guessing for diff commands based on CSV headers
+- Files are copied into the workspace with collision-safe naming
+- Resize, maximize, scroll, and Ctrl+Shift+C/V for copy/paste
+
+### Structured Diff Results View
+- **"Open Diff Results"** in the Command Palette parses `vgrid diff` JSON output into a proper spreadsheet sheet
+- Color-coded rows: amber for differences, gray for only-left/only-right
+- Provenance header: source files, workspace path, and timestamp on every report
+- Summary section with row counts, match stats, and key column
+- Detail section with Status, Key, Column, Left Value, Right Value, and Delta columns
+- Handles up to 50,000 detail rows with truncation notice
+- Re-running replaces the existing "Diff Results" sheet
+
+### CLI: Data Fetch Commands
+- **`vgrid fetch stripe`** — pull Stripe balance transactions into canonical CSV
+- **`vgrid fetch mercury`** — pull Mercury bank transactions into canonical CSV
+- Shared fetch infrastructure for adding new data sources
+- **Stripe ↔ Mercury reconciliation template** with automated tests
+
+### Reconciliation Workflow
+Drop two CSV exports onto the terminal, hit Enter, then Command Palette → Open Diff Results. That's a complete reconciliation pipeline — from raw bank/payment data to structured, filterable, exportable results — in under 30 seconds.
+
+## Releases without recorded notes
+
+The following versions shipped between 0.7.4 and 0.31.0 with no entry here and no notes on their GitHub release: 0.29.0, 0.28.0, 0.27.0, 0.26.0, 0.25.1, 0.25.0, 0.24.0, 0.23.0, 0.22.0, 0.21.0, 0.20.0, 0.19.0, 0.18.0, 0.17.0, 0.11.0, 0.10.1, 0.9.9, 0.9.8, 0.9.7, 0.9.5, 0.9.3, 0.9.2, 0.9.1, 0.9.0, 0.8.3, 0.8.2, 0.8.1, 0.7.8, 0.7.7, 0.7.5. Their changes are in the git history between the adjacent tags.
 
 ## 0.7.4
 

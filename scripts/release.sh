@@ -132,8 +132,19 @@ REMOTE="$(git rev-parse origin/main)"
 [[ "$LOCAL" == "$REMOTE" ]] || die "Local main is not up to date with origin/main. Pull or push first."
 
 # Tag doesn't already exist
+# A tag that already exists is fine only if it is this HEAD: that is a
+# previous run of this script that died after tagging (CI wait, publish, AUR),
+# and the rest of the script is idempotent from there. Any other tag by this
+# name means the version was already released, or points somewhere else.
+RESUMING=false
 if git rev-parse "v$VERSION" &>/dev/null 2>&1; then
-    die "Tag v$VERSION already exists."
+    TAG_SHA="$(git rev-parse "v$VERSION^{commit}")"
+    if [[ "$TAG_SHA" == "$(git rev-parse HEAD)" ]]; then
+        RESUMING=true
+        yellow "Tag v$VERSION already exists at HEAD; resuming after the tag step."
+    else
+        die "Tag v$VERSION already exists at ${TAG_SHA:0:7}, which is not HEAD ($(git rev-parse --short HEAD))."
+    fi
 fi
 
 # Build check
@@ -196,8 +207,16 @@ if [[ -n "$REMOTE_NOW" && "$HEAD_NOW" != "$REMOTE_NOW" ]]; then
      Nothing has been tagged. Reconcile, then re-run."
 fi
 
-run git tag "v$VERSION"
-run git push origin "v$VERSION"
+if $RESUMING; then
+    yellow "Tag exists; not re-creating it."
+else
+    run git tag "v$VERSION"
+fi
+if git ls-remote --tags origin "refs/tags/v$VERSION" | grep -q .; then
+    yellow "Tag v$VERSION already on origin; not re-pushing."
+else
+    run git push origin "v$VERSION"
+fi
 
 if $DRY_RUN; then
     yellow "[dry-run] Would wait for Release workflow to complete."
