@@ -580,6 +580,18 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
             }
         }
         Token::CellRef { col, row, col_abs, row_abs } => {
+            // `TAX2024(1)`: a name that reads as a cell reference but is
+            // followed by `(` is a function call, as it is in Excel. Without
+            // this the tokenizer's reading wins, the argument list is dropped
+            // on the floor, and a documented custom-function name quietly
+            // becomes a reference to a cell far off to the right.
+            if !*col_abs && !*row_abs {
+                if let Some(Token::LParen) = tokens.get(pos + 1) {
+                    let name = format!("{}{}", column_letters(*col), row + 1);
+                    let (args, new_pos) = parse_function_args(tokens, pos + 2)?;
+                    return Ok((Expr::Function { name, args }, new_pos));
+                }
+            }
             // Check if this is a range (A1:B5)
             if pos + 2 < tokens.len() {
                 if let Token::Colon = &tokens[pos + 1] {
@@ -1031,6 +1043,20 @@ fn collect_cell_refs<S>(expr: &Expr<S>, refs: &mut Vec<(usize, usize)>) {
     }
 }
 
+/// 0-based column index to its letters: 0 → A, 25 → Z, 26 → AA.
+fn column_letters(mut col: usize) -> String {
+    let mut out = Vec::new();
+    loop {
+        out.push(b'A' + (col % 26) as u8);
+        if col < 26 {
+            break;
+        }
+        col = col / 26 - 1;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("ASCII letters")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1433,6 +1459,33 @@ mod tests {
     }
 
     // ── Dotted function name tests ───────────────────────────────
+
+    #[test]
+    fn test_cell_reference_shaped_name_before_paren_is_a_call() {
+        // The docs list TAX2024 as a valid custom function name.
+        match parse("=TAX2024(1)").unwrap() {
+            Expr::Function { name, args } => {
+                assert_eq!(name, "TAX2024");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected a call, got {:?}", other),
+        }
+        match parse("=ABC12()").unwrap() {
+            Expr::Function { name, args } => {
+                assert_eq!(name, "ABC12");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected a call, got {:?}", other),
+        }
+        // Plain references and ranges are untouched.
+        assert!(matches!(parse("=A1").unwrap(), Expr::CellRef { .. }));
+        assert!(matches!(parse("=A1:B2").unwrap(), Expr::Range { .. }));
+        assert_eq!(column_letters(0), "A");
+        assert_eq!(column_letters(25), "Z");
+        assert_eq!(column_letters(26), "AA");
+        assert_eq!(column_letters(701), "ZZ");
+        assert_eq!(column_letters(702), "AAA");
+    }
 
     #[test]
     fn test_dotted_function_name() {

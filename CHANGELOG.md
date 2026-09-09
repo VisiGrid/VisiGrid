@@ -6,6 +6,15 @@
 
 - **Row and column differences** — `Ctrl+\` selects, in each row of the selection, the cells whose value differs from the active cell's column; `Ctrl+Shift+|` does the same per column against the active cell's row. Excel's Go To Special equivalents. Comparison is by computed value, so formulas that evaluate alike count as equal. Also in the palette as "Select: Row Differences" and "Select: Column Differences".
 
+### Custom functions
+
+- **Table returns spill** — a Lua custom function may now return a table. A sequence of scalars spills as a column, a sequence of sequences as rows of columns, ragged rows are padded, and a result over 100,000 cells is refused. A `#SPILL!` collision behaves as it does for built-in array functions. Previously any table return was `#LUA! unsupported return type`.
+- **Names like `TAX2024` now work** — a custom function whose name reads like a cell reference (letters then digits) was tokenised as one, and `=TAX2024(1)` silently became a reference to cell TAX2024 with the argument list dropped. A reference-shaped name followed by `(` is now a call, as in Excel.
+
+### Engine
+
+- **Readers of a fresh spill no longer lag a recalc** — a formula that reads a cell inside an array's spill area read it before the array was placed, so it showed the stale value until the next recalc. Built-ins mostly hid this because the insert path spills eagerly; a custom function's first spill, and any array that changes shape during a recalc, did not. The ordered recalc now re-evaluates the readers of every receiver it touched, in dependency order.
+
 ### Editing
 
 - **Composing input methods** — Korean, Japanese, Chinese and dead-key layouts now compose inside the cell editor. Typing `g k s r m f` on a 2-Set Korean keyboard lands `한글` (two syllables) instead of six separate jamo, which could not be repaired afterwards. Provisional text is shown in the cell and the formula bar while a syllable is being composed, and the input method's candidate window is anchored to the active cell. Committed text still goes through the normal typing path, so `=` entry, reference picking and autocomplete behave the same for every layout. Contributed by PLUTO-NIX in #15.

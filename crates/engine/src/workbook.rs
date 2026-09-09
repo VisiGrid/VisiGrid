@@ -1636,17 +1636,78 @@ impl Workbook {
         // sheet rather than a half-built one, and a collision is a real
         // collision rather than an accident of load order. apply_spill reports
         // #SPILL! and leaves the occupying cell alone when it cannot fit.
-        for sheet in &mut self.sheets {
-            for (row, col, array) in sheet.take_pending_spills() {
-                // Drop anything this cell spilled earlier before placing again.
-                // A caller that still inserts eagerly will have spilled once
-                // already, against a half-built sheet, and those receivers
-                // outlive the cells written after them — so without this, a
-                // refusal here leaves the error sitting beside the leftovers of
-                // the spill it just declined. This pass is the authority on
-                // where an array goes, whatever happened on the way in.
-                sheet.clear_spill_from(row, col);
-                sheet.place_spill(row, col, &array);
+        //
+        // Placing a spill changes the value of every receiver cell, and any
+        // formula that read a receiver during Phase 3 read it before the array
+        // landed there. A built-in array function usually hides this because
+        // the insert path spilled eagerly, so the receivers already held
+        // values; a custom function cannot spill at insert time (there is no
+        // handler then), and a built-in whose array changes SHAPE during a
+        // recompute has the same gap. So after placing, every formula that
+        // reads a touched receiver is evaluated again, in dependency order,
+        // and if that produces new arrays the round repeats. Bounded, because
+        // a formula whose array grows on every read is a cycle by another name.
+        const MAX_SPILL_SETTLE_ROUNDS: usize = 4;
+        for _round in 0..MAX_SPILL_SETTLE_ROUNDS {
+            let mut touched: FxHashSet<CellId> = FxHashSet::default();
+            for sheet in &mut self.sheets {
+                let sheet_id = sheet.id;
+                for (row, col, array) in sheet.take_pending_spills() {
+                    // Receivers of the previous extent lose their value too.
+                    if let Some(info) = sheet.cells.get(&(row, col)).and_then(|c| c.spill_info.clone()) {
+                        for dr in 0..info.rows {
+                            for dc in 0..info.cols {
+                                if dr != 0 || dc != 0 {
+                                    touched.insert(CellId { sheet: sheet_id, row: row + dr, col: col + dc });
+                                }
+                            }
+                        }
+                    }
+                    // Drop anything this cell spilled earlier before placing again.
+                    // A caller that still inserts eagerly will have spilled once
+                    // already, against a half-built sheet, and those receivers
+                    // outlive the cells written after them — so without this, a
+                    // refusal here leaves the error sitting beside the leftovers of
+                    // the spill it just declined. This pass is the authority on
+                    // where an array goes, whatever happened on the way in.
+                    sheet.clear_spill_from(row, col);
+                    sheet.place_spill(row, col, &array);
+                    for dr in 0..array.rows() {
+                        for dc in 0..array.cols() {
+                            if dr != 0 || dc != 0 {
+                                touched.insert(CellId { sheet: sheet_id, row: row + dr, col: col + dc });
+                            }
+                        }
+                    }
+                }
+            }
+            if touched.is_empty() {
+                break;
+            }
+            // Everything that reads a touched receiver, transitively.
+            let mut readers: FxHashSet<CellId> = FxHashSet::default();
+            let mut stack: Vec<CellId> = touched.into_iter().collect();
+            while let Some(cell) = stack.pop() {
+                for dependent in self.dep_graph.dependents(cell) {
+                    if readers.insert(dependent) {
+                        stack.push(dependent);
+                    }
+                }
+            }
+            let order = match self.dep_graph.topo_order_subset(&readers) {
+                Ok(order) => order,
+                Err(_) => break, // a cycle among the readers is already reported above
+            };
+            if order.is_empty() {
+                break;
+            }
+            for cell_id in order {
+                if let Err(e) = self.evaluate_cell_with_handler(cell_id, custom_fn_handler) {
+                    if report.errors.len() < 100 {
+                        report.errors.push(RecalcError::new(cell_id, e));
+                    }
+                }
+                report.cells_recomputed += 1;
             }
         }
 
@@ -2658,6 +2719,41 @@ mod tests {
         assert_eq!(wb.revision(), rev0 + 1, "one bump per batch");
         assert!(changed.contains(&CellId::new(sheet_id, 0, 0)));
         assert!(changed.contains(&CellId::new(sheet_id, 1, 1)));
+    }
+
+    /// A custom function (the Lua bridge, or any handler) may answer with an
+    /// array. The ordered recompute must place it as a spill exactly like a
+    /// built-in array function, since that is the only path custom functions
+    /// take: the insert-time evaluation has no handler and reports the name as
+    /// unknown until the recompute runs.
+    #[test]
+    fn test_custom_function_array_result_spills() {
+        use crate::formula::eval::{Array2D, EvalArg, EvalResult, Value};
+
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "=MY_SPILL()");
+        wb.active_sheet_mut().set_value(0, 1, "=A3*10");
+        wb.rebuild_dep_graph();
+
+        let handler = |name: &str, _args: &[EvalArg]| -> Option<EvalResult> {
+            if name != "MY_SPILL" {
+                return None;
+            }
+            let mut a = Array2D::new(3, 1);
+            a.set(0, 0, Value::Number(1.0));
+            a.set(1, 0, Value::Number(2.0));
+            a.set(2, 0, Value::Number(3.0));
+            Some(EvalResult::Array(a))
+        };
+        wb.recompute_full_ordered_with_custom_fns(&handler);
+
+        let sheet = wb.active_sheet();
+        assert!(sheet.is_spill_parent(0, 0), "A1 should own the spill");
+        assert_eq!(sheet.get_display(0, 0), "1");
+        assert_eq!(sheet.get_display(1, 0), "2");
+        assert_eq!(sheet.get_display(2, 0), "3");
+        // A dependent of a spilled cell sees the spilled value.
+        assert_eq!(sheet.get_display(0, 1), "30");
     }
 
     #[test]

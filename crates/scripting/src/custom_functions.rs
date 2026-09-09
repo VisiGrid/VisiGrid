@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use mlua::{self, Lua, HookTriggers, VmState};
 
-use visigrid_engine::formula::eval::{EvalArg, EvalResult, Value};
+use visigrid_engine::formula::eval::{Array2D, EvalArg, EvalResult, Value};
 use visigrid_engine::formula::functions::{is_known_function, is_valid_custom_function_name};
 
 // =============================================================================
@@ -410,8 +410,106 @@ fn lua_return_to_eval_result(val: &mlua::Value) -> EvalResult {
             //
             EvalResult::Empty
         }
+        mlua::Value::Table(t) => lua_table_to_eval_result(t),
         _ => EvalResult::Error("#LUA! unsupported return type".to_string()),
     }
+}
+
+/// The most cells one function call may spill. Generous for real results
+/// (a 1000-row × 100-column table) and small enough that a runaway loop
+/// building a table cannot take the process down before the instruction
+/// limit stops it.
+pub const MAX_ARRAY_CELLS: usize = 100_000;
+
+/// A returned table becomes an array that spills from the calling cell.
+///
+/// Two shapes are accepted, and they mirror how the sheet reads:
+///
+/// - a sequence of scalars, `{1, 2, 3}`, is a column: one value per row;
+/// - a sequence of sequences, `{{"a", 1}, {"b", 2}}`, is rows of columns.
+///
+/// A ragged inner sequence is padded with empty cells to the widest row, so a
+/// missing trailing value never shifts its neighbours. Shapes are not mixed:
+/// a row that is a scalar beside a row that is a table is an error, since it
+/// would have to be guessed at. An empty table is an empty cell. Only the
+/// sequence part (1..n) is read; string keys are ignored.
+fn lua_table_to_eval_result(t: &mlua::Table) -> EvalResult {
+    fn scalar(v: &mlua::Value) -> Result<Value, String> {
+        match v {
+            mlua::Value::Number(n) => Ok(Value::Number(*n)),
+            mlua::Value::Integer(i) => Ok(Value::Number(*i as f64)),
+            mlua::Value::String(s) => s
+                .to_str()
+                .map(|s| Value::Text(s.to_string()))
+                .map_err(|_| "#LUA! non-UTF8 string in table".to_string()),
+            mlua::Value::Boolean(b) => Ok(Value::Boolean(*b)),
+            mlua::Value::Nil => Ok(Value::Empty),
+            other => Err(format!("#LUA! unsupported value in table: {}", other.type_name())),
+        }
+    }
+
+    let len = t.raw_len();
+    if len == 0 {
+        return EvalResult::Empty;
+    }
+
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(len);
+    let mut nested: Option<bool> = None;
+    let mut width = 0usize;
+
+    for i in 1..=len {
+        let item: mlua::Value = match t.raw_get(i) {
+            Ok(v) => v,
+            Err(e) => return EvalResult::Error(format!("#LUA! {}", e)),
+        };
+        let is_table = matches!(item, mlua::Value::Table(_));
+        match nested {
+            None => nested = Some(is_table),
+            Some(expected) if expected != is_table => {
+                return EvalResult::Error(
+                    "#LUA! table mixes scalars and rows; return either {a, b, c} or {{a, b}, {c, d}}".to_string(),
+                )
+            }
+            _ => {}
+        }
+        let row: Vec<Value> = if let mlua::Value::Table(inner) = &item {
+            let n = inner.raw_len();
+            let mut row = Vec::with_capacity(n);
+            for j in 1..=n {
+                let cell: mlua::Value = match inner.raw_get(j) {
+                    Ok(v) => v,
+                    Err(e) => return EvalResult::Error(format!("#LUA! {}", e)),
+                };
+                match scalar(&cell) {
+                    Ok(v) => row.push(v),
+                    Err(e) => return EvalResult::Error(e),
+                }
+            }
+            row
+        } else {
+            match scalar(&item) {
+                Ok(v) => vec![v],
+                Err(e) => return EvalResult::Error(e),
+            }
+        };
+        width = width.max(row.len());
+        if rows.len().saturating_mul(width.max(1)) > MAX_ARRAY_CELLS {
+            return EvalResult::Error(format!("#LUA! array larger than {} cells", MAX_ARRAY_CELLS));
+        }
+        rows.push(row);
+    }
+
+    if width == 0 {
+        // Every row was an empty table: nothing to place.
+        return EvalResult::Empty;
+    }
+    if rows.len() * width > MAX_ARRAY_CELLS {
+        return EvalResult::Error(format!("#LUA! array larger than {} cells", MAX_ARRAY_CELLS));
+    }
+    for row in &mut rows {
+        row.resize(width, Value::Empty);
+    }
+    EvalResult::Array(Array2D::from_vec(rows))
 }
 
 // =============================================================================
@@ -518,5 +616,91 @@ fn scrub_lua_runtime_error(err: &mlua::Error, func_name: &str) -> String {
         format!("{}...", &msg[..97])
     } else {
         msg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eval_return(src: &str) -> EvalResult {
+        let lua = Lua::new();
+        let v: mlua::Value = lua.load(src).eval().expect("lua eval");
+        lua_return_to_eval_result(&v)
+    }
+
+    fn array(r: &EvalResult) -> &Array2D {
+        match r {
+            EvalResult::Array(a) => a,
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sequence_of_scalars_spills_as_a_column() {
+        let r = eval_return("return {1, 'two', true}");
+        let a = array(&r);
+        assert_eq!((a.rows(), a.cols()), (3, 1));
+        assert_eq!(a.get(0, 0), Some(&Value::Number(1.0)));
+        assert_eq!(a.get(1, 0), Some(&Value::Text("two".into())));
+        assert_eq!(a.get(2, 0), Some(&Value::Boolean(true)));
+    }
+
+    #[test]
+    fn sequence_of_sequences_is_rows_of_columns() {
+        let r = eval_return("return {{'a', 1}, {'b', 2}}");
+        let a = array(&r);
+        assert_eq!((a.rows(), a.cols()), (2, 2));
+        assert_eq!(a.get(1, 0), Some(&Value::Text("b".into())));
+        assert_eq!(a.get(1, 1), Some(&Value::Number(2.0)));
+    }
+
+    #[test]
+    fn ragged_rows_are_padded_with_empty_cells() {
+        let r = eval_return("return {{1, 2, 3}, {4}}");
+        let a = array(&r);
+        assert_eq!((a.rows(), a.cols()), (2, 3));
+        assert_eq!(a.get(1, 1), Some(&Value::Empty));
+        assert_eq!(a.get(1, 2), Some(&Value::Empty));
+    }
+
+    #[test]
+    fn empty_table_is_an_empty_cell_and_mixed_shapes_are_refused() {
+        assert!(matches!(eval_return("return {}"), EvalResult::Empty));
+        assert!(matches!(eval_return("return {{}, {}}"), EvalResult::Empty));
+        match eval_return("return {1, {2, 3}}") {
+            EvalResult::Error(e) => assert!(e.contains("mixes"), "{}", e),
+            other => panic!("expected error, got {:?}", other),
+        }
+        match eval_return("return {function() end}") {
+            EvalResult::Error(e) => assert!(e.contains("unsupported value"), "{}", e),
+            other => panic!("expected error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn oversized_arrays_are_refused_before_they_are_built() {
+        let src = format!(
+            "local t = {{}} for i = 1, {} do t[i] = i end return t",
+            MAX_ARRAY_CELLS + 1
+        );
+        match eval_return(&src) {
+            EvalResult::Error(e) => assert!(e.contains("larger than"), "{}", e),
+            other => panic!("expected error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_custom_function_returning_a_table_reaches_the_engine_as_an_array() {
+        let lua = Lua::new();
+        lua.load("function SEQ3() return {10, 20, 30} end").exec().unwrap();
+        let memo = RefCell::new(MemoCache::new());
+        let r = call_custom_function(&lua, "SEQ3", &[], &memo);
+        let a = array(&r);
+        assert_eq!((a.rows(), a.cols()), (3, 1));
+        assert_eq!(a.get(2, 0), Some(&Value::Number(30.0)));
+        // And the memo hands back the same array on a repeat call.
+        let again = call_custom_function(&lua, "SEQ3", &[], &memo);
+        assert_eq!(array(&again).rows(), 3);
     }
 }
