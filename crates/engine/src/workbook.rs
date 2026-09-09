@@ -1678,17 +1678,35 @@ impl Workbook {
             let mut touched: FxHashSet<CellId> = FxHashSet::default();
             for sheet in &mut self.sheets {
                 let sheet_id = sheet.id;
-                for (row, col, array) in sheet.take_pending_spills() {
-                    let id = CellId { sheet: sheet_id, row, col };
-                    if placed_this_recalc.get(&id) == Some(&array) {
-                        continue;
-                    }
-                    placed_this_recalc.insert(id, array.clone());
+                let pending: Vec<_> = sheet
+                    .take_pending_spills()
+                    .into_iter()
+                    .filter(|(row, col, array)| {
+                        let id = CellId { sheet: sheet_id, row: *row, col: *col };
+                        // An array this recalc already placed successfully, and
+                        // that has not changed, is not a change. Only successful
+                        // placements are remembered: a blocked one must be tried
+                        // again once whatever blocked it has moved.
+                        !placed_this_recalc.get(&id).is_some_and(|prev| arrays_equal(prev, array))
+                    })
+                    .collect();
+                // Every cell in this round gives up its old extent BEFORE any
+                // cell places a new one. Placement order is top-left first, so
+                // without this a parent above-and-right of another could be
+                // refused by a receiver that the other parent was about to
+                // retire in the same round, and stay #SPILL! for no reason.
+                // Drop anything a cell spilled earlier before placing again: a
+                // caller that still inserts eagerly will have spilled once
+                // already, against a half-built sheet, and those receivers
+                // outlive the cells written after them. This pass is the
+                // authority on where an array goes, whatever happened on the
+                // way in.
+                for (row, col, _) in &pending {
+                    let id = CellId { sheet: sheet_id, row: *row, col: *col };
                     // The parent's own reading changes too: it may have become
                     // #SPILL!, or stopped being one.
                     touched.insert(id);
-                    // Receivers of the previous extent lose their value.
-                    if let Some(info) = sheet.cells.get(&(row, col)).and_then(|c| c.spill_info.clone()) {
+                    if let Some(info) = sheet.cells.get(&(*row, *col)).and_then(|c| c.spill_info.clone()) {
                         for dr in 0..info.rows {
                             for dc in 0..info.cols {
                                 if dr != 0 || dc != 0 {
@@ -1697,20 +1715,21 @@ impl Workbook {
                             }
                         }
                     }
-                    // Drop anything this cell spilled earlier before placing again.
-                    // A caller that still inserts eagerly will have spilled once
-                    // already, against a half-built sheet, and those receivers
-                    // outlive the cells written after them — so without this, a
-                    // refusal here leaves the error sitting beside the leftovers of
-                    // the spill it just declined. This pass is the authority on
-                    // where an array goes, whatever happened on the way in.
-                    sheet.clear_spill_from(row, col);
+                    sheet.clear_spill_from(*row, *col);
+                }
+                for (row, col, array) in pending {
+                    let id = CellId { sheet: sheet_id, row, col };
                     if array.rows() == 0 || array.cols() == 0 {
                         // The retire marker: the cell no longer spills.
                         sheet.clear_spill_error(row, col);
+                        placed_this_recalc.remove(&id);
                         continue;
                     }
                     sheet.place_spill(row, col, &array);
+                    if sheet.has_spill_error(row, col) {
+                        placed_this_recalc.remove(&id);
+                        continue;
+                    }
                     for dr in 0..array.rows() {
                         for dc in 0..array.cols() {
                             if dr != 0 || dc != 0 {
@@ -1718,6 +1737,7 @@ impl Workbook {
                             }
                         }
                     }
+                    placed_this_recalc.insert(id, array);
                 }
             }
             if touched.is_empty() {
@@ -2626,6 +2646,30 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
     }
 }
 
+/// Same shape and same values, with every NaN equal to every other NaN.
+/// `Array2D` derives `PartialEq`, under which NaN != NaN, so a settled array
+/// holding one would read as changed on every round.
+fn arrays_equal(a: &crate::formula::eval::Array2D, b: &crate::formula::eval::Array2D) -> bool {
+    use crate::formula::eval::Value;
+    if a.rows() != b.rows() || a.cols() != b.cols() {
+        return false;
+    }
+    for r in 0..a.rows() {
+        for c in 0..a.cols() {
+            let same = match (a.get(r, c), b.get(r, c)) {
+                (Some(Value::Number(x)), Some(Value::Number(y))) => {
+                    (x.is_nan() && y.is_nan()) || x == y
+                }
+                (x, y) => x == y,
+            };
+            if !same {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2933,6 +2977,78 @@ mod tests {
         assert_eq!(sheet.get_display(0, 1), "3");
         assert_eq!(sheet.get_display(2, 1), "5");
         assert_eq!(sheet.get_display(0, 2), "5");
+    }
+
+    #[test]
+    fn test_placement_blocked_only_by_a_receiver_retiring_in_the_same_round_succeeds() {
+        use crate::formula::eval::{Array2D, EvalArg, EvalResult, Value};
+        use std::cell::Cell;
+        // X at A2 spills a row across A2:C2. Y at B1 wants B1:B2. B2 is X's
+        // receiver, and B1 sorts before A2 in placement order, so Y would be
+        // refused by a receiver that X retires moments later in the same round.
+        let second_pass = Cell::new(false);
+        let handler = |name: &str, _args: &[EvalArg]| -> Option<EvalResult> {
+            let row = |vals: &[f64]| {
+                let mut a = Array2D::new(1, vals.len());
+                for (i, v) in vals.iter().enumerate() {
+                    a.set(0, i, Value::Number(*v));
+                }
+                EvalResult::Array(a)
+            };
+            let column = |vals: &[f64]| {
+                let mut a = Array2D::new(vals.len(), 1);
+                for (i, v) in vals.iter().enumerate() {
+                    a.set(i, 0, Value::Number(*v));
+                }
+                EvalResult::Array(a)
+            };
+            match (name, second_pass.get()) {
+                ("X_ROW", false) => Some(row(&[1.0, 2.0, 3.0])),
+                ("X_ROW", true) => Some(EvalResult::Number(9.0)),
+                ("Y_COL", false) => Some(EvalResult::Empty),
+                ("Y_COL", true) => Some(column(&[7.0, 8.0])),
+                _ => None,
+            }
+        };
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(1, 0, "=X_ROW()");
+        wb.active_sheet_mut().set_value(0, 1, "=Y_COL()");
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered_with_custom_fns(&handler);
+        assert_eq!(wb.active_sheet().get_display(1, 1), "2", "X's receiver in place");
+
+        second_pass.set(true);
+        let report = wb.recompute_full_ordered_with_custom_fns(&handler);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let sheet = wb.active_sheet();
+        assert!(!sheet.has_spill_error(0, 1), "Y must not be refused by a receiver X retired this round");
+        assert_eq!(sheet.get_display(0, 1), "7");
+        assert_eq!(sheet.get_display(1, 1), "8");
+        assert_eq!(sheet.get_display(1, 0), "9");
+    }
+
+    #[test]
+    fn test_dynamic_array_containing_nan_settles_once() {
+        use crate::formula::eval::{Array2D, EvalArg, EvalResult, Value};
+        let handler = |name: &str, args: &[EvalArg]| -> Option<EvalResult> {
+            match name {
+                "MY_SPILL" => spill_handler(name, args),
+                "NAN_SPILL" => {
+                    let mut a = Array2D::new(2, 1);
+                    a.set(0, 0, Value::Number(f64::NAN));
+                    a.set(1, 0, Value::Number(1.0));
+                    Some(EvalResult::Array(a))
+                }
+                _ => None,
+            }
+        };
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "=MY_SPILL()");
+        wb.active_sheet_mut().set_value(0, 1, "=NAN_SPILL(INDIRECT(\"A3\"))");
+        wb.rebuild_dep_graph();
+        let report = wb.recompute_full_ordered_with_custom_fns(&handler);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(wb.active_sheet().get_display(1, 1), "1");
     }
 
     #[test]
