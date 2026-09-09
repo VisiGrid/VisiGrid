@@ -634,37 +634,19 @@ impl Spreadsheet {
     /// - Refreshing volatile functions (NOW, TODAY, RAND, etc.)
     /// - Forcing recalc after external data changes
     /// - Verifying formula results match expectations
-    /// Recompute everything, using custom functions when this build has them.
+    /// Recompute everything. Custom functions and =LUA cells are answered by
+    /// the formula adapter installed at startup, which the engine consults on
+    /// every path; this is the ordinary full recalc with the time spent in Lua
+    /// accounted in the report.
     ///
     /// The load path used to call `recompute_full_ordered` directly, with no
     /// handler, so opening a .sheet containing a custom function turned every
-    /// such cell into "Unknown function" until someone pressed F9. Two things
-    /// were wrong with that: the document looked live and was not, with nothing
-    /// on screen to suggest it — and once the loaders learned to keep values
-    /// they could not recompute, this second pass threw them away again.
-    ///
-    /// Falls back to the plain recompute when no functions are loaded, which
-    /// is the common case and avoids paying for a handler nobody will call.
+    /// such cell into "Unknown function" until someone pressed F9. That
+    /// asymmetry is gone: the handler is process-wide.
     pub fn recompute_with_custom_fns(&mut self, cx: &mut Context<Self>) -> visigrid_engine::recalc::RecalcReport {
-        if self.custom_fn_registry.functions.is_empty() {
-            return self.wb_mut(cx, |wb| wb.recompute_full_ordered());
-        }
-
-        use visigrid_engine::formula::eval::{EvalArg, EvalResult};
-        let memo_cache = std::cell::RefCell::new(crate::scripting::MemoCache::new());
-        let registry = &self.custom_fn_registry;
-        let lua = self.lua_runtime.lua();
-        let handler = |name: &str, args: &[EvalArg]| -> Option<EvalResult> {
-            if !registry.functions.contains_key(name) {
-                return None;
-            }
-            Some(crate::scripting::custom_functions::call_custom_function(
-                lua, name, args, &memo_cache,
-            ))
-        };
-        self.workbook
-            .update(cx, |wb, _| wb.recompute_full_ordered_with_custom_fns(&handler))
+        self.wb_mut(cx, crate::scripting::lua_formulas::recompute)
     }
+
 
     pub fn recalculate(&mut self, cx: &mut Context<Self>) {
         self.in_smoke_recalc = true;
@@ -716,44 +698,12 @@ impl Spreadsheet {
     pub fn profile_next_recalc(&mut self, cx: &mut Context<Self>) {
         self.in_smoke_recalc = true;
 
-        let has_custom_fns = !self.custom_fn_registry.functions.is_empty();
-        let report = if !has_custom_fns {
-            self.wb_mut(cx, |wb| wb.recompute_full_ordered())
-        } else {
-            {
-                use visigrid_engine::formula::eval::{EvalArg, EvalResult};
-                use std::time::Instant;
-
-                let lua_total_us = std::cell::Cell::new(0u64);
-                let memo_cache = std::cell::RefCell::new(crate::scripting::MemoCache::new());
-                let registry = &self.custom_fn_registry;
-                let lua = self.lua_runtime.lua();
-
-                let handler = |name: &str, args: &[EvalArg]| -> Option<EvalResult> {
-                    if !registry.functions.contains_key(name) {
-                        return None;
-                    }
-                    let fn_start = Instant::now();
-                    let result = crate::scripting::custom_functions::call_custom_function(
-                        lua, name, args, &memo_cache,
-                    );
-                    lua_total_us.set(lua_total_us.get() + fn_start.elapsed().as_micros() as u64);
-                    Some(result)
-                };
-
-                let mut report = self.workbook.update(cx, |wb, _| {
-                    wb.recompute_full_ordered_with_custom_fns(&handler)
-                });
-                report.phase_lua_total_us = lua_total_us.get();
-                debug_assert!(
-                    report.phase_lua_total_us <= report.phase_eval_us + 1000,
-                    "Lua total {}us > eval phase {}us",
-                    report.phase_lua_total_us, report.phase_eval_us,
-                );
-                report
-            }
-        };
-
+        let report = self.recompute_with_custom_fns(cx);
+        debug_assert!(
+            report.phase_lua_total_us <= report.phase_eval_us + 1000,
+            "Lua total {}us > eval phase {}us",
+            report.phase_lua_total_us, report.phase_eval_us,
+        );
         self.in_smoke_recalc = false;
 
         // Compute hotspot analysis
@@ -770,19 +720,18 @@ impl Spreadsheet {
 
     /// Reload custom functions from `functions.lua` and recalculate.
     pub fn reload_custom_functions(&mut self, cx: &mut Context<Self>) {
-        match crate::scripting::custom_functions::load_custom_functions(self.lua_runtime.lua()) {
-            Ok(registry) => {
-                let count = registry.functions.len();
-                let warnings = registry.warnings.clone();
-                self.custom_fn_registry = registry;
+        let status = crate::scripting::lua_formulas::reload();
+        match status.error {
+            None => {
+                let count = status.function_count;
                 let mut msg = format!("Loaded {} custom function{}", count, if count == 1 { "" } else { "s" });
-                if !warnings.is_empty() {
-                    msg.push_str(&format!(" ({})", warnings.join(", ")));
+                if !status.warnings.is_empty() {
+                    msg.push_str(&format!(" ({})", status.warnings.join(", ")));
                 }
                 self.status_message = Some(msg);
                 self.recalculate(cx);
             }
-            Err(e) => {
+            Some(e) => {
                 self.status_message = Some(format!("Custom functions error: {}", e));
             }
         }

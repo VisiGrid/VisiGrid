@@ -244,6 +244,15 @@ impl Default for MemoCache {
 }
 
 impl MemoCache {
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
     pub(crate) fn lookup(&self, key: &MemoKey) -> Option<&EvalResult> {
         self.get(key)
     }

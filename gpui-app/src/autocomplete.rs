@@ -88,9 +88,9 @@ impl Spreadsheet {
 
         // Custom functions from registry
         let upper = prefix.to_ascii_uppercase();
-        for name in self.custom_fn_registry.functions.keys() {
+        for name in crate::scripting::lua_formulas::function_names() {
             if name.starts_with(&upper) {
-                entries.push(AutocompleteEntry::Custom { name: name.clone() });
+                entries.push(AutocompleteEntry::Custom { name });
             }
         }
 
@@ -274,8 +274,8 @@ impl Spreadsheet {
 
         // While editing, only show Hard errors (unknown function, invalid token)
         // Transient errors (missing paren, trailing operator) are hidden - we'll auto-fix on confirm
-        let custom_names: Vec<&str> = self.custom_fn_registry.functions.keys()
-            .map(|s| s.as_str()).collect();
+        let custom_names_owned = crate::scripting::lua_formulas::function_names();
+        let custom_names: Vec<&str> = custom_names_owned.iter().map(|s| s.as_str()).collect();
         check_errors(&self.edit_value, self.edit_cursor, &custom_names)
             .filter(|diag| matches!(diag.kind, DiagnosticKind::Hard))
             .map(|diag| FormulaErrorInfo {

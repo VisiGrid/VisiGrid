@@ -1745,6 +1745,9 @@ pub(crate) fn long_version() -> &'static str {
 }
 
 fn main() -> ExitCode {
+    // Custom functions and =LUA cells compute in every command, including
+    // `serve`, through the engine's default handler.
+    visigrid_scripting::lua_formulas::install();
     let cli = Cli::parse();
 
     let result = match cli.command {

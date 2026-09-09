@@ -822,7 +822,6 @@ pub struct Spreadsheet {
     pub lua_runtime: crate::scripting::LuaRuntime,
     pub lua_console: crate::scripting::ConsoleState,
     pub script: crate::scripting::ScriptState,
-    pub custom_fn_registry: crate::scripting::CustomFunctionRegistry,
 
     // License dialog state
     pub license_input: String,
@@ -1333,7 +1332,6 @@ impl Spreadsheet {
             lua_runtime: crate::scripting::LuaRuntime::default(),
             lua_console: crate::scripting::ConsoleState::default(),
             script: crate::scripting::ScriptState::default(),
-            custom_fn_registry: crate::scripting::CustomFunctionRegistry::empty(),
 
             attached_scripts: Vec::new(),
             pending_run_records: Vec::new(),
@@ -1422,21 +1420,18 @@ impl Spreadsheet {
             session_request_tx: session_tx,
         };
 
-        // Load custom functions from ~/.config/visigrid/functions.lua
-        match crate::scripting::custom_functions::load_custom_functions(app.lua_runtime.lua()) {
-            Ok(registry) => {
-                if !registry.functions.is_empty() {
-                    app.status_message = Some(format!(
-                        "Loaded {} custom function{}",
-                        registry.functions.len(),
-                        if registry.functions.len() == 1 { "" } else { "s" },
-                    ));
-                }
-                app.custom_fn_registry = registry;
-            }
-            Err(e) => {
-                eprintln!("Custom functions error: {}", e);
-            }
+        // Custom functions from ~/.config/visigrid/functions.lua, loaded by the
+        // formula adapter on this thread's first use; ask it now so the status
+        // line can say what it found.
+        let status = crate::scripting::lua_formulas::load_status();
+        if let Some(e) = &status.error {
+            eprintln!("Custom functions error: {}", e);
+        } else if status.function_count > 0 {
+            app.status_message = Some(format!(
+                "Loaded {} custom function{}",
+                status.function_count,
+                if status.function_count == 1 { "" } else { "s" },
+            ));
         }
 
         app

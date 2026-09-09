@@ -1250,7 +1250,10 @@ impl Workbook {
     /// Formulas with INDIRECT/OFFSET are evaluated after all known-deps formulas
     /// since their dependencies cannot be determined statically.
     pub fn recompute_full_ordered(&mut self) -> crate::recalc::RecalcReport {
-        self.recompute_full_ordered_inner(None)
+        match crate::custom_fns::default_custom_fn_handler() {
+            Some(handler) => self.recompute_full_ordered_inner(Some(&handler)),
+            None => self.recompute_full_ordered_inner(None),
+        }
     }
 
     /// Core recompute implementation, optionally with custom function handler.
@@ -1630,6 +1633,45 @@ impl Workbook {
 
         report.phase_eval_us = phase_start.elapsed().as_micros() as u64;
 
+        self.settle_pending_spills(custom_fn_handler, &mut report);
+
+
+        report.duration_ms = start.elapsed().as_millis() as u64;
+
+        // Phase timing invariants — catch bogus data before it reaches the UI.
+        // lua_total is set by the GUI caller, so it's 0 here and the assertion
+        // only fires when populated (profile_next_recalc sets it after return).
+        #[cfg(debug_assertions)]
+        {
+            let phase_sum_us = report.phase_invalidation_us
+                + report.phase_topo_sort_us
+                + report.phase_eval_us;
+            let total_us = report.duration_ms * 1000;
+            // Phase sum should not wildly exceed total (allow 10% overhead + 1ms floor for rounding)
+            debug_assert!(
+                phase_sum_us <= total_us + 1000 + total_us / 10,
+                "Phase sum {}us exceeds total {}us by unreasonable margin",
+                phase_sum_us, total_us,
+            );
+        }
+
+        report
+    }
+
+    /// Full recalc with custom function handler support.
+    ///
+    /// Same as `recompute_full_ordered` but passes the handler through to all
+    /// cell evaluations so custom Lua functions can be resolved.
+    /// Place every array recorded during evaluation, then settle its readers.
+    /// Shared by the full ordered recalc and the incremental one, so a spill
+    /// that changes because its input changed is placed on an edit too, not
+    /// only when someone presses F9.
+    fn settle_pending_spills(
+        &mut self,
+        custom_fn_handler: Option<&dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
+        report: &mut crate::recalc::RecalcReport,
+    ) {
+        use crate::recalc::RecalcError;
         // --- Phase 4: Place spills ---
         //
         // Every value now exists, so an array can be placed against a finished
@@ -1813,33 +1855,8 @@ impl Workbook {
                 }
             }
         }
-
-        report.duration_ms = start.elapsed().as_millis() as u64;
-
-        // Phase timing invariants — catch bogus data before it reaches the UI.
-        // lua_total is set by the GUI caller, so it's 0 here and the assertion
-        // only fires when populated (profile_next_recalc sets it after return).
-        #[cfg(debug_assertions)]
-        {
-            let phase_sum_us = report.phase_invalidation_us
-                + report.phase_topo_sort_us
-                + report.phase_eval_us;
-            let total_us = report.duration_ms * 1000;
-            // Phase sum should not wildly exceed total (allow 10% overhead + 1ms floor for rounding)
-            debug_assert!(
-                phase_sum_us <= total_us + 1000 + total_us / 10,
-                "Phase sum {}us exceeds total {}us by unreasonable margin",
-                phase_sum_us, total_us,
-            );
-        }
-
-        report
     }
 
-    /// Full recalc with custom function handler support.
-    ///
-    /// Same as `recompute_full_ordered` but passes the handler through to all
-    /// cell evaluations so custom Lua functions can be resolved.
     pub fn recompute_full_ordered_with_custom_fns(
         &mut self,
         handler: &dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>,
@@ -1851,7 +1868,10 @@ impl Workbook {
     ///
     /// This forces evaluation by reading the cell value through the workbook lookup.
     fn evaluate_cell(&self, cell_id: CellId) -> Result<(), String> {
-        self.evaluate_cell_with_handler(cell_id, None)
+        match crate::custom_fns::default_custom_fn_handler() {
+            Some(handler) => self.evaluate_cell_with_handler(cell_id, Some(&handler)),
+            None => self.evaluate_cell_with_handler(cell_id, None),
+        }
     }
 
     /// Evaluate a single cell's formula, optionally with a custom function handler.
@@ -2015,13 +2035,8 @@ impl Workbook {
             // cross-sheet formula), evaluate it at the workbook level. This
             // handles formulas that evaluate_and_spill skipped (cross-sheet refs)
             // and also correctly re-evaluates same-sheet formulas.
-            let is_formula = self.sheet_by_id(cell_id.sheet)
-                .and_then(|s| s.cells.get(&(cell_id.row, cell_id.col)))
-                .map(|c| c.value.formula_ast().is_some())
-                .unwrap_or(false);
-            if is_formula {
-                let _ = self.evaluate_cell(cell_id);
-            }
+            // recalc_dirty_set evaluates the changed cell itself when it is a
+            // formula, then its dependents, then places any arrays.
             let recalculated = self.recalc_dirty_set(&[cell_id]);
             self.increment_revision();
             recalculated
@@ -2245,6 +2260,19 @@ impl Workbook {
         let mut queue = VecDeque::new();
 
         for &cell_id in changed {
+            // A changed cell that is itself a formula is re-evaluated here, at
+            // the workbook level, with the custom-function handler. The sheet's
+            // eager evaluation on entry has no handler, so without this a
+            // formula entered inside a batch (every agent op) stayed at
+            // "Unknown function" for any custom function or =LUA cell.
+            let is_formula = self
+                .sheet_by_id(cell_id.sheet)
+                .and_then(|s| s.cells.get(&(cell_id.row, cell_id.col)))
+                .map(|c| c.value.formula_ast().is_some())
+                .unwrap_or(false);
+            if is_formula && dirty_set.insert(cell_id) {
+                queue.push_back(cell_id);
+            }
             for dep in self.dep_graph.dependents(cell_id) {
                 if dirty_set.insert(dep) {
                     queue.push_back(dep);
@@ -2290,6 +2318,14 @@ impl Workbook {
             Ok(order) => {
                 for &cell_id in &order {
                     let _ = self.evaluate_cell(cell_id);
+                }
+                // Arrays noted during evaluation are placed now, exactly as
+                // the full recalc places them; a dependent array that grew
+                // or shrank used to keep its old receivers until F9.
+                let mut settle_report = crate::recalc::RecalcReport::default();
+                match crate::custom_fns::default_custom_fn_handler() {
+                    Some(handler) => self.settle_pending_spills(Some(&handler), &mut settle_report),
+                    None => self.settle_pending_spills(None, &mut settle_report),
                 }
                 // In evaluation order, which is the order a caller applying
                 // these downstream wants them in too.
@@ -3133,6 +3169,78 @@ mod tests {
             wb.active_sheet().get_raw(6, 0),
             "=LUA(\"return \"\"A1\"\" .. args[1]\", A5)"
         );
+    }
+
+    /// The registered default handler is consulted by the incremental path
+    /// (an edit outside a batch, and a batch closing) and by the full recalc,
+    /// so a custom function's dependents update on edits, not only on demand.
+    #[test]
+    fn test_default_custom_fn_handler_reaches_incremental_and_full_recalc() {
+        use crate::formula::eval::{EvalArg, EvalResult, Value};
+        fn probe(name: &str, args: &[EvalArg]) -> Option<EvalResult> {
+            if name != "DEFAULT_HANDLER_PROBE" {
+                return None;
+            }
+            match args.first() {
+                Some(EvalArg::Scalar(Value::Number(n))) => Some(EvalResult::Number(n * 3.0)),
+                _ => Some(EvalResult::Error("#VALUE!".into())),
+            }
+        }
+        crate::custom_fns::set_default_custom_fn_handler(Some(probe));
+
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "2");
+        wb.set_cell_value_tracked(0, 0, 1, "=DEFAULT_HANDLER_PROBE(A1)");
+        assert_eq!(wb.active_sheet().get_display(0, 1), "6", "entered outside a batch");
+
+        wb.set_cell_value_tracked(0, 0, 0, "5");
+        assert_eq!(wb.active_sheet().get_display(0, 1), "15", "dependent updated on edit");
+
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "7");
+        }
+        assert_eq!(wb.active_sheet().get_display(0, 1), "21", "batch close recalculated");
+
+        wb.recompute_full_ordered();
+        assert_eq!(wb.active_sheet().get_display(0, 1), "21", "full recalc agrees");
+    }
+
+    /// An array whose input changes must re-place on the incremental path.
+    #[test]
+    fn test_incremental_recalc_places_a_dependent_array() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "3");
+        wb.set_cell_value_tracked(0, 0, 1, "=SEQUENCE(A1)");
+        assert_eq!(wb.active_sheet().get_display(2, 1), "3");
+        wb.set_cell_value_tracked(0, 0, 0, "5");
+        assert_eq!(wb.active_sheet().get_display(4, 1), "5", "grew to five rows on the edit");
+        wb.set_cell_value_tracked(0, 0, 0, "2");
+        assert_eq!(wb.active_sheet().get_display(1, 1), "2");
+        assert_eq!(wb.active_sheet().get_display(2, 1), "", "shrank: old receiver cleared");
+        // And inside a batch, the path every agent op takes.
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "4");
+        }
+        assert_eq!(wb.active_sheet().get_display(3, 1), "4");
+    }
+
+    /// A formula entered inside a batch is evaluated with the default handler,
+    /// not left at the sheet's handler-less eager result.
+    #[test]
+    fn test_formula_entered_in_a_batch_uses_the_default_handler() {
+        use crate::formula::eval::{EvalArg, EvalResult};
+        fn probe(name: &str, _args: &[EvalArg]) -> Option<EvalResult> {
+            (name == "BATCH_ENTRY_PROBE").then_some(EvalResult::Number(7.0))
+        }
+        crate::custom_fns::set_default_custom_fn_handler(Some(probe));
+        let mut wb = Workbook::new();
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "=BATCH_ENTRY_PROBE()");
+        }
+        assert_eq!(wb.active_sheet().get_display(0, 0), "7");
     }
 
     #[test]

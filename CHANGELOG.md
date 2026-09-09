@@ -8,6 +8,8 @@
 
 ### Custom functions
 
+- **They compute everywhere now** — custom functions from `functions.lua` used to be evaluated only by the desktop app, and only on a full recalc: the CLI, `vgrid serve` and therefore agents over MCP reported them as unknown, and in the desktop an edit to a function's input left the cell stale until F9. A process-wide handler is now installed by both the desktop app and the CLI and consulted by every recalc path, including the incremental one after an edit or an agent op. The session host itself remains Lua-free.
+- **`=LUA(code, args…)`** — a cell whose formula is a Lua chunk. The code is the first argument and the remaining arguments are the chunk's inputs, visible as `args[1]`, `args[2]`, … with `args.n`, so dependencies are exact. It runs in the same read-only sandbox as a custom function and returns a scalar or a table that spills. For now the code is typed as a formula string with quotes doubled; a proper multiline editor is the next step.
 - **Table returns spill** — a Lua custom function may now return a table. A sequence of scalars spills as a column, a sequence of sequences as rows of columns, ragged rows are padded, and a result over 100,000 cells is refused. A `#SPILL!` collision behaves as it does for built-in array functions. Previously any table return was `#LUA! unsupported return type`.
 - **Names like `TAX2024` now work** — a custom function whose name reads like a cell reference (letters then digits) was tokenised as one, and `=TAX2024(1)` silently became a reference to cell TAX2024 with the argument list dropped. A reference-shaped name followed by `(` is now a call, as in Excel.
 

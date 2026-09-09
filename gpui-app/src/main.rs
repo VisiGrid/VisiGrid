@@ -496,6 +496,9 @@ fn open_file_urls(urls: Vec<String>, cx: &mut App) {
 
 fn main() {
     let startup_instant = std::time::Instant::now();
+    // Custom functions and =LUA cells compute on every recalc path, including
+    // the incremental one after an edit, through the engine's default handler.
+    scripting::lua_formulas::install();
 
     let cli = parse_args();
 
