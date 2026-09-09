@@ -1674,6 +1674,13 @@ impl Workbook {
         // treating it as one would touch its readers forever and exhaust the
         // rounds with nothing left to settle.
         let mut placed_this_recalc: FxHashMap<CellId, crate::formula::eval::Array2D> = FxHashMap::default();
+        // And what each cell was refused with. A blocked array from a dynamic
+        // formula would otherwise be retried every round against the same
+        // static obstruction and end up reported as unsettled, when #SPILL!
+        // on the parent is the settled answer. It is retried only when a cell
+        // in its extent was cleared this round, which is the only way a
+        // recalc can move an obstruction.
+        let mut blocked_this_recalc: FxHashMap<CellId, crate::formula::eval::Array2D> = FxHashMap::default();
         for _round in 0..MAX_SPILL_SETTLE_ROUNDS {
             let mut touched: FxHashSet<CellId> = FxHashSet::default();
             for sheet in &mut self.sheets {
@@ -1684,9 +1691,7 @@ impl Workbook {
                     .filter(|(row, col, array)| {
                         let id = CellId { sheet: sheet_id, row: *row, col: *col };
                         // An array this recalc already placed successfully, and
-                        // that has not changed, is not a change. Only successful
-                        // placements are remembered: a blocked one must be tried
-                        // again once whatever blocked it has moved.
+                        // that has not changed, is not a change.
                         !placed_this_recalc.get(&id).is_some_and(|prev| arrays_equal(prev, array))
                     })
                     .collect();
@@ -1701,16 +1706,15 @@ impl Workbook {
                 // outlive the cells written after them. This pass is the
                 // authority on where an array goes, whatever happened on the
                 // way in.
+                let mut cleared: FxHashSet<CellId> = FxHashSet::default();
                 for (row, col, _) in &pending {
-                    let id = CellId { sheet: sheet_id, row: *row, col: *col };
-                    // The parent's own reading changes too: it may have become
-                    // #SPILL!, or stopped being one.
-                    touched.insert(id);
                     if let Some(info) = sheet.cells.get(&(*row, *col)).and_then(|c| c.spill_info.clone()) {
                         for dr in 0..info.rows {
                             for dc in 0..info.cols {
                                 if dr != 0 || dc != 0 {
-                                    touched.insert(CellId { sheet: sheet_id, row: row + dr, col: col + dc });
+                                    let receiver = CellId { sheet: sheet_id, row: row + dr, col: col + dc };
+                                    touched.insert(receiver);
+                                    cleared.insert(receiver);
                                 }
                             }
                         }
@@ -1723,11 +1727,28 @@ impl Workbook {
                         // The retire marker: the cell no longer spills.
                         sheet.clear_spill_error(row, col);
                         placed_this_recalc.remove(&id);
+                        blocked_this_recalc.remove(&id);
+                        touched.insert(id);
                         continue;
                     }
+                    if blocked_this_recalc.get(&id).is_some_and(|prev| arrays_equal(prev, &array)) {
+                        let extent_cleared = (0..array.rows()).any(|dr| {
+                            (0..array.cols())
+                                .any(|dc| cleared.contains(&CellId { sheet: sheet_id, row: row + dr, col: col + dc }))
+                        });
+                        if !extent_cleared {
+                            // Same array, same obstruction: still #SPILL!, and
+                            // nothing about the parent's reading has changed.
+                            continue;
+                        }
+                    }
+                    // The parent's own reading changes: it may have become
+                    // #SPILL!, or stopped being one.
+                    touched.insert(id);
                     sheet.place_spill(row, col, &array);
                     if sheet.has_spill_error(row, col) {
                         placed_this_recalc.remove(&id);
+                        blocked_this_recalc.insert(id, array);
                         continue;
                     }
                     for dr in 0..array.rows() {
@@ -1737,6 +1758,7 @@ impl Workbook {
                             }
                         }
                     }
+                    blocked_this_recalc.remove(&id);
                     placed_this_recalc.insert(id, array);
                 }
             }
@@ -3049,6 +3071,33 @@ mod tests {
         let report = wb.recompute_full_ordered_with_custom_fns(&handler);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(wb.active_sheet().get_display(1, 1), "1");
+    }
+
+    #[test]
+    fn test_permanently_blocked_dynamic_array_settles_as_spill_error() {
+        // B1's array wants B1:B3; B2 holds a constant. A dynamic formula is
+        // re-evaluated every settlement round, so this must come to rest as a
+        // plain #SPILL! on B1 rather than a "not settled" report.
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "=MY_SPILL()");
+        wb.active_sheet_mut().set_value(1, 1, "wall");
+        wb.active_sheet_mut().set_value(0, 1, "=SPILL_FROM(INDIRECT(\"A3\"))");
+        wb.active_sheet_mut().set_value(0, 2, "=B1");
+        wb.rebuild_dep_graph();
+        let report = wb.recompute_full_ordered_with_custom_fns(&spill_handler);
+        // The report lists error-valued cells as it always has (C1 reads
+        // #SPILL!, which is an error value); what it must not contain is a
+        // settlement failure.
+        assert!(
+            !report.errors.iter().any(|e| e.error.contains("not settled")),
+            "{:?}",
+            report.errors
+        );
+        let sheet = wb.active_sheet();
+        assert!(sheet.has_spill_error(0, 1));
+        assert_eq!(sheet.get_display(0, 1), "#SPILL!");
+        assert_eq!(sheet.get_display(1, 1), "wall");
+        assert_eq!(sheet.get_display(0, 2), "#SPILL!", "reader of the blocked parent");
     }
 
     #[test]
