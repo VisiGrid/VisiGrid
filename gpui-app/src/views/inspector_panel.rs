@@ -461,19 +461,19 @@ fn render_inspector_tab(
         let sheet_id = app.sheet(cx).id;
         let impact = app.wb(cx).compute_impact(sheet_id, row, col);
 
-        // Cycle detection: use recalc report as source of truth when available
+        // Cycle detection:
         // 1. Check if this cell itself is #CYCLE!
         // 2. Check if any upstream cell has #CYCLE! (via graph traversal)
-        // 3. If verified mode, check recalc report's had_cycles flag
+        // The recalc report's workbook-wide had_cycles flag used to be a third
+        // term, but only ANDed with the upstream check, so it never changed the
+        // result; clippy's overly_complex_bool_expr (deny by default) flagged it.
         let cell_is_cycle = display_value == "#CYCLE!";
         let upstream_has_cycle = app.wb(cx).has_cycle_in_upstream(sheet_id, row, col);
-        let report_had_cycles = app.verified_mode
-            && app.last_recalc_report.as_ref().map(|r| r.had_cycles).unwrap_or(false);
 
         // Determine risk state
         let has_dynamic = impact.has_unknown_in_chain;
-        // Cell is affected by cycle if: it IS a cycle, its inputs have cycles, or workbook has cycles affecting it
-        let has_cycle = cell_is_cycle || upstream_has_cycle || (report_had_cycles && upstream_has_cycle);
+        // Cell is affected by cycle if it IS a cycle or its inputs have cycles
+        let has_cycle = cell_is_cycle || upstream_has_cycle;
         let is_verifiable = !has_cycle;
 
         // Only show impact header if there are dependents or it's a formula

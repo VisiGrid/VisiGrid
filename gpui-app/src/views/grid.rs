@@ -879,7 +879,7 @@ fn render_cell(
                 let on_left_edge = neighbor_left != cur_style;
                 let on_right_edge = neighbor_right != cur_style;
 
-                let style_top = !user_top && on_top_edge && (!cell_style.border_top_only || true);
+                let style_top = !user_top && on_top_edge;
                 let style_right = !user_right && on_right_edge && !cell_style.border_top_only;
                 let style_bottom = !user_bottom && on_bottom_edge && !cell_style.border_top_only;
                 let style_left = !user_left && on_left_edge && !cell_style.border_top_only;
