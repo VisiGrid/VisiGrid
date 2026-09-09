@@ -566,6 +566,16 @@ pub(crate) fn bind(
             }
             this.update_edit_scroll(window);
         }))
+        .on_action(cx.listener(|this, _: &SelectRowDifferences, _, cx| {
+            if !this.mode.is_editing() {
+                this.select_row_differences(cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &SelectColumnDifferences, _, cx| {
+            if !this.mode.is_editing() {
+                this.select_column_differences(cx);
+            }
+        }))
         .on_action(cx.listener(|this, _: &SelectBlanks, _, cx| {
             if !this.mode.is_editing() {
                 this.select_blanks(cx);

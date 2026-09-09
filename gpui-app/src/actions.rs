@@ -91,6 +91,8 @@ actions!(editing, [
 actions!(selection, [
     SelectAll,
     SelectBlanks,   // Select blank cells in current selection
+    SelectRowDifferences,     // Ctrl+\ - cells that differ from the active column, per row
+    SelectColumnDifferences,  // Ctrl+Shift+| - cells that differ from the active row, per column
     SelectRow,      // Shift+Space - select entire row
     SelectColumn,   // Ctrl+Space - select entire column
     ExtendUp,

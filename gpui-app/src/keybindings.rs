@@ -153,6 +153,14 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("alt-h c p", CopyAsPicture, Some("Spreadsheet")),
 
+        // Go To Special: row and column differences (Excel Ctrl+\ and
+        // Ctrl+Shift+|). The shifted backslash is reported differently per
+        // platform and layout, so the column form is bound both ways.
+        KeyBinding::new("ctrl-\\", SelectRowDifferences, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-shift-\\", SelectColumnDifferences, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-|", SelectColumnDifferences, Some("Spreadsheet")),
+        KeyBinding::new("ctrl-shift-|", SelectColumnDifferences, Some("Spreadsheet")),
+
         // File
         // Note: NewWindow and OpenFile are handled at App level (main.rs) to work
         // even when no windows are open. We bind in both Spreadsheet context (for

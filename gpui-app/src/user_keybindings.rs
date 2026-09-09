@@ -261,6 +261,8 @@ fn create_binding(key: &str, action: &str) -> Option<KeyBinding> {
         // Selection
         "selection.all" | "select.all" => Some(KeyBinding::new(key, SelectAll, context)),
         "selection.blanks" | "select.blanks" => Some(KeyBinding::new(key, SelectBlanks, context)),
+        "selection.rowdifferences" | "select.rowdifferences" => Some(KeyBinding::new(key, SelectRowDifferences, context)),
+        "selection.columndifferences" | "select.columndifferences" => Some(KeyBinding::new(key, SelectColumnDifferences, context)),
         "selection.row" | "select.row" => Some(KeyBinding::new(key, SelectRow, context)),
         "selection.column" | "select.column" => Some(KeyBinding::new(key, SelectColumn, context)),
         "selection.extendup" | "extend.up" => Some(KeyBinding::new(key, ExtendUp, context)),
@@ -348,6 +350,7 @@ pub fn available_actions() -> Vec<&'static str> {
         "edit.rename", "edit.createnamedrange", "edit.trim",
         // Selection
         "selection.all", "selection.blanks", "selection.row", "selection.column",
+        "selection.rowdifferences", "selection.columndifferences",
         "selection.extendup", "selection.extenddown", "selection.extendleft", "selection.extendright",
         // Clipboard
         "clipboard.copy", "clipboard.cut", "clipboard.paste", "clipboard.pastevalues",

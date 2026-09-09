@@ -61,6 +61,7 @@ mod provenance;
 mod ref_target;
 mod role_styles;
 mod search;
+mod selection_differences;
 mod series_fill;
 mod session;
 mod session_adapter;

@@ -486,6 +486,56 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Ctrl+\: select the cells in each row that differ from the active cell's column.
+    pub fn select_row_differences(&mut self, cx: &mut Context<Self>) {
+        let (min, max) = self.selection_range();
+        if min.1 == max.1 {
+            self.status_message = Some("Select at least two columns to compare".to_string());
+            cx.notify();
+            return;
+        }
+        let pivot_col = self.active_view_state().selected.1;
+        let cells = crate::selection_differences::find_row_differences(&self.sheet(cx), min, max, pivot_col);
+        self.select_cells_with_status(cells, "row", cx);
+    }
+
+    /// Ctrl+Shift+|: select the cells in each column that differ from the active cell's row.
+    pub fn select_column_differences(&mut self, cx: &mut Context<Self>) {
+        let (min, max) = self.selection_range();
+        if min.0 == max.0 {
+            self.status_message = Some("Select at least two rows to compare".to_string());
+            cx.notify();
+            return;
+        }
+        let pivot_row = self.active_view_state().selected.0;
+        let cells = crate::selection_differences::find_column_differences(&self.sheet(cx), min, max, pivot_row);
+        self.select_cells_with_status(cells, "column", cx);
+    }
+
+    /// Replace the selection with a set of single cells, the way select_blanks does,
+    /// and say how many. `axis` names the comparison in the status message.
+    fn select_cells_with_status(&mut self, mut cells: Vec<(usize, usize)>, axis: &str, cx: &mut Context<Self>) {
+        if cells.is_empty() {
+            self.status_message = Some(format!("No {} differences in selection", axis));
+            cx.notify();
+            return;
+        }
+        let first = cells.remove(0);
+        self.view_state.selected = first;
+        self.view_state.selection_end = None;
+        self.view_state.additional_selections.clear();
+        for cell in cells {
+            self.view_state.additional_selections.push((cell, None));
+        }
+        let count = 1 + self.view_state.additional_selections.len();
+        self.status_message = Some(if count == 1 {
+            format!("Selected 1 {} difference", axis)
+        } else {
+            format!("Selected {} {} differences", count, axis)
+        });
+        cx.notify();
+    }
+
     // ========================================================================
     // Fill Handle (drag corner to fill cells)
     // ========================================================================

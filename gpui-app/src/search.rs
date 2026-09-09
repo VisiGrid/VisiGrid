@@ -82,6 +82,8 @@ pub enum CommandId {
     ManageConditionalFormats,
     ClearConditionalFormats,
     SelectBlanks,
+    SelectRowDifferences,
+    SelectColumnDifferences,
     SelectCurrentRegion,
     HideRows,
     UnhideRows,
@@ -294,6 +296,8 @@ impl CommandId {
             Self::ManageConditionalFormats => "Conditional Formatting: Manage Rules",
             Self::ClearConditionalFormats => "Clear Conditional Formats in Selection",
             Self::SelectBlanks => "Select: Blanks in Region",
+            Self::SelectRowDifferences => "Select: Row Differences",
+            Self::SelectColumnDifferences => "Select: Column Differences",
             Self::SelectCurrentRegion => "Select Current Region",
             Self::HideRows => "Hide Rows",
             Self::UnhideRows => "Unhide Rows",
@@ -477,6 +481,8 @@ impl CommandId {
             Self::Undo => Some("Ctrl+Z"),
             Self::Redo => Some("Ctrl+Y"),
             Self::AutoSum => Some("Alt+="),
+            Self::SelectRowDifferences => Some("Ctrl+\\"),
+            Self::SelectColumnDifferences => Some("Ctrl+Shift+|"),
             Self::Copy => Some("Ctrl+C"),
             Self::Cut => Some("Ctrl+X"),
             Self::Paste => Some("Ctrl+V"),
@@ -552,6 +558,8 @@ impl CommandId {
             Self::ManageConditionalFormats => "conditional formatting rules manage panel edit reorder",
             Self::ClearConditionalFormats => "conditional formatting remove clear rules",
             Self::SelectBlanks => "empty cells region selection",
+            Self::SelectRowDifferences => "compare rows differ mismatch go to special",
+            Self::SelectColumnDifferences => "compare columns differ mismatch go to special",
             Self::SelectCurrentRegion => "select region contiguous data block table area ctrl shift star asterisk",
             Self::HideRows => "hide row invisible conceal",
             Self::UnhideRows => "unhide row show reveal visible",
@@ -728,6 +736,8 @@ impl CommandId {
             Self::ManageConditionalFormats,
             Self::ClearConditionalFormats,
             Self::SelectBlanks,
+            Self::SelectRowDifferences,
+            Self::SelectColumnDifferences,
             Self::SelectCurrentRegion,
             Self::HideRows,
             Self::UnhideRows,
@@ -1074,6 +1084,8 @@ impl CommandId {
             // These remain accessible via the unscoped Command Palette
             Self::GoToStart
             | Self::SelectBlanks
+            | Self::SelectRowDifferences
+            | Self::SelectColumnDifferences
             | Self::SelectCurrentRegion
             | Self::ExtractNamedRange
             | Self::SelectTheme

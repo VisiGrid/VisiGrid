@@ -4037,3 +4037,53 @@ fn a_brand_new_document_already_has_a_title_to_show() {
         "a never-saved document should say so in its title, got {title:?}"
     );
 }
+
+// ---- Go To Special: row and column differences ---------------------------------
+
+#[test]
+fn test_row_differences_compare_by_value_against_the_active_column() {
+    use crate::selection_differences::find_row_differences;
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    // Row 0: A=1, B=1, C=2         -> C differs
+    // Row 1: A=x, B=x, C=x         -> nothing
+    // Row 2: A=5, B=(blank), C=5   -> B differs
+    // Row 3: A=3, B==1+2, C==A4    -> formulas equal by value, nothing
+    sheet.set_value(0, 0, "1"); sheet.set_value(0, 1, "1"); sheet.set_value(0, 2, "2");
+    sheet.set_value(1, 0, "x"); sheet.set_value(1, 1, "x"); sheet.set_value(1, 2, "x");
+    sheet.set_value(2, 0, "5"); sheet.set_value(2, 2, "5");
+    sheet.set_value(3, 0, "3"); sheet.set_value(3, 1, "=1+2"); sheet.set_value(3, 2, "=A4");
+
+    let diffs = find_row_differences(&sheet, (0, 0), (3, 2), 0);
+    assert_eq!(diffs, vec![(0, 2), (2, 1)]);
+
+    // Pivot on column C instead: row 0 now reports A and B.
+    let diffs = find_row_differences(&sheet, (0, 0), (3, 2), 2);
+    assert_eq!(diffs, vec![(0, 0), (0, 1), (2, 1)]);
+}
+
+#[test]
+fn test_row_differences_need_two_columns_and_a_pivot_inside_the_region() {
+    use crate::selection_differences::find_row_differences;
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    sheet.set_value(0, 0, "1"); sheet.set_value(1, 0, "2");
+
+    assert!(find_row_differences(&sheet, (0, 0), (1, 0), 0).is_empty(), "single column: nothing to compare");
+    assert!(find_row_differences(&sheet, (0, 0), (1, 1), 5).is_empty(), "pivot outside region");
+}
+
+#[test]
+fn test_column_differences_mirror_rows() {
+    use crate::selection_differences::find_column_differences;
+
+    let mut sheet = Sheet::new(SheetId(1), 100, 100);
+    // Column A: 1, 1, 2   -> row 2 differs from pivot row 0
+    // Column B: a, b, a   -> row 1 differs
+    sheet.set_value(0, 0, "1"); sheet.set_value(1, 0, "1"); sheet.set_value(2, 0, "2");
+    sheet.set_value(0, 1, "a"); sheet.set_value(1, 1, "b"); sheet.set_value(2, 1, "a");
+
+    let diffs = find_column_differences(&sheet, (0, 0), (2, 1), 0);
+    assert_eq!(diffs, vec![(2, 0), (1, 1)]);
+    assert!(find_column_differences(&sheet, (0, 0), (0, 1), 0).is_empty(), "single row: nothing to compare");
+}

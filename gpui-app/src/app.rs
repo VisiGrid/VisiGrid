@@ -2301,6 +2301,8 @@ impl Spreadsheet {
             CommandId::ManageConditionalFormats => self.toggle_cf_panel(cx),
             CommandId::ClearConditionalFormats => self.clear_cond_formats_in_selection(cx),
             CommandId::SelectBlanks => self.select_blanks(cx),
+            CommandId::SelectRowDifferences => self.select_row_differences(cx),
+            CommandId::SelectColumnDifferences => self.select_column_differences(cx),
             CommandId::SelectCurrentRegion => self.select_current_region(cx),
             CommandId::HideRows => self.hide_rows(cx),
             CommandId::UnhideRows => self.unhide_rows(cx),
