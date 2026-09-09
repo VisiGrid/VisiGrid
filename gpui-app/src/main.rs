@@ -34,6 +34,7 @@ mod formula_refs;
 mod grid_ops;
 mod hints;
 mod history;
+mod ime;
 mod hub;
 mod cloud;
 mod impact_preview;
@@ -1068,6 +1069,17 @@ mod symbol_font_tests {
         }
         if (0x3000..=0x9FFF).contains(&cp) || (0xFE00..=0xFE0F).contains(&cp) {
             return false; // CJK and variation selectors need their own fonts
+        }
+        // Hangul, for the same reason, and it does not live next to the CJK block:
+        // syllables sit at U+AC00 and the jamo that compose them at U+1100, either
+        // side of the range above. Eleven thousand syllables are not going into a
+        // symbol font. Leaving the gap meant a source file that merely mentioned
+        // Korean failed this test while one mentioning Japanese passed.
+        if (0x1100..=0x11FF).contains(&cp)
+            || (0xA960..=0xA97F).contains(&cp)
+            || (0xAC00..=0xD7FF).contains(&cp)
+        {
+            return false;
         }
         true
     }

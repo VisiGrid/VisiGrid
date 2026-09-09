@@ -52,6 +52,11 @@ def in_scope(cp: int) -> bool:
         return False
     if 0x3000 <= cp <= 0x9FFF or 0xFE00 <= cp <= 0xFE0F:
         return False  # CJK and variation selectors need their own fonts
+    if 0x1100 <= cp <= 0x11FF or 0xA960 <= cp <= 0xA97F or 0xAC00 <= cp <= 0xD7FF:
+        # Hangul, for the same reason, and it does not live next to the CJK block:
+        # syllables sit at U+AC00 and the jamo that compose them at U+1100, either
+        # side of the range above.
+        return False
     return True
 
 

@@ -8,6 +8,30 @@ pub(crate) fn handle_key_down(
     window: &mut Window,
     cx: &mut Context<Spreadsheet>,
 ) {
+    // The printable text this keystroke carries, if any: what the cell branch at the
+    // bottom would type. Ctrl, Alt and Cmd turn a key into a command, and control
+    // characters are handled by actions, never inserted.
+    let printable_chars: String = match &event.keystroke.key_char {
+        Some(key_char)
+            if !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt
+                && !event.keystroke.modifiers.platform =>
+        {
+            key_char.chars().filter(|c| !c.is_control()).collect()
+        }
+        _ => String::new(),
+    };
+
+    // A text key this handler consumes must not reach the platform's text path as well,
+    // or it comes back through the IME input handler (`ime.rs`) and lands in the cell
+    // on top of whatever the consuming branch did: macOS goes on to `insertText` for
+    // any keystroke the app leaves unhandled, and Windows and Linux do the equivalent.
+    // Stop propagation up front for the keys that carry text; the cell branch at the
+    // bottom, the one place that wants the platform to deliver, turns it back on.
+    if !printable_chars.is_empty() && this.focus_handle.is_focused(window) {
+        cx.stop_propagation();
+    }
+
     // Terminal owns focus: don't route keys to the grid
     if this.terminal_has_focus(window) {
         #[cfg(debug_assertions)]
@@ -930,44 +954,41 @@ pub(crate) fn handle_key_down(
         }
     }
 
-    if let Some(key_char) = &event.keystroke.key_char {
-        if !event.keystroke.modifiers.control
-            && !event.keystroke.modifiers.alt
-            && !event.keystroke.modifiers.platform
-        {
-            // Filter out control characters - let them be handled by actions instead
-            let printable_chars: String = key_char.chars()
-                .filter(|c| !c.is_control())
-                .collect();
-
-            if !printable_chars.is_empty() {
-                match this.mode {
-                    Mode::GoTo => {
-                        for c in printable_chars.chars() {
-                            this.goto_insert_char(c, cx);
-                        }
+    if !printable_chars.is_empty() {
+        match this.mode {
+            Mode::GoTo => {
+                for c in printable_chars.chars() {
+                    this.goto_insert_char(c, cx);
+                }
+            }
+            Mode::Find => {
+                for c in printable_chars.chars() {
+                    this.find_insert_char(c, cx);
+                }
+            }
+            Mode::HubPasteToken => {
+                for c in printable_chars.chars() {
+                    this.hub_token_insert_char(c, cx);
+                }
+            }
+            Mode::HubLink => {
+                for c in printable_chars.chars() {
+                    this.hub_dataset_insert_char(c, cx);
+                }
+            }
+            _ => {
+                // Cell text: while `focus_handle` holds focus the IME input handler
+                // (`ime.rs`) is registered and the platform delivers this text to it, so
+                // let the keystroke propagate and insert nothing here (see the note at
+                // the top of this function). Without that focus there is no handler and
+                // the keystroke is the only delivery.
+                if this.focus_handle.is_focused(window) {
+                    cx.propagate();
+                } else {
+                    for c in printable_chars.chars() {
+                        this.insert_char(c, cx);
                     }
-                    Mode::Find => {
-                        for c in printable_chars.chars() {
-                            this.find_insert_char(c, cx);
-                        }
-                    }
-                    Mode::HubPasteToken => {
-                        for c in printable_chars.chars() {
-                            this.hub_token_insert_char(c, cx);
-                        }
-                    }
-                    Mode::HubLink => {
-                        for c in printable_chars.chars() {
-                            this.hub_dataset_insert_char(c, cx);
-                        }
-                    }
-                    _ => {
-                        for c in printable_chars.chars() {
-                            this.insert_char(c, cx);
-                        }
-                        this.update_edit_scroll(window);
-                    }
+                    this.update_edit_scroll(window);
                 }
             }
         }

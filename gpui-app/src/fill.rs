@@ -303,6 +303,7 @@ impl Spreadsheet {
 
         // Enter edit mode with the formula
         self.edit_original = self.sheet(cx).get_raw(row, col);
+        self.clear_edit_marks();
         self.edit_value = formula;
         self.edit_cursor = self.edit_value.chars().count(); // Cursor at end
         self.mode = Mode::Formula;
