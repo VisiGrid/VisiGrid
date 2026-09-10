@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.32.0
 
 ### Keyboard
 
@@ -22,6 +22,12 @@
 - **Quotes inside formula strings round-trip** — the formatter has always written a quote inside a string as `""`, but the tokenizer read the first quote as the end of the string, so a formula such as `="say ""hi"""` could not be parsed back after any rewrite or reload. Doubled quotes now read as one quote, as in Excel.
 
 - **Spill lifecycle during a recalc** — a formula that read a cell inside an array's spill area read it before the array was placed and showed a stale value until the next recalc; an array that shrank to a scalar, empty or error left its old receivers on the sheet; a `#SPILL!` stayed on a cell after the obstruction was removed; and readers of a blocked parent kept the array's first value instead of `#SPILL!`. Built-ins mostly hid these because the insert path spills eagerly; a custom function's spill only exists at recalc time. The ordered recalc now retires old extents, clears resolved collisions, and re-evaluates the readers of every cell it touched, including `INDIRECT` and `OFFSET` readers the dependency graph cannot see, for as many rounds as a chain of arrays needs, and reports if the bound is reached.
+
+### Scripting
+
+- **Lua memory limit** — a script, whether a custom function, an `=LUA` chunk, a console command or an AI script, may allocate up to 128 MiB. Beyond that it stops with an error instead of taking the app down with it. Instruction and time limits were already in place.
+- **`sheet:delete_rows(at, count)` and `sheet:clear_cell(row, col)`** — new sheet API for AI Lua scripts. Both use the source sheet's coordinates as they were when the script ran, and row deletions are applied after every cell write in the same script.
+- **AI Lua Apply is one atomic, verified commit** — the preview is materialised on a copy of the workbook, checked against the sheet's revision and contents again at Apply time, and swapped in as a single step. A preview whose source sheet has changed since is refused with "Re-preview the script first" rather than being redirected to a new sheet. Applying a script that deletes rows is refused while the sheet is sorted or filtered. Undo reverts the whole applied plan at once, and Apply no longer appends a Run Log entry.
 
 ### Editing
 
