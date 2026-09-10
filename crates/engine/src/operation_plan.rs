@@ -257,7 +257,49 @@ pub struct VerificationResult {
     pub id: String,
     pub label: Option<String>,
     pub status: VerificationStatus,
-    pub evidence: String,
+    #[serde(flatten)]
+    pub evidence: VerificationEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VerificationEvidence {
+    NoNewFormulaErrors {
+        new_errors: usize,
+    },
+    #[serde(rename = "gross_minus_group_equals_preview")]
+    RetainedTotal {
+        expected: String,
+        actual: String,
+        tolerance: String,
+        currency: String,
+        gross_source: String,
+        classified_exclusions: String,
+        difference: String,
+    },
+    Unavailable {
+        message: String,
+    },
+}
+
+impl VerificationEvidence {
+    fn summary(&self) -> String {
+        match self {
+            Self::NoNewFormulaErrors { new_errors } => {
+                format!("{new_errors} new formula error(s)")
+            }
+            Self::RetainedTotal {
+                expected,
+                actual,
+                tolerance,
+                currency,
+                ..
+            } => format!(
+                "expected={expected} {currency}; actual={actual} {currency}; tolerance={tolerance}"
+            ),
+            Self::Unavailable { message } => message.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,6 +439,7 @@ pub struct OperationPlan {
     pub groups: Vec<OperationGroup>,
     pub changes: Vec<MaterializedChange>,
     pub affected_ranges: Vec<AffectedRange>,
+    pub verification_definitions: Vec<VerificationDefinition>,
     pub verification: Vec<VerificationResult>,
     pub problems: Vec<PlanProblem>,
     pub summary: PlanSummary,
@@ -434,6 +477,7 @@ pub struct PlanCommit {
     pub source: Workbook,
     pub applied: Workbook,
     pub affected_cells: Vec<CellId>,
+    pub verification: Vec<VerificationResult>,
 }
 
 impl PlanCommit {
@@ -464,6 +508,7 @@ pub enum PlanError {
     PreviewFingerprintMismatch,
     Unresolved,
     BlockingProblems,
+    CandidateVerificationFailed,
     ConditionalRequiresOverride,
 }
 
@@ -498,6 +543,9 @@ impl std::fmt::Display for PlanError {
             }
             Self::Unresolved => write!(f, "plan calculation did not settle"),
             Self::BlockingProblems => write!(f, "plan has blocking problems"),
+            Self::CandidateVerificationFailed => {
+                write!(f, "final candidate failed verification")
+            }
             Self::ConditionalRequiresOverride => {
                 write!(
                     f,
@@ -532,6 +580,7 @@ impl PreparedOperationPlan {
         let normalized = normalize_operations(source_sheet, request.operations)?;
         let operations = normalized.operations;
         let source_fingerprint = workbook_fingerprint(source);
+        let verification_definitions = request.verification.clone();
         let plan_hash = compute_plan_hash(
             OPERATION_PLAN_CONTRACT_VERSION,
             &request.workbook_session_id,
@@ -563,83 +612,17 @@ impl PreparedOperationPlan {
         }
         let affected_ranges = affected_ranges(&changes);
         let summary = summarize(&changes);
-        let new_errors = changes
-            .iter()
-            .filter(|change| {
-                is_formula_error(&change.after.display) && !is_formula_error(&change.before.display)
-            })
-            .count();
-        let retained_verification_ids: HashSet<_> = request
-            .verification
-            .iter()
-            .filter_map(|definition| match definition {
-                VerificationDefinition::RetainedTotal { id, .. } => Some(id.clone()),
-                VerificationDefinition::NoNewFormulaErrors { .. } => None,
-            })
-            .collect();
-        let preview_sheet = preview
-            .sheet_by_id(request.source_sheet_id)
-            .ok_or(PlanError::SourceSheetMissing)?;
-        let verification: Vec<_> = request
-            .verification
-            .into_iter()
-            .map(|definition| match definition {
-                VerificationDefinition::NoNewFormulaErrors { id, label } => VerificationResult {
-                    id,
-                    label,
-                    status: if new_errors == 0 {
-                        VerificationStatus::Passed
-                    } else {
-                        VerificationStatus::Failed
-                    },
-                    evidence: format!("{new_errors} new formula error(s)"),
-                },
-                VerificationDefinition::RetainedTotal {
-                    id,
-                    label,
-                    source_range,
-                    amount_column,
-                    excluded_group,
-                    tolerance,
-                    currency,
-                } => evaluate_retained_total(
-                    source_sheet,
-                    preview_sheet,
-                    &row_lineage,
-                    &operations,
-                    id,
-                    label,
-                    source_range,
-                    amount_column,
-                    &excluded_group,
-                    tolerance,
-                    &currency,
-                ),
-            })
-            .collect();
-
         let mut problems = normalized.problems;
-        if new_errors > 0 {
-            problems.push(PlanProblem {
-                code: "new_formula_errors".into(),
-                message: format!("The preview introduces {new_errors} new formula error(s)."),
-                severity: ProblemSeverity::Blocking,
-            });
-        }
-        for result in &verification {
-            if retained_verification_ids.contains(&result.id)
-                && matches!(
-                    result.status,
-                    VerificationStatus::Failed | VerificationStatus::Unknown
-                )
-            {
-                problems.push(PlanProblem {
-                    code: "retained_total_verification_failed".into(),
-                    message: format!("Verification '{}': {}", result.id, result.evidence),
-                    severity: ProblemSeverity::Blocking,
-                });
-            }
-        }
+        let (verification, verification_problems) = evaluate_verifications(
+            source,
+            &preview,
+            request.source_sheet_id,
+            &row_lineage,
+            &operations,
+            &verification_definitions,
+            &changes,
+        )?;
+        problems.extend(verification_problems);
         if !report.errors.is_empty() || (report.scc_count > 0 && !report.converged) {
             problems.push(PlanProblem {
                 code: "recalculation_unresolved".into(),
@@ -676,6 +659,7 @@ impl PreparedOperationPlan {
             groups: request.groups,
             changes,
             affected_ranges,
+            verification_definitions,
             verification,
             problems,
             summary,
@@ -777,11 +761,40 @@ impl PreparedOperationPlan {
         }
 
         let mut candidate = current.clone();
-        let _ = apply_operations(
+        let report = apply_operations(
             &mut candidate,
             self.plan.source_sheet_id,
             &self.plan.operations,
         )?;
+        if !report.errors.is_empty() || (report.scc_count > 0 && !report.converged) {
+            return Err(PlanError::Unresolved);
+        }
+        let source_sheet = current
+            .sheet_by_id(self.plan.source_sheet_id)
+            .ok_or(PlanError::SourceSheetMissing)?;
+        let row_lineage = build_row_lineage(source_sheet.rows, &self.plan.operations);
+        let changes = materialize_changes(
+            current,
+            &candidate,
+            self.plan.source_sheet_id,
+            &self.plan.operations,
+            &row_lineage,
+        )?;
+        let (verification, verification_problems) = evaluate_verifications(
+            current,
+            &candidate,
+            self.plan.source_sheet_id,
+            &row_lineage,
+            &self.plan.operations,
+            &self.plan.verification_definitions,
+            &changes,
+        )?;
+        if verification_problems
+            .iter()
+            .any(|problem| problem.severity == ProblemSeverity::Blocking)
+        {
+            return Err(PlanError::CandidateVerificationFailed);
+        }
         if self.plan.determinism == DeterminismClass::Full
             && workbook_fingerprint(&candidate) != self.plan.preview_fingerprint
         {
@@ -805,6 +818,7 @@ impl PreparedOperationPlan {
             source: current.clone(),
             applied: candidate,
             affected_cells,
+            verification,
         })
     }
 }
@@ -1166,6 +1180,100 @@ fn validate_verification_definitions(
     Ok(())
 }
 
+fn evaluate_verifications(
+    source: &Workbook,
+    candidate: &Workbook,
+    source_sheet_id: SheetId,
+    lineage: &[ReviewRowLineage],
+    operations: &[PlannedOperation],
+    definitions: &[VerificationDefinition],
+    changes: &[MaterializedChange],
+) -> Result<(Vec<VerificationResult>, Vec<PlanProblem>), PlanError> {
+    let source_sheet = source
+        .sheet_by_id(source_sheet_id)
+        .ok_or(PlanError::SourceSheetMissing)?;
+    let candidate_sheet = candidate
+        .sheet_by_id(source_sheet_id)
+        .ok_or(PlanError::SourceSheetMissing)?;
+    let new_errors = changes
+        .iter()
+        .filter(|change| {
+            is_formula_error(&change.after.display) && !is_formula_error(&change.before.display)
+        })
+        .count();
+    let mut results = Vec::with_capacity(definitions.len());
+    let mut problems = if new_errors == 0 {
+        Vec::new()
+    } else {
+        vec![PlanProblem {
+            code: "new_formula_errors".into(),
+            message: format!("The candidate introduces {new_errors} new formula error(s)."),
+            severity: ProblemSeverity::Blocking,
+        }]
+    };
+
+    for definition in definitions {
+        let (result, problem_code) = match definition {
+            VerificationDefinition::NoNewFormulaErrors { id, label } => (
+                VerificationResult {
+                    id: id.clone(),
+                    label: label.clone(),
+                    status: if new_errors == 0 {
+                        VerificationStatus::Passed
+                    } else {
+                        VerificationStatus::Failed
+                    },
+                    evidence: VerificationEvidence::NoNewFormulaErrors { new_errors },
+                },
+                None,
+            ),
+            VerificationDefinition::RetainedTotal {
+                id,
+                label,
+                source_range,
+                amount_column,
+                excluded_group,
+                tolerance,
+                currency,
+            } => (
+                evaluate_retained_total(
+                    source_sheet,
+                    candidate_sheet,
+                    lineage,
+                    operations,
+                    id.clone(),
+                    label.clone(),
+                    *source_range,
+                    *amount_column,
+                    excluded_group,
+                    *tolerance,
+                    currency,
+                ),
+                Some("retained_total_verification_failed"),
+            ),
+        };
+        if let Some(problem_code) = problem_code {
+            if matches!(
+                result.status,
+                VerificationStatus::Failed | VerificationStatus::Unknown
+            ) {
+                problems.push(PlanProblem {
+                    code: problem_code.into(),
+                    message: format!(
+                        "Verification '{}': {}",
+                        result.id,
+                        result.evidence.summary()
+                    ),
+                    severity: ProblemSeverity::Blocking,
+                });
+            }
+        }
+        results.push(result);
+    }
+
+    Ok((results, problems))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn evaluate_retained_total(
     source: &Sheet,
@@ -1197,7 +1305,9 @@ fn evaluate_retained_total(
                     id,
                     label,
                     status: VerificationStatus::Unknown,
-                    evidence: format!("source row {}: {reason}", before_row + 1),
+                    evidence: VerificationEvidence::Unavailable {
+                        message: format!("source row {}: {reason}", before_row + 1),
+                    },
                 };
             }
         };
@@ -1223,7 +1333,9 @@ fn evaluate_retained_total(
                         id,
                         label,
                         status: VerificationStatus::Unknown,
-                        evidence: format!("preview row {}: {reason}", after_row + 1),
+                        evidence: VerificationEvidence::Unavailable {
+                            message: format!("preview row {}: {reason}", after_row + 1),
+                        },
                     };
                 }
             }
@@ -1240,9 +1352,27 @@ fn evaluate_retained_total(
         } else {
             VerificationStatus::Failed
         },
-        evidence: format!(
-            "gross={gross_source:.2} {currency}; exclusions={classified_exclusions:.2} {currency}; expected={expected_retained:.2} {currency}; preview={preview_retained:.2} {currency}; difference={difference:.2}"
-        ),
+        evidence: VerificationEvidence::RetainedTotal {
+            expected: currency_evidence(expected_retained),
+            actual: currency_evidence(preview_retained),
+            tolerance: decimal_evidence(tolerance),
+            currency: currency.to_ascii_uppercase(),
+            gross_source: currency_evidence(gross_source),
+            classified_exclusions: currency_evidence(classified_exclusions),
+            difference: currency_evidence(difference),
+        },
+    }
+}
+
+fn currency_evidence(value: f64) -> String {
+    format!("{value:.2}")
+}
+
+fn decimal_evidence(value: f64) -> String {
+    if value == 0.0 {
+        "0".into()
+    } else {
+        value.to_string()
     }
 }
 
@@ -1967,6 +2097,48 @@ mod tests {
     }
 
     #[test]
+    fn conditional_apply_reevaluates_assertions_instead_of_trusting_preview_results() {
+        let mut workbook = Workbook::new();
+        workbook.set_cell_value_tracked(0, 1, 2, "100");
+        let mut request = request(&workbook, Vec::new());
+        request.execution_context.volatile_inputs = vec!["test-clock".into()];
+        request.groups = vec![OperationGroup {
+            id: GroupId("duplicates".into()),
+            title: "Duplicates".into(),
+            description: None,
+        }];
+        request.operations = vec![PlannedOperation::plain(PlannedOp::DeleteRows {
+            at: 1,
+            count: 1,
+        })];
+        request.verification = vec![VerificationDefinition::RetainedTotal {
+            id: "retained".into(),
+            label: None,
+            source_range: CellRange {
+                start: CellCoordinate { row: 1, col: 0 },
+                end: CellCoordinate { row: 1, col: 2 },
+            },
+            amount_column: 2,
+            excluded_group: GroupId("duplicates".into()),
+            tolerance: 0.01,
+            currency: "USD".into(),
+        }];
+        let context = request.execution_context.clone();
+        let mut prepared = PreparedOperationPlan::materialize(&workbook, request).unwrap();
+
+        // Simulate a stale green result reaching Apply. The final candidate
+        // must be evaluated from the retained definition, not this snapshot.
+        prepared.plan.problems.clear();
+        prepared.plan.verification[0].status = VerificationStatus::Passed;
+        assert_eq!(
+            prepared
+                .verify_candidate_with_conditional_override(&workbook, &context)
+                .unwrap_err(),
+            PlanError::CandidateVerificationFailed
+        );
+    }
+
+    #[test]
     fn stale_revision_and_context_are_rejected() {
         let mut workbook = Workbook::new();
         let prepared = PreparedOperationPlan::materialize(
@@ -2262,8 +2434,21 @@ mod tests {
         let prepared = PreparedOperationPlan::materialize(&workbook, request).unwrap();
         let verification = &prepared.plan().verification[0];
         assert_eq!(verification.status, VerificationStatus::Passed);
-        assert!(verification.evidence.contains("expected=350.00 USD"));
-        assert!(verification.evidence.contains("preview=350.00 USD"));
+        assert!(matches!(
+            &verification.evidence,
+            VerificationEvidence::RetainedTotal {
+                expected,
+                actual,
+                currency,
+                ..
+            } if expected == "350.00" && actual == "350.00" && currency == "USD"
+        ));
+        let wire = serde_json::to_value(verification).unwrap();
+        assert_eq!(wire["kind"], "gross_minus_group_equals_preview");
+        assert_eq!(wire["expected"], "350.00");
+        assert_eq!(wire["actual"], "350.00");
+        assert_eq!(wire["tolerance"], "0.01");
+        assert!(wire.get("evidence").is_none());
         let deletion = prepared
             .plan()
             .changes
@@ -2309,6 +2494,11 @@ mod tests {
             prepared.plan().verification[0].status,
             VerificationStatus::Unknown
         );
+        assert!(matches!(
+            &prepared.plan().verification[0].evidence,
+            VerificationEvidence::Unavailable { message }
+                if message.contains("nonnumeric text")
+        ));
         assert_eq!(
             prepared.verify_candidate(&workbook, &context()).unwrap_err(),
             PlanError::BlockingProblems

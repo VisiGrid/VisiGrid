@@ -12,8 +12,9 @@
 //! - `sheet:get_formula(row, col)` → formula string or nil
 //! - `sheet:set_formula(row, col, formula)` → sets cell formula
 //! - `sheet:clear(row, col)` / `sheet:clear("A1:C3")` → clears cells
-//! - `sheet:delete_rows(at, count)` → proposes row deletion
+//! - `sheet:delete_rows(at, count)` → proposes row deletion in source coordinates
 //! - `sheet:review({...})` → describes subsequent changes for Review Mode
+//! - `sheet:verify({...})` → requests an engine-evaluated Review Mode assertion
 //!
 //! ## Read/Write by A1 notation
 //! - `sheet:get("A1")` → value at A1 notation (shorthand)
@@ -44,7 +45,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use super::ops::{parse_a1, parse_range, format_a1, CellKey, LuaCellValue, LuaOp, LuaReviewMetadata, PendingCell, SheetReader};
+use super::ops::{parse_a1, parse_range, format_a1, CellKey, LuaCellValue, LuaOp, LuaReviewMetadata, LuaVerificationRequest, PendingCell, SheetReader};
 use visigrid_io::scripting::{Capability, all_sheet_caps};
 
 // ============================================================================
@@ -416,6 +417,13 @@ impl DynOpSink {
         self.ops.push(LuaOp::SetReviewMetadata(metadata));
         Ok(())
     }
+
+    fn request_verification(&mut self, request: LuaVerificationRequest) -> Result<(), String> {
+        self.check_write()?;
+        self.check_ops_limit()?;
+        self.ops.push(LuaOp::RequestVerification(request));
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -537,6 +545,35 @@ impl UserData for SheetUserData {
                 )),
             };
             this.sink.borrow_mut().set_review_metadata(metadata)
+                .map_err(mlua::Error::RuntimeError)
+        });
+
+        // verify({...}) requests an assertion that the engine evaluates from
+        // source and candidate state. Scripts cannot provide assertion results.
+        methods.add_method("verify", |_, this, value: Value| {
+            let Value::Table(table) = value else {
+                return Err(mlua::Error::RuntimeError(
+                    "verify expects an assertion table".into(),
+                ));
+            };
+            for result_field in ["status", "result", "actual", "evidence"] {
+                if !matches!(table.get::<Value>(result_field)?, Value::Nil) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "verify accepts definitions only; '{result_field}' is engine-computed"
+                    )));
+                }
+            }
+            let request = LuaVerificationRequest {
+                id: table.get("id")?,
+                kind: table.get("kind")?,
+                label: table.get("label")?,
+                source_range: table.get("source_range")?,
+                amount_column: table.get("amount_column")?,
+                excluded_group: table.get("excluded_group")?,
+                tolerance: table.get("tolerance")?,
+                currency: table.get("currency")?,
+            };
+            this.sink.borrow_mut().request_verification(request)
                 .map_err(mlua::Error::RuntimeError)
         });
 

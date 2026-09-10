@@ -1168,6 +1168,54 @@ mod tests {
     }
 
     #[test]
+    fn test_sheet_verification_request_is_captured_without_a_claimed_result() {
+        let rt = LuaRuntime::new().unwrap();
+        let reader = MockReader::new();
+        let result = rt.eval_with_sheet(
+            r#"sheet:verify({
+                id = "retained",
+                kind = "gross_minus_group_equals_preview",
+                source_range = "A2:C6",
+                amount_column = "C",
+                excluded_group = "duplicates",
+                tolerance = 0.01,
+                currency = "USD",
+            })"#,
+            Box::new(reader),
+        );
+        assert!(result.error.is_none(), "Error: {:?}", result.error);
+        assert_eq!(result.mutations, 0);
+        assert!(matches!(
+            &result.ops[0],
+            LuaOp::RequestVerification(request)
+                if request.id == "retained" && request.amount_column == "C"
+        ));
+    }
+
+    #[test]
+    fn test_sheet_verification_rejects_script_supplied_results() {
+        let rt = LuaRuntime::new().unwrap();
+        let reader = MockReader::new();
+        let result = rt.eval_with_sheet(
+            r#"sheet:verify({
+                id = "retained",
+                kind = "gross_minus_group_equals_preview",
+                source_range = "A2:C6",
+                amount_column = "C",
+                excluded_group = "duplicates",
+                tolerance = 0.01,
+                currency = "USD",
+                status = "passed",
+            })"#,
+            Box::new(reader),
+        );
+        assert!(result.error.as_deref().is_some_and(|error| {
+            error.contains("definitions only") && error.contains("engine-computed")
+        }));
+        assert!(result.ops.is_empty());
+    }
+
+    #[test]
     fn test_sheet_global_cleaned_up() {
         let rt = LuaRuntime::new().unwrap();
         let reader = MockReader::new();

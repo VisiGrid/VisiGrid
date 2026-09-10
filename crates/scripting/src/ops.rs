@@ -119,6 +119,9 @@ pub enum LuaOp {
     /// Sets review-only metadata for subsequent journaled mutations. This
     /// marker never mutates a workbook.
     SetReviewMetadata(LuaReviewMetadata),
+    /// Requests a trusted engine assertion for Review Mode. This marker
+    /// carries only the definition; Lua never supplies the result.
+    RequestVerification(LuaVerificationRequest),
     /// Set a cell's value (clears any formula)
     SetValue {
         row: u32,
@@ -158,11 +161,24 @@ pub struct LuaReviewMetadata {
     pub sources: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LuaVerificationRequest {
+    pub id: String,
+    pub kind: String,
+    pub label: Option<String>,
+    pub source_range: String,
+    pub amount_column: String,
+    pub excluded_group: String,
+    pub tolerance: f64,
+    pub currency: String,
+}
+
 impl LuaOp {
     /// Get the cell key this operation affects (top-left for range ops)
     pub fn cell_key(&self) -> CellKey {
         match self {
             LuaOp::SetReviewMetadata(_) => CellKey::new(0, 0),
+            LuaOp::RequestVerification(_) => CellKey::new(0, 0),
             LuaOp::SetValue { row, col, .. } => CellKey::new(*row, *col),
             LuaOp::SetFormula { row, col, .. } => CellKey::new(*row, *col),
             LuaOp::ClearCell { row, col } => CellKey::new(*row, *col),

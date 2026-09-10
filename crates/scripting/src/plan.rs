@@ -3,21 +3,29 @@
 use visigrid_engine::operation_plan::{
     CellCoordinate, CellRange, ExecutionContextFingerprint, GroupId, OperationGroup,
     OperationMetadata, PlannedCellValue, PlannedOp, PlannedOperation, ProducerClaim,
+    VerificationDefinition,
 };
 use visigrid_engine::workbook::Workbook;
 
 use crate::lua_formulas::published_functions_fingerprint;
 use crate::{LuaCellValue, LuaOp, LuaReviewMetadata};
 
-/// Convert the Lua journal into executable operations and their untrusted
-/// review descriptions. Metadata markers apply to subsequent mutations until
-/// another marker replaces or clears them.
-pub fn lua_journal_to_plan(
-    ops: &[LuaOp],
-) -> Result<(Vec<PlannedOperation>, Vec<OperationGroup>), String> {
+/// Producer-neutral pieces extracted from Lua's private journal.
+#[derive(Debug, Clone)]
+pub struct LuaPlanParts {
+    pub operations: Vec<PlannedOperation>,
+    pub groups: Vec<OperationGroup>,
+    pub verification: Vec<VerificationDefinition>,
+}
+
+/// Convert the Lua journal into executable operations, untrusted review
+/// descriptions, and engine-evaluated assertion definitions. Metadata markers
+/// apply to subsequent mutations until another marker replaces or clears them.
+pub fn lua_journal_to_plan(ops: &[LuaOp]) -> Result<LuaPlanParts, String> {
     let mut metadata = OperationMetadata::default();
     let mut groups: Vec<OperationGroup> = Vec::new();
     let mut planned = Vec::new();
+    let mut verification = Vec::new();
 
     for operation in ops {
         if let LuaOp::SetReviewMetadata(review) = operation {
@@ -55,22 +63,67 @@ pub fn lua_journal_to_plan(
             }
             continue;
         }
+        if let LuaOp::RequestVerification(request) = operation {
+            if request.kind != "gross_minus_group_equals_preview" {
+                return Err(format!(
+                    "unsupported verification kind '{}'",
+                    request.kind
+                ));
+            }
+            let ((start_row, start_col), (end_row, end_col)) =
+                crate::ops::parse_range(&request.source_range).ok_or_else(|| {
+                    format!("invalid verification source range '{}'", request.source_range)
+                })?;
+            let amount_column_name = request.amount_column.trim();
+            if amount_column_name.is_empty()
+                || !amount_column_name.bytes().all(|byte| byte.is_ascii_alphabetic())
+            {
+                return Err(format!(
+                    "invalid verification amount column '{}'",
+                    request.amount_column
+                ));
+            }
+            let (_, amount_column) = crate::ops::parse_a1(&format!("{amount_column_name}1"))
+            .ok_or_else(|| {
+                format!(
+                    "invalid verification amount column '{}'",
+                    request.amount_column
+                )
+            })?;
+            verification.push(VerificationDefinition::RetainedTotal {
+                id: request.id.clone(),
+                label: request.label.clone(),
+                source_range: CellRange {
+                    start: CellCoordinate {
+                        row: start_row - 1,
+                        col: start_col - 1,
+                    },
+                    end: CellCoordinate {
+                        row: end_row - 1,
+                        col: end_col - 1,
+                    },
+                },
+                amount_column: amount_column - 1,
+                excluded_group: GroupId(request.excluded_group.clone()),
+                tolerance: request.tolerance,
+                currency: request.currency.clone(),
+            });
+            continue;
+        }
 
-        planned.push(PlannedOperation {
-            operation: lua_op_to_planned_op(operation)
-                .expect("review metadata marker handled before conversion"),
-            metadata: metadata.clone(),
-        });
+        if let Some(operation) = lua_op_to_planned_op(operation) {
+            planned.push(PlannedOperation {
+                operation,
+                metadata: metadata.clone(),
+            });
+        }
     }
 
-    Ok((planned, groups))
-}
-
-/// Compatibility helper for callers interested only in canonical operations.
-pub fn lua_ops_to_planned_ops(ops: &[LuaOp]) -> Vec<PlannedOperation> {
-    lua_journal_to_plan(ops)
-        .expect("Lua review metadata must be internally consistent")
-        .0
+    Ok(LuaPlanParts {
+        operations: planned,
+        groups,
+        verification,
+    })
 }
 
 fn operation_metadata(review: &LuaReviewMetadata) -> OperationMetadata {
@@ -83,7 +136,7 @@ fn operation_metadata(review: &LuaReviewMetadata) -> OperationMetadata {
 
 fn lua_op_to_planned_op(operation: &LuaOp) -> Option<PlannedOp> {
     Some(match operation {
-        LuaOp::SetReviewMetadata(_) => return None,
+        LuaOp::SetReviewMetadata(_) | LuaOp::RequestVerification(_) => return None,
         LuaOp::SetValue {
             row,
             col,
@@ -206,16 +259,18 @@ mod tests {
     #[test]
     fn lua_nil_and_explicit_clear_share_the_canonical_clear_operation() {
         let coordinate = CellCoordinate { row: 2, col: 3 };
-        let operations = lua_ops_to_planned_ops(&[
+        let parts = lua_journal_to_plan(&[
             LuaOp::SetValue {
                 row: 2,
                 col: 3,
                 value: LuaCellValue::Nil,
             },
             LuaOp::ClearCell { row: 2, col: 3 },
-        ]);
+        ])
+        .unwrap();
         assert_eq!(
-            operations
+            parts
+                .operations
                 .iter()
                 .map(|planned| &planned.operation)
                 .collect::<Vec<_>>(),
@@ -228,7 +283,7 @@ mod tests {
 
     #[test]
     fn review_metadata_is_associated_with_subsequent_operations() {
-        let (operations, groups) = lua_journal_to_plan(&[
+        let parts = lua_journal_to_plan(&[
             LuaOp::SetReviewMetadata(LuaReviewMetadata {
                 group_id: Some("duplicates".into()),
                 group_title: Some("Exact duplicates".into()),
@@ -240,9 +295,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(groups[0].id, GroupId("duplicates".into()));
-        assert_eq!(operations[0].metadata.group_id, Some(groups[0].id.clone()));
-        assert_eq!(operations[0].metadata.sources.len(), 2);
+        assert_eq!(parts.groups[0].id, GroupId("duplicates".into()));
+        assert!(parts.verification.is_empty());
+        assert_eq!(
+            parts.operations[0].metadata.group_id,
+            Some(parts.groups[0].id.clone())
+        );
+        assert_eq!(parts.operations[0].metadata.sources.len(), 2);
     }
 
     #[test]
@@ -293,7 +352,17 @@ mod tests {
             Box::new(source),
         );
         assert!(result.error.is_none(), "fixture error: {:?}", result.error);
-        let (operations, groups) = lua_journal_to_plan(&result.ops).unwrap();
+        let parts = lua_journal_to_plan(&result.ops).unwrap();
+        let operations = parts.operations;
+        let groups = parts.groups;
+        let mut verification = parts.verification;
+        verification.insert(
+            0,
+            VerificationDefinition::NoNewFormulaErrors {
+                id: "no_new_errors".into(),
+                label: Some("No new formula errors".into()),
+            },
+        );
         let context = execution_context_fingerprint(&workbook, &operations);
         let prepared = PreparedOperationPlan::materialize(
             &workbook,
@@ -313,24 +382,7 @@ mod tests {
                 description: Some("Phase 1.5 deterministic dogfood fixture".into()),
                 operations,
                 groups,
-                verification: vec![
-                    VerificationDefinition::NoNewFormulaErrors {
-                        id: "no_new_errors".into(),
-                        label: Some("No new formula errors".into()),
-                    },
-                    VerificationDefinition::RetainedTotal {
-                        id: "retained_payments".into(),
-                        label: Some("Retained payments".into()),
-                        source_range: CellRange {
-                            start: CellCoordinate { row: 1, col: 0 },
-                            end: CellCoordinate { row: 5, col: 2 },
-                        },
-                        amount_column: 2,
-                        excluded_group: GroupId("exact_duplicates".into()),
-                        tolerance: 0.01,
-                        currency: "USD".into(),
-                    },
-                ],
+                verification,
             },
         )
         .unwrap();
@@ -358,6 +410,11 @@ mod tests {
         );
 
         let commit = prepared.verify_candidate(&workbook, &context).unwrap();
+        assert!(commit
+            .verification
+            .iter()
+            .any(|result| result.id == "retained_payments"
+                && result.status == VerificationStatus::Passed));
         commit.redo_into(&mut workbook);
         assert_eq!(workbook.active_sheet().get_display(4, 2), "350");
         commit.undo_into(&mut workbook);

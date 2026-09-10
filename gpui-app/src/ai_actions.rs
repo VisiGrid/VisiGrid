@@ -25,13 +25,15 @@ fn prepare_lua_operation_plan(
     script_path: &std::path::Path,
     script_hash: &str,
     ops: &[crate::scripting::LuaOp],
+    mut verification: Vec<visigrid_engine::operation_plan::VerificationDefinition>,
 ) -> Result<visigrid_engine::operation_plan::PreparedOperationPlan, String> {
     use visigrid_engine::operation_plan::{
         OperationPlanRequest, PlanId, PlanProducer, PreparedOperationPlan,
-        VerificationDefinition,
     };
 
-    let (planned_ops, groups) = crate::scripting::lua_journal_to_plan(ops)?;
+    let parts = crate::scripting::lua_journal_to_plan(ops)?;
+    verification.extend(parts.verification);
+    let planned_ops = parts.operations;
     let context = crate::scripting::execution_context_fingerprint(workbook, &planned_ops);
     PreparedOperationPlan::materialize(workbook, OperationPlanRequest {
         id: PlanId(format!("pv_{}", uuid::Uuid::new_v4().simple())),
@@ -48,12 +50,75 @@ fn prepare_lua_operation_plan(
         title: "Review Lua changes".into(),
         description: None,
         operations: planned_ops,
-        groups,
-        verification: vec![VerificationDefinition::NoNewFormulaErrors {
+        groups: parts.groups,
+        verification,
+    }).map_err(|error| error.to_string())
+}
+
+fn default_lua_verification() -> Vec<visigrid_engine::operation_plan::VerificationDefinition> {
+    vec![
+        visigrid_engine::operation_plan::VerificationDefinition::NoNewFormulaErrors {
             id: "no_new_errors".into(),
             label: Some("No new formula errors".into()),
-        }],
-    }).map_err(|error| error.to_string())
+        },
+    ]
+}
+
+#[cfg(test)]
+mod review_plan_tests {
+    use super::{default_lua_verification, prepare_lua_operation_plan};
+    use visigrid_engine::operation_plan::{VerificationEvidence, VerificationStatus};
+    use visigrid_engine::workbook::Workbook;
+
+    #[test]
+    fn desktop_lua_adapter_evaluates_fixture_requested_verification() {
+        let mut workbook = Workbook::new();
+        for (row, values) in [
+            (0, ["Transaction", "Vendor", "Amount"]),
+            (1, ["tx-001", "Amazon.com", "100"]),
+            (2, ["tx-002", "AMZN", "200"]),
+            (3, ["tx-001", "Amazon.com", "100"]),
+            (4, ["", "", ""]),
+            (5, ["tx-003", "Acme", "50"]),
+            (6, ["", "Total", "=SUM(C2:C4)"]),
+        ] {
+            for (col, value) in values.into_iter().enumerate() {
+                if !value.is_empty() {
+                    workbook.set_cell_value_tracked(0, row, col, value);
+                }
+            }
+        }
+
+        let runtime = crate::scripting::LuaRuntime::new().unwrap();
+        let snapshot = crate::scripting::SheetSnapshot::from_sheet(workbook.active_sheet());
+        let result = runtime.eval_with_sheet(
+            include_str!("../../fixtures/review_mode/transaction_cleanup.lua"),
+            Box::new(snapshot),
+        );
+        assert!(result.error.is_none(), "fixture error: {:?}", result.error);
+
+        let prepared = prepare_lua_operation_plan(
+            &workbook,
+            42,
+            std::path::Path::new("fixtures/review_mode/transaction_cleanup.lua"),
+            "fixture-hash",
+            &result.ops,
+            default_lua_verification(),
+        )
+        .unwrap();
+        let retained = prepared
+            .plan()
+            .verification
+            .iter()
+            .find(|result| result.id == "retained_payments")
+            .expect("fixture assertion should reach the desktop adapter");
+        assert_eq!(retained.status, VerificationStatus::Passed);
+        assert!(matches!(
+            &retained.evidence,
+            VerificationEvidence::RetainedTotal { expected, actual, currency, .. }
+                if expected == "350.00" && actual == "350.00" && currency == "USD"
+        ));
+    }
 }
 
 fn plan_row_state_after_apply(
@@ -665,6 +730,7 @@ sheet:set_formula(row, col, \"=...\")
 sheet:clear(row, col) or sheet:clear(\"A1:C3\")
 sheet:delete_rows(at, count)
 sheet:review({ group=\"id\", title=\"...\", reason=\"...\", sources={\"A1:C2\"} })
+sheet:verify({ id=\"retained\", kind=\"gross_minus_group_equals_preview\", source_range=\"A2:C100\", amount_column=\"C\", excluded_group=\"duplicates\", tolerance=0.01, currency=\"USD\" })
 sheet:get_value(row, col)
 sheet:rows()
 sheet:cols()
@@ -678,6 +744,10 @@ sheet:cols()
 - The user will preview your code before applying it.
 - Use sheet:review(...) before related mutations when a plain-language reason
   and source references would help the user review them.
+- Row numbers always refer to the source sheet. A write below deleted rows is
+  shifted with those deletions in the materialized preview.
+- sheet:verify(...) requests an engine-evaluated assertion; never claim or
+  calculate its pass/fail result in Lua.
 ";
 
         let Some((sheet_name, headers, tsv, sel_rows, sel_cols, ..)) =
@@ -786,6 +856,7 @@ sheet:cols()
                     &script_path,
                     &script_hash,
                     &result.ops,
+                    default_lua_verification(),
                 ) {
                     Ok(plan) => Some(plan),
                     Err(error) => {
@@ -876,6 +947,7 @@ sheet:cols()
                     &path,
                     &script_hash,
                     &result.ops,
+                    default_lua_verification(),
                 ) {
                     Ok(plan) => Some(plan),
                     Err(error) => {

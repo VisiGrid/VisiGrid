@@ -1,5 +1,18 @@
 -- Fixed Phase 1.5 dogfood fixture. Run against the transaction workbook
 -- assembled by the scripting plan integration test.
+-- All row numbers are source-workbook coordinates. Deletions are resolved
+-- together, so the formula written at source row 7 appears at preview row 5.
+
+sheet:verify({
+    id = "retained_payments",
+    kind = "gross_minus_group_equals_preview",
+    label = "Retained payments",
+    source_range = "A2:C6",
+    amount_column = "C",
+    excluded_group = "exact_duplicates",
+    tolerance = 0.01,
+    currency = "USD",
+})
 
 sheet:review({
     group = "normalize_vendors",
