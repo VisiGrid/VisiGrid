@@ -813,6 +813,8 @@ pub struct Spreadsheet {
 
     // Terminal panel state
     pub terminal: crate::terminal::TerminalState,
+    /// Active immutable plan preview plus viewport lookup indexes.
+    pub review_mode: Option<crate::review_mode::ReviewModeState>,
     pub terminal_focus_handle: FocusHandle,
     /// Explicit boolean tracking terminal focus — secondary check for platforms
     /// where `FocusHandle::is_focused()` may not reflect focus correctly (macOS).
@@ -1328,6 +1330,7 @@ impl Spreadsheet {
             bottom_panel_tab: BottomPanelTab::default(),
 
             terminal: crate::terminal::TerminalState::default(),
+            review_mode: None,
 
             lua_runtime: crate::scripting::LuaRuntime::default(),
             lua_console: crate::scripting::ConsoleState::default(),
@@ -2664,6 +2667,7 @@ impl Spreadsheet {
         match crate::structured_results::parse(&text) {
             Some(result) => {
                 let had_previous = self.terminal.pending_result.is_some();
+                self.review_mode = None;
                 self.terminal.pending_result = Some(
                     crate::terminal::state::PendingResult::Structured(result)
                 );
@@ -2723,6 +2727,7 @@ impl Spreadsheet {
     /// Dismiss the pending structured result.
     pub fn dismiss_structured_result(&mut self, cx: &mut Context<Self>) {
         self.terminal.pending_result = None;
+        self.review_mode = None;
         cx.notify();
     }
 
@@ -2748,6 +2753,7 @@ impl Spreadsheet {
         self.terminal.watching_for_result = true;
         self.terminal.watch_generation += 1;
         self.terminal.pending_result = None;
+        self.review_mode = None;
         self.terminal.result_settle_task = None;
         self.terminal.last_injected_command = Some(cmd.trim().to_string());
     }
@@ -2779,6 +2785,7 @@ impl Spreadsheet {
         self.terminal.watching_for_result = true;
         self.terminal.watch_generation += 1;
         self.terminal.pending_result = None;
+        self.review_mode = None;
         self.terminal.result_settle_task = None;
         self.terminal.last_injected_command = Some(cmd.clone());
 
@@ -3821,9 +3828,14 @@ impl Spreadsheet {
     }
 
     /// Total height of UI chrome below the grid body.
-    /// Currently just the status bar, which is hidden in zen mode.
     pub fn bottom_chrome_height(&self) -> f32 {
-        if self.zen_mode { 0.0 } else { STATUS_BAR_HEIGHT }
+        let status = if self.zen_mode { 0.0 } else { STATUS_BAR_HEIGHT };
+        let review = if self.review_mode.is_some() {
+            crate::views::review_action_bar::REVIEW_ACTION_BAR_HEIGHT
+        } else {
+            0.0
+        };
+        status + review
     }
 
     /// Calculate visible rows based on window height.
@@ -3897,6 +3909,7 @@ impl Spreadsheet {
 
     // Formatting (applies to all discontiguous selection ranges)
     pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
@@ -3915,6 +3928,7 @@ impl Spreadsheet {
     }
 
     pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
@@ -3930,6 +3944,7 @@ impl Spreadsheet {
     }
 
     pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
@@ -3945,6 +3960,7 @@ impl Spreadsheet {
     }
 
     pub fn toggle_strikethrough(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
@@ -3960,6 +3976,7 @@ impl Spreadsheet {
     }
 
     pub fn format_currency(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
@@ -3973,6 +3990,7 @@ impl Spreadsheet {
     }
 
     pub fn format_percent(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
@@ -4073,6 +4091,7 @@ impl Spreadsheet {
 
     /// Insert a newline character into the edit buffer (Alt+Enter)
     pub fn insert_newline(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         if self.mode.is_editing() {
             // Delete selection if any
             self.delete_edit_selection();
@@ -4183,7 +4202,7 @@ impl Spreadsheet {
 
     /// Check if editing is allowed (blocked during preview)
     pub fn can_edit(&self) -> bool {
-        !self.is_previewing()
+        !self.is_previewing() && self.review_mode.is_none()
     }
 
 
@@ -4327,7 +4346,10 @@ impl Render for Spreadsheet {
         let window_height: f32 = current_size.height.into();
         let window_width: f32 = current_size.width.into();
 
-        let right_panel_width = if self.inspector_visible || self.profiler_visible {
+        let right_panel_width = if self.review_mode.is_some() {
+            crate::views::review_panel::REVIEW_PANEL_WIDTH
+                + crate::views::review_overview_rail::REVIEW_OVERVIEW_RAIL_WIDTH
+        } else if self.inspector_visible || self.profiler_visible {
             crate::views::inspector_panel::PANEL_WIDTH
         } else {
             0.0

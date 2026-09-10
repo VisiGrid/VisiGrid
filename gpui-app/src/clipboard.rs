@@ -9,6 +9,7 @@
 use gpui::*;
 use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, CellStyle, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
+use visigrid_engine::operation_plan::ChangeKind;
 use visigrid_engine::provenance::{MutationOp, PasteMode, ClearMode};
 use visigrid_engine::sheet::MergedRegion;
 
@@ -371,6 +372,48 @@ impl Spreadsheet {
             self.internal_clipboard = None;  // Text copy, not cell copy
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             self.status_message = Some("Copied to clipboard".to_string());
+            cx.notify();
+            return;
+        }
+
+        if let Some(endpoint) = self.review_mode.as_ref().map(|state| state.endpoint) {
+            let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+            let mut tsv = String::new();
+            for view_row in min_row..=max_row {
+                if view_row > min_row {
+                    tsv.push('\n');
+                }
+                let data_row = self.view_to_data(view_row, cx);
+                for col in min_col..=max_col {
+                    if col > min_col {
+                        tsv.push('\t');
+                    }
+                    let displayed = self
+                        .review_change_at_source(self.sheet(cx).id, data_row, col)
+                        .filter(|change| {
+                            endpoint == crate::review_mode::ReviewEndpoint::After
+                                && matches!(change.kind, ChangeKind::Value | ChangeKind::Formula)
+                        })
+                        .map(|change| {
+                            if self.show_formulas() {
+                                change.after.raw.clone()
+                            } else {
+                                change.after.display.clone()
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            if self.show_formulas() {
+                                self.sheet(cx).get_raw(data_row, col)
+                            } else {
+                                self.sheet(cx).get_formatted_display(data_row, col)
+                            }
+                        });
+                    tsv.push_str(&displayed);
+                }
+            }
+            self.internal_clipboard = None;
+            cx.write_to_clipboard(ClipboardItem::new_string(tsv));
+            self.status_message = Some("Copied displayed Review Mode values".to_string());
             cx.notify();
             return;
         }

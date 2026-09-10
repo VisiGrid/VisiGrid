@@ -59,6 +59,7 @@ mod named_ranges;
 mod perf;
 mod provenance;
 mod ref_target;
+mod review_mode;
 mod role_styles;
 mod search;
 mod selection_differences;

@@ -50,10 +50,16 @@ impl Spreadsheet {
             RewindPreviewState::Off => None,
         }
     }
-    /// Block a command if in preview mode.
+    /// Block a command while a read-only preview is active.
     /// Returns true if blocked (command should return early).
     /// Sets status message with consistent preview warning.
     pub fn block_if_previewing(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.review_mode.is_some() {
+            self.status_message =
+                Some("Apply or dismiss Review Mode before editing the workbook.".to_string());
+            cx.notify();
+            return true;
+        }
         if self.is_previewing() {
             self.status_message = Some(PREVIEW_BLOCK_MSG.to_string());
             cx.notify();

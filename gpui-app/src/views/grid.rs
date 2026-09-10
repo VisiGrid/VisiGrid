@@ -5,6 +5,7 @@ use crate::app::{Spreadsheet, REF_COLORS};
 use crate::fill::{FILL_HANDLE_BORDER, FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_SIZE, FILL_HANDLE_HOVER_GLOW, FILL_HANDLE_INWARD_OVERLAP};
 use crate::formula_refs::RefKey;
 use crate::mode::Mode;
+use crate::review_mode::ReviewEndpoint;
 use crate::settings::{user_settings, Setting};
 use crate::split_view::SplitSide;
 use crate::theme::TokenKey;
@@ -14,6 +15,7 @@ use super::headers::render_row_header;
 use super::formula_bar;
 use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
+use visigrid_engine::operation_plan::{ChangeCause, ChangeKind};
 
 /// Create a non-interactive overlay div (absolute-positioned, full cell coverage).
 ///
@@ -402,6 +404,18 @@ fn render_cell(
 
     // Check if cell is in trace path (Phase 3.5b)
     let sheet_id = app.sheet(cx).id;
+    let review_change = app.review_change_at_source(sheet_id, data_row, col);
+    let review_kind = review_change.map(|change| change.kind);
+    let review_cause = review_change.map(|change| change.cause);
+    let review_row_deleted = app.review_row_is_deleted(sheet_id, data_row);
+    let review_endpoint = app
+        .review_mode
+        .as_ref()
+        .map(|state| state.endpoint)
+        .unwrap_or(ReviewEndpoint::Before);
+    let review_struck = review_row_deleted
+        || (review_endpoint == ReviewEndpoint::After
+            && review_kind == Some(ChangeKind::Cleared));
     let trace_position = app.inspector_trace_path.as_ref().and_then(|path| {
         path.iter().position(|cell| {
             cell.sheet == sheet_id && cell.row == view_row && cell.col == col
@@ -497,6 +511,15 @@ fn render_cell(
     } else if let Some(preview) = multi_edit_preview {
         // Show the preview value for cells in multi-selection during editing
         preview
+    } else if review_endpoint == ReviewEndpoint::After
+        && matches!(review_kind, Some(ChangeKind::Value | ChangeKind::Formula))
+    {
+        let change = review_change.expect("review kind came from a change");
+        if app.show_formulas() {
+            change.after.raw.clone()
+        } else {
+            change.after.display.clone()
+        }
     } else if app.show_formulas() {
         app.sheet(cx).get_raw(data_row, col)
     } else {
@@ -548,6 +571,45 @@ fn render_cell(
         .overflow_hidden()  // Always clip; spill is rendered in overlay layer
         .bg(cell_base_background_with_role(app, is_editing, format.background_color, cell_style.fill, role_style))
         .border_color(border_color);
+
+    // Resolve Review Mode only for this visible cell. Direct edits use the
+    // normal accent, recalculated effects use warning amber, and deletion
+    // tombstones use the error color.
+    if review_change.is_some() || review_row_deleted {
+        let review_color = if review_row_deleted || review_kind == Some(ChangeKind::Cleared) {
+            app.token(TokenKey::Error)
+        } else if review_cause == Some(ChangeCause::Recalculated) {
+            app.token(TokenKey::Warn)
+        } else {
+            app.token(TokenKey::Accent)
+        };
+        let opacity = if review_endpoint == ReviewEndpoint::After { 0.16 } else { 0.08 };
+        cell = cell.child(
+            non_interactive_overlay()
+                .bg(review_color.opacity(opacity))
+                .border_l_2()
+                .border_color(review_color.opacity(0.85))
+        );
+
+        let marker = match review_kind {
+            Some(ChangeKind::Formula) => Some("ƒ"),
+            Some(ChangeKind::Cleared) if !review_row_deleted => Some("×"),
+            _ if review_row_deleted && col == 0 => Some("-"),
+            _ => None,
+        };
+        if let Some(marker) = marker {
+            cell = cell.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right(px(2.0))
+                    .text_size(px(9.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(review_color)
+                    .child(marker)
+            );
+        }
+    }
 
     // Add selection/formula-ref overlay (semi-transparent, layered on top of cell background)
     // This allows custom background colors to show through the selection highlight
@@ -898,8 +960,13 @@ fn render_cell(
         }
     };
 
+    let cell_text = if review_struck && !is_selected && !is_editing {
+        cell_text_color(app, is_editing, is_selected, is_multi_edit_preview).opacity(0.58)
+    } else {
+        cell_text_color(app, is_editing, is_selected, is_multi_edit_preview)
+    };
     cell = cell
-        .text_color(cell_text_color(app, is_editing, is_selected, is_multi_edit_preview))
+        .text_color(cell_text)
         .text_size(px(app.metrics.font_size));  // Scaled font size for zoom
 
     // Build the text content with selection highlight (caret drawn as overlay)
@@ -951,7 +1018,7 @@ fn render_cell(
             let byte_sel_start = sel_start_byte.min(total_bytes);
             let byte_sel_end = sel_end_byte.min(total_bytes);
 
-            let normal_color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
+            let normal_color = cell_text;
             let selection_bg = app.token(TokenKey::EditorSelectionBg);
             let selection_fg = app.token(TokenKey::EditorSelectionText);
 
@@ -1040,17 +1107,19 @@ fn render_cell(
         // Not editing - show value with formatting using StyledText
         // Text spillover is handled by render_text_spill_overlay() in a separate pass.
         // If this cell will be rendered by the spill overlay, skip text here to avoid double-draw.
-        let use_spill_overlay = should_use_spill_overlay(
-            data_row,
-            col,
-            &value,
-            col_width,
-            format.alignment,
-            is_editing,
-            app,
-            window,
-            cx,
-        );
+        let use_spill_overlay = review_change.is_none()
+            && !review_row_deleted
+            && should_use_spill_overlay(
+                data_row,
+                col,
+                &value,
+                col_width,
+                format.alignment,
+                is_editing,
+                app,
+                window,
+                cx,
+            );
 
         // CenterAcrossSelection: continuation cells suppress text entirely
         let suppress_text = matches!(center_across_span, Some(w) if w == 0.0);
@@ -1064,7 +1133,8 @@ fn render_cell(
                 rs.bold.is_some() || rs.italic.is_some() || rs.text_color.is_some()
             });
             let style_has_formatting = cell_style.bold || cell_style.italic || cell_style.text.is_some();
-            let has_formatting = format.bold
+            let has_formatting = review_struck
+                || format.bold
                 || format.italic
                 || format.underline
                 || format.strikethrough
@@ -1078,7 +1148,7 @@ fn render_cell(
             let text_element: AnyElement = if has_formatting {
                 // Build text style with ALL formatting properties
                 let mut text_style = window.text_style();
-                text_style.color = cell_text_color(app, is_editing, is_selected, is_multi_edit_preview);
+                text_style.color = cell_text;
 
                 // Apply role-based text color if present (overrides default, but format.font_color wins)
                 if let Some(role_color) = role_style.and_then(|rs| rs.text_color) {
@@ -1121,7 +1191,7 @@ fn render_cell(
                         ..Default::default()
                     });
                 }
-                if format.strikethrough {
+                if format.strikethrough || review_struck {
                     text_style.strikethrough = Some(StrikethroughStyle {
                         thickness: px(1.),
                         ..Default::default()
@@ -2675,6 +2745,16 @@ fn render_text_spill_overlay(
             // Selection does NOT suppress spill — Excel parity: the overlay
             // paints above per-cell selection tints.
             if app.mode.is_editing() && view_state.selected == (view_row, col) {
+                continue;
+            }
+
+            // Review cells keep their text clipped inside the cell so markers,
+            // strikethrough, and proposed values remain one coherent treatment.
+            // The normal cell renderer owns their text during Review Mode.
+            let sheet_id = app.sheet(cx).id;
+            if app.review_change_at_source(sheet_id, data_row, col).is_some()
+                || app.review_row_is_deleted(sheet_id, data_row)
+            {
                 continue;
             }
 

@@ -39,6 +39,7 @@ impl Spreadsheet {
                         this.terminal.watching_for_result = true;
                         this.terminal.watch_generation += 1;
                         this.terminal.pending_result = None;
+                        this.review_mode = None;
                         this.terminal.result_settle_task = None;
                         this.terminal.last_injected_command = Some(cmd.trim().to_string());
 

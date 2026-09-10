@@ -244,6 +244,7 @@ impl Spreadsheet {
         if !self.mode.is_editing() {
             return;
         }
+        if self.block_if_previewing(cx) { return; }
 
         // Restore home sheet for cross-sheet formula editing
         self.restore_formula_home_sheet(cx);

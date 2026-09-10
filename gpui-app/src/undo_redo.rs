@@ -31,6 +31,7 @@ const NUM_COLS: usize = 16_384;
 impl Spreadsheet {
     // Undo/Redo
     pub fn undo(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         if let Some(entry) = self.history.undo() {
             match entry.action {
                 UndoAction::CondFormatAdded { sheet_index, rule } => {
@@ -1093,6 +1094,7 @@ impl Spreadsheet {
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         if let Some(entry) = self.history.redo() {
             match entry.action {
                 UndoAction::CondFormatAdded { sheet_index, rule } => {

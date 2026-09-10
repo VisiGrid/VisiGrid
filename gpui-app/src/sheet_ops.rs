@@ -223,6 +223,7 @@ impl Spreadsheet {
     /// Set a cell value and update the dependency graph.
     /// This is the preferred way to set cell values - it ensures the dep graph stays in sync.
     pub fn set_cell_value(&mut self, row: usize, col: usize, value: &str, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         self.workbook.update(cx, |wb, _| {
             let sheet_id = wb.active_sheet_id();
             wb.active_sheet_mut().set_value(row, col, value);
@@ -236,6 +237,7 @@ impl Spreadsheet {
     /// Clear a cell value on the active sheet and update the dependency graph + recalc.
     /// This is the preferred way to clear cells - it ensures the dep graph stays in sync.
     pub fn clear_cell_value(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         self.workbook.update(cx, |wb, _| {
             let sheet_id = wb.active_sheet_id();
             wb.active_sheet_mut().clear_cell(row, col);

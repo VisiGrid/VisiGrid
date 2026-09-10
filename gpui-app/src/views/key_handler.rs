@@ -217,6 +217,27 @@ pub(crate) fn handle_key_down(
         return;
     }
 
+    // Scope these keys here so [ and ] retain normal type-to-edit behavior
+    // outside Review Mode.
+    if this.review_mode.is_some()
+        && this.mode == Mode::Navigation
+        && !event.keystroke.modifiers.control
+        && !event.keystroke.modifiers.alt
+        && !event.keystroke.modifiers.platform
+    {
+        match event.keystroke.key.as_str() {
+            "[" => {
+                this.navigate_review_change(false, event.keystroke.modifiers.shift, cx);
+                return;
+            }
+            "]" => {
+                this.navigate_review_change(true, event.keystroke.modifiers.shift, cx);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     // Exit zen mode with Escape
     if this.zen_mode && event.keystroke.key == "escape" {
         this.zen_mode = false;

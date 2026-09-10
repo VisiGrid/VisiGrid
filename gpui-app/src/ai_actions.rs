@@ -67,7 +67,7 @@ fn default_lua_verification() -> Vec<visigrid_engine::operation_plan::Verificati
 #[cfg(test)]
 mod review_plan_tests {
     use super::{default_lua_verification, prepare_lua_operation_plan};
-    use visigrid_engine::operation_plan::{VerificationEvidence, VerificationStatus};
+    use visigrid_engine::operation_plan::{ChangeKind, VerificationEvidence, VerificationStatus};
     use visigrid_engine::workbook::Workbook;
 
     #[test]
@@ -116,8 +116,22 @@ mod review_plan_tests {
         assert!(matches!(
             &retained.evidence,
             VerificationEvidence::RetainedTotal { expected, actual, currency, .. }
-                if expected == "350.00" && actual == "350.00" && currency == "USD"
+                if expected == "350" && actual == "350" && currency == "USD"
         ));
+
+        let review = crate::review_mode::ReviewModeState::from_plan(prepared.plan());
+        let vendor_change = review.change_index_at_source(1, 1).unwrap();
+        assert_eq!(prepared.plan().changes[vendor_change].kind, ChangeKind::Value);
+        assert!(review.is_deleted_source_row(3));
+        assert!(review.is_deleted_source_row(4));
+        assert!(review.overview_buckets().iter().any(|count| *count > 0));
+        let first = review
+            .adjacent_source_change(usize::MAX, usize::MAX, true)
+            .unwrap();
+        let last = review.adjacent_source_change(0, 0, false).unwrap();
+        assert_eq!(review.adjacent_source_change(first.0, first.1, false), Some(last));
+        assert_eq!(review.adjacent_source_change(last.0, last.1, true), Some(first));
+        assert!(review.adjacent_source_group(0, 0, true).is_some());
     }
 }
 
@@ -821,6 +835,9 @@ sheet:cols()
         let hash = blake3::hash(code.as_bytes());
         let script_hash = hash.to_hex()[..32].to_string();
 
+        if self.mode.is_editing() {
+            self.cancel_edit(cx);
+        }
         // Snapshot current sheet for preview
         let sheet = self.sheet(cx);
         let source_sheet_index = self.sheet_index(cx);
@@ -871,6 +888,9 @@ sheet:cols()
         let cells_written = prepared_plan.as_ref()
             .map(|prepared| prepared.plan().summary.total_changes())
             .unwrap_or(result.mutations);
+        self.review_mode = prepared_plan
+            .as_ref()
+            .map(|prepared| crate::review_mode::ReviewModeState::from_plan(prepared.plan()));
 
         // Store preview
         self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
@@ -916,6 +936,9 @@ sheet:cols()
         let hash = blake3::hash(code.as_bytes());
         let script_hash = hash.to_hex()[..32].to_string();
 
+        if self.mode.is_editing() {
+            self.cancel_edit(cx);
+        }
         let sheet = self.sheet(cx);
         let source_sheet_index = self.sheet_index(cx);
         let source_fingerprint = sheet_fingerprint(sheet);
@@ -962,6 +985,9 @@ sheet:cols()
         let cells_written = prepared_plan.as_ref()
             .map(|prepared| prepared.plan().summary.total_changes())
             .unwrap_or(result.mutations);
+        self.review_mode = prepared_plan
+            .as_ref()
+            .map(|prepared| crate::review_mode::ReviewModeState::from_plan(prepared.plan()));
 
         self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
             script_path: path,
@@ -1095,6 +1121,7 @@ sheet:cols()
 
         // Switch to new sheet
         self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(sheet_idx); });
+        self.review_mode = None;
 
         self.status_message = Some(format!(
             "Applied AI Lua to new sheet '{}'.", sheet_name
@@ -1187,6 +1214,7 @@ sheet:cols()
         );
         self.bump_cells_rev();
         self.is_modified = true;
+        self.review_mode = None;
 
         self.status_message = Some(format!(
             "Applied AI Lua to current sheet '{}'.", sheet_name

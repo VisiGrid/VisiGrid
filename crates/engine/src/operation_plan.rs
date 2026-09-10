@@ -257,12 +257,24 @@ pub struct VerificationResult {
     pub id: String,
     pub label: Option<String>,
     pub status: VerificationStatus,
+    pub kind: VerificationKind,
     #[serde(flatten)]
     pub evidence: VerificationEvidence,
 }
 
+/// Stable assertion identity, independent of whether evidence was available.
+///
+/// Keeping this on the result prevents an `Unknown` outcome from changing the
+/// assertion kind merely because its evidence could not be calculated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationKind {
+    NoNewFormulaErrors,
+    GrossMinusGroupEqualsPreview,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(untagged)]
 pub enum VerificationEvidence {
     NoNewFormulaErrors {
         new_errors: usize,
@@ -348,7 +360,7 @@ impl CellSnapshot {
     fn from_sheet(sheet: &Sheet, row: usize, col: usize) -> Self {
         Self {
             raw: sheet.get_raw(row, col),
-            display: sheet.get_display(row, col),
+            display: sheet.get_formatted_display(row, col),
             format: sheet.get_format(row, col),
         }
     }
@@ -1223,6 +1235,7 @@ fn evaluate_verifications(
                     } else {
                         VerificationStatus::Failed
                     },
+                    kind: VerificationKind::NoNewFormulaErrors,
                     evidence: VerificationEvidence::NoNewFormulaErrors { new_errors },
                 },
                 None,
@@ -1305,6 +1318,7 @@ fn evaluate_retained_total(
                     id,
                     label,
                     status: VerificationStatus::Unknown,
+                    kind: VerificationKind::GrossMinusGroupEqualsPreview,
                     evidence: VerificationEvidence::Unavailable {
                         message: format!("source row {}: {reason}", before_row + 1),
                     },
@@ -1333,6 +1347,7 @@ fn evaluate_retained_total(
                         id,
                         label,
                         status: VerificationStatus::Unknown,
+                        kind: VerificationKind::GrossMinusGroupEqualsPreview,
                         evidence: VerificationEvidence::Unavailable {
                             message: format!("preview row {}: {reason}", after_row + 1),
                         },
@@ -1352,20 +1367,17 @@ fn evaluate_retained_total(
         } else {
             VerificationStatus::Failed
         },
+        kind: VerificationKind::GrossMinusGroupEqualsPreview,
         evidence: VerificationEvidence::RetainedTotal {
-            expected: currency_evidence(expected_retained),
-            actual: currency_evidence(preview_retained),
+            expected: decimal_evidence(expected_retained),
+            actual: decimal_evidence(preview_retained),
             tolerance: decimal_evidence(tolerance),
             currency: currency.to_ascii_uppercase(),
-            gross_source: currency_evidence(gross_source),
-            classified_exclusions: currency_evidence(classified_exclusions),
-            difference: currency_evidence(difference),
+            gross_source: decimal_evidence(gross_source),
+            classified_exclusions: decimal_evidence(classified_exclusions),
+            difference: decimal_evidence(difference),
         },
     }
-}
-
-fn currency_evidence(value: f64) -> String {
-    format!("{value:.2}")
 }
 
 fn decimal_evidence(value: f64) -> String {
@@ -2441,12 +2453,12 @@ mod tests {
                 actual,
                 currency,
                 ..
-            } if expected == "350.00" && actual == "350.00" && currency == "USD"
+            } if expected == "350" && actual == "350" && currency == "USD"
         ));
         let wire = serde_json::to_value(verification).unwrap();
         assert_eq!(wire["kind"], "gross_minus_group_equals_preview");
-        assert_eq!(wire["expected"], "350.00");
-        assert_eq!(wire["actual"], "350.00");
+        assert_eq!(wire["expected"], "350");
+        assert_eq!(wire["actual"], "350");
         assert_eq!(wire["tolerance"], "0.01");
         assert!(wire.get("evidence").is_none());
         let deletion = prepared
@@ -2464,6 +2476,13 @@ mod tests {
             .problems
             .iter()
             .any(|problem| problem.severity == ProblemSeverity::Blocking));
+    }
+
+    #[test]
+    fn verification_evidence_preserves_sub_cent_comparison_precision() {
+        assert_eq!(decimal_evidence(0.004), "0.004");
+        assert_eq!(decimal_evidence(0.000_001), "0.000001");
+        assert_eq!(decimal_evidence(0.0), "0");
     }
 
     #[test]
@@ -2499,6 +2518,10 @@ mod tests {
             VerificationEvidence::Unavailable { message }
                 if message.contains("nonnumeric text")
         ));
+        let wire = serde_json::to_value(&prepared.plan().verification[0]).unwrap();
+        assert_eq!(wire["kind"], "gross_minus_group_equals_preview");
+        assert_eq!(wire["status"], "unknown");
+        assert!(wire["message"].as_str().unwrap().contains("nonnumeric text"));
         assert_eq!(
             prepared.verify_candidate(&workbook, &context()).unwrap_err(),
             PlanError::BlockingProblems

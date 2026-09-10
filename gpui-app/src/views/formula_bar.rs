@@ -6,6 +6,7 @@ use crate::app::{
 };
 use crate::theme::TokenKey;
 use crate::formula_context::{tokenize_for_highlight, TokenType, char_index_to_byte_offset};
+use visigrid_engine::operation_plan::ChangeKind;
 
 /// Maximum number of TextRuns to render with syntax highlighting.
 /// If exceeded, fall back to plain text to avoid performance issues with complex formulas.
@@ -23,6 +24,12 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
     // Get the raw value (without cursor)
     let raw_value = if editing {
         app.edit_value.clone()
+    } else if let Some(change) = app.review_change_at_source(app.sheet(cx).id, data_row, view_col) {
+        if change.kind == ChangeKind::Formula {
+            format!("{} → {}", change.before.raw, change.after.raw)
+        } else {
+            app.sheet(cx).get_raw(data_row, view_col)
+        }
     } else {
         app.sheet(cx).get_raw(data_row, view_col)
     };

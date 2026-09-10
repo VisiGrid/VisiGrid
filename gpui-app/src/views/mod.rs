@@ -32,6 +32,9 @@ mod paste_special_dialog;
 mod convert_picker;
 mod preferences_panel;
 pub mod refactor_log;
+pub(crate) mod review_action_bar;
+pub(crate) mod review_panel;
+pub(crate) mod review_overview_rail;
 mod menu_bar;
 mod status_bar;
 mod theme_picker;
@@ -112,8 +115,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_import_overlay = app.import_overlay_visible;
     let show_name_tooltip = app.should_show_name_tooltip(cx) && app.mode == Mode::Navigation;
     let show_f2_tip = app.should_show_f2_tip(cx);  // Show immediately on trigger, not gated on mode
-    let show_inspector = app.inspector_visible;
-    let show_profiler = app.profiler_visible;
+    let show_review_panel = app.review_mode.is_some();
+    let show_inspector = app.inspector_visible && !show_review_panel;
+    let show_profiler = app.profiler_visible && !show_review_panel;
     let zen_mode = app.zen_mode;
 
     // Build element with action handlers from extracted modules
@@ -536,11 +540,20 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     .flex_1()
                     .min_h(px(0.0))  // Allow grid to shrink below content size for console panel
                     .child(grid_element)
+                    .when(show_review_panel, |d| {
+                        d.child(review_panel::render_review_panel(app, cx))
+                    })
+                    .when(show_review_panel, |d| {
+                        d.child(review_overview_rail::render_review_overview_rail(app, cx))
+                    })
                     .when(show_minimap, |d| {
                         d.child(minimap::render_minimap(app, window, cx))
                     })
                     .into_any_element()
             }
+        })
+        .when(app.review_mode.is_some(), |div| {
+            div.child(review_action_bar::render_review_action_bar(app, cx))
         })
         // Bottom panel: tabbed container for Lua console + Terminal
         .child({
