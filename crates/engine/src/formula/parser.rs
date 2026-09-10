@@ -1054,6 +1054,10 @@ fn collect_cell_refs<S>(expr: &Expr<S>, refs: &mut Vec<(usize, usize)>) {
 }
 
 /// 0-based column index to its letters: 0 → A, 25 → Z, 26 → AA.
+pub fn column_letters_pub(col: usize) -> String {
+    column_letters(col)
+}
+
 fn column_letters(mut col: usize) -> String {
     let mut out = Vec::new();
     loop {

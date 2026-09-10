@@ -689,6 +689,11 @@ impl Sheet {
     // Spill Management
     // =========================================================================
 
+    /// Every cell currently holding a spilled value (receivers, not parents).
+    pub fn spill_receiver_coords(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.spill_values.keys().copied()
+    }
+
     /// Forget a #SPILL! on a cell, whatever it currently holds.
     pub fn clear_spill_error(&mut self, row: usize, col: usize) {
         if let Some(cell) = self.cells.get_mut(&(row, col)) {

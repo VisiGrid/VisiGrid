@@ -73,6 +73,11 @@ pub struct Workbook {
     /// Rebuilt on load, updated incrementally on cell changes.
     #[serde(skip)]
     dep_graph: DepGraph,
+    /// Settlement failures from incremental recalcs, which have no report to
+    /// carry them. Taken by whoever surfaces recalc problems (the status
+    /// line, a session log); never persisted.
+    #[serde(skip)]
+    incremental_errors: Vec<crate::recalc::RecalcError>,
 
     /// Batch nesting counter. When > 0, recalc is deferred until end_batch().
     /// `pub(crate)` for test harness access.
@@ -146,6 +151,7 @@ impl Workbook {
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
             dep_graph: DepGraph::new(),
+            incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
             batch_format_changed: Vec::new(),
@@ -411,6 +417,7 @@ impl Workbook {
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
             dep_graph: DepGraph::new(),
+            incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
             batch_format_changed: Vec::new(),
@@ -435,6 +442,7 @@ impl Workbook {
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
             dep_graph: DepGraph::new(),
+            incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
             batch_format_changed: Vec::new(),
@@ -1249,6 +1257,12 @@ impl Workbook {
     ///
     /// Formulas with INDIRECT/OFFSET are evaluated after all known-deps formulas
     /// since their dependencies cannot be determined statically.
+    /// Settlement failures recorded by incremental recalcs since the last
+    /// call. Empty is the normal state.
+    pub fn take_incremental_errors(&mut self) -> Vec<crate::recalc::RecalcError> {
+        std::mem::take(&mut self.incremental_errors)
+    }
+
     pub fn recompute_full_ordered(&mut self) -> crate::recalc::RecalcReport {
         match crate::custom_fns::default_custom_fn_handler() {
             Some(handler) => self.recompute_full_ordered_inner(Some(&handler)),
@@ -1257,10 +1271,13 @@ impl Workbook {
     }
 
     /// Core recompute implementation, optionally with custom function handler.
+    /// Bracketed by the custom-function hooks so a handler can scope a memo
+    /// to this one recalculation.
     fn recompute_full_ordered_inner(
         &mut self,
         custom_fn_handler: Option<&dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
     ) -> crate::recalc::RecalcReport {
+        let _recalc_scope = crate::custom_fns::recalc_scope();
         use crate::formula::analyze::has_dynamic_deps;
         use crate::formula::eval::Value;
         use crate::recalc::{CellRecalcInfo, RecalcError, RecalcReport};
@@ -2266,6 +2283,7 @@ impl Workbook {
     /// cost follows the size of the change rather than the size of the
     /// workbook.
     fn recalc_dirty_set(&mut self, changed: &[CellId]) -> Recalculated {
+        let _recalc_scope = crate::custom_fns::recalc_scope();
         use std::collections::VecDeque;
 
         // Test instrumentation: count recalc calls
@@ -2344,6 +2362,12 @@ impl Workbook {
                     Some(handler) => self.settle_pending_spills(Some(&handler), &mut settle_report),
                     None => self.settle_pending_spills(None, &mut settle_report),
                 };
+                // A settlement that gave up is a real failure: values are
+                // stale with nothing on screen to say so. Keep it where a
+                // caller can find it; ordinary error VALUES are on the cells.
+                self.incremental_errors.extend(
+                    settle_report.errors.into_iter().filter(|e| e.error.starts_with("spill not settled")),
+                );
                 // In evaluation order, which is the order a caller applying
                 // these downstream wants them in too; then whatever placing
                 // arrays changed, since those cells changed as surely.
@@ -3211,8 +3235,73 @@ mod tests {
                 _ => Some(EvalResult::Error("#VALUE!".into())),
             },
             "BATCH_ENTRY_PROBE" => Some(EvalResult::Number(7.0)),
+            "PROBE_SPILL_FROM" => match args.first() {
+                Some(EvalArg::Scalar(Value::Number(n))) => {
+                    let mut a = crate::formula::eval::Array2D::new(3, 1);
+                    for i in 0..3 {
+                        a.set(i, 0, Value::Number(n + i as f64));
+                    }
+                    Some(EvalResult::Array(a))
+                }
+                _ => Some(EvalResult::Error("#VALUE!".into())),
+            },
             _ => None,
         }
+    }
+
+    /// begin/end bracket every recalc the engine runs, in matched pairs,
+    /// including the incremental path's fallback into a full recompute.
+    #[test]
+    fn test_recalc_hooks_bracket_full_and_incremental_recalcs() {
+        // Counted per thread: the hooks are process-wide and the tests run in
+        // parallel, so another test's recalc on another thread would otherwise
+        // show up here mid-flight.
+        use std::cell::Cell;
+        thread_local! {
+            static BEGINS: Cell<usize> = const { Cell::new(0) };
+            static ENDS: Cell<usize> = const { Cell::new(0) };
+        }
+        fn begin() { BEGINS.with(|c| c.set(c.get() + 1)); }
+        fn end() { ENDS.with(|c| c.set(c.get() + 1)); }
+        crate::custom_fns::set_default_custom_fns(Some(crate::custom_fns::CustomFnHooks {
+            call: test_probe_handler,
+            begin_recalc: begin,
+            end_recalc: end,
+        }));
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "1");
+        wb.set_cell_value_tracked(0, 0, 1, "=A1+1");
+        wb.recompute_full_ordered();
+        {
+            let mut guard = wb.batch_guard();
+            guard.set_cell_value_tracked(0, 0, 0, "2");
+        }
+        let (begins, ends) = (BEGINS.with(|c| c.get()), ENDS.with(|c| c.get()));
+        assert!(begins >= 3, "each recalc began: {}", begins);
+        assert_eq!(begins, ends, "every begin ended");
+        // Leave the plain probe installed for the other tests.
+        crate::custom_fns::set_default_custom_fn_handler(Some(test_probe_handler));
+    }
+
+    /// An incremental recalc that exhausts its settlement rounds says so
+    /// somewhere a caller can read, rather than leaving stale values silently.
+    #[test]
+    fn test_incremental_settlement_exhaustion_is_recorded() {
+        crate::custom_fns::set_default_custom_fn_handler(Some(test_probe_handler));
+        // A chain deeper than the round bound: each column's array is built
+        // from the previous column's last receiver.
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "1");
+        wb.set_cell_value_tracked(0, 0, 1, "=PROBE_SPILL_FROM(A1)");
+        for col in 2..20 {
+            let prev = crate::formula::parser::column_letters_pub(col - 1);
+            wb.set_cell_value_tracked(0, 0, col, &format!("=PROBE_SPILL_FROM({}3)", prev));
+        }
+        let _ = wb.take_incremental_errors();
+        wb.set_cell_value_tracked(0, 0, 0, "2");
+        let errors = wb.take_incremental_errors();
+        assert!(errors.iter().any(|e| e.error.contains("not settled")), "{:?}", errors);
+        assert!(wb.take_incremental_errors().is_empty(), "taken once");
     }
 
     /// The delta an incremental recalc reports must include what placing

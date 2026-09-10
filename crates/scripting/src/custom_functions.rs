@@ -56,10 +56,15 @@ impl CustomFunctionRegistry {
 ///
 /// Returns an empty registry (not an error) if the file doesn't exist.
 /// Returns Err only for parse/compile failures.
-pub fn load_custom_functions(lua: &Lua) -> Result<CustomFunctionRegistry, String> {
+/// Where `functions.lua` lives.
+pub fn custom_functions_path() -> Result<PathBuf, String> {
     let config_dir = dirs::config_dir()
         .ok_or_else(|| "Could not determine config directory".to_string())?;
-    let source_path = config_dir.join("visigrid").join("functions.lua");
+    Ok(config_dir.join("visigrid").join("functions.lua"))
+}
+
+pub fn load_custom_functions(lua: &Lua) -> Result<CustomFunctionRegistry, String> {
+    let source_path = custom_functions_path()?;
 
     if !source_path.exists() {
         return Ok(CustomFunctionRegistry {

@@ -573,8 +573,20 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
             changed_cells.iter().map(|c| (c.sheet, c.row, c.col)).collect();
         let recalculated: Vec<CellId> = match outcome.recalculated {
             Recalculated::Cells(cells) => cells,
-            // A cycle forced a full recompute: every formula may have moved.
-            Recalculated::All => wb.dep_graph().formula_cells().collect(),
+            // A cycle forced a full recompute, which can also resize or retire
+            // spills, so "everything" is every cell that holds a value: the
+            // stored cells and every spill receiver, on every sheet.
+            Recalculated::All => wb
+                .sheets()
+                .iter()
+                .flat_map(|sheet| {
+                    let id = sheet.id;
+                    sheet
+                        .cells_iter()
+                        .map(move |(&(row, col), _)| CellId { sheet: id, row, col })
+                        .chain(sheet.spill_receiver_coords().map(move |(row, col)| CellId { sheet: id, row, col }))
+                })
+                .collect(),
         };
         for cell in recalculated {
             if let Some(sheet) = wb.sheet_index_by_id(cell.sheet) {
@@ -671,6 +683,33 @@ mod tests {
         assert!(has(4, 2), "a new spill receiver");
         assert_eq!(wb.sheets()[0].get_display(0, 1), "10");
         assert_eq!(wb.sheets()[0].get_display(4, 2), "5");
+    }
+
+    /// When a cycle forces a full recompute the delta must cover every cell
+    /// that can hold a value, receivers included.
+    #[test]
+    fn apply_ops_delta_after_a_full_recompute_covers_spill_receivers() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "1");
+        wb.set_cell_value_tracked(0, 0, 2, "=SEQUENCE(3)");
+        wb.rebuild_dep_graph();
+        let req = ApplyOpsRequest {
+            request_id: String::new(),
+            batch_name: String::new(),
+            atomic: false,
+            expected_revision: None,
+            // A1 and B1 reference each other: a cycle among the dirty cells
+            // makes the incremental path fall back to a full recompute.
+            ops: vec![
+                Op::SetCellFormula { sheet: 0, row: 0, col: 0, formula: "=B1".into() },
+                Op::SetCellFormula { sheet: 0, row: 0, col: 1, formula: "=A1".into() },
+            ],
+            client: None,
+        };
+        let outcome = apply_ops(&mut wb, &req);
+        assert!(outcome.response.error.is_none(), "{:?}", outcome.response.error);
+        let has = |row: usize, col: usize| outcome.changed_cells.iter().any(|c| c.sheet == 0 && c.row == row && c.col == col);
+        assert!(has(2, 2), "receiver C3 is in the delta, {:?}", outcome.changed_cells);
     }
     use crate::bridge::ApplyOpsRequest;
 
