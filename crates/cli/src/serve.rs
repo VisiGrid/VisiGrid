@@ -213,6 +213,9 @@ pub fn cmd_serve(
         match req {
             host::SessionRequest::ApplyOps { req, reply } => {
                 let outcome = host::apply_ops(&mut wb, &req);
+                for warning in &outcome.response.warnings {
+                    eprintln!("warning: {}", warning);
+                }
                 if outcome.response.error.is_none() && outcome.response.applied > 0 {
                     dirty = true;
                     if let Some(sh) = share_session.as_mut() {

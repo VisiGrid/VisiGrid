@@ -372,6 +372,11 @@ pub struct ApplyOpsResultMessage {
     pub revision: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<OpError>,
+    /// Additive (2026-09): problems the recalc could not resolve after a
+    /// successful apply. Absent on the wire when empty; older servers never
+    /// send it and older clients ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Error applying a specific operation.

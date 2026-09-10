@@ -301,6 +301,15 @@ impl Spreadsheet {
     /// the cycle banner if needed. This is the single hook that ensures the
     /// "Turn on iterative calculation..." button appears regardless of whether
     /// cycles were introduced via file import, manual editing, or Lua scripting.
+    /// Say so when an edit's recalc could not settle a spill chain: the
+    /// values on screen are stale and nothing else marks them.
+    pub(crate) fn surface_incremental_recalc_problems(&mut self, cx: &mut Context<Self>) {
+        let errors = self.wb_mut(cx, |wb| wb.take_incremental_errors());
+        if let Some(first) = errors.first() {
+            self.status_message = Some(format!("Recalc incomplete: {}", first.error));
+        }
+    }
+
     pub(crate) fn maybe_show_cycle_banner(&mut self, cx: &App) {
         if self.should_show_cycle_banner(cx) && !self.cycle_banner.visible {
             self.cycle_banner.show_force();
@@ -974,6 +983,7 @@ impl Spreadsheet {
 
         // Show cycle banner if this edit introduced circular references
         self.maybe_show_cycle_banner(cx);
+        self.surface_incremental_recalc_problems(cx);
 
         // Invalidate trace cache (dependencies may have changed)
         if had_changes {
@@ -1384,6 +1394,7 @@ impl Spreadsheet {
 
         // Show cycle banner if this edit introduced circular references
         self.maybe_show_cycle_banner(cx);
+        self.surface_incremental_recalc_problems(cx);
 
         cx.notify();
 

@@ -833,11 +833,13 @@ fn handle_message(
 
             match bridge.apply_ops(req) {
                 Ok(resp) => {
+                    let warnings = resp.warnings.clone();
                     ServerMessage::ApplyOpsResult(ApplyOpsResultMessage {
                         id: apply.id,
                         applied: resp.applied,
                         total: resp.total,
                         revision: resp.current_revision,
+                        warnings,
                         error: resp.error.map(|e| match e {
                             crate::bridge::ApplyOpsError::RevisionMismatch { expected, actual } => {
                                 OpError {
@@ -1029,7 +1031,7 @@ mod tests {
                             total: req.ops.len(),
                             current_revision: 1,
                             error: None,
-                        });
+                        warnings: Vec::new(), });
                     }
                     SessionRequest::Inspect { req: _, reply } => {
                         let _ = reply.send(InspectResponse {

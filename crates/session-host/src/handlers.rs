@@ -425,6 +425,7 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
             total,
             current_revision: current_rev,
             error,
+            warnings: Vec::new(),
         },
         value_changes: HashMap::new(),
         format_patches: HashMap::new(),
@@ -597,12 +598,28 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
         }
     }
 
+    let warnings: Vec<String> = outcome
+        .errors
+        .iter()
+        .map(|e| {
+            let sheet = wb.sheet_index_by_id(e.cell.sheet).unwrap_or(0);
+            format!(
+                "sheet {} {}{}: {}",
+                sheet,
+                visigrid_engine::formula::parser::column_letters_pub(e.cell.col),
+                e.cell.row + 1,
+                e.error
+            )
+        })
+        .collect();
+
     ApplyOutcome {
         response: ApplyOpsResponse {
             applied,
             total: req.ops.len(),
             current_revision: wb.revision(),
             error: None,
+            warnings,
         },
         value_changes,
         format_patches,
@@ -683,6 +700,36 @@ mod tests {
         assert!(has(4, 2), "a new spill receiver");
         assert_eq!(wb.sheets()[0].get_display(0, 1), "10");
         assert_eq!(wb.sheets()[0].get_display(4, 2), "5");
+    }
+
+    /// A spill chain deeper than the settlement bound is reported on the
+    /// response, so an agent learns its values are stale.
+    #[test]
+    fn apply_ops_reports_an_unsettled_spill_chain_as_a_warning() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "1");
+        wb.set_cell_value_tracked(0, 0, 1, "=SEQUENCE(A1+2)");
+        for col in 2..20 {
+            let prev = visigrid_engine::formula::parser::column_letters_pub(col - 1);
+            wb.set_cell_value_tracked(0, 0, col, &format!("=SEQUENCE({}3)", prev));
+        }
+        wb.rebuild_dep_graph();
+        let _ = wb.take_incremental_errors();
+        let req = ApplyOpsRequest {
+            request_id: String::new(),
+            batch_name: String::new(),
+            atomic: false,
+            expected_revision: None,
+            ops: vec![Op::SetCellValue { sheet: 0, row: 0, col: 0, value: "2".into() }],
+            client: None,
+        };
+        let outcome = apply_ops(&mut wb, &req);
+        assert!(outcome.response.error.is_none(), "{:?}", outcome.response.error);
+        assert!(
+            outcome.response.warnings.iter().any(|w| w.contains("not settled")),
+            "{:?}",
+            outcome.response.warnings
+        );
     }
 
     /// When a cycle forces a full recompute the delta must cover every cell

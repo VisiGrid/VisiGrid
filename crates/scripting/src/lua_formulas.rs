@@ -54,13 +54,32 @@ static PUBLISHED: RwLock<Option<Published>> = RwLock::new(None);
 /// Read `functions.lua` from disk and prove it compiles, on this thread, in
 /// a throwaway runtime. Only then does it become the published version.
 fn publish_from_disk() -> Result<(), String> {
-    let path = custom_functions_path()?;
-    let candidate = if path.exists() {
-        Some(std::fs::read_to_string(&path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?)
-    } else {
-        None
+    let read = || -> Result<(Option<String>, PathBuf), String> {
+        let path = custom_functions_path()?;
+        let candidate = if path.exists() {
+            Some(std::fs::read_to_string(&path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?)
+        } else {
+            None
+        };
+        Ok((candidate, path))
     };
-    publish(candidate, path)
+    match read() {
+        Ok((candidate, path)) => publish(candidate, path),
+        Err(e) => {
+            // A file that cannot be found or read is a failed reload like any
+            // other: the published version stays, and the reason is kept.
+            record_failure(e.clone());
+            Err(e)
+        }
+    }
+}
+
+fn record_failure(error: String) {
+    let mut slot = PUBLISHED.write().unwrap_or_else(|e| e.into_inner());
+    match slot.as_mut() {
+        Some(p) => p.error = Some(error),
+        None => *slot = Some(Published { generation: 1, source: None, error: Some(error) }),
+    }
 }
 
 fn publish(candidate: Option<String>, path: PathBuf) -> Result<(), String> {
@@ -82,10 +101,8 @@ fn publish(candidate: Option<String>, path: PathBuf) -> Result<(), String> {
             Ok(())
         }
         Err(e) => {
-            match slot.as_mut() {
-                Some(p) => p.error = Some(e.clone()),
-                None => *slot = Some(Published { generation: 1, source: None, error: Some(e.clone()) }),
-            }
+            drop(slot);
+            record_failure(e.clone());
             Err(e)
         }
     }
@@ -179,15 +196,19 @@ thread_local! {
 }
 
 /// This thread's host at the published generation, building or rebuilding
-/// it first when it is missing or behind.
+/// it first when it is missing or behind. A host in the middle of a recalc
+/// is pinned: every cell of one recalc is answered by one version of
+/// functions.lua, with one memo, and the new version takes over at the next
+/// recalc. Otherwise a reload on another thread during a background load
+/// would leave a workbook computed half by each version.
 fn with_host<R>(f: impl FnOnce(&Host) -> R) -> R {
     let (generation, source, _) = published();
     HOST.with(|slot| {
-        let behind = match slot.borrow().as_ref() {
-            None => true,
-            Some(host) => host.generation != generation,
+        let (behind, pinned) = match slot.borrow().as_ref() {
+            None => (true, false),
+            Some(host) => (host.generation != generation, host.recalc_depth.get() > 0),
         };
-        if behind {
+        if behind && !pinned {
             *slot.borrow_mut() = Some(Host::build(generation, source));
         }
         let host = slot.borrow();
@@ -439,6 +460,37 @@ mod tests {
         let fresh = std::thread::spawn(|| (host_generation(), function_names())).join().unwrap();
         assert_eq!(fresh.0, good_gen);
         assert!(fresh.1.iter().any(|n| n == "GOOD"), "a new thread compiled the last good version too");
+    }
+
+    /// A reload that lands mid-recalc waits: the recalc finishes on the
+    /// version it started with, and the next one uses the new version.
+    #[test]
+    fn a_reload_during_a_recalc_waits_for_it_to_end() {
+        let _serial = PUBLISH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        install();
+        let path = std::path::PathBuf::from("functions.lua");
+        publish(Some("function PIN_A() return 1 end".into()), path.clone()).unwrap();
+        assert!(function_names().iter().any(|n| n == "PIN_A"));
+        begin_recalc();
+        publish(Some("function PIN_B() return 2 end".into()), path).unwrap();
+        assert!(function_names().iter().any(|n| n == "PIN_A"), "still the version the recalc began with");
+        assert!(!function_names().iter().any(|n| n == "PIN_B"));
+        end_recalc();
+        assert!(function_names().iter().any(|n| n == "PIN_B"), "the next use takes the new version");
+    }
+
+    /// A file that cannot be read is a failed reload: reported, and the
+    /// published version untouched.
+    #[test]
+    fn a_read_failure_is_reported_and_keeps_the_published_version() {
+        let _serial = PUBLISH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        install();
+        let path = std::path::PathBuf::from("functions.lua");
+        publish(Some("function KEEP_ME() return 1 end".into()), path).unwrap();
+        record_failure("Failed to read functions.lua: disk gone".into());
+        let status = load_status();
+        assert_eq!(status.error.as_deref(), Some("Failed to read functions.lua: disk gone"));
+        assert!(function_names().iter().any(|n| n == "KEEP_ME"));
     }
 
     #[test]

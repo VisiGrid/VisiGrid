@@ -2046,11 +2046,15 @@ impl Workbook {
             if !changed.is_empty() || !format_changed.is_empty() {
                 self.increment_revision();
                 changed.extend(format_changed);
-                return BatchOutcome { written: changed, recalculated };
+                // The batch is the caller's unit of work: hand back what its
+                // recalc could not settle instead of leaving it in the side
+                // channel for someone else to find.
+                let errors = self.take_incremental_errors();
+                return BatchOutcome { written: changed, recalculated, errors };
             }
         }
         // Nested end, or nothing happened.
-        BatchOutcome { written: Vec::new(), recalculated: Recalculated::Cells(Vec::new()) }
+        BatchOutcome { written: Vec::new(), recalculated: Recalculated::Cells(Vec::new()), errors: Vec::new() }
     }
 
     /// Record a cell change. If batching, defers recalc.
@@ -2565,6 +2569,10 @@ pub struct BatchOutcome {
     pub written: Vec<CellId>,
     /// Cells re-evaluated as a consequence of those writes.
     pub recalculated: Recalculated,
+    /// Problems the recalc could not resolve, chiefly a spill chain that did
+    /// not settle within the round bound. Values on the sheet are stale when
+    /// this is non-empty; the caller must say so somewhere visible.
+    pub errors: Vec<crate::recalc::RecalcError>,
 }
 
 /// RAII guard that calls `begin_batch()` on creation and `end_batch()` on drop.
@@ -3220,10 +3228,25 @@ mod tests {
         );
     }
 
-    /// The one probe every test installs. The handler is process-wide and the
-    /// tests run in parallel, so two tests installing two different handlers
-    /// raced: whichever set last won and the other's name went unknown. One
-    /// shared handler answering every probe name makes the install idempotent.
+    /// The one hook set every test installs. The hooks are process-wide and
+    /// the tests run in parallel, so two tests installing different hooks
+    /// raced: whichever set last won. One shared set answering every probe
+    /// name, counting recalcs per thread, makes the install idempotent.
+    fn test_hooks() -> crate::custom_fns::CustomFnHooks {
+        crate::custom_fns::CustomFnHooks {
+            call: test_probe_handler,
+            begin_recalc: test_begin_recalc,
+            end_recalc: test_end_recalc,
+        }
+    }
+
+    thread_local! {
+        static TEST_BEGINS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static TEST_ENDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    fn test_begin_recalc() { TEST_BEGINS.with(|c| c.set(c.get() + 1)); }
+    fn test_end_recalc() { TEST_ENDS.with(|c| c.set(c.get() + 1)); }
+
     fn test_probe_handler(
         name: &str,
         args: &[crate::formula::eval::EvalArg],
@@ -3253,21 +3276,10 @@ mod tests {
     /// including the incremental path's fallback into a full recompute.
     #[test]
     fn test_recalc_hooks_bracket_full_and_incremental_recalcs() {
-        // Counted per thread: the hooks are process-wide and the tests run in
-        // parallel, so another test's recalc on another thread would otherwise
-        // show up here mid-flight.
-        use std::cell::Cell;
-        thread_local! {
-            static BEGINS: Cell<usize> = const { Cell::new(0) };
-            static ENDS: Cell<usize> = const { Cell::new(0) };
-        }
-        fn begin() { BEGINS.with(|c| c.set(c.get() + 1)); }
-        fn end() { ENDS.with(|c| c.set(c.get() + 1)); }
-        crate::custom_fns::set_default_custom_fns(Some(crate::custom_fns::CustomFnHooks {
-            call: test_probe_handler,
-            begin_recalc: begin,
-            end_recalc: end,
-        }));
+        // Counted per thread: another test's recalc on another thread must
+        // not show up here mid-flight.
+        crate::custom_fns::set_default_custom_fns(Some(test_hooks()));
+        let (b0, e0) = (TEST_BEGINS.with(|c| c.get()), TEST_ENDS.with(|c| c.get()));
         let mut wb = Workbook::new();
         wb.set_cell_value_tracked(0, 0, 0, "1");
         wb.set_cell_value_tracked(0, 0, 1, "=A1+1");
@@ -3276,18 +3288,16 @@ mod tests {
             let mut guard = wb.batch_guard();
             guard.set_cell_value_tracked(0, 0, 0, "2");
         }
-        let (begins, ends) = (BEGINS.with(|c| c.get()), ENDS.with(|c| c.get()));
+        let (begins, ends) = (TEST_BEGINS.with(|c| c.get()) - b0, TEST_ENDS.with(|c| c.get()) - e0);
         assert!(begins >= 3, "each recalc began: {}", begins);
         assert_eq!(begins, ends, "every begin ended");
-        // Leave the plain probe installed for the other tests.
-        crate::custom_fns::set_default_custom_fn_handler(Some(test_probe_handler));
     }
 
     /// An incremental recalc that exhausts its settlement rounds says so
     /// somewhere a caller can read, rather than leaving stale values silently.
     #[test]
     fn test_incremental_settlement_exhaustion_is_recorded() {
-        crate::custom_fns::set_default_custom_fn_handler(Some(test_probe_handler));
+        crate::custom_fns::set_default_custom_fns(Some(test_hooks()));
         // A chain deeper than the round bound: each column's array is built
         // from the previous column's last receiver.
         let mut wb = Workbook::new();
@@ -3298,10 +3308,17 @@ mod tests {
             wb.set_cell_value_tracked(0, 0, col, &format!("=PROBE_SPILL_FROM({}3)", prev));
         }
         let _ = wb.take_incremental_errors();
+        // Outside a batch: the side channel carries it.
         wb.set_cell_value_tracked(0, 0, 0, "2");
         let errors = wb.take_incremental_errors();
         assert!(errors.iter().any(|e| e.error.contains("not settled")), "{:?}", errors);
         assert!(wb.take_incremental_errors().is_empty(), "taken once");
+        // Inside a batch: the outcome carries it, and the side channel is empty.
+        wb.begin_batch();
+        wb.set_cell_value_tracked(0, 0, 0, "3");
+        let outcome = wb.end_batch_outcome();
+        assert!(outcome.errors.iter().any(|e| e.error.contains("not settled")), "{:?}", outcome.errors);
+        assert!(wb.take_incremental_errors().is_empty(), "moved into the outcome");
     }
 
     /// The delta an incremental recalc reports must include what placing
@@ -3333,7 +3350,7 @@ mod tests {
     /// so a custom function's dependents update on edits, not only on demand.
     #[test]
     fn test_default_custom_fn_handler_reaches_incremental_and_full_recalc() {
-        crate::custom_fns::set_default_custom_fn_handler(Some(test_probe_handler));
+        crate::custom_fns::set_default_custom_fns(Some(test_hooks()));
 
         let mut wb = Workbook::new();
         wb.set_cell_value_tracked(0, 0, 0, "2");
@@ -3377,7 +3394,7 @@ mod tests {
     /// not left at the sheet's handler-less eager result.
     #[test]
     fn test_formula_entered_in_a_batch_uses_the_default_handler() {
-        crate::custom_fns::set_default_custom_fn_handler(Some(test_probe_handler));
+        crate::custom_fns::set_default_custom_fns(Some(test_hooks()));
         let mut wb = Workbook::new();
         {
             let mut guard = wb.batch_guard();

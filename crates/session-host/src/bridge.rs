@@ -290,6 +290,9 @@ pub struct ApplyOpsResponse {
     pub current_revision: u64,
     /// Error if any op failed.
     pub error: Option<ApplyOpsError>,
+    /// Problems the recalc could not resolve after a successful apply: values
+    /// on the sheet are stale where these point. Empty is the normal state.
+    pub warnings: Vec<String>,
 }
 
 /// Error details for apply_ops.
@@ -415,6 +418,7 @@ mod tests {
             total: 3,
             current_revision: 10,
             error: None,
+            warnings: Vec::new(),
         };
         assert_eq!(success.current_revision, 10);
 
@@ -427,6 +431,7 @@ mod tests {
                 expected: 8,
                 actual: 9,
             }),
+            warnings: Vec::new(),
         };
         assert_eq!(failure.current_revision, 9);
     }
