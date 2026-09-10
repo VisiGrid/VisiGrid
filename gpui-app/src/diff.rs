@@ -480,6 +480,10 @@ fn process_action(
                 );
             }
         }
+        UndoAction::PlanCommit { .. } => {
+            // The plan's materialized changes are already frozen in Review
+            // Mode; legacy history diff extraction does not expand snapshots.
+        }
 
         // Skip column/row sizing and visibility changes (visual only)
         UndoAction::ColumnWidthSet { .. }

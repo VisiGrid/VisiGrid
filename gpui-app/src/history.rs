@@ -5,6 +5,7 @@ use visigrid_engine::named_range::NamedRange;
 use visigrid_engine::provenance::Provenance;
 use visigrid_engine::sheet::{MergedRegion, SheetId};
 use visigrid_engine::workbook::Workbook;
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// Cryptographic fingerprint of the history stack.
@@ -151,6 +152,16 @@ pub enum UndoAction {
     Group {
         actions: Vec<UndoAction>,
         description: String,
+    },
+    /// Atomic Review Mode commit. Workbook and GUI-owned row state are kept
+    /// as before/after snapshots for the first implementation.
+    PlanCommit {
+        commit: Box<visigrid_engine::operation_plan::PlanCommit>,
+        sheet_id: SheetId,
+        before_row_view: visigrid_engine::filter::RowView,
+        after_row_view: visigrid_engine::filter::RowView,
+        before_row_heights: HashMap<usize, f32>,
+        after_row_heights: HashMap<usize, f32>,
     },
     /// Rows inserted (for undo: delete the inserted rows)
     RowsInserted {
@@ -370,6 +381,9 @@ impl UndoAction {
             }
             UndoAction::Group { description, .. } => {
                 description.clone()
+            }
+            UndoAction::PlanCommit { commit, .. } => {
+                format!("Apply reviewed plan {}", commit.plan_id.0)
             }
             UndoAction::RowsInserted { count, .. } => {
                 if *count == 1 {
@@ -1479,6 +1493,9 @@ impl History {
                     Self::apply_action_forward(workbook, view_state, sub_action)?;
                 }
             }
+            UndoAction::PlanCommit { commit, .. } => {
+                *workbook = commit.applied.clone();
+            }
             UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
                 let sheet = workbook.sheet_mut(*sheet_index)
                     .ok_or_else(|| PreviewBuildError::InvariantViolation(
@@ -1626,6 +1643,7 @@ pub enum UndoActionKind {
     NamedRangeRenamed,
     NamedRangeDescriptionChanged,
     Group,
+    PlanCommit,
     RowsInserted,
     RowsDeleted,
     ColsInserted,
@@ -1661,6 +1679,7 @@ impl UndoActionKind {
             UndoActionKind::NamedRangeRenamed => true,
             UndoActionKind::NamedRangeDescriptionChanged => true,
             UndoActionKind::Group => true,
+            UndoActionKind::PlanCommit => true,
             UndoActionKind::RowsInserted => true,
             UndoActionKind::RowsDeleted => true,
             UndoActionKind::ColsInserted => true,
@@ -1702,6 +1721,7 @@ impl UndoActionKind {
             UndoActionKind::NamedRangeRenamed => "Rename named range",
             UndoActionKind::NamedRangeDescriptionChanged => "Change description",
             UndoActionKind::Group => "Group",
+            UndoActionKind::PlanCommit => "Reviewed plan",
             UndoActionKind::RowsInserted => "Insert rows",
             UndoActionKind::RowsDeleted => "Delete rows",
             UndoActionKind::ColsInserted => "Insert columns",
@@ -1736,6 +1756,7 @@ impl UndoActionKind {
             UndoActionKind::NamedRangeRenamed => 0x05,
             UndoActionKind::NamedRangeDescriptionChanged => 0x06,
             UndoActionKind::Group => 0x07,
+            UndoActionKind::PlanCommit => 0x1A,
             UndoActionKind::RowsInserted => 0x08,
             UndoActionKind::RowsDeleted => 0x09,
             UndoActionKind::ColsInserted => 0x0A,
@@ -1770,6 +1791,7 @@ impl UndoAction {
             UndoAction::NamedRangeRenamed { .. } => UndoActionKind::NamedRangeRenamed,
             UndoAction::NamedRangeDescriptionChanged { .. } => UndoActionKind::NamedRangeDescriptionChanged,
             UndoAction::Group { .. } => UndoActionKind::Group,
+            UndoAction::PlanCommit { .. } => UndoActionKind::PlanCommit,
             UndoAction::RowsInserted { .. } => UndoActionKind::RowsInserted,
             UndoAction::RowsDeleted { .. } => UndoActionKind::RowsDeleted,
             UndoAction::ColsInserted { .. } => UndoActionKind::ColsInserted,

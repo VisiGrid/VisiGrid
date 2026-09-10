@@ -8,6 +8,7 @@ pub mod events;
 pub mod filter;
 pub mod formula;
 pub mod named_range;
+pub mod operation_plan;
 pub mod provenance;
 pub mod recalc;
 pub mod sheet;

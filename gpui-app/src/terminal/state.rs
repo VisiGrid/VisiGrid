@@ -25,6 +25,9 @@ pub struct LuaPreviewData {
     pub script_hash: String,
     /// Operations collected from eval_with_sheet (no mutation applied yet).
     pub ops: Vec<LuaOp>,
+    /// Canonical frozen plan plus runtime-only source/preview snapshots.
+    /// None only when Lua evaluation or plan materialization failed.
+    pub prepared_plan: Option<visigrid_engine::operation_plan::PreparedOperationPlan>,
     /// Number of unique cells that would be written.
     pub cells_written: usize,
     /// Number of non-empty cells that would be overwritten.

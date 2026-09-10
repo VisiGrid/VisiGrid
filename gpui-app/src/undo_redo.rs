@@ -105,6 +105,19 @@ impl Spreadsheet {
                     }
                     self.status_message = Some(format!("Undo: {}", description));
                 }
+                UndoAction::PlanCommit {
+                    commit,
+                    sheet_id,
+                    before_row_view,
+                    before_row_heights,
+                    ..
+                } => {
+                    self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
+                    self.row_view = before_row_view;
+                    self.row_heights.insert(sheet_id, before_row_heights);
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Undo reviewed plan {}", commit.plan_id.0));
+                }
                 UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
                     // Undo insert by deleting the rows
                     self.workbook.update(cx, |wb, _| {
@@ -509,6 +522,18 @@ impl Spreadsheet {
                     self.apply_undo_action(sub_action, cx);
                 }
             }
+            UndoAction::PlanCommit {
+                commit,
+                sheet_id,
+                before_row_view,
+                before_row_heights,
+                ..
+            } => {
+                self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
+                self.row_view = before_row_view;
+                self.row_heights.insert(sheet_id, before_row_heights);
+                self.bump_cells_rev();
+            }
             UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -844,6 +869,18 @@ impl Spreadsheet {
                     self.apply_redo_action(sub_action, cx);
                 }
             }
+            UndoAction::PlanCommit {
+                commit,
+                sheet_id,
+                after_row_view,
+                after_row_heights,
+                ..
+            } => {
+                self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
+                self.row_view = after_row_view;
+                self.row_heights.insert(sheet_id, after_row_heights);
+                self.bump_cells_rev();
+            }
             UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
                 let _ = formula_rewrites;
                 // Redo re-runs the edit through the structural entry point so
@@ -1130,6 +1167,19 @@ impl Spreadsheet {
                         self.apply_redo_action(action, cx);
                     }
                     self.status_message = Some(format!("Redo: {}", description));
+                }
+                UndoAction::PlanCommit {
+                    commit,
+                    sheet_id,
+                    after_row_view,
+                    after_row_heights,
+                    ..
+                } => {
+                    self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
+                    self.row_view = after_row_view;
+                    self.row_heights.insert(sheet_id, after_row_heights);
+                    self.bump_cells_rev();
+                    self.status_message = Some(format!("Redo reviewed plan {}", commit.plan_id.0));
                 }
                 // These four route through apply_redo_action, which redoes the
                 // edit via Workbook::structural_edit, so formula references,

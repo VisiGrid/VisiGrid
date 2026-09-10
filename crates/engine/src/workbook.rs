@@ -2269,6 +2269,15 @@ impl Workbook {
         self.revision
     }
 
+    /// Set the revision after a fully verified copy-on-write commit.
+    ///
+    /// This is intentionally crate-visible: ordinary mutations must use the
+    /// tracked edit paths, while the operation-plan module swaps an already
+    /// recalculated candidate as one logical revision.
+    pub(crate) fn set_revision_after_atomic_commit(&mut self, revision: u64) {
+        self.revision = revision;
+    }
+
     /// Increment revision. Called at end of successful batch or single-cell edit.
     fn increment_revision(&mut self) {
         self.revision += 1;

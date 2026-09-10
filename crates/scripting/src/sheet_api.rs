@@ -11,6 +11,8 @@
 //! - `sheet:set_value(row, col, val_or_nil)` → sets cell value
 //! - `sheet:get_formula(row, col)` → formula string or nil
 //! - `sheet:set_formula(row, col, formula)` → sets cell formula
+//! - `sheet:clear(row, col)` / `sheet:clear("A1:C3")` → clears cells
+//! - `sheet:delete_rows(at, count)` → proposes row deletion
 //!
 //! ## Read/Write by A1 notation
 //! - `sheet:get("A1")` → value at A1 notation (shorthand)
@@ -374,6 +376,33 @@ impl DynOpSink {
 
         Ok(())
     }
+
+    /// Clear one cell (1-indexed). Requires SheetWriteValues capability.
+    fn clear_cell(&mut self, row: usize, col: usize) -> Result<(), String> {
+        self.check_write()?;
+        self.check_ops_limit()?;
+        if row == 0 || col == 0 {
+            return Err("row and column must be >= 1".to_string());
+        }
+        let row = row - 1;
+        let col = col - 1;
+        self.pending.insert(CellKey::from((row, col)), PendingCell::Value(LuaCellValue::Nil));
+        self.ops.push(LuaOp::ClearCell { row: row as u32, col: col as u32 });
+        Ok(())
+    }
+
+    /// Delete rows using 1-indexed source coordinates.
+    fn delete_rows(&mut self, at: usize, count: usize) -> Result<(), String> {
+        self.check_write()?;
+        self.check_ops_limit()?;
+        if at == 0 || count == 0 {
+            return Err("row and count must be >= 1".to_string());
+        }
+        let at = u32::try_from(at - 1).map_err(|_| "row is too large".to_string())?;
+        let count = u32::try_from(count).map_err(|_| "row count is too large".to_string())?;
+        self.ops.push(LuaOp::DeleteRows { at, count });
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -430,6 +459,39 @@ impl UserData for SheetUserData {
         methods.add_method("set_formula", |_, this, (row, col, formula): (usize, usize, String)| {
             this.sink.borrow_mut().set_formula(row, col, formula)
                 .map_err(mlua::Error::RuntimeError)
+        });
+
+        // clear(row, col) or clear("A1:C3")
+        methods.add_method("clear", |_, this, args: mlua::MultiValue| {
+            let mut args = args.into_iter();
+            match (args.next(), args.next(), args.next()) {
+                (Some(Value::String(range)), None, None) => {
+                    let range = range.to_str().map_err(|_| mlua::Error::RuntimeError("invalid UTF-8 range".into()))?;
+                    let ((r1, c1), (r2, c2)) = parse_range(&range)
+                        .ok_or_else(|| mlua::Error::RuntimeError(format!("Invalid range: '{range}'")))?;
+                    let mut sink = this.sink.borrow_mut();
+                    for row in r1..=r2 {
+                        for col in c1..=c2 {
+                            sink.clear_cell(row, col).map_err(mlua::Error::RuntimeError)?;
+                        }
+                    }
+                    Ok(())
+                }
+                (Some(Value::Integer(row)), Some(Value::Integer(col)), None)
+                    if row > 0 && col > 0 =>
+                {
+                    this.sink.borrow_mut().clear_cell(row as usize, col as usize)
+                        .map_err(mlua::Error::RuntimeError)
+                }
+                _ => Err(mlua::Error::RuntimeError(
+                    "clear expects (row, col) or an A1 range".into(),
+                )),
+            }
+        });
+
+        // delete_rows(at, count) uses 1-indexed source coordinates.
+        methods.add_method("delete_rows", |_, this, (at, count): (usize, usize)| {
+            this.sink.borrow_mut().delete_rows(at, count).map_err(mlua::Error::RuntimeError)
         });
 
         // ====================================================================

@@ -985,7 +985,14 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
     }
 
     // Apply operations if any (single undo entry for all)
-    if result.has_mutations() {
+    let has_structural_ops = result.ops.iter().any(|operation| {
+        matches!(operation, LuaOp::DeleteRows { .. })
+    });
+    if has_structural_ops {
+        app.lua_console.push_output(OutputEntry::error(
+            "Row deletion requires the AI Lua Review preview so it can be applied atomically.",
+        ));
+    } else if result.has_mutations() {
         let (changes, format_patches) = apply_lua_ops(app, sheet_index, &result.ops, cx);
         let cells_modified = changes.len() as i64;
         let has_values = !changes.is_empty();
@@ -1192,6 +1199,34 @@ pub(crate) fn apply_captured_lua_ops(
                     new_value: formula.clone(),
                 });
             }
+            LuaOp::ClearCell { row, col } => {
+                let row = *row as usize;
+                let col = *col as usize;
+                let old_value = guard.sheet(sheet_index)
+                    .map(|sheet| sheet.get_raw(row, col))
+                    .unwrap_or_default();
+                let before = guard.sheet(sheet_index)
+                    .map(|sheet| sheet.get_format(row, col))
+                    .unwrap_or_default();
+                guard.clear_cell_tracked(sheet_index, row, col);
+                if before != Default::default() {
+                    format_patches.push(CellFormatPatch {
+                        row,
+                        col,
+                        before,
+                        after: Default::default(),
+                    });
+                }
+                changes.push(CellChange {
+                    row,
+                    col,
+                    old_value,
+                    new_value: String::new(),
+                });
+            }
+            // Row deletion is only committed through PreparedOperationPlan,
+            // whose snapshot history can undo structural state atomically.
+            LuaOp::DeleteRows { .. } => {}
             LuaOp::SetCellStyle { r1, c1, r2, c2, style } => {
                 let cell_style = CellStyle::from_int(*style as i32);
                 for row in (*r1 as usize)..=(*r2 as usize) {
@@ -1411,7 +1446,14 @@ fn handle_debug_completed(
             current
         };
 
-        if result.has_mutations() {
+        let has_structural_ops = result.ops.iter().any(|operation| {
+            matches!(operation, LuaOp::DeleteRows { .. })
+        });
+        if has_structural_ops {
+            app.lua_console.push_output_ungrouped(OutputEntry::error(
+                "[debug] row deletion requires the AI Lua Review preview",
+            ));
+        } else if result.has_mutations() {
             let (changes, format_patches) = apply_lua_ops(app, target_index, &result.ops, cx);
             let has_values = !changes.is_empty();
             let has_formats = !format_patches.is_empty();

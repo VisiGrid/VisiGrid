@@ -463,12 +463,14 @@ pub fn render_terminal_panel(
                 } else {
                     &data.script_hash
                 };
-                // Check drift at render time
-                let drifted = !crate::ai_actions::lua_preview_source_matches(
-                    app.workbook.read(cx),
-                    data.source_sheet_index,
-                    data.source_fingerprint,
-                );
+                // Check workbook revision, content, and calculation context at render time.
+                let drifted = data.prepared_plan.as_ref().map_or(true, |prepared| {
+                    let context = crate::scripting::execution_context_fingerprint(
+                        app.workbook.read(cx),
+                        &prepared.plan().operations,
+                    );
+                    prepared.is_stale(app.workbook.read(cx), &context)
+                });
                 let drift_hint = if drifted {
                     " \u{00b7} source changed \u{00b7} re-preview required"
                 } else {

@@ -1131,6 +1131,20 @@ mod tests {
     }
 
     #[test]
+    fn test_sheet_explicit_clear_and_row_delete_are_captured() {
+        let rt = LuaRuntime::new().unwrap();
+        let reader = MockReader::new();
+        let result = rt.eval_with_sheet(
+            "sheet:clear('B2:C2'); sheet:delete_rows(4, 2)",
+            Box::new(reader),
+        );
+        assert!(result.error.is_none(), "Error: {:?}", result.error);
+        assert!(matches!(result.ops[0], LuaOp::ClearCell { row: 1, col: 1 }));
+        assert!(matches!(result.ops[1], LuaOp::ClearCell { row: 1, col: 2 }));
+        assert!(matches!(result.ops[2], LuaOp::DeleteRows { at: 3, count: 2 }));
+    }
+
+    #[test]
     fn test_sheet_global_cleaned_up() {
         let rt = LuaRuntime::new().unwrap();
         let reader = MockReader::new();

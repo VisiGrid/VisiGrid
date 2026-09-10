@@ -19,6 +19,69 @@ pub(crate) fn lua_preview_source_matches(
         == Some(source_fingerprint)
 }
 
+fn prepare_lua_operation_plan(
+    workbook: &visigrid_engine::workbook::Workbook,
+    session_window_id: u64,
+    script_path: &std::path::Path,
+    script_hash: &str,
+    ops: &[crate::scripting::LuaOp],
+) -> Result<visigrid_engine::operation_plan::PreparedOperationPlan, String> {
+    use visigrid_engine::operation_plan::{
+        OperationPlanRequest, PlanId, PlanProducer, PreparedOperationPlan,
+        VerificationDefinition,
+    };
+
+    let planned_ops = crate::scripting::lua_ops_to_planned_ops(ops);
+    let context = crate::scripting::execution_context_fingerprint(workbook, &planned_ops);
+    PreparedOperationPlan::materialize(workbook, OperationPlanRequest {
+        id: PlanId(format!("pv_{}", uuid::Uuid::new_v4().simple())),
+        workbook_session_id: session_window_id.to_string(),
+        source_sheet_id: workbook.active_sheet_id(),
+        expected_revision: workbook.revision(),
+        execution_context: context,
+        producer: PlanProducer {
+            kind: "lua".into(),
+            name: "Lua Console".into(),
+            source_path: Some(script_path.to_string_lossy().into_owned()),
+            source_hash: Some(script_hash.to_string()),
+        },
+        title: "Review Lua changes".into(),
+        description: None,
+        operations: planned_ops,
+        groups: Vec::new(),
+        verification: vec![VerificationDefinition::NoNewFormulaErrors {
+            id: "no_new_errors".into(),
+            label: Some("No new formula errors".into()),
+        }],
+    }).map_err(|error| error.to_string())
+}
+
+fn plan_row_state_after_apply(
+    row_view: &visigrid_engine::filter::RowView,
+    row_heights: &std::collections::HashMap<usize, f32>,
+    operations: &[visigrid_engine::operation_plan::PlannedOp],
+) -> (visigrid_engine::filter::RowView, std::collections::HashMap<usize, f32>) {
+    let mut after_view = row_view.clone();
+    let mut after_heights = row_heights.clone();
+    for operation in operations {
+        let visigrid_engine::operation_plan::PlannedOp::DeleteRows { at, count } = operation else {
+            continue;
+        };
+        for row in (0..*count).rev() {
+            after_view.delete_row(at + row);
+        }
+        let shifted: Vec<_> = after_heights.iter()
+            .filter(|(row, _)| **row >= at + count)
+            .map(|(row, height)| (*row, *height))
+            .collect();
+        after_heights.retain(|row, _| *row < *at);
+        for (row, height) in shifted {
+            after_heights.insert(row - count, height);
+        }
+    }
+    (after_view, after_heights)
+}
+
 impl Spreadsheet {
     /// Generate AI context files for all supported CLIs.
     ///
@@ -599,6 +662,8 @@ Output ONLY a single ```lua fenced code block. No other text or code.
 ```
 sheet:set_value(row, col, value)
 sheet:set_formula(row, col, \"=...\")
+sheet:clear(row, col) or sheet:clear(\"A1:C3\")
+sheet:delete_rows(at, count)
 sheet:get_value(row, col)
 sheet:rows()
 sheet:cols()
@@ -702,43 +767,49 @@ sheet:cols()
             self.status_message = Some("Previous pending result replaced.".into());
         }
 
-        // Run Log: record LuaPreview entry
-        let source_sheet_name = self.workbook.read(cx)
-            .sheet_names()
-            .get(source_sheet_index)
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        {
-            let sp = script_path.clone();
-            let sh = script_hash.clone();
-            let writes = result.mutations;
-            self.workbook.update(cx, |wb, _| {
-                let meta = crate::structured_results::ResultMeta {
-                    sheet_idx: source_sheet_index,
-                    sheet_name: source_sheet_name,
-                    result_type: "LuaPreview",
-                    row_count: writes,
-                    col_count: cells_overwritten,
-                };
-                crate::structured_results::append_run_log(
-                    wb, &meta,
-                    Some(sp.to_string_lossy().as_ref()),
-                    Some(&sh),
+        let mut preview_error = result.error;
+        let prepared_plan = if preview_error.is_none() {
+            if result.ops.iter().any(|op| matches!(op, crate::scripting::LuaOp::DeleteRows { .. }))
+                && (self.row_view.is_sorted() || self.filter_state.is_enabled())
+            {
+                preview_error = Some(
+                    "unsupported_view_state: clear the active sort/filter before reviewing row deletion".into(),
                 );
-            });
-        }
+                None
+            } else {
+                match prepare_lua_operation_plan(
+                    self.workbook.read(cx),
+                    self.session_window_id,
+                    &script_path,
+                    &script_hash,
+                    &result.ops,
+                ) {
+                    Ok(plan) => Some(plan),
+                    Err(error) => {
+                        preview_error = Some(error);
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        let cells_written = prepared_plan.as_ref()
+            .map(|prepared| prepared.plan().summary.total_changes())
+            .unwrap_or(result.mutations);
 
         // Store preview
         self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
             script_path,
             script_hash,
-            cells_written: result.mutations,
+            cells_written,
             cells_overwritten,
             ops: result.ops,
+            prepared_plan,
             source_sheet_index,
             source_fingerprint,
             output: result.output,
-            error: result.error,
+            error: preview_error,
         }));
 
         cx.notify();
@@ -786,16 +857,48 @@ sheet:cols()
             self.status_message = Some("Previous pending result replaced.".into());
         }
 
+        let mut preview_error = result.error;
+        let prepared_plan = if preview_error.is_none() {
+            if result.ops.iter().any(|op| matches!(op, crate::scripting::LuaOp::DeleteRows { .. }))
+                && (self.row_view.is_sorted() || self.filter_state.is_enabled())
+            {
+                preview_error = Some(
+                    "unsupported_view_state: clear the active sort/filter before reviewing row deletion".into(),
+                );
+                None
+            } else {
+                match prepare_lua_operation_plan(
+                    self.workbook.read(cx),
+                    self.session_window_id,
+                    &path,
+                    &script_hash,
+                    &result.ops,
+                ) {
+                    Ok(plan) => Some(plan),
+                    Err(error) => {
+                        preview_error = Some(error);
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        let cells_written = prepared_plan.as_ref()
+            .map(|prepared| prepared.plan().summary.total_changes())
+            .unwrap_or(result.mutations);
+
         self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
             script_path: path,
             script_hash,
-            cells_written: result.mutations,
+            cells_written,
             cells_overwritten,
             ops: result.ops,
+            prepared_plan,
             source_sheet_index,
             source_fingerprint,
             output: result.output,
-            error: result.error,
+            error: preview_error,
         }));
 
         cx.notify();
@@ -820,6 +923,23 @@ sheet:cols()
             return;
         }
 
+        let Some(prepared) = preview.prepared_plan.as_ref() else {
+            self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
+            self.status_message = Some("Cannot copy: complete materialized preview is unavailable.".into());
+            cx.notify();
+            return;
+        };
+        let Some(preview_sheet) = prepared
+            .preview_workbook()
+            .sheet_by_id(prepared.plan().source_sheet_id)
+            .cloned()
+        else {
+            self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
+            self.status_message = Some("Cannot copy: preview source sheet is unavailable.".into());
+            cx.notify();
+            return;
+        };
+
         let hash_prefix = if preview.script_hash.len() >= 8 {
             &preview.script_hash[..8]
         } else {
@@ -827,16 +947,44 @@ sheet:cols()
         };
         let base_name = format!("AI Result - {}", hash_prefix);
 
-        // Create new sheet and apply ops
-        let (sheet_name, sheet_idx) = self.workbook.update(cx, |wb, _| {
+        // Copy the complete materialized preview, not just changed operations.
+        // This remains honest even when the original source has gone stale.
+        let (sheet_name, sheet_idx, changes, format_patches) = self.workbook.update(cx, |wb, _| {
             let name = crate::structured_results::unique_sheet_name(wb, &base_name);
             let idx = wb.add_sheet_named(&name).unwrap_or_else(|| wb.add_sheet());
-            (name, idx)
+            let mut changes = Vec::new();
+            let mut format_patches = Vec::new();
+            let mut cells: Vec<_> = preview_sheet.cells_iter()
+                .map(|(&(row, col), _)| (row, col))
+                .collect();
+            cells.sort_unstable();
+            {
+                let mut guard = wb.batch_guard();
+                for (row, col) in cells {
+                    let raw = preview_sheet.get_raw(row, col);
+                    let format = preview_sheet.get_format(row, col);
+                    guard.set_cell_value_tracked(idx, row, col, &raw);
+                    changes.push(crate::history::CellChange {
+                        row,
+                        col,
+                        old_value: String::new(),
+                        new_value: raw,
+                    });
+                    if format != Default::default() {
+                        if let Some(sheet) = guard.sheet_mut(idx) {
+                            sheet.set_format(row, col, format.clone());
+                        }
+                        format_patches.push(crate::history::CellFormatPatch {
+                            row,
+                            col,
+                            before: Default::default(),
+                            after: format,
+                        });
+                    }
+                }
+            }
+            (name, idx, changes, format_patches)
         });
-
-        let (changes, format_patches) = crate::views::lua_console::apply_lua_ops(
-            self, sheet_idx, &preview.ops, cx,
-        );
 
         // Record undo
         let has_values = !changes.is_empty();
@@ -914,60 +1062,53 @@ sheet:cols()
             return;
         }
 
-        // Drift check: recompute fingerprint and compare
-        if !lua_preview_source_matches(
-            self.workbook.read(cx),
-            preview.source_sheet_index,
-            preview.source_fingerprint,
-        ) {
-            // A stale preview is inert. The explicit "Apply to New Sheet"
-            // action remains available, but this action must never silently
-            // turn into a different mutation than the user selected.
+        let Some(prepared) = preview.prepared_plan.as_ref() else {
+            self.status_message = Some("Cannot apply: preview did not produce a valid operation plan.".into());
+            self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
+            cx.notify();
+            return;
+        };
+        if prepared.plan().operations.iter().any(|operation| {
+            matches!(operation, visigrid_engine::operation_plan::PlannedOp::DeleteRows { .. })
+        }) && (self.row_view.is_sorted() || self.filter_state.is_enabled()) {
             self.status_message = Some(
-                "Cannot apply: source sheet changed since preview. Re-preview the script first.".into()
+                "Cannot apply row deletion while the sheet is sorted or filtered.".into(),
             );
             self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
             cx.notify();
             return;
         }
 
-        let sheet_idx = preview.source_sheet_index;
-
-        let (changes, format_patches) = crate::views::lua_console::apply_lua_ops(
-            self, sheet_idx, &preview.ops, cx,
+        let context = crate::scripting::execution_context_fingerprint(
+            self.workbook.read(cx),
+            &prepared.plan().operations,
         );
+        let mut commit = match prepared.verify_candidate(self.workbook.read(cx), &context) {
+            Ok(commit) => commit,
+            Err(error) => {
+                self.status_message = Some(format!(
+                    "Cannot apply: {error}. Re-preview the script first."
+                ));
+                self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
+                cx.notify();
+                return;
+            }
+        };
 
-        // Record undo
-        let has_values = !changes.is_empty();
-        let has_formats = !format_patches.is_empty();
-        if has_values && has_formats {
-            use crate::history::{UndoAction, FormatActionKind};
-            let group = UndoAction::Group {
-                actions: vec![
-                    UndoAction::Values { sheet_index: sheet_idx, changes },
-                    UndoAction::Format {
-                        sheet_index: sheet_idx,
-                        patches: format_patches,
-                        kind: FormatActionKind::CellStyle,
-                        description: "AI Lua: set cell styles".into(),
-                    },
-                ],
-                description: "AI Lua apply".into(),
-            };
-            self.history.record_action_with_provenance(group, None);
-            self.is_modified = true;
-        } else if has_values {
-            self.history.record_batch(sheet_idx, changes);
-            self.is_modified = true;
-        } else if has_formats {
-            self.history.record_format(
-                sheet_idx,
-                format_patches,
-                crate::history::FormatActionKind::CellStyle,
-                "AI Lua: set cell styles".into(),
-            );
-            self.is_modified = true;
-        }
+        let sheet_id = prepared.plan().source_sheet_id;
+        let sheet_idx = self.workbook.read(cx)
+            .sheet_index_by_id(sheet_id)
+            .expect("verified plan source sheet still exists");
+        let before_row_view = self.row_view.clone();
+        let before_row_heights = self.row_heights.get(&sheet_id).cloned().unwrap_or_default();
+        let (after_row_view, after_row_heights) = plan_row_state_after_apply(
+            &before_row_view,
+            &before_row_heights,
+            &prepared.plan().operations,
+        );
+        self.workbook.update(cx, |workbook, _| *workbook = commit.applied.clone());
+        self.row_view = after_row_view.clone();
+        self.row_heights.insert(sheet_id, after_row_heights.clone());
 
         // Append Run Log entry
         let sheet_name = self.workbook.read(cx)
@@ -989,6 +1130,23 @@ sheet:cols()
                 Some(&preview.script_hash),
             );
         });
+
+        // The Run Log is part of this user-visible transaction. Preserve the
+        // exact post-Apply workbook so redo restores it along with the plan.
+        commit.applied = self.workbook.read(cx).clone();
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::PlanCommit {
+                commit: Box::new(commit),
+                sheet_id,
+                before_row_view,
+                after_row_view,
+                before_row_heights,
+                after_row_heights,
+            },
+            None,
+        );
+        self.bump_cells_rev();
+        self.is_modified = true;
 
         self.status_message = Some(format!(
             "Applied AI Lua to current sheet '{}'.", sheet_name

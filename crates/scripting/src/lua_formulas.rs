@@ -49,6 +49,24 @@ struct Published {
     error: Option<String>,
 }
 
+/// Read-only identity of the exact `functions.lua` version used by every
+/// calculation thread. Review plans store this so Apply can detect context
+/// drift without exposing or re-reading producer code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedFunctionsFingerprint {
+    pub generation: u64,
+    pub source_hash: String,
+}
+
+pub fn published_functions_fingerprint() -> PublishedFunctionsFingerprint {
+    let (generation, source, _) = published();
+    let source_hash = match source {
+        Some((source, _)) => format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex()),
+        None => "no-functions-file".to_string(),
+    };
+    PublishedFunctionsFingerprint { generation, source_hash }
+}
+
 static PUBLISHED: RwLock<Option<Published>> = RwLock::new(None);
 
 /// Read `functions.lua` from disk and prove it compiles, on this thread, in

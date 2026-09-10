@@ -128,6 +128,16 @@ pub enum LuaOp {
         col: u32,
         formula: String,
     },
+    /// Remove a cell entirely, including its formula and formatting.
+    ClearCell {
+        row: u32,
+        col: u32,
+    },
+    /// Delete rows in source-sheet coordinate space.
+    DeleteRows {
+        at: u32,
+        count: u32,
+    },
     /// Set cell style on a range (format-only, no recalc needed)
     SetCellStyle {
         r1: u32, c1: u32,  // top-left (0-indexed)
@@ -142,6 +152,8 @@ impl LuaOp {
         match self {
             LuaOp::SetValue { row, col, .. } => CellKey::new(*row, *col),
             LuaOp::SetFormula { row, col, .. } => CellKey::new(*row, *col),
+            LuaOp::ClearCell { row, col } => CellKey::new(*row, *col),
+            LuaOp::DeleteRows { at, .. } => CellKey::new(*at, 0),
             LuaOp::SetCellStyle { r1, c1, .. } => CellKey::new(*r1, *c1),
         }
     }
@@ -319,6 +331,18 @@ impl<'a, R: SheetReader> LuaOpSink<'a, R> {
             col: col as u32,
             formula,
         });
+    }
+
+    /// Clear a cell completely.
+    pub fn clear_cell(&mut self, row: usize, col: usize) {
+        let key = CellKey::from((row, col));
+        self.pending.insert(key, PendingCell::Value(LuaCellValue::Nil));
+        self.ops.push(LuaOp::ClearCell { row: row as u32, col: col as u32 });
+    }
+
+    /// Delete rows using source-sheet coordinates.
+    pub fn delete_rows(&mut self, at: usize, count: usize) {
+        self.ops.push(LuaOp::DeleteRows { at: at as u32, count: count as u32 });
     }
 }
 

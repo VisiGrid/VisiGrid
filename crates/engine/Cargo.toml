@@ -12,6 +12,7 @@ description = "Spreadsheet engine - cells, sheets, formulas"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 ordered-float = { workspace = true }
 rustc-hash = "2.0"
 ssfmt = "0.1"

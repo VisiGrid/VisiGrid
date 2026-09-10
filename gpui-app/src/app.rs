@@ -4565,6 +4565,7 @@ pub(crate) fn count_lua_overwrites(ops: &[crate::scripting::LuaOp], sheet: &visi
         let (row, col) = match op {
             LuaOp::SetValue { row, col, .. } => (*row as usize, *col as usize),
             LuaOp::SetFormula { row, col, .. } => (*row as usize, *col as usize),
+            LuaOp::ClearCell { row, col } => (*row as usize, *col as usize),
             _ => continue,
         };
         if seen.insert((row, col)) && !sheet.get_raw(row, col).is_empty() {
