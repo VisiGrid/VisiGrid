@@ -1633,7 +1633,7 @@ impl Workbook {
 
         report.phase_eval_us = phase_start.elapsed().as_micros() as u64;
 
-        self.settle_pending_spills(custom_fn_handler, &mut report);
+        let _ = self.settle_pending_spills(custom_fn_handler, &mut report);
 
 
         report.duration_ms = start.elapsed().as_millis() as u64;
@@ -1666,12 +1666,20 @@ impl Workbook {
     /// Shared by the full ordered recalc and the incremental one, so a spill
     /// that changes because its input changed is placed on an edit too, not
     /// only when someone presses F9.
+    ///
+    /// Returns every cell whose value it changed, in the order it changed
+    /// them: receivers of placed and retired arrays, parents whose reading
+    /// changed, and the readers it re-evaluated. The incremental recalc adds
+    /// these to its delta, since a mirror of the document (the browser
+    /// session, a live viewer) only learns about cells it is told about.
     fn settle_pending_spills(
         &mut self,
         custom_fn_handler: Option<&dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
         report: &mut crate::recalc::RecalcReport,
-    ) {
+    ) -> Vec<CellId> {
         use crate::recalc::RecalcError;
+        let mut affected_set: FxHashSet<CellId> = FxHashSet::default();
+        let mut affected: Vec<CellId> = Vec::new();
         // --- Phase 4: Place spills ---
         //
         // Every value now exists, so an array can be placed against a finished
@@ -1807,6 +1815,11 @@ impl Workbook {
             if touched.is_empty() {
                 break;
             }
+            for cell in &touched {
+                if affected_set.insert(*cell) {
+                    affected.push(*cell);
+                }
+            }
             // Everything that reads a touched cell, transitively, plus the
             // formulas the graph cannot see.
             // The dynamic readers are seeds, not an afterthought: what reads
@@ -1838,6 +1851,9 @@ impl Workbook {
                     }
                 }
                 report.cells_recomputed += 1;
+                if affected_set.insert(cell_id) {
+                    affected.push(cell_id);
+                }
             }
         }
         // Say so if the bound was hit with arrays still waiting: those cells
@@ -1855,6 +1871,7 @@ impl Workbook {
                 }
             }
         }
+        affected
     }
 
     pub fn recompute_full_ordered_with_custom_fns(
@@ -2323,13 +2340,21 @@ impl Workbook {
                 // the full recalc places them; a dependent array that grew
                 // or shrank used to keep its old receivers until F9.
                 let mut settle_report = crate::recalc::RecalcReport::default();
-                match crate::custom_fns::default_custom_fn_handler() {
+                let settled = match crate::custom_fns::default_custom_fn_handler() {
                     Some(handler) => self.settle_pending_spills(Some(&handler), &mut settle_report),
                     None => self.settle_pending_spills(None, &mut settle_report),
-                }
+                };
                 // In evaluation order, which is the order a caller applying
-                // these downstream wants them in too.
-                Recalculated::Cells(order)
+                // these downstream wants them in too; then whatever placing
+                // arrays changed, since those cells changed as surely.
+                let mut delta = order;
+                let mut seen: FxHashSet<CellId> = delta.iter().copied().collect();
+                for cell in settled {
+                    if seen.insert(cell) {
+                        delta.push(cell);
+                    }
+                }
+                Recalculated::Cells(delta)
             }
             Err(_cycle) => {
                 // A circular reference among the dirty cells makes an order
@@ -3171,22 +3196,55 @@ mod tests {
         );
     }
 
+    /// The one probe every test installs. The handler is process-wide and the
+    /// tests run in parallel, so two tests installing two different handlers
+    /// raced: whichever set last won and the other's name went unknown. One
+    /// shared handler answering every probe name makes the install idempotent.
+    fn test_probe_handler(
+        name: &str,
+        args: &[crate::formula::eval::EvalArg],
+    ) -> Option<crate::formula::eval::EvalResult> {
+        use crate::formula::eval::{EvalArg, EvalResult, Value};
+        match name {
+            "DEFAULT_HANDLER_PROBE" => match args.first() {
+                Some(EvalArg::Scalar(Value::Number(n))) => Some(EvalResult::Number(n * 3.0)),
+                _ => Some(EvalResult::Error("#VALUE!".into())),
+            },
+            "BATCH_ENTRY_PROBE" => Some(EvalResult::Number(7.0)),
+            _ => None,
+        }
+    }
+
+    /// The delta an incremental recalc reports must include what placing
+    /// arrays changed: the receivers, and the readers settled afterwards.
+    #[test]
+    fn test_incremental_delta_includes_spill_receivers_and_their_readers() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "3");
+        wb.set_cell_value_tracked(0, 0, 1, "=SEQUENCE(A1)");
+        wb.set_cell_value_tracked(0, 0, 2, "=B2*10");
+        assert_eq!(wb.active_sheet().get_display(0, 2), "20");
+
+        let recalculated = wb.set_cell_value_tracked(0, 0, 0, "5");
+        let cells = match recalculated {
+            Recalculated::Cells(cells) => cells,
+            Recalculated::All => panic!("no cycle here"),
+        };
+        let sheet = wb.active_sheet().id;
+        let has = |row: usize, col: usize| cells.contains(&CellId { sheet, row, col });
+        assert!(has(0, 1), "the array parent");
+        assert!(has(1, 1), "receiver B2");
+        assert!(has(4, 1), "new receiver B5");
+        assert!(has(0, 2), "reader of a receiver");
+        assert_eq!(wb.active_sheet().get_display(0, 2), "20");
+    }
+
     /// The registered default handler is consulted by the incremental path
     /// (an edit outside a batch, and a batch closing) and by the full recalc,
     /// so a custom function's dependents update on edits, not only on demand.
     #[test]
     fn test_default_custom_fn_handler_reaches_incremental_and_full_recalc() {
-        use crate::formula::eval::{EvalArg, EvalResult, Value};
-        fn probe(name: &str, args: &[EvalArg]) -> Option<EvalResult> {
-            if name != "DEFAULT_HANDLER_PROBE" {
-                return None;
-            }
-            match args.first() {
-                Some(EvalArg::Scalar(Value::Number(n))) => Some(EvalResult::Number(n * 3.0)),
-                _ => Some(EvalResult::Error("#VALUE!".into())),
-            }
-        }
-        crate::custom_fns::set_default_custom_fn_handler(Some(probe));
+        crate::custom_fns::set_default_custom_fn_handler(Some(test_probe_handler));
 
         let mut wb = Workbook::new();
         wb.set_cell_value_tracked(0, 0, 0, "2");
@@ -3230,11 +3288,7 @@ mod tests {
     /// not left at the sheet's handler-less eager result.
     #[test]
     fn test_formula_entered_in_a_batch_uses_the_default_handler() {
-        use crate::formula::eval::{EvalArg, EvalResult};
-        fn probe(name: &str, _args: &[EvalArg]) -> Option<EvalResult> {
-            (name == "BATCH_ENTRY_PROBE").then_some(EvalResult::Number(7.0))
-        }
-        crate::custom_fns::set_default_custom_fn_handler(Some(probe));
+        crate::custom_fns::set_default_custom_fn_handler(Some(test_probe_handler));
         let mut wb = Workbook::new();
         {
             let mut guard = wb.batch_guard();

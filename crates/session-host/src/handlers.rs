@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use visigrid_engine::cell::CellFormat;
 use visigrid_engine::cell_id::CellId;
-use visigrid_engine::workbook::Workbook;
+use visigrid_engine::workbook::{Recalculated, Workbook};
 use visigrid_protocol::{InspectResult, InspectTarget, Op, OpError, CellInfo, WorkbookInfo, StructureOp};
 
 use crate::bridge::{ApplyOpsError, ApplyOpsRequest, ApplyOpsResponse, InspectError, InspectRequest, InspectResponse};
@@ -469,8 +469,9 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
     let mut format_acc: HashMap<usize, (Vec<FormatPatch>, HashMap<(usize, usize), usize>)> =
         HashMap::new();
 
+    wb.begin_batch();
     {
-        let mut guard = wb.batch_guard();
+        let guard: &mut Workbook = wb;
 
         let push_patch = |acc: &mut HashMap<usize, (Vec<FormatPatch>, HashMap<(usize, usize), usize>)>,
                               sheet_idx: usize,
@@ -548,7 +549,13 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
                 }
             }
         }
-    } // guard dropped: single recalc + revision increment
+    }
+    // Closing the batch is the single recalc and revision increment. Its
+    // outcome says which OTHER cells changed as a consequence: dependent
+    // formulas, custom-function and =LUA cells, spill receivers. A subscriber
+    // or a live viewer only learns about cells it is told about, so the
+    // delta carries those too, not just what the caller wrote.
+    let outcome = wb.end_batch_outcome();
 
     let mut changed_cells: Vec<CellRef> = value_changes
         .iter()
@@ -561,6 +568,22 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
     changed_cells.extend(format_patches.iter().flat_map(|(sheet_idx, patches)| {
         patches.iter().map(move |p| CellRef { sheet: *sheet_idx, row: p.row, col: p.col })
     }));
+    {
+        let mut seen: std::collections::HashSet<(usize, usize, usize)> =
+            changed_cells.iter().map(|c| (c.sheet, c.row, c.col)).collect();
+        let recalculated: Vec<CellId> = match outcome.recalculated {
+            Recalculated::Cells(cells) => cells,
+            // A cycle forced a full recompute: every formula may have moved.
+            Recalculated::All => wb.dep_graph().formula_cells().collect(),
+        };
+        for cell in recalculated {
+            if let Some(sheet) = wb.sheet_index_by_id(cell.sheet) {
+                if seen.insert((sheet, cell.row, cell.col)) {
+                    changed_cells.push(CellRef { sheet, row: cell.row, col: cell.col });
+                }
+            }
+        }
+    }
 
     ApplyOutcome {
         response: ApplyOpsResponse {
@@ -622,6 +645,33 @@ pub fn inspect(wb: &Workbook, req: &InspectRequest, title: &str) -> InspectRespo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The delta of an op must name the cells the op changed indirectly, or
+    /// a subscriber mirroring the sheet keeps showing the old dependent.
+    #[test]
+    fn apply_ops_delta_includes_dependents_and_spill_receivers() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "3");
+        wb.set_cell_value_tracked(0, 0, 1, "=A1*2");
+        wb.set_cell_value_tracked(0, 0, 2, "=SEQUENCE(A1)");
+        wb.rebuild_dep_graph();
+        let req = ApplyOpsRequest {
+            request_id: String::new(),
+            batch_name: String::new(),
+            atomic: false,
+            expected_revision: None,
+            ops: vec![Op::SetCellValue { sheet: 0, row: 0, col: 0, value: "5".into() }],
+            client: None,
+        };
+        let outcome = apply_ops(&mut wb, &req);
+        assert!(outcome.response.error.is_none(), "{:?}", outcome.response.error);
+        let has = |row: usize, col: usize| outcome.changed_cells.iter().any(|c| c.sheet == 0 && c.row == row && c.col == col);
+        assert!(has(0, 0), "the written cell");
+        assert!(has(0, 1), "its dependent");
+        assert!(has(4, 2), "a new spill receiver");
+        assert_eq!(wb.sheets()[0].get_display(0, 1), "10");
+        assert_eq!(wb.sheets()[0].get_display(4, 2), "5");
+    }
     use crate::bridge::ApplyOpsRequest;
 
     fn write(sheet: usize, row: usize, col: usize, value: &str) -> Op {

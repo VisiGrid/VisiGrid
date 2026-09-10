@@ -72,9 +72,23 @@ pub fn load_custom_functions(lua: &Lua) -> Result<CustomFunctionRegistry, String
 
     let source = std::fs::read_to_string(&source_path)
         .map_err(|e| format!("Failed to read {}: {}", source_path.display(), e))?;
+    load_custom_functions_from_source(lua, &source, &source_path)
+}
 
+/// The name of the cell-chunk function. A user function by this name would
+/// never be called, since dispatch answers `LUA` with the cell chunk first,
+/// so it is refused at load with a warning rather than accepted and ignored.
+pub const RESERVED_LUA_CELL_NAME: &str = "LUA";
+
+/// Load `source` as `functions.lua`. `source_path` only names it in errors.
+pub fn load_custom_functions_from_source(
+    lua: &Lua,
+    source: &str,
+    source_path: &std::path::Path,
+) -> Result<CustomFunctionRegistry, String> {
+    let source_path = source_path.to_path_buf();
     // Execute the file in the Lua runtime to populate globals
-    lua.load(&source)
+    lua.load(source)
         .set_name(source_path.to_string_lossy().into_owned())
         .exec()
         .map_err(|e| scrub_lua_load_error(&e, &source_path))?;
@@ -104,6 +118,10 @@ pub fn load_custom_functions(lua: &Lua) -> Result<CustomFunctionRegistry, String
         // Check for built-in collision
         if is_known_function(&name) {
             warnings.push(format!("{} shadows built-in", name));
+            continue;
+        }
+        if name == RESERVED_LUA_CELL_NAME {
+            warnings.push(format!("{} is reserved for Lua cells", name));
             continue;
         }
 
@@ -631,9 +649,11 @@ fn freeze_table(lua: &Lua, original: &mlua::Table) -> mlua::Result<mlua::Table> 
 fn scrub_lua_load_error(err: &mlua::Error, source_path: &std::path::Path) -> String {
     let raw = err.to_string();
     let scrubbed = raw.replace(&source_path.to_string_lossy().to_string(), "functions.lua");
-    // Truncate long messages
-    if scrubbed.len() > 120 {
-        format!("{}...", &scrubbed[..117])
+    // Truncate on characters, not bytes: a byte offset inside a multi-byte
+    // character panics, and this runs while a host is being built lazily.
+    if scrubbed.chars().count() > 120 {
+        let head: String = scrubbed.chars().take(117).collect();
+        format!("{}...", head)
     } else {
         scrubbed
     }
@@ -689,6 +709,32 @@ mod tests {
             }
             other => panic!("{:?}", other),
         }
+    }
+
+    #[test]
+    fn a_long_non_ascii_load_error_is_reported_not_panicked() {
+        let lua = Lua::new();
+        // A runtime error raised while the file loads carries its full
+        // message; a syntax error's message is short by construction.
+        let bad = format!("error('{}')", "한".repeat(200));
+        let path = std::path::Path::new("/nonexistent/functions.lua");
+        match load_custom_functions_from_source(&lua, &bad, path) {
+            Err(e) => {
+                assert!(e.ends_with("..."), "{}", e);
+                assert!(e.chars().count() <= 130, "{}", e.chars().count());
+            }
+            Ok(_) => panic!("a syntax error must fail the load"),
+        }
+    }
+
+    #[test]
+    fn a_function_named_lua_is_refused_with_a_warning() {
+        let lua = Lua::new();
+        let src = "function LUA() return 1 end\nfunction FINE() return 2 end";
+        let reg = load_custom_functions_from_source(&lua, src, std::path::Path::new("functions.lua")).unwrap();
+        assert!(reg.functions.contains_key("FINE"));
+        assert!(!reg.functions.contains_key("LUA"));
+        assert!(reg.warnings.iter().any(|w| w.contains("reserved")), "{:?}", reg.warnings);
     }
 
     #[test]
