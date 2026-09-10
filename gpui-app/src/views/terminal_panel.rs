@@ -464,11 +464,13 @@ pub fn render_terminal_panel(
                     &data.script_hash
                 };
                 // Check drift at render time
-                let drifted = app.workbook.read(cx).sheet(data.source_sheet_index)
-                    .map(|s| crate::app::sheet_fingerprint(s) != data.source_fingerprint)
-                    .unwrap_or(true);
+                let drifted = !crate::ai_actions::lua_preview_source_matches(
+                    app.workbook.read(cx),
+                    data.source_sheet_index,
+                    data.source_fingerprint,
+                );
                 let drift_hint = if drifted {
-                    " \u{00b7} src changed \u{2192} will apply to new sheet"
+                    " \u{00b7} source changed \u{00b7} re-preview required"
                 } else {
                     ""
                 };

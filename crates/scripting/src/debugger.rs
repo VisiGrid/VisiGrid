@@ -32,7 +32,7 @@ use super::ops::LuaOp;
 use super::custom_functions::load_custom_functions;
 use super::runtime::{
     format_lua_error, lua_value_to_string, prepare_code, LuaEvalResult, DEFAULT_TIMEOUT,
-    INSTRUCTION_HOOK_INTERVAL, INSTRUCTION_LIMIT,
+    INSTRUCTION_HOOK_INTERVAL, INSTRUCTION_LIMIT, MEMORY_LIMIT_BYTES,
 };
 use super::sheet_api::{register_sheet_global_with_selection, SheetSnapshot, MAX_OUTPUT_LINES};
 
@@ -683,6 +683,17 @@ fn debug_thread_main(
     //    SAFETY: We sandbox the VM immediately after capturing debug functions,
     //    removing the debug global and other dangerous modules.
     let lua = unsafe { Lua::unsafe_new() };
+
+    // The debugger owns a separate VM, so it cannot inherit LuaRuntime's
+    // allocator bound. Install the same hard cap before creating any debugger
+    // globals or loading user code.
+    if let Err(e) = lua.set_memory_limit(MEMORY_LIMIT_BYTES) {
+        let _ = event_tx.send(DebugEvent {
+            session_id,
+            payload: DebugEventPayload::Error(format!("Failed to set Lua memory limit: {}", e)),
+        });
+        return;
+    }
 
     // 2. Capture raw debug functions (before sandbox removes debug global)
     let introspection = create_hook_introspection(&lua);

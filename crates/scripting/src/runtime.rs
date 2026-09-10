@@ -76,6 +76,15 @@ pub type CancelToken = Arc<AtomicBool>;
 /// This catches pathological code patterns that burn instructions slowly.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Maximum memory owned by one Lua VM.
+///
+/// This is deliberately an absolute VM limit, rather than an allowance reset
+/// for each evaluation. Console globals, compiled formula chunks, and custom
+/// functions all survive between calls and must remain inside the same bound.
+/// 128 MiB leaves room for the 100k-cell formula-array limit and the 30k-row
+/// Review Mode fixture while preventing a script from exhausting the process.
+pub const MEMORY_LIMIT_BYTES: usize = 128 * 1024 * 1024;
+
 /// Result of evaluating a Lua chunk
 #[derive(Debug, Clone)]
 pub struct LuaEvalResult {
@@ -246,13 +255,14 @@ impl OutputState {
 pub struct Limits {
     pub instructions: i64,
     pub wall_clock: Duration,
+    pub memory_bytes: usize,
 }
 
 impl Default for Limits {
     /// The interactive defaults: someone is watching a window, so 30 seconds of
     /// no response is already too long.
     fn default() -> Self {
-        Self { instructions: INSTRUCTION_LIMIT, wall_clock: DEFAULT_TIMEOUT }
+        Self { instructions: INSTRUCTION_LIMIT, wall_clock: DEFAULT_TIMEOUT, memory_bytes: MEMORY_LIMIT_BYTES }
     }
 }
 
@@ -263,7 +273,7 @@ impl Limits {
     /// reason for it to differ. A far longer clock, because nobody is watching
     /// and the 30-second figure exists for a human staring at a window.
     pub fn batch() -> Self {
-        Self { instructions: INSTRUCTION_LIMIT, wall_clock: Duration::from_secs(300) }
+        Self { instructions: INSTRUCTION_LIMIT, wall_clock: Duration::from_secs(300), memory_bytes: MEMORY_LIMIT_BYTES }
     }
 }
 
@@ -287,6 +297,14 @@ impl LuaRuntime {
     /// looks sanctioned, which is worse than never having had one.
     pub fn with_limits(limits: Limits) -> LuaResult<Self> {
         let lua = Lua::new();
+        if limits.memory_bytes == 0 {
+            return Err(mlua::Error::RuntimeError(
+                "memory limit must be greater than zero".to_string(),
+            ));
+        }
+        // Install the allocator bound before creating any host-owned globals.
+        // mlua reports allocation attempts beyond it as Error::MemoryError.
+        lua.set_memory_limit(limits.memory_bytes)?;
 
         // Create output state that print() will write to
         let output_state = Rc::new(RefCell::new(OutputState::new()));
@@ -650,6 +668,46 @@ mod tests {
         let result = rt.eval("1 + 1");
         assert!(result.error.is_none());
         assert_eq!(result.returned, Some("2".to_string()));
+    }
+
+    #[test]
+    fn memory_hungry_script_is_stopped_and_runtime_recovers() {
+        let rt = LuaRuntime::with_limits(Limits {
+            instructions: INSTRUCTION_LIMIT,
+            wall_clock: DEFAULT_TIMEOUT,
+            memory_bytes: 256 * 1024,
+        }).unwrap();
+
+        let result = rt.eval(
+            "local t = {}; while true do t[#t + 1] = string.rep('x', 1024) end",
+        );
+        let error = result.error.expect("allocation must hit the VM memory cap");
+        assert!(
+            error.to_ascii_lowercase().contains("memory"),
+            "expected a memory-limit error, got: {error}"
+        );
+        assert!(
+            !result.instruction_limit_exceeded,
+            "the allocator limit should fire before the instruction budget"
+        );
+
+        let recovered = rt.eval("return 6 * 7");
+        assert!(
+            recovered.error.is_none(),
+            "a memory error must not poison later evaluations: {:?}",
+            recovered.error
+        );
+        assert_eq!(recovered.returned.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn zero_memory_limit_cannot_disable_the_bound() {
+        let result = LuaRuntime::with_limits(Limits {
+            instructions: INSTRUCTION_LIMIT,
+            wall_clock: DEFAULT_TIMEOUT,
+            memory_bytes: 0,
+        });
+        assert!(result.is_err(), "zero would disable mlua's allocator bound");
     }
 
     // Minimal reader so eval_with_sheet registers the sheet API + compat shim

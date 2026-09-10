@@ -8,6 +8,17 @@ use crate::ai_cli::{detect_ai_cli, project_ai_context_template, system_ai_contex
 use crate::settings::{update_user_settings, user_settings, TipId};
 use crate::app::{count_lua_overwrites, extract_last_lua_block, save_ai_lua_script, sheet_fingerprint, Spreadsheet};
 
+pub(crate) fn lua_preview_source_matches(
+    workbook: &visigrid_engine::workbook::Workbook,
+    source_sheet_index: usize,
+    source_fingerprint: u64,
+) -> bool {
+    workbook
+        .sheet(source_sheet_index)
+        .map(sheet_fingerprint)
+        == Some(source_fingerprint)
+}
+
 impl Spreadsheet {
     /// Generate AI context files for all supported CLIs.
     ///
@@ -904,18 +915,19 @@ sheet:cols()
         }
 
         // Drift check: recompute fingerprint and compare
-        let current_fp = self.workbook.read(cx).sheet(preview.source_sheet_index)
-            .map(|s| sheet_fingerprint(s))
-            .unwrap_or(0);
-
-        if current_fp != preview.source_fingerprint {
-            // Drift detected — redirect to new sheet
+        if !lua_preview_source_matches(
+            self.workbook.read(cx),
+            preview.source_sheet_index,
+            preview.source_fingerprint,
+        ) {
+            // A stale preview is inert. The explicit "Apply to New Sheet"
+            // action remains available, but this action must never silently
+            // turn into a different mutation than the user selected.
             self.status_message = Some(
-                "Sheet changed since preview. Applying to new sheet instead.".into()
+                "Cannot apply: source sheet changed since preview. Re-preview the script first.".into()
             );
-            // Re-store the preview and delegate to new-sheet path
             self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
-            self.apply_lua_to_new_sheet(_window, cx);
+            cx.notify();
             return;
         }
 
@@ -990,5 +1002,22 @@ sheet:cols()
             msg.push_str(" Tip: \"AI: Explain Selection\" auto-pastes everything.");
             update_user_settings(cx, |s| s.dismiss_tip(TipId::AiPasteShortcut));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lua_preview_source_matches;
+    use crate::app::sheet_fingerprint;
+
+    #[test]
+    fn lua_preview_source_must_still_exist_and_match() {
+        let mut workbook = visigrid_engine::workbook::Workbook::new();
+        let fingerprint = sheet_fingerprint(workbook.active_sheet());
+        assert!(lua_preview_source_matches(&workbook, 0, fingerprint));
+
+        workbook.set_cell_value_tracked(0, 0, 0, "changed");
+        assert!(!lua_preview_source_matches(&workbook, 0, fingerprint));
+        assert!(!lua_preview_source_matches(&workbook, 99, fingerprint));
     }
 }

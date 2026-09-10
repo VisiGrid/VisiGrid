@@ -700,6 +700,23 @@ mod tests {
         assert!(has(4, 2), "a new spill receiver");
         assert_eq!(wb.sheets()[0].get_display(0, 1), "10");
         assert_eq!(wb.sheets()[0].get_display(4, 2), "5");
+
+        let shrink = ApplyOpsRequest {
+            request_id: String::new(),
+            batch_name: String::new(),
+            atomic: false,
+            expected_revision: None,
+            ops: vec![Op::SetCellValue { sheet: 0, row: 0, col: 0, value: "2".into() }],
+            client: None,
+        };
+        let outcome = apply_ops(&mut wb, &shrink);
+        let has = |row: usize, col: usize| outcome.changed_cells.iter().any(|c| c.sheet == 0 && c.row == row && c.col == col);
+        assert!(has(2, 2), "retired spill receiver C3");
+        assert!(has(3, 2), "retired spill receiver C4");
+        assert!(has(4, 2), "retired spill receiver C5");
+        assert_eq!(wb.sheets()[0].get_display(2, 2), "");
+        assert_eq!(wb.sheets()[0].get_display(3, 2), "");
+        assert_eq!(wb.sheets()[0].get_display(4, 2), "");
     }
 
     /// A spill chain deeper than the settlement bound is reported on the
@@ -990,4 +1007,3 @@ mod validation_tests {
         );
     }
 }
-

@@ -1128,6 +1128,21 @@ pub(crate) fn apply_lua_ops(
     ops: &[LuaOp],
     cx: &mut gpui::Context<Spreadsheet>,
 ) -> (Vec<crate::history::CellChange>, Vec<crate::history::CellFormatPatch>) {
+    if ops.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    app.workbook.update(cx, |wb, _| apply_captured_lua_ops(wb, sheet_index, ops))
+}
+
+/// Commit already-materialized operations. There is intentionally no script,
+/// path, or Lua runtime in this interface: Apply cannot re-execute producer
+/// code and therefore commits the exact values/formulas that were previewed.
+pub(crate) fn apply_captured_lua_ops(
+    workbook: &mut visigrid_engine::workbook::Workbook,
+    sheet_index: usize,
+    ops: &[LuaOp],
+) -> (Vec<crate::history::CellChange>, Vec<crate::history::CellFormatPatch>) {
     use crate::history::CellChange;
     use crate::history::CellFormatPatch;
     use visigrid_engine::cell::CellStyle;
@@ -1136,72 +1151,70 @@ pub(crate) fn apply_lua_ops(
         return (Vec::new(), Vec::new());
     }
 
-    app.workbook.update(cx, |wb, _| {
-        let mut guard = wb.batch_guard();
-        let mut changes = Vec::new();
-        let mut format_patches = Vec::new();
+    let mut guard = workbook.batch_guard();
+    let mut changes = Vec::new();
+    let mut format_patches = Vec::new();
 
-        for op in ops {
-            match op {
-                LuaOp::SetValue { row, col, value } => {
-                    let row = *row as usize;
-                    let col = *col as usize;
+    for op in ops {
+        match op {
+            LuaOp::SetValue { row, col, value } => {
+                let row = *row as usize;
+                let col = *col as usize;
 
-                    let old_value = guard.sheet(sheet_index)
-                        .map(|s| s.get_raw(row, col))
-                        .unwrap_or_default();
+                let old_value = guard.sheet(sheet_index)
+                    .map(|s| s.get_raw(row, col))
+                    .unwrap_or_default();
 
-                    let new_value = lua_cell_value_to_string(value);
-                    guard.set_cell_value_tracked(sheet_index, row, col, &new_value);
+                let new_value = lua_cell_value_to_string(value);
+                guard.set_cell_value_tracked(sheet_index, row, col, &new_value);
 
-                    changes.push(CellChange {
-                        row,
-                        col,
-                        old_value,
-                        new_value,
-                    });
-                }
-                LuaOp::SetFormula { row, col, formula } => {
-                    let row = *row as usize;
-                    let col = *col as usize;
+                changes.push(CellChange {
+                    row,
+                    col,
+                    old_value,
+                    new_value,
+                });
+            }
+            LuaOp::SetFormula { row, col, formula } => {
+                let row = *row as usize;
+                let col = *col as usize;
 
-                    let old_value = guard.sheet(sheet_index)
-                        .map(|s| s.get_raw(row, col))
-                        .unwrap_or_default();
+                let old_value = guard.sheet(sheet_index)
+                    .map(|s| s.get_raw(row, col))
+                    .unwrap_or_default();
 
-                    guard.set_cell_value_tracked(sheet_index, row, col, formula);
+                guard.set_cell_value_tracked(sheet_index, row, col, formula);
 
-                    changes.push(CellChange {
-                        row,
-                        col,
-                        old_value,
-                        new_value: formula.clone(),
-                    });
-                }
-                LuaOp::SetCellStyle { r1, c1, r2, c2, style } => {
-                    let cell_style = CellStyle::from_int(*style as i32);
-                    for row in (*r1 as usize)..=(*r2 as usize) {
-                        for col in (*c1 as usize)..=(*c2 as usize) {
-                            let before = guard.sheet(sheet_index)
-                                .map(|s| s.get_format(row, col))
-                                .unwrap_or_default();
-                            if let Some(s) = guard.sheet_mut(sheet_index) {
-                                s.set_cell_style(row, col, cell_style);
-                            }
-                            let after = guard.sheet(sheet_index)
-                                .map(|s| s.get_format(row, col))
-                                .unwrap_or_default();
-                            if before != after {
-                                format_patches.push(CellFormatPatch { row, col, before, after });
-                            }
+                changes.push(CellChange {
+                    row,
+                    col,
+                    old_value,
+                    new_value: formula.clone(),
+                });
+            }
+            LuaOp::SetCellStyle { r1, c1, r2, c2, style } => {
+                let cell_style = CellStyle::from_int(*style as i32);
+                for row in (*r1 as usize)..=(*r2 as usize) {
+                    for col in (*c1 as usize)..=(*c2 as usize) {
+                        let before = guard.sheet(sheet_index)
+                            .map(|s| s.get_format(row, col))
+                            .unwrap_or_default();
+                        if let Some(s) = guard.sheet_mut(sheet_index) {
+                            s.set_cell_style(row, col, cell_style);
+                        }
+                        let after = guard.sheet(sheet_index)
+                            .map(|s| s.get_format(row, col))
+                            .unwrap_or_default();
+                        if before != after {
+                            format_patches.push(CellFormatPatch { row, col, before, after });
                         }
                     }
                 }
             }
         }
+    }
 
-        (changes, format_patches)
-    })
+    (changes, format_patches)
 }
 
 /// Convert LuaCellValue to a string suitable for sheet.set_value()
@@ -1218,6 +1231,31 @@ fn lua_cell_value_to_string(value: &LuaCellValue) -> String {
         LuaCellValue::String(s) => s.clone(),
         LuaCellValue::Bool(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
         LuaCellValue::Error(e) => format!("#ERROR: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod captured_apply_tests {
+    use super::apply_captured_lua_ops;
+    use crate::scripting::{LuaRuntime, SheetSnapshot};
+
+    #[test]
+    fn apply_uses_captured_operations_without_rerunning_lua() {
+        let mut workbook = visigrid_engine::workbook::Workbook::new();
+        workbook.set_cell_value_tracked(0, 0, 0, "10");
+        let snapshot = SheetSnapshot::from_sheet(workbook.active_sheet());
+        let runtime = LuaRuntime::new().unwrap();
+        let preview = runtime.eval_with_sheet(
+            "sheet:set_value(1, 2, sheet:get_value(1, 1))",
+            Box::new(snapshot),
+        );
+        assert!(preview.error.is_none(), "preview failed: {:?}", preview.error);
+
+        // If Apply reran the script it would now write 99. Committing the
+        // frozen operations must write the value observed during preview.
+        workbook.set_cell_value_tracked(0, 0, 0, "99");
+        let _ = apply_captured_lua_ops(&mut workbook, 0, &preview.ops);
+        assert_eq!(workbook.active_sheet().get_display(0, 1), "10");
     }
 }
 

@@ -3354,6 +3354,21 @@ mod tests {
         assert!(has(4, 1), "new receiver B5");
         assert!(has(0, 2), "reader of a receiver");
         assert_eq!(wb.active_sheet().get_display(0, 2), "20");
+
+        // Shrinking the array retires B3:B5. Those now-empty coordinates are
+        // still changes and must remain in the delta so mirrors clear them.
+        let recalculated = wb.set_cell_value_tracked(0, 0, 0, "2");
+        let cells = match recalculated {
+            Recalculated::Cells(cells) => cells,
+            Recalculated::All => panic!("no cycle here"),
+        };
+        let has = |row: usize, col: usize| cells.contains(&CellId { sheet, row, col });
+        assert!(has(2, 1), "retired receiver B3");
+        assert!(has(3, 1), "retired receiver B4");
+        assert!(has(4, 1), "retired receiver B5");
+        assert_eq!(wb.active_sheet().get_display(2, 1), "");
+        assert_eq!(wb.active_sheet().get_display(3, 1), "");
+        assert_eq!(wb.active_sheet().get_display(4, 1), "");
     }
 
     /// The registered default handler is consulted by the incremental path

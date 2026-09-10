@@ -232,7 +232,10 @@ pub fn cmd_scripts_run(
         // A script that ran out of budget is a different thing from a script
         // that is wrong, and a pipeline should be able to tell without reading
         // the message.
-        if err.contains("instruction limit exceeded") || err.contains("execution timeout") {
+        if err.contains("instruction limit exceeded")
+            || err.contains("execution timeout")
+            || err.contains("memory error")
+        {
             return Err(CliError::budget(format!("script exceeded its budget: {}", err)));
         }
         return Err(CliError::eval(format!("script error: {}", err)));
@@ -970,6 +973,7 @@ mod tests {
         let limits = visigrid_scripting::Limits {
             instructions: 200_000,
             wall_clock: std::time::Duration::from_secs(60),
+            memory_bytes: visigrid_scripting::MEMORY_LIMIT_BYTES,
         };
         let rt = visigrid_scripting::LuaRuntime::with_limits(limits).unwrap();
 
@@ -999,6 +1003,10 @@ mod tests {
         assert_eq!(
             batch.instructions, interactive.instructions,
             "the deterministic bound must not depend on where the script runs"
+        );
+        assert_eq!(
+            batch.memory_bytes, interactive.memory_bytes,
+            "batch and interactive scripts must have the same allocator bound"
         );
         assert!(
             batch.wall_clock > interactive.wall_clock,
