@@ -17,7 +17,8 @@ use crate::structural::Axis;
 use crate::workbook::Workbook;
 
 pub const OPERATION_PLAN_CONTRACT_VERSION: u32 = 1;
-pub const MAX_PLAN_OPERATIONS: usize = 1_000_000;
+pub const MAX_PLAN_OPERATIONS: usize = 100_000;
+pub const MAX_MATERIALIZED_CHANGES: usize = 250_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PlanId(pub String);
@@ -40,6 +41,12 @@ pub struct ExecutionContextFingerprint {
     pub functions_source_hash: String,
     pub locale: String,
     pub timezone: String,
+    pub auto_recalc: bool,
+    pub iterative_calculation_enabled: bool,
+    pub iterative_max_iterations: u32,
+    /// Exact IEEE-754 representation, used instead of lossy text or `f64`
+    /// equality in the wire-safe fingerprint.
+    pub iterative_tolerance_bits: u64,
     #[serde(default)]
     pub volatile_inputs: Vec<String>,
 }
@@ -392,6 +399,9 @@ impl PlanCommit {
 pub enum PlanError {
     RevisionMismatch { expected: u64, actual: u64 },
     SourceSheetMissing,
+    OperationLimitExceeded { limit: usize },
+    MaterializedChangeLimitExceeded { limit: usize },
+    MultiSheetUnsupported,
     InvalidOperation(String),
     UnsupportedOperation(String),
     ContextChanged,
@@ -412,6 +422,18 @@ impl std::fmt::Display for PlanError {
                 )
             }
             Self::SourceSheetMissing => write!(f, "source sheet no longer exists"),
+            Self::OperationLimitExceeded { limit } => {
+                write!(f, "normalized operation limit exceeded ({limit})")
+            }
+            Self::MaterializedChangeLimitExceeded { limit } => {
+                write!(f, "materialized change limit exceeded ({limit})")
+            }
+            Self::MultiSheetUnsupported => {
+                write!(
+                    f,
+                    "multi_sheet_unsupported: the preview affects another sheet"
+                )
+            }
             Self::InvalidOperation(message) => write!(f, "invalid operation: {message}"),
             Self::UnsupportedOperation(message) => write!(f, "unsupported operation: {message}"),
             Self::ContextChanged => write!(f, "calculation context changed"),
@@ -470,7 +492,7 @@ impl PreparedOperationPlan {
             request.source_sheet_id,
             &operations,
             &row_lineage,
-        );
+        )?;
         let changed_row_ids: HashSet<_> = changes
             .iter()
             .filter(|change| change.sheet_id == request.source_sheet_id)
@@ -688,9 +710,9 @@ fn normalize_operations(
     operations: Vec<PlannedOp>,
 ) -> Result<Vec<PlannedOp>, PlanError> {
     if operations.len() > MAX_PLAN_OPERATIONS {
-        return Err(PlanError::InvalidOperation(format!(
-            "operation limit exceeded ({MAX_PLAN_OPERATIONS})"
-        )));
+        return Err(PlanError::OperationLimitExceeded {
+            limit: MAX_PLAN_OPERATIONS,
+        });
     }
 
     let mut cell_writes: BTreeMap<CellCoordinate, PlannedOp> = BTreeMap::new();
@@ -741,9 +763,9 @@ fn normalize_operations(
                     .saturating_mul(range.end.col - range.start.col + 1);
                 expanded_cell_touches = expanded_cell_touches.saturating_add(count);
                 if expanded_cell_touches > MAX_PLAN_OPERATIONS {
-                    return Err(PlanError::InvalidOperation(
-                        "expanded cell operations exceed plan limit".into(),
-                    ));
+                    return Err(PlanError::OperationLimitExceeded {
+                        limit: MAX_PLAN_OPERATIONS,
+                    });
                 }
                 for row in range.start.row..=range.end.row {
                     for col in range.start.col..=range.end.col {
@@ -760,9 +782,9 @@ fn normalize_operations(
                     .saturating_mul(range.end.col - range.start.col + 1);
                 expanded_cell_touches = expanded_cell_touches.saturating_add(count);
                 if expanded_cell_touches > MAX_PLAN_OPERATIONS {
-                    return Err(PlanError::InvalidOperation(
-                        "expanded cell operations exceed plan limit".into(),
-                    ));
+                    return Err(PlanError::OperationLimitExceeded {
+                        limit: MAX_PLAN_OPERATIONS,
+                    });
                 }
                 let changes_any_cell = (range.start.row..=range.end.row).any(|row| {
                     (range.start.col..=range.end.col)
@@ -792,9 +814,9 @@ fn normalize_operations(
             }
         }
         if expanded_cell_touches > MAX_PLAN_OPERATIONS {
-            return Err(PlanError::InvalidOperation(
-                "expanded cell operations exceed plan limit".into(),
-            ));
+            return Err(PlanError::OperationLimitExceeded {
+                limit: MAX_PLAN_OPERATIONS,
+            });
         }
     }
 
@@ -968,7 +990,7 @@ fn materialize_changes(
     source_sheet_id: SheetId,
     operations: &[PlannedOp],
     lineage: &[ReviewRowLineage],
-) -> Vec<MaterializedChange> {
+) -> Result<Vec<MaterializedChange>, PlanError> {
     let direct_cells: BTreeSet<CellCoordinate> = operations
         .iter()
         .flat_map(|operation| match operation {
@@ -988,7 +1010,7 @@ fn materialize_changes(
         })
         .collect();
     let mut changes = Vec::new();
-    for (sheet_index, before_sheet) in before.sheets().iter().enumerate() {
+    for before_sheet in before.sheets() {
         let sheet_id = before_sheet.id;
         let Some(after_sheet) = after.sheet_by_id(sheet_id) else {
             continue;
@@ -999,22 +1021,25 @@ fn materialize_changes(
                     .before_data_row
                     .expect("source lineage always has before row");
                 if row.state == ReviewRowState::Deleted {
-                    changes.push(MaterializedChange {
-                        sheet_id,
-                        row_id: row.id,
-                        before_coordinate: Some(CellCoordinate {
-                            row: before_row,
-                            col: 0,
-                        }),
-                        after_coordinate: None,
-                        kind: ChangeKind::RowDeleted,
-                        cause: ChangeCause::Direct,
-                        before: CellSnapshot::empty(),
-                        after: CellSnapshot::empty(),
-                        group_id: None,
-                        reason: None,
-                        sources: Vec::new(),
-                    });
+                    push_materialized_change(
+                        &mut changes,
+                        MaterializedChange {
+                            sheet_id,
+                            row_id: row.id,
+                            before_coordinate: Some(CellCoordinate {
+                                row: before_row,
+                                col: 0,
+                            }),
+                            after_coordinate: None,
+                            kind: ChangeKind::RowDeleted,
+                            cause: ChangeCause::Direct,
+                            before: CellSnapshot::empty(),
+                            after: CellSnapshot::empty(),
+                            group_id: None,
+                            reason: None,
+                            sources: Vec::new(),
+                        },
+                    )?;
                     let mut coordinates: Vec<_> = before_sheet
                         .cells_iter()
                         .filter(|((cell_row, _), _)| *cell_row == before_row)
@@ -1025,19 +1050,22 @@ fn materialize_changes(
                         let old =
                             CellSnapshot::from_sheet(before_sheet, coordinate.row, coordinate.col);
                         if old != CellSnapshot::empty() {
-                            changes.push(MaterializedChange {
-                                sheet_id,
-                                row_id: row.id,
-                                before_coordinate: Some(coordinate),
-                                after_coordinate: None,
-                                kind: ChangeKind::Cleared,
-                                cause: ChangeCause::Direct,
-                                before: old,
-                                after: CellSnapshot::empty(),
-                                group_id: None,
-                                reason: None,
-                                sources: Vec::new(),
-                            });
+                            push_materialized_change(
+                                &mut changes,
+                                MaterializedChange {
+                                    sheet_id,
+                                    row_id: row.id,
+                                    before_coordinate: Some(coordinate),
+                                    after_coordinate: None,
+                                    kind: ChangeKind::Cleared,
+                                    cause: ChangeCause::Direct,
+                                    before: old,
+                                    after: CellSnapshot::empty(),
+                                    group_id: None,
+                                    reason: None,
+                                    sources: Vec::new(),
+                                },
+                            )?;
                         }
                     }
                     continue;
@@ -1076,7 +1104,7 @@ fn materialize_changes(
                         CellSnapshot::from_sheet(before_sheet, before_row, col),
                         CellSnapshot::from_sheet(after_sheet, after_row, col),
                         direct_cells.contains(&before_coordinate),
-                    );
+                    )?;
                 }
             }
         } else {
@@ -1092,16 +1120,11 @@ fn materialize_changes(
                     .map(|(&(row, col), _)| CellCoordinate { row, col }),
             );
             for coordinate in coordinates {
-                push_cell_change(
-                    &mut changes,
-                    sheet_id,
-                    ReviewRowId(((sheet_index as u64 + 1) << 32) | coordinate.row as u64 + 1),
-                    coordinate,
-                    coordinate,
-                    CellSnapshot::from_sheet(before_sheet, coordinate.row, coordinate.col),
-                    CellSnapshot::from_sheet(after_sheet, coordinate.row, coordinate.col),
-                    false,
-                );
+                let before = CellSnapshot::from_sheet(before_sheet, coordinate.row, coordinate.col);
+                let after = CellSnapshot::from_sheet(after_sheet, coordinate.row, coordinate.col);
+                if before != after {
+                    return Err(PlanError::MultiSheetUnsupported);
+                }
             }
         }
     }
@@ -1117,7 +1140,25 @@ fn materialize_changes(
             change.kind as u8,
         )
     });
-    changes
+    Ok(changes)
+}
+
+fn push_materialized_change(
+    changes: &mut Vec<MaterializedChange>,
+    change: MaterializedChange,
+) -> Result<(), PlanError> {
+    ensure_materialized_change_capacity(changes.len())?;
+    changes.push(change);
+    Ok(())
+}
+
+fn ensure_materialized_change_capacity(current_len: usize) -> Result<(), PlanError> {
+    if current_len >= MAX_MATERIALIZED_CHANGES {
+        return Err(PlanError::MaterializedChangeLimitExceeded {
+            limit: MAX_MATERIALIZED_CHANGES,
+        });
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1130,9 +1171,9 @@ fn push_cell_change(
     before: CellSnapshot,
     after: CellSnapshot,
     direct: bool,
-) {
+) -> Result<(), PlanError> {
     if before == after {
-        return;
+        return Ok(());
     }
     let kind = if before.raw != after.raw {
         if after.raw.is_empty() {
@@ -1147,23 +1188,26 @@ fn push_cell_change(
     } else {
         ChangeKind::Value
     };
-    changes.push(MaterializedChange {
-        sheet_id,
-        row_id,
-        before_coordinate: Some(before_coordinate),
-        after_coordinate: Some(after_coordinate),
-        kind,
-        cause: if direct {
-            ChangeCause::Direct
-        } else {
-            ChangeCause::Recalculated
+    push_materialized_change(
+        changes,
+        MaterializedChange {
+            sheet_id,
+            row_id,
+            before_coordinate: Some(before_coordinate),
+            after_coordinate: Some(after_coordinate),
+            kind,
+            cause: if direct {
+                ChangeCause::Direct
+            } else {
+                ChangeCause::Recalculated
+            },
+            before,
+            after,
+            group_id: None,
+            reason: None,
+            sources: Vec::new(),
         },
-        before,
-        after,
-        group_id: None,
-        reason: None,
-        sources: Vec::new(),
-    });
+    )
 }
 
 fn affected_ranges(changes: &[MaterializedChange]) -> Vec<AffectedRange> {
@@ -1305,6 +1349,10 @@ mod tests {
             functions_source_hash: "none".into(),
             locale: "en-US".into(),
             timezone: "UTC".into(),
+            auto_recalc: true,
+            iterative_calculation_enabled: false,
+            iterative_max_iterations: 100,
+            iterative_tolerance_bits: 0.001_f64.to_bits(),
             volatile_inputs: Vec::new(),
         }
     }
@@ -1468,7 +1516,7 @@ mod tests {
 
         let workbook = prepared.source_workbook().clone();
         let mut changed_context = context();
-        changed_context.functions_generation += 1;
+        changed_context.iterative_tolerance_bits = 0.01_f64.to_bits();
         assert_eq!(
             prepared
                 .verify_candidate(&workbook, &changed_context)
@@ -1548,15 +1596,63 @@ mod tests {
                 vec![PlannedOp::SetCellStyle {
                     range: CellRange {
                         start: CellCoordinate { row: 0, col: 0 },
-                        end: CellCoordinate {
-                            row: 1_000,
-                            col: 1_000,
-                        },
+                        end: CellCoordinate { row: 400, col: 255 },
                     },
                     style: CellStyle::from_int(1),
                 }],
             ),
         );
-        assert!(matches!(oversized, Err(PlanError::InvalidOperation(_))));
+        assert!(matches!(
+            oversized,
+            Err(PlanError::OperationLimitExceeded {
+                limit: MAX_PLAN_OPERATIONS
+            })
+        ));
+    }
+
+    #[test]
+    fn v1_plan_and_materialized_change_limits_are_enforced() {
+        let workbook = Workbook::new();
+        let repeated_clear = PlannedOp::ClearCell {
+            coordinate: CellCoordinate { row: 0, col: 0 },
+        };
+        let too_many_operations = PreparedOperationPlan::materialize(
+            &workbook,
+            request(&workbook, vec![repeated_clear; MAX_PLAN_OPERATIONS + 1]),
+        );
+        assert!(matches!(
+            too_many_operations,
+            Err(PlanError::OperationLimitExceeded {
+                limit: MAX_PLAN_OPERATIONS
+            })
+        ));
+        assert!(ensure_materialized_change_capacity(MAX_MATERIALIZED_CHANGES - 1).is_ok());
+        assert_eq!(
+            ensure_materialized_change_capacity(MAX_MATERIALIZED_CHANGES).unwrap_err(),
+            PlanError::MaterializedChangeLimitExceeded {
+                limit: MAX_MATERIALIZED_CHANGES
+            }
+        );
+    }
+
+    #[test]
+    fn v1_rejects_cross_sheet_recalculation_effects() {
+        let mut workbook = Workbook::new();
+        workbook.set_cell_value_tracked(0, 0, 0, "10");
+        let dependent_sheet = workbook.add_sheet();
+        workbook.set_cell_value_tracked(dependent_sheet, 0, 0, "=Sheet1!A1*2");
+        let _ = workbook.set_active_sheet(0);
+
+        let result = PreparedOperationPlan::materialize(
+            &workbook,
+            request(
+                &workbook,
+                vec![PlannedOp::SetCellValue {
+                    coordinate: CellCoordinate { row: 0, col: 0 },
+                    value: PlannedCellValue::Number(20.0),
+                }],
+            ),
+        );
+        assert!(matches!(result, Err(PlanError::MultiSheetUnsupported)));
     }
 }

@@ -107,6 +107,10 @@ pub fn execution_context_fingerprint(
         functions_source_hash: functions.source_hash,
         locale,
         timezone,
+        auto_recalc: workbook.auto_recalc(),
+        iterative_calculation_enabled: workbook.iterative_enabled(),
+        iterative_max_iterations: workbook.iterative_max_iters(),
+        iterative_tolerance_bits: workbook.iterative_tolerance().to_bits(),
         volatile_inputs,
     }
 }
@@ -150,9 +154,17 @@ mod tests {
     #[test]
     fn execution_context_reports_volatile_formulas() {
         let mut workbook = Workbook::new();
+        workbook.set_auto_recalc(false);
+        workbook.set_iterative_enabled(true);
+        workbook.set_iterative_max_iters(77);
+        workbook.set_iterative_tolerance(0.000_123);
         workbook.set_cell_value_tracked(0, 0, 0, "=TODAY()");
         let context = execution_context_fingerprint(&workbook, &[]);
         assert!(context.volatile_inputs.contains(&"TODAY".to_string()));
         assert!(!context.functions_source_hash.is_empty());
+        assert!(!context.auto_recalc);
+        assert!(context.iterative_calculation_enabled);
+        assert_eq!(context.iterative_max_iterations, 77);
+        assert_eq!(context.iterative_tolerance_bits, 0.000_123_f64.to_bits());
     }
 }

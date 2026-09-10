@@ -1021,22 +1021,6 @@ sheet:cols()
         // Switch to new sheet
         self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(sheet_idx); });
 
-        // Append Run Log entry
-        self.workbook.update(cx, |wb, _| {
-            let meta = crate::structured_results::ResultMeta {
-                sheet_idx,
-                sheet_name: sheet_name.clone(),
-                result_type: "LuaApply",
-                row_count: preview.cells_written,
-                col_count: 0,
-            };
-            crate::structured_results::append_run_log(
-                wb, &meta,
-                Some(preview.script_path.to_string_lossy().as_ref()),
-                Some(&preview.script_hash),
-            );
-        });
-
         self.status_message = Some(format!(
             "Applied AI Lua to new sheet '{}'.", sheet_name
         ));
@@ -1083,7 +1067,7 @@ sheet:cols()
             self.workbook.read(cx),
             &prepared.plan().operations,
         );
-        let mut commit = match prepared.verify_candidate(self.workbook.read(cx), &context) {
+        let commit = match prepared.verify_candidate(self.workbook.read(cx), &context) {
             Ok(commit) => commit,
             Err(error) => {
                 self.status_message = Some(format!(
@@ -1110,30 +1094,11 @@ sheet:cols()
         self.row_view = after_row_view.clone();
         self.row_heights.insert(sheet_id, after_row_heights.clone());
 
-        // Append Run Log entry
         let sheet_name = self.workbook.read(cx)
             .sheet_names()
             .get(sheet_idx)
             .map(|s| s.to_string())
             .unwrap_or_default();
-        self.workbook.update(cx, |wb, _| {
-            let meta = crate::structured_results::ResultMeta {
-                sheet_idx,
-                sheet_name: sheet_name.clone(),
-                result_type: "LuaApply",
-                row_count: preview.cells_written,
-                col_count: 0,
-            };
-            crate::structured_results::append_run_log(
-                wb, &meta,
-                Some(preview.script_path.to_string_lossy().as_ref()),
-                Some(&preview.script_hash),
-            );
-        });
-
-        // The Run Log is part of this user-visible transaction. Preserve the
-        // exact post-Apply workbook so redo restores it along with the plan.
-        commit.applied = self.workbook.read(cx).clone();
         self.history.record_action_with_provenance(
             crate::history::UndoAction::PlanCommit {
                 commit: Box::new(commit),
