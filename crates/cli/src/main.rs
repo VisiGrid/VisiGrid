@@ -3935,6 +3935,9 @@ fn cmd_apply(
 
                 println!("Applied: {}/{}", result.applied, result.total);
                 println!("Revision: {}", result.revision);
+                for warning in &result.warnings {
+                    eprintln!("warning: {}", warning);
+                }
                 return Ok(());
             }
             Err(session::SessionError::ServerError { code, message, retry_after_ms }) if code == "writer_conflict" => {

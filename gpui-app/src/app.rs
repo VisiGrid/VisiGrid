@@ -1468,13 +1468,39 @@ impl Spreadsheet {
     ///
     /// Returns the number of changed cells (0 if no changes or nested batch).
     pub fn end_batch_and_broadcast(&mut self, cx: &mut Context<Self>) -> usize {
-        let changed = self.workbook.update(cx, |wb, _| wb.end_batch());
-        let count = changed.len();
+        use visigrid_engine::workbook::Recalculated;
+        let outcome = self.workbook.update(cx, |wb, _| wb.end_batch_outcome());
+        let count = outcome.written.len();
 
-        if !changed.is_empty() && self.session_server.is_running() {
-            let revision = self.workbook.read(cx).revision();
-            let cells: Vec<crate::session_server::CellRef> = changed
+        // What the recalc could not settle: values are stale, say so.
+        if let Some(first) = outcome.errors.first() {
+            self.status_message = Some(format!("Recalc incomplete: {}", first.error));
+        }
+
+        if !outcome.written.is_empty() && self.session_server.is_running() {
+            let wb = self.workbook.read(cx);
+            let revision = wb.revision();
+            // Subscribers learn about every cell that changed: the writes, the
+            // dependents recalculated because of them, and spill receivers.
+            let mut cells: Vec<visigrid_engine::cell_id::CellId> = outcome.written;
+            match outcome.recalculated {
+                Recalculated::Cells(more) => cells.extend(more),
+                Recalculated::All => {
+                    for sheet in wb.sheets() {
+                        let id = sheet.id;
+                        cells.extend(sheet.cells_iter().map(|(&(row, col), _)| {
+                            visigrid_engine::cell_id::CellId { sheet: id, row, col }
+                        }));
+                        cells.extend(sheet.spill_receiver_coords().map(|(row, col)| {
+                            visigrid_engine::cell_id::CellId { sheet: id, row, col }
+                        }));
+                    }
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            let cells: Vec<crate::session_server::CellRef> = cells
                 .into_iter()
+                .filter(|c| seen.insert(*c))
                 .map(|c| crate::session_server::CellRef {
                     sheet: c.sheet.0 as usize, // SheetId(u64) -> usize
                     row: c.row,

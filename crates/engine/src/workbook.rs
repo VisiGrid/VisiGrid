@@ -2020,7 +2020,12 @@ impl Workbook {
     /// Returns the list of changed cells (empty if nested batch or no changes).
     /// Callers can use this to broadcast changes to subscribers.
     pub fn end_batch(&mut self) -> Vec<CellId> {
-        self.end_batch_outcome().written
+        // A caller that wants only the written cells still must not lose
+        // what the recalc could not settle: put it back on the side channel
+        // for take_incremental_errors, the way a non-batch edit leaves it.
+        let outcome = self.end_batch_outcome();
+        self.incremental_errors.extend(outcome.errors);
+        outcome.written
     }
 
     /// End a batch and report both halves: the cells written, and the cells
@@ -3319,6 +3324,12 @@ mod tests {
         let outcome = wb.end_batch_outcome();
         assert!(outcome.errors.iter().any(|e| e.error.contains("not settled")), "{:?}", outcome.errors);
         assert!(wb.take_incremental_errors().is_empty(), "moved into the outcome");
+        // A caller using plain end_batch (the guard, the desktop) keeps them.
+        wb.begin_batch();
+        wb.set_cell_value_tracked(0, 0, 0, "4");
+        let _written = wb.end_batch();
+        let errors = wb.take_incremental_errors();
+        assert!(errors.iter().any(|e| e.error.contains("not settled")), "{:?}", errors);
     }
 
     /// The delta an incremental recalc reports must include what placing

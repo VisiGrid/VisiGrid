@@ -331,12 +331,17 @@ impl McpServer {
         if let Some(err) = result.error {
             return Err(apply_error_text(&err, result.revision));
         }
-        serde_json::to_string_pretty(&json!({
+        let mut out = json!({
             "applied": result.applied,
             "total": result.total,
             "revision": result.revision,
-        }))
-        .map_err(|e| e.to_string())
+        });
+        // Present only when the recalc could not settle something: the apply
+        // succeeded, but values downstream are stale and the agent must know.
+        if !result.warnings.is_empty() {
+            out["warnings"] = json!(result.warnings);
+        }
+        serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
     }
 
     fn tool_set_format(&mut self, args: &Value) -> Result<String, String> {
@@ -405,12 +410,17 @@ impl McpServer {
         if let Some(err) = result.error {
             return Err(apply_error_text(&err, result.revision));
         }
-        serde_json::to_string_pretty(&json!({
+        let mut out = json!({
             "applied": result.applied,
             "total": result.total,
             "revision": result.revision,
-        }))
-        .map_err(|e| e.to_string())
+        });
+        // Present only when the recalc could not settle something: the apply
+        // succeeded, but values downstream are stale and the agent must know.
+        if !result.warnings.is_empty() {
+            out["warnings"] = json!(result.warnings);
+        }
+        serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
     }
 
     fn tool_save(&mut self, args: &Value) -> Result<String, String> {
