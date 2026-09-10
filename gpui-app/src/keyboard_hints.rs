@@ -226,6 +226,27 @@ impl Spreadsheet {
                 self.paste(cx);
                 true
             }
+            // Requested in issue #6 after x/y/p shipped. Each maps onto an
+            // existing action rather than inventing grid semantics: `u` is
+            // Undo (redo stays on Ctrl+Y / Ctrl+Shift+Z, since vim's Ctrl+R is
+            // Fill Right here as in Excel), `/` opens the same Find that Ctrl+F
+            // does, and n / N step through its matches.
+            "u" => {
+                self.undo(cx);
+                true
+            }
+            "/" => {
+                self.show_find(cx);
+                true
+            }
+            "n" => {
+                self.find_next(cx);
+                true
+            }
+            "N" => {
+                self.find_prev(cx);
+                true
+            }
             "0" => {
                 // Move to first column
                 self.view_state.selected = (self.view_state.selected.0, 0);

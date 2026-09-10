@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Keyboard
+
+- **Vim mode: `u`, `/`, `n` and `N`** — undo, open Find, and step to the next or previous match, in normal mode. Requested in #6 after `x`, `y` and `p` shipped in 0.31.0. Redo stays on Ctrl+Y and Ctrl+Shift+Z; vim's Ctrl+R is Fill Right here, as in Excel.
+
 ### Selection
 
 - **Row and column differences** — `Ctrl+\` selects, in each row of the selection, the cells whose value differs from the active cell's column; `Ctrl+Shift+|` does the same per column against the active cell's row. Excel's Go To Special equivalents. Comparison is by computed value, so formulas that evaluate alike count as equal. Also in the palette as "Select: Row Differences" and "Select: Column Differences".
