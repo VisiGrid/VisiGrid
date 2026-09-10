@@ -464,7 +464,8 @@ pub fn render_terminal_panel(
                     &data.script_hash
                 };
                 // Check workbook revision, content, and calculation context at render time.
-                let drifted = data.prepared_plan.as_ref().map_or(true, |prepared| {
+                let prepared = data.prepared_plan.as_ref();
+                let drifted = prepared.map_or(true, |prepared| {
                     let context = crate::scripting::execution_context_fingerprint(
                         app.workbook.read(cx),
                         &prepared.plan().operations,
@@ -476,12 +477,32 @@ pub fn render_terminal_panel(
                 } else {
                     ""
                 };
+                let (blocking, problem_hint) = prepared.map_or_else(
+                    || (false, String::new()),
+                    |prepared| {
+                        let blocking = prepared.plan().problems.iter().any(|problem| {
+                            problem.severity
+                                == visigrid_engine::operation_plan::ProblemSeverity::Blocking
+                        });
+                        let hint = prepared.plan().problems.first().map_or_else(
+                            String::new,
+                            |problem| {
+                                format!(" \u{00b7} {:?}: {}", problem.severity, problem.message)
+                            },
+                        );
+                        (blocking, hint)
+                    },
+                );
                 Some((
                     format!(
-                        "Lua preview \u{00b7} {} writes \u{00b7} {} overwrites \u{00b7} {}{}",
-                        data.cells_written, data.cells_overwritten, hash_prefix, drift_hint
+                        "Lua preview \u{00b7} {} writes \u{00b7} {} overwrites \u{00b7} {}{}{}",
+                        data.cells_written,
+                        data.cells_overwritten,
+                        hash_prefix,
+                        drift_hint,
+                        problem_hint
                     ),
-                    false,
+                    blocking,
                 ))
             }
         }

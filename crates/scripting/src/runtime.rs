@@ -1145,6 +1145,29 @@ mod tests {
     }
 
     #[test]
+    fn test_sheet_review_metadata_is_captured_without_counting_as_a_mutation() {
+        let rt = LuaRuntime::new().unwrap();
+        let reader = MockReader::new();
+        let result = rt.eval_with_sheet(
+            r#"sheet:review({
+                group = "duplicates",
+                title = "Exact duplicates",
+                reason = "Matches the retained row",
+                sources = { "A2:C2", "A4:C4" },
+            })"#,
+            Box::new(reader),
+        );
+        assert!(result.error.is_none(), "Error: {:?}", result.error);
+        assert_eq!(result.mutations, 0);
+        assert!(matches!(
+            &result.ops[0],
+            LuaOp::SetReviewMetadata(metadata)
+                if metadata.group_id.as_deref() == Some("duplicates")
+                    && metadata.sources == ["A2:C2", "A4:C4"]
+        ));
+    }
+
+    #[test]
     fn test_sheet_global_cleaned_up() {
         let rt = LuaRuntime::new().unwrap();
         let reader = MockReader::new();

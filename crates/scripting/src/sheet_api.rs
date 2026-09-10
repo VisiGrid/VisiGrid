@@ -13,6 +13,7 @@
 //! - `sheet:set_formula(row, col, formula)` → sets cell formula
 //! - `sheet:clear(row, col)` / `sheet:clear("A1:C3")` → clears cells
 //! - `sheet:delete_rows(at, count)` → proposes row deletion
+//! - `sheet:review({...})` → describes subsequent changes for Review Mode
 //!
 //! ## Read/Write by A1 notation
 //! - `sheet:get("A1")` → value at A1 notation (shorthand)
@@ -43,7 +44,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use super::ops::{parse_a1, parse_range, format_a1, CellKey, LuaCellValue, LuaOp, PendingCell, SheetReader};
+use super::ops::{parse_a1, parse_range, format_a1, CellKey, LuaCellValue, LuaOp, LuaReviewMetadata, PendingCell, SheetReader};
 use visigrid_io::scripting::{Capability, all_sheet_caps};
 
 // ============================================================================
@@ -403,6 +404,18 @@ impl DynOpSink {
         self.ops.push(LuaOp::DeleteRows { at, count });
         Ok(())
     }
+
+    fn set_review_metadata(&mut self, metadata: LuaReviewMetadata) -> Result<(), String> {
+        self.check_write()?;
+        self.check_ops_limit()?;
+        if (metadata.group_title.is_some() || metadata.group_description.is_some())
+            && metadata.group_id.is_none()
+        {
+            return Err("review title/description requires a group id".into());
+        }
+        self.ops.push(LuaOp::SetReviewMetadata(metadata));
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -492,6 +505,39 @@ impl UserData for SheetUserData {
         // delete_rows(at, count) uses 1-indexed source coordinates.
         methods.add_method("delete_rows", |_, this, (at, count): (usize, usize)| {
             this.sink.borrow_mut().delete_rows(at, count).map_err(mlua::Error::RuntimeError)
+        });
+
+        // review({group, title, description, reason, sources}) associates
+        // untrusted explanation metadata with subsequent mutations. Nil
+        // clears the association.
+        methods.add_method("review", |_, this, value: Value| {
+            let metadata = match value {
+                Value::Nil => LuaReviewMetadata::default(),
+                Value::Table(table) => {
+                    let sources = match table.get::<Value>("sources")? {
+                        Value::Nil => Vec::new(),
+                        Value::String(source) => vec![source.to_str()?.to_string()],
+                        Value::Table(sources) => sources
+                            .sequence_values::<String>()
+                            .collect::<LuaResult<Vec<_>>>()?,
+                        _ => return Err(mlua::Error::RuntimeError(
+                            "review sources must be a string or array of strings".into(),
+                        )),
+                    };
+                    LuaReviewMetadata {
+                        group_id: table.get("group")?,
+                        group_title: table.get("title")?,
+                        group_description: table.get("description")?,
+                        reason: table.get("reason")?,
+                        sources,
+                    }
+                }
+                _ => return Err(mlua::Error::RuntimeError(
+                    "review expects a table or nil".into(),
+                )),
+            };
+            this.sink.borrow_mut().set_review_metadata(metadata)
+                .map_err(mlua::Error::RuntimeError)
         });
 
         // ====================================================================

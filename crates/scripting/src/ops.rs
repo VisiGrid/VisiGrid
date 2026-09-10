@@ -116,6 +116,9 @@ impl LuaCellValue {
 /// after the script completes.
 #[derive(Debug, Clone)]
 pub enum LuaOp {
+    /// Sets review-only metadata for subsequent journaled mutations. This
+    /// marker never mutates a workbook.
+    SetReviewMetadata(LuaReviewMetadata),
     /// Set a cell's value (clears any formula)
     SetValue {
         row: u32,
@@ -146,10 +149,20 @@ pub enum LuaOp {
     },
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LuaReviewMetadata {
+    pub group_id: Option<String>,
+    pub group_title: Option<String>,
+    pub group_description: Option<String>,
+    pub reason: Option<String>,
+    pub sources: Vec<String>,
+}
+
 impl LuaOp {
     /// Get the cell key this operation affects (top-left for range ops)
     pub fn cell_key(&self) -> CellKey {
         match self {
+            LuaOp::SetReviewMetadata(_) => CellKey::new(0, 0),
             LuaOp::SetValue { row, col, .. } => CellKey::new(*row, *col),
             LuaOp::SetFormula { row, col, .. } => CellKey::new(*row, *col),
             LuaOp::ClearCell { row, col } => CellKey::new(*row, *col),

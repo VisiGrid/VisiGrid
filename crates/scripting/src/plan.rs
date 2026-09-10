@@ -1,84 +1,156 @@
 //! Adapter from Lua's private journal to the producer-neutral engine plan.
 
 use visigrid_engine::operation_plan::{
-    CellCoordinate, CellRange, ExecutionContextFingerprint, PlannedCellValue, PlannedOp,
+    CellCoordinate, CellRange, ExecutionContextFingerprint, GroupId, OperationGroup,
+    OperationMetadata, PlannedCellValue, PlannedOp, PlannedOperation, ProducerClaim,
 };
 use visigrid_engine::workbook::Workbook;
 
 use crate::lua_formulas::published_functions_fingerprint;
-use crate::{LuaCellValue, LuaOp};
+use crate::{LuaCellValue, LuaOp, LuaReviewMetadata};
 
-pub fn lua_ops_to_planned_ops(ops: &[LuaOp]) -> Vec<PlannedOp> {
-    ops.iter()
-        .map(|operation| match operation {
-            LuaOp::SetValue {
-                row,
-                col,
-                value: LuaCellValue::Nil,
-            } => PlannedOp::ClearCell {
-                coordinate: CellCoordinate {
-                    row: *row as usize,
-                    col: *col as usize,
+/// Convert the Lua journal into executable operations and their untrusted
+/// review descriptions. Metadata markers apply to subsequent mutations until
+/// another marker replaces or clears them.
+pub fn lua_journal_to_plan(
+    ops: &[LuaOp],
+) -> Result<(Vec<PlannedOperation>, Vec<OperationGroup>), String> {
+    let mut metadata = OperationMetadata::default();
+    let mut groups: Vec<OperationGroup> = Vec::new();
+    let mut planned = Vec::new();
+
+    for operation in ops {
+        if let LuaOp::SetReviewMetadata(review) = operation {
+            metadata = operation_metadata(review);
+            if let Some(group_id) = &review.group_id {
+                if let Some(existing) = groups
+                    .iter_mut()
+                    .find(|group| group.id.0 == *group_id)
+                {
+                    if let Some(title) = &review.group_title {
+                        if existing.title == *group_id {
+                            existing.title = title.clone();
+                        } else if existing.title != *title {
+                            return Err(format!(
+                                "review group '{group_id}' was declared with conflicting titles"
+                            ));
+                        }
+                    }
+                    if let Some(description) = &review.group_description {
+                        match &existing.description {
+                            None => existing.description = Some(description.clone()),
+                            Some(current) if current == description => {}
+                            Some(_) => return Err(format!(
+                                "review group '{group_id}' was declared with conflicting descriptions"
+                            )),
+                        }
+                    }
+                } else {
+                    groups.push(OperationGroup {
+                        id: GroupId(group_id.clone()),
+                        title: review.group_title.clone().unwrap_or_else(|| group_id.clone()),
+                        description: review.group_description.clone(),
+                    });
+                }
+            }
+            continue;
+        }
+
+        planned.push(PlannedOperation {
+            operation: lua_op_to_planned_op(operation)
+                .expect("review metadata marker handled before conversion"),
+            metadata: metadata.clone(),
+        });
+    }
+
+    Ok((planned, groups))
+}
+
+/// Compatibility helper for callers interested only in canonical operations.
+pub fn lua_ops_to_planned_ops(ops: &[LuaOp]) -> Vec<PlannedOperation> {
+    lua_journal_to_plan(ops)
+        .expect("Lua review metadata must be internally consistent")
+        .0
+}
+
+fn operation_metadata(review: &LuaReviewMetadata) -> OperationMetadata {
+    OperationMetadata {
+        group_id: review.group_id.clone().map(GroupId),
+        reason: review.reason.clone().map(ProducerClaim),
+        sources: review.sources.clone(),
+    }
+}
+
+fn lua_op_to_planned_op(operation: &LuaOp) -> Option<PlannedOp> {
+    Some(match operation {
+        LuaOp::SetReviewMetadata(_) => return None,
+        LuaOp::SetValue {
+            row,
+            col,
+            value: LuaCellValue::Nil,
+        } => PlannedOp::ClearCell {
+            coordinate: CellCoordinate {
+                row: *row as usize,
+                col: *col as usize,
+            },
+        },
+        LuaOp::SetValue { row, col, value } => PlannedOp::SetCellValue {
+            coordinate: CellCoordinate {
+                row: *row as usize,
+                col: *col as usize,
+            },
+            value: match value {
+                LuaCellValue::Nil => unreachable!("handled above"),
+                LuaCellValue::Number(value) => PlannedCellValue::Number(*value),
+                LuaCellValue::String(value) => PlannedCellValue::Text(value.clone()),
+                LuaCellValue::Bool(value) => PlannedCellValue::Boolean(*value),
+                LuaCellValue::Error(value) => PlannedCellValue::Error(value.clone()),
+            },
+        },
+        LuaOp::SetFormula { row, col, formula } => PlannedOp::SetCellFormula {
+            coordinate: CellCoordinate {
+                row: *row as usize,
+                col: *col as usize,
+            },
+            formula: formula.clone(),
+        },
+        LuaOp::ClearCell { row, col } => PlannedOp::ClearCell {
+            coordinate: CellCoordinate {
+                row: *row as usize,
+                col: *col as usize,
+            },
+        },
+        LuaOp::DeleteRows { at, count } => PlannedOp::DeleteRows {
+            at: *at as usize,
+            count: *count as usize,
+        },
+        LuaOp::SetCellStyle {
+            r1,
+            c1,
+            r2,
+            c2,
+            style,
+        } => PlannedOp::SetCellStyle {
+            range: CellRange {
+                start: CellCoordinate {
+                    row: *r1 as usize,
+                    col: *c1 as usize,
+                },
+                end: CellCoordinate {
+                    row: *r2 as usize,
+                    col: *c2 as usize,
                 },
             },
-            LuaOp::SetValue { row, col, value } => PlannedOp::SetCellValue {
-                coordinate: CellCoordinate {
-                    row: *row as usize,
-                    col: *col as usize,
-                },
-                value: match value {
-                    LuaCellValue::Nil => unreachable!("handled above"),
-                    LuaCellValue::Number(value) => PlannedCellValue::Number(*value),
-                    LuaCellValue::String(value) => PlannedCellValue::Text(value.clone()),
-                    LuaCellValue::Bool(value) => PlannedCellValue::Boolean(*value),
-                    LuaCellValue::Error(value) => PlannedCellValue::Error(value.clone()),
-                },
-            },
-            LuaOp::SetFormula { row, col, formula } => PlannedOp::SetCellFormula {
-                coordinate: CellCoordinate {
-                    row: *row as usize,
-                    col: *col as usize,
-                },
-                formula: formula.clone(),
-            },
-            LuaOp::ClearCell { row, col } => PlannedOp::ClearCell {
-                coordinate: CellCoordinate {
-                    row: *row as usize,
-                    col: *col as usize,
-                },
-            },
-            LuaOp::DeleteRows { at, count } => PlannedOp::DeleteRows {
-                at: *at as usize,
-                count: *count as usize,
-            },
-            LuaOp::SetCellStyle {
-                r1,
-                c1,
-                r2,
-                c2,
-                style,
-            } => PlannedOp::SetCellStyle {
-                range: CellRange {
-                    start: CellCoordinate {
-                        row: *r1 as usize,
-                        col: *c1 as usize,
-                    },
-                    end: CellCoordinate {
-                        row: *r2 as usize,
-                        col: *c2 as usize,
-                    },
-                },
-                style: visigrid_engine::cell::CellStyle::from_int(*style as i32),
-            },
-        })
-        .collect()
+            style: visigrid_engine::cell::CellStyle::from_int(*style as i32),
+        },
+    })
 }
 
 /// Fingerprint calculation inputs that are not represented by workbook
 /// revision. This accessor is intentionally read-only and never reloads Lua.
 pub fn execution_context_fingerprint(
     workbook: &Workbook,
-    planned_ops: &[PlannedOp],
+    planned_ops: &[PlannedOperation],
 ) -> ExecutionContextFingerprint {
     let functions = published_functions_fingerprint();
     let locale = std::env::var("LC_ALL")
@@ -93,8 +165,8 @@ pub fn execution_context_fingerprint(
             note_volatile_formula(&cell.value.raw_display(), &mut volatile_inputs);
         }
     }
-    for operation in planned_ops {
-        if let PlannedOp::SetCellFormula { formula, .. } = operation {
+    for planned in planned_ops {
+        if let PlannedOp::SetCellFormula { formula, .. } = &planned.operation {
             note_volatile_formula(formula, &mut volatile_inputs);
         }
     }
@@ -143,12 +215,34 @@ mod tests {
             LuaOp::ClearCell { row: 2, col: 3 },
         ]);
         assert_eq!(
-            operations,
+            operations
+                .iter()
+                .map(|planned| &planned.operation)
+                .collect::<Vec<_>>(),
             vec![
-                PlannedOp::ClearCell { coordinate },
-                PlannedOp::ClearCell { coordinate },
+                &PlannedOp::ClearCell { coordinate },
+                &PlannedOp::ClearCell { coordinate },
             ]
         );
+    }
+
+    #[test]
+    fn review_metadata_is_associated_with_subsequent_operations() {
+        let (operations, groups) = lua_journal_to_plan(&[
+            LuaOp::SetReviewMetadata(LuaReviewMetadata {
+                group_id: Some("duplicates".into()),
+                group_title: Some("Exact duplicates".into()),
+                group_description: None,
+                reason: Some("Same transaction identifier and amount".into()),
+                sources: vec!["A2:C2".into(), "A4:C4".into()],
+            }),
+            LuaOp::DeleteRows { at: 3, count: 1 },
+        ])
+        .unwrap();
+
+        assert_eq!(groups[0].id, GroupId("duplicates".into()));
+        assert_eq!(operations[0].metadata.group_id, Some(groups[0].id.clone()));
+        assert_eq!(operations[0].metadata.sources.len(), 2);
     }
 
     #[test]
@@ -166,5 +260,108 @@ mod tests {
         assert!(context.iterative_calculation_enabled);
         assert_eq!(context.iterative_max_iterations, 77);
         assert_eq!(context.iterative_tolerance_bits, 0.000_123_f64.to_bits());
+    }
+
+    #[test]
+    fn transaction_fixture_materializes_verifies_applies_and_undoes() {
+        use visigrid_engine::operation_plan::{
+            ChangeKind, OperationPlanRequest, PlanId, PlanProducer, PreparedOperationPlan,
+            VerificationDefinition, VerificationStatus,
+        };
+
+        let mut workbook = Workbook::new();
+        for (row, values) in [
+            (0, ["Transaction", "Vendor", "Amount"]),
+            (1, ["tx-001", "Amazon.com", "100"]),
+            (2, ["tx-002", "AMZN", "200"]),
+            (3, ["tx-001", "Amazon.com", "100"]),
+            (4, ["", "", ""]),
+            (5, ["tx-003", "Acme", "50"]),
+            (6, ["", "Total", "=SUM(C2:C4)"]),
+        ] {
+            for (col, value) in values.into_iter().enumerate() {
+                if !value.is_empty() {
+                    workbook.set_cell_value_tracked(0, row, col, value);
+                }
+            }
+        }
+
+        let runtime = crate::LuaRuntime::new().unwrap();
+        let source = crate::SheetSnapshot::from_sheet(workbook.active_sheet());
+        let result = runtime.eval_with_sheet(
+            include_str!("../../../fixtures/review_mode/transaction_cleanup.lua"),
+            Box::new(source),
+        );
+        assert!(result.error.is_none(), "fixture error: {:?}", result.error);
+        let (operations, groups) = lua_journal_to_plan(&result.ops).unwrap();
+        let context = execution_context_fingerprint(&workbook, &operations);
+        let prepared = PreparedOperationPlan::materialize(
+            &workbook,
+            OperationPlanRequest {
+                id: PlanId("pv_transaction_fixture".into()),
+                workbook_session_id: "fixture-session".into(),
+                source_sheet_id: workbook.active_sheet_id(),
+                expected_revision: workbook.revision(),
+                execution_context: context.clone(),
+                producer: PlanProducer {
+                    kind: "lua_fixture".into(),
+                    name: "Transaction cleanup".into(),
+                    source_path: Some("fixtures/review_mode/transaction_cleanup.lua".into()),
+                    source_hash: None,
+                },
+                title: "Clean transaction export".into(),
+                description: Some("Phase 1.5 deterministic dogfood fixture".into()),
+                operations,
+                groups,
+                verification: vec![
+                    VerificationDefinition::NoNewFormulaErrors {
+                        id: "no_new_errors".into(),
+                        label: Some("No new formula errors".into()),
+                    },
+                    VerificationDefinition::RetainedTotal {
+                        id: "retained_payments".into(),
+                        label: Some("Retained payments".into()),
+                        source_range: CellRange {
+                            start: CellCoordinate { row: 1, col: 0 },
+                            end: CellCoordinate { row: 5, col: 2 },
+                        },
+                        amount_column: 2,
+                        excluded_group: GroupId("exact_duplicates".into()),
+                        tolerance: 0.01,
+                        currency: "USD".into(),
+                    },
+                ],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(prepared.plan().groups.len(), 4);
+        assert!(prepared.plan().changes.iter().any(|change| {
+            change.kind == ChangeKind::RowDeleted
+                && change.group_id == Some(GroupId("exact_duplicates".into()))
+                && change.reason.is_some()
+                && change.sources == ["A2:C2", "A4:C4"]
+        }));
+        assert_eq!(
+            prepared
+                .plan()
+                .verification
+                .iter()
+                .find(|check| check.id == "retained_payments")
+                .unwrap()
+                .status,
+            VerificationStatus::Passed
+        );
+        assert_eq!(
+            prepared.preview_workbook().active_sheet().get_display(4, 2),
+            "350"
+        );
+
+        let commit = prepared.verify_candidate(&workbook, &context).unwrap();
+        commit.redo_into(&mut workbook);
+        assert_eq!(workbook.active_sheet().get_display(4, 2), "350");
+        commit.undo_into(&mut workbook);
+        assert_eq!(workbook.active_sheet().get_display(3, 0), "tx-001");
+        assert_eq!(workbook.active_sheet().get_display(6, 2), "400");
     }
 }

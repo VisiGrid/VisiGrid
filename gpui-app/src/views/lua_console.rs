@@ -1164,6 +1164,7 @@ pub(crate) fn apply_captured_lua_ops(
 
     for op in ops {
         match op {
+            LuaOp::SetReviewMetadata(_) => {}
             LuaOp::SetValue { row, col, value } => {
                 let row = *row as usize;
                 let col = *col as usize;

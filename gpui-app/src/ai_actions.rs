@@ -31,7 +31,7 @@ fn prepare_lua_operation_plan(
         VerificationDefinition,
     };
 
-    let planned_ops = crate::scripting::lua_ops_to_planned_ops(ops);
+    let (planned_ops, groups) = crate::scripting::lua_journal_to_plan(ops)?;
     let context = crate::scripting::execution_context_fingerprint(workbook, &planned_ops);
     PreparedOperationPlan::materialize(workbook, OperationPlanRequest {
         id: PlanId(format!("pv_{}", uuid::Uuid::new_v4().simple())),
@@ -48,7 +48,7 @@ fn prepare_lua_operation_plan(
         title: "Review Lua changes".into(),
         description: None,
         operations: planned_ops,
-        groups: Vec::new(),
+        groups,
         verification: vec![VerificationDefinition::NoNewFormulaErrors {
             id: "no_new_errors".into(),
             label: Some("No new formula errors".into()),
@@ -59,12 +59,12 @@ fn prepare_lua_operation_plan(
 fn plan_row_state_after_apply(
     row_view: &visigrid_engine::filter::RowView,
     row_heights: &std::collections::HashMap<usize, f32>,
-    operations: &[visigrid_engine::operation_plan::PlannedOp],
+    operations: &[visigrid_engine::operation_plan::PlannedOperation],
 ) -> (visigrid_engine::filter::RowView, std::collections::HashMap<usize, f32>) {
     let mut after_view = row_view.clone();
     let mut after_heights = row_heights.clone();
-    for operation in operations {
-        let visigrid_engine::operation_plan::PlannedOp::DeleteRows { at, count } = operation else {
+    for planned in operations {
+        let visigrid_engine::operation_plan::PlannedOp::DeleteRows { at, count } = &planned.operation else {
             continue;
         };
         for row in (0..*count).rev() {
@@ -664,6 +664,7 @@ sheet:set_value(row, col, value)
 sheet:set_formula(row, col, \"=...\")
 sheet:clear(row, col) or sheet:clear(\"A1:C3\")
 sheet:delete_rows(at, count)
+sheet:review({ group=\"id\", title=\"...\", reason=\"...\", sources={\"A1:C2\"} })
 sheet:get_value(row, col)
 sheet:rows()
 sheet:cols()
@@ -675,6 +676,8 @@ sheet:cols()
 - Do NOT delete or overwrite existing data.
 - No `os`, `io`, file, or network operations.
 - The user will preview your code before applying it.
+- Use sheet:review(...) before related mutations when a plain-language reason
+  and source references would help the user review them.
 ";
 
         let Some((sheet_name, headers, tsv, sel_rows, sel_cols, ..)) =
@@ -1053,7 +1056,7 @@ sheet:cols()
             return;
         };
         if prepared.plan().operations.iter().any(|operation| {
-            matches!(operation, visigrid_engine::operation_plan::PlannedOp::DeleteRows { .. })
+            matches!(operation.operation, visigrid_engine::operation_plan::PlannedOp::DeleteRows { .. })
         }) && (self.row_view.is_sorted() || self.filter_state.is_enabled()) {
             self.status_message = Some(
                 "Cannot apply row deletion while the sheet is sorted or filtered.".into(),

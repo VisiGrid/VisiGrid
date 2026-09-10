@@ -19,6 +19,15 @@ use crate::workbook::Workbook;
 pub const OPERATION_PLAN_CONTRACT_VERSION: u32 = 1;
 pub const MAX_PLAN_OPERATIONS: usize = 100_000;
 pub const MAX_MATERIALIZED_CHANGES: usize = 250_000;
+pub const MAX_DELETE_ROWS_PER_OPERATION: usize = 1_000;
+pub const MAX_ROWS_DELETED: usize = 65_536;
+pub const MAX_VERIFICATION_DEFINITIONS: usize = 8;
+pub const MAX_PLAN_GROUPS: usize = 256;
+pub const MAX_SOURCES_PER_OPERATION: usize = 16;
+pub const MAX_METADATA_TEXT_BYTES: usize = 500;
+pub const MAX_ID_BYTES: usize = 64;
+pub const MAX_LABEL_BYTES: usize = 120;
+pub const MAX_SOURCE_REFERENCE_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PlanId(pub String);
@@ -182,10 +191,56 @@ pub struct OperationGroup {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProducerClaim(pub String);
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationMetadata {
+    pub group_id: Option<GroupId>,
+    pub reason: Option<ProducerClaim>,
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
+/// A primitive mutation paired with optional, untrusted review metadata.
+/// Only `operation` contributes to execution authority; metadata is carried
+/// into materialized changes for explanation and cannot alter the mutation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlannedOperation {
+    pub operation: PlannedOp,
+    #[serde(default)]
+    pub metadata: OperationMetadata,
+}
+
+impl PlannedOperation {
+    pub fn plain(operation: PlannedOp) -> Self {
+        Self {
+            operation,
+            metadata: OperationMetadata::default(),
+        }
+    }
+}
+
+impl From<PlannedOp> for PlannedOperation {
+    fn from(operation: PlannedOp) -> Self {
+        Self::plain(operation)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VerificationDefinition {
-    NoNewFormulaErrors { id: String, label: Option<String> },
+    NoNewFormulaErrors {
+        id: String,
+        label: Option<String>,
+    },
+    #[serde(rename = "gross_minus_group_equals_preview")]
+    RetainedTotal {
+        id: String,
+        label: Option<String>,
+        source_range: CellRange,
+        amount_column: usize,
+        excluded_group: GroupId,
+        tolerance: f64,
+        currency: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,7 +393,7 @@ pub struct OperationPlan {
     pub producer: PlanProducer,
     pub title: String,
     pub description: Option<String>,
-    pub operations: Vec<PlannedOp>,
+    pub operations: Vec<PlannedOperation>,
     pub groups: Vec<OperationGroup>,
     pub changes: Vec<MaterializedChange>,
     pub affected_ranges: Vec<AffectedRange>,
@@ -360,7 +415,7 @@ pub struct OperationPlanRequest {
     pub producer: PlanProducer,
     pub title: String,
     pub description: Option<String>,
-    pub operations: Vec<PlannedOp>,
+    pub operations: Vec<PlannedOperation>,
     pub groups: Vec<OperationGroup>,
     pub verification: Vec<VerificationDefinition>,
 }
@@ -472,7 +527,10 @@ impl PreparedOperationPlan {
         let source_sheet = source
             .sheet(sheet_index)
             .ok_or(PlanError::SourceSheetMissing)?;
-        let operations = normalize_operations(source_sheet, request.operations)?;
+        validate_plan_metadata(source_sheet, &request.operations, &request.groups)?;
+        validate_verification_definitions(source_sheet, &request.verification, &request.groups)?;
+        let normalized = normalize_operations(source_sheet, request.operations)?;
+        let operations = normalized.operations;
         let source_fingerprint = workbook_fingerprint(source);
         let plan_hash = compute_plan_hash(
             OPERATION_PLAN_CONTRACT_VERSION,
@@ -511,7 +569,18 @@ impl PreparedOperationPlan {
                 is_formula_error(&change.after.display) && !is_formula_error(&change.before.display)
             })
             .count();
-        let verification = request
+        let retained_verification_ids: HashSet<_> = request
+            .verification
+            .iter()
+            .filter_map(|definition| match definition {
+                VerificationDefinition::RetainedTotal { id, .. } => Some(id.clone()),
+                VerificationDefinition::NoNewFormulaErrors { .. } => None,
+            })
+            .collect();
+        let preview_sheet = preview
+            .sheet_by_id(request.source_sheet_id)
+            .ok_or(PlanError::SourceSheetMissing)?;
+        let verification: Vec<_> = request
             .verification
             .into_iter()
             .map(|definition| match definition {
@@ -525,16 +594,51 @@ impl PreparedOperationPlan {
                     },
                     evidence: format!("{new_errors} new formula error(s)"),
                 },
+                VerificationDefinition::RetainedTotal {
+                    id,
+                    label,
+                    source_range,
+                    amount_column,
+                    excluded_group,
+                    tolerance,
+                    currency,
+                } => evaluate_retained_total(
+                    source_sheet,
+                    preview_sheet,
+                    &row_lineage,
+                    &operations,
+                    id,
+                    label,
+                    source_range,
+                    amount_column,
+                    &excluded_group,
+                    tolerance,
+                    &currency,
+                ),
             })
             .collect();
 
-        let mut problems = Vec::new();
+        let mut problems = normalized.problems;
         if new_errors > 0 {
             problems.push(PlanProblem {
                 code: "new_formula_errors".into(),
                 message: format!("The preview introduces {new_errors} new formula error(s)."),
                 severity: ProblemSeverity::Blocking,
             });
+        }
+        for result in &verification {
+            if retained_verification_ids.contains(&result.id)
+                && matches!(
+                    result.status,
+                    VerificationStatus::Failed | VerificationStatus::Unknown
+                )
+            {
+                problems.push(PlanProblem {
+                    code: "retained_total_verification_failed".into(),
+                    message: format!("Verification '{}': {}", result.id, result.evidence),
+                    severity: ProblemSeverity::Blocking,
+                });
+            }
         }
         if !report.errors.is_empty() || (report.scc_count > 0 && !report.converged) {
             problems.push(PlanProblem {
@@ -705,21 +809,31 @@ impl PreparedOperationPlan {
     }
 }
 
+struct NormalizationResult {
+    operations: Vec<PlannedOperation>,
+    problems: Vec<PlanProblem>,
+}
+
 fn normalize_operations(
     sheet: &Sheet,
-    operations: Vec<PlannedOp>,
-) -> Result<Vec<PlannedOp>, PlanError> {
+    operations: Vec<PlannedOperation>,
+) -> Result<NormalizationResult, PlanError> {
     if operations.len() > MAX_PLAN_OPERATIONS {
         return Err(PlanError::OperationLimitExceeded {
             limit: MAX_PLAN_OPERATIONS,
         });
     }
 
-    let mut cell_writes: BTreeMap<CellCoordinate, PlannedOp> = BTreeMap::new();
+    let mut cell_writes: BTreeMap<CellCoordinate, PlannedOperation> = BTreeMap::new();
     let mut styles = Vec::new();
     let mut deletes = Vec::new();
+    let mut rows_deleted = 0usize;
     let mut expanded_cell_touches = 0usize;
-    for operation in operations {
+    for planned in operations {
+        let PlannedOperation {
+            operation,
+            metadata,
+        } = planned;
         match operation {
             PlannedOp::SetCellValue { coordinate, value } => {
                 expanded_cell_touches = expanded_cell_touches.saturating_add(1);
@@ -729,7 +843,13 @@ fn normalize_operations(
                         "cell numbers must be finite".into(),
                     ));
                 }
-                cell_writes.insert(coordinate, PlannedOp::SetCellValue { coordinate, value });
+                cell_writes.insert(
+                    coordinate,
+                    PlannedOperation {
+                        operation: PlannedOp::SetCellValue { coordinate, value },
+                        metadata,
+                    },
+                );
             }
             PlannedOp::SetCellFormula {
                 coordinate,
@@ -744,16 +864,25 @@ fn normalize_operations(
                 }
                 cell_writes.insert(
                     coordinate,
-                    PlannedOp::SetCellFormula {
-                        coordinate,
-                        formula,
+                    PlannedOperation {
+                        operation: PlannedOp::SetCellFormula {
+                            coordinate,
+                            formula,
+                        },
+                        metadata,
                     },
                 );
             }
             PlannedOp::ClearCell { coordinate } => {
                 expanded_cell_touches = expanded_cell_touches.saturating_add(1);
                 validate_coordinate(sheet, coordinate)?;
-                cell_writes.insert(coordinate, PlannedOp::ClearCell { coordinate });
+                cell_writes.insert(
+                    coordinate,
+                    PlannedOperation {
+                        operation: PlannedOp::ClearCell { coordinate },
+                        metadata,
+                    },
+                );
             }
             PlannedOp::ClearRange { range } => {
                 let range = range.normalized();
@@ -770,7 +899,13 @@ fn normalize_operations(
                 for row in range.start.row..=range.end.row {
                     for col in range.start.col..=range.end.col {
                         let coordinate = CellCoordinate { row, col };
-                        cell_writes.insert(coordinate, PlannedOp::ClearCell { coordinate });
+                        cell_writes.insert(
+                            coordinate,
+                            PlannedOperation {
+                                operation: PlannedOp::ClearCell { coordinate },
+                                metadata: metadata.clone(),
+                            },
+                        );
                     }
                 }
             }
@@ -791,7 +926,10 @@ fn normalize_operations(
                         .any(|col| sheet.get_format(row, col).cell_style != style)
                 });
                 if changes_any_cell {
-                    styles.push(PlannedOp::SetCellStyle { range, style });
+                    styles.push(PlannedOperation {
+                        operation: PlannedOp::SetCellStyle { range, style },
+                        metadata,
+                    });
                 }
             }
             PlannedOp::DeleteRows { at, count } => {
@@ -800,7 +938,18 @@ fn normalize_operations(
                         "row deletion is outside the sheet".into(),
                     ));
                 }
-                deletes.push((at, count));
+                if count > MAX_DELETE_ROWS_PER_OPERATION {
+                    return Err(PlanError::InvalidOperation(format!(
+                        "row deletion exceeds {MAX_DELETE_ROWS_PER_OPERATION} rows per operation"
+                    )));
+                }
+                rows_deleted = rows_deleted.saturating_add(count);
+                if rows_deleted > MAX_ROWS_DELETED {
+                    return Err(PlanError::InvalidOperation(format!(
+                        "plan deletes more than {MAX_ROWS_DELETED} rows"
+                    )));
+                }
+                deletes.push((at, count, metadata));
             }
             PlannedOp::InsertRows { .. } => {
                 return Err(PlanError::UnsupportedOperation(
@@ -820,7 +969,7 @@ fn normalize_operations(
         }
     }
 
-    deletes.sort_unstable_by_key(|(at, _)| *at);
+    deletes.sort_by_key(|(at, _, _)| *at);
     for pair in deletes.windows(2) {
         if pair[0].0 + pair[0].1 > pair[1].0 {
             return Err(PlanError::InvalidOperation("row deletions overlap".into()));
@@ -829,14 +978,18 @@ fn normalize_operations(
     let deleted = |row: usize| {
         deletes
             .iter()
-            .any(|(at, count)| row >= *at && row < at + count)
+            .any(|(at, count, _)| row >= *at && row < at + count)
     };
+    let dropped_writes = cell_writes
+        .keys()
+        .filter(|coordinate| deleted(coordinate.row))
+        .count();
     cell_writes.retain(|coordinate, operation| {
         if deleted(coordinate.row) {
             return false;
         }
         let before = CellSnapshot::from_sheet(sheet, coordinate.row, coordinate.col);
-        match operation {
+        match &operation.operation {
             PlannedOp::SetCellValue { value, .. } => before.raw != value.as_input(),
             PlannedOp::SetCellFormula { formula, .. } => before.raw != *formula,
             PlannedOp::ClearCell { .. } => before != CellSnapshot::empty(),
@@ -846,13 +999,30 @@ fn normalize_operations(
 
     let mut normalized: Vec<_> = cell_writes.into_values().collect();
     normalized.extend(styles);
-    deletes.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+    deletes.sort_unstable_by_key(|delete| std::cmp::Reverse(delete.0));
     normalized.extend(
         deletes
             .into_iter()
-            .map(|(at, count)| PlannedOp::DeleteRows { at, count }),
+            .map(|(at, count, metadata)| PlannedOperation {
+                operation: PlannedOp::DeleteRows { at, count },
+                metadata,
+            }),
     );
-    Ok(normalized)
+    let problems = if dropped_writes == 0 {
+        Vec::new()
+    } else {
+        vec![PlanProblem {
+            code: "write_to_deleted_row_dropped".into(),
+            message: format!(
+                "Normalization dropped {dropped_writes} write(s) targeting rows deleted by this plan."
+            ),
+            severity: ProblemSeverity::Warning,
+        }]
+    };
+    Ok(NormalizationResult {
+        operations: normalized,
+        problems,
+    })
 }
 
 fn validate_coordinate(sheet: &Sheet, coordinate: CellCoordinate) -> Result<(), PlanError> {
@@ -866,17 +1036,296 @@ fn validate_coordinate(sheet: &Sheet, coordinate: CellCoordinate) -> Result<(), 
     }
 }
 
+fn validate_plan_metadata(
+    sheet: &Sheet,
+    operations: &[PlannedOperation],
+    groups: &[OperationGroup],
+) -> Result<(), PlanError> {
+    if groups.len() > MAX_PLAN_GROUPS {
+        return Err(PlanError::InvalidOperation(format!(
+            "plan has more than {MAX_PLAN_GROUPS} review groups"
+        )));
+    }
+
+    let mut group_ids = HashSet::new();
+    for group in groups {
+        validate_text_bytes("group id", &group.id.0, MAX_ID_BYTES)?;
+        validate_text_bytes("group title", &group.title, MAX_LABEL_BYTES)?;
+        if group.id.0.trim().is_empty() || group.title.trim().is_empty() {
+            return Err(PlanError::InvalidOperation(
+                "review group ids and titles must not be empty".into(),
+            ));
+        }
+        if !group_ids.insert(group.id.0.as_str()) {
+            return Err(PlanError::InvalidOperation(format!(
+                "duplicate review group id '{}'",
+                group.id.0
+            )));
+        }
+        if let Some(description) = &group.description {
+            validate_text_bytes("group description", description, MAX_METADATA_TEXT_BYTES)?;
+        }
+    }
+
+    for planned in operations {
+        if let Some(group_id) = &planned.metadata.group_id {
+            if !group_ids.contains(group_id.0.as_str()) {
+                return Err(PlanError::InvalidOperation(format!(
+                    "operation references unknown review group '{}'",
+                    group_id.0
+                )));
+            }
+        }
+        if let Some(reason) = &planned.metadata.reason {
+            validate_text_bytes("operation reason", &reason.0, MAX_METADATA_TEXT_BYTES)?;
+        }
+        if planned.metadata.sources.len() > MAX_SOURCES_PER_OPERATION {
+            return Err(PlanError::InvalidOperation(format!(
+                "operation has more than {MAX_SOURCES_PER_OPERATION} source references"
+            )));
+        }
+        for source in &planned.metadata.sources {
+            validate_text_bytes("source reference", source, MAX_SOURCE_REFERENCE_BYTES)?;
+            validate_source_reference(sheet, source)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_verification_definitions(
+    sheet: &Sheet,
+    definitions: &[VerificationDefinition],
+    groups: &[OperationGroup],
+) -> Result<(), PlanError> {
+    if definitions.len() > MAX_VERIFICATION_DEFINITIONS {
+        return Err(PlanError::InvalidOperation(format!(
+            "plan has more than {MAX_VERIFICATION_DEFINITIONS} verification definitions"
+        )));
+    }
+    let group_ids: HashSet<_> = groups.iter().map(|group| &group.id).collect();
+    let mut ids = HashSet::new();
+    for definition in definitions {
+        let id = match definition {
+            VerificationDefinition::NoNewFormulaErrors { id, label } => {
+                if let Some(label) = label {
+                    validate_text_bytes("verification label", label, MAX_LABEL_BYTES)?;
+                }
+                id
+            }
+            VerificationDefinition::RetainedTotal {
+                id,
+                label,
+                source_range,
+                amount_column,
+                excluded_group,
+                tolerance,
+                currency,
+            } => {
+                if let Some(label) = label {
+                    validate_text_bytes("verification label", label, MAX_LABEL_BYTES)?;
+                }
+                let range = source_range.normalized();
+                validate_coordinate(sheet, range.start)?;
+                validate_coordinate(sheet, range.end)?;
+                if *amount_column >= sheet.cols
+                    || *amount_column < range.start.col
+                    || *amount_column > range.end.col
+                {
+                    return Err(PlanError::InvalidOperation(
+                        "retained-total amount column is outside the source range".into(),
+                    ));
+                }
+                if !group_ids.contains(excluded_group) {
+                    return Err(PlanError::InvalidOperation(format!(
+                        "retained-total verification references unknown group '{}'",
+                        excluded_group.0
+                    )));
+                }
+                if !tolerance.is_finite() || *tolerance < 0.0 {
+                    return Err(PlanError::InvalidOperation(
+                        "retained-total tolerance must be finite and nonnegative".into(),
+                    ));
+                }
+                if currency.len() != 3
+                    || !currency.bytes().all(|byte| byte.is_ascii_alphabetic())
+                {
+                    return Err(PlanError::InvalidOperation(
+                        "verification currency must be a three-letter code".into(),
+                    ));
+                }
+                id
+            }
+        };
+        validate_text_bytes("verification id", id, MAX_ID_BYTES)?;
+        if id.trim().is_empty() || !ids.insert(id.as_str()) {
+            return Err(PlanError::InvalidOperation(
+                "verification ids must be nonempty and unique".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_retained_total(
+    source: &Sheet,
+    preview: &Sheet,
+    lineage: &[ReviewRowLineage],
+    operations: &[PlannedOperation],
+    id: String,
+    label: Option<String>,
+    source_range: CellRange,
+    amount_column: usize,
+    excluded_group: &GroupId,
+    tolerance: f64,
+    currency: &str,
+) -> VerificationResult {
+    let range = source_range.normalized();
+    let mut gross_source = 0.0;
+    let mut classified_exclusions = 0.0;
+    let mut preview_retained = 0.0;
+
+    for row in lineage.iter().filter(|row| {
+        row.before_data_row
+            .is_some_and(|before| before >= range.start.row && before <= range.end.row)
+    }) {
+        let before_row = row.before_data_row.expect("filtered to source rows");
+        let amount = match strict_numeric_amount(source, before_row, amount_column) {
+            Ok(amount) => amount.unwrap_or(0.0),
+            Err(reason) => {
+                return VerificationResult {
+                    id,
+                    label,
+                    status: VerificationStatus::Unknown,
+                    evidence: format!("source row {}: {reason}", before_row + 1),
+                };
+            }
+        };
+        gross_source += amount;
+
+        if row.state == ReviewRowState::Deleted {
+            let is_classified = operations.iter().any(|planned| {
+                matches!(
+                    planned.operation,
+                    PlannedOp::DeleteRows { at, count }
+                        if before_row >= at && before_row < at + count
+                ) && planned.metadata.group_id.as_ref() == Some(excluded_group)
+            });
+            if is_classified {
+                classified_exclusions += amount;
+            }
+        } else if let Some(after_row) = row.after_data_row {
+            match strict_numeric_amount(preview, after_row, amount_column) {
+                Ok(Some(amount)) => preview_retained += amount,
+                Ok(None) => {}
+                Err(reason) => {
+                    return VerificationResult {
+                        id,
+                        label,
+                        status: VerificationStatus::Unknown,
+                        evidence: format!("preview row {}: {reason}", after_row + 1),
+                    };
+                }
+            }
+        }
+    }
+
+    let expected_retained = gross_source - classified_exclusions;
+    let difference = (expected_retained - preview_retained).abs();
+    VerificationResult {
+        id,
+        label,
+        status: if difference <= tolerance {
+            VerificationStatus::Passed
+        } else {
+            VerificationStatus::Failed
+        },
+        evidence: format!(
+            "gross={gross_source:.2} {currency}; exclusions={classified_exclusions:.2} {currency}; expected={expected_retained:.2} {currency}; preview={preview_retained:.2} {currency}; difference={difference:.2}"
+        ),
+    }
+}
+
+fn strict_numeric_amount(sheet: &Sheet, row: usize, col: usize) -> Result<Option<f64>, String> {
+    use crate::formula::eval::Value;
+
+    match sheet.get_computed_value(row, col) {
+        Value::Empty => Ok(None),
+        Value::Number(value) if value.is_finite() => Ok(Some(value)),
+        Value::Number(_) => Err("amount is not finite".into()),
+        Value::Text(value) if value.is_empty() => Ok(None),
+        Value::Text(_) => Err("amount is nonnumeric text".into()),
+        Value::Boolean(_) => Err("amount is boolean".into()),
+        Value::Error(error) => Err(format!("amount contains {error}")),
+    }
+}
+
+fn validate_text_bytes(label: &str, value: &str, limit: usize) -> Result<(), PlanError> {
+    if value.len() > limit {
+        return Err(PlanError::InvalidOperation(format!(
+            "{label} exceeds {limit} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_source_reference(sheet: &Sheet, source: &str) -> Result<(), PlanError> {
+    let mut endpoints = source.split(':');
+    let Some(start) = endpoints.next().and_then(parse_a1_coordinate) else {
+        return Err(PlanError::InvalidOperation(format!(
+            "invalid same-sheet source reference '{source}'"
+        )));
+    };
+    let end = match endpoints.next() {
+        Some(value) => parse_a1_coordinate(value).ok_or_else(|| {
+            PlanError::InvalidOperation(format!("invalid same-sheet source reference '{source}'"))
+        })?,
+        None => start,
+    };
+    if endpoints.next().is_some() {
+        return Err(PlanError::InvalidOperation(format!(
+            "invalid same-sheet source reference '{source}'"
+        )));
+    }
+    validate_coordinate(sheet, start)?;
+    validate_coordinate(sheet, end)
+}
+
+fn parse_a1_coordinate(value: &str) -> Option<CellCoordinate> {
+    if value.is_empty() || !value.is_ascii() {
+        return None;
+    }
+    let letters = value.bytes().take_while(u8::is_ascii_alphabetic).count();
+    if letters == 0 || letters == value.len() {
+        return None;
+    }
+    let mut col = 0usize;
+    for byte in value.bytes().take(letters) {
+        col = col
+            .checked_mul(26)?
+            .checked_add((byte.to_ascii_uppercase() - b'A' + 1) as usize)?;
+    }
+    let row = value[letters..].parse::<usize>().ok()?;
+    if row == 0 {
+        return None;
+    }
+    Some(CellCoordinate {
+        row: row - 1,
+        col: col - 1,
+    })
+}
+
 fn apply_operations(
     workbook: &mut Workbook,
     sheet_id: SheetId,
-    operations: &[PlannedOp],
+    operations: &[PlannedOperation],
 ) -> Result<crate::recalc::RecalcReport, PlanError> {
     let sheet_index = workbook
         .sheet_index_by_id(sheet_id)
         .ok_or(PlanError::SourceSheetMissing)?;
     workbook.begin_batch();
-    for operation in operations {
-        match operation {
+    for planned in operations {
+        match &planned.operation {
             PlannedOp::SetCellValue { coordinate, value } => {
                 workbook.set_cell_value_tracked(
                     sheet_index,
@@ -929,8 +1378,8 @@ fn apply_operations(
     }
     workbook.end_batch();
 
-    for operation in operations {
-        if let PlannedOp::DeleteRows { at, count } = operation {
+    for planned in operations {
+        if let PlannedOp::DeleteRows { at, count } = &planned.operation {
             workbook
                 .structural_edit(sheet_index, Axis::Row, *at, *count, true)
                 .map_err(PlanError::InvalidOperation)?;
@@ -939,17 +1388,17 @@ fn apply_operations(
     Ok(workbook.recompute_full_ordered())
 }
 
-fn build_row_lineage(row_count: usize, operations: &[PlannedOp]) -> Vec<ReviewRowLineage> {
+fn build_row_lineage(row_count: usize, operations: &[PlannedOperation]) -> Vec<ReviewRowLineage> {
     let deletes: Vec<(usize, usize)> = operations
         .iter()
-        .filter_map(|operation| match operation {
+        .filter_map(|planned| match &planned.operation {
             PlannedOp::DeleteRows { at, count } => Some((*at, *count)),
             _ => None,
         })
         .collect();
     let changed_rows: HashSet<usize> = operations
         .iter()
-        .filter_map(|operation| match operation {
+        .filter_map(|planned| match &planned.operation {
             PlannedOp::SetCellValue { coordinate, .. }
             | PlannedOp::SetCellFormula { coordinate, .. }
             | PlannedOp::ClearCell { coordinate } => Some(coordinate.row),
@@ -988,20 +1437,22 @@ fn materialize_changes(
     before: &Workbook,
     after: &Workbook,
     source_sheet_id: SheetId,
-    operations: &[PlannedOp],
+    operations: &[PlannedOperation],
     lineage: &[ReviewRowLineage],
 ) -> Result<Vec<MaterializedChange>, PlanError> {
-    let direct_cells: BTreeSet<CellCoordinate> = operations
+    let direct_metadata: BTreeMap<CellCoordinate, OperationMetadata> = operations
         .iter()
-        .flat_map(|operation| match operation {
+        .flat_map(|planned| match &planned.operation {
             PlannedOp::SetCellValue { coordinate, .. }
             | PlannedOp::SetCellFormula { coordinate, .. }
-            | PlannedOp::ClearCell { coordinate } => vec![*coordinate],
+            | PlannedOp::ClearCell { coordinate } => {
+                vec![(*coordinate, planned.metadata.clone())]
+            }
             PlannedOp::SetCellStyle { range, .. } => {
                 let mut cells = Vec::new();
                 for row in range.start.row..=range.end.row {
                     for col in range.start.col..=range.end.col {
-                        cells.push(CellCoordinate { row, col });
+                        cells.push((CellCoordinate { row, col }, planned.metadata.clone()));
                     }
                 }
                 cells
@@ -1021,6 +1472,17 @@ fn materialize_changes(
                     .before_data_row
                     .expect("source lineage always has before row");
                 if row.state == ReviewRowState::Deleted {
+                    let metadata = operations
+                        .iter()
+                        .find_map(|planned| match &planned.operation {
+                            PlannedOp::DeleteRows { at, count }
+                                if before_row >= *at && before_row < at + count =>
+                            {
+                                Some(&planned.metadata)
+                            }
+                            _ => None,
+                        })
+                        .expect("deleted row has normalized deletion metadata");
                     push_materialized_change(
                         &mut changes,
                         MaterializedChange {
@@ -1035,9 +1497,9 @@ fn materialize_changes(
                             cause: ChangeCause::Direct,
                             before: CellSnapshot::empty(),
                             after: CellSnapshot::empty(),
-                            group_id: None,
-                            reason: None,
-                            sources: Vec::new(),
+                            group_id: metadata.group_id.clone(),
+                            reason: metadata.reason.clone(),
+                            sources: metadata.sources.clone(),
                         },
                     )?;
                     let mut coordinates: Vec<_> = before_sheet
@@ -1061,9 +1523,9 @@ fn materialize_changes(
                                     cause: ChangeCause::Direct,
                                     before: old,
                                     after: CellSnapshot::empty(),
-                                    group_id: None,
-                                    reason: None,
-                                    sources: Vec::new(),
+                                    group_id: metadata.group_id.clone(),
+                                    reason: metadata.reason.clone(),
+                                    sources: metadata.sources.clone(),
                                 },
                             )?;
                         }
@@ -1103,7 +1565,7 @@ fn materialize_changes(
                         after_coordinate,
                         CellSnapshot::from_sheet(before_sheet, before_row, col),
                         CellSnapshot::from_sheet(after_sheet, after_row, col),
-                        direct_cells.contains(&before_coordinate),
+                        direct_metadata.get(&before_coordinate),
                     )?;
                 }
             }
@@ -1170,7 +1632,7 @@ fn push_cell_change(
     after_coordinate: CellCoordinate,
     before: CellSnapshot,
     after: CellSnapshot,
-    direct: bool,
+    direct_metadata: Option<&OperationMetadata>,
 ) -> Result<(), PlanError> {
     if before == after {
         return Ok(());
@@ -1196,16 +1658,18 @@ fn push_cell_change(
             before_coordinate: Some(before_coordinate),
             after_coordinate: Some(after_coordinate),
             kind,
-            cause: if direct {
+            cause: if direct_metadata.is_some() {
                 ChangeCause::Direct
             } else {
                 ChangeCause::Recalculated
             },
             before,
             after,
-            group_id: None,
-            reason: None,
-            sources: Vec::new(),
+            group_id: direct_metadata.and_then(|metadata| metadata.group_id.clone()),
+            reason: direct_metadata.and_then(|metadata| metadata.reason.clone()),
+            sources: direct_metadata
+                .map(|metadata| metadata.sources.clone())
+                .unwrap_or_default(),
         },
     )
 }
@@ -1278,7 +1742,7 @@ struct PlanHashInput<'a> {
     source_sheet_id: SheetId,
     source_revision: u64,
     execution_context: &'a ExecutionContextFingerprint,
-    operations: &'a [PlannedOp],
+    operations: Vec<&'a PlannedOp>,
 }
 
 fn compute_plan_hash(
@@ -1287,8 +1751,12 @@ fn compute_plan_hash(
     source_sheet_id: SheetId,
     source_revision: u64,
     execution_context: &ExecutionContextFingerprint,
-    operations: &[PlannedOp],
+    operations: &[PlannedOperation],
 ) -> String {
+    let operations = operations
+        .iter()
+        .map(|planned| &planned.operation)
+        .collect();
     hash_serializable(&PlanHashInput {
         contract_version,
         workbook_session_id,
@@ -1299,6 +1767,9 @@ fn compute_plan_hash(
     })
 }
 
+/// Hash all workbook state used by plan materialization. This is deliberately
+/// complete and therefore O(populated cells); long-lived callers such as MCP
+/// should retain prepared plans instead of polling by recomputing this hash.
 pub fn workbook_fingerprint(workbook: &Workbook) -> String {
     let mut hasher = Sha256::new();
     let mut named_ranges = workbook.named_ranges().list();
@@ -1372,7 +1843,7 @@ mod tests {
             },
             title: "Test plan".into(),
             description: None,
-            operations,
+            operations: operations.into_iter().map(Into::into).collect(),
             groups: Vec::new(),
             verification: vec![VerificationDefinition::NoNewFormulaErrors {
                 id: "errors".into(),
@@ -1560,7 +2031,7 @@ mod tests {
             ),
         )
         .unwrap();
-        prepared.plan.operations[0] = PlannedOp::SetCellValue {
+        prepared.plan.operations[0].operation = PlannedOp::SetCellValue {
             coordinate: CellCoordinate { row: 0, col: 0 },
             value: PlannedCellValue::Text("tampered".into()),
         };
@@ -1632,6 +2103,215 @@ mod tests {
             PlanError::MaterializedChangeLimitExceeded {
                 limit: MAX_MATERIALIZED_CHANGES
             }
+        );
+    }
+
+    #[test]
+    fn v1_delete_primitive_limit_is_enforced() {
+        let workbook = Workbook::new();
+        let result = PreparedOperationPlan::materialize(
+            &workbook,
+            request(
+                &workbook,
+                vec![PlannedOp::DeleteRows {
+                    at: 0,
+                    count: MAX_DELETE_ROWS_PER_OPERATION + 1,
+                }],
+            ),
+        );
+        assert!(
+            matches!(result, Err(PlanError::InvalidOperation(message)) if message.contains("1000"))
+        );
+    }
+
+    #[test]
+    fn v1_total_deleted_row_limit_is_enforced() {
+        let workbook = Workbook::from_sheets(
+            vec![Sheet::new(SheetId::from_raw(1), 70_000, 10)],
+            0,
+        );
+        let operations = (0..66)
+            .map(|block| {
+                PlannedOperation::plain(PlannedOp::DeleteRows {
+                    at: block * 1_000,
+                    count: 1_000,
+                })
+            })
+            .collect();
+        let result = normalize_operations(workbook.active_sheet(), operations);
+        assert!(
+            matches!(result, Err(PlanError::InvalidOperation(message)) if message.contains("65536"))
+        );
+    }
+
+    #[test]
+    fn writes_to_rows_deleted_by_the_same_plan_are_reported() {
+        let mut workbook = Workbook::new();
+        workbook.set_cell_value_tracked(0, 1, 0, "before");
+        let prepared = PreparedOperationPlan::materialize(
+            &workbook,
+            request(
+                &workbook,
+                vec![
+                    PlannedOp::SetCellValue {
+                        coordinate: CellCoordinate { row: 1, col: 0 },
+                        value: PlannedCellValue::Text("never visible".into()),
+                    },
+                    PlannedOp::DeleteRows { at: 1, count: 1 },
+                ],
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.plan().operations.len(), 1);
+        assert!(prepared.plan().problems.iter().any(|problem| {
+            problem.code == "write_to_deleted_row_dropped"
+                && problem.severity == ProblemSeverity::Warning
+        }));
+    }
+
+    #[test]
+    fn review_metadata_reaches_direct_changes_but_not_the_execution_hash() {
+        let workbook = Workbook::new();
+        let mut first = request(&workbook, Vec::new());
+        first.groups = vec![OperationGroup {
+            id: GroupId("cleanup".into()),
+            title: "Cleanup".into(),
+            description: None,
+        }];
+        first.operations = vec![PlannedOperation {
+            operation: PlannedOp::SetCellValue {
+                coordinate: CellCoordinate { row: 0, col: 0 },
+                value: PlannedCellValue::Text("after".into()),
+            },
+            metadata: OperationMetadata {
+                group_id: Some(GroupId("cleanup".into())),
+                reason: Some(ProducerClaim("First explanation".into())),
+                sources: vec!["A2".into()],
+            },
+        }];
+        let mut second = first.clone();
+        second.operations[0].metadata.reason = Some(ProducerClaim("Reworded".into()));
+
+        let first = PreparedOperationPlan::materialize(&workbook, first).unwrap();
+        let second = PreparedOperationPlan::materialize(&workbook, second).unwrap();
+        assert_eq!(first.plan().plan_hash, second.plan().plan_hash);
+        let change = first
+            .plan()
+            .changes
+            .iter()
+            .find(|change| change.after_coordinate == Some(CellCoordinate { row: 0, col: 0 }))
+            .unwrap();
+        assert_eq!(change.group_id, Some(GroupId("cleanup".into())));
+        assert_eq!(
+            change.reason,
+            Some(ProducerClaim("First explanation".into()))
+        );
+        assert_eq!(change.sources, vec!["A2"]);
+    }
+
+    #[test]
+    fn retained_total_is_computed_from_typed_source_and_preview_values() {
+        let mut workbook = Workbook::new();
+        for (row, value) in [(1, "100"), (2, "200"), (3, "100"), (5, "50")] {
+            workbook.set_cell_value_tracked(0, row, 2, value);
+        }
+        let duplicate_group = OperationGroup {
+            id: GroupId("exact_duplicates".into()),
+            title: "Exact duplicates".into(),
+            description: None,
+        };
+        let empty_group = OperationGroup {
+            id: GroupId("empty_rows".into()),
+            title: "Empty rows".into(),
+            description: None,
+        };
+        let mut request = request(&workbook, Vec::new());
+        request.groups = vec![duplicate_group.clone(), empty_group.clone()];
+        request.operations = vec![
+            PlannedOperation {
+                operation: PlannedOp::DeleteRows { at: 3, count: 1 },
+                metadata: OperationMetadata {
+                    group_id: Some(duplicate_group.id.clone()),
+                    reason: Some(ProducerClaim("Duplicate transaction".into())),
+                    sources: vec!["A2:C2".into(), "A4:C4".into()],
+                },
+            },
+            PlannedOperation {
+                operation: PlannedOp::DeleteRows { at: 4, count: 1 },
+                metadata: OperationMetadata {
+                    group_id: Some(empty_group.id.clone()),
+                    reason: Some(ProducerClaim("Empty transaction row".into())),
+                    sources: vec!["A5:C5".into()],
+                },
+            },
+        ];
+        request.verification = vec![VerificationDefinition::RetainedTotal {
+            id: "retained_payments".into(),
+            label: Some("Retained payments".into()),
+            source_range: CellRange {
+                start: CellCoordinate { row: 1, col: 0 },
+                end: CellCoordinate { row: 5, col: 2 },
+            },
+            amount_column: 2,
+            excluded_group: duplicate_group.id,
+            tolerance: 0.01,
+            currency: "USD".into(),
+        }];
+
+        let prepared = PreparedOperationPlan::materialize(&workbook, request).unwrap();
+        let verification = &prepared.plan().verification[0];
+        assert_eq!(verification.status, VerificationStatus::Passed);
+        assert!(verification.evidence.contains("expected=350.00 USD"));
+        assert!(verification.evidence.contains("preview=350.00 USD"));
+        let deletion = prepared
+            .plan()
+            .changes
+            .iter()
+            .find(|change| {
+                change.kind == ChangeKind::RowDeleted
+                    && change.group_id == Some(GroupId("exact_duplicates".into()))
+            })
+            .unwrap();
+        assert_eq!(deletion.sources, vec!["A2:C2", "A4:C4"]);
+        assert!(!prepared
+            .plan()
+            .problems
+            .iter()
+            .any(|problem| problem.severity == ProblemSeverity::Blocking));
+    }
+
+    #[test]
+    fn nonnumeric_retained_amount_is_unknown_and_blocks_apply() {
+        let mut workbook = Workbook::new();
+        workbook.set_cell_value_tracked(0, 1, 2, "not an amount");
+        let mut request = request(&workbook, Vec::new());
+        request.groups = vec![OperationGroup {
+            id: GroupId("duplicates".into()),
+            title: "Duplicates".into(),
+            description: None,
+        }];
+        request.verification = vec![VerificationDefinition::RetainedTotal {
+            id: "retained".into(),
+            label: None,
+            source_range: CellRange {
+                start: CellCoordinate { row: 1, col: 0 },
+                end: CellCoordinate { row: 1, col: 2 },
+            },
+            amount_column: 2,
+            excluded_group: GroupId("duplicates".into()),
+            tolerance: 0.01,
+            currency: "USD".into(),
+        }];
+
+        let prepared = PreparedOperationPlan::materialize(&workbook, request).unwrap();
+        assert_eq!(
+            prepared.plan().verification[0].status,
+            VerificationStatus::Unknown
+        );
+        assert_eq!(
+            prepared.verify_candidate(&workbook, &context()).unwrap_err(),
+            PlanError::BlockingProblems
         );
     }
 
