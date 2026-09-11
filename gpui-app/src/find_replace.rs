@@ -431,6 +431,7 @@ impl Spreadsheet {
     /// Replace the current match and move to next
     /// In Find-only mode, this just does FindNext
     pub fn replace_next(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         // In Find-only mode, Enter does FindNext
         if !self.find_replace_mode {
             self.find_next(cx);
@@ -490,6 +491,7 @@ impl Spreadsheet {
 
     /// Replace all matches at once
     pub fn replace_all(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         if self.find_results.is_empty() || !self.find_replace_mode {
             return;
         }

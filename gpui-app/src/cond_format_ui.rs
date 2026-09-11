@@ -204,6 +204,7 @@ fn override_from_explicit(format: &CellFormat) -> CellFormatOverride {
 impl Spreadsheet {
     /// Open the Add Conditional Format dialog for the current selection.
     pub fn show_add_cond_format(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         if self.mode.is_editing() {
             return;
         }
@@ -221,6 +222,7 @@ impl Spreadsheet {
     }
 
     pub fn hide_add_cond_format(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         // Cancel: withdraw the live-preview rule, if any
         if let Some(id) = self.cf_preview_id.take() {
             let sheet_index = self.sheet_index(cx);
@@ -251,6 +253,7 @@ impl Spreadsheet {
     }
 
     pub fn cf_input_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         self.cf_input.push(c);
         self.cf_input_error = None;
         self.update_cf_preview(cx);
@@ -258,6 +261,7 @@ impl Spreadsheet {
     }
 
     pub fn cf_input_backspace(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         self.cf_input.pop();
         self.cf_input_error = None;
         self.update_cf_preview(cx);
@@ -327,6 +331,7 @@ impl Spreadsheet {
     /// Commit the typed rule: promote the live-preview rule (already in
     /// the store and visible on the grid) into a permanent, undoable rule.
     pub fn confirm_add_cond_format(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let input = self.cf_input.clone();
         let sheet_index = self.sheet_index(cx);
 
@@ -416,6 +421,7 @@ impl Spreadsheet {
     /// Remove all conditional format rules that touch the current selection
     /// (or all rules on the sheet when the selection covers everything).
     pub fn clear_cond_formats_in_selection(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
         let sel = CellRange {
             start_row: min_row,
@@ -540,6 +546,7 @@ impl Spreadsheet {
     }
 
     pub fn toggle_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let sheet_index = self.sheet_index(cx);
         let before = self.cf_rules_snapshot(cx);
         let mut changed = false;
@@ -559,6 +566,7 @@ impl Spreadsheet {
     }
 
     pub fn delete_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let sheet_index = self.sheet_index(cx);
         let before = self.cf_rules_snapshot(cx);
         let mut removed = false;
@@ -577,6 +585,7 @@ impl Spreadsheet {
 
     /// Move a rule up (-1) or down (+1) in precedence order.
     pub fn move_cf_rule(&mut self, id: u64, delta: i32, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let sheet_index = self.sheet_index(cx);
         let before = self.cf_rules_snapshot(cx);
         let Some(pos) = before.iter().position(|r| r.id == id) else { return };
@@ -599,6 +608,7 @@ impl Spreadsheet {
     /// it cleanly instead of stacking); cancel restores it, confirm records
     /// a single undoable replacement.
     pub fn edit_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let sheet_index = self.sheet_index(cx);
         let rules = self.cf_rules_snapshot(cx);
         let Some(pos) = rules.iter().position(|r| r.id == id) else { return };

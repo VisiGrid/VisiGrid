@@ -1,9 +1,8 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use visigrid_engine::operation_plan::ProblemSeverity;
 
 use crate::app::Spreadsheet;
-use crate::review_mode::ReviewEndpoint;
+use crate::review_mode::{ReviewApplyStatus, ReviewEndpoint};
 use crate::terminal::state::PendingResult;
 use crate::theme::TokenKey;
 
@@ -29,12 +28,17 @@ pub fn render_review_action_bar(
     let plan = prepared.plan();
     let title = plan.title.clone();
     let total_changes = plan.summary.total_changes();
-    let blocking = plan
-        .problems
-        .iter()
-        .any(|problem| problem.severity == ProblemSeverity::Blocking);
-    let source_changed = app.workbook.read(cx).revision() != plan.source_revision;
-    let can_apply = !blocking && !source_changed;
+    let execution_context = crate::scripting::execution_context_fingerprint(
+        app.workbook.read(cx),
+        &plan.operations,
+    );
+    let apply_status = ReviewApplyStatus::evaluate(
+        prepared,
+        app.workbook.read(cx),
+        &execution_context,
+    );
+    let can_apply = apply_status.can_apply();
+    let disabled_reason = apply_status.disabled_reason();
 
     let panel_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
@@ -92,12 +96,24 @@ pub fn render_review_action_bar(
                         .text_color(text_primary)
                         .child(format!("Review changes · {title}")),
                 )
-                .when(source_changed, |row| {
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(if apply_status.determinism
+                            == visigrid_engine::operation_plan::DeterminismClass::Full
+                        {
+                            text_muted
+                        } else {
+                            warning
+                        })
+                        .child(apply_status.determinism_label()),
+                )
+                .when_some(disabled_reason, |row, reason| {
                     row.child(
                         div()
                             .text_size(px(10.0))
                             .text_color(warning)
-                            .child("Source changed · re-preview required"),
+                            .child(reason),
                     )
                 }),
         )

@@ -67,7 +67,9 @@ fn default_lua_verification() -> Vec<visigrid_engine::operation_plan::Verificati
 #[cfg(test)]
 mod review_plan_tests {
     use super::{default_lua_verification, prepare_lua_operation_plan};
-    use visigrid_engine::operation_plan::{ChangeKind, VerificationEvidence, VerificationStatus};
+    use visigrid_engine::operation_plan::{
+        ChangeKind, DeterminismClass, VerificationEvidence, VerificationStatus,
+    };
     use visigrid_engine::workbook::Workbook;
 
     #[test]
@@ -121,10 +123,35 @@ mod review_plan_tests {
 
         let review = crate::review_mode::ReviewModeState::from_plan(prepared.plan());
         let vendor_change = review.change_index_at_source(1, 1).unwrap();
-        assert_eq!(prepared.plan().changes[vendor_change].kind, ChangeKind::Value);
+        let vendor_change = &prepared.plan().changes[vendor_change];
+        assert_eq!(vendor_change.kind, ChangeKind::Value);
+        assert_eq!(
+            crate::review_mode::review_display_value(
+                crate::review_mode::ReviewEndpoint::Before,
+                false,
+                vendor_change,
+                "Amazon.com",
+                "Amazon.com",
+            ),
+            "Amazon.com"
+        );
+        assert_eq!(
+            crate::review_mode::review_display_value(
+                crate::review_mode::ReviewEndpoint::After,
+                false,
+                vendor_change,
+                "Amazon.com",
+                "Amazon.com",
+            ),
+            "Amazon"
+        );
         assert!(review.is_deleted_source_row(3));
         assert!(review.is_deleted_source_row(4));
-        assert!(review.overview_buckets().iter().any(|count| *count > 0));
+        assert!(review
+            .overview_buckets()
+            .iter()
+            .any(|bucket| bucket.change_count > 0));
+        assert!(review.overview_buckets()[review.bucket_for_source_row(3)].has_deleted_row);
         let first = review
             .adjacent_source_change(usize::MAX, usize::MAX, true)
             .unwrap();
@@ -132,6 +159,95 @@ mod review_plan_tests {
         assert_eq!(review.adjacent_source_change(first.0, first.1, false), Some(last));
         assert_eq!(review.adjacent_source_change(last.0, last.1, true), Some(first));
         assert!(review.adjacent_source_group(0, 0, true).is_some());
+        let visible_after_hidden_vendor = review
+            .adjacent_visible_source_change(0, 0, true, false, |row| row != 1)
+            .unwrap();
+        assert_ne!(visible_after_hidden_vendor.0, 1);
+        assert!(review
+            .adjacent_visible_source_change(0, 0, true, false, |_| false)
+            .is_none());
+
+        let execution_context = crate::scripting::execution_context_fingerprint(
+            &workbook,
+            &prepared.plan().operations,
+        );
+        let ready = crate::review_mode::ReviewApplyStatus::evaluate(
+            &prepared,
+            &workbook,
+            &execution_context,
+        );
+        assert!(ready.can_apply());
+        let mut changed_context = execution_context.clone();
+        changed_context.timezone.push_str("-changed");
+        let stale = crate::review_mode::ReviewApplyStatus::evaluate(
+            &prepared,
+            &workbook,
+            &changed_context,
+        );
+        assert!(stale.stale);
+        assert!(!stale.can_apply());
+        assert_eq!(stale.disabled_reason(), Some("Plan is stale · re-preview required"));
+    }
+
+    #[test]
+    fn review_apply_status_disables_conditional_plans_without_override() {
+        let workbook = Workbook::new();
+        let runtime = crate::scripting::LuaRuntime::new().unwrap();
+        let snapshot = crate::scripting::SheetSnapshot::from_sheet(workbook.active_sheet());
+        let result = runtime.eval_with_sheet(
+            "sheet:set_formula(2, 1, '=TODAY()')",
+            Box::new(snapshot),
+        );
+        assert!(result.error.is_none(), "fixture error: {:?}", result.error);
+        let prepared = prepare_lua_operation_plan(
+            &workbook,
+            42,
+            std::path::Path::new("conditional.lua"),
+            "conditional-hash",
+            &result.ops,
+            default_lua_verification(),
+        )
+        .unwrap();
+        assert_eq!(prepared.plan().determinism, DeterminismClass::Conditional);
+        let context = crate::scripting::execution_context_fingerprint(
+            &workbook,
+            &prepared.plan().operations,
+        );
+        let status = crate::review_mode::ReviewApplyStatus::evaluate(
+            &prepared,
+            &workbook,
+            &context,
+        );
+        assert!(!status.can_apply());
+        assert_eq!(status.determinism_label(), "Conditional");
+        assert_eq!(
+            status.disabled_reason(),
+            Some("Conditional plan · explicit override is not available yet")
+        );
+    }
+
+    #[test]
+    fn overview_marks_new_formula_errors() {
+        let workbook = Workbook::new();
+        let runtime = crate::scripting::LuaRuntime::new().unwrap();
+        let snapshot = crate::scripting::SheetSnapshot::from_sheet(workbook.active_sheet());
+        let result = runtime.eval_with_sheet(
+            "sheet:set_formula(2, 1, '=1/0')",
+            Box::new(snapshot),
+        );
+        assert!(result.error.is_none(), "fixture error: {:?}", result.error);
+        let prepared = prepare_lua_operation_plan(
+            &workbook,
+            42,
+            std::path::Path::new("error.lua"),
+            "error-hash",
+            &result.ops,
+            default_lua_verification(),
+        )
+        .unwrap();
+        let review = crate::review_mode::ReviewModeState::from_plan(prepared.plan());
+        let bucket = review.bucket_for_source_row(1);
+        assert!(review.overview_buckets()[bucket].has_new_formula_error);
     }
 }
 
@@ -1180,6 +1296,15 @@ sheet:cols()
                 return;
             }
         };
+        let passed_verifications = commit
+            .verification
+            .iter()
+            .filter(|result| {
+                result.status
+                    == visigrid_engine::operation_plan::VerificationStatus::Passed
+            })
+            .count();
+        let verification_count = commit.verification.len();
 
         let sheet_id = prepared.plan().source_sheet_id;
         let sheet_idx = self.workbook.read(cx)
@@ -1216,9 +1341,14 @@ sheet:cols()
         self.is_modified = true;
         self.review_mode = None;
 
-        self.status_message = Some(format!(
-            "Applied AI Lua to current sheet '{}'.", sheet_name
-        ));
+        self.status_message = Some(if verification_count == 0 {
+            format!("Applied AI Lua to current sheet '{}'.", sheet_name)
+        } else {
+            format!(
+                "Applied AI Lua to current sheet '{}'. Final verification: {passed_verifications}/{verification_count} passed.",
+                sheet_name
+            )
+        });
         cx.notify();
     }
     /// One-time hint: "AI: Explain Selection auto-pastes everything."

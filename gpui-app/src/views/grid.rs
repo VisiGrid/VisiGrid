@@ -5,7 +5,7 @@ use crate::app::{Spreadsheet, REF_COLORS};
 use crate::fill::{FILL_HANDLE_BORDER, FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_SIZE, FILL_HANDLE_HOVER_GLOW, FILL_HANDLE_INWARD_OVERLAP};
 use crate::formula_refs::RefKey;
 use crate::mode::Mode;
-use crate::review_mode::ReviewEndpoint;
+use crate::review_mode::{review_display_value, ReviewEndpoint};
 use crate::settings::{user_settings, Setting};
 use crate::split_view::SplitSide;
 use crate::theme::TokenKey;
@@ -515,11 +515,13 @@ fn render_cell(
         && matches!(review_kind, Some(ChangeKind::Value | ChangeKind::Formula))
     {
         let change = review_change.expect("review kind came from a change");
-        if app.show_formulas() {
-            change.after.raw.clone()
-        } else {
-            change.after.display.clone()
-        }
+        review_display_value(
+            review_endpoint,
+            app.show_formulas(),
+            change,
+            &app.sheet(cx).get_raw(data_row, col),
+            &app.sheet(cx).get_formatted_display(data_row, col),
+        )
     } else if app.show_formulas() {
         app.sheet(cx).get_raw(data_row, col)
     } else {

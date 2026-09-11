@@ -17,12 +17,22 @@ pub fn render_review_overview_rail(
     let max_density = state
         .overview_buckets()
         .iter()
-        .copied()
+        .map(|bucket| bucket.change_count)
         .max()
         .unwrap_or(0)
         .max(1);
-    let active_bucket = state.bucket_for_source_row(app.view_state.scroll_row);
+    let on_source_sheet = app.wb(cx).active_sheet_id() == state.source_sheet_id;
+    let active_bucket = on_source_sheet.then(|| {
+        state.bucket_for_source_row(app.view_to_data(app.view_state.scroll_row, cx))
+    });
+    let selected_data_row = on_source_sheet
+        .then(|| app.view_to_data(app.view_state.selected.0, cx));
+    let selected_bucket = selected_data_row
+        .filter(|row| !state.change_indices_at_source_row(*row).is_empty())
+        .map(|row| state.bucket_for_source_row(row));
     let accent = app.token(TokenKey::Accent);
+    let warning = app.token(TokenKey::Warn);
+    let error = app.token(TokenKey::Error);
     let border = app.token(TokenKey::PanelBorder);
     let panel_bg = app.token(TokenKey::PanelBg);
 
@@ -39,27 +49,33 @@ pub fn render_review_overview_rail(
         .border_l_1()
         .border_color(border)
         .children((0..OVERVIEW_BUCKET_COUNT).map(|bucket| {
-            let count = state.overview_buckets()[bucket];
-            let opacity = if count == 0 {
+            let overview = state.overview_buckets()[bucket];
+            let opacity = if overview.change_count == 0 {
                 0.0
             } else {
-                0.22 + 0.68 * (count as f32 / max_density as f32).sqrt()
+                0.22 + 0.68 * (overview.change_count as f32 / max_density as f32).sqrt()
             };
-            let target_row = state.source_row_for_bucket(bucket);
+            let marker_color = if overview.has_new_formula_error {
+                error
+            } else if overview.has_deleted_row {
+                warning
+            } else {
+                accent
+            };
             div()
                 .id(ElementId::Name(format!("review-density-{bucket}").into()))
                 .flex_1()
                 .w_full()
                 .cursor_pointer()
-                .bg(accent.opacity(opacity))
-                .when(bucket == active_bucket, |marker| {
-                    marker.border_1().border_color(accent)
+                .bg(marker_color.opacity(opacity))
+                .when(active_bucket == Some(bucket), |marker| {
+                    marker.border_1().border_color(border)
+                })
+                .when(selected_bucket == Some(bucket), |marker| {
+                    marker.border_2().border_color(accent)
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.view_state.selected = (target_row, 0);
-                    this.view_state.selection_end = None;
-                    this.view_state.scroll_row = target_row.saturating_sub(2);
-                    cx.notify();
+                    this.navigate_review_bucket(bucket, cx);
                 }))
         }))
         .into_any_element()

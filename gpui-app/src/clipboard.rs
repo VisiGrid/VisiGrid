@@ -9,7 +9,6 @@
 use gpui::*;
 use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, CellStyle, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
-use visigrid_engine::operation_plan::ChangeKind;
 use visigrid_engine::provenance::{MutationOp, PasteMode, ClearMode};
 use visigrid_engine::sheet::MergedRegion;
 
@@ -388,24 +387,24 @@ impl Spreadsheet {
                     if col > min_col {
                         tsv.push('\t');
                     }
+                    let source_raw = self.sheet(cx).get_raw(data_row, col);
+                    let source_display = self.sheet(cx).get_formatted_display(data_row, col);
                     let displayed = self
                         .review_change_at_source(self.sheet(cx).id, data_row, col)
-                        .filter(|change| {
-                            endpoint == crate::review_mode::ReviewEndpoint::After
-                                && matches!(change.kind, ChangeKind::Value | ChangeKind::Formula)
-                        })
                         .map(|change| {
-                            if self.show_formulas() {
-                                change.after.raw.clone()
-                            } else {
-                                change.after.display.clone()
-                            }
+                            crate::review_mode::review_display_value(
+                                endpoint,
+                                self.show_formulas(),
+                                change,
+                                &source_raw,
+                                &source_display,
+                            )
                         })
                         .unwrap_or_else(|| {
                             if self.show_formulas() {
-                                self.sheet(cx).get_raw(data_row, col)
+                                source_raw
                             } else {
-                                self.sheet(cx).get_formatted_display(data_row, col)
+                                source_display
                             }
                         });
                     tsv.push_str(&displayed);

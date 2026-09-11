@@ -541,10 +541,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     .min_h(px(0.0))  // Allow grid to shrink below content size for console panel
                     .child(grid_element)
                     .when(show_review_panel, |d| {
-                        d.child(review_panel::render_review_panel(app, cx))
+                        d.child(review_overview_rail::render_review_overview_rail(app, cx))
                     })
                     .when(show_review_panel, |d| {
-                        d.child(review_overview_rail::render_review_overview_rail(app, cx))
+                        d.child(review_panel::render_review_panel(app, cx))
                     })
                     .when(show_minimap, |d| {
                         d.child(minimap::render_minimap(app, window, cx))

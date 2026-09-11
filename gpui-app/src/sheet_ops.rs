@@ -606,6 +606,7 @@ impl Spreadsheet {
 
     /// Add a new sheet and switch to it
     pub fn add_sheet(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let new_index = self.wb_mut(cx, |wb| wb.add_sheet());
         self.wb_mut(cx, |wb| wb.set_active_sheet(new_index));
         self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
@@ -633,6 +634,7 @@ impl Spreadsheet {
 
     /// Start renaming a sheet (double-click on tab or context menu)
     pub fn start_sheet_rename(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         if let Some(name) = self.wb(cx).sheet_names().get(index).map(|s| s.to_string()) {
             self.renaming_sheet = Some(index);
             self.sheet_rename_input = name;
@@ -647,6 +649,7 @@ impl Spreadsheet {
     /// Confirm the sheet rename with validation.
     /// Rejects: empty names, duplicates, too long. Trims whitespace.
     pub fn confirm_sheet_rename(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         if let Some(index) = self.renaming_sheet {
             let new_name = self.sheet_rename_input.trim();
 
@@ -870,6 +873,7 @@ impl Spreadsheet {
 
     /// Delete a sheet
     pub fn delete_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         if self.wb_mut(cx, |wb| wb.delete_sheet(index)) {
             self.is_modified = true;
             self.sheet_context_menu = None;

@@ -179,6 +179,7 @@ impl Spreadsheet {
 
     /// Apply the rename operation
     pub fn confirm_rename_symbol(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         // Validate first
         self.validate_rename_name(cx);
         if self.rename_validation_error.is_some() {
@@ -360,6 +361,7 @@ impl Spreadsheet {
 
     /// Apply the edited description and record undo
     pub fn apply_edit_description(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let name = self.edit_description_name.clone();
         let old_description = self.edit_description_original.clone();
         let new_description = if self.edit_description_value.is_empty() {

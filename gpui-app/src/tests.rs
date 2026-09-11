@@ -2995,6 +2995,74 @@ fn no_untracked_cell_mutations() {
     );
 }
 
+/// Review Mode is a frozen workbook view. Keep the workbook-mutating entry
+/// points that do not flow through the normal cell-editing path behind the
+/// same guard as ordinary edits.
+#[test]
+fn review_mode_workbook_mutators_are_guarded() {
+    fn assert_guarded(source: &str, function: &str) {
+        let marker = format!("pub fn {function}");
+        let start = source
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing mutation entry point {function}"));
+        let prefix = &source[start..source.len().min(start + 320)];
+        assert!(
+            prefix.contains("block_if_previewing(cx)"),
+            "{function} must block workbook mutation while Review Mode is active"
+        );
+    }
+
+    let conditional_formats = include_str!("cond_format_ui.rs");
+    for function in [
+        "show_add_cond_format",
+        "hide_add_cond_format",
+        "cf_input_insert_char",
+        "cf_input_backspace",
+        "confirm_add_cond_format",
+        "clear_cond_formats_in_selection",
+        "toggle_cf_rule",
+        "delete_cf_rule",
+        "move_cf_rule",
+        "edit_cf_rule",
+    ] {
+        assert_guarded(conditional_formats, function);
+    }
+
+    let validations = include_str!("dialogs.rs");
+    for function in [
+        "show_validation_dialog",
+        "apply_validation_dialog",
+        "clear_validation_dialog",
+        "exclude_from_validation",
+        "clear_validation_exclusions",
+    ] {
+        assert_guarded(validations, function);
+    }
+
+    let sheets = include_str!("sheet_ops.rs");
+    for function in [
+        "add_sheet",
+        "start_sheet_rename",
+        "confirm_sheet_rename",
+        "delete_sheet",
+    ] {
+        assert_guarded(sheets, function);
+    }
+
+    assert_guarded(include_str!("editing.rs"), "recalculate");
+    assert_guarded(include_str!("app.rs"), "commit_validation_value");
+    let find_replace = include_str!("find_replace.rs");
+    assert_guarded(find_replace, "replace_next");
+    assert_guarded(find_replace, "replace_all");
+    assert_guarded(include_str!("dialogs.rs"), "ask_ai_insert_formula");
+    assert_guarded(include_str!("named_ranges/create.rs"), "confirm_create_named_range");
+    assert_guarded(include_str!("named_ranges/extract.rs"), "confirm_extract_named_range");
+    assert_guarded(include_str!("named_ranges/panel.rs"), "delete_named_range");
+    let rename = include_str!("named_ranges/rename.rs");
+    assert_guarded(rename, "confirm_rename_symbol");
+    assert_guarded(rename, "apply_edit_description");
+}
+
 // =========================================================================
 // Clipboard is_internal_paste: Wayland regression tests
 // =========================================================================

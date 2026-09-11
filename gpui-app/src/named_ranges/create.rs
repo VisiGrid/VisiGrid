@@ -90,6 +90,7 @@ impl Spreadsheet {
 
     /// Confirm creation of the named range
     pub fn confirm_create_named_range(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         // Validate first
         self.validate_create_name(cx);
         if self.create_name_validation_error.is_some() {

@@ -7,9 +7,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use visigrid_engine::operation_plan::{
-    ChangeKind, GroupId, MaterializedChange, OperationPlan, PlanId, ReviewRowState,
+    ChangeKind, DeterminismClass, ExecutionContextFingerprint, GroupId, MaterializedChange,
+    OperationPlan, PlanId, PreparedOperationPlan, ProblemSeverity, ReviewRowState,
 };
 use visigrid_engine::sheet::SheetId;
+use visigrid_engine::workbook::Workbook;
 
 use crate::app::Spreadsheet;
 use crate::terminal::state::PendingResult;
@@ -17,10 +19,92 @@ use crate::terminal::state::PendingResult;
 pub const OVERVIEW_BUCKET_COUNT: usize = 64;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReviewOverviewBucket {
+    pub change_count: usize,
+    pub has_deleted_row: bool,
+    pub has_new_formula_error: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewApplyStatus {
+    pub stale: bool,
+    pub blocking: bool,
+    pub determinism: DeterminismClass,
+}
+
+impl ReviewApplyStatus {
+    pub fn evaluate(
+        prepared: &PreparedOperationPlan,
+        workbook: &Workbook,
+        context: &ExecutionContextFingerprint,
+    ) -> Self {
+        Self {
+            stale: prepared.is_stale(workbook, context),
+            blocking: prepared
+                .plan()
+                .problems
+                .iter()
+                .any(|problem| problem.severity == ProblemSeverity::Blocking),
+            determinism: prepared.plan().determinism,
+        }
+    }
+
+    pub fn can_apply(self) -> bool {
+        !self.stale && !self.blocking && self.determinism == DeterminismClass::Full
+    }
+
+    pub fn disabled_reason(self) -> Option<&'static str> {
+        if self.stale {
+            Some("Plan is stale · re-preview required")
+        } else if self.blocking {
+            Some("Resolve blocking review problems")
+        } else {
+            match self.determinism {
+                DeterminismClass::Full => None,
+                DeterminismClass::Conditional => {
+                    Some("Conditional plan · explicit override is not available yet")
+                }
+                DeterminismClass::Unresolved => Some("Plan determinism is unresolved"),
+            }
+        }
+    }
+
+    pub fn determinism_label(self) -> &'static str {
+        match self.determinism {
+            DeterminismClass::Full => "Deterministic",
+            DeterminismClass::Conditional => "Conditional",
+            DeterminismClass::Unresolved => "Unresolved",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ReviewEndpoint {
     Before,
     #[default]
     After,
+}
+
+pub fn review_display_value(
+    endpoint: ReviewEndpoint,
+    show_formulas: bool,
+    change: &MaterializedChange,
+    source_raw: &str,
+    source_display: &str,
+) -> String {
+    if endpoint == ReviewEndpoint::After
+        && matches!(change.kind, ChangeKind::Value | ChangeKind::Formula)
+    {
+        if show_formulas {
+            change.after.raw.clone()
+        } else {
+            change.after.display.clone()
+        }
+    } else if show_formulas {
+        source_raw.to_string()
+    } else {
+        source_display.to_string()
+    }
 }
 
 #[derive(Debug)]
@@ -34,7 +118,8 @@ pub struct ReviewModeState {
     group_counts: HashMap<GroupId, usize>,
     navigable_cells: Vec<(usize, usize)>,
     navigable_groups: Vec<(usize, usize)>,
-    overview_buckets: Vec<usize>,
+    overview_buckets: Vec<ReviewOverviewBucket>,
+    overview_bucket_targets: Vec<Vec<(usize, usize)>>,
     source_row_count: usize,
 }
 
@@ -95,16 +180,23 @@ impl ReviewModeState {
             .filter_map(|row| row.before_data_row)
             .max()
             .map_or(1, |row| row + 1);
-        let mut overview_buckets = vec![0; OVERVIEW_BUCKET_COUNT];
+        let mut overview_buckets = vec![ReviewOverviewBucket::default(); OVERVIEW_BUCKET_COUNT];
+        let mut overview_bucket_targets = vec![Vec::new(); OVERVIEW_BUCKET_COUNT];
         for change in &plan.changes {
-            if change.kind == ChangeKind::RowDeleted {
-                continue;
-            }
             if let Some(coordinate) = change.before_coordinate {
                 let bucket = (coordinate.row * OVERVIEW_BUCKET_COUNT / source_row_count)
                     .min(OVERVIEW_BUCKET_COUNT - 1);
-                overview_buckets[bucket] += 1;
+                let overview = &mut overview_buckets[bucket];
+                overview.change_count += 1;
+                overview.has_deleted_row |= change.kind == ChangeKind::RowDeleted;
+                overview.has_new_formula_error |= change.after.display.starts_with('#')
+                    && !change.before.display.starts_with('#');
+                overview_bucket_targets[bucket].push((coordinate.row, coordinate.col));
             }
+        }
+        for targets in &mut overview_bucket_targets {
+            targets.sort_unstable();
+            targets.dedup();
         }
 
         Self {
@@ -118,6 +210,7 @@ impl ReviewModeState {
             navigable_cells,
             navigable_groups,
             overview_buckets,
+            overview_bucket_targets,
             source_row_count,
         }
     }
@@ -159,12 +252,46 @@ impl ReviewModeState {
         adjacent_coordinate(&self.navigable_groups, row, col, forward)
     }
 
-    pub fn overview_buckets(&self) -> &[usize] {
+    pub fn adjacent_visible_source_change(
+        &self,
+        row: usize,
+        col: usize,
+        forward: bool,
+        by_group: bool,
+        mut is_visible: impl FnMut(usize) -> bool,
+    ) -> Option<(usize, usize)> {
+        let mut cursor = (row, col);
+        for _ in 0..self.navigation_len(by_group) {
+            let target = if by_group {
+                self.adjacent_source_group(cursor.0, cursor.1, forward)
+            } else {
+                self.adjacent_source_change(cursor.0, cursor.1, forward)
+            }?;
+            cursor = target;
+            if is_visible(target.0) {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    pub fn navigation_len(&self, by_group: bool) -> usize {
+        if by_group {
+            self.navigable_groups.len()
+        } else {
+            self.navigable_cells.len()
+        }
+    }
+
+    pub fn overview_buckets(&self) -> &[ReviewOverviewBucket] {
         &self.overview_buckets
     }
 
-    pub fn source_row_for_bucket(&self, bucket: usize) -> usize {
-        bucket.min(OVERVIEW_BUCKET_COUNT - 1) * self.source_row_count / OVERVIEW_BUCKET_COUNT
+    pub fn overview_bucket_targets(&self, bucket: usize) -> &[(usize, usize)] {
+        self.overview_bucket_targets
+            .get(bucket)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub fn bucket_for_source_row(&self, row: usize) -> usize {
@@ -226,21 +353,65 @@ impl Spreadsheet {
         } else {
             (0, 0)
         };
-        let Some((sheet_id, row, col)) = self.review_mode.as_ref().and_then(|state| {
-            let target = if by_group {
-                state.adjacent_source_group(current.0, current.1, forward)
-            } else {
-                state.adjacent_source_change(current.0, current.1, forward)
+        let Some(sheet_index) = self.wb(cx).sheet_index_by_id(source_sheet_id) else {
+            return;
+        };
+        let target = {
+            let row_view = &self.row_view;
+            self.review_mode.as_ref().and_then(|state| {
+                state.adjacent_visible_source_change(
+                    current.0,
+                    current.1,
+                    forward,
+                    by_group,
+                    |row| row_view.data_to_view(row).is_some(),
+                )
+            })
+        };
+        if let Some((row, col)) = target {
+            let view_row = self
+                .row_view
+                .data_to_view(row)
+                .expect("review target was filtered for visibility");
+            self.reveal_cell(sheet_index, view_row, col, cx);
+            return;
+        }
+        self.status_message = Some("Review changes are hidden by the active filter.".into());
+        cx.notify();
+    }
+
+    pub fn navigate_review_bucket(&mut self, bucket: usize, cx: &mut gpui::Context<Self>) {
+        let Some(source_sheet_id) = self
+            .review_mode
+            .as_ref()
+            .map(|state| state.source_sheet_id)
+        else {
+            return;
+        };
+        let Some(sheet_index) = self.wb(cx).sheet_index_by_id(source_sheet_id) else {
+            return;
+        };
+        let target_count = self
+            .review_mode
+            .as_ref()
+            .map(|state| state.overview_bucket_targets(bucket).len())
+            .unwrap_or(0);
+        for index in 0..target_count {
+            let target = self
+                .review_mode
+                .as_ref()
+                .and_then(|state| state.overview_bucket_targets(bucket).get(index))
+                .copied();
+            let Some((row, col)) = target else {
+                continue;
             };
-            target.map(|(row, col)| (state.source_sheet_id, row, col))
-        }) else {
-            return;
-        };
-        let Some(sheet_index) = self.wb(cx).sheet_index_by_id(sheet_id) else {
-            return;
-        };
-        let view_row = self.data_to_view(row, cx).unwrap_or(row);
-        self.reveal_cell(sheet_index, view_row, col, cx);
+            if let Some(view_row) = self.data_to_view(row, cx) {
+                self.reveal_cell(sheet_index, view_row, col, cx);
+                return;
+            }
+        }
+        self.status_message = Some("Review changes in this region are hidden by the active filter.".into());
+        cx.notify();
     }
 
     /// Resolve a visible source-grid coordinate in O(1). The returned change

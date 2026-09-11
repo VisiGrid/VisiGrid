@@ -1710,6 +1710,7 @@ impl Spreadsheet {
     /// - Dependency graph is updated
     /// - Dirty state is tracked via history
     pub fn commit_validation_value(&mut self, value: &str, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         use crate::validation_dropdown::DropdownCloseReason;
 
         // Close dropdown first

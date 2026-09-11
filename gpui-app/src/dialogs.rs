@@ -560,6 +560,7 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn show_validation_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         use visigrid_engine::validation::CellRange;
 
         // Close validation dropdown when opening modal
@@ -601,6 +602,7 @@ impl Spreadsheet {
     }
 
     pub fn apply_validation_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         use crate::app::{ValidationTypeOption, NumericOperatorOption};
         use crate::history::UndoAction;
         use visigrid_engine::validation::{ValidationRule, ValidationType, ListSource, NumericConstraint, ComparisonOperator, CellRange};
@@ -902,6 +904,7 @@ impl Spreadsheet {
     }
 
     pub fn clear_validation_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         use crate::history::UndoAction;
         use visigrid_engine::validation::CellRange;
 
@@ -964,6 +967,7 @@ impl Spreadsheet {
     /// Exclude the current selection from validation.
     /// Cells in excluded ranges are not validated regardless of any rules.
     pub fn exclude_from_validation(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         use crate::history::UndoAction;
         use visigrid_engine::validation::CellRange;
 
@@ -1013,6 +1017,7 @@ impl Spreadsheet {
 
     /// Clear validation exclusions in the current selection.
     pub fn clear_validation_exclusions(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         use crate::history::UndoAction;
         use visigrid_engine::validation::CellRange;
 
@@ -1887,6 +1892,7 @@ impl Spreadsheet {
 
     /// Insert the AI-proposed formula into the active cell
     pub fn ask_ai_insert_formula(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         use crate::ai::cell_ref;
         use crate::history::{MutationSource, AiMutationMeta};
 

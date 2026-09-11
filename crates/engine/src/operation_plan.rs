@@ -1929,6 +1929,17 @@ pub fn workbook_fingerprint(workbook: &Workbook) -> String {
         hasher.update(sheet.name.as_bytes());
         hasher.update((sheet.rows as u64).to_le_bytes());
         hasher.update((sheet.cols as u64).to_le_bytes());
+        let validation_rules: Vec<_> = sheet.validations.iter().collect();
+        let validation_exclusions: Vec<_> = sheet.validations.exclusions_iter().collect();
+        for encoded in [
+            serde_json::to_vec(&sheet.merged_regions).expect("merged regions serialize"),
+            serde_json::to_vec(&sheet.cond_formats).expect("conditional formats serialize"),
+            serde_json::to_vec(&(validation_rules, validation_exclusions))
+                .expect("validations serialize"),
+        ] {
+            hasher.update((encoded.len() as u64).to_le_bytes());
+            hasher.update(encoded);
+        }
         let mut coordinates: Vec<_> = sheet
             .cells_iter()
             .map(|(&(row, col), _)| (row, col))
@@ -1968,6 +1979,53 @@ mod tests {
             iterative_tolerance_bits: 0.001_f64.to_bits(),
             volatile_inputs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn workbook_fingerprint_includes_conditional_formats_and_validations() {
+        use crate::cell::CellStyle;
+        use crate::cond_format::CondStyle;
+        use crate::validation::{
+            CellRange as ValidationRange, ListSource, ValidationRule, ValidationType,
+        };
+
+        let mut workbook = Workbook::new();
+        let initial = workbook_fingerprint(&workbook);
+        workbook.active_sheet_mut().cond_formats.add(
+            vec![ValidationRange {
+                start_row: 0,
+                start_col: 0,
+                end_row: 1,
+                end_col: 0,
+            }],
+            "=A1>0",
+            CondStyle::Named(CellStyle::Warning),
+        );
+        let with_conditional_format = workbook_fingerprint(&workbook);
+        assert_ne!(with_conditional_format, initial);
+
+        workbook.active_sheet_mut().validations.set(
+            ValidationRange {
+                start_row: 0,
+                start_col: 0,
+                end_row: 1,
+                end_col: 0,
+            },
+            ValidationRule::new(ValidationType::List(ListSource::Inline(vec!["yes".into()]))),
+        );
+        let with_validation = workbook_fingerprint(&workbook);
+        assert_ne!(with_validation, with_conditional_format);
+
+        workbook
+            .active_sheet_mut()
+            .validations
+            .exclude(ValidationRange {
+                start_row: 1,
+                start_col: 0,
+                end_row: 1,
+                end_col: 0,
+            });
+        assert_ne!(workbook_fingerprint(&workbook), with_validation);
     }
 
     fn request(workbook: &Workbook, operations: Vec<PlannedOp>) -> OperationPlanRequest {

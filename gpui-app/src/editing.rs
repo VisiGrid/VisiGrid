@@ -659,6 +659,7 @@ impl Spreadsheet {
 
 
     pub fn recalculate(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         self.in_smoke_recalc = true;
 
         // Same recompute the load path uses, so F9 and opening a file cannot

@@ -350,6 +350,7 @@ impl Spreadsheet {
 
     /// Confirm extraction - create named range and replace in formulas
     pub fn confirm_extract_named_range(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         // Validate
         if self.extract_name.is_empty() {
             self.extract_validation_error = Some("Name cannot be empty".to_string());
