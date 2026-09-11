@@ -4,7 +4,7 @@
 
 ### AI review
 
-- **Frozen Review Mode for AI Lua changes** — previews retain immutable Before and After workbooks, show cell and row-deletion changes with verification results, and apply only the reviewed, deterministic plan as one atomic undoable commit. Editing, sheet switching, workbook replacement, and attached-session writes are refused until Apply or Dismiss. Stale plans stay stale, and copying a stale result to a new sheet preserves the complete candidate sheet and can be undone as one full-workbook snapshot.
+- **Frozen Review Mode for AI Lua changes** — previews retain immutable Before and After workbooks, show cell and row-deletion changes with verification results, and apply only the reviewed, deterministic plan as one atomic undoable commit. Editing, sheet switching, workbook replacement, and attached-session writes are refused until Apply or Dismiss. Stale plans stay stale, and copying a result to a new sheet preserves the complete candidate sheet and can be undone as one full-workbook snapshot.
 
 ## 0.32.0
 
