@@ -1,0 +1,7 @@
+Transaction,Vendor,Amount
+tx-001,Amazon.com,100
+tx-002,AMZN,200
+tx-001,Amazon.com,100
+,,
+tx-003,Acme,50
+,Total,=SUM(C2:C4)

@@ -68,12 +68,12 @@ fn default_lua_verification() -> Vec<visigrid_engine::operation_plan::Verificati
 mod review_plan_tests {
     use super::{default_lua_verification, prepare_lua_operation_plan};
     use visigrid_engine::operation_plan::{
-        ChangeKind, DeterminismClass, VerificationEvidence, VerificationStatus,
+        ChangeKind, DeterminismClass, ProblemSeverity, VerificationEvidence,
+        VerificationStatus,
     };
     use visigrid_engine::workbook::Workbook;
 
-    #[test]
-    fn desktop_lua_adapter_evaluates_fixture_requested_verification() {
+    fn transaction_fixture_workbook() -> Workbook {
         let mut workbook = Workbook::new();
         for (row, values) in [
             (0, ["Transaction", "Vendor", "Amount"]),
@@ -90,24 +90,38 @@ mod review_plan_tests {
                 }
             }
         }
+        workbook
+    }
 
+    fn prepare_fixture(
+        workbook: &Workbook,
+        path: &str,
+        source: &str,
+    ) -> visigrid_engine::operation_plan::PreparedOperationPlan {
         let runtime = crate::scripting::LuaRuntime::new().unwrap();
         let snapshot = crate::scripting::SheetSnapshot::from_sheet(workbook.active_sheet());
-        let result = runtime.eval_with_sheet(
-            include_str!("../../fixtures/review_mode/transaction_cleanup.lua"),
-            Box::new(snapshot),
-        );
+        let result = runtime.eval_with_sheet(source, Box::new(snapshot));
         assert!(result.error.is_none(), "fixture error: {:?}", result.error);
 
-        let prepared = prepare_lua_operation_plan(
-            &workbook,
+        prepare_lua_operation_plan(
+            workbook,
             42,
-            std::path::Path::new("fixtures/review_mode/transaction_cleanup.lua"),
+            std::path::Path::new(path),
             "fixture-hash",
             &result.ops,
             default_lua_verification(),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn desktop_lua_adapter_evaluates_fixture_requested_verification() {
+        let mut workbook = transaction_fixture_workbook();
+        let prepared = prepare_fixture(
+            &workbook,
+            "fixtures/review_mode/transaction_cleanup.lua",
+            include_str!("../../fixtures/review_mode/transaction_cleanup.lua"),
+        );
         let retained = prepared
             .plan()
             .verification
@@ -251,6 +265,80 @@ mod review_plan_tests {
         assert_eq!(
             status.disabled_reason(),
             Some("Conditional plan · explicit override is not available yet")
+        );
+    }
+
+    #[test]
+    fn dogfood_failure_fixture_blocks_apply_with_expected_evidence() {
+        let workbook = transaction_fixture_workbook();
+        let prepared = prepare_fixture(
+            &workbook,
+            "fixtures/review_mode/transaction_cleanup_verification_failure.lua",
+            include_str!(
+                "../../fixtures/review_mode/transaction_cleanup_verification_failure.lua"
+            ),
+        );
+        let retained = prepared
+            .plan()
+            .verification
+            .iter()
+            .find(|result| result.id == "retained_payments")
+            .unwrap();
+        assert_eq!(retained.status, VerificationStatus::Failed);
+        assert!(matches!(
+            &retained.evidence,
+            VerificationEvidence::RetainedTotal { expected, actual, currency, .. }
+                if expected == "350" && actual == "300" && currency == "USD"
+        ));
+        assert!(prepared
+            .plan()
+            .problems
+            .iter()
+            .any(|problem| problem.severity == ProblemSeverity::Blocking));
+    }
+
+    #[test]
+    fn filtered_navigation_fixture_remains_value_only() {
+        let workbook = transaction_fixture_workbook();
+        let prepared = prepare_fixture(
+            &workbook,
+            "fixtures/review_mode/filtered_value_changes.lua",
+            include_str!("../../fixtures/review_mode/filtered_value_changes.lua"),
+        );
+        assert_eq!(prepared.plan().changes.len(), 2);
+        assert!(prepared
+            .plan()
+            .changes
+            .iter()
+            .all(|change| change.kind == ChangeKind::Value));
+        assert_eq!(
+            prepared
+                .plan()
+                .changes
+                .iter()
+                .map(|change| change.before_coordinate.unwrap().row)
+                .collect::<Vec<_>>(),
+            vec![1, 5]
+        );
+    }
+
+    #[test]
+    fn large_dogfood_fixture_spans_the_thirty_thousand_row_sheet() {
+        let workbook = transaction_fixture_workbook();
+        let prepared = prepare_fixture(
+            &workbook,
+            "fixtures/review_mode/large_sparse_review.lua",
+            include_str!("../../fixtures/review_mode/large_sparse_review.lua"),
+        );
+        assert_eq!(prepared.plan().changes.len(), 4);
+        assert_eq!(
+            prepared
+                .plan()
+                .changes
+                .iter()
+                .map(|change| change.before_coordinate.unwrap().row)
+                .collect::<Vec<_>>(),
+            vec![1, 10_001, 20_001, 29_999]
         );
     }
 
