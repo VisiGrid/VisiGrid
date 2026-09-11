@@ -529,11 +529,40 @@ impl Spreadsheet {
     // Sheet navigation methods
     // =========================================================================
 
+    /// The only UI-level path for changing the workbook's active sheet.
+    /// Review Mode may navigate back to its source sheet, but no caller may
+    /// expose a different sheet until the plan is applied or dismissed.
+    pub fn activate_sheet(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
+        let Some(target_sheet_id) = self.wb(cx).sheet(index).map(|sheet| sheet.id) else {
+            return false;
+        };
+        if self
+            .review_mode
+            .as_ref()
+            .is_some_and(|review| review.source_sheet_id != target_sheet_id)
+        {
+            self.status_message =
+                Some("Apply or dismiss Review Mode before switching sheets.".into());
+            cx.notify();
+            return false;
+        }
+        if !self.wb_mut(cx, |wb| wb.set_active_sheet(index)) {
+            return false;
+        }
+        self.update_cached_sheet_id(cx);
+        self.debug_assert_sheet_cache_sync(cx);
+        self.active_view_state_mut().active_sheet = index;
+        true
+    }
+
     /// Move to the next sheet
     pub fn next_sheet(&mut self, cx: &mut Context<Self>) {
-        if self.block_review_sheet_switch(cx) { return; }
-        if self.wb_mut(cx, |wb| wb.next_sheet()) {
-            self.update_cached_sheet_id(cx);
+        let count = self.wb(cx).sheet_count();
+        if count == 0 {
+            return;
+        }
+        let next = (self.wb(cx).active_sheet_index() + 1) % count;
+        if self.activate_sheet(next, cx) {
             self.clear_selection_state();
             cx.notify();
         }
@@ -541,9 +570,13 @@ impl Spreadsheet {
 
     /// Move to the previous sheet
     pub fn prev_sheet(&mut self, cx: &mut Context<Self>) {
-        if self.block_review_sheet_switch(cx) { return; }
-        if self.wb_mut(cx, |wb| wb.prev_sheet()) {
-            self.update_cached_sheet_id(cx);
+        let count = self.wb(cx).sheet_count();
+        if count == 0 {
+            return;
+        }
+        let current = self.wb(cx).active_sheet_index();
+        let previous = if current == 0 { count - 1 } else { current - 1 };
+        if self.activate_sheet(previous, cx) {
             self.clear_selection_state();
             cx.notify();
         }
@@ -551,12 +584,10 @@ impl Spreadsheet {
 
     /// Switch to a specific sheet by index
     pub fn goto_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.block_review_sheet_switch(cx) { return; }
         // In formula mode, switch sheets for cross-sheet reference picking
         // without committing the formula or clearing edit state.
         if self.mode.is_formula() {
-            if self.wb_mut(cx, |wb| wb.set_active_sheet(index)) {
-                self.update_cached_sheet_id(cx);
+            if self.activate_sheet(index, cx) {
                 // Reset scroll/selection on the target sheet but stay in formula mode
                 self.view_state.selected = (0, 0);
                 self.view_state.selection_end = None;
@@ -593,9 +624,7 @@ impl Spreadsheet {
 
         // Commit any pending edit before switching sheets
         self.commit_pending_edit(cx);
-        if self.wb_mut(cx, |wb| wb.set_active_sheet(index)) {
-            self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
-            self.debug_assert_sheet_cache_sync(cx);  // Catch desync immediately at switch point
+        if self.activate_sheet(index, cx) {
             self.clear_selection_state();
             // Clear history highlight unless it's for the new sheet
             if let Some((sheet_idx, _, _, _, _)) = self.history_highlight_range {
@@ -611,16 +640,14 @@ impl Spreadsheet {
     pub fn add_sheet(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         let new_index = self.wb_mut(cx, |wb| wb.add_sheet());
-        self.wb_mut(cx, |wb| wb.set_active_sheet(new_index));
-        self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
-        self.debug_assert_sheet_cache_sync(cx);  // Catch desync immediately
+        self.activate_sheet(new_index, cx);
         self.clear_selection_state();
         self.is_modified = true;
         cx.notify();
     }
 
     /// Clear selection state when switching sheets
-    fn clear_selection_state(&mut self) {
+    pub(crate) fn clear_selection_state(&mut self) {
         self.view_state.selected = (0, 0);
         self.view_state.selection_end = None;
         self.view_state.scroll_row = 0;

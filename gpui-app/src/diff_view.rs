@@ -350,6 +350,7 @@ pub fn populate_diff_sheet(
     workspace: &Path,
     cx: &mut Context<Spreadsheet>,
 ) {
+    if app.block_if_previewing(cx) { return; }
     let sheet_name = "Diff Results";
 
     // Delete existing "Diff Results" sheet if present
@@ -509,8 +510,7 @@ pub fn populate_diff_sheet(
     });
 
     // Switch to the new sheet
-    app.wb_mut(cx, |wb| { wb.set_active_sheet(sheet_idx); });
-    app.update_cached_sheet_id(cx);
+    app.activate_sheet(sheet_idx, cx);
     // Reset selection to A1 for the new sheet
     app.view_state.selected = (0, 0);
     app.view_state.selection_end = None;

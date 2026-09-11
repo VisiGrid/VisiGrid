@@ -421,11 +421,9 @@ impl Spreadsheet {
             let wb = self.wb(cx);
             if let Some(sheet_idx) = wb.sheets().iter().position(|s| s.id == target.sheet) {
                 // Update workbook's active sheet (required for col_width/row_height)
-                self.wb_mut(cx, |wb| wb.set_active_sheet(sheet_idx));
-                self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
-                self.debug_assert_sheet_cache_sync(cx);
-                // Also update view state for consistency
-                self.active_view_state_mut().active_sheet = sheet_idx;
+                if !self.activate_sheet(sheet_idx, cx) {
+                    return;
+                }
             }
         }
 
@@ -472,11 +470,9 @@ impl Spreadsheet {
             let wb = self.wb(cx);
             if let Some(sheet_idx) = wb.sheets().iter().position(|s| s.id == source.sheet) {
                 // Update workbook's active sheet (required for col_width/row_height)
-                self.wb_mut(cx, |wb| wb.set_active_sheet(sheet_idx));
-                self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
-                self.debug_assert_sheet_cache_sync(cx);
-                // Also update view state for consistency
-                self.active_view_state_mut().active_sheet = sheet_idx;
+                if !self.activate_sheet(sheet_idx, cx) {
+                    return;
+                }
             }
         }
 

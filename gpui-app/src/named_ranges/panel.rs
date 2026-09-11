@@ -165,9 +165,9 @@ impl Spreadsheet {
             // Switch to target sheet if different
             let current_sheet = self.sheet_index(cx);
             if sheet_idx != current_sheet {
-                self.wb_mut(cx, |wb| wb.set_active_sheet(sheet_idx));
-                self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
-                self.debug_assert_sheet_cache_sync(cx);
+                if !self.activate_sheet(sheet_idx, cx) {
+                    return;
+                }
             }
 
             // Select the whole range

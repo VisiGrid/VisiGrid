@@ -216,6 +216,7 @@ impl Spreadsheet {
     /// Open remote version as a copy (always safe, never overwrites).
     /// Downloads the latest revision and saves to a new file.
     pub fn hub_open_remote_as_copy(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let Some(path) = self.current_file.clone() else {
             self.status_message = Some("No file open".to_string());
             cx.notify();
@@ -355,6 +356,11 @@ impl Spreadsheet {
 
             // Load the copy as the new workbook
             let _ = this.update(cx, |this, cx| {
+                if this.block_if_previewing(cx) {
+                    this.hub_status = HubStatus::Idle;
+                    this.hub_activity = None;
+                    return;
+                }
                 match visigrid_io::native::load_workbook(&copy_path) {
                     Ok(workbook) => {
                         this.workbook = cx.new(|_| workbook);
@@ -390,6 +396,7 @@ impl Spreadsheet {
     /// Only allowed when local is clean (no uncommitted changes).
     /// If local is dirty, use hub_open_remote_as_copy() instead.
     pub fn hub_pull(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         if !self.hub_status.can_pull() {
             self.status_message = Some("No updates available".to_string());
             cx.notify();
@@ -568,6 +575,11 @@ impl Spreadsheet {
 
             // Reload the workbook
             let _ = this.update(cx, |this, cx| {
+                if this.block_if_previewing(cx) {
+                    this.hub_status = HubStatus::Idle;
+                    this.hub_activity = None;
+                    return;
+                }
                 match visigrid_io::native::load_workbook(&path) {
                     Ok(workbook) => {
                         this.workbook = cx.new(|_| workbook);

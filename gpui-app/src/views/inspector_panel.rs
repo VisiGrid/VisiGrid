@@ -3832,8 +3832,9 @@ fn render_history_tab(
                         let (sheet_idx, start_row, start_col, end_row, end_col) = range;
                         // Switch to sheet if needed
                         if sheet_idx != this.sheet_index(cx) {
-                            this.wb_mut(cx, |wb| wb.set_active_sheet(sheet_idx));
-                            this.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+                            if !this.activate_sheet(sheet_idx, cx) {
+                                return;
+                            }
                         }
                         // Select the full affected range
                         this.view_state.selected = (start_row, start_col);
@@ -4227,8 +4228,9 @@ fn render_history_entry(
                                     // Jump to location (entry selection happens via parent handler)
                                     if let Some((si, sr, sc, er, ec)) = jump_range {
                                         if si != this.sheet_index(cx) {
-                                            this.wb_mut(cx, |wb| wb.set_active_sheet(si));
-                                            this.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
+                                            if !this.activate_sheet(si, cx) {
+                                                return;
+                                            }
                                         }
                                         this.view_state.selected = (sr, sc);
                                         if sr != er || sc != ec {

@@ -2705,6 +2705,7 @@ impl Spreadsheet {
 
     /// Inner method that opens the pending result without requiring window access.
     pub(crate) fn open_structured_result_inner(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let result = match self.terminal.pending_result.take() {
             Some(crate::terminal::state::PendingResult::Structured(r)) => r,
             other => {
@@ -2720,7 +2721,7 @@ impl Spreadsheet {
             crate::structured_results::append_run_log(wb, &meta, source_file.as_deref(), command.as_deref());
             meta
         });
-        self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(meta.sheet_idx); });
+        self.activate_sheet(meta.sheet_idx, cx);
         self.status_message = Some(format!("Opened {} as new sheet.", meta.sheet_name));
         cx.notify();
     }

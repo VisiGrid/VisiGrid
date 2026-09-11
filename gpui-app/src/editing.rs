@@ -1313,8 +1313,7 @@ impl Spreadsheet {
         if let Some(home_sheet) = self.formula_home_sheet {
             let current = self.wb(cx).active_sheet_index();
             if current != home_sheet {
-                self.wb_mut(cx, |wb| wb.set_active_sheet(home_sheet));
-                self.update_cached_sheet_id(cx);
+                self.activate_sheet(home_sheet, cx);
             }
             if let Some(edit_cell) = self.formula_edit_cell {
                 self.view_state.selected = edit_cell;

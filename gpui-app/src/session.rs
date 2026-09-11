@@ -696,9 +696,7 @@ impl Spreadsheet {
                 .iter()
                 .position(|s| s.name == name)
             {
-                self.wb_mut(cx, |wb| wb.set_active_sheet(idx));
-                self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
-                self.debug_assert_sheet_cache_sync(cx);
+                self.activate_sheet(idx, cx);
             }
         }
 

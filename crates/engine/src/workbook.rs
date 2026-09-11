@@ -273,6 +273,23 @@ impl Workbook {
         Some(self.sheets.len() - 1)
     }
 
+    /// Append a complete copy of an existing sheet under a fresh identity.
+    /// Cell state, formulas, formatting, validation, conditional formatting,
+    /// merges, and other sheet-owned state are preserved. Only identity and
+    /// display name are replaced.
+    pub fn add_sheet_clone_named(&mut self, source: &Sheet, name: &str) -> Option<usize> {
+        if !is_valid_sheet_name(name) || self.sheet_name_exists(name) {
+            return None;
+        }
+        let mut sheet = source.clone();
+        sheet.id = self.generate_sheet_id();
+        sheet.set_name(name);
+        self.sheets.push(sheet);
+        self.rebuild_dep_graph();
+        self.bump_revision_for_structure();
+        Some(self.sheets.len() - 1)
+    }
+
     /// Check if a sheet name already exists (case-insensitive)
     pub fn sheet_name_exists(&self, name: &str) -> bool {
         let key = normalize_sheet_name(name);
@@ -2802,6 +2819,52 @@ fn arrays_equal(a: &crate::formula::eval::Array2D, b: &crate::formula::eval::Arr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloned_sheet_preserves_complete_sheet_owned_state() {
+        use crate::cell::CellStyle;
+        use crate::cond_format::CondStyle;
+        use crate::sheet::MergedRegion;
+        use crate::validation::{CellRange, ValidationRule};
+
+        let mut source = Sheet::new_with_name(SheetId::from_raw(40), 20, 10, "Preview");
+        source.set_value(0, 0, "kept");
+        source.add_merge(MergedRegion::new(0, 0, 0, 1)).unwrap();
+        source.set_cell_validation(
+            1,
+            0,
+            ValidationRule::list_inline(vec!["Yes".into(), "No".into()]),
+        );
+        source
+            .validations
+            .exclude(CellRange::new(2, 0, 2, 0));
+        source.cond_formats.add(
+            vec![CellRange::new(1, 0, 2, 0)],
+            "=A2=\"Yes\"",
+            CondStyle::Named(CellStyle::Success),
+        );
+        source.tab_color = Some([10, 20, 30, 255]);
+
+        let mut workbook = Workbook::new();
+        let revision = workbook.revision();
+        let copied_index = workbook
+            .add_sheet_clone_named(&source, "Copied preview")
+            .unwrap();
+        let copied = workbook.sheet(copied_index).unwrap();
+
+        assert_ne!(copied.id, source.id);
+        assert_eq!(copied.name, "Copied preview");
+        assert_eq!(copied.get_raw(0, 0), "kept");
+        assert_eq!(copied.merged_regions, source.merged_regions);
+        assert_eq!(copied.validations.len(), source.validations.len());
+        assert_eq!(
+            copied.validations.exclusions_len(),
+            source.validations.exclusions_len()
+        );
+        assert_eq!(copied.cond_formats.len(), source.cond_formats.len());
+        assert_eq!(copied.tab_color, source.tab_color);
+        assert_eq!(workbook.revision(), revision + 1);
+    }
 
     /// Redo of a structural edit has to go through `structural_edit`, never
     /// `Sheet::insert_rows`. These two halves are the reason, and they are

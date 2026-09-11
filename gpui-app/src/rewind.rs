@@ -70,6 +70,10 @@ impl Spreadsheet {
     }
     /// Enter preview mode for the currently selected history entry
     pub fn enter_preview(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.review_mode.is_some() {
+            self.block_if_previewing(cx);
+            return Err("Review Mode is active".to_string());
+        }
         // Must have a history highlight to preview
         let (sheet_idx, start_row, start_col, end_row, end_col) = match self.history_highlight_range {
             Some(range) => range,
@@ -144,7 +148,7 @@ impl Spreadsheet {
 
         // Navigate to the affected area in preview
         // Switch to the sheet where the action occurred
-        self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(sheet_idx); });
+        self.activate_sheet(sheet_idx, cx);
         self.view_state.selected = (start_row, start_col);
         self.view_state.selection_end = if start_row != end_row || start_col != end_col {
             Some((end_row, end_col))
@@ -163,9 +167,7 @@ impl Spreadsheet {
     pub fn exit_preview(&mut self, cx: &mut Context<Self>) {
         if let RewindPreviewState::On(session) = std::mem::take(&mut self.rewind_preview) {
             // Restore live focus (Option A: peek behavior)
-            self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(session.live_focus.sheet_index); });
-            self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
-            self.debug_assert_sheet_cache_sync(cx);  // Catch desync at preview exit
+            self.activate_sheet(session.live_focus.sheet_index, cx);
             self.view_state.selected = session.live_focus.selected;
             self.view_state.selection_end = session.live_focus.selection_end;
             self.view_state.scroll_row = session.live_focus.scroll_row;
@@ -258,7 +260,7 @@ impl Spreadsheet {
 
                 // Navigate to the affected area
                 if let Some((sheet_idx, start_row, start_col, end_row, end_col)) = new_highlight {
-                    self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(sheet_idx); });
+                    self.activate_sheet(sheet_idx, cx);
                     self.view_state.selected = (start_row, start_col);
                     self.view_state.selection_end = if start_row != end_row || start_col != end_col {
                         Some((end_row, end_col))
@@ -275,7 +277,7 @@ impl Spreadsheet {
             }
             Err(e) => {
                 // Preview build failed - show error and restore live focus
-                self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(live_focus.sheet_index); });
+                self.activate_sheet(live_focus.sheet_index, cx);
                 self.view_state.selected = live_focus.selected;
                 self.view_state.selection_end = live_focus.selection_end;
                 self.view_state.scroll_row = live_focus.scroll_row;

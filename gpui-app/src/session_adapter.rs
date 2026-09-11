@@ -153,9 +153,9 @@ impl Spreadsheet {
     pub fn reveal_cell(&mut self, sheet_idx: usize, row: usize, col: usize, cx: &mut Context<Self>) {
         let current_idx = self.wb(cx).active_sheet_index();
         if sheet_idx != current_idx && sheet_idx < self.wb(cx).sheets().len() {
-            self.wb_mut(cx, |wb| wb.set_active_sheet(sheet_idx));
-            self.update_cached_sheet_id(cx);
-            self.active_view_state_mut().active_sheet = sheet_idx;
+            if !self.activate_sheet(sheet_idx, cx) {
+                return;
+            }
         }
         let view_state = self.active_view_state_mut();
         view_state.selected = (row, col);

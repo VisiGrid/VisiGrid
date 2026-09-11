@@ -244,6 +244,12 @@ impl ReviewModeState {
     ) -> ReviewApplyStatus {
         let key = Self::eligibility_key(workbook);
         if let Some(cache) = self.eligibility_cache.borrow().as_ref() {
+            // Staleness is terminal for the lifetime of a prepared plan. A
+            // calculation setting or environment value changing back must not
+            // make a previously stale review look authoritative again.
+            if cache.status.stale {
+                return cache.status;
+            }
             if cache.key == key {
                 return cache.status;
             }
@@ -417,16 +423,6 @@ fn adjacent_coordinate(
 }
 
 impl Spreadsheet {
-    pub fn block_review_sheet_switch(&mut self, cx: &mut gpui::Context<Self>) -> bool {
-        if self.review_mode.is_none() {
-            return false;
-        }
-        self.status_message =
-            Some("Apply or dismiss Review Mode before switching sheets.".into());
-        cx.notify();
-        true
-    }
-
     pub fn review_apply_status(
         &self,
         prepared: &PreparedOperationPlan,

@@ -192,9 +192,16 @@ mod review_plan_tests {
         assert_eq!(stale.disabled_reason(), Some("Plan is stale · re-preview required"));
 
         let unchanged_revision = workbook.revision();
+        let original_tolerance = workbook.iterative_tolerance();
         workbook.set_iterative_tolerance(0.01);
         assert_eq!(workbook.revision(), unchanged_revision);
         assert!(review.apply_status(&prepared, &workbook).stale);
+        workbook.set_iterative_tolerance(original_tolerance);
+        assert_eq!(workbook.revision(), unchanged_revision);
+        assert!(
+            review.apply_status(&prepared, &workbook).stale,
+            "staleness must remain latched after execution context is restored"
+        );
 
         workbook.set_cell_value_tracked(0, 1, 1, "live drift");
         assert!(review.apply_status(&prepared, &workbook).stale);
@@ -1199,38 +1206,33 @@ sheet:cols()
         // This remains honest even when the original source has gone stale.
         let (sheet_name, sheet_idx, changes, format_patches) = self.workbook.update(cx, |wb, _| {
             let name = crate::structured_results::unique_sheet_name(wb, &base_name);
-            let idx = wb.add_sheet_named(&name).unwrap_or_else(|| wb.add_sheet());
             let mut changes = Vec::new();
             let mut format_patches = Vec::new();
             let mut cells: Vec<_> = preview_sheet.cells_iter()
                 .map(|(&(row, col), _)| (row, col))
                 .collect();
             cells.sort_unstable();
-            {
-                let mut guard = wb.batch_guard();
-                for (row, col) in cells {
-                    let raw = preview_sheet.get_raw(row, col);
-                    let format = preview_sheet.get_format(row, col);
-                    guard.set_cell_value_tracked(idx, row, col, &raw);
-                    changes.push(crate::history::CellChange {
+            for (row, col) in cells {
+                let raw = preview_sheet.get_raw(row, col);
+                let format = preview_sheet.get_format(row, col);
+                changes.push(crate::history::CellChange {
+                    row,
+                    col,
+                    old_value: String::new(),
+                    new_value: raw,
+                });
+                if format != Default::default() {
+                    format_patches.push(crate::history::CellFormatPatch {
                         row,
                         col,
-                        old_value: String::new(),
-                        new_value: raw,
+                        before: Default::default(),
+                        after: format,
                     });
-                    if format != Default::default() {
-                        if let Some(sheet) = guard.sheet_mut(idx) {
-                            sheet.set_format(row, col, format.clone());
-                        }
-                        format_patches.push(crate::history::CellFormatPatch {
-                            row,
-                            col,
-                            before: Default::default(),
-                            after: format,
-                        });
-                    }
                 }
             }
+            let idx = wb
+                .add_sheet_clone_named(&preview_sheet, &name)
+                .expect("unique preview sheet name must be accepted");
             (name, idx, changes, format_patches)
         });
 
@@ -1266,9 +1268,10 @@ sheet:cols()
             self.is_modified = true;
         }
 
-        // Switch to new sheet
-        self.workbook.update(cx, |wb, _| { let _ = wb.set_active_sheet(sheet_idx); });
         self.review_mode = None;
+        self.activate_sheet(sheet_idx, cx);
+        self.row_view = visigrid_engine::filter::RowView::new(crate::app::NUM_ROWS);
+        self.clear_selection_state();
 
         self.status_message = Some(format!(
             "Applied AI Lua to new sheet '{}'.", sheet_name

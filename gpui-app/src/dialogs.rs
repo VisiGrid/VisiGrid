@@ -2083,8 +2083,9 @@ impl Spreadsheet {
     pub fn diff_jump_to_cell(&mut self, sheet_index: usize, row: usize, col: usize, cx: &mut Context<Self>) {
         // Switch to sheet if needed
         if sheet_index != self.sheet_index(cx) {
-            self.wb_mut(cx, |wb| wb.set_active_sheet(sheet_index));
-            self.update_cached_sheet_id(cx);
+            if !self.activate_sheet(sheet_index, cx) {
+                return;
+            }
         }
         // Select the cell
         self.view_state.selected = (row, col);
@@ -2101,8 +2102,9 @@ impl Spreadsheet {
         if let Some((sheet_index, row, col)) = self.diff_selected_entry {
             // Switch to sheet if needed
             if sheet_index != self.sheet_index(cx) {
-                self.wb_mut(cx, |wb| wb.set_active_sheet(sheet_index));
-                self.update_cached_sheet_id(cx);
+                if !self.activate_sheet(sheet_index, cx) {
+                    return;
+                }
             }
             // Select the cell
             self.view_state.selected = (row, col);

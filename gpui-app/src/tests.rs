@@ -3001,11 +3001,13 @@ fn no_untracked_cell_mutations() {
 #[test]
 fn review_mode_workbook_mutators_are_guarded() {
     fn assert_contains_near(source: &str, function: &str, required: &str) {
-        let marker = format!("pub fn {function}");
+        let public_marker = format!("pub fn {function}");
+        let private_marker = format!("fn {function}");
         let start = source
-            .find(&marker)
+            .find(&public_marker)
+            .or_else(|| source.find(&private_marker))
             .unwrap_or_else(|| panic!("missing mutation entry point {function}"));
-        let prefix = &source[start..source.len().min(start + 320)];
+        let prefix = &source[start..source.len().min(start + 640)];
         assert!(
             prefix.contains(required),
             "{function} must contain {required:?} near its entry point"
@@ -3045,8 +3047,9 @@ fn review_mode_workbook_mutators_are_guarded() {
 
     let sheets = include_str!("sheet_ops.rs");
     for function in ["next_sheet", "prev_sheet", "goto_sheet"] {
-        assert_contains_near(sheets, function, "block_review_sheet_switch(cx)");
+        assert_contains_near(sheets, function, "activate_sheet(");
     }
+    assert_contains_near(sheets, "activate_sheet", "review.source_sheet_id");
     for function in [
         "add_sheet",
         "start_sheet_rename",
@@ -3098,6 +3101,54 @@ fn review_mode_workbook_mutators_are_guarded() {
         session_adapter.matches("if self.review_mode.is_some()").count() >= 3,
         "session apply, structure, and history mutations must all reject during review"
     );
+
+    let file_ops = include_str!("file_ops.rs");
+    for function in [
+        "new_in_place",
+        "load_file",
+        "start_excel_import",
+        "start_csv_import",
+        "load_excel_sync",
+        "reimport_with_freeze",
+        "start_excel_import_with_options",
+        "load_excel_sync_with_options",
+    ] {
+        assert_guarded(file_ops, function);
+    }
+    assert!(
+        file_ops.matches("if this.block_if_previewing(cx)").count() >= 3,
+        "every asynchronous workbook replacement must re-check Review Mode on completion"
+    );
+
+    let hub_sync = include_str!("hub_sync.rs");
+    for function in ["hub_open_remote_as_copy", "hub_pull"] {
+        assert_guarded(hub_sync, function);
+    }
+    assert!(
+        hub_sync.matches("if this.block_if_previewing(cx)").count() >= 2,
+        "every asynchronous hub workbook replacement must re-check Review Mode on completion"
+    );
+
+    for (name, source) in [
+        ("session adapter", include_str!("session_adapter.rs")),
+        ("trace navigation", include_str!("trace.rs")),
+        ("named-range navigation", include_str!("named_ranges/panel.rs")),
+        ("diff navigation", include_str!("diff_view.rs")),
+        ("problem navigation", include_str!("dialogs.rs")),
+        ("history navigation", include_str!("views/inspector_panel.rs")),
+        ("rewind navigation", include_str!("rewind.rs")),
+        ("formula navigation", include_str!("editing.rs")),
+        ("file reload navigation", include_str!("file_ops.rs")),
+        ("session restore navigation", include_str!("session.rs")),
+    ] {
+        assert!(
+            !source.contains("set_active_sheet"),
+            "{name} must route sheet changes through activate_sheet"
+        );
+    }
+
+    let ai_actions = include_str!("ai_actions.rs");
+    assert!(ai_actions.contains("add_sheet_clone_named(&preview_sheet"));
 }
 
 // =========================================================================
