@@ -561,7 +561,11 @@ impl Spreadsheet {
         if count == 0 {
             return;
         }
-        let next = (self.wb(cx).active_sheet_index() + 1) % count;
+        let current = self.wb(cx).active_sheet_index();
+        if current + 1 >= count {
+            return;
+        }
+        let next = current + 1;
         if self.activate_sheet(next, cx) {
             self.clear_selection_state();
             cx.notify();
@@ -575,7 +579,10 @@ impl Spreadsheet {
             return;
         }
         let current = self.wb(cx).active_sheet_index();
-        let previous = if current == 0 { count - 1 } else { current - 1 };
+        if current == 0 {
+            return;
+        }
+        let previous = current - 1;
         if self.activate_sheet(previous, cx) {
             self.clear_selection_state();
             cx.notify();

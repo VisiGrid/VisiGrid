@@ -2295,6 +2295,14 @@ impl Workbook {
         self.revision = revision;
     }
 
+    /// Replace the complete workbook from a trusted snapshot while preserving
+    /// the invariant that observed revisions only move forward.
+    pub fn restore_snapshot_monotonic(&mut self, snapshot: &Workbook) {
+        let revision = self.revision.saturating_add(1);
+        *self = snapshot.clone();
+        self.set_revision_after_atomic_commit(revision);
+    }
+
     /// Increment revision. Called at end of successful batch or single-cell edit.
     fn increment_revision(&mut self) {
         self.revision += 1;

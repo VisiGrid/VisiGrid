@@ -127,7 +127,7 @@ impl UndoAction {
             UndoAction::Group { actions, description } => {
                 Some(group_to_lua(actions, description))
             }
-            UndoAction::PlanCommit { .. } => None,
+            UndoAction::PlanCommit { .. } | UndoAction::WorkbookSnapshot { .. } => None,
             UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
                 Some(format!(
                     "grid.insert_rows{{ sheet={}, at={}, count={} }}",
@@ -452,6 +452,9 @@ impl UndoAction {
             }
             UndoAction::PlanCommit { commit, .. } => {
                 vec![format!("plan_commit:{}", commit.plan_id.0)]
+            }
+            UndoAction::WorkbookSnapshot { commit, .. } => {
+                vec![format!("workbook_snapshot:{}", commit.description)]
             }
             UndoAction::SetMerges { sheet_index, description, .. } => {
                 let op = if description.starts_with("Unmerge") { "unmerge" } else { "merge" };
@@ -919,7 +922,7 @@ fn action_affects_sheet(action: &UndoAction, sheet_index: usize) -> bool {
         UndoAction::Group { actions, .. } => {
             actions.iter().any(|a| action_affects_sheet(a, sheet_index))
         }
-        UndoAction::PlanCommit { .. } => true,
+        UndoAction::PlanCommit { .. } | UndoAction::WorkbookSnapshot { .. } => true,
         // View-only, include everywhere
         UndoAction::FreezePanesChanged { .. } => true,
         // Rewind is audit-only, always include

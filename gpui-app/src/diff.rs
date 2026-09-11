@@ -484,6 +484,10 @@ fn process_action(
             // The plan's materialized changes are already frozen in Review
             // Mode; legacy history diff extraction does not expand snapshots.
         }
+        UndoAction::WorkbookSnapshot { .. } => {
+            // Full-workbook snapshot actions are atomic and are not expanded
+            // into the legacy cell-oriented diff model.
+        }
 
         // Skip column/row sizing and visibility changes (visual only)
         UndoAction::ColumnWidthSet { .. }

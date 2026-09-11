@@ -943,6 +943,8 @@ sheet:cols()
         use crate::terminal::state::{LuaPreviewData, PendingResult};
         use crate::scripting::SheetSnapshot;
 
+        if self.block_review_entry_for_workbook_transition(cx) { return; }
+
         // Guard: terminal must be running
         let Some(ref term_arc) = self.terminal.term else {
             self.status_message = Some("No terminal session.".into());
@@ -1062,6 +1064,8 @@ sheet:cols()
     pub fn preview_last_lua(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         use crate::terminal::state::{LuaPreviewData, PendingResult};
         use crate::scripting::SheetSnapshot;
+
+        if self.block_review_entry_for_workbook_transition(cx) { return; }
 
         let last_path = self.terminal.workspace_root.as_ref()
             .map(|r| r.join("ai").join("generated").join("last.lua"));
@@ -1201,77 +1205,39 @@ sheet:cols()
             &preview.script_hash
         };
         let base_name = format!("AI Result - {}", hash_prefix);
+        let before_workbook = self.wb(cx).clone();
+        let before_row_view = self.row_view.clone();
 
         // Copy the complete materialized preview, not just changed operations.
         // This remains honest even when the original source has gone stale.
-        let (sheet_name, sheet_idx, changes, format_patches) = self.workbook.update(cx, |wb, _| {
+        let (sheet_name, sheet_idx) = self.workbook.update(cx, |wb, _| {
             let name = crate::structured_results::unique_sheet_name(wb, &base_name);
-            let mut changes = Vec::new();
-            let mut format_patches = Vec::new();
-            let mut cells: Vec<_> = preview_sheet.cells_iter()
-                .map(|(&(row, col), _)| (row, col))
-                .collect();
-            cells.sort_unstable();
-            for (row, col) in cells {
-                let raw = preview_sheet.get_raw(row, col);
-                let format = preview_sheet.get_format(row, col);
-                changes.push(crate::history::CellChange {
-                    row,
-                    col,
-                    old_value: String::new(),
-                    new_value: raw,
-                });
-                if format != Default::default() {
-                    format_patches.push(crate::history::CellFormatPatch {
-                        row,
-                        col,
-                        before: Default::default(),
-                        after: format,
-                    });
-                }
-            }
             let idx = wb
                 .add_sheet_clone_named(&preview_sheet, &name)
                 .expect("unique preview sheet name must be accepted");
-            (name, idx, changes, format_patches)
+            (name, idx)
         });
 
-        // Record undo
-        let has_values = !changes.is_empty();
-        let has_formats = !format_patches.is_empty();
-        if has_values && has_formats {
-            use crate::history::{UndoAction, FormatActionKind};
-            let group = UndoAction::Group {
-                actions: vec![
-                    UndoAction::Values { sheet_index: sheet_idx, changes },
-                    UndoAction::Format {
-                        sheet_index: sheet_idx,
-                        patches: format_patches,
-                        kind: FormatActionKind::CellStyle,
-                        description: "AI Lua: set cell styles".into(),
-                    },
-                ],
-                description: "AI Lua apply".into(),
-            };
-            self.history.record_action_with_provenance(group, None);
-            self.is_modified = true;
-        } else if has_values {
-            self.history.record_batch(sheet_idx, changes);
-            self.is_modified = true;
-        } else if has_formats {
-            self.history.record_format(
-                sheet_idx,
-                format_patches,
-                crate::history::FormatActionKind::CellStyle,
-                "AI Lua: set cell styles".into(),
-            );
-            self.is_modified = true;
-        }
-
         self.review_mode = None;
-        self.activate_sheet(sheet_idx, cx);
+        let activated = self.activate_sheet(sheet_idx, cx);
+        debug_assert!(activated);
         self.row_view = visigrid_engine::filter::RowView::new(crate::app::NUM_ROWS);
         self.clear_selection_state();
+
+        let after_workbook = self.wb(cx).clone();
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::WorkbookSnapshot {
+                commit: Box::new(crate::history::WorkbookSnapshotCommit::new(
+                    format!("Copy reviewed result to '{}'", sheet_name),
+                    before_workbook,
+                    after_workbook,
+                )),
+                before_row_view,
+                after_row_view: self.row_view.clone(),
+            },
+            None,
+        );
+        self.is_modified = true;
 
         self.status_message = Some(format!(
             "Applied AI Lua to new sheet '{}'.", sheet_name

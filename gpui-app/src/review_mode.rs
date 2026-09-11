@@ -423,6 +423,23 @@ fn adjacent_coordinate(
 }
 
 impl Spreadsheet {
+    /// Review Mode and asynchronous workbook replacement are mutually
+    /// exclusive. This closes the race where a pull/import starts first and
+    /// replaces the reviewed workbook after materialization.
+    pub fn block_review_entry_for_workbook_transition(
+        &mut self,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        if !self.import_in_progress && self.hub_activity.is_none() {
+            return false;
+        }
+        self.status_message = Some(
+            "Wait for the active import or Hub operation before entering Review Mode.".into(),
+        );
+        cx.notify();
+        true
+    }
+
     pub fn review_apply_status(
         &self,
         prepared: &PreparedOperationPlan,

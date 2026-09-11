@@ -315,11 +315,23 @@ impl Spreadsheet {
                 }
             }
 
-            // Update activity to writing
-            let _ = this.update(cx, |this, cx| {
-                this.hub_activity = Some(HubActivity::Writing);
-                cx.notify();
-            });
+            // Review Mode cannot begin while this operation is active, and a
+            // pull cannot begin while review is active. Recheck immediately
+            // before touching disk as a second line of defense.
+            let may_write = this.update(cx, |this, cx| {
+                if this.block_if_previewing(cx) {
+                    this.hub_status = HubStatus::Idle;
+                    this.hub_activity = None;
+                    false
+                } else {
+                    this.hub_activity = Some(HubActivity::Writing);
+                    cx.notify();
+                    true
+                }
+            }).unwrap_or(false);
+            if !may_write {
+                return;
+            }
 
             // Generate copy path: "{stem} (from VisiHub).sheet"
             let copy_path = generate_copy_path(&path);
@@ -523,11 +535,23 @@ impl Spreadsheet {
                 }
             }
 
-            // Update activity to writing
-            let _ = this.update(cx, |this, cx| {
-                this.hub_activity = Some(HubActivity::Writing);
-                cx.notify();
-            });
+            // Refuse the destructive write if Review Mode somehow became
+            // active after the pull began. There is no await between this
+            // check, the temp-file write, and the atomic rename.
+            let may_write = this.update(cx, |this, cx| {
+                if this.block_if_previewing(cx) {
+                    this.hub_status = HubStatus::Idle;
+                    this.hub_activity = None;
+                    false
+                } else {
+                    this.hub_activity = Some(HubActivity::Writing);
+                    cx.notify();
+                    true
+                }
+            }).unwrap_or(false);
+            if !may_write {
+                return;
+            }
 
             // Write to temp file first, then atomic rename
             let temp_path = path.with_extension("sheet.tmp");

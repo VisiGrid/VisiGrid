@@ -81,6 +81,38 @@ pub struct CellFormatPatch {
     pub after: CellFormat,
 }
 
+/// Atomic before/after workbook state for actions whose fidelity crosses
+/// several sheet-owned subsystems. Revisions remain monotonic across undo and
+/// redo even though the stored snapshots retain their original revisions.
+#[derive(Clone, Debug)]
+pub struct WorkbookSnapshotCommit {
+    pub description: String,
+    before: Workbook,
+    after: Workbook,
+}
+
+impl WorkbookSnapshotCommit {
+    pub fn new(description: impl Into<String>, before: Workbook, after: Workbook) -> Self {
+        Self {
+            description: description.into(),
+            before,
+            after,
+        }
+    }
+
+    pub fn undo_into(&self, workbook: &mut Workbook) {
+        workbook.restore_snapshot_monotonic(&self.before);
+    }
+
+    pub fn redo_into(&self, workbook: &mut Workbook) {
+        workbook.restore_snapshot_monotonic(&self.after);
+    }
+
+    fn replay_into(&self, workbook: &mut Workbook) {
+        *workbook = self.after.clone();
+    }
+}
+
 /// Kind of format action (for coalescing)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FormatActionKind {
@@ -162,6 +194,13 @@ pub enum UndoAction {
         after_row_view: visigrid_engine::filter::RowView,
         before_row_heights: HashMap<usize, f32>,
         after_row_heights: HashMap<usize, f32>,
+    },
+    /// Atomic non-plan workbook mutation. Used when a cell/format patch cannot
+    /// faithfully represent the action, such as cloning a complete sheet.
+    WorkbookSnapshot {
+        commit: Box<WorkbookSnapshotCommit>,
+        before_row_view: visigrid_engine::filter::RowView,
+        after_row_view: visigrid_engine::filter::RowView,
     },
     /// Rows inserted (for undo: delete the inserted rows)
     RowsInserted {
@@ -385,6 +424,7 @@ impl UndoAction {
             UndoAction::PlanCommit { commit, .. } => {
                 format!("Apply reviewed plan {}", commit.plan_id.0)
             }
+            UndoAction::WorkbookSnapshot { commit, .. } => commit.description.clone(),
             UndoAction::RowsInserted { count, .. } => {
                 if *count == 1 {
                     "Insert row".to_string()
@@ -1496,6 +1536,23 @@ impl History {
             UndoAction::PlanCommit { commit, .. } => {
                 *workbook = commit.applied.clone();
             }
+            UndoAction::WorkbookSnapshot {
+                commit,
+                after_row_view,
+                ..
+            } => {
+                commit.replay_into(workbook);
+                view_state.per_sheet = vec![
+                    crate::app::PreviewSheetView::default();
+                    workbook.sheet_count()
+                ];
+                if after_row_view.is_sorted() {
+                    let active_sheet = workbook.active_sheet_index();
+                    if let Some(sheet_view) = view_state.per_sheet.get_mut(active_sheet) {
+                        sheet_view.row_order = Some(after_row_view.row_order().to_vec());
+                    }
+                }
+            }
             UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
                 let sheet = workbook.sheet_mut(*sheet_index)
                     .ok_or_else(|| PreviewBuildError::InvariantViolation(
@@ -1644,6 +1701,7 @@ pub enum UndoActionKind {
     NamedRangeDescriptionChanged,
     Group,
     PlanCommit,
+    WorkbookSnapshot,
     RowsInserted,
     RowsDeleted,
     ColsInserted,
@@ -1680,6 +1738,7 @@ impl UndoActionKind {
             UndoActionKind::NamedRangeDescriptionChanged => true,
             UndoActionKind::Group => true,
             UndoActionKind::PlanCommit => true,
+            UndoActionKind::WorkbookSnapshot => true,
             UndoActionKind::RowsInserted => true,
             UndoActionKind::RowsDeleted => true,
             UndoActionKind::ColsInserted => true,
@@ -1722,6 +1781,7 @@ impl UndoActionKind {
             UndoActionKind::NamedRangeDescriptionChanged => "Change description",
             UndoActionKind::Group => "Group",
             UndoActionKind::PlanCommit => "Reviewed plan",
+            UndoActionKind::WorkbookSnapshot => "Workbook snapshot",
             UndoActionKind::RowsInserted => "Insert rows",
             UndoActionKind::RowsDeleted => "Delete rows",
             UndoActionKind::ColsInserted => "Insert columns",
@@ -1757,6 +1817,7 @@ impl UndoActionKind {
             UndoActionKind::NamedRangeDescriptionChanged => 0x06,
             UndoActionKind::Group => 0x07,
             UndoActionKind::PlanCommit => 0x1A,
+            UndoActionKind::WorkbookSnapshot => 0x1B,
             UndoActionKind::RowsInserted => 0x08,
             UndoActionKind::RowsDeleted => 0x09,
             UndoActionKind::ColsInserted => 0x0A,
@@ -1792,6 +1853,7 @@ impl UndoAction {
             UndoAction::NamedRangeDescriptionChanged { .. } => UndoActionKind::NamedRangeDescriptionChanged,
             UndoAction::Group { .. } => UndoActionKind::Group,
             UndoAction::PlanCommit { .. } => UndoActionKind::PlanCommit,
+            UndoAction::WorkbookSnapshot { .. } => UndoActionKind::WorkbookSnapshot,
             UndoAction::RowsInserted { .. } => UndoActionKind::RowsInserted,
             UndoAction::RowsDeleted { .. } => UndoActionKind::RowsDeleted,
             UndoAction::ColsInserted { .. } => UndoActionKind::ColsInserted,
@@ -1872,6 +1934,34 @@ pub enum PreviewBuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workbook_snapshot_undo_redo_restores_complete_sheet_and_monotonic_revisions() {
+        use visigrid_engine::sheet::MergedRegion;
+
+        let before = Workbook::new();
+        let mut after = before.clone();
+        let copied_index = after.add_sheet_named("Copied preview").unwrap();
+        let copied = after.sheet_mut(copied_index).unwrap();
+        copied.set_value(0, 0, "kept");
+        copied.add_merge(MergedRegion::new(0, 0, 0, 1)).unwrap();
+        assert!(after.set_active_sheet(copied_index));
+
+        let commit = WorkbookSnapshotCommit::new("Copy reviewed result", before, after.clone());
+        let mut current = after;
+        let applied_revision = current.revision();
+
+        commit.undo_into(&mut current);
+        assert_eq!(current.sheet_count(), 1);
+        assert_eq!(current.revision(), applied_revision + 1);
+
+        commit.redo_into(&mut current);
+        assert_eq!(current.sheet_count(), 2);
+        assert_eq!(current.active_sheet_index(), copied_index);
+        assert_eq!(current.sheet(copied_index).unwrap().get_raw(0, 0), "kept");
+        assert_eq!(current.sheet(copied_index).unwrap().merged_regions.len(), 1);
+        assert_eq!(current.revision(), applied_revision + 2);
+    }
 
     /// Test 1: Fingerprint is order-sensitive - different action sequences produce different hashes
     #[test]
@@ -2040,6 +2130,8 @@ mod tests {
             UndoActionKind::NamedRangeRenamed,
             UndoActionKind::NamedRangeDescriptionChanged,
             UndoActionKind::Group,
+            UndoActionKind::PlanCommit,
+            UndoActionKind::WorkbookSnapshot,
             UndoActionKind::RowsInserted,
             UndoActionKind::RowsDeleted,
             UndoActionKind::ColsInserted,
@@ -2050,6 +2142,12 @@ mod tests {
             UndoActionKind::ValidationCleared,
             UndoActionKind::ValidationExcluded,
             UndoActionKind::ValidationExclusionCleared,
+            UndoActionKind::ColumnWidthSet,
+            UndoActionKind::RowHeightSet,
+            UndoActionKind::RowVisibilityChanged,
+            UndoActionKind::ColVisibilityChanged,
+            UndoActionKind::FreezePanesChanged,
+            UndoActionKind::SetMerges,
             UndoActionKind::Rewind,
         ];
 

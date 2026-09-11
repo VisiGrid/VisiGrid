@@ -3049,6 +3049,8 @@ fn review_mode_workbook_mutators_are_guarded() {
     for function in ["next_sheet", "prev_sheet", "goto_sheet"] {
         assert_contains_near(sheets, function, "activate_sheet(");
     }
+    assert_contains_near(sheets, "next_sheet", "if current + 1 >= count");
+    assert_contains_near(sheets, "prev_sheet", "if current == 0");
     assert_contains_near(sheets, "activate_sheet", "review.source_sheet_id");
     for function in [
         "add_sheet",
@@ -3128,6 +3130,10 @@ fn review_mode_workbook_mutators_are_guarded() {
         hub_sync.matches("if this.block_if_previewing(cx)").count() >= 2,
         "every asynchronous hub workbook replacement must re-check Review Mode on completion"
     );
+    assert!(
+        hub_sync.matches("let may_write = this.update").count() >= 2,
+        "Hub downloads must re-check Review Mode before writing to disk"
+    );
 
     for (name, source) in [
         ("session adapter", include_str!("session_adapter.rs")),
@@ -3149,6 +3155,17 @@ fn review_mode_workbook_mutators_are_guarded() {
 
     let ai_actions = include_str!("ai_actions.rs");
     assert!(ai_actions.contains("add_sheet_clone_named(&preview_sheet"));
+    assert_contains_near(
+        ai_actions,
+        "capture_ai_lua",
+        "block_review_entry_for_workbook_transition(cx)",
+    );
+    assert_contains_near(
+        ai_actions,
+        "preview_last_lua",
+        "block_review_entry_for_workbook_transition(cx)",
+    );
+    assert!(ai_actions.contains("UndoAction::WorkbookSnapshot"));
 }
 
 // =========================================================================
