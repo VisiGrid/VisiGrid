@@ -12,7 +12,10 @@
 
 use std::sync::mpsc;
 
-use visigrid_protocol::{Op, InspectTarget, InspectResult, OpError};
+use visigrid_protocol::{
+    ApplyPlanMessage, CreatePlanMessage, DismissPlanMessage, GetPlanMessage, InspectResult,
+    InspectTarget, ListPlanChangesMessage, Op, OpError,
+};
 
 /// A simple oneshot channel for single-use responses.
 /// Uses std::sync::mpsc under the hood.
@@ -65,8 +68,14 @@ impl SessionBridgeHandle {
         Self { tx, waker: None }
     }
 
-    pub fn new_with_waker(tx: mpsc::Sender<SessionRequest>, waker: smol::channel::Sender<()>) -> Self {
-        Self { tx, waker: Some(waker) }
+    pub fn new_with_waker(
+        tx: mpsc::Sender<SessionRequest>,
+        waker: smol::channel::Sender<()>,
+    ) -> Self {
+        Self {
+            tx,
+            waker: Some(waker),
+        }
     }
 
     fn wake(&self) {
@@ -79,42 +88,65 @@ impl SessionBridgeHandle {
     pub fn apply_ops(&self, req: ApplyOpsRequest) -> Result<ApplyOpsResponse, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(SessionRequest::ApplyOps { req, reply: reply_tx })
+            .send(SessionRequest::ApplyOps {
+                req,
+                reply: reply_tx,
+            })
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
-        reply_rx.blocking_recv().map_err(|_| BridgeError::ChannelClosed)
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| BridgeError::ChannelClosed)
     }
 
     /// Send an inspect request and wait for the response.
     pub fn inspect(&self, req: InspectRequest) -> Result<InspectResponse, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(SessionRequest::Inspect { req, reply: reply_tx })
+            .send(SessionRequest::Inspect {
+                req,
+                reply: reply_tx,
+            })
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
-        reply_rx.blocking_recv().map_err(|_| BridgeError::ChannelClosed)
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| BridgeError::ChannelClosed)
     }
 
     /// Send a pairing request and wait (bounded) for the user's decision.
     /// The timeout covers the human thinking about the dialog — generous,
     /// but bounded so an abandoned dialog can't wedge the TCP thread.
-    pub fn pair(&self, client_name: String, timeout: std::time::Duration) -> Result<bool, BridgeError> {
+    pub fn pair(
+        &self,
+        client_name: String,
+        timeout: std::time::Duration,
+    ) -> Result<bool, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(SessionRequest::Pair { client_name, reply: reply_tx })
+            .send(SessionRequest::Pair {
+                client_name,
+                reply: reply_tx,
+            })
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
-        reply_rx.blocking_recv_timeout(timeout).map_err(|_| BridgeError::ChannelClosed)
+        reply_rx
+            .blocking_recv_timeout(timeout)
+            .map_err(|_| BridgeError::ChannelClosed)
     }
 
     /// Request a save and wait for the host.
     pub fn save(&self, request_id: String) -> Result<SaveOutcome, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(SessionRequest::Save { request_id, reply: reply_tx })
+            .send(SessionRequest::Save {
+                request_id,
+                reply: reply_tx,
+            })
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
-        reply_rx.blocking_recv_timeout(std::time::Duration::from_secs(30))
+        reply_rx
+            .blocking_recv_timeout(std::time::Duration::from_secs(30))
             .map_err(|_| BridgeError::ChannelClosed)
     }
 
@@ -126,21 +158,37 @@ impl SessionBridgeHandle {
     ) -> Result<StructureOutcome, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(SessionRequest::Structure { op, client, reply: reply_tx })
+            .send(SessionRequest::Structure {
+                op,
+                client,
+                reply: reply_tx,
+            })
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
-        reply_rx.blocking_recv_timeout(std::time::Duration::from_secs(30))
+        reply_rx
+            .blocking_recv_timeout(std::time::Duration::from_secs(30))
             .map_err(|_| BridgeError::ChannelClosed)
     }
 
     /// Request undo/redo and wait for the host.
-    pub fn history(&self, redo: bool, steps: u32, client: Option<String>) -> Result<HistoryOutcome, BridgeError> {
+    pub fn history(
+        &self,
+        redo: bool,
+        steps: u32,
+        client: Option<String>,
+    ) -> Result<HistoryOutcome, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(SessionRequest::History { redo, steps, client, reply: reply_tx })
+            .send(SessionRequest::History {
+                redo,
+                steps,
+                client,
+                reply: reply_tx,
+            })
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
-        reply_rx.blocking_recv_timeout(std::time::Duration::from_secs(30))
+        reply_rx
+            .blocking_recv_timeout(std::time::Duration::from_secs(30))
             .map_err(|_| BridgeError::ChannelClosed)
     }
 
@@ -148,20 +196,91 @@ impl SessionBridgeHandle {
     pub fn subscribe(&self, req: SubscribeRequest) -> Result<SubscribeResponse, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(SessionRequest::Subscribe { req, reply: reply_tx })
+            .send(SessionRequest::Subscribe {
+                req,
+                reply: reply_tx,
+            })
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
-        reply_rx.blocking_recv().map_err(|_| BridgeError::ChannelClosed)
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| BridgeError::ChannelClosed)
     }
 
     /// Send an unsubscribe request (fire-and-forget for now).
     pub fn unsubscribe(&self, req: UnsubscribeRequest) -> Result<UnsubscribeResponse, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(SessionRequest::Unsubscribe { req, reply: reply_tx })
+            .send(SessionRequest::Unsubscribe {
+                req,
+                reply: reply_tx,
+            })
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
-        reply_rx.blocking_recv().map_err(|_| BridgeError::ChannelClosed)
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| BridgeError::ChannelClosed)
+    }
+
+    pub fn create_plan(
+        &self,
+        req: CreatePlanMessage,
+        client: String,
+    ) -> Result<PlanBridgeOutcome, BridgeError> {
+        self.plan_request(
+            |reply| SessionRequest::CreatePlan { req, client, reply },
+            std::time::Duration::from_secs(60),
+        )
+    }
+
+    pub fn get_plan(&self, req: GetPlanMessage) -> Result<PlanBridgeOutcome, BridgeError> {
+        self.plan_request(
+            |reply| SessionRequest::GetPlan { req, reply },
+            std::time::Duration::from_secs(30),
+        )
+    }
+
+    pub fn list_plan_changes(
+        &self,
+        req: ListPlanChangesMessage,
+    ) -> Result<PlanBridgeOutcome, BridgeError> {
+        self.plan_request(
+            |reply| SessionRequest::ListPlanChanges { req, reply },
+            std::time::Duration::from_secs(30),
+        )
+    }
+
+    pub fn apply_plan(&self, req: ApplyPlanMessage) -> Result<PlanBridgeOutcome, BridgeError> {
+        self.plan_request(
+            |reply| SessionRequest::ApplyPlan { req, reply },
+            std::time::Duration::from_secs(30),
+        )
+    }
+
+    pub fn dismiss_plan(
+        &self,
+        req: DismissPlanMessage,
+        client: String,
+    ) -> Result<PlanBridgeOutcome, BridgeError> {
+        self.plan_request(
+            |reply| SessionRequest::DismissPlan { req, client, reply },
+            std::time::Duration::from_secs(30),
+        )
+    }
+
+    fn plan_request(
+        &self,
+        build: impl FnOnce(oneshot::Sender<PlanBridgeOutcome>) -> SessionRequest,
+        timeout: std::time::Duration,
+    ) -> Result<PlanBridgeOutcome, BridgeError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(build(reply_tx))
+            .map_err(|_| BridgeError::ChannelClosed)?;
+        self.wake();
+        reply_rx
+            .blocking_recv_timeout(timeout)
+            .map_err(|_| BridgeError::ChannelClosed)
     }
 }
 
@@ -219,6 +338,63 @@ pub enum SessionRequest {
         client: Option<String>,
         reply: oneshot::Sender<HistoryOutcome>,
     },
+    CreatePlan {
+        req: CreatePlanMessage,
+        client: String,
+        reply: oneshot::Sender<PlanBridgeOutcome>,
+    },
+    GetPlan {
+        req: GetPlanMessage,
+        reply: oneshot::Sender<PlanBridgeOutcome>,
+    },
+    ListPlanChanges {
+        req: ListPlanChangesMessage,
+        reply: oneshot::Sender<PlanBridgeOutcome>,
+    },
+    ApplyPlan {
+        req: ApplyPlanMessage,
+        reply: oneshot::Sender<PlanBridgeOutcome>,
+    },
+    DismissPlan {
+        req: DismissPlanMessage,
+        client: String,
+        reply: oneshot::Sender<PlanBridgeOutcome>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanBridgeOutcome {
+    pub value: Option<serde_json::Value>,
+    pub error: Option<PlanBridgeError>,
+}
+
+impl PlanBridgeOutcome {
+    pub fn success(value: serde_json::Value) -> Self {
+        Self {
+            value: Some(value),
+            error: None,
+        }
+    }
+
+    pub fn error(code: impl Into<String>, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            value: None,
+            error: Some(PlanBridgeError {
+                code: code.into(),
+                message: message.into(),
+                retryable,
+                details: serde_json::Map::new(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanBridgeError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    pub details: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Host reply to a structure request.
@@ -299,10 +475,7 @@ pub struct ApplyOpsResponse {
 #[derive(Debug, Clone)]
 pub enum ApplyOpsError {
     /// Expected revision didn't match current revision.
-    RevisionMismatch {
-        expected: u64,
-        actual: u64,
-    },
+    RevisionMismatch { expected: u64, actual: u64 },
     /// An operation failed.
     OpFailed(OpError),
 }

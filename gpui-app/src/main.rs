@@ -57,6 +57,7 @@ use visigrid_scripting as scripting;
 mod terminal;
 mod named_ranges;
 mod perf;
+mod plan_manager;
 mod provenance;
 mod ref_target;
 mod review_mode;

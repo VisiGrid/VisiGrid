@@ -330,6 +330,17 @@ pub fn cmd_serve(
                 };
                 let _ = reply.send(outcome);
             }
+            host::SessionRequest::CreatePlan { reply, .. }
+            | host::SessionRequest::GetPlan { reply, .. }
+            | host::SessionRequest::ListPlanChanges { reply, .. }
+            | host::SessionRequest::ApplyPlan { reply, .. }
+            | host::SessionRequest::DismissPlan { reply, .. } => {
+                let _ = reply.send(host::PlanBridgeOutcome::error(
+                    "review_unavailable",
+                    "Review Mode requires a workbook open in the VisiGrid desktop app.",
+                    false,
+                ));
+            }
         }
 
         // Layouts don't change headless (no layout-mutating ops yet), but

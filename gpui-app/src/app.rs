@@ -815,6 +815,8 @@ pub struct Spreadsheet {
     pub terminal: crate::terminal::TerminalState,
     /// Active immutable plan preview plus viewport lookup indexes.
     pub review_mode: Option<crate::review_mode::ReviewModeState>,
+    /// MCP plan ownership, idempotency, and terminal observation records.
+    pub(crate) mcp_plans: crate::plan_manager::McpPlanManager,
     pub terminal_focus_handle: FocusHandle,
     /// Explicit boolean tracking terminal focus — secondary check for platforms
     /// where `FocusHandle::is_focused()` may not reflect focus correctly (macOS).
@@ -1331,6 +1333,7 @@ impl Spreadsheet {
 
             terminal: crate::terminal::TerminalState::default(),
             review_mode: None,
+            mcp_plans: crate::plan_manager::McpPlanManager::default(),
 
             lua_runtime: crate::scripting::LuaRuntime::default(),
             lua_console: crate::scripting::ConsoleState::default(),
@@ -2728,8 +2731,26 @@ impl Spreadsheet {
 
     /// Dismiss the pending structured result.
     pub fn dismiss_structured_result(&mut self, cx: &mut Context<Self>) {
+        let dismissed_plan_id = self
+            .review_mode
+            .as_ref()
+            .map(|state| state.plan_id.0.clone());
         self.terminal.pending_result = None;
         self.review_mode = None;
+        if let Some(plan_id) = dismissed_plan_id {
+            if self.mcp_plans.record(&plan_id).is_some() {
+                let result = serde_json::json!({
+                    "plan_id": plan_id,
+                    "state": "dismissed",
+                    "workbook_revision": self.workbook.read(cx).revision(),
+                    "workbook_changed": false,
+                    "already_dismissed": false,
+                });
+                self.mcp_plans.mark_dismissed(&plan_id, result);
+                self.status_message =
+                    Some("Dismissed the proposed changes without modifying the workbook.".into());
+            }
+        }
         cx.notify();
     }
 

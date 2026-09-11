@@ -10,6 +10,7 @@ pub use visigrid_session_host::bridge;
 
 pub use visigrid_session_host::{
     SessionBridgeHandle, SessionRequest, SaveOutcome, HistoryOutcome, StructureOutcome, BridgeError,
+    PlanBridgeOutcome, PlanBridgeError,
     ApplyOpsRequest, ApplyOpsResponse, ApplyOpsError,
     InspectRequest, InspectResponse, InspectError,
     SubscribeRequest, SubscribeResponse,

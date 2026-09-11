@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 // VisiGrid CLI - headless spreadsheet operations
 // See docs/cli-v1.md for specification
 

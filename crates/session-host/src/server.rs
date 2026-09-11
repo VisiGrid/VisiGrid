@@ -3,21 +3,19 @@
 //! Binds to 127.0.0.1:<random_port> and handles JSONL messages.
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream, SocketAddr};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::bridge::{
-    SessionBridgeHandle, ApplyOpsRequest, InspectRequest,
-};
+use crate::bridge::{ApplyOpsRequest, InspectRequest, SessionBridgeHandle};
 use crate::discovery::DiscoveryManager;
 use crate::events::{BroadcastEvent, ConnectionSubscriptions};
-use visigrid_protocol::*;
-use crate::wire_ext::{CellRef, ProtocolError, MAX_MESSAGE_SIZE};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
+use crate::wire_ext::{CellRef, ProtocolError, MAX_MESSAGE_SIZE};
+use visigrid_protocol::*;
 
 /// Server operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,6 +47,9 @@ pub struct SessionServerConfig {
     /// If None, generates a fresh cryptographic token.
     /// If Some, uses the provided token (for spawn mode integration).
     pub token_override: Option<String>,
+    /// Whether this host is a GUI window with native Review Mode approval.
+    /// Headless `vgrid serve` deliberately leaves this false.
+    pub review_capable: bool,
 }
 
 impl std::fmt::Debug for SessionServerConfig {
@@ -72,6 +73,7 @@ impl Default for SessionServerConfig {
             bridge: None,
             rate_limiter_config: RateLimiterConfig::default(),
             token_override: None,
+            review_capable: false,
         }
     }
 }
@@ -117,7 +119,10 @@ impl EventRegistry {
 
     /// Unregister a connection.
     pub fn unregister(&self, id: u64) {
-        self.senders.lock().unwrap().retain(|(conn_id, _)| *conn_id != id);
+        self.senders
+            .lock()
+            .unwrap()
+            .retain(|(conn_id, _)| *conn_id != id);
     }
 
     /// Broadcast an event to all registered connections.
@@ -334,16 +339,25 @@ impl SessionServer {
         let event_registry = self.event_registry.clone();
         let writer_lease = self.writer_lease.clone();
         let metrics = self.metrics.clone();
+        let review_capable = config.review_capable;
 
         self.listener_handle = Some(thread::spawn(move || {
-            run_listener(listener, shutdown, mode, token, session_id, bridge, rate_limiter_config, event_registry, writer_lease, metrics);
+            run_listener(
+                listener,
+                shutdown,
+                mode,
+                token,
+                session_id,
+                bridge,
+                rate_limiter_config,
+                event_registry,
+                writer_lease,
+                metrics,
+                review_capable,
+            );
         }));
 
-        log::info!(
-            "Session server started on {} (mode: {:?})",
-            addr,
-            self.mode
-        );
+        log::info!("Session server started on {} (mode: {:?})", addr, self.mode);
 
         Ok(())
     }
@@ -414,7 +428,8 @@ impl SessionServer {
         }
         // Coalesce cells into ranges at broadcast point (not in network threads)
         let ranges = super::coalesce::coalesce_cells_to_ranges(&cells);
-        self.event_registry.broadcast(BroadcastEvent { revision, ranges });
+        self.event_registry
+            .broadcast(BroadcastEvent { revision, ranges });
     }
 
     /// Get the number of connected clients.
@@ -469,6 +484,7 @@ fn run_listener(
     event_registry: EventRegistry,
     writer_lease: WriterLease,
     metrics: ServerMetrics,
+    review_capable: bool,
 ) {
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -502,7 +518,20 @@ fn run_listener(
                 thread::spawn(move || {
                     // Register connection with event registry
                     let (conn_id, event_rx) = registry.register();
-                    let result = handle_connection(stream, conn_id, mode, &token, &session_id, &bridge, rl_config, event_rx, &lease, &conn_metrics, &registry);
+                    let result = handle_connection(
+                        stream,
+                        conn_id,
+                        mode,
+                        &token,
+                        &session_id,
+                        &bridge,
+                        rl_config,
+                        event_rx,
+                        &lease,
+                        &conn_metrics,
+                        &registry,
+                        review_capable,
+                    );
                     // Release writer lease if this connection held it
                     lease.release(conn_id);
                     // Unregister on disconnect
@@ -530,13 +559,13 @@ static PAIRING_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Clamp a client-supplied name to something safe to render in a dialog.
 fn sanitize_client_name(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(60)
-        .collect();
+    let cleaned: String = name.chars().filter(|c| !c.is_control()).take(60).collect();
     let trimmed = cleaned.trim();
-    if trimmed.is_empty() { "Unknown client".to_string() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        "Unknown client".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Handle a single client connection.
@@ -552,6 +581,7 @@ fn handle_connection(
     writer_lease: &WriterLease,
     metrics: &ServerMetrics,
     registry: &EventRegistry,
+    review_capable: bool,
 ) -> std::io::Result<()> {
     // Use shorter read timeout to allow event polling
     stream.set_nonblocking(false)?;
@@ -589,8 +619,14 @@ fn handle_connection(
         // Check message size - disconnect immediately for oversized messages
         if line.len() > MAX_MESSAGE_SIZE {
             send_error(&mut stream, None, ProtocolError::MessageTooLarge)?;
-            log::warn!("Connection {} sent oversized message ({}), disconnecting", conn_id, line.len());
-            metrics.connections_closed_oversize.fetch_add(1, Ordering::Relaxed);
+            log::warn!(
+                "Connection {} sent oversized message ({}), disconnecting",
+                conn_id,
+                line.len()
+            );
+            metrics
+                .connections_closed_oversize
+                .fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
 
@@ -603,13 +639,23 @@ fn handle_connection(
             }
             Err(e) => {
                 parse_failures += 1;
-                log::debug!("Malformed message ({}/{}): {}", parse_failures, MAX_PARSE_FAILURES, e);
+                log::debug!(
+                    "Malformed message ({}/{}): {}",
+                    parse_failures,
+                    MAX_PARSE_FAILURES,
+                    e
+                );
                 send_error(&mut stream, None, ProtocolError::MalformedMessage)?;
 
                 // Disconnect after too many consecutive parse failures
                 if parse_failures >= MAX_PARSE_FAILURES {
-                    log::warn!("Connection {} exceeded parse failure limit, disconnecting", conn_id);
-                    metrics.connections_closed_parse_failures.fetch_add(1, Ordering::Relaxed);
+                    log::warn!(
+                        "Connection {} exceeded parse failure limit, disconnecting",
+                        conn_id
+                    );
+                    metrics
+                        .connections_closed_parse_failures
+                        .fetch_add(1, Ordering::Relaxed);
                     return Ok(());
                 }
                 continue;
@@ -704,7 +750,17 @@ fn handle_connection(
                         session_id: session_id.to_string(),
                         protocol_version: hello.protocol_version.min(PROTOCOL_VERSION),
                         revision,
-                        capabilities: vec!["apply_ops".to_string(), "inspect".to_string()],
+                        capabilities: if review_capable {
+                            vec![
+                                "apply_ops".to_string(),
+                                "inspect".to_string(),
+                                "review_plans_v1".to_string(),
+                                "review_gui_approval_v1".to_string(),
+                                "review_lua_plan_v1".to_string(),
+                            ]
+                        } else {
+                            vec!["apply_ops".to_string(), "inspect".to_string()]
+                        },
                     });
                     send_message(&mut stream, &response)?;
                 }
@@ -717,7 +773,19 @@ fn handle_connection(
         }
 
         // Check rate limit and handle authenticated messages
-        let response = handle_message_with_rate_limit(msg, conn_id, client_name.as_deref(), mode, bridge, &mut rate_limiter, &mut subscriptions, writer_lease, metrics, registry);
+        let response = handle_message_with_rate_limit(
+            msg,
+            conn_id,
+            client_name.as_deref(),
+            mode,
+            bridge,
+            &mut rate_limiter,
+            &mut subscriptions,
+            writer_lease,
+            metrics,
+            registry,
+            review_capable,
+        );
         send_message(&mut stream, &response)?;
     }
 }
@@ -734,6 +802,7 @@ fn handle_message_with_rate_limit(
     writer_lease: &WriterLease,
     metrics: &ServerMetrics,
     registry: &EventRegistry,
+    review_capable: bool,
 ) -> ServerMessage {
     // Extract request ID for error responses
     let request_id = match &msg {
@@ -748,6 +817,11 @@ fn handle_message_with_rate_limit(
         ClientMessage::Save(sv) => Some(sv.id.clone()),
         ClientMessage::History(h) => Some(h.id.clone()),
         ClientMessage::Structure(st) => Some(st.id.clone()),
+        ClientMessage::CreatePlan(p) => Some(p.id.clone()),
+        ClientMessage::GetPlan(p) => Some(p.id.clone()),
+        ClientMessage::ListPlanChanges(p) => Some(p.id.clone()),
+        ClientMessage::ApplyPlan(p) => Some(p.id.clone()),
+        ClientMessage::DismissPlan(p) => Some(p.id.clone()),
     };
 
     // Check rate limit based on message type
@@ -763,6 +837,11 @@ fn handle_message_with_rate_limit(
         ClientMessage::Save(_) => rate_limiter.try_ping(),
         ClientMessage::History(_) => rate_limiter.try_ping(),
         ClientMessage::Structure(_) => rate_limiter.try_apply_ops(1),
+        ClientMessage::CreatePlan(_) => rate_limiter.try_apply_ops(1),
+        ClientMessage::GetPlan(_) | ClientMessage::ListPlanChanges(_) => rate_limiter.try_inspect(),
+        ClientMessage::ApplyPlan(_) | ClientMessage::DismissPlan(_) => {
+            rate_limiter.try_apply_ops(1)
+        }
     };
 
     if let Err(e) = rate_check {
@@ -772,10 +851,24 @@ fn handle_message_with_rate_limit(
             e.available,
             e.retry_after_ms
         );
-        return ServerMessage::Error(ProtocolError::rate_limited_error(request_id, e.retry_after_ms));
+        return ServerMessage::Error(ProtocolError::rate_limited_error(
+            request_id,
+            e.retry_after_ms,
+        ));
     }
 
-    handle_message(msg, conn_id, client_name, mode, bridge, subscriptions, writer_lease, metrics, registry)
+    handle_message(
+        msg,
+        conn_id,
+        client_name,
+        mode,
+        bridge,
+        subscriptions,
+        writer_lease,
+        metrics,
+        registry,
+        review_capable,
+    )
 }
 
 /// Handle a single message and return the response.
@@ -789,7 +882,34 @@ fn handle_message(
     writer_lease: &WriterLease,
     metrics: &ServerMetrics,
     registry: &EventRegistry,
+    review_capable: bool,
 ) -> ServerMessage {
+    let review_unavailable = |id: String| {
+        ServerMessage::Error(ErrorMessage {
+            id: Some(id),
+            code: "review_unavailable".to_string(),
+            message: "Review Mode requires a workbook open in the VisiGrid desktop app."
+                .to_string(),
+            retry_after_ms: None,
+        })
+    };
+    let plan_response = |id: String, outcome: crate::bridge::PlanBridgeOutcome, kind: &str| {
+        if let Some(error) = outcome.error {
+            return ServerMessage::Error(ErrorMessage {
+                id: Some(id),
+                code: error.code,
+                message: error.message,
+                retry_after_ms: error.retryable.then_some(250),
+            });
+        }
+        let value = outcome.value.unwrap_or_else(|| serde_json::json!({}));
+        match kind {
+            "changes" => ServerMessage::PlanChanges(PlanChangesMessage { id, page: value }),
+            "applied" => ServerMessage::PlanApplied(PlanAppliedMessage { id, result: value }),
+            "dismissed" => ServerMessage::PlanDismissed(PlanDismissedMessage { id, result: value }),
+            _ => ServerMessage::PlanResult(PlanResultMessage { id, plan: value }),
+        }
+    };
     match msg {
         ClientMessage::Hello(h) => {
             // Already authenticated, treat as error
@@ -809,7 +929,9 @@ fn handle_message(
 
             // Try to acquire writer lease
             if let Err(retry_after_ms) = writer_lease.try_acquire(conn_id) {
-                metrics.writer_conflict_count.fetch_add(1, Ordering::Relaxed);
+                metrics
+                    .writer_conflict_count
+                    .fetch_add(1, Ordering::Relaxed);
                 return ServerMessage::Error(ErrorMessage {
                     id: Some(apply.id),
                     code: ProtocolError::WriterConflict.code().to_string(),
@@ -844,7 +966,10 @@ fn handle_message(
                             crate::bridge::ApplyOpsError::RevisionMismatch { expected, actual } => {
                                 OpError {
                                     code: "revision_mismatch".to_string(),
-                                    message: format!("Expected revision {} but current is {}", expected, actual),
+                                    message: format!(
+                                        "Expected revision {} but current is {}",
+                                        expected, actual
+                                    ),
                                     op_index: 0,
                                     suggestion: Some("Retry with updated revision".to_string()),
                                 }
@@ -945,7 +1070,10 @@ fn handle_message(
                         active_sheet: outcome.active_sheet,
                     }),
                     Some((code, message)) => ServerMessage::Error(ErrorMessage {
-                        id: Some(st.id), code, message, retry_after_ms: None,
+                        id: Some(st.id),
+                        code,
+                        message,
+                        retry_after_ms: None,
                     }),
                 },
                 Err(_) => ServerMessage::Error(ErrorMessage {
@@ -968,7 +1096,10 @@ fn handle_message(
                         can_redo: outcome.can_redo,
                     }),
                     Some((code, message)) => ServerMessage::Error(ErrorMessage {
-                        id: Some(h.id), code, message, retry_after_ms: None,
+                        id: Some(h.id),
+                        code,
+                        message,
+                        retry_after_ms: None,
                     }),
                 },
                 Err(_) => ServerMessage::Error(ErrorMessage {
@@ -979,17 +1110,85 @@ fn handle_message(
                 }),
             }
         }
+        ClientMessage::CreatePlan(plan) => {
+            if !review_capable {
+                review_unavailable(plan.id)
+            } else {
+                let id = plan.id.clone();
+                match bridge.create_plan(plan, client_name.unwrap_or("MCP client").to_string()) {
+                    Ok(outcome) => plan_response(id, outcome, "plan"),
+                    Err(_) => bridge_error(id),
+                }
+            }
+        }
+        ClientMessage::GetPlan(plan) => {
+            if !review_capable {
+                review_unavailable(plan.id)
+            } else {
+                let id = plan.id.clone();
+                match bridge.get_plan(plan) {
+                    Ok(outcome) => plan_response(id, outcome, "plan"),
+                    Err(_) => bridge_error(id),
+                }
+            }
+        }
+        ClientMessage::ListPlanChanges(plan) => {
+            if !review_capable {
+                review_unavailable(plan.id)
+            } else {
+                let id = plan.id.clone();
+                match bridge.list_plan_changes(plan) {
+                    Ok(outcome) => plan_response(id, outcome, "changes"),
+                    Err(_) => bridge_error(id),
+                }
+            }
+        }
+        ClientMessage::ApplyPlan(plan) => {
+            if !review_capable {
+                review_unavailable(plan.id)
+            } else {
+                let id = plan.id.clone();
+                match bridge.apply_plan(plan) {
+                    Ok(outcome) => plan_response(id, outcome, "applied"),
+                    Err(_) => bridge_error(id),
+                }
+            }
+        }
+        ClientMessage::DismissPlan(plan) => {
+            if !review_capable {
+                review_unavailable(plan.id)
+            } else {
+                let id = plan.id.clone();
+                match bridge.dismiss_plan(plan, client_name.unwrap_or("MCP client").to_string()) {
+                    Ok(outcome) => plan_response(id, outcome, "dismissed"),
+                    Err(_) => bridge_error(id),
+                }
+            }
+        }
         ClientMessage::Ping(ping) => ServerMessage::Pong(PongMessage { id: ping.id }),
         ClientMessage::Stats(stats) => ServerMessage::StatsResult(StatsResultMessage {
             id: stats.id,
-            connections_closed_parse_failures: metrics.connections_closed_parse_failures.load(Ordering::Relaxed),
-            connections_closed_oversize: metrics.connections_closed_oversize.load(Ordering::Relaxed),
+            connections_closed_parse_failures: metrics
+                .connections_closed_parse_failures
+                .load(Ordering::Relaxed),
+            connections_closed_oversize: metrics
+                .connections_closed_oversize
+                .load(Ordering::Relaxed),
             writer_conflict_count: metrics.writer_conflict_count.load(Ordering::Relaxed),
             connections_refused_limit: metrics.connections_refused_limit.load(Ordering::Relaxed),
             dropped_events_total: registry.dropped_events_count(),
             active_connections: registry.connection_count() as u64,
         }),
     }
+}
+
+fn bridge_error(id: String) -> ServerMessage {
+    ServerMessage::Error(ErrorMessage {
+        id: Some(id),
+        code: "internal_error".to_string(),
+        message: "Bridge communication failed".to_string(),
+        retry_after_ms: None,
+    })
 }
 
 /// Send a message to the client.
@@ -1001,7 +1200,11 @@ fn send_message(stream: &mut TcpStream, msg: &ServerMessage) -> std::io::Result<
 }
 
 /// Send an error message to the client.
-fn send_error(stream: &mut TcpStream, id: Option<String>, error: ProtocolError) -> std::io::Result<()> {
+fn send_error(
+    stream: &mut TcpStream,
+    id: Option<String>,
+    error: ProtocolError,
+) -> std::io::Result<()> {
     let msg = ServerMessage::Error(error.to_error_message(id));
     send_message(stream, &msg)
 }
@@ -1010,8 +1213,7 @@ fn send_error(stream: &mut TcpStream, id: Option<String>, error: ProtocolError) 
 mod tests {
     use super::*;
     use crate::bridge::{
-        SessionRequest, ApplyOpsResponse, InspectResponse,
-        SubscribeResponse, UnsubscribeResponse,
+        ApplyOpsResponse, InspectResponse, SessionRequest, SubscribeResponse, UnsubscribeResponse,
     };
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
@@ -1031,7 +1233,8 @@ mod tests {
                             total: req.ops.len(),
                             current_revision: 1,
                             error: None,
-                        warnings: Vec::new(), });
+                            warnings: Vec::new(),
+                        });
                     }
                     SessionRequest::Inspect { req: _, reply } => {
                         let _ = reply.send(InspectResponse {
@@ -1050,9 +1253,7 @@ mod tests {
                         });
                     }
                     SessionRequest::Unsubscribe { req, reply } => {
-                        let _ = reply.send(UnsubscribeResponse {
-                            topics: req.topics,
-                        });
+                        let _ = reply.send(UnsubscribeResponse { topics: req.topics });
                     }
                     SessionRequest::Pair { reply, .. } => {
                         // Test bridge auto-approves pairing
@@ -1070,6 +1271,17 @@ mod tests {
                             revision: 1,
                             error: None,
                         });
+                    }
+                    SessionRequest::CreatePlan { reply, .. }
+                    | SessionRequest::GetPlan { reply, .. }
+                    | SessionRequest::ListPlanChanges { reply, .. }
+                    | SessionRequest::ApplyPlan { reply, .. }
+                    | SessionRequest::DismissPlan { reply, .. } => {
+                        let _ = reply.send(crate::bridge::PlanBridgeOutcome::error(
+                            "review_unavailable",
+                            "test bridge has no Review Mode",
+                            false,
+                        ));
                     }
                 }
             }
@@ -1181,6 +1393,52 @@ mod tests {
     }
 
     #[test]
+    fn gui_host_advertises_review_capabilities() {
+        let (bridge, _handler) = create_test_bridge();
+        let mut server = SessionServer::new();
+        server
+            .start(SessionServerConfig {
+                mode: ServerMode::Apply,
+                workbook_title: "Test".to_string(),
+                bridge: Some(bridge),
+                review_capable: true,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let mut stream = TcpStream::connect(server.bound_addr().unwrap()).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({
+                "type": "hello",
+                "id": "review-capabilities",
+                "client": "test",
+                "version": "1.0.0",
+                "token": server.token().unwrap(),
+                "protocol_version": 1
+            })
+        )
+        .unwrap();
+        let mut response = String::new();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        let ServerMessage::Welcome(welcome) = serde_json::from_str(&response).unwrap() else {
+            panic!("expected welcome");
+        };
+        for capability in [
+            "review_plans_v1",
+            "review_gui_approval_v1",
+            "review_lua_plan_v1",
+        ] {
+            assert!(welcome.capabilities.iter().any(|value| value == capability));
+        }
+        server.stop();
+    }
+
+    #[test]
     fn test_server_auth_failure() {
         let (bridge, _handler) = create_test_bridge();
         let mut server = SessionServer::new();
@@ -1247,7 +1505,9 @@ mod tests {
 
         // Connect and authenticate
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
 
         let hello = serde_json::json!({
             "type": "hello",
@@ -1310,7 +1570,9 @@ mod tests {
 
         // Connect and authenticate
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
 
         let hello = serde_json::json!({
             "type": "hello",
@@ -1385,7 +1647,9 @@ mod tests {
 
         // Connect and authenticate
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
 
         let hello = serde_json::json!({
             "type": "hello",
@@ -1411,14 +1675,20 @@ mod tests {
         response.clear();
         reader.read_line(&mut response).unwrap();
         let msg: ServerMessage = serde_json::from_str(&response).unwrap();
-        assert!(matches!(msg, ServerMessage::InspectResult(_)), "First inspect should succeed");
+        assert!(
+            matches!(msg, ServerMessage::InspectResult(_)),
+            "First inspect should succeed"
+        );
 
         // Second inspect should succeed (cost 5, have 5 tokens left)
         writeln!(stream, "{}", inspect).unwrap();
         response.clear();
         reader.read_line(&mut response).unwrap();
         let msg: ServerMessage = serde_json::from_str(&response).unwrap();
-        assert!(matches!(msg, ServerMessage::InspectResult(_)), "Second inspect should succeed");
+        assert!(
+            matches!(msg, ServerMessage::InspectResult(_)),
+            "Second inspect should succeed"
+        );
 
         // Third inspect should fail (cost 5, have 0 tokens)
         writeln!(stream, "{}", inspect).unwrap();
@@ -1455,7 +1725,9 @@ mod tests {
         // Connect and authenticate
         let mut stream = TcpStream::connect(addr).unwrap();
         // Short timeout to receive events promptly
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
 
         let hello = serde_json::json!({
             "type": "hello",
@@ -1488,7 +1760,14 @@ mod tests {
         }
 
         // Broadcast an event from the server (cells get coalesced to ranges)
-        server.broadcast_cells(42, vec![CellRef { sheet: 0, row: 1, col: 2 }]);
+        server.broadcast_cells(
+            42,
+            vec![CellRef {
+                sheet: 0,
+                row: 1,
+                col: 2,
+            }],
+        );
 
         // Give time for event to be delivered
         thread::sleep(std::time::Duration::from_millis(150));
@@ -1541,7 +1820,9 @@ mod tests {
 
         // Connect and authenticate
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
 
         let hello = serde_json::json!({
             "type": "hello",
@@ -1728,7 +2009,9 @@ mod tests {
         let token = server.token().unwrap().to_string();
 
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
 
         // Authenticate first
         let hello = serde_json::json!({
@@ -1796,7 +2079,9 @@ mod tests {
         let token = server.token().unwrap().to_string();
 
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
 
         // Authenticate
         let hello = serde_json::json!({
@@ -1852,8 +2137,14 @@ mod tests {
 
         // Should have dropped some events (queue is 256)
         let dropped = registry.dropped_events_count();
-        assert!(dropped > 0, "Should have dropped events due to backpressure");
-        assert!(dropped >= 244, "Should have dropped at least 500 - 256 = 244 events");
+        assert!(
+            dropped > 0,
+            "Should have dropped events due to backpressure"
+        );
+        assert!(
+            dropped >= 244,
+            "Should have dropped at least 500 - 256 = 244 events"
+        );
 
         registry.unregister(conn_id);
     }
@@ -1905,7 +2196,9 @@ mod tests {
         let token = server.token().unwrap().to_string();
 
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
 
         // Authenticate
         let hello = serde_json::json!({
@@ -1983,10 +2276,18 @@ mod tests {
         let token = server.token().unwrap().to_string();
 
         // Initial metrics should be zero
-        assert_eq!(server.metrics().connections_closed_parse_failures.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            server
+                .metrics()
+                .connections_closed_parse_failures
+                .load(Ordering::Relaxed),
+            0
+        );
 
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
 
         // Authenticate
         let hello = serde_json::json!({
@@ -2014,7 +2315,13 @@ mod tests {
         thread::sleep(std::time::Duration::from_millis(100));
 
         // Metric should be incremented
-        assert_eq!(server.metrics().connections_closed_parse_failures.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            server
+                .metrics()
+                .connections_closed_parse_failures
+                .load(Ordering::Relaxed),
+            1
+        );
 
         server.stop();
     }
@@ -2037,11 +2344,19 @@ mod tests {
         let token = server.token().unwrap().to_string();
 
         // Initial metrics should be zero
-        assert_eq!(server.metrics().writer_conflict_count.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            server
+                .metrics()
+                .writer_conflict_count
+                .load(Ordering::Relaxed),
+            0
+        );
 
         // First connection - acquires writer lease
         let mut stream1 = TcpStream::connect(addr).unwrap();
-        stream1.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        stream1
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
 
         let hello = serde_json::json!({
             "type": "hello",
@@ -2070,7 +2385,9 @@ mod tests {
 
         // Second connection - should get writer conflict
         let mut stream2 = TcpStream::connect(addr).unwrap();
-        stream2.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        stream2
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
 
         writeln!(stream2, "{}", hello).unwrap();
         let mut reader2 = BufReader::new(stream2.try_clone().unwrap());
@@ -2091,7 +2408,13 @@ mod tests {
         assert!(response.contains("writer_conflict"));
 
         // Metric should be incremented
-        assert_eq!(server.metrics().writer_conflict_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            server
+                .metrics()
+                .writer_conflict_count
+                .load(Ordering::Relaxed),
+            1
+        );
 
         server.stop();
     }
@@ -2114,7 +2437,9 @@ mod tests {
         let token = server.token().unwrap().to_string();
 
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
 
         // Authenticate
         let hello = serde_json::json!({
@@ -2181,13 +2506,21 @@ mod tests {
         let token = server.token().unwrap().to_string();
 
         // Initial counter should be zero
-        assert_eq!(server.metrics().connections_refused_limit.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            server
+                .metrics()
+                .connections_refused_limit
+                .load(Ordering::Relaxed),
+            0
+        );
 
         // Open MAX_CONNECTIONS connections and authenticate them
         let mut streams = Vec::new();
         for i in 0..MAX_CONNECTIONS {
             let mut stream = TcpStream::connect(addr).unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
 
             let hello = serde_json::json!({
                 "type": "hello",
@@ -2202,7 +2535,11 @@ mod tests {
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut response = String::new();
             reader.read_line(&mut response).unwrap();
-            assert!(response.contains("welcome"), "Connection {} should be accepted", i);
+            assert!(
+                response.contains("welcome"),
+                "Connection {} should be accepted",
+                i
+            );
 
             streams.push((stream, reader));
         }
@@ -2213,7 +2550,9 @@ mod tests {
         // Attempt to open one more - should be refused
         let result = TcpStream::connect(addr);
         if let Ok(stream) = result {
-            stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+                .unwrap();
 
             // Try to read - connection should be immediately closed
             let mut reader = BufReader::new(stream);
@@ -2233,7 +2572,10 @@ mod tests {
 
         // Counter should be incremented
         assert_eq!(
-            server.metrics().connections_refused_limit.load(Ordering::Relaxed),
+            server
+                .metrics()
+                .connections_refused_limit
+                .load(Ordering::Relaxed),
             1,
             "connections_refused_limit should be 1 after rejecting 6th connection"
         );
@@ -2262,7 +2604,9 @@ mod tests {
         let mut streams = Vec::new();
         for i in 0..MAX_CONNECTIONS {
             let mut stream = TcpStream::connect(addr).unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
 
             let hello = serde_json::json!({
                 "type": "hello",
@@ -2288,7 +2632,9 @@ mod tests {
 
         // Now a new connection should succeed
         let mut new_stream = TcpStream::connect(addr).unwrap();
-        new_stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        new_stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
 
         let hello = serde_json::json!({
             "type": "hello",
@@ -2303,7 +2649,10 @@ mod tests {
         let mut reader = BufReader::new(new_stream);
         let mut response = String::new();
         reader.read_line(&mut response).unwrap();
-        assert!(response.contains("welcome"), "New connection should be accepted after one disconnects");
+        assert!(
+            response.contains("welcome"),
+            "New connection should be accepted after one disconnects"
+        );
 
         server.stop();
     }

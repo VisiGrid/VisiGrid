@@ -23,13 +23,16 @@ use visigrid_protocol::{InspectResult, Op};
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Instructions surfaced to the model by MCP hosts.
-const SERVER_INSTRUCTIONS: &str = "VisiGrid is a native spreadsheet running on this machine; these tools drive a live GUI window the user can see. Reads return display values plus formulas. Writes land in the user's undo history and render immediately. Batch related edits into one write_cells call; pass expected_revision (from any read) to avoid clobbering concurrent human edits, and re-read on revision_mismatch. Coordinates are A1-style; sheet is a 0-based index.";
+const SERVER_INSTRUCTIONS: &str = "VisiGrid is a native spreadsheet running on this machine; these tools drive a live GUI window the user can see. Reads return display values plus formulas. When the user asks to preview, review, propose, clean up, or approve changes before applying, use plan_script: it opens native Review Mode and cannot mutate the workbook until the user clicks Apply. Use direct write tools only when the user clearly asked for immediate edits. Pass expected_revision from a read to avoid clobbering concurrent human edits. Coordinates are A1-style; sheet is a 0-based index.";
 
 pub fn cmd_mcp(session_id: Option<String>) -> Result<(), CliError> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
-    let mut server = McpServer { session_pref: session_id, client_name: "MCP client".to_string() };
+    let mut server = McpServer {
+        session_pref: session_id,
+        client_name: "MCP client".to_string(),
+    };
 
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| CliError::io(format!("stdin read failed: {}", e)))?;
@@ -80,8 +83,10 @@ fn structure_at(args: &Value, is_col: bool) -> Result<usize, String> {
             if let Ok(v) = s.parse::<u64>() {
                 one_based(v)
             } else if is_col {
-                let (_, col) = parse_cell_ref(&format!("{}1", s))
-                    .ok_or(format!("invalid column '{}' — use a letter like 'C' or a number", s))?;
+                let (_, col) = parse_cell_ref(&format!("{}1", s)).ok_or(format!(
+                    "invalid column '{}' — use a letter like 'C' or a number",
+                    s
+                ))?;
                 Ok(col)
             } else {
                 Err(format!("`at` must be a row number (got '{}')", s))
@@ -91,7 +96,6 @@ fn structure_at(args: &Value, is_col: bool) -> Result<usize, String> {
         None => Err("missing required argument: at".to_string()),
     }
 }
-
 
 impl McpServer {
     /// Handle one JSON-RPC line. Returns None for notifications (no reply).
@@ -111,7 +115,10 @@ impl McpServer {
 
         let result = match method {
             "initialize" => {
-                if let Some(name) = msg.pointer("/params/clientInfo/name").and_then(|v| v.as_str()) {
+                if let Some(name) = msg
+                    .pointer("/params/clientInfo/name")
+                    .and_then(|v| v.as_str())
+                {
                     self.client_name = name.to_string();
                 }
                 // Echo the client's requested version when present — we speak
@@ -133,8 +140,14 @@ impl McpServer {
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tool_definitions() })),
             "tools/call" => {
-                let name = msg.pointer("/params/name").and_then(|v| v.as_str()).unwrap_or("");
-                let args = msg.pointer("/params/arguments").cloned().unwrap_or(json!({}));
+                let name = msg
+                    .pointer("/params/name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let args = msg
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or(json!({}));
                 Ok(self.call_tool(name, &args))
             }
             _ => {
@@ -173,6 +186,11 @@ impl McpServer {
             "rename_sheet" => self.tool_structure(args, "rename_sheet"),
             "undo" => self.tool_history(args, false),
             "redo" => self.tool_history(args, true),
+            "plan_script" => self.tool_plan_script(args),
+            "get_plan" => self.tool_get_plan(args),
+            "list_plan_changes" => self.tool_list_plan_changes(args),
+            "apply_plan" => self.tool_apply_plan(args),
+            "dismiss_plan" => self.tool_dismiss_plan(args),
             _ => Err(format!("unknown tool: {}", name)),
         };
         match outcome {
@@ -186,8 +204,8 @@ impl McpServer {
     // ------------------------------------------------------------------
 
     fn tool_list_sessions(&self) -> Result<String, String> {
-        let sessions = session::list_sessions()
-            .map_err(|e| format!("failed to list sessions: {}", e))?;
+        let sessions =
+            session::list_sessions().map_err(|e| format!("failed to list sessions: {}", e))?;
         if sessions.is_empty() {
             return Err("No running VisiGrid sessions. Ask the user to start VisiGrid — the session server starts with the GUI.".to_string());
         }
@@ -279,22 +297,44 @@ impl McpServer {
                 .get("cell")
                 .and_then(|v| v.as_str())
                 .ok_or(format!("cells[{}]: missing 'cell' (A1-style reference)", i))?;
-            let (row, col) = parse_cell_ref(cell_ref)
-                .ok_or(format!("cells[{}]: invalid cell reference '{}'", i, cell_ref))?;
+            let (row, col) = parse_cell_ref(cell_ref).ok_or(format!(
+                "cells[{}]: invalid cell reference '{}'",
+                i, cell_ref
+            ))?;
 
             let value = entry.get("value").and_then(|v| v.as_str());
             let formula = entry.get("formula").and_then(|v| v.as_str());
-            let clear = entry.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
+            let clear = entry
+                .get("clear")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             let (op, describe) = match (value, formula, clear) {
                 (Some(v), None, false) => (
-                    Op::SetCellValue { sheet, row, col, value: v.to_string() },
+                    Op::SetCellValue {
+                        sheet,
+                        row,
+                        col,
+                        value: v.to_string(),
+                    },
                     format!("{} = {:?}", cell_ref.to_uppercase(), v),
                 ),
                 (None, Some(f), false) => {
-                    let f = if f.starts_with('=') { f.to_string() } else { format!("={}", f) };
+                    let f = if f.starts_with('=') {
+                        f.to_string()
+                    } else {
+                        format!("={}", f)
+                    };
                     let describe = format!("{} = {}", cell_ref.to_uppercase(), f);
-                    (Op::SetCellFormula { sheet, row, col, formula: f }, describe)
+                    (
+                        Op::SetCellFormula {
+                            sheet,
+                            row,
+                            col,
+                            formula: f,
+                        },
+                        describe,
+                    )
                 }
                 (None, None, true) => (
                     Op::ClearCell { sheet, row, col },
@@ -311,7 +351,11 @@ impl McpServer {
             preview.push(describe);
         }
 
-        if args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return serde_json::to_string_pretty(&json!({
                 "dry_run": true,
                 "would_apply": preview,
@@ -388,11 +432,15 @@ impl McpServer {
         }
         if ops.is_empty() {
             return Err(
-                "nothing to do: provide bold/italic/underline and/or number_format".to_string()
+                "nothing to do: provide bold/italic/underline and/or number_format".to_string(),
             );
         }
 
-        if args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return serde_json::to_string_pretty(&json!({
                 "dry_run": true,
                 "would_apply": preview,
@@ -437,19 +485,41 @@ impl McpServer {
     fn tool_structure(&mut self, args: &Value, kind: &str) -> Result<String, String> {
         use visigrid_protocol::StructureOp;
 
-        let sheet = args.get("sheet").and_then(|v| v.as_u64()).map(|v| v as usize);
+        let sheet = args
+            .get("sheet")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
         let count = args.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
 
         // `at` arrives as a 1-based row number or a column letter, matching
         // what the user sees; the wire is 0-based.
 
         let op = match kind {
-            "insert_rows" => StructureOp::InsertRows { sheet, at: structure_at(args, false)?, count },
-            "delete_rows" => StructureOp::DeleteRows { sheet, at: structure_at(args, false)?, count },
-            "insert_cols" => StructureOp::InsertCols { sheet, at: structure_at(args, true)?, count },
-            "delete_cols" => StructureOp::DeleteCols { sheet, at: structure_at(args, true)?, count },
+            "insert_rows" => StructureOp::InsertRows {
+                sheet,
+                at: structure_at(args, false)?,
+                count,
+            },
+            "delete_rows" => StructureOp::DeleteRows {
+                sheet,
+                at: structure_at(args, false)?,
+                count,
+            },
+            "insert_cols" => StructureOp::InsertCols {
+                sheet,
+                at: structure_at(args, true)?,
+                count,
+            },
+            "delete_cols" => StructureOp::DeleteCols {
+                sheet,
+                at: structure_at(args, true)?,
+                count,
+            },
             "add_sheet" => StructureOp::AddSheet {
-                name: args.get("name").and_then(|v| v.as_str()).map(str::to_string),
+                name: args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
             },
             "rename_sheet" => StructureOp::RenameSheet {
                 sheet,
@@ -458,7 +528,11 @@ impl McpServer {
             other => return Err(format!("unknown structure op: {}", other)),
         };
 
-        if args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return serde_json::to_string_pretty(&json!({ "dry_run": true, "would_apply": op }))
                 .map_err(|e| e.to_string());
         }
@@ -475,7 +549,11 @@ impl McpServer {
     }
 
     fn tool_history(&mut self, args: &Value, redo: bool) -> Result<String, String> {
-        let steps = args.get("steps").and_then(|v| v.as_u64()).unwrap_or(1).clamp(1, 100) as u32;
+        let steps = args
+            .get("steps")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .clamp(1, 100) as u32;
         let mut client = self.connect(args)?;
         let r = client.history(redo, steps).map_err(session_error_text)?;
         serde_json::to_string_pretty(&json!({
@@ -486,6 +564,143 @@ impl McpServer {
             "can_redo": r.can_redo,
         }))
         .map_err(|e| e.to_string())
+    }
+
+    fn tool_plan_script(&mut self, args: &Value) -> Result<String, String> {
+        reject_unknown(
+            args,
+            &[
+                "session",
+                "sheet",
+                "script",
+                "title",
+                "description",
+                "expected_revision",
+                "idempotency_key",
+                "wait_ms",
+                "verification",
+            ],
+        )?;
+        let script = require_str(args, "script")?;
+        let title = require_str(args, "title")?;
+        let idempotency_key = require_str(args, "idempotency_key")?;
+        let expected_revision = args
+            .get("expected_revision")
+            .and_then(Value::as_u64)
+            .ok_or("missing required argument: expected_revision")?;
+        let verification = args
+            .get("verification")
+            .cloned()
+            .map(serde_json::from_value::<Vec<visigrid_protocol::PlanVerificationDefinition>>)
+            .transpose()
+            .map_err(|error| format!("invalid verification definition: {error}"))?
+            .unwrap_or_default();
+        let mut client = self.connect(args)?;
+        require_review_capabilities(&client)?;
+        let result = client
+            .create_plan(visigrid_protocol::CreatePlanMessage {
+                id: String::new(),
+                idempotency_key: idempotency_key.to_string(),
+                expected_revision,
+                sheet: args
+                    .get("sheet")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize),
+                title: title.to_string(),
+                description: args
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                producer: visigrid_protocol::PlanProducerPayload::LuaScript {
+                    source: script.to_string(),
+                },
+                verification,
+            })
+            .map_err(plan_session_error_text)?;
+        serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
+    }
+
+    fn tool_get_plan(&mut self, args: &Value) -> Result<String, String> {
+        reject_unknown(args, &["session", "plan_id"])?;
+        let plan_id = require_str(args, "plan_id")?.to_string();
+        let mut client = self.connect(args)?;
+        require_review_capabilities(&client)?;
+        let result = client.get_plan(plan_id).map_err(plan_session_error_text)?;
+        serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
+    }
+
+    fn tool_list_plan_changes(&mut self, args: &Value) -> Result<String, String> {
+        reject_unknown(
+            args,
+            &["session", "plan_id", "cursor", "limit", "group", "kind"],
+        )?;
+        let plan_id = require_str(args, "plan_id")?.to_string();
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+        let kind = match args.get("kind").and_then(Value::as_str) {
+            None => None,
+            Some("value") => Some(visigrid_protocol::PlanChangeKindFilter::Value),
+            Some("formula") => Some(visigrid_protocol::PlanChangeKindFilter::Formula),
+            Some("clear") => Some(visigrid_protocol::PlanChangeKindFilter::Clear),
+            Some("row_delete") => Some(visigrid_protocol::PlanChangeKindFilter::RowDelete),
+            Some("recalculated") => Some(visigrid_protocol::PlanChangeKindFilter::Recalculated),
+            Some(other) => return Err(format!("invalid change kind: {other}")),
+        };
+        let mut client = self.connect(args)?;
+        require_review_capabilities(&client)?;
+        let result = client
+            .list_plan_changes(
+                plan_id,
+                args.get("cursor")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                limit,
+                args.get("group")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                kind,
+            )
+            .map_err(plan_session_error_text)?;
+        serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
+    }
+
+    fn tool_apply_plan(&mut self, args: &Value) -> Result<String, String> {
+        reject_unknown(
+            args,
+            &["session", "plan_id", "expected_revision", "idempotency_key"],
+        )?;
+        let plan_id = require_str(args, "plan_id")?.to_string();
+        let expected_revision = args
+            .get("expected_revision")
+            .and_then(Value::as_u64)
+            .ok_or("missing required argument: expected_revision")?;
+        let mut client = self.connect(args)?;
+        require_review_capabilities(&client)?;
+        let result = client
+            .apply_plan(
+                plan_id,
+                expected_revision,
+                args.get("idempotency_key")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            )
+            .map_err(plan_session_error_text)?;
+        serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
+    }
+
+    fn tool_dismiss_plan(&mut self, args: &Value) -> Result<String, String> {
+        reject_unknown(args, &["session", "plan_id", "idempotency_key"])?;
+        let plan_id = require_str(args, "plan_id")?.to_string();
+        let mut client = self.connect(args)?;
+        require_review_capabilities(&client)?;
+        let result = client
+            .dismiss_plan(
+                plan_id,
+                args.get("idempotency_key")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            )
+            .map_err(plan_session_error_text)?;
+        serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
     }
 
     // ------------------------------------------------------------------
@@ -501,14 +716,18 @@ impl McpServer {
             .map(str::to_string)
             .or_else(|| self.session_pref.clone());
 
-        let sessions = session::list_sessions()
-            .map_err(|e| format!("failed to list sessions: {}", e))?;
+        let sessions =
+            session::list_sessions().map_err(|e| format!("failed to list sessions: {}", e))?;
         let discovery = match &pref {
             Some(id) => session::find_session(id)
                 .map_err(|e| e.to_string())?
                 .ok_or(format!("session '{}' not found — use list_sessions", id))?,
             None => match sessions.len() {
-                0 => return Err("No running VisiGrid sessions. Ask the user to start VisiGrid.".to_string()),
+                0 => {
+                    return Err(
+                        "No running VisiGrid sessions. Ask the user to start VisiGrid.".to_string(),
+                    )
+                }
                 1 => sessions.into_iter().next().unwrap(),
                 n => {
                     return Err(format!(
@@ -522,10 +741,11 @@ impl McpServer {
         // Credential order: env override → stored pairing credential →
         // interactive pairing (GUI approval dialog).
         if let Ok(token) = std::env::var("VISIGRID_SESSION_TOKEN") {
-            return SessionClient::connect(&discovery, &token).map_err(session_error_text);
+            return SessionClient::connect_as(&discovery, &token, &self.client_name)
+                .map_err(session_error_text);
         }
         if let Some(cred) = visigrid_protocol::paired::load_client_credential() {
-            match SessionClient::connect(&discovery, &cred.token) {
+            match SessionClient::connect_as(&discovery, &cred.token, &self.client_name) {
                 Ok(client) => return Ok(client),
                 Err(session::SessionError::AuthFailed(_)) => {
                     // Credential was revoked or the store was reset — fall
@@ -541,10 +761,16 @@ impl McpServer {
             }
             other => session_error_text(other),
         })?;
-        if let Err(e) = visigrid_protocol::paired::store_client_credential(&self.client_name, &token) {
-            return Err(format!("pairing approved but storing the credential failed: {}", e));
+        if let Err(e) =
+            visigrid_protocol::paired::store_client_credential(&self.client_name, &token)
+        {
+            return Err(format!(
+                "pairing approved but storing the credential failed: {}",
+                e
+            ));
         }
-        SessionClient::connect(&discovery, &token).map_err(session_error_text)
+        SessionClient::connect_as(&discovery, &token, &self.client_name)
+            .map_err(session_error_text)
     }
 }
 
@@ -556,6 +782,64 @@ fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(|v| v.as_str())
         .ok_or(format!("missing required argument: {}", key))
+}
+
+fn reject_unknown(args: &Value, allowed: &[&str]) -> Result<(), String> {
+    let object = args.as_object().ok_or("tool arguments must be an object")?;
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(format!("unknown argument: {key}"));
+    }
+    Ok(())
+}
+
+fn require_review_capabilities(client: &SessionClient) -> Result<(), String> {
+    for capability in [
+        "review_plans_v1",
+        "review_gui_approval_v1",
+        "review_lua_plan_v1",
+    ] {
+        if !client
+            .capabilities()
+            .iter()
+            .any(|value| value == capability)
+        {
+            return Err(serde_json::json!({
+                "error": {
+                    "code": "review_unavailable",
+                    "message": "Review Mode requires a workbook open in the VisiGrid desktop app.",
+                    "retryable": false,
+                }
+            })
+            .to_string());
+        }
+    }
+    Ok(())
+}
+
+fn plan_session_error_text(error: session::SessionError) -> String {
+    match error {
+        session::SessionError::ServerError {
+            code,
+            message,
+            retry_after_ms,
+        } => serde_json::json!({
+            "error": {
+                "code": code,
+                "message": message,
+                "retryable": retry_after_ms.is_some(),
+                "retry_after_ms": retry_after_ms,
+            }
+        })
+        .to_string(),
+        other => serde_json::json!({
+            "error": {
+                "code": "session_error",
+                "message": other.to_string(),
+                "retryable": true,
+            }
+        })
+        .to_string(),
+    }
 }
 
 /// Parse "A1" or "A1:D10" into ((start_row, start_col), (end_row, end_col)).
@@ -858,6 +1142,127 @@ fn tool_definitions() -> Value {
                 "required": ["name"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "plan_script",
+            "title": "Propose workbook changes",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+            "description": "Create a sandboxed Lua proposal in the open VisiGrid desktop workbook. This does NOT change the live workbook: it opens native Review Mode and only the user's Apply click can commit it. Use this for cleanup, multi-cell edits, or whenever the user asks to review/approve proposed changes. Lua uses a 1-based sheet API: sheet:get_value(row,col), sheet:set_value(row,col,value), sheet:set_formula(row,col,formula), sheet:clear(...), sheet:delete_rows(at,count), sheet:review({group=...,title=...,reason=...,sources={...}}), sheet:verify({...}), sheet:rows(), and sheet:cols().",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string" },
+                    "sheet": { "type": "integer", "minimum": 0, "description": "0-based active sheet index; omit for active sheet" },
+                    "script": { "type": "string", "minLength": 1, "maxLength": 262144 },
+                    "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+                    "description": { "type": "string", "maxLength": 1000 },
+                    "expected_revision": { "type": "integer", "minimum": 0 },
+                    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 },
+                    "wait_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 10000 },
+                    "verification": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+                                        "kind": { "const": "no_new_formula_errors" },
+                                        "label": { "type": "string", "maxLength": 120 }
+                                    },
+                                    "required": ["id", "kind"],
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+                                        "kind": { "const": "gross_minus_group_equals_preview" },
+                                        "label": { "type": "string", "maxLength": 120 },
+                                        "source_range": { "type": "string", "maxLength": 64 },
+                                        "amount_column": { "type": "string", "maxLength": 8 },
+                                        "excluded_group": { "type": "string", "maxLength": 64 },
+                                        "tolerance": { "type": "number", "minimum": 0 },
+                                        "currency": { "type": "string", "minLength": 3, "maxLength": 3 }
+                                    },
+                                    "required": ["id", "kind", "source_range", "amount_column", "excluded_group", "tolerance"],
+                                    "additionalProperties": false
+                                }
+                            ]
+                        }
+                    }
+                },
+                "required": ["script", "title", "expected_revision", "idempotency_key"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "get_plan",
+            "title": "Get proposal status",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+            "description": "Read a Review Mode proposal's status, summary, verification, and problems from the open VisiGrid desktop app.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string" },
+                    "plan_id": { "type": "string", "minLength": 4, "maxLength": 128 }
+                },
+                "required": ["plan_id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "list_plan_changes",
+            "title": "List proposed changes",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+            "description": "Page through the immutable changes in a VisiGrid Review Mode proposal. Requires an open desktop workbook.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string" },
+                    "plan_id": { "type": "string", "minLength": 4, "maxLength": 128 },
+                    "cursor": { "type": "string", "maxLength": 512 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 },
+                    "group": { "type": "string", "maxLength": 64 },
+                    "kind": { "type": "string", "enum": ["value", "formula", "clear", "row_delete", "recalculated"] }
+                },
+                "required": ["plan_id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "apply_plan",
+            "title": "Observe proposal approval",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+            "description": "Report whether the user has applied a proposal in VisiGrid. This tool cannot approve or commit it; before the GUI click it returns approval_required.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string" },
+                    "plan_id": { "type": "string", "minLength": 4, "maxLength": 128 },
+                    "expected_revision": { "type": "integer", "minimum": 0 },
+                    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 }
+                },
+                "required": ["plan_id", "expected_revision"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "dismiss_plan",
+            "title": "Dismiss proposed changes",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+            "description": "Dismiss your uncommitted Review Mode proposal without changing the workbook. The user may also dismiss it in VisiGrid.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string" },
+                    "plan_id": { "type": "string", "minLength": 4, "maxLength": 128 },
+                    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 }
+                },
+                "required": ["plan_id"],
+                "additionalProperties": false
+            }
         }
     ])
 }
@@ -875,7 +1280,11 @@ mod tests {
         let row_num = serde_json::json!({ "at": 5 });
         let row_str = serde_json::json!({ "at": "5" });
         assert_eq!(structure_at(&row_num, false), Ok(4));
-        assert_eq!(structure_at(&row_str, false), Ok(4), "rows must accept \"5\"");
+        assert_eq!(
+            structure_at(&row_str, false),
+            Ok(4),
+            "rows must accept \"5\""
+        );
         assert_eq!(structure_at(&row_num, true), Ok(4));
         assert_eq!(structure_at(&row_str, true), Ok(4));
     }
@@ -897,7 +1306,10 @@ mod tests {
     }
 
     fn server() -> McpServer {
-        McpServer { session_pref: None, client_name: "Test Client".to_string() }
+        McpServer {
+            session_pref: None,
+            client_name: "Test Client".to_string(),
+        }
     }
 
     #[test]
@@ -931,10 +1343,25 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "list_sessions", "get_workbook", "read_range", "write_cells", "set_format",
-                "save_workbook", "undo", "redo",
-                "insert_rows", "delete_rows", "insert_columns", "delete_columns",
-                "add_sheet", "rename_sheet",
+                "list_sessions",
+                "get_workbook",
+                "read_range",
+                "write_cells",
+                "set_format",
+                "save_workbook",
+                "undo",
+                "redo",
+                "insert_rows",
+                "delete_rows",
+                "insert_columns",
+                "delete_columns",
+                "add_sheet",
+                "rename_sheet",
+                "plan_script",
+                "get_plan",
+                "list_plan_changes",
+                "apply_plan",
+                "dismiss_plan",
             ]
         );
         for t in tools {
@@ -944,14 +1371,23 @@ mod tests {
             // Every tool declares all four hints — clients use readOnlyHint to
             // auto-approve, and the ChatGPT submission portal scans them.
             let a = &t["annotations"];
-            for hint in ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] {
+            for hint in [
+                "readOnlyHint",
+                "destructiveHint",
+                "idempotentHint",
+                "openWorldHint",
+            ] {
                 assert!(a[hint].is_boolean(), "{} missing {}", t["name"], hint);
             }
             // Everything here is a local, closed-world spreadsheet.
             assert_eq!(a["openWorldHint"], false);
             // A read-only tool must never be flagged destructive.
             if a["readOnlyHint"] == true {
-                assert_eq!(a["destructiveHint"], false, "{} read-only but destructive", t["name"]);
+                assert_eq!(
+                    a["destructiveHint"], false,
+                    "{} read-only but destructive",
+                    t["name"]
+                );
             }
         }
     }
@@ -963,7 +1399,9 @@ mod tests {
             .handle_line(r#"{"jsonrpc":"2.0","id":3,"method":"bogus/method"}"#)
             .unwrap();
         assert_eq!(resp["error"]["code"], -32601);
-        assert!(s.handle_line(r#"{"jsonrpc":"2.0","method":"bogus/notify"}"#).is_none());
+        assert!(s
+            .handle_line(r#"{"jsonrpc":"2.0","method":"bogus/notify"}"#)
+            .is_none());
     }
 
     #[test]
@@ -1005,7 +1443,11 @@ mod tests {
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("\"dry_run\": true"));
         assert!(text.contains(r#"A1 = \"Hello\""#));
-        assert!(text.contains("B2 = =SUM(A1:A2)"), "leading '=' must be added: {}", text);
+        assert!(
+            text.contains("B2 = =SUM(A1:A2)"),
+            "leading '=' must be added: {}",
+            text
+        );
         assert!(text.contains("C3 cleared"));
     }
 

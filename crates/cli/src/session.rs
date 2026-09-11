@@ -249,6 +249,15 @@ pub struct SessionClient {
 impl SessionClient {
     /// Connect to a session and perform the hello handshake.
     pub fn connect(discovery: &DiscoveryFile, token: &str) -> Result<Self, SessionError> {
+        Self::connect_as(discovery, token, "vgrid")
+    }
+
+    /// Connect while preserving the authenticated client's display identity.
+    pub fn connect_as(
+        discovery: &DiscoveryFile,
+        token: &str,
+        client_name: &str,
+    ) -> Result<Self, SessionError> {
         let addr = format!("127.0.0.1:{}", discovery.port);
         let stream = TcpStream::connect_timeout(
             &addr.parse().map_err(|_| SessionError::ConnectionFailed("Invalid address".into()))?,
@@ -276,7 +285,7 @@ impl SessionClient {
         // Send hello
         let hello = ClientMessage::Hello(HelloMessage {
             id: client.next_request_id(),
-            client: "vgrid".to_string(),
+            client: client_name.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             token: token.to_string(),
             protocol_version: PROTOCOL_VERSION,
@@ -394,6 +403,81 @@ impl SessionClient {
                 code: err.code, message: err.message, retry_after_ms: err.retry_after_ms,
             }),
             _ => Err(SessionError::ProtocolError("Unexpected response to history".into())),
+        }
+    }
+
+    pub fn create_plan(
+        &mut self,
+        mut request: visigrid_protocol::CreatePlanMessage,
+    ) -> Result<serde_json::Value, SessionError> {
+        request.id = self.next_request_id();
+        self.send(&ClientMessage::CreatePlan(request))?;
+        match self.receive()? {
+            ServerMessage::PlanResult(result) => Ok(result.plan),
+            ServerMessage::Error(err) => Err(server_error(err)),
+            _ => Err(SessionError::ProtocolError("Unexpected response to create_plan".into())),
+        }
+    }
+
+    pub fn get_plan(&mut self, plan_id: String) -> Result<serde_json::Value, SessionError> {
+        let id = self.next_request_id();
+        self.send(&ClientMessage::GetPlan(visigrid_protocol::GetPlanMessage { id, plan_id }))?;
+        match self.receive()? {
+            ServerMessage::PlanResult(result) => Ok(result.plan),
+            ServerMessage::Error(err) => Err(server_error(err)),
+            _ => Err(SessionError::ProtocolError("Unexpected response to get_plan".into())),
+        }
+    }
+
+    pub fn list_plan_changes(
+        &mut self,
+        plan_id: String,
+        cursor: Option<String>,
+        limit: usize,
+        group: Option<String>,
+        kind: Option<visigrid_protocol::PlanChangeKindFilter>,
+    ) -> Result<serde_json::Value, SessionError> {
+        let id = self.next_request_id();
+        self.send(&ClientMessage::ListPlanChanges(visigrid_protocol::ListPlanChangesMessage {
+            id, plan_id, cursor, limit, group, kind,
+        }))?;
+        match self.receive()? {
+            ServerMessage::PlanChanges(result) => Ok(result.page),
+            ServerMessage::Error(err) => Err(server_error(err)),
+            _ => Err(SessionError::ProtocolError("Unexpected response to list_plan_changes".into())),
+        }
+    }
+
+    pub fn apply_plan(
+        &mut self,
+        plan_id: String,
+        expected_revision: u64,
+        idempotency_key: Option<String>,
+    ) -> Result<serde_json::Value, SessionError> {
+        let id = self.next_request_id();
+        self.send(&ClientMessage::ApplyPlan(visigrid_protocol::ApplyPlanMessage {
+            id, plan_id, expected_revision, idempotency_key,
+        }))?;
+        match self.receive()? {
+            ServerMessage::PlanApplied(result) => Ok(result.result),
+            ServerMessage::Error(err) => Err(server_error(err)),
+            _ => Err(SessionError::ProtocolError("Unexpected response to apply_plan".into())),
+        }
+    }
+
+    pub fn dismiss_plan(
+        &mut self,
+        plan_id: String,
+        idempotency_key: Option<String>,
+    ) -> Result<serde_json::Value, SessionError> {
+        let id = self.next_request_id();
+        self.send(&ClientMessage::DismissPlan(visigrid_protocol::DismissPlanMessage {
+            id, plan_id, idempotency_key,
+        }))?;
+        match self.receive()? {
+            ServerMessage::PlanDismissed(result) => Ok(result.result),
+            ServerMessage::Error(err) => Err(server_error(err)),
+            _ => Err(SessionError::ProtocolError("Unexpected response to dismiss_plan".into())),
         }
     }
 
@@ -577,6 +661,14 @@ impl SessionClient {
 
         String::from_utf8(buf)
             .map_err(|e| SessionError::ProtocolError(format!("Invalid UTF-8: {}", e)))
+    }
+}
+
+fn server_error(err: visigrid_protocol::ErrorMessage) -> SessionError {
+    SessionError::ServerError {
+        code: err.code,
+        message: err.message,
+        retry_after_ms: err.retry_after_ms,
     }
 }
 

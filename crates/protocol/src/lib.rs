@@ -24,6 +24,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub mod paired;
 
@@ -49,6 +50,106 @@ pub enum ClientMessage {
     Save(SaveMessage),
     History(HistoryMessage),
     Structure(StructureMessage),
+    CreatePlan(CreatePlanMessage),
+    GetPlan(GetPlanMessage),
+    ListPlanChanges(ListPlanChangesMessage),
+    ApplyPlan(ApplyPlanMessage),
+    DismissPlan(DismissPlanMessage),
+}
+
+/// Create a sandboxed Lua-authored Review Mode proposal. The live workbook is
+/// not mutated; the GUI owns the resulting plan and its approval lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePlanMessage {
+    pub id: String,
+    pub idempotency_key: String,
+    pub expected_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<usize>,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub producer: PlanProducerPayload,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification: Vec<PlanVerificationDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlanProducerPayload {
+    LuaScript { source: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlanVerificationDefinition {
+    NoNewFormulaErrors {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    GrossMinusGroupEqualsPreview {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        source_range: String,
+        amount_column: String,
+        excluded_group: String,
+        tolerance: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        currency: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetPlanMessage {
+    pub id: String,
+    pub plan_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListPlanChangesMessage {
+    pub id: String,
+    pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default = "default_plan_page_limit")]
+    pub limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PlanChangeKindFilter>,
+}
+
+fn default_plan_page_limit() -> usize {
+    100
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanChangeKindFilter {
+    Value,
+    Formula,
+    Clear,
+    RowDelete,
+    Recalculated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyPlanMessage {
+    pub id: String,
+    pub plan_id: String,
+    pub expected_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DismissPlanMessage {
+    pub id: String,
+    pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// Structural edit: rows, columns, sheets (added 2026-07-30, additive).
@@ -301,6 +402,36 @@ pub enum ServerMessage {
     SaveResult(SaveResultMessage),
     HistoryResult(HistoryResultMessage),
     StructureResult(StructureResultMessage),
+    PlanResult(PlanResultMessage),
+    PlanChanges(PlanChangesMessage),
+    PlanApplied(PlanAppliedMessage),
+    PlanDismissed(PlanDismissedMessage),
+}
+
+/// Wire-safe plan payloads are deliberately opaque to the session transport.
+/// The GUI is the authority that shapes and owns Review Mode state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanResultMessage {
+    pub id: String,
+    pub plan: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanChangesMessage {
+    pub id: String,
+    pub page: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanAppliedMessage {
+    pub id: String,
+    pub result: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanDismissedMessage {
+    pub id: String,
+    pub result: Value,
 }
 
 /// Result of a structural edit.
@@ -468,7 +599,9 @@ pub struct EventMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventPayload {
-    CellsChanged { ranges: Vec<CellRange> },
+    CellsChanged {
+        ranges: Vec<CellRange>,
+    },
     EventsDropped {
         dropped_count: u64,
         current_revision: u64,
@@ -487,18 +620,29 @@ pub struct CellRange {
 
 impl CellRange {
     pub fn single(sheet: usize, row: usize, col: usize) -> Self {
-        Self { sheet, r1: row, c1: col, r2: row, c2: col }
+        Self {
+            sheet,
+            r1: row,
+            c1: col,
+            r2: row,
+            c2: col,
+        }
     }
 
     pub fn new(sheet: usize, r1: usize, c1: usize, r2: usize, c2: usize) -> Self {
-        Self { sheet, r1, c1, r2, c2 }
+        Self {
+            sheet,
+            r1,
+            c1,
+            r2,
+            c2,
+        }
     }
 
     pub fn cell_count(&self) -> usize {
         (self.r2 - self.r1 + 1) * (self.c2 - self.c1 + 1)
     }
 }
-
 
 /// Server statistics result.
 #[derive(Debug, Clone, Serialize, Deserialize)]

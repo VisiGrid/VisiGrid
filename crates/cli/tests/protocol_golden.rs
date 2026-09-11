@@ -487,6 +487,27 @@ fn test_round_trip_apply_ops() {
     assert_eq!(original["current_revision"], reserialized["current_revision"]);
 }
 
+#[test]
+fn test_round_trip_review_plan_messages() {
+    let lines = load_golden_lines("review_plans.jsonl");
+    for (index, line) in lines.iter().enumerate() {
+        let original: Value = serde_json::from_str(line).unwrap();
+        let serialized = if matches!(
+            original["type"].as_str(),
+            Some("create_plan" | "get_plan" | "list_plan_changes" | "apply_plan" | "dismiss_plan")
+        ) {
+            let typed: ClientMessage = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("client review vector {index}: {error}"));
+            serde_json::to_string(&typed).unwrap()
+        } else {
+            let typed: ServerMessage = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("server review vector {index}: {error}"));
+            serde_json::to_string(&typed).unwrap()
+        };
+        assert_eq!(line, &serialized, "review vector {index} drifted byte-for-byte");
+    }
+}
+
 // =============================================================================
 // Byte-Exact Serialization Tests (Tripwire for wire format drift)
 // =============================================================================

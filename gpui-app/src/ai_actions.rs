@@ -19,40 +19,63 @@ pub(crate) fn lua_preview_source_matches(
         == Some(source_fingerprint)
 }
 
-fn prepare_lua_operation_plan(
+pub(crate) fn prepare_lua_operation_plan_with_metadata(
     workbook: &visigrid_engine::workbook::Workbook,
     session_window_id: u64,
-    script_path: &std::path::Path,
-    script_hash: &str,
+    plan_id: visigrid_engine::operation_plan::PlanId,
+    producer: visigrid_engine::operation_plan::PlanProducer,
+    title: String,
+    description: Option<String>,
+    _script_hash: &str,
     ops: &[crate::scripting::LuaOp],
     mut verification: Vec<visigrid_engine::operation_plan::VerificationDefinition>,
 ) -> Result<visigrid_engine::operation_plan::PreparedOperationPlan, String> {
-    use visigrid_engine::operation_plan::{
-        OperationPlanRequest, PlanId, PlanProducer, PreparedOperationPlan,
-    };
+    use visigrid_engine::operation_plan::{OperationPlanRequest, PreparedOperationPlan};
 
     let parts = crate::scripting::lua_journal_to_plan(ops)?;
     verification.extend(parts.verification);
     let planned_ops = parts.operations;
     let context = crate::scripting::execution_context_fingerprint(workbook, &planned_ops);
     PreparedOperationPlan::materialize(workbook, OperationPlanRequest {
-        id: PlanId(format!("pv_{}", uuid::Uuid::new_v4().simple())),
+        id: plan_id,
         workbook_session_id: session_window_id.to_string(),
         source_sheet_id: workbook.active_sheet_id(),
         expected_revision: workbook.revision(),
         execution_context: context,
-        producer: PlanProducer {
+        producer,
+        title,
+        description,
+        operations: planned_ops,
+        groups: parts.groups,
+        verification,
+    }).map_err(|error| error.to_string())
+}
+
+fn prepare_lua_operation_plan(
+    workbook: &visigrid_engine::workbook::Workbook,
+    session_window_id: u64,
+    script_path: &std::path::Path,
+    script_hash: &str,
+    ops: &[crate::scripting::LuaOp],
+    verification: Vec<visigrid_engine::operation_plan::VerificationDefinition>,
+) -> Result<visigrid_engine::operation_plan::PreparedOperationPlan, String> {
+    use visigrid_engine::operation_plan::{PlanId, PlanProducer};
+    prepare_lua_operation_plan_with_metadata(
+        workbook,
+        session_window_id,
+        PlanId(format!("pv_{}", uuid::Uuid::new_v4().simple())),
+        PlanProducer {
             kind: "lua".into(),
             name: "Lua Console".into(),
             source_path: Some(script_path.to_string_lossy().into_owned()),
             source_hash: Some(script_hash.to_string()),
         },
-        title: "Review Lua changes".into(),
-        description: None,
-        operations: planned_ops,
-        groups: parts.groups,
+        "Review Lua changes".into(),
+        None,
+        script_hash,
+        ops,
         verification,
-    }).map_err(|error| error.to_string())
+    )
 }
 
 fn default_lua_verification() -> Vec<visigrid_engine::operation_plan::VerificationDefinition> {
@@ -64,9 +87,19 @@ fn default_lua_verification() -> Vec<visigrid_engine::operation_plan::Verificati
     ]
 }
 
+pub(crate) fn require_visible_plan_changes(
+    plan: visigrid_engine::operation_plan::PreparedOperationPlan,
+) -> Result<visigrid_engine::operation_plan::PreparedOperationPlan, String> {
+    if plan.plan().changes.is_empty() {
+        Err("empty_plan: the script produced no visible workbook changes".into())
+    } else {
+        Ok(plan)
+    }
+}
+
 #[cfg(test)]
 mod review_plan_tests {
-    use super::{default_lua_verification, prepare_lua_operation_plan};
+    use super::{default_lua_verification, prepare_lua_operation_plan, require_visible_plan_changes};
     use visigrid_engine::operation_plan::{
         ChangeKind, DeterminismClass, ProblemSeverity, VerificationEvidence,
         VerificationStatus,
@@ -364,6 +397,26 @@ mod review_plan_tests {
         let review = crate::review_mode::ReviewModeState::from_plan(prepared.plan());
         let bucket = review.bucket_for_source_row(1);
         assert!(review.overview_buckets()[bucket].has_new_formula_error);
+    }
+
+    #[test]
+    fn no_op_script_cannot_enter_review_mode() {
+        let workbook = Workbook::new();
+        let runtime = crate::scripting::LuaRuntime::new().unwrap();
+        let snapshot = crate::scripting::SheetSnapshot::from_sheet(workbook.active_sheet());
+        let result = runtime.eval_with_sheet("sheet:set('A1', '')", Box::new(snapshot));
+        assert!(result.error.is_none());
+        let prepared = prepare_lua_operation_plan(
+            &workbook,
+            42,
+            std::path::Path::new("no-op.lua"),
+            "no-op-hash",
+            &result.ops,
+            default_lua_verification(),
+        )
+        .unwrap();
+        let error = require_visible_plan_changes(prepared).unwrap_err();
+        assert!(error.starts_with("empty_plan:"));
     }
 }
 
@@ -1109,7 +1162,13 @@ sheet:cols()
                     &result.ops,
                     default_lua_verification(),
                 ) {
-                    Ok(plan) => Some(plan),
+                    Ok(plan) => match require_visible_plan_changes(plan) {
+                        Ok(plan) => Some(plan),
+                        Err(error) => {
+                            preview_error = Some(error);
+                            None
+                        }
+                    },
                     Err(error) => {
                         preview_error = Some(error);
                         None
@@ -1213,7 +1272,13 @@ sheet:cols()
                     &result.ops,
                     default_lua_verification(),
                 ) {
-                    Ok(plan) => Some(plan),
+                    Ok(plan) => match require_visible_plan_changes(plan) {
+                        Ok(plan) => Some(plan),
+                        Err(error) => {
+                            preview_error = Some(error);
+                            None
+                        }
+                    },
                     Err(error) => {
                         preview_error = Some(error);
                         None
@@ -1393,6 +1458,9 @@ sheet:cols()
             })
             .count();
         let verification_count = commit.verification.len();
+        let applied_plan_id = prepared.plan().id.0.clone();
+        let applied_plan_hash = prepared.plan().plan_hash.clone();
+        let applied_changes = prepared.plan().changes.len();
 
         let sheet_id = prepared.plan().source_sheet_id;
         let sheet_idx = self.workbook.read(cx)
@@ -1428,6 +1496,25 @@ sheet:cols()
         self.bump_cells_rev();
         self.is_modified = true;
         self.review_mode = None;
+
+        if self.mcp_plans.record(&applied_plan_id).is_some() {
+            let result_fingerprint =
+                visigrid_engine::operation_plan::workbook_fingerprint(self.workbook.read(cx));
+            self.mcp_plans.mark_applied(
+                &applied_plan_id,
+                serde_json::json!({
+                    "plan_id": applied_plan_id,
+                    "state": "applied",
+                    "applied_revision": self.workbook.read(cx).revision(),
+                    "applied_changes": applied_changes,
+                    "plan_hash": applied_plan_hash,
+                    "result_fingerprint": result_fingerprint,
+                    "undo_available": true,
+                    "already_applied": false,
+                    "warnings": [],
+                }),
+            );
+        }
 
         self.status_message = Some(if verification_count == 0 {
             format!("Applied AI Lua to current sheet '{}'.", sheet_name)

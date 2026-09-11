@@ -1,0 +1,9 @@
+{"type":"create_plan","id":"req-p1","idempotency_key":"idem-1","expected_revision":42,"sheet":0,"title":"Normalize vendors","description":"Standardize one alias","producer":{"kind":"lua_script","source":"sheet:set_value(2, 2, \"Amazon\")"},"verification":[{"kind":"no_new_formula_errors","id":"no-new","label":"No new formula errors"}]}
+{"type":"plan_result","id":"req-p1","plan":{"plan_id":"pv_test","state":"ready"}}
+{"type":"get_plan","id":"req-p2","plan_id":"pv_test"}
+{"type":"list_plan_changes","id":"req-p3","plan_id":"pv_test","cursor":"100.abcd","limit":100,"group":"vendors","kind":"value"}
+{"type":"plan_changes","id":"req-p3","page":{"changes":[],"next_cursor":null,"plan_id":"pv_test","remaining":0}}
+{"type":"apply_plan","id":"req-p4","plan_id":"pv_test","expected_revision":42,"idempotency_key":"apply-1"}
+{"type":"plan_applied","id":"req-p4","result":{"already_applied":true,"applied_revision":43,"plan_id":"pv_test","state":"applied"}}
+{"type":"dismiss_plan","id":"req-p5","plan_id":"pv_test","idempotency_key":"dismiss-1"}
+{"type":"plan_dismissed","id":"req-p5","result":{"already_dismissed":false,"plan_id":"pv_test","state":"dismissed"}}
