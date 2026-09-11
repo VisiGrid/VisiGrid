@@ -3133,6 +3133,7 @@ impl Spreadsheet {
     /// Record a column width change to history (for undo/redo support).
     /// Called on mouse up after a resize drag to coalesce all drag events into one history entry.
     pub fn record_col_width_change(&mut self, col: usize, old: Option<f32>, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         // Get the current value from the map
         let new = self.col_widths
             .get(&self.cached_sheet_id)
@@ -3159,6 +3160,7 @@ impl Spreadsheet {
     /// Record a row height change to history (for undo/redo support).
     /// Called on mouse up after a resize drag to coalesce all drag events into one history entry.
     pub fn record_row_height_change(&mut self, row: usize, old: Option<f32>, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         // Get the current value from the map
         let new = self.row_heights
             .get(&self.cached_sheet_id)
@@ -3482,6 +3484,7 @@ impl Spreadsheet {
 
     /// Apply measured widths to `cols`, recording one undo entry for the lot.
     fn fit_columns(&mut self, cols: Vec<usize>, window: Option<&Window>, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         if cols.is_empty() {
             return;
         }
@@ -3533,6 +3536,7 @@ impl Spreadsheet {
     /// keyboard entry point — the header double-click uses
     /// `auto_fit_selected_col_widths`.
     pub fn fit_selection_columns(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         self.set_repeat(crate::repeat::RepeatAction::FitColumnWidth);
         let mut cols: Vec<usize> = Vec::new();
         for ((_, min_col), (_, max_col)) in self.all_selection_ranges() {
@@ -3605,6 +3609,7 @@ impl Spreadsheet {
     /// Auto-fit row height. Rows reset to the default height: VisiGrid has no
     /// multi-line cell text yet, so there is nothing taller to fit to.
     pub fn auto_fit_row_height(&mut self, row: usize, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         self.sheet_row_heights_mut().remove(&row);
         cx.notify();
     }
@@ -3612,6 +3617,7 @@ impl Spreadsheet {
     /// Auto-fit row height - if row is selected and multiple rows are selected,
     /// auto-fit all selected rows (Excel behavior)
     pub fn auto_fit_selected_row_heights(&mut self, clicked_row: usize, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         // Check if clicked row is part of selection
         if self.is_row_header_selected(clicked_row) {
             // Collect all selected rows

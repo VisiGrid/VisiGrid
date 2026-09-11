@@ -3000,16 +3000,20 @@ fn no_untracked_cell_mutations() {
 /// same guard as ordinary edits.
 #[test]
 fn review_mode_workbook_mutators_are_guarded() {
-    fn assert_guarded(source: &str, function: &str) {
+    fn assert_contains_near(source: &str, function: &str, required: &str) {
         let marker = format!("pub fn {function}");
         let start = source
             .find(&marker)
             .unwrap_or_else(|| panic!("missing mutation entry point {function}"));
         let prefix = &source[start..source.len().min(start + 320)];
         assert!(
-            prefix.contains("block_if_previewing(cx)"),
-            "{function} must block workbook mutation while Review Mode is active"
+            prefix.contains(required),
+            "{function} must contain {required:?} near its entry point"
         );
+    }
+
+    fn assert_guarded(source: &str, function: &str) {
+        assert_contains_near(source, function, "block_if_previewing(cx)");
     }
 
     let conditional_formats = include_str!("cond_format_ui.rs");
@@ -3040,6 +3044,9 @@ fn review_mode_workbook_mutators_are_guarded() {
     }
 
     let sheets = include_str!("sheet_ops.rs");
+    for function in ["next_sheet", "prev_sheet", "goto_sheet"] {
+        assert_contains_near(sheets, function, "block_review_sheet_switch(cx)");
+    }
     for function in [
         "add_sheet",
         "start_sheet_rename",
@@ -3061,6 +3068,36 @@ fn review_mode_workbook_mutators_are_guarded() {
     let rename = include_str!("named_ranges/rename.rs");
     assert_guarded(rename, "confirm_rename_symbol");
     assert_guarded(rename, "apply_edit_description");
+
+    let app = include_str!("app.rs");
+    for function in [
+        "record_col_width_change",
+        "record_row_height_change",
+        "fit_selection_columns",
+        "auto_fit_row_height",
+        "auto_fit_selected_row_heights",
+    ] {
+        assert_guarded(app, function);
+    }
+    let headers = include_str!("views/headers.rs");
+    assert!(headers.contains("\"col-resize\""));
+    assert!(headers.contains("\"row-resize\""));
+    assert!(
+        headers.matches("if this.block_if_previewing(cx)").count() >= 2,
+        "both manual resize handles must block while Review Mode is active"
+    );
+    let root_view = include_str!("views/mod.rs");
+    assert!(
+        root_view.contains("&& this.block_if_previewing(cx)"),
+        "an in-progress resize must stop if Review Mode opens during the drag"
+    );
+
+    let session_adapter = include_str!("session_adapter.rs");
+    assert!(session_adapter.contains("plan_under_review"));
+    assert!(
+        session_adapter.matches("if self.review_mode.is_some()").count() >= 3,
+        "session apply, structure, and history mutations must all reject during review"
+    );
 }
 
 // =========================================================================

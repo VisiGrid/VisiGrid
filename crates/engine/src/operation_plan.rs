@@ -2519,6 +2519,8 @@ mod tests {
         assert_eq!(wire["actual"], "350");
         assert_eq!(wire["tolerance"], "0.01");
         assert!(wire.get("evidence").is_none());
+        let decoded: VerificationResult = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, *verification);
         let deletion = prepared
             .plan()
             .changes

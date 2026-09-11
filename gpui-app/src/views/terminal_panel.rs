@@ -463,15 +463,10 @@ pub fn render_terminal_panel(
                 } else {
                     &data.script_hash
                 };
-                // Check workbook revision, content, and calculation context at render time.
                 let prepared = data.prepared_plan.as_ref();
-                let drifted = prepared.map_or(true, |prepared| {
-                    let context = crate::scripting::execution_context_fingerprint(
-                        app.workbook.read(cx),
-                        &prepared.plan().operations,
-                    );
-                    prepared.is_stale(app.workbook.read(cx), &context)
-                });
+                let apply_status =
+                    prepared.and_then(|prepared| app.review_apply_status(prepared, cx));
+                let drifted = apply_status.map_or(true, |status| status.stale);
                 let drift_hint = if drifted {
                     " \u{00b7} source changed \u{00b7} re-preview required"
                 } else {

@@ -1,11 +1,11 @@
 use gpui::*;
 use gpui::StyledText;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, REF_COLORS};
+use crate::app::{Spreadsheet, NUM_COLS, NUM_ROWS, REF_COLORS};
 use crate::fill::{FILL_HANDLE_BORDER, FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_SIZE, FILL_HANDLE_HOVER_GLOW, FILL_HANDLE_INWARD_OVERLAP};
 use crate::formula_refs::RefKey;
 use crate::mode::Mode;
-use crate::review_mode::{review_display_value, ReviewEndpoint};
+use crate::review_mode::ReviewEndpoint;
 use crate::settings::{user_settings, Setting};
 use crate::split_view::SplitSide;
 use crate::theme::TokenKey;
@@ -13,9 +13,10 @@ use crate::trace::TraceRole;
 use crate::workbook_view::WorkbookViewState;
 use super::headers::render_row_header;
 use super::formula_bar;
-use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment};
+use visigrid_engine::cell::{max_border, Alignment, CellBorder, CellStyle, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
 use visigrid_engine::operation_plan::{ChangeCause, ChangeKind};
+use visigrid_engine::sheet::Sheet;
 
 /// Create a non-interactive overlay div (absolute-positioned, full cell coverage).
 ///
@@ -30,6 +31,60 @@ fn non_interactive_overlay() -> Div {
     div()
         .absolute()
         .inset_0()
+}
+
+/// Resolve regular-cell border ownership from an immutable review snapshot.
+/// Merged-cell borders are owned by the frozen merge overlay instead.
+fn frozen_cell_user_borders(
+    sheet: &Sheet,
+    row: usize,
+    col: usize,
+    boundary_bottom: bool,
+    boundary_right: bool,
+) -> (CellBorder, CellBorder, CellBorder, CellBorder) {
+    let none = CellBorder::default();
+    let own = sheet.get_format(row, col);
+    let top = max_border(
+        own.border_top,
+        if row > 0 {
+            sheet.get_format(row - 1, col).border_bottom
+        } else {
+            none
+        },
+    );
+    let left = max_border(
+        own.border_left,
+        if col > 0 {
+            sheet.get_format(row, col - 1).border_right
+        } else {
+            none
+        },
+    );
+    let bottom = if boundary_bottom {
+        max_border(
+            own.border_bottom,
+            if row + 1 < NUM_ROWS {
+                sheet.get_format(row + 1, col).border_top
+            } else {
+                none
+            },
+        )
+    } else {
+        none
+    };
+    let right = if boundary_right {
+        max_border(
+            own.border_right,
+            if col + 1 < NUM_COLS {
+                sheet.get_format(row, col + 1).border_left
+            } else {
+                none
+            },
+        )
+    } else {
+        none
+    };
+    (top, right, bottom, left)
 }
 
 /// Get the view state for a specific pane.
@@ -413,6 +468,14 @@ fn render_cell(
         .as_ref()
         .map(|state| state.endpoint)
         .unwrap_or(ReviewEndpoint::Before);
+    let frozen_review_cell = app.review_endpoint_sheet_row(sheet_id, data_row);
+    let (display_sheet, display_data_row, is_frozen_review) = match frozen_review_cell {
+        Some((sheet, row)) => (sheet, row, true),
+        None => (app.sheet(cx), data_row, false),
+    };
+    let geometry_sheet = app
+        .review_source_sheet(sheet_id)
+        .unwrap_or_else(|| app.sheet(cx));
     let review_struck = review_row_deleted
         || (review_endpoint == ReviewEndpoint::After
             && review_kind == Some(ChangeKind::Cleared));
@@ -451,8 +514,8 @@ fn render_cell(
     };
 
     // Merged cell: hidden cells suppress text and block editing
-    let is_merge_hidden = app.sheet(cx).is_merge_hidden(data_row, col);
-    let is_merge_origin = app.sheet(cx).is_merge_origin(data_row, col);
+    let is_merge_hidden = geometry_sheet.is_merge_hidden(data_row, col);
+    let is_merge_origin = geometry_sheet.is_merge_origin(data_row, col);
 
     // Merge spacer: overlay handles all rendering for merged cells.
     // Hidden cells always become spacers. Origin cells become spacers unless editing.
@@ -483,9 +546,9 @@ fn render_cell(
     }
 
     // Spill state detection - uses data_row (storage)
-    let is_spill_parent = app.sheet(cx).is_spill_parent(data_row, col);
-    let is_spill_receiver = app.sheet(cx).is_spill_receiver(data_row, col);
-    let has_spill_error = app.sheet(cx).has_spill_error(data_row, col);
+    let is_spill_parent = display_sheet.is_spill_parent(display_data_row, col);
+    let is_spill_receiver = display_sheet.is_spill_receiver(display_data_row, col);
+    let has_spill_error = display_sheet.has_spill_error(display_data_row, col);
 
     // Check for multi-edit preview (shows what each selected cell will receive)
     let multi_edit_preview = app.multi_edit_preview(view_row, col);
@@ -496,7 +559,17 @@ fn render_cell(
     // Effective format = stored format + conditional formatting rules,
     // cached per cell keyed on (cells_rev, cf_rules_rev) so heavy
     // predicates cost once per edit, not once per frame.
-    let format = app.effective_format_cached(data_row, col, cx);
+    let format = if is_frozen_review {
+        let base = display_sheet.get_format(display_data_row, col);
+        display_sheet.cond_formats.effective_format(
+            display_data_row,
+            col,
+            &base,
+            display_sheet,
+        )
+    } else {
+        app.effective_format_cached(data_row, col, cx)
+    };
 
     // Role-based auto-styling (from agent metadata)
     let role_style = app.get_cell_role_style(data_row, col);
@@ -511,21 +584,10 @@ fn render_cell(
     } else if let Some(preview) = multi_edit_preview {
         // Show the preview value for cells in multi-selection during editing
         preview
-    } else if review_endpoint == ReviewEndpoint::After
-        && matches!(review_kind, Some(ChangeKind::Value | ChangeKind::Formula))
-    {
-        let change = review_change.expect("review kind came from a change");
-        review_display_value(
-            review_endpoint,
-            app.show_formulas(),
-            change,
-            &app.sheet(cx).get_raw(data_row, col),
-            &app.sheet(cx).get_formatted_display(data_row, col),
-        )
     } else if app.show_formulas() {
-        app.sheet(cx).get_raw(data_row, col)
+        display_sheet.get_raw(display_data_row, col)
     } else {
-        let display = app.sheet(cx).get_formatted_display(data_row, col);
+        let display = display_sheet.get_formatted_display(display_data_row, col);
         // Hide zero values if show_zeros is false
         let display = if !app.show_zeros() && display == "0" {
             String::new()
@@ -721,14 +783,20 @@ fn render_cell(
     // If this cell has text + CenterAcrossSelection, compute the total span width.
     // If this cell is empty + CenterAcrossSelection and a cell to its left spans across it, suppress text.
     // Priority: merge rules win — merged cells never use CenterAcrossSelection.
-    let is_in_merge = app.sheet(cx).get_merge(data_row, col).is_some();
+    let is_in_merge = geometry_sheet.get_merge(data_row, col).is_some();
     let center_across_span = if !is_editing && !is_in_merge && format.alignment == Alignment::CenterAcrossSelection {
         if !value.is_empty() {
             // Source cell: scan right for empty cells with CenterAcrossSelection
-            Some(center_across_span_width(data_row, col, col_width, app, cx))
+            Some(center_across_span_width(
+                display_data_row,
+                col,
+                col_width,
+                display_sheet,
+                app,
+            ))
         } else {
             // Empty cell: check if a source cell to the left spans across us → suppress
-            if is_center_across_continuation(data_row, col, app, cx) {
+            if is_center_across_continuation(display_data_row, col, display_sheet) {
                 Some(0.0) // sentinel: continuation cell, suppress text
             } else {
                 None // isolated empty CenterAcross cell, render normally
@@ -755,7 +823,7 @@ fn render_cell(
                     cell.justify_center()
                 } else {
                     // Default General behavior: numbers right, text left
-                    let computed = app.sheet(cx).get_computed_value(data_row, col);
+                    let computed = display_sheet.get_computed_value(display_data_row, col);
                     match computed {
                         Value::Number(_) => cell.justify_end(),
                         _ => cell.justify_start(),
@@ -802,7 +870,7 @@ fn render_cell(
         // Interior gridlines (GridLines color via overlay child, since cell border_color
         // is already SelectionBorder for outer edges)
         if show_gridlines {
-            let (top_in_merge, left_in_merge, _, _) = if let Some(merge) = app.sheet(cx).get_merge(data_row, col) {
+            let (top_in_merge, left_in_merge, _, _) = if let Some(merge) = geometry_sheet.get_merge(data_row, col) {
                 (data_row > merge.start.0, col > merge.start.1, data_row < merge.end.0, col < merge.end.1)
             } else {
                 (false, false, false, false)
@@ -840,7 +908,7 @@ fn render_cell(
     } else {
         // Formula ref borders are drawn as dashed overlays (render_formula_ref_borders)
         // so formula ref cells fall through here for normal gridline/user border handling
-        let sheet_has_borders = app.sheet(cx).has_any_borders;
+        let sheet_has_borders = display_sheet.has_any_borders;
 
         let has_cell_style_border = cell_style.border.is_some();
 
@@ -855,9 +923,19 @@ fn render_cell(
             // that have never had border formatting).
             let none = CellBorder::default();
             let (border_top, border_right, border_bottom, border_left) = if sheet_has_borders {
-                app.cell_user_borders(
-                    data_row, col, cx, is_last_visible_row, is_last_visible_col,
-                )
+                if is_frozen_review {
+                    frozen_cell_user_borders(
+                        display_sheet,
+                        display_data_row,
+                        col,
+                        is_last_visible_row,
+                        is_last_visible_col,
+                    )
+                } else {
+                    app.cell_user_borders(
+                        data_row, col, cx, is_last_visible_row, is_last_visible_col,
+                    )
+                }
             } else {
                 (none, none, none, none)
             };
@@ -868,7 +946,7 @@ fn render_cell(
             let has_user_border = user_top || user_right || user_bottom || user_left;
 
             // Suppress interior gridlines within merged regions (computed once, used by gridlines)
-            let (top_in_merge, left_in_merge, bottom_in_merge, right_in_merge) = if let Some(merge) = app.sheet(cx).get_merge(data_row, col) {
+            let (top_in_merge, left_in_merge, bottom_in_merge, right_in_merge) = if let Some(merge) = geometry_sheet.get_merge(data_row, col) {
                 (data_row > merge.start.0, col > merge.start.1, data_row < merge.end.0, col < merge.end.1)
             } else {
                 (false, false, false, false)
@@ -933,10 +1011,10 @@ fn render_cell(
             // Suppress borders where the neighboring cell shares the same style.
             if let Some(style_border_color) = cell_style.border {
                 let cur_style = format.cell_style;
-                let neighbor_top = if data_row > 0 { app.sheet(cx).get_format(data_row - 1, col).cell_style } else { CellStyle::None };
-                let neighbor_bottom = app.sheet(cx).get_format(data_row + 1, col).cell_style;
-                let neighbor_left = if col > 0 { app.sheet(cx).get_format(data_row, col - 1).cell_style } else { CellStyle::None };
-                let neighbor_right = app.sheet(cx).get_format(data_row, col + 1).cell_style;
+                let neighbor_top = if display_data_row > 0 { display_sheet.get_format(display_data_row - 1, col).cell_style } else { CellStyle::None };
+                let neighbor_bottom = display_sheet.get_format(display_data_row + 1, col).cell_style;
+                let neighbor_left = if col > 0 { display_sheet.get_format(display_data_row, col - 1).cell_style } else { CellStyle::None };
+                let neighbor_right = display_sheet.get_format(display_data_row, col + 1).cell_style;
 
                 let on_top_edge = neighbor_top != cur_style;
                 let on_bottom_edge = neighbor_bottom != cur_style;
@@ -1112,15 +1190,15 @@ fn render_cell(
         let use_spill_overlay = review_change.is_none()
             && !review_row_deleted
             && should_use_spill_overlay(
-                data_row,
+                display_data_row,
                 col,
                 &value,
                 col_width,
                 format.alignment,
                 is_editing,
+                display_sheet,
                 app,
                 window,
-                cx,
             );
 
         // CenterAcrossSelection: continuation cells suppress text entirely
@@ -1631,22 +1709,22 @@ fn center_across_span_width(
     row: usize,
     col: usize,
     col_width: f32,
+    sheet: &Sheet,
     app: &Spreadsheet,
-    cx: &App,
 ) -> f32 {
     let mut total_width = col_width;
-    let max_col = app.sheet(cx).cols.min(col + 50); // reasonable scan limit
+    let max_col = sheet.cols.min(col + 50); // reasonable scan limit
     let mut check_col = col + 1;
     while check_col < max_col {
         // Stop at merged cells — merge rules take priority over CenterAcross
-        if app.sheet(cx).get_merge(row, check_col).is_some() {
+        if sheet.get_merge(row, check_col).is_some() {
             break;
         }
-        let adj_format = app.sheet(cx).get_format(row, check_col);
+        let adj_format = sheet.get_format(row, check_col);
         if adj_format.alignment != Alignment::CenterAcrossSelection {
             break;
         }
-        let adj_display = app.sheet(cx).get_formatted_display(row, check_col);
+        let adj_display = sheet.get_formatted_display(row, check_col);
         if !adj_display.is_empty() {
             break; // adjacent cell has content — stop the span
         }
@@ -1662,8 +1740,7 @@ fn center_across_span_width(
 fn is_center_across_continuation(
     row: usize,
     col: usize,
-    app: &Spreadsheet,
-    cx: &App,
+    sheet: &Sheet,
 ) -> bool {
     if col == 0 {
         return false;
@@ -1672,29 +1749,29 @@ fn is_center_across_continuation(
     while check_col > 0 {
         check_col -= 1;
         // Stop at merged cells — merge rules take priority over CenterAcross
-        if app.sheet(cx).get_merge(row, check_col).is_some() {
+        if sheet.get_merge(row, check_col).is_some() {
             return false;
         }
-        let fmt = app.sheet(cx).get_format(row, check_col);
+        let fmt = sheet.get_format(row, check_col);
         if fmt.alignment != Alignment::CenterAcrossSelection {
             return false; // hit a non-CenterAcross cell — no span from the left
         }
-        let display = app.sheet(cx).get_formatted_display(row, check_col);
+        let display = sheet.get_formatted_display(row, check_col);
         if !display.is_empty() {
             // Found a source cell. Check if its span reaches our column
             // by re-scanning rightward from the source.
             let mut scan_col = check_col + 1;
-            let max_col = app.sheet(cx).cols.min(check_col + 50);
+            let max_col = sheet.cols.min(check_col + 50);
             while scan_col < max_col && scan_col <= col {
                 // Stop at merged cells
-                if app.sheet(cx).get_merge(row, scan_col).is_some() {
+                if sheet.get_merge(row, scan_col).is_some() {
                     break;
                 }
-                let sf = app.sheet(cx).get_format(row, scan_col);
+                let sf = sheet.get_format(row, scan_col);
                 if sf.alignment != Alignment::CenterAcrossSelection {
                     break;
                 }
-                let sd = app.sheet(cx).get_formatted_display(row, scan_col);
+                let sd = sheet.get_formatted_display(row, scan_col);
                 if !sd.is_empty() {
                     break;
                 }
@@ -1723,12 +1800,12 @@ fn calculate_text_spill(
     text: &str,
     cell_width: f32,
     alignment: Alignment,
+    sheet: &Sheet,
     app: &Spreadsheet,
     window: &Window,
-    cx: &App,
 ) -> Option<f32> {
     // Check if alignment allows spilling
-    let is_number = matches!(app.sheet(cx).get_computed_value(row, col), Value::Number(_));
+    let is_number = matches!(sheet.get_computed_value(row, col), Value::Number(_));
     if !should_alignment_spill(alignment, is_number) {
         return None;
     }
@@ -1771,7 +1848,7 @@ fn calculate_text_spill(
 
     while spill_width < overflow_needed && check_col < max_col {
         // Check if adjacent cell is empty
-        let adjacent_display = app.sheet(cx).get_formatted_display(row, check_col);
+        let adjacent_display = sheet.get_formatted_display(row, check_col);
         if !adjacent_display.is_empty() {
             break; // Adjacent cell has content, stop spilling
         }
@@ -1813,9 +1890,9 @@ fn should_use_spill_overlay(
     cell_width: f32,
     alignment: Alignment,
     is_editing: bool,
+    sheet: &Sheet,
     app: &Spreadsheet,
     window: &Window,
-    cx: &App,
 ) -> bool {
     // The inline editor owns text while editing
     if is_editing {
@@ -1823,7 +1900,7 @@ fn should_use_spill_overlay(
     }
 
     // Check if this cell would spill (text overflows AND can spill into adjacent cells)
-    calculate_text_spill(data_row, col, text, cell_width, alignment, app, window, cx).is_some()
+    calculate_text_spill(data_row, col, text, cell_width, alignment, sheet, app, window).is_some()
 }
 
 /// Returns the base background color for a cell (ignoring selection state).
@@ -2236,7 +2313,10 @@ fn collect_visible_merges(
     visible_rows: usize,
     visible_cols: usize,
 ) -> Vec<VisibleMerge> {
-    let sheet = app.sheet(cx);
+    let live_sheet = app.sheet(cx);
+    let sheet = app
+        .review_source_sheet(live_sheet.id)
+        .unwrap_or(live_sheet);
     if sheet.merged_regions.is_empty() {
         return Vec::new();
     }
@@ -2290,8 +2370,11 @@ fn render_merge_div(
     sel_border_color: Hsla,
     user_border_color: Hsla,
 ) -> Stateful<Div> {
-    let sheet = app.sheet(cx);
-    let format = sheet.get_format(m.origin_row, m.origin_col);
+    let live_sheet = app.sheet(cx);
+    let (sheet, display_row) = app
+        .review_endpoint_sheet_row(live_sheet.id, m.origin_row)
+        .unwrap_or((live_sheet, m.origin_row));
+    let format = sheet.get_format(display_row, m.origin_col);
     let merge_cell_style = resolve_cell_style(app, format.cell_style);
     let bg = cell_base_background(app, false, format.background_color, merge_cell_style.fill);
     let is_editing_this = editing && view_state.selected == (m.origin_row, m.origin_col);
@@ -2335,7 +2418,7 @@ fn render_merge_div(
     // 3. Text (skip if editing origin — caret renders in inline cell)
     if !is_editing_this {
         let is_number = matches!(
-            sheet.get_computed_value(m.origin_row, m.origin_col),
+            sheet.get_computed_value(display_row, m.origin_col),
             Value::Number(_)
         );
 
@@ -2355,9 +2438,9 @@ fn render_merge_div(
         };
 
         let value = if app.show_formulas() {
-            sheet.get_raw(m.origin_row, m.origin_col)
+            sheet.get_raw(display_row, m.origin_col)
         } else {
-            let display = sheet.get_formatted_display(m.origin_row, m.origin_col);
+            let display = sheet.get_formatted_display(display_row, m.origin_col);
             if !app.show_zeros() && display == "0" {
                 String::new()
             } else {
@@ -2374,8 +2457,17 @@ fn render_merge_div(
 
     // 4. User borders (non-interactive overlay — no .id())
     let (b_top, b_right, b_bottom, b_left) =
-        sheet.resolve_merge_borders(
-            sheet.get_merge(m.origin_row, m.origin_col).unwrap()
+        sheet.get_merge(display_row, m.origin_col).map_or_else(
+            || {
+                let format = sheet.get_format(display_row, m.origin_col);
+                (
+                    format.border_top,
+                    format.border_right,
+                    format.border_bottom,
+                    format.border_left,
+                )
+            },
+            |merge| sheet.resolve_merge_borders(merge),
         );
     if b_top.is_set() || b_right.is_set() || b_bottom.is_set() || b_left.is_set() {
         merge_div = merge_div.child(
@@ -2739,6 +2831,13 @@ fn render_text_spill_overlay(
 
         for screen_col in 0..visible_cols {
             let Some(col) = app.nth_visible_col(screen_col, scroll_col) else { continue; };
+            let sheet_id = app.sheet(cx).id;
+            let (display_sheet, display_data_row) = app
+                .review_endpoint_sheet_row(sheet_id, data_row)
+                .unwrap_or_else(|| (app.sheet(cx), data_row));
+            let geometry_sheet = app
+                .review_source_sheet(sheet_id)
+                .unwrap_or_else(|| app.sheet(cx));
 
             // Skip only the cell being edited (the inline editor owns its text).
             // MUST mirror should_use_spill_overlay exactly: exactly one layer
@@ -2753,7 +2852,6 @@ fn render_text_spill_overlay(
             // Review cells keep their text clipped inside the cell so markers,
             // strikethrough, and proposed values remain one coherent treatment.
             // The normal cell renderer owns their text during Review Mode.
-            let sheet_id = app.sheet(cx).id;
             if app.review_change_at_source(sheet_id, data_row, col).is_some()
                 || app.review_row_is_deleted(sheet_id, data_row)
             {
@@ -2768,20 +2866,20 @@ fn render_text_spill_overlay(
             // The predicate get_merge() is tested in engine tests:
             //   test_merge_get_merge_covers_all_cells
             //   test_merge_with_text_still_detected_by_get_merge
-            if app.sheet(cx).get_merge(data_row, col).is_some() {
+            if geometry_sheet.get_merge(data_row, col).is_some() {
                 continue;
             }
 
             // Get cell display value
-            let display = app.sheet(cx).get_formatted_display(data_row, col);
+            let display = display_sheet.get_formatted_display(display_data_row, col);
             if display.is_empty() {
                 continue;
             }
 
             // Get format and check if alignment allows spilling
-            let format = app.sheet(cx).get_format(data_row, col);
+            let format = display_sheet.get_format(display_data_row, col);
             let is_number = matches!(
-                app.sheet(cx).get_computed_value(data_row, col),
+                display_sheet.get_computed_value(display_data_row, col),
                 Value::Number(_)
             );
 
@@ -2831,7 +2929,8 @@ fn render_text_spill_overlay(
 
             while spill_width < overflow_needed && check_col < max_col {
                 // Check if adjacent cell is empty
-                let adjacent_display = app.sheet(cx).get_formatted_display(data_row, check_col);
+                let adjacent_display =
+                    display_sheet.get_formatted_display(display_data_row, check_col);
                 if !adjacent_display.is_empty() {
                     break; // Adjacent cell has content, stop spilling
                 }

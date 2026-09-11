@@ -199,12 +199,22 @@ fn lua_op_to_planned_op(operation: &LuaOp) -> Option<PlannedOp> {
     })
 }
 
-/// Fingerprint calculation inputs that are not represented by workbook
-/// revision. This accessor is intentionally read-only and never reloads Lua.
-pub fn execution_context_fingerprint(
-    workbook: &Workbook,
-    planned_ops: &[PlannedOperation],
-) -> ExecutionContextFingerprint {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionContextGenerationKey {
+    pub functions_generation: u64,
+    pub functions_source_hash: String,
+    pub locale: String,
+    pub timezone: String,
+    pub auto_recalc: bool,
+    pub iterative_calculation_enabled: bool,
+    pub iterative_max_iterations: u32,
+    pub iterative_tolerance_bits: u64,
+}
+
+/// Cheap key for deciding whether a cached execution-context check remains
+/// valid. Formula volatility is intentionally absent: formula changes bump
+/// workbook revision and trigger the complete context scan on the cache miss.
+pub fn execution_context_generation_key(workbook: &Workbook) -> ExecutionContextGenerationKey {
     let functions = published_functions_fingerprint();
     let locale = std::env::var("LC_ALL")
         .or_else(|_| std::env::var("LC_NUMERIC"))
@@ -212,6 +222,25 @@ pub fn execution_context_fingerprint(
         .unwrap_or_else(|_| "C".into());
     let timezone =
         std::env::var("TZ").unwrap_or_else(|_| chrono::Local::now().offset().to_string());
+    ExecutionContextGenerationKey {
+        functions_generation: functions.generation,
+        functions_source_hash: functions.source_hash,
+        locale,
+        timezone,
+        auto_recalc: workbook.auto_recalc(),
+        iterative_calculation_enabled: workbook.iterative_enabled(),
+        iterative_max_iterations: workbook.iterative_max_iters(),
+        iterative_tolerance_bits: workbook.iterative_tolerance().to_bits(),
+    }
+}
+
+/// Fingerprint calculation inputs that are not represented by workbook
+/// revision. This accessor is intentionally read-only and never reloads Lua.
+pub fn execution_context_fingerprint(
+    workbook: &Workbook,
+    planned_ops: &[PlannedOperation],
+) -> ExecutionContextFingerprint {
+    let generation = execution_context_generation_key(workbook);
     let mut volatile_inputs = Vec::new();
     for sheet in workbook.sheets() {
         for (_, cell) in sheet.cells_iter() {
@@ -228,14 +257,14 @@ pub fn execution_context_fingerprint(
 
     ExecutionContextFingerprint {
         engine_version: env!("CARGO_PKG_VERSION").into(),
-        functions_generation: functions.generation,
-        functions_source_hash: functions.source_hash,
-        locale,
-        timezone,
-        auto_recalc: workbook.auto_recalc(),
-        iterative_calculation_enabled: workbook.iterative_enabled(),
-        iterative_max_iterations: workbook.iterative_max_iters(),
-        iterative_tolerance_bits: workbook.iterative_tolerance().to_bits(),
+        functions_generation: generation.functions_generation,
+        functions_source_hash: generation.functions_source_hash,
+        locale: generation.locale,
+        timezone: generation.timezone,
+        auto_recalc: generation.auto_recalc,
+        iterative_calculation_enabled: generation.iterative_calculation_enabled,
+        iterative_max_iterations: generation.iterative_max_iterations,
+        iterative_tolerance_bits: generation.iterative_tolerance_bits,
         volatile_inputs,
     }
 }

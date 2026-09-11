@@ -43,7 +43,10 @@ pub use console_state::{ConsoleState, ConsoleTab, ActiveDebugSession, OutputEntr
 pub use script_state::ScriptState;
 pub use text_buffer::TextBuffer;
 pub use ops::{CellKey, LuaCellValue, LuaOp, LuaOpSink, LuaReviewMetadata, LuaVerificationRequest, PendingCell, SheetReader, parse_a1, format_a1};
-pub use plan::{execution_context_fingerprint, lua_journal_to_plan, LuaPlanParts};
+pub use plan::{
+    execution_context_fingerprint, execution_context_generation_key, lua_journal_to_plan,
+    ExecutionContextGenerationKey, LuaPlanParts,
+};
 pub use runtime::{LuaEvalResult, LuaRuntime, Limits, CancelToken, INSTRUCTION_LIMIT, INSTRUCTION_HOOK_INTERVAL, DEFAULT_TIMEOUT, MEMORY_LIMIT_BYTES};
 pub use sheet_api::{DynOpSink, SheetUserData, SheetSnapshot, register_sheet_global, register_sheet_global_with_caps, register_sheet_global_with_selection_and_caps, MAX_OPS, MAX_OUTPUT_LINES};
 pub use custom_functions::{CustomFunctionRegistry, CustomFunction, MemoCache};

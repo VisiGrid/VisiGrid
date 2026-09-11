@@ -121,30 +121,36 @@ mod review_plan_tests {
                 if expected == "350" && actual == "350" && currency == "USD"
         ));
 
-        let review = crate::review_mode::ReviewModeState::from_plan(prepared.plan());
+        let mut review = crate::review_mode::ReviewModeState::from_prepared(&prepared, &workbook);
         let vendor_change = review.change_index_at_source(1, 1).unwrap();
         let vendor_change = &prepared.plan().changes[vendor_change];
         assert_eq!(vendor_change.kind, ChangeKind::Value);
+        review.set_endpoint(crate::review_mode::ReviewEndpoint::Before);
+        let (before_sheet, before_row) = review
+            .endpoint_sheet_row(&prepared, prepared.plan().source_sheet_id, 1)
+            .unwrap();
         assert_eq!(
-            crate::review_mode::review_display_value(
-                crate::review_mode::ReviewEndpoint::Before,
-                false,
-                vendor_change,
-                "Amazon.com",
-                "Amazon.com",
-            ),
+            before_sheet.get_formatted_display(before_row, 1),
             "Amazon.com"
         );
+        review.set_endpoint(crate::review_mode::ReviewEndpoint::After);
+        let (after_sheet, after_row) = review
+            .endpoint_sheet_row(&prepared, prepared.plan().source_sheet_id, 1)
+            .unwrap();
         assert_eq!(
-            crate::review_mode::review_display_value(
-                crate::review_mode::ReviewEndpoint::After,
-                false,
-                vendor_change,
-                "Amazon.com",
-                "Amazon.com",
-            ),
+            after_sheet.get_formatted_display(after_row, 1),
             "Amazon"
         );
+        let (after_sheet, shifted_formula_row) = review
+            .endpoint_sheet_row(&prepared, prepared.plan().source_sheet_id, 6)
+            .unwrap();
+        assert_eq!(shifted_formula_row, 4);
+        assert_eq!(after_sheet.get_raw(shifted_formula_row, 2), "=SUM(C2:C4)");
+        let (deleted_source, deleted_row) = review
+            .endpoint_sheet_row(&prepared, prepared.plan().source_sheet_id, 3)
+            .unwrap();
+        assert_eq!(deleted_row, 3);
+        assert_eq!(deleted_source.get_formatted_display(deleted_row, 0), "tx-001");
         assert!(review.is_deleted_source_row(3));
         assert!(review.is_deleted_source_row(4));
         assert!(review
@@ -171,12 +177,9 @@ mod review_plan_tests {
             &workbook,
             &prepared.plan().operations,
         );
-        let ready = crate::review_mode::ReviewApplyStatus::evaluate(
-            &prepared,
-            &workbook,
-            &execution_context,
-        );
+        let ready = review.apply_status(&prepared, &workbook);
         assert!(ready.can_apply());
+        assert_eq!(review.apply_status(&prepared, &workbook), ready);
         let mut changed_context = execution_context.clone();
         changed_context.timezone.push_str("-changed");
         let stale = crate::review_mode::ReviewApplyStatus::evaluate(
@@ -187,6 +190,24 @@ mod review_plan_tests {
         assert!(stale.stale);
         assert!(!stale.can_apply());
         assert_eq!(stale.disabled_reason(), Some("Plan is stale · re-preview required"));
+
+        let unchanged_revision = workbook.revision();
+        workbook.set_iterative_tolerance(0.01);
+        assert_eq!(workbook.revision(), unchanged_revision);
+        assert!(review.apply_status(&prepared, &workbook).stale);
+
+        workbook.set_cell_value_tracked(0, 1, 1, "live drift");
+        assert!(review.apply_status(&prepared, &workbook).stale);
+        review.set_endpoint(crate::review_mode::ReviewEndpoint::Before);
+        let (before_sheet, before_row) = review
+            .endpoint_sheet_row(&prepared, prepared.plan().source_sheet_id, 1)
+            .unwrap();
+        assert_eq!(before_sheet.get_formatted_display(before_row, 1), "Amazon.com");
+        review.set_endpoint(crate::review_mode::ReviewEndpoint::After);
+        let (after_sheet, after_row) = review
+            .endpoint_sheet_row(&prepared, prepared.plan().source_sheet_id, 1)
+            .unwrap();
+        assert_eq!(after_sheet.get_formatted_display(after_row, 1), "Amazon");
     }
 
     #[test]
@@ -1006,7 +1027,12 @@ sheet:cols()
             .unwrap_or(result.mutations);
         self.review_mode = prepared_plan
             .as_ref()
-            .map(|prepared| crate::review_mode::ReviewModeState::from_plan(prepared.plan()));
+            .map(|prepared| {
+                crate::review_mode::ReviewModeState::from_prepared(
+                    prepared,
+                    self.workbook.read(cx),
+                )
+            });
 
         // Store preview
         self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
@@ -1103,7 +1129,12 @@ sheet:cols()
             .unwrap_or(result.mutations);
         self.review_mode = prepared_plan
             .as_ref()
-            .map(|prepared| crate::review_mode::ReviewModeState::from_plan(prepared.plan()));
+            .map(|prepared| {
+                crate::review_mode::ReviewModeState::from_prepared(
+                    prepared,
+                    self.workbook.read(cx),
+                )
+            });
 
         self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
             script_path: path,

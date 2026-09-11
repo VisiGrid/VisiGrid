@@ -243,6 +243,7 @@ fn render_column_header(
                 .hover(move |s| s.bg(accent.opacity(0.25)))
                 // Mouse down to start resize, double-click to auto-fit
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if this.block_if_previewing(cx) { return; }
                     if event.click_count == 2 {
                         // Double-click to auto-fit (all selected if part of selection).
                         // The window lets the text actually be shaped.
@@ -355,6 +356,7 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
                 .cursor(CursorStyle::ResizeUpDown)
                 .hover(move |s| s.bg(accent.opacity(0.25)))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    if this.block_if_previewing(cx) { return; }
                     if event.click_count == 2 {
                         // Double-click to auto-fit (all selected if part of selection)
                         this.auto_fit_selected_row_heights(row, cx);

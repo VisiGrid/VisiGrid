@@ -375,7 +375,7 @@ impl Spreadsheet {
             return;
         }
 
-        if let Some(endpoint) = self.review_mode.as_ref().map(|state| state.endpoint) {
+        if self.review_mode.is_some() {
             let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
             let mut tsv = String::new();
             for view_row in min_row..=max_row {
@@ -387,24 +387,21 @@ impl Spreadsheet {
                     if col > min_col {
                         tsv.push('\t');
                     }
-                    let source_raw = self.sheet(cx).get_raw(data_row, col);
-                    let source_display = self.sheet(cx).get_formatted_display(data_row, col);
+                    let sheet_id = self.sheet(cx).id;
                     let displayed = self
-                        .review_change_at_source(self.sheet(cx).id, data_row, col)
-                        .map(|change| {
-                            crate::review_mode::review_display_value(
-                                endpoint,
-                                self.show_formulas(),
-                                change,
-                                &source_raw,
-                                &source_display,
-                            )
+                        .review_endpoint_sheet_row(sheet_id, data_row)
+                        .map(|(sheet, endpoint_row)| {
+                            if self.show_formulas() {
+                                sheet.get_raw(endpoint_row, col)
+                            } else {
+                                sheet.get_formatted_display(endpoint_row, col)
+                            }
                         })
                         .unwrap_or_else(|| {
                             if self.show_formulas() {
-                                source_raw
+                                self.sheet(cx).get_raw(data_row, col)
                             } else {
-                                source_display
+                                self.sheet(cx).get_formatted_display(data_row, col)
                             }
                         });
                     tsv.push_str(&displayed);

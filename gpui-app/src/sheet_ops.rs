@@ -531,6 +531,7 @@ impl Spreadsheet {
 
     /// Move to the next sheet
     pub fn next_sheet(&mut self, cx: &mut Context<Self>) {
+        if self.block_review_sheet_switch(cx) { return; }
         if self.wb_mut(cx, |wb| wb.next_sheet()) {
             self.update_cached_sheet_id(cx);
             self.clear_selection_state();
@@ -540,6 +541,7 @@ impl Spreadsheet {
 
     /// Move to the previous sheet
     pub fn prev_sheet(&mut self, cx: &mut Context<Self>) {
+        if self.block_review_sheet_switch(cx) { return; }
         if self.wb_mut(cx, |wb| wb.prev_sheet()) {
             self.update_cached_sheet_id(cx);
             self.clear_selection_state();
@@ -549,6 +551,7 @@ impl Spreadsheet {
 
     /// Switch to a specific sheet by index
     pub fn goto_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.block_review_sheet_switch(cx) { return; }
         // In formula mode, switch sheets for cross-sheet reference picking
         // without committing the formula or clearing edit state.
         if self.mode.is_formula() {

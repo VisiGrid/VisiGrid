@@ -4,13 +4,14 @@
 //! workbook snapshots. This index stores only change offsets and row markers,
 //! so entering Review Mode does not duplicate a potentially large plan.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use visigrid_engine::operation_plan::{
     ChangeKind, DeterminismClass, ExecutionContextFingerprint, GroupId, MaterializedChange,
     OperationPlan, PlanId, PreparedOperationPlan, ProblemSeverity, ReviewRowState,
 };
-use visigrid_engine::sheet::SheetId;
+use visigrid_engine::sheet::{Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
 
 use crate::app::Spreadsheet;
@@ -30,6 +31,18 @@ pub struct ReviewApplyStatus {
     pub stale: bool,
     pub blocking: bool,
     pub determinism: DeterminismClass,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewEligibilityKey {
+    workbook_revision: u64,
+    execution_context: crate::scripting::ExecutionContextGenerationKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewEligibilityCache {
+    key: ReviewEligibilityKey,
+    status: ReviewApplyStatus,
 }
 
 impl ReviewApplyStatus {
@@ -85,28 +98,6 @@ pub enum ReviewEndpoint {
     After,
 }
 
-pub fn review_display_value(
-    endpoint: ReviewEndpoint,
-    show_formulas: bool,
-    change: &MaterializedChange,
-    source_raw: &str,
-    source_display: &str,
-) -> String {
-    if endpoint == ReviewEndpoint::After
-        && matches!(change.kind, ChangeKind::Value | ChangeKind::Formula)
-    {
-        if show_formulas {
-            change.after.raw.clone()
-        } else {
-            change.after.display.clone()
-        }
-    } else if show_formulas {
-        source_raw.to_string()
-    } else {
-        source_display.to_string()
-    }
-}
-
 #[derive(Debug)]
 pub struct ReviewModeState {
     pub plan_id: PlanId,
@@ -120,10 +111,24 @@ pub struct ReviewModeState {
     navigable_groups: Vec<(usize, usize)>,
     overview_buckets: Vec<ReviewOverviewBucket>,
     overview_bucket_targets: Vec<Vec<(usize, usize)>>,
+    after_row_by_before: Vec<Option<usize>>,
     source_row_count: usize,
+    eligibility_cache: RefCell<Option<ReviewEligibilityCache>>,
 }
 
 impl ReviewModeState {
+    pub fn from_prepared(prepared: &PreparedOperationPlan, workbook: &Workbook) -> Self {
+        let mut state = Self::from_plan(prepared.plan());
+        let key = Self::eligibility_key(workbook);
+        let context = crate::scripting::execution_context_fingerprint(
+            workbook,
+            &prepared.plan().operations,
+        );
+        let status = ReviewApplyStatus::evaluate(prepared, workbook, &context);
+        *state.eligibility_cache.get_mut() = Some(ReviewEligibilityCache { key, status });
+        state
+    }
+
     pub fn from_plan(plan: &OperationPlan) -> Self {
         let mut by_before_cell = HashMap::new();
         let mut by_before_row: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -198,6 +203,14 @@ impl ReviewModeState {
             targets.sort_unstable();
             targets.dedup();
         }
+        let mut after_row_by_before = vec![None; source_row_count];
+        for row in &plan.row_lineage {
+            if let Some(before_row) = row.before_data_row {
+                if before_row < after_row_by_before.len() {
+                    after_row_by_before[before_row] = row.after_data_row;
+                }
+            }
+        }
 
         Self {
             plan_id: plan.id.clone(),
@@ -211,8 +224,79 @@ impl ReviewModeState {
             navigable_groups,
             overview_buckets,
             overview_bucket_targets,
+            after_row_by_before,
             source_row_count,
+            eligibility_cache: RefCell::new(None),
         }
+    }
+
+    fn eligibility_key(workbook: &Workbook) -> ReviewEligibilityKey {
+        ReviewEligibilityKey {
+            workbook_revision: workbook.revision(),
+            execution_context: crate::scripting::execution_context_generation_key(workbook),
+        }
+    }
+
+    pub fn apply_status(
+        &self,
+        prepared: &PreparedOperationPlan,
+        workbook: &Workbook,
+    ) -> ReviewApplyStatus {
+        let key = Self::eligibility_key(workbook);
+        if let Some(cache) = self.eligibility_cache.borrow().as_ref() {
+            if cache.key == key {
+                return cache.status;
+            }
+        }
+        let context = crate::scripting::execution_context_fingerprint(
+            workbook,
+            &prepared.plan().operations,
+        );
+        let status = ReviewApplyStatus::evaluate(prepared, workbook, &context);
+        *self.eligibility_cache.borrow_mut() = Some(ReviewEligibilityCache { key, status });
+        status
+    }
+
+    fn after_row_for_source(&self, source_row: usize) -> Option<usize> {
+        self.after_row_by_before.get(source_row).copied().flatten()
+    }
+
+    pub fn endpoint_sheet_row<'a>(
+        &self,
+        prepared: &'a PreparedOperationPlan,
+        sheet_id: SheetId,
+        source_row: usize,
+    ) -> Option<(&'a Sheet, usize)> {
+        if self.source_sheet_id != sheet_id || prepared.plan().id != self.plan_id {
+            return None;
+        }
+        match self.endpoint {
+            ReviewEndpoint::Before => prepared
+                .source_workbook()
+                .sheet_by_id(sheet_id)
+                .map(|sheet| (sheet, source_row)),
+            ReviewEndpoint::After => match self.after_row_for_source(source_row) {
+                Some(after_row) => prepared
+                    .preview_workbook()
+                    .sheet_by_id(sheet_id)
+                    .map(|sheet| (sheet, after_row)),
+                None => prepared
+                    .source_workbook()
+                    .sheet_by_id(sheet_id)
+                    .map(|sheet| (sheet, source_row)),
+            },
+        }
+    }
+
+    pub fn source_sheet<'a>(
+        &self,
+        prepared: &'a PreparedOperationPlan,
+        sheet_id: SheetId,
+    ) -> Option<&'a Sheet> {
+        if self.source_sheet_id != sheet_id || prepared.plan().id != self.plan_id {
+            return None;
+        }
+        prepared.source_workbook().sheet_by_id(sheet_id)
     }
 
     pub fn change_index_at_source(&self, row: usize, col: usize) -> Option<usize> {
@@ -333,6 +417,53 @@ fn adjacent_coordinate(
 }
 
 impl Spreadsheet {
+    pub fn block_review_sheet_switch(&mut self, cx: &mut gpui::Context<Self>) -> bool {
+        if self.review_mode.is_none() {
+            return false;
+        }
+        self.status_message =
+            Some("Apply or dismiss Review Mode before switching sheets.".into());
+        cx.notify();
+        true
+    }
+
+    pub fn review_apply_status(
+        &self,
+        prepared: &PreparedOperationPlan,
+        cx: &gpui::App,
+    ) -> Option<ReviewApplyStatus> {
+        let state = self.review_mode.as_ref()?;
+        if state.plan_id != prepared.plan().id {
+            return None;
+        }
+        Some(state.apply_status(prepared, self.workbook.read(cx)))
+    }
+
+    /// Resolve a source-geometry row against the immutable Before/After
+    /// workbook snapshots. Deleted rows deliberately retain their frozen
+    /// source content so the deletion tint and strikethrough remain legible.
+    pub fn review_endpoint_sheet_row(
+        &self,
+        sheet_id: SheetId,
+        source_row: usize,
+    ) -> Option<(&Sheet, usize)> {
+        let state = self.review_mode.as_ref()?;
+        let PendingResult::LuaPreview(preview) = self.terminal.pending_result.as_ref()? else {
+            return None;
+        };
+        let prepared = preview.prepared_plan.as_ref()?;
+        state.endpoint_sheet_row(prepared, sheet_id, source_row)
+    }
+
+    pub fn review_source_sheet(&self, sheet_id: SheetId) -> Option<&Sheet> {
+        let state = self.review_mode.as_ref()?;
+        let PendingResult::LuaPreview(preview) = self.terminal.pending_result.as_ref()? else {
+            return None;
+        };
+        let prepared = preview.prepared_plan.as_ref()?;
+        state.source_sheet(prepared, sheet_id)
+    }
+
     pub fn navigate_review_change(
         &mut self,
         forward: bool,

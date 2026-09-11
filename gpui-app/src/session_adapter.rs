@@ -10,6 +10,35 @@ use gpui::*;
 
 use crate::app::{PairingPrompt, Problem, Spreadsheet};
 
+fn plan_under_review_error() -> (String, String) {
+    (
+        "plan_under_review".to_string(),
+        "this workbook has a plan under review; wait for the user to apply or dismiss it"
+            .to_string(),
+    )
+}
+
+fn review_blocked_apply_response(
+    req: &crate::session_server::ApplyOpsRequest,
+    current_revision: u64,
+) -> crate::session_server::ApplyOpsResponse {
+    let (code, message) = plan_under_review_error();
+    crate::session_server::ApplyOpsResponse {
+        applied: 0,
+        total: req.ops.len(),
+        current_revision,
+        error: Some(crate::session_server::ApplyOpsError::OpFailed(
+            visigrid_protocol::OpError {
+                code,
+                message,
+                op_index: 0,
+                suggestion: Some("Retry after the plan is applied or dismissed".to_string()),
+            },
+        )),
+        warnings: Vec::new(),
+    }
+}
+
 impl Spreadsheet {
     /// Create a bridge handle for the session server.
     /// The handle can be cloned and passed to the TCP server.
@@ -160,6 +189,10 @@ impl Spreadsheet {
     ) -> crate::session_server::ApplyOpsResponse {
         use crate::history::{CellChange, CellFormatPatch, FormatActionKind, MutationSource};
 
+        if self.review_mode.is_some() {
+            return review_blocked_apply_response(req, self.workbook.read(cx).revision());
+        }
+
         let source = match &req.client {
             Some(client) => MutationSource::Agent { client: client.clone() },
             None => MutationSource::Human,
@@ -241,6 +274,11 @@ impl Spreadsheet {
             active_sheet: self.workbook.read(cx).active_sheet_index(),
             ..Default::default()
         };
+
+        if self.review_mode.is_some() {
+            out.error = Some(plan_under_review_error());
+            return out;
+        }
 
         // Shared validation (bounds, counts, name clashes).
         {
@@ -351,6 +389,11 @@ impl Spreadsheet {
             ..Default::default()
         };
 
+        if self.review_mode.is_some() {
+            out.error = Some(plan_under_review_error());
+            return out;
+        }
+
         for _ in 0..steps {
             if redo {
                 if !self.history.can_redo() {
@@ -455,5 +498,36 @@ impl Spreadsheet {
     /// Stop the session server.
     pub fn stop_session_server(&mut self) {
         self.session_server.stop();
+    }
+}
+
+#[cfg(test)]
+mod review_block_tests {
+    use super::review_blocked_apply_response;
+
+    #[test]
+    fn session_apply_rejection_is_explicit_and_non_mutating() {
+        let request = crate::session_server::ApplyOpsRequest {
+            request_id: "request-1".into(),
+            batch_name: "Agent edit".into(),
+            atomic: true,
+            expected_revision: Some(7),
+            ops: vec![visigrid_protocol::Op::SetCellValue {
+                sheet: 0,
+                row: 0,
+                col: 0,
+                value: "blocked".into(),
+            }],
+            client: Some("Test agent".into()),
+        };
+        let response = review_blocked_apply_response(&request, 7);
+        assert_eq!(response.applied, 0);
+        assert_eq!(response.current_revision, 7);
+        assert!(matches!(
+            response.error,
+            Some(crate::session_server::ApplyOpsError::OpFailed(
+                visigrid_protocol::OpError { ref code, .. }
+            )) if code == "plan_under_review"
+        ));
     }
 }

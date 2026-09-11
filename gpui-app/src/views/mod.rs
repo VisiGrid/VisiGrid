@@ -221,6 +221,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 cx.notify();
                 return;
             }
+            if (this.resizing_col.is_some() || this.resizing_row.is_some())
+                && this.block_if_previewing(cx)
+            {
+                this.resizing_col = None;
+                this.resizing_row = None;
+                return;
+            }
             // Handle column resize drag
             if let Some(col) = this.resizing_col {
                 let x: f32 = event.position.x.into();

@@ -2,7 +2,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use crate::app::Spreadsheet;
-use crate::review_mode::{ReviewApplyStatus, ReviewEndpoint};
+use crate::review_mode::ReviewEndpoint;
 use crate::terminal::state::PendingResult;
 use crate::theme::TokenKey;
 
@@ -28,15 +28,9 @@ pub fn render_review_action_bar(
     let plan = prepared.plan();
     let title = plan.title.clone();
     let total_changes = plan.summary.total_changes();
-    let execution_context = crate::scripting::execution_context_fingerprint(
-        app.workbook.read(cx),
-        &plan.operations,
-    );
-    let apply_status = ReviewApplyStatus::evaluate(
-        prepared,
-        app.workbook.read(cx),
-        &execution_context,
-    );
+    let Some(apply_status) = app.review_apply_status(prepared, cx) else {
+        return div().into_any_element();
+    };
     let can_apply = apply_status.can_apply();
     let disabled_reason = apply_status.disabled_reason();
 
