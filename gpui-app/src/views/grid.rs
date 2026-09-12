@@ -5,7 +5,7 @@ use crate::app::{Spreadsheet, NUM_COLS, NUM_ROWS, REF_COLORS};
 use crate::fill::{FILL_HANDLE_BORDER, FILL_HANDLE_HIT_SIZE, FILL_HANDLE_VISUAL_SIZE, FILL_HANDLE_HOVER_GLOW, FILL_HANDLE_INWARD_OVERLAP};
 use crate::formula_refs::RefKey;
 use crate::mode::Mode;
-use crate::review_mode::ReviewEndpoint;
+use crate::review_mode::{ReviewEndpoint, review_proposal_color};
 use crate::settings::{user_settings, Setting};
 use crate::split_view::SplitSide;
 use crate::theme::TokenKey;
@@ -463,6 +463,11 @@ fn render_cell(
     let review_kind = review_change.map(|change| change.kind);
     let review_cause = review_change.map(|change| change.cause);
     let review_row_deleted = app.review_row_is_deleted(sheet_id, data_row);
+    let review_is_focused = app.review_mode.as_ref().is_some_and(|state| {
+        state.focused_cell().is_some_and(|(row, focused_col)| {
+            row == data_row && (focused_col == col || (review_row_deleted && col == 0))
+        })
+    });
     let review_endpoint = app
         .review_mode
         .as_ref()
@@ -636,24 +641,62 @@ fn render_cell(
         .bg(cell_base_background_with_role(app, is_editing, format.background_color, cell_style.fill, role_style))
         .border_color(border_color);
 
-    // Resolve Review Mode only for this visible cell. Direct edits use the
-    // normal accent, recalculated effects use warning amber, and deletion
-    // tombstones use the error color.
+    // Background proposals stay quiet: a wash and a slim edge marker show the
+    // shape of the plan without resembling a multi-cell selection. The focused
+    // review item owns the full outline and short-lived two-pulse treatment.
     if review_change.is_some() || review_row_deleted {
         let review_color = if review_row_deleted || review_kind == Some(ChangeKind::Cleared) {
             app.token(TokenKey::Error)
         } else if review_cause == Some(ChangeCause::Recalculated) {
             app.token(TokenKey::Warn)
         } else {
-            app.token(TokenKey::Accent)
+            review_proposal_color(app)
         };
-        let opacity = if review_endpoint == ReviewEndpoint::After { 0.16 } else { 0.08 };
-        cell = cell.child(
-            non_interactive_overlay()
-                .bg(review_color.opacity(opacity))
-                .border_l_2()
-                .border_color(review_color.opacity(0.85))
-        );
+        let opacity: f32 = if review_endpoint == ReviewEndpoint::After { 0.09 } else { 0.045 };
+        let resting_opacity = if review_is_focused {
+            (opacity + 0.13).min(0.30)
+        } else {
+            opacity
+        };
+        let overlay = non_interactive_overlay().bg(review_color.opacity(resting_opacity));
+        cell = if review_is_focused {
+            let animation_id = app.review_mode.as_ref()
+                .map(|state| ElementId::Name(format!(
+                    "review-halo-{}-{data_row}-{col}-{}",
+                    state.plan_id.0,
+                    state.halo_generation(),
+                ).into()))
+                .unwrap_or_else(|| ElementId::Name("review-halo".into()));
+            cell.child(
+                overlay
+                    .border_2()
+                    .border_color(review_color.opacity(0.94))
+                    .with_animation(
+                    animation_id,
+                    Animation::new(std::time::Duration::from_millis(1100)),
+                    move |overlay, delta| {
+                        let pulse = (delta * std::f32::consts::TAU * 2.0).sin().abs();
+                        overlay
+                            .bg(review_color.opacity(resting_opacity + pulse * 0.10))
+                            .border_color(review_color.opacity(0.9 + pulse * 0.1))
+                    },
+                ),
+            )
+        } else {
+            cell.child(overlay)
+        };
+
+        if review_is_focused || (!review_row_deleted || col == 0) {
+            cell = cell.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(if review_is_focused { 3.0 } else { 2.0 }))
+                    .bg(review_color.opacity(if review_is_focused { 1.0 } else { 0.72 })),
+            );
+        }
 
         let marker = match review_kind {
             Some(ChangeKind::Formula) => Some("ƒ"),
@@ -677,7 +720,11 @@ fn render_cell(
 
     // Add selection/formula-ref overlay (semi-transparent, layered on top of cell background)
     // This allows custom background colors to show through the selection highlight
-    if !is_editing && (is_active || is_selected || is_formula_ref) {
+    if !is_editing
+        && review_change.is_none()
+        && !review_row_deleted
+        && (is_active || is_selected || is_formula_ref)
+    {
         if let Some(overlay_color) = selection_overlay_color(app, is_active, is_selected, formula_ref_color) {
             cell = cell.child(
                 div()

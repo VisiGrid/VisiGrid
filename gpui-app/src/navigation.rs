@@ -636,6 +636,25 @@ impl Spreadsheet {
                 self.inspector_trace_path = None;
                 self.inspector_trace_incomplete = false;
             }
+            let data_row = self.view_to_data(row, cx);
+            let review_focus = self.review_mode.as_ref().and_then(|state| {
+                if state.change_index_at_source(data_row, col).is_some() {
+                    Some((data_row, col))
+                } else if state.is_deleted_source_row(data_row) {
+                    state
+                        .navigable_cells()
+                        .iter()
+                        .find(|coordinate| coordinate.0 == data_row)
+                        .copied()
+                } else {
+                    None
+                }
+            });
+            if let (Some((data_row, col)), Some(state)) =
+                (review_focus, self.review_mode.as_mut())
+            {
+                state.focus_cell(data_row, col);
+            }
         }
         // Update dependency trace if enabled
         self.recompute_trace_if_needed(cx);

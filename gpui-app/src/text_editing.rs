@@ -367,6 +367,18 @@ impl Spreadsheet {
         } else if col >= self.view_state.scroll_col + visible_cols {
             self.view_state.scroll_col = col.saturating_sub(visible_cols - 1);
         }
+
+        // Never let the scrollable pane duplicate frozen rows or columns.
+        // Review navigation can call this immediately after file load, before
+        // the normal deferred navigation clamp has run.
+        self.view_state.scroll_row = self
+            .view_state
+            .scroll_row
+            .max(self.view_state.frozen_rows);
+        self.view_state.scroll_col = self
+            .view_state
+            .scroll_col
+            .max(self.view_state.frozen_cols);
     }
 
     // ========================================================================

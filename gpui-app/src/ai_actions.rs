@@ -169,6 +169,30 @@ mod review_plan_tests {
         ));
 
         let mut review = crate::review_mode::ReviewModeState::from_prepared(&prepared, &workbook);
+        assert_eq!(review.review_item_count(), review.navigation_len(false));
+        let first_focused = review.first_navigable_cell().unwrap();
+        assert_eq!(review.focused_cell(), Some(first_focused));
+        assert_eq!(review.review_position(first_focused.0, first_focused.1), Some(0));
+        let original_halo = review.halo_generation();
+        review.focus_cell(5, 1);
+        assert_eq!(review.focused_cell(), Some((5, 1)));
+        assert_ne!(review.halo_generation(), original_halo);
+        assert!(!review.collapsed);
+        review.toggle_collapsed();
+        assert!(review.collapsed);
+        review.toggle_collapsed();
+        assert!(!review.collapsed);
+        review.begin_card_drag((120.0, 240.0), (100.0, 100.0), 120.0);
+        assert!(review.card_is_dragging());
+        review.drag_card(
+            (900.0, 900.0),
+            120.0,
+            (500.0, 400.0),
+            (360.0, 310.0),
+        );
+        assert_eq!(review.card_position(), Some((132.0, 82.0)));
+        review.end_card_drag();
+        assert!(!review.card_is_dragging());
         let vendor_change = review.change_index_at_source(1, 1).unwrap();
         let vendor_change = &prepared.plan().changes[vendor_change];
         assert_eq!(vendor_change.kind, ChangeKind::Value);
@@ -205,12 +229,10 @@ mod review_plan_tests {
             .iter()
             .any(|bucket| bucket.change_count > 0));
         assert!(review.overview_buckets()[review.bucket_for_source_row(3)].has_deleted_row);
-        let first = review
-            .adjacent_source_change(usize::MAX, usize::MAX, true)
-            .unwrap();
-        let last = review.adjacent_source_change(0, 0, false).unwrap();
-        assert_eq!(review.adjacent_source_change(first.0, first.1, false), Some(last));
-        assert_eq!(review.adjacent_source_change(last.0, last.1, true), Some(first));
+        let first = *review.navigable_cells().first().unwrap();
+        let last = *review.navigable_cells().last().unwrap();
+        assert_eq!(review.adjacent_source_change(first.0, first.1, false), None);
+        assert_eq!(review.adjacent_source_change(last.0, last.1, true), None);
         assert!(review.adjacent_source_group(0, 0, true).is_some());
         let visible_after_hidden_vendor = review
             .adjacent_visible_source_change(0, 0, true, false, |row| row != 1)
@@ -1204,6 +1226,10 @@ sheet:cols()
             error: preview_error,
         }));
 
+        if self.review_mode.is_some() {
+            self.focus_first_review_change(cx);
+        }
+
         cx.notify();
     }
     /// Re-preview last.lua from disk — recovers a dismissed preview or re-runs
@@ -1312,6 +1338,10 @@ sheet:cols()
             output: result.output,
             error: preview_error,
         }));
+
+        if self.review_mode.is_some() {
+            self.focus_first_review_change(cx);
+        }
 
         cx.notify();
     }

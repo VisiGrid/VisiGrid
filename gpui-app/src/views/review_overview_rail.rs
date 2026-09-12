@@ -2,7 +2,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use crate::app::Spreadsheet;
-use crate::review_mode::OVERVIEW_BUCKET_COUNT;
+use crate::review_mode::{OVERVIEW_BUCKET_COUNT, review_proposal_color};
 use crate::theme::TokenKey;
 
 pub const REVIEW_OVERVIEW_RAIL_WIDTH: f32 = 14.0;
@@ -30,7 +30,7 @@ pub fn render_review_overview_rail(
     let selected_bucket = selected_data_row
         .filter(|row| !state.change_indices_at_source_row(*row).is_empty())
         .map(|row| state.bucket_for_source_row(row));
-    let accent = app.token(TokenKey::Accent);
+    let proposal = review_proposal_color(app);
     let warning = app.token(TokenKey::Warn);
     let error = app.token(TokenKey::Error);
     let border = app.token(TokenKey::PanelBorder);
@@ -60,7 +60,7 @@ pub fn render_review_overview_rail(
             } else if overview.has_deleted_row {
                 warning
             } else {
-                accent
+                proposal
             };
             div()
                 .id(ElementId::Name(format!("review-density-{bucket}").into()))
@@ -72,7 +72,7 @@ pub fn render_review_overview_rail(
                     marker.border_1().border_color(border)
                 })
                 .when(selected_bucket == Some(bucket), |marker| {
-                    marker.border_2().border_color(accent)
+                    marker.border_2().border_color(proposal)
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.navigate_review_bucket(bucket, cx);

@@ -6,6 +6,7 @@
 
 - **Frozen Review Mode for AI Lua changes** — previews retain immutable Before and After workbooks, show cell and row-deletion changes with verification results, and apply only the reviewed, deterministic plan as one atomic undoable commit. Editing, sheet switching, workbook replacement, and attached-session writes are refused until Apply or Dismiss. Stale plans stay stale, and copying a result to a new sheet preserves the complete candidate sheet and can be undone as one full-workbook snapshot.
 - **Native Review Mode for external agents** — the local MCP server now exposes proposal creation, status, deterministic change pagination, approval observation, and dismissal. A Codex or Claude session running in a separate terminal can inspect a workbook and open a fully explained proposal in VisiGrid without modifying the live cells; only the person in VisiGrid can Apply it. Headless sessions reject review tools explicitly, while existing direct-write tools remain compatible.
+- **Proposals live on the sheet** — changed cells carry a distinct proposal treatment, with the current change connected to a movable review card containing its concrete Before/After diff, reason, provenance, verification, navigation, and Apply or Discard decision. The card collapses to a compact proposal pill, avoids populated data when it opens, and keeps the focused cell, formula bar, headers, and keyboard navigation synchronized.
 
 ## 0.32.0
 

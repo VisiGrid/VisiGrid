@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{Spreadsheet, ROW_RESIZE_GRAB_PX, COL_RESIZE_GRAB_PX};
+use crate::review_mode::review_proposal_color;
 use crate::theme::TokenKey;
 
 /// Render the filter dropdown button for a column header cell
@@ -151,6 +152,12 @@ fn render_column_header(
     let header_active_text = app.token(TokenKey::HeaderActiveText);
     let accent = app.token(TokenKey::Accent);
     let selection_bg = app.token(TokenKey::SelectionBg);
+    let active_data_row = app.view_to_data(app.view_state.selected.0, cx);
+    let review_focus_selected = app.review_mode.as_ref().is_some_and(|state| {
+        state.focused_cell() == Some((active_data_row, app.view_state.selected.1))
+            && app.view_state.selected.1 == col
+    });
+    let proposal = review_proposal_color(app);
 
     // Reserve right padding when filter button is shown to prevent text/icon overlap
     let has_filter_button = app.filter_state.is_enabled() && app.filter_state.contains_column(col);
@@ -166,9 +173,13 @@ fn render_column_header(
         .justify_center()
         .border_1()
         .border_color(header_border)
-        .when(is_selected, |div| div.bg(header_active_bg))
+        .when(is_selected && review_focus_selected, |div| {
+            div.bg(proposal.opacity(0.16))
+        })
+        .when(is_selected && !review_focus_selected, |div| div.bg(header_active_bg))
         .when(!is_selected, |div| div.bg(header_bg))
-        .when(is_selected, |div| div.text_color(header_active_text))
+        .when(is_selected && review_focus_selected, |div| div.text_color(proposal))
+        .when(is_selected && !review_focus_selected, |div| div.text_color(header_active_text))
         .when(!is_selected, |div| div.text_color(header_text))
         .text_sm()
         .cursor_pointer()
@@ -280,6 +291,11 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
     let is_selected = app.is_row_header_selected(row);
     let is_filtered = app.row_view.is_filtered();
     let data_row = if is_filtered { app.row_view.view_to_data(row) } else { row };
+    let review_focus_selected = app.review_mode.as_ref().is_some_and(|state| {
+        state.focused_cell() == Some((data_row, app.view_state.selected.1))
+            && app.view_state.selected.0 == row
+    });
+    let proposal = review_proposal_color(app);
 
     div()
         .id(ElementId::NamedInteger("row-header".into(), row as u64))
@@ -290,12 +306,16 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
         .flex()
         .items_center()
         .justify_center()
-        .when(is_selected, |div| div.bg(header_active_bg))
+        .when(is_selected && review_focus_selected, |div| {
+            div.bg(proposal.opacity(0.16))
+        })
+        .when(is_selected && !review_focus_selected, |div| div.bg(header_active_bg))
         .when(!is_selected && !is_filtered, |div| div.bg(header_bg))
         .when(!is_selected && is_filtered, |div| div.bg(accent.opacity(0.1)))
         .border_1()
         .border_color(header_border)
-        .when(is_selected, |div| div.text_color(header_active_text))
+        .when(is_selected && review_focus_selected, |div| div.text_color(proposal))
+        .when(is_selected && !review_focus_selected, |div| div.text_color(header_active_text))
         .when(!is_selected, |div| div.text_color(header_text))
         .text_size(px(app.metrics.font_size))  // Scaled font size
         .cursor_pointer()

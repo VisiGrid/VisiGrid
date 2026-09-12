@@ -32,8 +32,7 @@ mod paste_special_dialog;
 mod convert_picker;
 mod preferences_panel;
 pub mod refactor_log;
-pub(crate) mod review_action_bar;
-pub(crate) mod review_panel;
+pub(crate) mod review_card;
 pub(crate) mod review_overview_rail;
 mod menu_bar;
 mod status_bar;
@@ -116,6 +115,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_name_tooltip = app.should_show_name_tooltip(cx) && app.mode == Mode::Navigation;
     let show_f2_tip = app.should_show_f2_tip(cx);  // Show immediately on trigger, not gated on mode
     let show_review_panel = app.review_mode.is_some();
+    let show_review_rail = show_review_panel && app.review_has_offscreen_changes(cx);
     let show_inspector = app.inspector_visible && !show_review_panel;
     let show_profiler = app.profiler_visible && !show_review_panel;
     let zen_mode = app.zen_mode;
@@ -203,6 +203,28 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         // Mouse move for resize and header selection dragging
         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            if this
+                .review_mode
+                .as_ref()
+                .is_some_and(|state| state.card_is_dragging())
+            {
+                let pointer = (event.position.x.into(), event.position.y.into());
+                let grid_top = this.grid_layout.grid_body_origin.1;
+                let viewport = this.grid_layout.viewport_size;
+                if let Some(state) = this.review_mode.as_mut() {
+                    state.drag_card(
+                        pointer,
+                        grid_top,
+                        viewport,
+                        (
+                            review_card::REVIEW_CARD_WIDTH,
+                            review_card::REVIEW_CARD_HEIGHT_ESTIMATE,
+                        ),
+                    );
+                }
+                cx.notify();
+                return;
+            }
             // Handle Lua console resize drag
             if this.lua_console.resizing {
                 let y: f32 = event.position.y.into();
@@ -261,6 +283,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         // Mouse up to end resize and header selection drag
         .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            if let Some(state) = this.review_mode.as_mut() {
+                if state.card_is_dragging() {
+                    state.end_card_drag();
+                    cx.notify();
+                }
+            }
             // End Lua console resize
             if this.lua_console.resizing {
                 this.lua_console.resizing = false;
@@ -542,25 +570,23 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     grid::render_grid(app, window, cx, None).into_any_element()
                 };
                 div()
+                    .relative()
                     .flex()
                     .flex_row()
                     .flex_1()
                     .min_h(px(0.0))  // Allow grid to shrink below content size for console panel
                     .child(grid_element)
-                    .when(show_review_panel, |d| {
+                    .when(show_review_rail, |d| {
                         d.child(review_overview_rail::render_review_overview_rail(app, cx))
                     })
                     .when(show_review_panel, |d| {
-                        d.child(review_panel::render_review_panel(app, cx))
+                        d.child(review_card::render_review_card(app, cx))
                     })
                     .when(show_minimap, |d| {
                         d.child(minimap::render_minimap(app, window, cx))
                     })
                     .into_any_element()
             }
-        })
-        .when(app.review_mode.is_some(), |div| {
-            div.child(review_action_bar::render_review_action_bar(app, cx))
         })
         // Bottom panel: tabbed container for Lua console + Terminal
         .child({

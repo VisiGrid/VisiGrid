@@ -8,16 +8,27 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use visigrid_engine::operation_plan::{
-    ChangeKind, DeterminismClass, ExecutionContextFingerprint, GroupId, MaterializedChange,
-    OperationPlan, PlanId, PreparedOperationPlan, ProblemSeverity, ReviewRowState,
+    ChangeKind, DeterminismClass, ExecutionContextFingerprint, MaterializedChange, OperationPlan,
+    PlanId, PreparedOperationPlan, ProblemSeverity, ReviewRowState,
 };
 use visigrid_engine::sheet::{Sheet, SheetId};
 use visigrid_engine::workbook::Workbook;
 
 use crate::app::Spreadsheet;
 use crate::terminal::state::PendingResult;
+use crate::theme::Appearance;
 
 pub const OVERVIEW_BUCKET_COUNT: usize = 64;
+
+/// Proposal purple is intentionally separate from the app's blue selection
+/// accent. Light and dark themes need different luminance to keep the pending
+/// state legible without overpowering cell contents.
+pub fn review_proposal_color(app: &Spreadsheet) -> gpui::Hsla {
+    match app.active_theme().meta.appearance {
+        Appearance::Light => gpui::rgb(0x7047eb).into(),
+        Appearance::Dark => gpui::rgb(0x9a7cff).into(),
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReviewOverviewBucket {
@@ -103,16 +114,20 @@ pub struct ReviewModeState {
     pub plan_id: PlanId,
     pub source_sheet_id: SheetId,
     pub endpoint: ReviewEndpoint,
+    pub collapsed: bool,
     by_before_cell: HashMap<(usize, usize), usize>,
     by_before_row: BTreeMap<usize, Vec<usize>>,
     deleted_rows: HashSet<usize>,
-    group_counts: HashMap<GroupId, usize>,
     navigable_cells: Vec<(usize, usize)>,
+    focused_cell: Option<(usize, usize)>,
     navigable_groups: Vec<(usize, usize)>,
     overview_buckets: Vec<ReviewOverviewBucket>,
     overview_bucket_targets: Vec<Vec<(usize, usize)>>,
     after_row_by_before: Vec<Option<usize>>,
     source_row_count: usize,
+    halo_generation: u64,
+    card_position: Option<(f32, f32)>,
+    card_drag_offset: Option<(f32, f32)>,
     eligibility_cache: RefCell<Option<ReviewEligibilityCache>>,
 }
 
@@ -120,10 +135,8 @@ impl ReviewModeState {
     pub fn from_prepared(prepared: &PreparedOperationPlan, workbook: &Workbook) -> Self {
         let mut state = Self::from_plan(prepared.plan());
         let key = Self::eligibility_key(workbook);
-        let context = crate::scripting::execution_context_fingerprint(
-            workbook,
-            &prepared.plan().operations,
-        );
+        let context =
+            crate::scripting::execution_context_fingerprint(workbook, &prepared.plan().operations);
         let status = ReviewApplyStatus::evaluate(prepared, workbook, &context);
         *state.eligibility_cache.get_mut() = Some(ReviewEligibilityCache { key, status });
         state
@@ -151,12 +164,6 @@ impl ReviewModeState {
             .filter(|row| row.state == ReviewRowState::Deleted)
             .filter_map(|row| row.before_data_row)
             .collect();
-        let mut group_counts = HashMap::new();
-        for change in &plan.changes {
-            if let Some(group_id) = &change.group_id {
-                *group_counts.entry(group_id.clone()).or_default() += 1;
-            }
-        }
         let mut navigable_cells: Vec<_> = plan
             .changes
             .iter()
@@ -165,6 +172,7 @@ impl ReviewModeState {
             .collect();
         navigable_cells.sort_unstable();
         navigable_cells.dedup();
+        let focused_cell = navigable_cells.first().copied();
         let mut navigable_groups: Vec<_> = plan
             .groups
             .iter()
@@ -216,16 +224,20 @@ impl ReviewModeState {
             plan_id: plan.id.clone(),
             source_sheet_id: plan.source_sheet_id,
             endpoint: ReviewEndpoint::After,
+            collapsed: false,
             by_before_cell,
             by_before_row,
             deleted_rows,
-            group_counts,
             navigable_cells,
+            focused_cell,
             navigable_groups,
             overview_buckets,
             overview_bucket_targets,
             after_row_by_before,
             source_row_count,
+            halo_generation: 0,
+            card_position: None,
+            card_drag_offset: None,
             eligibility_cache: RefCell::new(None),
         }
     }
@@ -254,10 +266,8 @@ impl ReviewModeState {
                 return cache.status;
             }
         }
-        let context = crate::scripting::execution_context_fingerprint(
-            workbook,
-            &prepared.plan().operations,
-        );
+        let context =
+            crate::scripting::execution_context_fingerprint(workbook, &prepared.plan().operations);
         let status = ReviewApplyStatus::evaluate(prepared, workbook, &context);
         *self.eligibility_cache.borrow_mut() = Some(ReviewEligibilityCache { key, status });
         status
@@ -320,10 +330,6 @@ impl ReviewModeState {
             .unwrap_or(&[])
     }
 
-    pub fn group_change_count(&self, group_id: &GroupId) -> usize {
-        self.group_counts.get(group_id).copied().unwrap_or(0)
-    }
-
     pub fn adjacent_source_change(
         &self,
         row: usize,
@@ -373,6 +379,96 @@ impl ReviewModeState {
         }
     }
 
+    pub fn review_item_count(&self) -> usize {
+        self.navigable_cells.len()
+    }
+
+    pub fn review_position(&self, row: usize, col: usize) -> Option<usize> {
+        if self.is_deleted_source_row(row) {
+            return self
+                .navigable_cells
+                .iter()
+                .position(|coordinate| coordinate.0 == row);
+        }
+        self.navigable_cells
+            .iter()
+            .position(|coordinate| *coordinate == (row, col))
+            .or_else(|| {
+                self.navigable_cells
+                    .iter()
+                    .position(|coordinate| coordinate.0 == row)
+            })
+    }
+
+    pub fn first_navigable_cell(&self) -> Option<(usize, usize)> {
+        self.navigable_cells.first().copied()
+    }
+
+    pub fn navigable_cells(&self) -> &[(usize, usize)] {
+        &self.navigable_cells
+    }
+
+    pub fn focused_cell(&self) -> Option<(usize, usize)> {
+        self.focused_cell
+    }
+
+    pub fn focus_cell(&mut self, row: usize, col: usize) {
+        self.focused_cell = Some((row, col));
+        self.halo_generation = self.halo_generation.wrapping_add(1);
+    }
+
+    pub fn halo_generation(&self) -> u64 {
+        self.halo_generation
+    }
+
+    pub fn toggle_collapsed(&mut self) {
+        self.collapsed = !self.collapsed;
+        self.card_drag_offset = None;
+    }
+
+    pub fn card_position(&self) -> Option<(f32, f32)> {
+        self.card_position
+    }
+
+    pub fn card_is_dragging(&self) -> bool {
+        self.card_drag_offset.is_some()
+    }
+
+    pub fn begin_card_drag(
+        &mut self,
+        pointer: (f32, f32),
+        card_position: (f32, f32),
+        grid_top: f32,
+    ) {
+        self.card_position = Some(card_position);
+        self.card_drag_offset = Some((
+            pointer.0 - card_position.0,
+            pointer.1 - grid_top - card_position.1,
+        ));
+    }
+
+    pub fn drag_card(
+        &mut self,
+        pointer: (f32, f32),
+        grid_top: f32,
+        viewport: (f32, f32),
+        card_size: (f32, f32),
+    ) {
+        let Some((offset_x, offset_y)) = self.card_drag_offset else {
+            return;
+        };
+        let max_left = (viewport.0 - card_size.0 - 8.0).max(8.0);
+        let max_top = (viewport.1 - card_size.1 - 8.0).max(8.0);
+        self.card_position = Some((
+            (pointer.0 - offset_x).clamp(8.0, max_left),
+            (pointer.1 - grid_top - offset_y).clamp(8.0, max_top),
+        ));
+    }
+
+    pub fn end_card_drag(&mut self) {
+        self.card_drag_offset = None;
+    }
+
     pub fn overview_buckets(&self) -> &[ReviewOverviewBucket] {
         &self.overview_buckets
     }
@@ -406,20 +502,26 @@ fn adjacent_coordinate(
     let current = (row, col);
     let index = if forward {
         let next = coordinates.partition_point(|coordinate| *coordinate <= current);
-        if next == coordinates.len() {
-            0
-        } else {
-            next
-        }
+        (next < coordinates.len()).then_some(next)?
     } else {
         let previous = coordinates.partition_point(|coordinate| *coordinate < current);
-        if previous == 0 {
-            coordinates.len() - 1
-        } else {
-            previous - 1
-        }
+        previous.checked_sub(1)?
     };
     coordinates.get(index).copied()
+}
+
+#[cfg(test)]
+mod review_navigation_tests {
+    use super::adjacent_coordinate;
+
+    #[test]
+    fn review_navigation_stops_at_plan_boundaries() {
+        let changes = [(1, 0), (4, 0), (9, 2)];
+        assert_eq!(adjacent_coordinate(&changes, 1, 0, true), Some((4, 0)));
+        assert_eq!(adjacent_coordinate(&changes, 9, 2, true), None);
+        assert_eq!(adjacent_coordinate(&changes, 9, 2, false), Some((4, 0)));
+        assert_eq!(adjacent_coordinate(&changes, 1, 0, false), None);
+    }
 }
 
 impl Spreadsheet {
@@ -433,9 +535,8 @@ impl Spreadsheet {
         if !self.import_in_progress && self.hub_activity.is_none() {
             return false;
         }
-        self.status_message = Some(
-            "Wait for the active import or Hub operation before entering Review Mode.".into(),
-        );
+        self.status_message =
+            Some("Wait for the active import or Hub operation before entering Review Mode.".into());
         cx.notify();
         true
     }
@@ -488,10 +589,15 @@ impl Spreadsheet {
             None => return,
         };
         let current = if self.wb(cx).active_sheet_id() == source_sheet_id {
-            (
-                self.view_to_data(self.view_state.selected.0, cx),
-                self.view_state.selected.1,
-            )
+            self.review_mode
+                .as_ref()
+                .and_then(ReviewModeState::focused_cell)
+                .unwrap_or_else(|| {
+                    (
+                        self.view_to_data(self.view_state.selected.0, cx),
+                        self.view_state.selected.1,
+                    )
+                })
         } else if forward {
             (usize::MAX, usize::MAX)
         } else {
@@ -517,18 +623,71 @@ impl Spreadsheet {
                 .row_view
                 .data_to_view(row)
                 .expect("review target was filtered for visibility");
+            if let Some(state) = self.review_mode.as_mut() {
+                state.focus_cell(row, col);
+            }
             self.reveal_cell(sheet_index, view_row, col, cx);
             return;
+        }
+        self.status_message = Some(if self.row_view.is_filtered() {
+            "No more visible proposed changes in this direction.".into()
+        } else if forward {
+            "End of proposed changes.".into()
+        } else {
+            "Start of proposed changes.".into()
+        });
+        cx.notify();
+    }
+
+    /// Select and reveal the first visible review item. Review Mode should
+    /// never open with its explanation disconnected from the grid.
+    pub fn focus_first_review_change(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(source_sheet_id) = self.review_mode.as_ref().map(|state| state.source_sheet_id)
+        else {
+            return;
+        };
+        let Some(sheet_index) = self.wb(cx).sheet_index_by_id(source_sheet_id) else {
+            return;
+        };
+        let targets = self
+            .review_mode
+            .as_ref()
+            .map(|state| state.navigable_cells().to_vec())
+            .unwrap_or_default();
+        for (row, col) in targets {
+            if let Some(view_row) = self.data_to_view(row, cx) {
+                if let Some(state) = self.review_mode.as_mut() {
+                    state.focus_cell(row, col);
+                }
+                self.reveal_cell(sheet_index, view_row, col, cx);
+                return;
+            }
         }
         self.status_message = Some("Review changes are hidden by the active filter.".into());
         cx.notify();
     }
 
+    pub fn review_has_offscreen_changes(&self, cx: &gpui::App) -> bool {
+        let Some(state) = self.review_mode.as_ref() else {
+            return false;
+        };
+        let visible_row_start = self.view_state.scroll_row;
+        let visible_row_end = visible_row_start.saturating_add(self.visible_rows());
+        let visible_col_start = self.view_state.scroll_col;
+        let visible_col_end = visible_col_start.saturating_add(self.visible_cols());
+        state.navigable_cells().iter().any(|(data_row, col)| {
+            let Some(view_row) = self.data_to_view(*data_row, cx) else {
+                return true;
+            };
+            view_row < visible_row_start
+                || view_row >= visible_row_end
+                || *col < visible_col_start
+                || *col >= visible_col_end
+        })
+    }
+
     pub fn navigate_review_bucket(&mut self, bucket: usize, cx: &mut gpui::Context<Self>) {
-        let Some(source_sheet_id) = self
-            .review_mode
-            .as_ref()
-            .map(|state| state.source_sheet_id)
+        let Some(source_sheet_id) = self.review_mode.as_ref().map(|state| state.source_sheet_id)
         else {
             return;
         };
@@ -554,7 +713,8 @@ impl Spreadsheet {
                 return;
             }
         }
-        self.status_message = Some("Review changes in this region are hidden by the active filter.".into());
+        self.status_message =
+            Some("Review changes in this region are hidden by the active filter.".into());
         cx.notify();
     }
 

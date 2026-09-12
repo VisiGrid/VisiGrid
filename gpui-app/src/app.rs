@@ -3858,13 +3858,7 @@ impl Spreadsheet {
 
     /// Total height of UI chrome below the grid body.
     pub fn bottom_chrome_height(&self) -> f32 {
-        let status = if self.zen_mode { 0.0 } else { STATUS_BAR_HEIGHT };
-        let review = if self.review_mode.is_some() {
-            crate::views::review_action_bar::REVIEW_ACTION_BAR_HEIGHT
-        } else {
-            0.0
-        };
-        status + review
+        if self.zen_mode { 0.0 } else { STATUS_BAR_HEIGHT }
     }
 
     /// Calculate visible rows based on window height.
@@ -4375,9 +4369,10 @@ impl Render for Spreadsheet {
         let window_height: f32 = current_size.height.into();
         let window_width: f32 = current_size.width.into();
 
-        let right_panel_width = if self.review_mode.is_some() {
-            crate::views::review_panel::REVIEW_PANEL_WIDTH
-                + crate::views::review_overview_rail::REVIEW_OVERVIEW_RAIL_WIDTH
+        let right_panel_width = if self.review_mode.is_some()
+            && self.review_has_offscreen_changes(cx)
+        {
+            crate::views::review_overview_rail::REVIEW_OVERVIEW_RAIL_WIDTH
         } else if self.inspector_visible || self.profiler_visible {
             crate::views::inspector_panel::PANEL_WIDTH
         } else {

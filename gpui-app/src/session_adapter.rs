@@ -340,6 +340,7 @@ impl Spreadsheet {
             output: result.output,
             error: None,
         }));
+        self.focus_first_review_change(cx);
         self.mcp_plans.insert(
             McpPlanRecord {
                 plan_id: plan_id.clone(),

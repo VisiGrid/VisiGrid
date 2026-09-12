@@ -226,6 +226,29 @@ pub(crate) fn handle_key_down(
         && !event.keystroke.modifiers.platform
     {
         match event.keystroke.key.as_str() {
+            "escape" => {
+                this.dismiss_structured_result(cx);
+                return;
+            }
+            "enter" => {
+                let status = match this.terminal.pending_result.as_ref() {
+                    Some(crate::terminal::state::PendingResult::LuaPreview(preview)) => preview
+                        .prepared_plan
+                        .as_ref()
+                        .and_then(|prepared| this.review_apply_status(prepared, cx)),
+                    _ => None,
+                };
+                if status.is_some_and(|status| status.can_apply()) {
+                    this.apply_lua_to_current_sheet(window, cx);
+                } else {
+                    this.status_message = status
+                        .and_then(|status| status.disabled_reason())
+                        .map(str::to_string)
+                        .or_else(|| Some("This proposal cannot be applied yet.".into()));
+                    cx.notify();
+                }
+                return;
+            }
             "[" => {
                 this.navigate_review_change(false, event.keystroke.modifiers.shift, cx);
                 return;
