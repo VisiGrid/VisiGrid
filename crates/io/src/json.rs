@@ -614,7 +614,13 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
             continue;
         }
 
-        let (value, formula) = if raw.starts_with('=') {
+        // Whether the cell IS a formula, not whether its text starts with '='.
+        // Text such as "=1+1" arrives from Parquet, xlsx and the web editor as
+        // text, and writing it with a `formula` field turned it into a live
+        // formula on the next load — every server-side import and recalc goes
+        // through here.
+        let is_formula = matches!(sheet.get_cell(row, col).value, CellValue::Formula { .. });
+        let (value, formula) = if is_formula {
             let computed = match sheet.get_computed_value(row, col) {
                 visigrid_engine::formula::eval::Value::Number(n) => {
                     serde_json::Number::from_f64(n).map(serde_json::Value::Number)
@@ -1398,6 +1404,11 @@ mod full_json_tests {
         sheet.set_text(1, 0, "0123456789");
         sheet.set_value(2, 0, "42"); // a real number, must stay one
         sheet.set_text(3, 0, "label"); // ordinary text, unaffected
+        // Text that reads like a formula. Written as a formula, it came back
+        // live: "=1+1" returned as 2.
+        sheet.set_text(4, 0, "=1+1");
+        sheet.set_text(5, 0, "=SUM(A1:A3)");
+        sheet.set_value(6, 0, "=1+1"); // a real formula, must stay one
 
         let restored = import_full(&export_full(&sheet).unwrap()).unwrap();
 
@@ -1411,11 +1422,19 @@ mod full_json_tests {
         text_at(0, "007");
         text_at(1, "0123456789");
         text_at(3, "label");
+        text_at(4, "=1+1");
+        text_at(5, "=SUM(A1:A3)");
 
         let number = &restored.get_cell(2, 0).value;
         assert!(
             matches!(number, CellValue::Number(n) if *n == 42.0),
             "a real number must stay a number, got {number:?}"
+        );
+
+        let formula = &restored.get_cell(6, 0).value;
+        assert!(
+            matches!(formula, CellValue::Formula { source, .. } if source == "=1+1"),
+            "a real formula must stay a formula, got {formula:?}"
         );
     }
 

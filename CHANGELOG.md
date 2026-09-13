@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.34.1
+
+### Files
+
+- **Text that starts with `=` stays text in visigrid-json** — `vgrid convert -t json-full` wrote any cell whose content began with `=` as a formula, so text such as `=1+1` from a Parquet file, an xlsx string cell or the web editor came back as a live formula on the next load. This is the format behind web imports and every server-side recalc. Only real formulas are written as formulas now.
+
 ## 0.34.0
 
 ### Files
