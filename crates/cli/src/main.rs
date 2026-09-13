@@ -1420,6 +1420,8 @@ enum Format {
     Lines,
     Xlsx,
     Sheet,
+    /// Apache Parquet (read-only)
+    Parquet,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -1428,6 +1430,8 @@ enum InspectFormat {
     Xlsx,
     Csv,
     Tsv,
+    /// Apache Parquet (read-only)
+    Parquet,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -5109,8 +5113,8 @@ fn cmd_sheet_inspect(
         None => infer_inspect_format(&file)?,
     };
 
-    if sheet_arg.is_some() && matches!(fmt, InspectFormat::Csv | InspectFormat::Tsv) {
-        return Err(CliError::args("--sheet is not valid for CSV/TSV (single-sheet source)"));
+    if sheet_arg.is_some() && matches!(fmt, InspectFormat::Csv | InspectFormat::Tsv | InspectFormat::Parquet) {
+        return Err(CliError::args("--sheet is not valid for CSV/TSV/Parquet (single-sheet source)"));
     }
 
     if delimiter.is_some() && !matches!(fmt, InspectFormat::Csv) {
@@ -5204,6 +5208,15 @@ fn cmd_sheet_inspect(
                 .map_err(CliError::parse)?;
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
             (wb, false, vec![], HashMap::new())
+        }
+        // Inspecting only reads, so a file bigger than a sheet shows what
+        // fits, with a note, rather than refusing.
+        InspectFormat::Parquet => {
+            let imported = visigrid_io::parquet::import(&file)
+                .map_err(CliError::parse)?;
+            let notes = imported.truncation_message().into_iter().collect();
+            let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![imported.sheet], 0);
+            (wb, false, notes, HashMap::new())
         }
     };
 
@@ -5299,6 +5312,7 @@ fn cmd_sheet_inspect(
             InspectFormat::Xlsx => "xlsx",
             InspectFormat::Csv => "csv",
             InspectFormat::Tsv => "tsv",
+            InspectFormat::Parquet => "parquet",
         };
         let output = sheet_ops::CalcOutput {
             format: format_name.to_string(),
@@ -5319,6 +5333,7 @@ fn cmd_sheet_inspect(
         InspectFormat::Xlsx => Some("xlsx"),
         InspectFormat::Csv => Some("csv"),
         InspectFormat::Tsv => Some("tsv"),
+        InspectFormat::Parquet => Some("parquet"),
         InspectFormat::Sheet => None,
     };
 
@@ -5910,11 +5925,11 @@ fn cmd_sheet_import(
     let fmt = infer_source_format(&source)?;
 
     // 2. Validate arg combinations
-    let is_csv_tsv = matches!(fmt, InspectFormat::Csv | InspectFormat::Tsv);
-    if sheet_arg.is_some() && is_csv_tsv {
+    let is_single_sheet_source = matches!(fmt, InspectFormat::Csv | InspectFormat::Tsv | InspectFormat::Parquet);
+    if sheet_arg.is_some() && is_single_sheet_source {
         return Err(CliError::args("--sheet is only valid for XLSX"));
     }
-    if !matches!(formulas, FormulaPolicy::Values) && is_csv_tsv {
+    if !matches!(formulas, FormulaPolicy::Values) && is_single_sheet_source {
         return Err(CliError::args("--formulas keep/recalc only valid for XLSX"));
     }
     if delimiter.is_some() && !matches!(fmt, InspectFormat::Csv) {
@@ -5948,6 +5963,12 @@ fn cmd_sheet_import(
             format_str = "tsv";
             let sheet = visigrid_io::csv::import_tsv(&source)
                 .map_err(CliError::parse)?;
+            let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
+            (wb, visigrid_io::xlsx::ImportResult::default())
+        }
+        InspectFormat::Parquet => {
+            format_str = "parquet";
+            let sheet = convert::read_parquet_whole(&source)?;
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
             (wb, visigrid_io::xlsx::ImportResult::default())
         }

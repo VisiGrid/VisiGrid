@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use visigrid_engine::workbook::Workbook;
-use visigrid_io::{csv, json, native, xlsx};
+use visigrid_io::{csv, json, native, parquet, xlsx};
 
 use crate::app::{Spreadsheet, DocumentMeta, ext_lower};
 use crate::settings::{load_doc_settings, save_doc_settings, DocumentSettings};
@@ -94,8 +94,8 @@ impl Spreadsheet {
             return;
         }
 
-        // CSV/TSV: background import (large files can freeze the UI)
-        if matches!(ext_lower.as_str(), "csv" | "tsv") {
+        // CSV/TSV/Parquet: background import (large files can freeze the UI)
+        if matches!(ext_lower.as_str(), "csv" | "tsv" | "parquet") {
             self.start_csv_import(path, &ext_lower, cx);
             return;
         }
@@ -404,7 +404,7 @@ impl Spreadsheet {
         .detach();
     }
 
-    /// Start background CSV/TSV import with delayed overlay
+    /// Start background CSV/TSV/Parquet import with delayed overlay
     fn start_csv_import(&mut self, path: &PathBuf, ext: &str, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         let filename = path.file_name()
@@ -422,7 +422,7 @@ impl Spreadsheet {
         let path_for_import = path.clone();
         let path_for_recent = path.clone();
         let filename_for_completion = filename.clone();
-        let is_tsv = ext == "tsv";
+        let ext = ext.to_string();
 
         cx.notify();
 
@@ -442,15 +442,21 @@ impl Spreadsheet {
         cx.spawn(async move |this, cx| {
             let import_result = cx.background_executor()
                 .spawn(async move {
-                    let sheet = if is_tsv {
-                        csv::import_tsv(&path_for_import)
-                    } else {
-                        csv::import(&path_for_import)
-                    }?;
+                    // A Parquet file bigger than a sheet loads what fits;
+                    // the note says so rather than letting rows vanish.
+                    let (sheet, note) = match ext.as_str() {
+                        "tsv" => (csv::import_tsv(&path_for_import)?, None),
+                        "parquet" => {
+                            let imported = parquet::import(&path_for_import)?;
+                            let note = imported.truncation_message();
+                            (imported.sheet, note)
+                        }
+                        _ => (csv::import(&path_for_import)?, None),
+                    };
                     let mut workbook = Workbook::from_sheets(vec![sheet], 0);
                     workbook.rebuild_dep_graph();
                     workbook.recompute_full_ordered();
-                    Ok::<Workbook, String>(workbook)
+                    Ok::<(Workbook, Option<String>), String>((workbook, note))
                 })
                 .await;
 
@@ -464,7 +470,7 @@ impl Spreadsheet {
                     .unwrap_or(0);
 
                 match import_result {
-                    Ok(workbook) => {
+                    Ok((workbook, note)) => {
                         if this.block_if_previewing(cx) { return; }
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
@@ -488,7 +494,7 @@ impl Spreadsheet {
                         this.finalize_load(&path_for_recent);
                         this.request_title_refresh(cx);
 
-                        // Clear hub link (CSV has no hub metadata)
+                        // Clear hub link (CSV/Parquet have no hub metadata)
                         this.hub_link = None;
                         this.hub_status = crate::hub::HubStatus::Unlinked;
                         this.cell_metadata.clear();
@@ -501,9 +507,10 @@ impl Spreadsheet {
                         } else {
                             format!("{}ms", duration_ms)
                         };
-                        this.status_message = Some(
-                            format!("Opened {} in {}", filename_for_completion, duration_str)
-                        );
+                        this.status_message = Some(match note {
+                            Some(note) => format!("Opened {} in {}. {}", filename_for_completion, duration_str, note),
+                            None => format!("Opened {} in {}", filename_for_completion, duration_str),
+                        });
                     }
                     Err(e) => {
                         this.import_result = None;

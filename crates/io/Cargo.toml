@@ -22,6 +22,11 @@ sha2 = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = { workspace = true }
+# Parquet import. No Arrow: the record reader is enough to fill a grid and
+# keeps several large crates out of the build. The codecs are the ones real
+# files are written with; a file using one left out fails to open with a clear
+# error instead of partially loading.
+parquet = { version = "59", default-features = false, features = ["snap", "zstd", "lz4", "flate2-zlib-rs", "brotli", "json"] }
 
 [dev-dependencies]
 tempfile = "3"

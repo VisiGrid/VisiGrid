@@ -3,6 +3,7 @@
 pub mod csv;
 pub mod json;
 pub mod native;
+pub mod parquet;
 pub mod scripting;
 pub mod truth;
 pub mod xlsx;

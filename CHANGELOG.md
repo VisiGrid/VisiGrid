@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.34.0
+
+### Files
+
+- **Open Apache Parquet files** — `.parquet` opens like a CSV, in the background: column names in row 1, one record per row. Values keep the type the file declared: strings stay text, so `007` keeps its zeros and `=1+1` is not a formula; dates, times and timestamps (milliseconds through nanoseconds, placed as UTC) become formatted date cells; decimals and integers a double would round, such as a 64-bit ID, stay as exact text; UUIDs are formatted; structs, lists and maps are shown as JSON. A file bigger than a sheet loads the first 65,535 rows and 256 columns and the status bar says how much was left out. Also `vgrid convert` and `vgrid sheet inspect`/`import`, where converting or importing a file that doesn't fit is refused rather than cut short. Read-only; snappy, zstd, gzip, brotli and lz4 compression. Requested in #16.
+
+## 0.33.0
 
 ### AI review
 

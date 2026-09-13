@@ -465,10 +465,11 @@ pub(crate) fn infer_inspect_format(path: &PathBuf) -> Result<InspectFormat, CliE
         Some("tsv") => Ok(InspectFormat::Tsv),
         Some("xlsx") | Some("xls") | Some("xlsb") | Some("ods") => Ok(InspectFormat::Xlsx),
         Some("sheet") => Ok(InspectFormat::Sheet),
+        Some("parquet") => Ok(InspectFormat::Parquet),
         _ => Err(CliError::args(format!(
             "cannot infer inspect format from extension {:?}",
             ext.as_deref().unwrap_or("(none)")
-        )).with_hint("supported: .sheet, .xlsx, .xls, .xlsb, .ods, .csv, .tsv (or use --format)")),
+        )).with_hint("supported: .sheet, .xlsx, .xls, .xlsb, .ods, .csv, .tsv, .parquet (or use --format)")),
     }
 }
 
@@ -484,11 +485,33 @@ pub(crate) fn infer_format(path: &PathBuf) -> Result<Format, CliError> {
         Some("json") => Ok(Format::Json),
         Some("xlsx") | Some("xls") | Some("xlsb") | Some("ods") => Ok(Format::Xlsx),
         Some("sheet") => Ok(Format::Sheet),
+        Some("parquet") => Ok(Format::Parquet),
         _ => Err(CliError::args(format!(
             "cannot infer format from extension {:?}",
             ext.as_deref().unwrap_or("(none)")
-        )).with_hint("use --from with one of: csv, tsv, json, xlsx, sheet")),
+        )).with_hint("use --from with one of: csv, tsv, json, xlsx, sheet, parquet")),
     }
+}
+
+/// Read a Parquet file that must arrive whole.
+///
+/// A Parquet file can hold far more than a sheet. The desktop app shows what
+/// fits and says so; a command that converts or keeps the data must not drop
+/// rows on the way, so it refuses instead.
+pub(crate) fn read_parquet_whole(path: &std::path::Path) -> Result<visigrid_engine::sheet::Sheet, CliError> {
+    let imported = visigrid_io::parquet::import(path).map_err(CliError::parse)?;
+    if imported.truncated() {
+        return Err(CliError::parse(format!(
+            "{} has {} rows and {} columns; a sheet holds {} rows (including the header row) and {} columns",
+            path.display(),
+            imported.total_rows,
+            imported.total_cols,
+            visigrid_io::parquet::MAX_ROWS,
+            visigrid_io::parquet::MAX_COLS,
+        ))
+        .with_hint("split or filter the file into smaller Parquet files first"));
+    }
+    Ok(imported.sheet)
 }
 
 pub(crate) fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_arg: Option<&str>) -> Result<visigrid_engine::sheet::Sheet, CliError> {
@@ -502,6 +525,7 @@ pub(crate) fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_
             visigrid_io::csv::import_tsv(path)
                 .map_err(CliError::parse)
         }
+        Format::Parquet => read_parquet_whole(path),
         Format::Xlsx => {
             let (workbook, _stats) = visigrid_io::xlsx::import(path)
                 .map_err(CliError::parse)?;
@@ -670,8 +694,8 @@ pub(crate) fn read_stdin(format: Format, delimiter: char, into_row: usize, into_
         Format::Json => parse_json(&input, into_row, into_col),
         Format::JsonFull => visigrid_io::json::import_full(&input).map_err(CliError::io),
         Format::Lines => parse_lines(&input, into_row, into_col),
-        Format::Xlsx | Format::Sheet => {
-            Err(CliError::args("xlsx and sheet formats require file input"))
+        Format::Xlsx | Format::Sheet | Format::Parquet => {
+            Err(CliError::args("xlsx, sheet and parquet formats require file input"))
         }
     }
 }
@@ -816,6 +840,8 @@ pub(crate) fn write_format(
             .with_hint("this is a bug — please report it")),
         Format::Sheet => Err(CliError::format("sheet format cannot be written to stdout")
             .with_hint("use -o output.sheet to write to a file")),
+        Format::Parquet => Err(CliError::format("parquet output is not supported")
+            .with_hint("parquet is read-only; convert to csv, json, xlsx or sheet")),
     }
 }
 
