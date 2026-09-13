@@ -229,19 +229,30 @@ else
     INTERVAL=30
     ELAPSED=0
 
+    RUN_SEEN=false
     while true; do
         STATUS="$(gh run list --workflow=release.yml --branch="v$VERSION" --limit=1 --json status,conclusion --jq '.[0]' 2>/dev/null || echo "")"
 
         if [[ -z "$STATUS" ]]; then
-            if (( ELAPSED > 60 )); then
+            # An empty answer after the run has been seen is a failed gh call
+            # (network, rate limit), not a missing run. Treating it as missing
+            # killed v0.34.0 sixteen minutes into a healthy CI run.
+            if $RUN_SEEN; then
+                if (( ELAPSED >= TIMEOUT )); then
+                    die "Timed out waiting for Release workflow (${TIMEOUT}s)."
+                fi
+                echo "Could not read workflow status; retrying..."
+            elif (( ELAPSED > 60 )); then
                 die "No Release workflow run found for v$VERSION after 60s."
+            else
+                echo "Waiting for workflow to appear..."
             fi
-            echo "Waiting for workflow to appear..."
             sleep "$INTERVAL"
             ELAPSED=$((ELAPSED + INTERVAL))
             continue
         fi
 
+        RUN_SEEN=true
         RUN_STATUS="$(echo "$STATUS" | jq -r '.status')"
         RUN_CONCLUSION="$(echo "$STATUS" | jq -r '.conclusion')"
 
