@@ -5171,6 +5171,8 @@ fn cmd_sheet_inspect(
 
     // Phase B: Load workbook by format
     // Note: load_workbook() already calls rebuild_dep_graph() + recompute_full_ordered()
+    // Set when a Parquet file was bigger than a sheet and only part of it loaded.
+    let mut truncation: Option<String> = None;
     let (workbook, is_native, import_notes, formula_map) = match fmt {
         InspectFormat::Sheet => {
             let wb = visigrid_io::native::load_workbook(&file)
@@ -5210,11 +5212,13 @@ fn cmd_sheet_inspect(
             (wb, false, vec![], HashMap::new())
         }
         // Inspecting only reads, so a file bigger than a sheet shows what
-        // fits, with a note, rather than refusing.
+        // fits, with a note, rather than refusing. --calc is the exception,
+        // below: an aggregate over part of the file is a wrong answer.
         InspectFormat::Parquet => {
             let imported = visigrid_io::parquet::import(&file)
                 .map_err(CliError::parse)?;
-            let notes = imported.truncation_message().into_iter().collect();
+            truncation = imported.truncation_message();
+            let notes = truncation.clone().into_iter().collect();
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![imported.sheet], 0);
             (wb, false, notes, HashMap::new())
         }
@@ -5222,6 +5226,12 @@ fn cmd_sheet_inspect(
 
     // --calc: evaluate formulas against loaded data, output JSON, early return
     if !calc.is_empty() {
+        // A total over the rows that fit is not the file's total, and the JSON
+        // result has nowhere to say so. Refuse, the way convert does.
+        if let Some(ref note) = truncation {
+            return Err(CliError::parse(format!("{}: {}", file.display(), note))
+                .with_hint("--calc would only see the rows that fit; split or filter the file into smaller Parquet files first"));
+        }
         let (sheet_idx, sheet) = resolve_sheet(&workbook, sheet_arg.as_deref())?;
         let sheet_id = workbook.sheet_id_at_idx(sheet_idx)
             .ok_or_else(|| CliError::io("cannot resolve sheet ID"))?;
@@ -5326,6 +5336,13 @@ fn cmd_sheet_inspect(
             return Err(CliError { code: EXIT_EVAL_ERROR, message: String::new(), hint: None });
         }
         return Ok(());
+    }
+
+    // The workbook summary reports the truncation itself; every other view
+    // would otherwise present a partial file as the whole one.
+    let summary_mode = workbook_mode || (target.is_none() && !non_empty && !sheets_mode);
+    if let (Some(note), false) = (&truncation, summary_mode) {
+        eprintln!("note: {}: {}", file.display(), note);
     }
 
     // Format label for foreign formats
@@ -5460,10 +5477,10 @@ fn cmd_sheet_inspect(
             if raw_str.is_empty() { continue; }
             let display = sheet.get_display(row, col);
             let value_type = if is_native {
-                classify_value_type(&raw_str, &display)
+                classify_value_type(&raw_str, &sheet.get_computed_value(row, col))
             } else {
                 // For foreign formats, check formula_map for formula classification
-                if formula_map.contains_key(&(idx, row, col)) { "formula" } else { classify_value_type(&raw_str, &display) }
+                if formula_map.contains_key(&(idx, row, col)) { "formula" } else { classify_value_type(&raw_str, &sheet.get_computed_value(row, col)) }
             };
             let formula = get_formula(sheet, idx, row, col);
 
@@ -5559,9 +5576,9 @@ fn cmd_sheet_inspect(
                 if raw.is_empty() { continue; }
                 let display = sheet.get_display(row, col);
                 let value_type = if is_native {
-                    classify_value_type(&raw, &display)
+                    classify_value_type(&raw, &sheet.get_computed_value(row, col))
                 } else {
-                    if formula_map.contains_key(&(sheet_idx, row, col)) { "formula" } else { classify_value_type(&raw, &display) }
+                    if formula_map.contains_key(&(sheet_idx, row, col)) { "formula" } else { classify_value_type(&raw, &sheet.get_computed_value(row, col)) }
                 };
                 let formula = get_formula(sheet, sheet_idx, row, col);
                 let cell_result = enrich_headers(row, col, sheet_ops::CellInspectResult {
@@ -5614,9 +5631,9 @@ fn cmd_sheet_inspect(
             }
 
             let value_type = if is_native {
-                classify_value_type(&raw, &display)
+                classify_value_type(&raw, &sheet.get_computed_value(start_row, start_col))
             } else {
-                if formula_map.contains_key(&(sheet_idx, start_row, start_col)) { "formula" } else { classify_value_type(&raw, &display) }
+                if formula_map.contains_key(&(sheet_idx, start_row, start_col)) { "formula" } else { classify_value_type(&raw, &sheet.get_computed_value(start_row, start_col)) }
             };
             let formula = get_formula(sheet, sheet_idx, start_row, start_col);
 
@@ -5672,9 +5689,9 @@ fn cmd_sheet_inspect(
                     let display = sheet.get_display(row, col);
 
                     let value_type = if is_native {
-                        classify_value_type(&raw, &display)
+                        classify_value_type(&raw, &sheet.get_computed_value(row, col))
                     } else {
-                        if formula_map.contains_key(&(sheet_idx, row, col)) { "formula" } else { classify_value_type(&raw, &display) }
+                        if formula_map.contains_key(&(sheet_idx, row, col)) { "formula" } else { classify_value_type(&raw, &sheet.get_computed_value(row, col)) }
                     };
                     let formula = get_formula(sheet, sheet_idx, row, col);
 
@@ -5711,16 +5728,19 @@ fn cmd_sheet_inspect(
     Ok(())
 }
 
-/// Classify a cell value type from its raw and display strings.
-fn classify_value_type(raw: &str, display: &str) -> &'static str {
+/// Type of a cell for inspect output, from what the cell holds. Deciding by
+/// whether the display text parses as a number called text such as "007" (an
+/// ID read from Parquet) a number.
+fn classify_value_type(raw: &str, value: &visigrid_engine::formula::eval::Value) -> &'static str {
+    use visigrid_engine::formula::eval::Value;
     if raw.starts_with('=') {
-        "formula"
-    } else if display.parse::<f64>().is_ok() {
-        "number"
-    } else if display.is_empty() {
-        "empty"
-    } else {
-        "text"
+        return "formula";
+    }
+    match value {
+        Value::Number(_) => "number",
+        Value::Empty => "empty",
+        Value::Text(s) if s.is_empty() => "empty",
+        Value::Text(_) | Value::Boolean(_) | Value::Error(_) => "text",
     }
 }
 

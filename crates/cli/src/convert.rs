@@ -864,12 +864,12 @@ pub(crate) fn write_csv(
         match col_filter {
             Some(selected) => {
                 for (idx, _) in selected {
-                    record.push(sheet.get_display(row, *idx));
+                    record.push(sheet.get_interchange_display(row, *idx));
                 }
             }
             None => {
                 for col in 0..cols {
-                    record.push(sheet.get_display(row, col));
+                    record.push(sheet.get_interchange_display(row, col));
                 }
             }
         }
@@ -950,8 +950,7 @@ pub(crate) fn write_json(
             for row in data_rows {
                 let mut pairs = Vec::new();
                 for (col_idx, key) in &json_keys {
-                    let value = sheet.get_display(row, *col_idx);
-                    pairs.push((key.clone(), string_to_json_value(&value)));
+                    pairs.push((key.clone(), cell_json_value(sheet, row, *col_idx)));
                 }
                 rows_json.push(pairs);
             }
@@ -1001,8 +1000,7 @@ pub(crate) fn write_json(
             for row in data_rows {
                 let mut obj = serde_json::Map::new();
                 for (col, key) in header_names.iter().enumerate() {
-                    let value = sheet.get_display(row, col);
-                    obj.insert(key.clone(), string_to_json_value(&value));
+                    obj.insert(key.clone(), cell_json_value(sheet, row, col));
                 }
                 objects.push(obj);
             }
@@ -1025,8 +1023,7 @@ pub(crate) fn write_json(
         for row in all_rows {
             let mut row_vec: Vec<serde_json::Value> = Vec::new();
             for col in 0..cols {
-                let value = sheet.get_display(row, col);
-                row_vec.push(string_to_json_value(&value));
+                row_vec.push(cell_json_value(sheet, row, col));
             }
             rows_vec.push(row_vec);
         }
@@ -1034,6 +1031,21 @@ pub(crate) fn write_json(
         let mut bytes = serde_json::to_vec_pretty(&rows_vec).map_err(|e| CliError::io(e.to_string()))?;
         bytes.push(b'\n');
         Ok(bytes)
+    }
+}
+
+/// JSON for one cell, typed by what the cell holds rather than by whether its
+/// display text parses as a number. Text stays a string even when it looks
+/// numeric, so IDs, zip codes, and part numbers like "007" keep their zeros.
+/// Numbers, booleans, and formula results go through the display text as before.
+pub(crate) fn cell_json_value(sheet: &visigrid_engine::sheet::Sheet, row: usize, col: usize) -> serde_json::Value {
+    use visigrid_engine::formula::eval::Value;
+    match sheet.get_computed_value(row, col) {
+        // Booleans are stored as text; keep writing them as JSON booleans.
+        Value::Text(s) if matches!(s.as_str(), "TRUE" | "true") => serde_json::json!(true),
+        Value::Text(s) if matches!(s.as_str(), "FALSE" | "false") => serde_json::json!(false),
+        Value::Text(s) => serde_json::Value::String(s),
+        _ => string_to_json_value(&sheet.get_display(row, col)),
     }
 }
 

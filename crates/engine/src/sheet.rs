@@ -896,6 +896,53 @@ impl Sheet {
         }
     }
 
+    /// Cell text for interchange formats (CSV, TSV).
+    ///
+    /// The raw display, except that a number formatted as a date, time, or
+    /// date-time is written as ISO 8601 — `2026-09-01`, `14:02:00`,
+    /// `2026-09-01 14:02:00` — instead of a serial like `46266.58` that nothing
+    /// outside a spreadsheet can read. Milliseconds appear only when non-zero.
+    ///
+    /// Every other format stays raw on purpose: currency and percent cells are
+    /// written as plain numbers so the file remains machine-readable.
+    pub fn get_interchange_display(&self, row: usize, col: usize) -> String {
+        enum Iso { Date, Time, DateTime }
+        let iso = match self.cells.get(&(row, col)).map(|c| &c.format.number_format) {
+            Some(NumberFormat::Date { .. }) => Iso::Date,
+            Some(NumberFormat::Time) => Iso::Time,
+            Some(NumberFormat::DateTime) => Iso::DateTime,
+            _ => return self.get_display(row, col),
+        };
+        let serial = match self.get_computed_value(row, col) {
+            Value::Number(n) if n.is_finite() && n >= 0.0 => n,
+            _ => return self.get_display(row, col),
+        };
+
+        let mut day = serial.floor();
+        let mut ms = ((serial - day) * 86_400_000.0).round() as i64;
+        if ms >= 86_400_000 {
+            day += 1.0;
+            ms -= 86_400_000;
+        }
+        let date = || {
+            let (y, m, d) = super::cell::serial_to_date(day);
+            format!("{:04}-{:02}-{:02}", y, m, d)
+        };
+        let time = || {
+            let (h, mi, s, frac) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
+            if frac == 0 {
+                format!("{:02}:{:02}:{:02}", h, mi, s)
+            } else {
+                format!("{:02}:{:02}:{:02}.{:03}", h, mi, s, frac)
+            }
+        };
+        match iso {
+            Iso::Date => date(),
+            Iso::Time => time(),
+            Iso::DateTime => format!("{} {}", date(), time()),
+        }
+    }
+
     /// Get display value with number formatting applied
     pub fn get_formatted_display(&self, row: usize, col: usize) -> String {
         // Check for spilled value first
@@ -2007,6 +2054,50 @@ impl Sheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cell::{DateStyle, NegativeStyle};
+
+    fn formatted(value: &str, number_format: NumberFormat) -> Sheet {
+        let mut sheet = Sheet::new(SheetId(1), 2, 2);
+        sheet.set_value(0, 0, value);
+        let mut format = sheet.get_format(0, 0);
+        format.number_format = number_format;
+        sheet.set_format(0, 0, format);
+        sheet
+    }
+
+    #[test]
+    fn interchange_display_writes_dates_and_times_as_iso_8601() {
+        // 46266 is 2026-09-01; .584722… is 14:02:00.
+        let dt = formatted("46266.58472222222", NumberFormat::DateTime);
+        assert_eq!(dt.get_interchange_display(0, 0), "2026-09-01 14:02:00");
+
+        let d = formatted("46266", NumberFormat::Date { style: DateStyle::Short });
+        assert_eq!(d.get_interchange_display(0, 0), "2026-09-01");
+
+        let t = formatted("0.5", NumberFormat::Time);
+        assert_eq!(t.get_interchange_display(0, 0), "12:00:00");
+
+        // Sub-second precision survives; whole seconds carry no ".000".
+        let ms = formatted(&format!("{}", 46266.0 + 0.25 + 0.123 / 86_400.0), NumberFormat::DateTime);
+        assert_eq!(ms.get_interchange_display(0, 0), "2026-09-01 06:00:00.123");
+
+        // A fraction that rounds up to midnight rolls into the next day.
+        let roll = formatted(&format!("{}", 46266.0 + 0.9999999999), NumberFormat::DateTime);
+        assert_eq!(roll.get_interchange_display(0, 0), "2026-09-02 00:00:00");
+    }
+
+    #[test]
+    fn interchange_display_leaves_other_formats_raw() {
+        let currency = formatted("1234.5", NumberFormat::Currency { decimals: 2, thousands: true, negative: NegativeStyle::default(), symbol: None });
+        assert_eq!(currency.get_interchange_display(0, 0), currency.get_display(0, 0));
+
+        let percent = formatted("0.12", NumberFormat::Percent { decimals: 0 });
+        assert_eq!(percent.get_interchange_display(0, 0), "0.12");
+
+        // Text in a date-formatted cell is not a date.
+        let text = formatted("not a date", NumberFormat::DateTime);
+        assert_eq!(text.get_interchange_display(0, 0), "not a date");
+    }
 
     #[test]
     fn test_set_text_overflow() {

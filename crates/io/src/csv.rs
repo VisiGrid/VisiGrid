@@ -181,7 +181,8 @@ fn export_with_delimiter(sheet: &Sheet, path: &Path, delimiter: u8) -> Result<()
             let value = if sheet.is_merge_hidden(row, col) {
                 String::new()
             } else {
-                sheet.get_display(row, col)
+                // Dates as ISO 8601, not serials; see get_interchange_display.
+                sheet.get_interchange_display(row, col)
             };
             if !value.is_empty() {
                 last_non_empty = col + 1;
@@ -228,6 +229,32 @@ mod tests {
     use tempfile::tempdir;
 
     use visigrid_engine::sheet::MergedRegion;
+
+    /// A date-formatted cell used to export as its serial (46266.58), which no
+    /// CSV reader outside a spreadsheet understands. Parquet timestamps made
+    /// that visible; any date column had it.
+    #[test]
+    fn test_csv_export_writes_dates_as_iso_8601() {
+        use visigrid_engine::cell::NumberFormat;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dates.csv");
+
+        let mut sheet = Sheet::new(SheetId(1), 2, 3);
+        sheet.set_value(0, 0, "placed_at");
+        sheet.set_value(0, 1, "amount");
+        sheet.set_value(1, 0, "46266.58472222222");
+        sheet.set_number_format(1, 0, NumberFormat::DateTime);
+        sheet.set_value(1, 1, "1234.5");
+        sheet.set_number_format(1, 1, NumberFormat::Currency { decimals: 2, thousands: true, negative: Default::default(), symbol: None });
+
+        export(&sheet, &path).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        // Only the date changes; the currency cell exports exactly as before.
+        let amount = sheet.get_display(1, 1);
+        assert_eq!(content, format!("placed_at,amount\n2026-09-01 14:02:00,{}\n", amount));
+        assert!(!amount.contains('$'), "currency must stay machine-readable: {}", amount);
+    }
 
     #[test]
     fn test_csv_export_merged_cells_no_leak() {
