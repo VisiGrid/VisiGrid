@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.34.2
+
+### Files
+
+- **`vgrid sheet inspect --calc` no longer answers from part of a file** — on a Parquet file bigger than a sheet, `--calc` totalled the rows that fit and exited 0 with no warning, so `SUM` over a 70,000-row file silently covered 65,535 of them. It now refuses the file (exit 4), the way `vgrid convert` and `vgrid sheet import` already did. Other `inspect` views still show what fits and now say so on stderr, keeping JSON on stdout parseable. The 0.34.0 note claimed `inspect` refused such files; only `convert` and `import` did.
+- **Text that looks like a number stays text in JSON** — `vgrid convert -t json` and `vgrid sheet inspect`'s `value_type` decided a cell's type by whether its displayed text parsed as a number, so a string such as `007` (an ID from Parquet) came out as the number `7`. Both now use the type the cell holds. CSV-to-JSON output is unchanged, because CSV import already stores numbers and booleans as such.
+- **Dates export as ISO 8601 in CSV and TSV** — date, time and date-time cells were written as spreadsheet serials (`46266.58`), which nothing outside a spreadsheet can read. They are now `2026-09-01`, `14:02:00` and `2026-09-01 14:02:00`, with milliseconds only when non-zero. Currency, percent and other formats still export as plain numbers. Applies to the desktop app's CSV/TSV export and to `vgrid convert`.
+
 ## 0.34.1
 
 ### Files
