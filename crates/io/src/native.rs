@@ -106,12 +106,12 @@ CREATE TABLE IF NOT EXISTS cells (
     fmt_italic INTEGER DEFAULT 0,
     fmt_underline INTEGER DEFAULT 0,
     fmt_alignment INTEGER DEFAULT 0,     -- 0=left, 1=center, 2=right
-    fmt_number_type INTEGER DEFAULT 0,   -- 0=general, 1=number, 2=currency, 3=percent
+    fmt_number_type INTEGER DEFAULT 0,   -- 0=general, 1=number, 2=currency, 3=percent, 4=date, 5=time, 6=datetime, 7=custom
     fmt_decimals INTEGER DEFAULT 2,      -- decimal places
     fmt_font_family TEXT,                -- NULL = inherit from settings
     fmt_thousands INTEGER DEFAULT 0,     -- 1 = use thousands separator
     fmt_negative INTEGER DEFAULT 0,      -- 0=minus, 1=parens, 2=red minus, 3=red parens
-    fmt_currency_symbol TEXT,            -- NULL = default ($)
+    fmt_currency_symbol TEXT,            -- NULL = default ($); for type 7, the Excel format code
     fmt_border_top INTEGER DEFAULT 0,    -- style: 0=none, 1=thin, 2=medium, 3=thick
     fmt_border_right INTEGER DEFAULT 0,
     fmt_border_bottom INTEGER DEFAULT 0,
@@ -643,7 +643,10 @@ fn extract_number_format_fields(nf: &NumberFormat) -> (i32, i32, i32, i32, Optio
         }, 0, 0, None),
         NumberFormat::Time => (5, 0, 0, 0, None),
         NumberFormat::DateTime => (6, 0, 0, 0, None),
-        NumberFormat::Custom(_) => (0, 2, 0, 0, None),
+        // The code rides in the currency-symbol text column rather than a
+        // new one: no migration, and older builds read type 7 as General,
+        // which is what they did with custom formats anyway.
+        NumberFormat::Custom(code) => (7, 0, 0, 0, Some(code.as_str())),
     }
 }
 
@@ -678,6 +681,7 @@ fn build_number_format(
         },
         5 => NumberFormat::Time,
         6 => NumberFormat::DateTime,
+        7 => currency_symbol.map(NumberFormat::Custom).unwrap_or(NumberFormat::General),
         _ => NumberFormat::General,
     }
 }
@@ -798,6 +802,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             }},
             5 => NumberFormat::Time,
             6 => NumberFormat::DateTime,
+            7 => fmt_currency_symbol.map(NumberFormat::Custom).unwrap_or(NumberFormat::General),
             _ => NumberFormat::General,
         };
         let format = CellFormat {
@@ -3789,6 +3794,37 @@ mod tests {
         let fmt1 = loaded.active_sheet().get_format(1, 1);
         assert_eq!(fmt1.background_color, Some([0x00, 0x80, 0x00, 0xFF]), "Background should be green");
         assert_eq!(fmt1.font_color, None, "Font color should be None");
+    }
+
+    /// Custom format codes used to save as General, so an xlsx date like
+    /// `d-mmm` came back from a .sheet as a bare serial number.
+    #[test]
+    fn test_custom_number_format_roundtrip() {
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+        for (row, code) in ["d-mmm", "h:mm AM/PM", "$#,##0.00_);[Red]($#,##0.00)"].iter().enumerate() {
+            sheet.set_value(row, 0, "46029.5869");
+            let mut fmt = sheet.get_format(row, 0).clone();
+            fmt.number_format = NumberFormat::Custom(code.to_string());
+            sheet.set_format(row, 0, fmt);
+        }
+
+        let full = NamedTempFile::with_suffix(".sheet").unwrap();
+        save_workbook_full(&workbook, &CellMetadata::default(), &[], &[], full.path()).unwrap();
+        let plain = NamedTempFile::with_suffix(".sheet").unwrap();
+        save_workbook(&workbook, plain.path()).unwrap();
+
+        for path in [full.path(), plain.path()] {
+            let loaded = load_workbook(path).unwrap();
+            let sheet = loaded.active_sheet();
+            assert_eq!(sheet.get_format(0, 0).number_format, NumberFormat::Custom("d-mmm".into()));
+            assert_eq!(sheet.get_formatted_display(0, 0), "7-Jan");
+            assert_eq!(sheet.get_formatted_display(1, 0), "2:05 PM");
+            assert_eq!(
+                sheet.get_format(2, 0).number_format,
+                NumberFormat::Custom("$#,##0.00_);[Red]($#,##0.00)".into())
+            );
+        }
     }
 
     #[test]

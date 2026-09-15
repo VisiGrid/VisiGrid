@@ -906,11 +906,14 @@ impl Sheet {
     /// Every other format stays raw on purpose: currency and percent cells are
     /// written as plain numbers so the file remains machine-readable.
     pub fn get_interchange_display(&self, row: usize, col: usize) -> String {
-        enum Iso { Date, Time, DateTime }
         let iso = match self.cells.get(&(row, col)).map(|c| &c.format.number_format) {
             Some(NumberFormat::Date { .. }) => Iso::Date,
             Some(NumberFormat::Time) => Iso::Time,
             Some(NumberFormat::DateTime) => Iso::DateTime,
+            Some(NumberFormat::Custom(code)) => match custom_code_iso(code) {
+                Some(iso) => iso,
+                None => return self.get_display(row, col),
+            },
             _ => return self.get_display(row, col),
         };
         let serial = match self.get_computed_value(row, col) {
@@ -2051,6 +2054,36 @@ impl Sheet {
     }
 }
 
+enum Iso { Date, Time, DateTime }
+
+/// Which ISO form a custom format code's cells take in CSV/TSV.
+///
+/// Date and time codes imported from xlsx (`d-mmm`, `h:mm AM/PM`,
+/// `m/d/yyyy h:mm`) are dates just as much as the native styles are.
+/// Elapsed codes (`[h]:mm:ss`) are durations, not times of day, and stay raw.
+fn custom_code_iso(code: &str) -> Option<Iso> {
+    use ssfmt::ast::{DatePart as P, FormatPart};
+    let fmt = ssfmt::NumberFormat::parse(code).ok()?;
+    let parts = &fmt.sections().first()?.parts;
+    let (mut calendar, mut clock) = (false, false);
+    for part in parts {
+        match part {
+            FormatPart::Elapsed(_) => return None,
+            FormatPart::AmPm(_) => clock = true,
+            FormatPart::DatePart(P::Hour | P::Hour2 | P::Minute | P::Minute2 | P::Second
+                | P::Second2 | P::SubSecond(_)) => clock = true,
+            FormatPart::DatePart(_) => calendar = true,
+            _ => {}
+        }
+    }
+    match (calendar, clock) {
+        (true, true) => Some(Iso::DateTime),
+        (true, false) => Some(Iso::Date),
+        (false, true) => Some(Iso::Time),
+        (false, false) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2084,6 +2117,20 @@ mod tests {
         // A fraction that rounds up to midnight rolls into the next day.
         let roll = formatted(&format!("{}", 46266.0 + 0.9999999999), NumberFormat::DateTime);
         assert_eq!(roll.get_interchange_display(0, 0), "2026-09-02 00:00:00");
+    }
+
+    #[test]
+    fn interchange_display_treats_custom_date_codes_as_dates() {
+        let custom = |code: &str| formatted("46266.58472222222", NumberFormat::Custom(code.into()));
+        assert_eq!(custom("d-mmm").get_interchange_display(0, 0), "2026-09-01");
+        assert_eq!(custom("m/d/yyyy").get_interchange_display(0, 0), "2026-09-01");
+        assert_eq!(custom("h:mm AM/PM").get_interchange_display(0, 0), "14:02:00");
+        assert_eq!(custom("m/d/yyyy h:mm").get_interchange_display(0, 0), "2026-09-01 14:02:00");
+        // Durations and number codes stay raw.
+        let elapsed = custom("[h]:mm:ss");
+        assert_eq!(elapsed.get_interchange_display(0, 0), elapsed.get_display(0, 0));
+        let number = custom("#,##0.00");
+        assert_eq!(number.get_interchange_display(0, 0), number.get_display(0, 0));
     }
 
     #[test]

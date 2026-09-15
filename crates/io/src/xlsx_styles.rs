@@ -99,30 +99,28 @@ fn builtin_number_format(id: u16) -> NumberFormat {
         10 => NumberFormat::Percent { decimals: 2 },
         11 => NumberFormat::number_compat(2), // 0.00E+00 (scientific)
         14 => NumberFormat::Date {
-            style: visigrid_engine::cell::DateStyle::Short,
+            style: visigrid_engine::cell::DateStyle::Short, // m/d/yyyy
         },
-        15 => NumberFormat::Date {
-            style: visigrid_engine::cell::DateStyle::Long,
-        },
-        16 => NumberFormat::Date {
-            style: visigrid_engine::cell::DateStyle::Long,
-        },
-        17 => NumberFormat::Date {
-            style: visigrid_engine::cell::DateStyle::Short,
-        },
-        18 => NumberFormat::Time,
-        19 => NumberFormat::Time,
-        20 => NumberFormat::Time,
-        21 => NumberFormat::Time,
-        22 => NumberFormat::DateTime,
+        // The rest of the date/time built-ins have no exact native style, and
+        // an approximate one reads as a different value ("7-Jan" became
+        // "January 7, 2026"). Excel stores only the id for these, so supply
+        // its code and let the custom-format renderer do what Excel does.
+        15 => NumberFormat::Custom("d-mmm-yy".to_string()),
+        16 => NumberFormat::Custom("d-mmm".to_string()),
+        17 => NumberFormat::Custom("mmm-yy".to_string()),
+        18 => NumberFormat::Custom("h:mm AM/PM".to_string()),
+        19 => NumberFormat::Custom("h:mm:ss AM/PM".to_string()),
+        20 => NumberFormat::Custom("h:mm".to_string()),
+        21 => NumberFormat::Custom("h:mm:ss".to_string()),
+        22 => NumberFormat::Custom("m/d/yyyy h:mm".to_string()),
         37 => NumberFormat::Number { decimals: 0, thousands: true, negative: NegativeStyle::Parens }, // #,##0;(#,##0)
         38 => NumberFormat::Number { decimals: 0, thousands: true, negative: NegativeStyle::RedParens }, // #,##0;[Red](#,##0)
         39 => NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::Parens }, // #,##0.00;(#,##0.00)
         40 => NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::RedParens }, // #,##0.00;[Red](#,##0.00)
         44 => NumberFormat::currency_compat(2),
-        45 => NumberFormat::Time,
-        46 => NumberFormat::Time,
-        47 => NumberFormat::Time,
+        45 => NumberFormat::Custom("mm:ss".to_string()),
+        46 => NumberFormat::Custom("[h]:mm:ss".to_string()),
+        47 => NumberFormat::Custom("mmss.0".to_string()),
         48 => NumberFormat::number_compat(2), // ##0.0E+0
         49 => NumberFormat::General,                // @ (text)
         _ => NumberFormat::General,
@@ -1761,6 +1759,31 @@ mod tests {
             builtin_number_format(44),
             NumberFormat::currency_compat(2)
         );
+    }
+
+    /// Built-in date/time ids carry no code in the file, so they must render
+    /// the way Excel's own code for the id does. Issue #17: id 16 showed
+    /// "January 7, 2026" where Excel shows "7-Jan".
+    #[test]
+    fn test_builtin_date_time_formats_render_like_excel() {
+        use visigrid_engine::cell::CellValue;
+        let serial = 46029.586909722; // 2026-01-07 14:05:09
+        let cases = [
+            (14, "1/7/2026"),
+            (15, "7-Jan-26"),
+            (16, "7-Jan"),
+            (17, "Jan-26"),
+            (18, "2:05 PM"),
+            (19, "2:05:09 PM"),
+            (20, "14:05"),
+            (21, "14:05:09"),
+            (22, "1/7/2026 14:05"),
+            (45, "05:09"),
+        ];
+        for (id, want) in cases {
+            assert_eq!(CellValue::format_number(serial, &builtin_number_format(id)), want, "id {id}");
+        }
+        assert_eq!(CellValue::format_number(1.25, &builtin_number_format(46)), "30:00:00");
     }
 
     #[test]
