@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.34.3
+
+### Files
+
+- **Excel theme colours import as Excel shows them** — fills, font colours, borders, conditional formats and tab colours picked from Excel's theme palette were mapped to a fixed Office 2007 palette with the tint ignored. Any workbook built on a newer theme came in with the wrong hues, and every "lighter 80%" or "darker 25%" shade came in as the full-strength accent, so pale pink became teal and pale green became orange. VisiGrid now reads the theme stored in the workbook and applies the tint the way Excel does. ([#17](https://github.com/VisiGrid/VisiGrid/issues/17))
+- **Excel's built-in date and time formats display as in Excel** — formats Excel stores by number rather than by code were shown in the nearest VisiGrid style, which often read as a different value: `d-mmm` ("7-Jan") showed as "January 7, 2026" and `h:mm AM/PM` as "14:05:09". They now use Excel's own format codes. ([#17](https://github.com/VisiGrid/VisiGrid/issues/17))
+- **Custom number formats survive saving as `.sheet`** — any custom format, such as `d-mmm` or `$#,##0.00_);[Red]($#,##0.00)`, was saved as General, so a workbook imported from Excel reopened with dates as bare serials and currency as plain numbers. The format code is now saved. Older versions open these files and show such cells as General, as they did before.
+- **Custom date formats export as ISO 8601 in CSV and TSV** — 0.34.2's ISO dates applied only to VisiGrid's own date styles, so a cell formatted `m/d/yyyy` or `d-mmm` still exported as a serial. Date and time format codes now export as `2026-01-07`, `14:05:09` or `2026-01-07 14:05:09`. Duration formats such as `[h]:mm:ss` still export as numbers.
+
 ## 0.34.2
 
 ### Files
