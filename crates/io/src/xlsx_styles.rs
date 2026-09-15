@@ -208,38 +208,210 @@ fn indexed_color(idx: u8) -> Option<[u8; 4]> {
     Some([rgb[0], rgb[1], rgb[2], 255])
 }
 
-/// Flat theme color defaults (approximate, no tint math).
-/// theme="0" through theme="9" map to Excel's default theme.
-fn theme_color_default(idx: u8) -> Option<[u8; 4]> {
-    let rgb: [u8; 3] = match idx {
-        0 => [255, 255, 255], // Background 1 (lt1)
-        1 => [0, 0, 0],       // Text 1 (dk1)
-        2 => [238, 236, 225],  // Background 2 (lt2)
-        3 => [31, 73, 125],    // Text 2 (dk2)
-        4 => [79, 129, 189],   // Accent 1
-        5 => [192, 80, 77],    // Accent 2
-        6 => [155, 187, 89],   // Accent 3
-        7 => [128, 100, 162],  // Accent 4
-        8 => [75, 172, 198],   // Accent 5
-        9 => [247, 150, 70],   // Accent 6
-        _ => return None,
+// =============================================================================
+// Theme palette
+// =============================================================================
+
+/// A workbook's theme colour scheme, in `theme="N"` index order.
+///
+/// Most colours Excel's picker offers are theme references, not RGB: the
+/// file says `theme="9" tint="0.7999"` and the actual colour lives in
+/// `xl/theme/theme1.xml`. Themes differ between Office versions (2007,
+/// 2013, 2023 all ship different accents), so a hard-coded palette gets the
+/// hue wrong for any workbook not made with that one version.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemePalette([[u8; 3]; 12]);
+
+impl Default for ThemePalette {
+    /// The Office 2007 theme, used only when a workbook carries no theme part.
+    fn default() -> Self {
+        ThemePalette([
+            [255, 255, 255], // 0  lt1  (Background 1)
+            [0, 0, 0],       // 1  dk1  (Text 1)
+            [238, 236, 225], // 2  lt2  (Background 2)
+            [31, 73, 125],   // 3  dk2  (Text 2)
+            [79, 129, 189],  // 4  accent1
+            [192, 80, 77],   // 5  accent2
+            [155, 187, 89],  // 6  accent3
+            [128, 100, 162], // 7  accent4
+            [75, 172, 198],  // 8  accent5
+            [247, 150, 70],  // 9  accent6
+            [0, 0, 255],     // 10 hlink
+            [128, 0, 128],   // 11 folHlink
+        ])
+    }
+}
+
+impl ThemePalette {
+    fn get(&self, idx: usize) -> Option<[u8; 3]> {
+        self.0.get(idx).copied()
+    }
+}
+
+/// Parse the `<a:clrScheme>` of a theme part (`xl/theme/theme1.xml`).
+///
+/// SpreadsheetML indexes the scheme with the light/dark pairs swapped
+/// relative to their document order: `theme="0"` is lt1, `theme="1"` is dk1.
+/// Slots the theme doesn't define in a form we read (`srgbClr`, or `sysClr`
+/// with `lastClr`) keep the default.
+pub fn parse_theme_xml(xml: &str) -> ThemePalette {
+    let mut palette = ThemePalette::default();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut in_scheme = false;
+    let mut slot: Option<usize> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let local = e.local_name();
+                match local.as_ref() {
+                    b"clrScheme" => in_scheme = true,
+                    name if in_scheme => {
+                        let idx = match name {
+                            b"lt1" => Some(0),
+                            b"dk1" => Some(1),
+                            b"lt2" => Some(2),
+                            b"dk2" => Some(3),
+                            b"accent1" => Some(4),
+                            b"accent2" => Some(5),
+                            b"accent3" => Some(6),
+                            b"accent4" => Some(7),
+                            b"accent5" => Some(8),
+                            b"accent6" => Some(9),
+                            b"hlink" => Some(10),
+                            b"folHlink" => Some(11),
+                            _ => None,
+                        };
+                        if idx.is_some() {
+                            slot = idx;
+                        } else if let Some(i) = slot {
+                            let wanted: &[u8] = match name {
+                                b"srgbClr" => b"val",
+                                b"sysClr" => b"lastClr",
+                                _ => b"",
+                            };
+                            for attr in e.attributes().flatten() {
+                                if !wanted.is_empty() && attr.key.as_ref() == wanted {
+                                    if let Some(c) = parse_argb_hex(&attr.value) {
+                                        palette.0[i] = [c[0], c[1], c[2]];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(ref e)) => match e.local_name().as_ref() {
+                // The first scheme is the workbook's; later ones sit in
+                // extraClrSchemeLst and aren't in effect.
+                b"clrScheme" => break,
+                b"lt1" | b"dk1" | b"lt2" | b"dk2" | b"accent1" | b"accent2" | b"accent3"
+                | b"accent4" | b"accent5" | b"accent6" | b"hlink" | b"folHlink" => slot = None,
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    palette
+}
+
+/// Apply an OOXML `tint` (-1.0..=1.0) to a colour.
+///
+/// Tint scales HLS lightness: negative darkens toward black, positive
+/// lightens toward white. Excel does this in Windows' integer HLS space
+/// (HLSMAX = 240), and matching that — rather than float HLS — lands on
+/// Excel's swatches exactly or within one step per channel.
+fn apply_tint(rgb: [u8; 3], tint: f64) -> [u8; 3] {
+    if tint == 0.0 {
+        return rgb;
+    }
+    let (h, l, s) = rgb_to_hls240(rgb);
+    let l = l as f64;
+    let l = if tint < 0.0 {
+        l * (1.0 + tint)
+    } else {
+        l * (1.0 - tint) + (HLSMAX as f64 * tint)
     };
-    Some([rgb[0], rgb[1], rgb[2], 255])
+    hls240_to_rgb(h, (l.round() as i32).clamp(0, HLSMAX), s)
+}
+
+const HLSMAX: i32 = 240;
+const RGBMAX: i32 = 255;
+
+/// Windows `ColorRGBToHLS`: H, L, S each in 0..=240.
+fn rgb_to_hls240([r, g, b]: [u8; 3]) -> (i32, i32, i32) {
+    let (r, g, b) = (r as i32, g as i32, b as i32);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = ((max + min) * HLSMAX + RGBMAX) / (2 * RGBMAX);
+    if max == min {
+        return (0, l, 0);
+    }
+    let d = max - min;
+    let s = if l <= HLSMAX / 2 {
+        (d * HLSMAX + (max + min) / 2) / (max + min)
+    } else {
+        (d * HLSMAX + (2 * RGBMAX - max - min) / 2) / (2 * RGBMAX - max - min)
+    };
+    let rd = ((max - r) * (HLSMAX / 6) + d / 2) / d;
+    let gd = ((max - g) * (HLSMAX / 6) + d / 2) / d;
+    let bd = ((max - b) * (HLSMAX / 6) + d / 2) / d;
+    let h = if r == max {
+        bd - gd
+    } else if g == max {
+        HLSMAX / 3 + rd - bd
+    } else {
+        2 * HLSMAX / 3 + gd - rd
+    };
+    (h.rem_euclid(HLSMAX), l, s)
+}
+
+/// Windows `ColorHLSToRGB`, the inverse of [`rgb_to_hls240`].
+fn hls240_to_rgb(h: i32, l: i32, s: i32) -> [u8; 3] {
+    if s == 0 {
+        let v = ((l * RGBMAX + HLSMAX / 2) / HLSMAX) as u8;
+        return [v, v, v];
+    }
+    let m2 = if l <= HLSMAX / 2 {
+        (l * (HLSMAX + s) + HLSMAX / 2) / HLSMAX
+    } else {
+        l + s - (l * s + HLSMAX / 2) / HLSMAX
+    };
+    let m1 = 2 * l - m2;
+    let hue = |h: i32| -> u8 {
+        let h = h.rem_euclid(HLSMAX);
+        let v = if h < HLSMAX / 6 {
+            m1 + ((m2 - m1) * h + HLSMAX / 12) / (HLSMAX / 6)
+        } else if h < HLSMAX / 2 {
+            m2
+        } else if h < HLSMAX * 2 / 3 {
+            m1 + ((m2 - m1) * (HLSMAX * 2 / 3 - h) + HLSMAX / 12) / (HLSMAX / 6)
+        } else {
+            m1
+        };
+        ((v * RGBMAX + HLSMAX / 2) / HLSMAX).clamp(0, 255) as u8
+    };
+    [hue(h + HLSMAX / 3), hue(h), hue(h - HLSMAX / 3)]
 }
 
 // =============================================================================
 // Color parsing
 // =============================================================================
 
-/// Parse a color from XML attributes (rgb, indexed, or theme).
-/// Returns RGBA as [u8; 4], or None if no color found.
-fn parse_color_attrs(
-    attrs: &[(Vec<u8>, Vec<u8>)],
-    unsupported: &mut Vec<String>,
-) -> Option<[u8; 4]> {
+/// Parse a color from XML attributes (rgb, indexed, or theme), applying
+/// `tint` when present. Returns RGBA as [u8; 4], or None if no color found.
+fn parse_color_attrs(attrs: &[(Vec<u8>, Vec<u8>)], theme: &ThemePalette) -> Option<[u8; 4]> {
     let mut rgb_val: Option<Vec<u8>> = None;
     let mut indexed_val: Option<u8> = None;
-    let mut theme_val: Option<u8> = None;
+    let mut theme_val: Option<usize> = None;
+    let mut tint = 0.0_f64;
 
     for (key, value) in attrs {
         match key.as_slice() {
@@ -254,28 +426,29 @@ fn parse_color_attrs(
                     .ok()
                     .and_then(|s| s.parse().ok());
             }
+            b"tint" => {
+                tint = std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+            }
             _ => {}
         }
     }
 
     // Prefer rgb > indexed > theme
-    if let Some(hex) = rgb_val {
-        return parse_argb_hex(&hex);
-    }
-    if let Some(idx) = indexed_val {
-        return indexed_color(idx);
-    }
-    if let Some(idx) = theme_val {
-        let color = theme_color_default(idx);
-        if color.is_some() {
-            // Log as approximate
-            if !unsupported.iter().any(|s| s.starts_with("theme tints")) {
-                unsupported.push("theme tints approximated".to_string());
-            }
-        }
-        return color;
-    }
-    None
+    let base = if let Some(hex) = rgb_val {
+        parse_argb_hex(&hex)?
+    } else if let Some(idx) = indexed_val {
+        indexed_color(idx)?
+    } else if let Some(idx) = theme_val {
+        let [r, g, b] = theme.get(idx)?;
+        [r, g, b, 255]
+    } else {
+        return None;
+    };
+    let [r, g, b] = apply_tint([base[0], base[1], base[2]], tint.clamp(-1.0, 1.0));
+    Some([r, g, b, base[3]])
 }
 
 /// Parse AARRGGBB hex string to RGBA [u8; 4].
@@ -346,13 +519,18 @@ struct ParsedBorder {
 
 /// Parse styles.xml content into a StyleTable.
 pub fn parse_styles_xml(xml: &str) -> (StyleTable, Vec<String>) {
+    parse_styles_xml_with_theme(xml, &ThemePalette::default())
+}
+
+/// Parse styles.xml, resolving theme colour references against `theme`.
+pub fn parse_styles_xml_with_theme(xml: &str, theme: &ThemePalette) -> (StyleTable, Vec<String>) {
     let mut unsupported: Vec<String> = Vec::new();
 
     // Step 1: Parse sub-sections
     let custom_num_fmts = parse_num_fmts(xml);
-    let fonts = parse_fonts(xml, &mut unsupported);
-    let fills = parse_fills(xml, &mut unsupported);
-    let borders = parse_borders(xml, &mut unsupported);
+    let fonts = parse_fonts(xml, theme);
+    let fills = parse_fills(xml, theme, &mut unsupported);
+    let borders = parse_borders(xml, theme);
 
     // Step 2: Parse cellXfs and resolve each <xf> into a CellFormat
     let styles = parse_cell_xfs(xml, &custom_num_fmts, &fonts, &fills, &borders, &mut unsupported);
@@ -411,7 +589,7 @@ fn parse_num_fmts(xml: &str) -> HashMap<u16, String> {
 }
 
 /// Parse <fonts> section into Vec<ParsedFont>.
-fn parse_fonts(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedFont> {
+fn parse_fonts(xml: &str, theme: &ThemePalette) -> Vec<ParsedFont> {
     let mut fonts = Vec::new();
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -432,7 +610,7 @@ fn parse_fonts(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedFont> {
                     }
                     b"color" if depth == 2 => {
                         let attrs = collect_attrs(e);
-                        current_font.color = parse_color_attrs(&attrs, unsupported);
+                        current_font.color = parse_color_attrs(&attrs, theme);
                     }
                     _ => {}
                 }
@@ -455,7 +633,7 @@ fn parse_fonts(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedFont> {
                     }
                     b"color" => {
                         let attrs = collect_attrs(e);
-                        current_font.color = parse_color_attrs(&attrs, unsupported);
+                        current_font.color = parse_color_attrs(&attrs, theme);
                     }
                     b"name" | b"rFont" => {
                         for attr in e.attributes().flatten() {
@@ -489,7 +667,7 @@ fn parse_fonts(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedFont> {
 }
 
 /// Parse <fills> section into Vec<ParsedFill>.
-fn parse_fills(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedFill> {
+fn parse_fills(xml: &str, theme: &ThemePalette, unsupported: &mut Vec<String>) -> Vec<ParsedFill> {
     let mut fills = Vec::new();
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -530,7 +708,7 @@ fn parse_fills(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedFill> {
                     }
                     b"fgColor" if in_pattern_fill => {
                         let attrs = collect_attrs(e);
-                        current_fill.bg_color = parse_color_attrs(&attrs, unsupported);
+                        current_fill.bg_color = parse_color_attrs(&attrs, theme);
                     }
                     _ => {}
                 }
@@ -543,7 +721,7 @@ fn parse_fills(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedFill> {
                     }
                     b"fgColor" if in_pattern_fill => {
                         let attrs = collect_attrs(e);
-                        current_fill.bg_color = parse_color_attrs(&attrs, unsupported);
+                        current_fill.bg_color = parse_color_attrs(&attrs, theme);
                     }
                     _ => {}
                 }
@@ -571,7 +749,7 @@ fn parse_fills(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedFill> {
 }
 
 /// Parse <borders> section into Vec<ParsedBorder>.
-fn parse_borders(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedBorder> {
+fn parse_borders(xml: &str, theme: &ThemePalette) -> Vec<ParsedBorder> {
     let mut borders = Vec::new();
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -612,7 +790,7 @@ fn parse_borders(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedBorder> 
                     }
                     b"color" if current_side.is_some() => {
                         let attrs = collect_attrs(e);
-                        side_color = parse_color_attrs(&attrs, unsupported);
+                        side_color = parse_color_attrs(&attrs, theme);
                     }
                     _ => {}
                 }
@@ -645,7 +823,7 @@ fn parse_borders(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedBorder> 
                     }
                     b"color" if current_side.is_some() => {
                         let attrs = collect_attrs(e);
-                        side_color = parse_color_attrs(&attrs, unsupported);
+                        side_color = parse_color_attrs(&attrs, theme);
                     }
                     _ => {}
                 }
@@ -991,6 +1169,11 @@ fn resolve_xf(
 
 /// Parse a worksheet XML to extract per-cell style IDs and layout dimensions.
 pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
+    parse_sheet_formatting_with_theme(xml, &ThemePalette::default())
+}
+
+/// Parse a worksheet, resolving theme colour references against `theme`.
+pub fn parse_sheet_formatting_with_theme(xml: &str, theme: &ThemePalette) -> SheetFormatting {
     let mut cell_styles = Vec::new();
     let mut col_widths = HashMap::new();
     let mut row_heights = HashMap::new();
@@ -1000,7 +1183,6 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
     let mut hidden_rows: Vec<usize> = Vec::new();
     let mut hidden_cols: Vec<usize> = Vec::new();
     let mut tab_color: Option<[u8; 4]> = None;
-    let mut unsupported_sink: Vec<String> = Vec::new();
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -1142,7 +1324,7 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
                     }
                     b"tabColor" => {
                         let attrs = collect_attrs(e);
-                        tab_color = parse_color_attrs(&attrs, &mut unsupported_sink);
+                        tab_color = parse_color_attrs(&attrs, theme);
                     }
                     b"pane" => {
                         // <pane xSplit="1" ySplit="1" state="frozen"/> inside
@@ -1282,9 +1464,18 @@ pub fn parse_xlsx_formatting(
 
     let mut stats = StyleImportStats::default();
 
+    // Theme colours are referenced by fonts, fills, borders, dxfs and tab
+    // colours alike, so resolve the palette before any of them.
+    let rels_xml = read_zip_file(&mut archive, "xl/_rels/workbook.xml.rels")
+        .unwrap_or_default();
+    let theme = read_zip_file(&mut archive, &theme_part_path(&rels_xml))
+        .ok()
+        .map(|xml| parse_theme_xml(&xml))
+        .unwrap_or_default();
+
     // Step 1: Parse styles.xml
     let (style_table, unsupported) = match read_zip_file(&mut archive, "xl/styles.xml") {
-        Ok(xml) => parse_styles_xml(&xml),
+        Ok(xml) => parse_styles_xml_with_theme(&xml, &theme),
         Err(_) => {
             // No styles.xml — return empty
             return Ok((
@@ -1304,13 +1495,11 @@ pub fn parse_xlsx_formatting(
     // into it by dxfId.
     let mut style_table = style_table;
     if let Ok(xml) = read_zip_file(&mut archive, "xl/styles.xml") {
-        style_table.dxfs = parse_dxfs(&xml, &mut stats.unsupported_features);
+        style_table.dxfs = parse_dxfs(&xml, &theme);
     }
 
     // Step 2: Resolve worksheet paths
     let workbook_xml = read_zip_file(&mut archive, "xl/workbook.xml")
-        .unwrap_or_default();
-    let rels_xml = read_zip_file(&mut archive, "xl/_rels/workbook.xml.rels")
         .unwrap_or_default();
     let worksheet_paths = resolve_worksheet_paths_for_sheets(&workbook_xml, &rels_xml, sheet_names);
 
@@ -1319,7 +1508,7 @@ pub fn parse_xlsx_formatting(
     for ws_path in &worksheet_paths {
         let formatting = match read_zip_file(&mut archive, ws_path) {
             Ok(xml) => {
-                let sf = parse_sheet_formatting(&xml);
+                let sf = parse_sheet_formatting_with_theme(&xml, &theme);
                 stats.styles_imported += sf.cell_styles.len();
                 sf
             }
@@ -1463,6 +1652,45 @@ fn resolve_worksheet_paths_for_sheets(
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// Find the workbook's theme part from `xl/_rels/workbook.xml.rels`.
+///
+/// Excel always names it `xl/theme/theme1.xml`, but the relationship is the
+/// authority; fall back to the conventional path when rels don't say.
+fn theme_part_path(rels_xml: &str) -> String {
+    let mut reader = Reader::from_str(rels_xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e))
+                if e.name().as_ref() == b"Relationship" =>
+            {
+                let mut is_theme = false;
+                let mut target = None;
+                for attr in e.attributes().flatten() {
+                    match attr.key.as_ref() {
+                        b"Type" => is_theme = attr.value.ends_with(b"/theme"),
+                        b"Target" => {
+                            target = Some(String::from_utf8_lossy(&attr.value).to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                if let (true, Some(target)) = (is_theme, target) {
+                    return resolve_rel_target(&target);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    "xl/theme/theme1.xml".to_string()
 }
 
 /// Resolve a relationship `Target` to a path inside the xlsx ZIP.
@@ -1782,7 +2010,7 @@ mod tests {
     }
 
     #[test]
-    fn test_theme_color_approximate_warning() {
+    fn test_theme_color_without_theme_part_uses_default() {
         let xml = r#"<?xml version="1.0"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <fonts count="2">
@@ -1798,9 +2026,146 @@ mod tests {
 </styleSheet>"#;
 
         let (table, unsupported) = parse_styles_xml(xml);
-        // Theme 4 = Accent 1 = [79, 129, 189]
+        // Theme 4 = Accent 1 of the Office 2007 fallback = [79, 129, 189]
         assert_eq!(table.styles[1].font_color, Some([79, 129, 189, 255]));
-        assert!(unsupported.iter().any(|s| s.contains("theme tints")));
+        assert!(!unsupported.iter().any(|s| s.contains("theme")));
+    }
+
+    /// Office 2023+ default theme, as Excel writes it — the palette the
+    /// workbook in issue #17 used.
+    const OFFICE_2023_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme">
+  <a:themeElements>
+    <a:clrScheme name="Office">
+      <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+      <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+      <a:dk2><a:srgbClr val="0E2841"/></a:dk2>
+      <a:lt2><a:srgbClr val="E8E8E8"/></a:lt2>
+      <a:accent1><a:srgbClr val="156082"/></a:accent1>
+      <a:accent2><a:srgbClr val="E97132"/></a:accent2>
+      <a:accent3><a:srgbClr val="196B24"/></a:accent3>
+      <a:accent4><a:srgbClr val="0F9ED5"/></a:accent4>
+      <a:accent5><a:srgbClr val="A02B93"/></a:accent5>
+      <a:accent6><a:srgbClr val="4EA72E"/></a:accent6>
+      <a:hlink><a:srgbClr val="467886"/></a:hlink>
+      <a:folHlink><a:srgbClr val="96607D"/></a:folHlink>
+    </a:clrScheme>
+  </a:themeElements>
+  <a:extraClrSchemeLst>
+    <a:extraClrScheme><a:clrScheme name="Other"><a:accent1><a:srgbClr val="FF0000"/></a:accent1></a:clrScheme></a:extraClrScheme>
+  </a:extraClrSchemeLst>
+</a:theme>"#;
+
+    #[test]
+    fn test_parse_theme_xml_index_order() {
+        let theme = parse_theme_xml(OFFICE_2023_THEME);
+        // lt/dk pairs swap: theme="0" is lt1, theme="1" is dk1.
+        assert_eq!(theme.get(0), Some([0xFF, 0xFF, 0xFF]));
+        assert_eq!(theme.get(1), Some([0x00, 0x00, 0x00]));
+        assert_eq!(theme.get(2), Some([0xE8, 0xE8, 0xE8]));
+        assert_eq!(theme.get(3), Some([0x0E, 0x28, 0x41]));
+        assert_eq!(theme.get(4), Some([0x15, 0x60, 0x82]));
+        assert_eq!(theme.get(9), Some([0x4E, 0xA7, 0x2E]));
+        assert_eq!(theme.get(11), Some([0x96, 0x60, 0x7D]));
+        assert_eq!(theme.get(12), None);
+    }
+
+    #[test]
+    fn test_parse_theme_xml_empty_falls_back() {
+        assert_eq!(parse_theme_xml(""), ThemePalette::default());
+    }
+
+    fn hex3(s: &str) -> [u8; 3] {
+        let v = u32::from_str_radix(s, 16).unwrap();
+        [(v >> 16) as u8, (v >> 8) as u8, v as u8]
+    }
+
+    #[test]
+    fn test_apply_tint_matches_excel_swatches() {
+        // (base, tint as Excel writes it, swatch Excel shows)
+        let exact = [
+            ("4472C4", 0.3999755851924192, "8EA9DB"),
+            ("4472C4", -0.249977111117893, "305496"),
+            ("4472C4", -0.499984740745262, "203764"),
+            ("70AD47", -0.249977111117893, "548235"),
+            ("70AD47", 0.7999816888943144, "E2EFDA"),
+            ("ED7D31", 0.7999816888943144, "FCE4D6"),
+            ("ED7D31", -0.249977111117893, "C65911"),
+            ("FFFFFF", -0.0499893185216834, "F2F2F2"),
+            ("FFC000", 0.3999755851924192, "FFD966"),
+        ];
+        for (base, tint, want) in exact {
+            assert_eq!(apply_tint(hex3(base), tint), hex3(want), "{base} tint {tint}");
+        }
+        // A few land one step off Excel's integer rounding; never more.
+        let near = [
+            ("4472C4", 0.7999816888943144, "D9E1F2"),
+            ("5B9BD5", -0.499984740745262, "1F4E78"),
+        ];
+        for (base, tint, want) in near {
+            let got = apply_tint(hex3(base), tint);
+            let want = hex3(want);
+            for c in 0..3 {
+                assert!((got[c] as i16 - want[c] as i16).abs() <= 2, "{base} tint {tint}: {got:?}");
+            }
+        }
+        assert_eq!(apply_tint(hex3("156082"), 0.0), hex3("156082"));
+        assert_eq!(apply_tint(hex3("156082"), -1.0), [0, 0, 0]);
+        assert_eq!(apply_tint(hex3("156082"), 1.0), [255, 255, 255]);
+    }
+
+    /// Issue #17: theme colours with tints rendered as the saturated Office
+    /// 2007 accent instead of the workbook's own pastel.
+    #[test]
+    fn test_themed_tinted_fill_and_font_resolve_against_workbook_theme() {
+        let theme = parse_theme_xml(OFFICE_2023_THEME);
+        let xml = r#"<?xml version="1.0"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2">
+    <font><sz val="11"/></font>
+    <font><sz val="11"/><color theme="0"/></font>
+  </fonts>
+  <fills count="4">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor theme="9" tint="0.7999816888943144"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor theme="9" tint="-0.249977111117893"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="1"><border><left/><right/><top/><bottom/></border></borders>
+  <cellXfs count="3">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+    <xf numFmtId="0" fontId="0" fillId="2" borderId="0" applyFill="1"/>
+    <xf numFmtId="0" fontId="1" fillId="3" borderId="0" applyFont="1" applyFill="1"/>
+  </cellXfs>
+</styleSheet>"#;
+
+        let (table, _) = parse_styles_xml_with_theme(xml, &theme);
+        let light = table.styles[1].background_color.unwrap();
+        let dark = table.styles[2].background_color.unwrap();
+        // Green, Accent 6, Lighter 80% — a pale green, not orange.
+        assert!(light[1] > light[0] && light[1] > light[2] && light[0] > 200, "{light:?}");
+        // Green, Accent 6, Darker 25%.
+        assert!(dark[1] > dark[0] && dark[1] > dark[2] && dark[1] < 0xA7, "{dark:?}");
+        assert_eq!(table.styles[2].font_color, Some([255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn test_tab_color_theme_uses_workbook_theme() {
+        let theme = parse_theme_xml(OFFICE_2023_THEME);
+        let xml = r#"<worksheet><sheetPr><tabColor theme="5"/></sheetPr><sheetData/></worksheet>"#;
+        assert_eq!(
+            parse_sheet_formatting_with_theme(xml, &theme).tab_color,
+            Some([0xE9, 0x71, 0x32, 255])
+        );
+    }
+
+    #[test]
+    fn test_theme_part_path() {
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme7.xml"/>
+</Relationships>"#;
+        assert_eq!(theme_part_path(rels), "xl/theme/theme7.xml");
+        assert_eq!(theme_part_path(""), "xl/theme/theme1.xml");
     }
 
     #[test]
@@ -1948,7 +2313,7 @@ pub struct ParsedCondRule {
 /// properties the rule changes, which is exactly the shape of
 /// `CellFormatOverride`. Note the fill quirk — in a dxf the solid colour
 /// lives in `bgColor`, where a normal `<fill>` puts it in `fgColor`.
-pub fn parse_dxfs(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedDxf> {
+pub fn parse_dxfs(xml: &str, theme: &ThemePalette) -> Vec<ParsedDxf> {
     let mut dxfs = Vec::new();
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -1986,13 +2351,13 @@ pub fn parse_dxfs(xml: &str, unsupported: &mut Vec<String>) -> Vec<ParsedDxf> {
                     }
                     b"color" if in_font => {
                         let attrs = collect_attrs(e);
-                        current.font_color = parse_color_attrs(&attrs, unsupported);
+                        current.font_color = parse_color_attrs(&attrs, theme);
                     }
                     // bgColor is the solid colour in a dxf; fgColor appears too
                     // in files written by some tools, so accept either.
                     b"bgColor" | b"fgColor" if in_fill => {
                         let attrs = collect_attrs(e);
-                        if let Some(c) = parse_color_attrs(&attrs, unsupported) {
+                        if let Some(c) = parse_color_attrs(&attrs, theme) {
                             current.fill_color = Some(c);
                         }
                     }
