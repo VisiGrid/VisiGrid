@@ -582,6 +582,13 @@ fn render_cell(
     // Semantic cell style (base layer — explicit formatting overrides per-property)
     let cell_style = resolve_cell_style(app, format.cell_style);
 
+    // Fills replace the default grid, including inherited and conditional fills.
+    // Keep explicit borders and selection outlines independent of this setting.
+    let show_gridlines = show_gridlines
+        && format.background_color.is_none()
+        && cell_style.fill.is_none()
+        && role_style.and_then(|style| style.background).is_none();
+
     let value = if is_merge_hidden {
         String::new()
     } else if is_editing {
@@ -1831,6 +1838,28 @@ fn is_center_across_continuation(
     false
 }
 
+/// Shared font metrics for deciding which layer owns text and painting it.
+fn spill_text_metrics(format: &visigrid_engine::cell::CellFormat, app: &Spreadsheet) -> (Font, f32) {
+    let style = resolve_cell_style(app, format.cell_style);
+    let mut font = Font::default();
+    if let Some(family) = &format.font_family { font.family = family.clone().into(); }
+    font.weight = if format.bold || style.bold { FontWeight::BOLD } else { FontWeight::NORMAL };
+    font.style = if format.italic || style.italic { FontStyle::Italic } else { FontStyle::Normal };
+    (font, format.font_size.map(|size| size * app.metrics.zoom).unwrap_or(app.metrics.font_size))
+}
+
+fn measure_spill_text(text: &str, format: &visigrid_engine::cell::CellFormat,
+    app: &Spreadsheet, window: &Window) -> f32 {
+    let (font, size) = spill_text_metrics(format, app);
+    let shared: SharedString = text.to_owned().into();
+    let len = shared.len();
+    let shaped = window.text_system().shape_line(shared, px(size), &[TextRun {
+        len, font, color: Hsla::default(), background_color: None,
+        underline: None, strikethrough: None,
+    }], None);
+    shaped.width.into()
+}
+
 /// Calculate how much a cell's text should spill into adjacent cells (Excel-style overflow).
 /// Returns Some(extra_pixels) if text should spill, None otherwise.
 /// Only left-aligned text (or General alignment for text values) spills rightward.
@@ -1838,7 +1867,6 @@ fn is_center_across_continuation(
 /// # Spill Behavior (Excel-compatible)
 /// - Text spills rightward into adjacent empty cells only
 /// - Spill stops at the first non-empty cell
-/// - Selected/active cells don't spill (handled by caller)
 /// - Editing cells don't spill (handled by caller)
 /// - Numbers never spill (they show #### if too wide, but we don't implement that yet)
 fn calculate_text_spill(
@@ -1857,29 +1885,8 @@ fn calculate_text_spill(
         return None;
     }
 
-    // Shape text to get its pixel width
-    let text_owned = text.to_string();
-    let text_shared: SharedString = text_owned.into();
-    let text_len = text_shared.len();
-    if text_len == 0 {
-        return None;
-    }
-
-    let shaped = window.text_system().shape_line(
-        text_shared,
-        px(app.metrics.font_size),
-        &[TextRun {
-            len: text_len,
-            font: Font::default(),
-            color: Hsla::default(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        }],
-        None,
-    );
-
-    let text_width: f32 = shaped.width.into();
+    if text.is_empty() { return None; }
+    let text_width = measure_spill_text(text, &sheet.get_format(row, col), app, window);
     let padding = 8.0; // px_1 = 4px each side
     let available_width = cell_width - padding;
 
@@ -2440,8 +2447,8 @@ fn render_merge_div(
         .bg(bg)
         .flex();
 
-    // Gridlines: all four perimeter sides (overlay covers underlying cells)
-    if show_gridlines {
+    // Unfilled merges show perimeter gridlines; fills replace the default grid.
+    if show_gridlines && format.background_color.is_none() && merge_cell_style.fill.is_none() {
         merge_div = merge_div.border_color(gridline_color);
         if m.origin_row > 0 { merge_div = merge_div.border_t_1(); }
         if m.origin_col > 0 { merge_div = merge_div.border_l_1(); }
@@ -2845,6 +2852,7 @@ fn render_text_spill_overlay(
         text_width: f32,  // Shaped text width for alignment
         text_color: Hsla,
         font_size: f32,
+        font_family: Option<String>,
         alignment: Alignment, // For text positioning within base_width
         bold: bool,
         italic: bool,
@@ -2937,30 +2945,8 @@ fn render_text_spill_overlay(
             // Calculate cell width
             let col_width = metrics.col_width(app.col_width(col));
 
-            // Shape text to get its pixel width
             let text_owned = display.clone();
-            let text_shared: SharedString = text_owned.clone().into();
-            let text_len = text_shared.len();
-            if text_len == 0 {
-                continue;
-            }
-
-            let effective_font_size = format.font_size.map(|s| s * metrics.zoom).unwrap_or(metrics.font_size);
-            let shaped = window.text_system().shape_line(
-                text_shared,
-                px(effective_font_size),
-                &[TextRun {
-                    len: text_len,
-                    font: Font::default(),
-                    color: Hsla::default(),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
-            );
-
-            let text_width: f32 = shaped.width.into();
+            let text_width = measure_spill_text(&display, &format, app, window);
             let padding = 8.0; // px_1 = 4px each side
             let available_width = col_width - padding;
 
@@ -3029,6 +3015,7 @@ fn render_text_spill_overlay(
                     cell_text
                 },
                 font_size: format.font_size.map(|s| s * metrics.zoom).unwrap_or(metrics.font_size),
+                font_family: format.font_family.clone(),
                 alignment: effective_alignment,  // Resolved alignment for text positioning
                 bold: format.bold || spill_cs.bold,
                 italic: format.italic || spill_cs.italic,
@@ -3097,6 +3084,8 @@ fn render_text_spill_overlay(
                     .text_color(run.text_color)
                     .text_size(px(run.font_size));
 
+                // Use the same family used when deciding text ownership.
+                if let Some(family) = run.font_family { text_div = text_div.font_family(family); }
                 // Apply formatting
                 if run.bold {
                     text_div = text_div.font_weight(FontWeight::BOLD);

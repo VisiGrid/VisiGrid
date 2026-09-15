@@ -94,6 +94,7 @@ impl Spreadsheet {
         let old_cols = self.view_state.frozen_cols;
         self.view_state.frozen_rows = 0;
         self.view_state.frozen_cols = 0;
+        self.clamp_scroll_to_freeze(cx);
         self.history.record_action_with_provenance(
             crate::history::UndoAction::FreezePanesChanged {
                 old_frozen_rows: old_rows, old_frozen_cols: old_cols,
@@ -104,7 +105,12 @@ impl Spreadsheet {
     }
 
     /// Clamp scroll position to ensure it doesn't overlap with frozen regions
-    pub(crate) fn clamp_scroll_to_freeze(&mut self, _cx: &mut Context<Self>) {
+    pub(crate) fn clamp_scroll_to_freeze(&mut self, cx: &mut Context<Self>) {
+        let frozen = (self.view_state.frozen_rows, self.view_state.frozen_cols);
+        if self.wb(cx).active_sheet().frozen_panes != frozen {
+            self.wb_mut(cx, |wb| wb.active_sheet_mut().frozen_panes = frozen);
+            self.is_modified = true;
+        }
         // When freeze panes are active, scrollable region starts after frozen rows/cols
         // Ensure scroll position doesn't show frozen rows/cols in the scrollable area
         if self.view_state.frozen_rows > 0 && self.view_state.scroll_row < self.view_state.frozen_rows {
@@ -461,6 +467,8 @@ impl Spreadsheet {
 
     /// Finalize document state after loading a file
     pub fn finalize_load(&mut self, path: &std::path::Path) {
+        self.view_state.scroll_row = self.view_state.scroll_row.max(self.view_state.frozen_rows);
+        self.view_state.scroll_col = self.view_state.scroll_col.max(self.view_state.frozen_cols);
         let ext = ext_lower(path);
         let filename = display_filename(path);
         let is_native = ext.as_ref().map(|e| is_native_ext(e)).unwrap_or(false);

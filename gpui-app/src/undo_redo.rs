@@ -819,6 +819,7 @@ impl Spreadsheet {
             UndoAction::FreezePanesChanged { old_frozen_rows, old_frozen_cols, .. } => {
                 self.view_state.frozen_rows = old_frozen_rows;
                 self.view_state.frozen_cols = old_frozen_cols;
+                self.clamp_scroll_to_freeze(cx);
             }
             UndoAction::Rewind { .. } => {
                 // Rewind is audit-only - cannot be undone
@@ -1109,6 +1110,7 @@ impl Spreadsheet {
             UndoAction::FreezePanesChanged { new_frozen_rows, new_frozen_cols, .. } => {
                 self.view_state.frozen_rows = new_frozen_rows;
                 self.view_state.frozen_cols = new_frozen_cols;
+                self.clamp_scroll_to_freeze(cx);
             }
             UndoAction::Rewind { .. } => {
                 // Rewind is audit-only - cannot be redone

@@ -40,6 +40,8 @@ impl StyleTable {
 pub struct SheetFormatting {
     /// (row, col, style_id) triples
     pub cell_styles: Vec<(usize, usize, usize)>,
+    pub row_styles: HashMap<usize, usize>,
+    pub col_styles: HashMap<usize, usize>,
     /// Column widths in raw Excel character-width units
     pub col_widths: HashMap<usize, f64>,
     /// Row heights in raw Excel point units
@@ -1173,6 +1175,8 @@ pub fn parse_sheet_formatting(xml: &str) -> SheetFormatting {
 /// Parse a worksheet, resolving theme colour references against `theme`.
 pub fn parse_sheet_formatting_with_theme(xml: &str, theme: &ThemePalette) -> SheetFormatting {
     let mut cell_styles = Vec::new();
+    let mut row_styles = HashMap::new();
+    let mut col_styles = HashMap::new();
     let mut col_widths = HashMap::new();
     let mut row_heights = HashMap::new();
     let mut merged_regions = Vec::new();
@@ -1223,6 +1227,13 @@ pub fn parse_sheet_formatting_with_theme(xml: &str, theme: &ThemePalette) -> She
                             }
                         }
 
+                        let attrs: HashMap<String, String> = e.attributes().flatten().map(|a|
+                            (String::from_utf8_lossy(a.key.as_ref()).into_owned(), String::from_utf8_lossy(&a.value).into_owned())).collect();
+                        if matches!(attrs.get("customFormat").map(String::as_str), Some("1" | "true")) {
+                            if let (Some(row), Some(style)) = (row_idx, attrs.get("s").and_then(|s| s.parse::<usize>().ok())) {
+                                row_styles.insert(row, style);
+                            }
+                        }
                         _current_row = row_idx;
 
                         if custom_height {
@@ -1258,11 +1269,9 @@ pub fn parse_sheet_formatting_with_theme(xml: &str, theme: &ThemePalette) -> She
                         }
 
                         if let (Some(style_id), Some(ref cell_ref)) = (style_id, &cell_ref) {
-                            if style_id > 0 {
-                                // style_id 0 = default, skip
-                                if let Some((row, col)) = parse_cell_ref(cell_ref) {
-                                    cell_styles.push((row, col, style_id));
-                                }
+                            // Explicit style zero overrides an inherited row/column style.
+                            if let Some((row, col)) = parse_cell_ref(cell_ref) {
+                                cell_styles.push((row, col, style_id));
                             }
                         }
                     }
@@ -1305,6 +1314,12 @@ pub fn parse_sheet_formatting_with_theme(xml: &str, theme: &ThemePalette) -> She
                             }
                         }
 
+                        let attrs: HashMap<String, String> = e.attributes().flatten().map(|a|
+                            (String::from_utf8_lossy(a.key.as_ref()).into_owned(), String::from_utf8_lossy(&a.value).into_owned())).collect();
+                        if let (Some(min), Some(max), Some(style)) = (min_col, max_col,
+                            attrs.get("style").and_then(|s| s.parse::<usize>().ok())) {
+                            for col in min..=max.min(16383) { col_styles.insert(col, style); }
+                        }
                         if custom_width {
                             if let (Some(min), Some(max), Some(w)) = (min_col, max_col, width) {
                                 for col in min..=max {
@@ -1392,6 +1407,8 @@ pub fn parse_sheet_formatting_with_theme(xml: &str, theme: &ThemePalette) -> She
 
     SheetFormatting {
         cell_styles,
+        row_styles,
+        col_styles,
         col_widths,
         row_heights,
         merged_regions,
@@ -1901,8 +1918,9 @@ mod tests {
 </worksheet>"#;
 
         let sf = parse_sheet_formatting(xml);
-        // Style 0 is default, should be skipped
-        assert_eq!(sf.cell_styles.len(), 3);
+        // Explicit style 0 must override inherited row/column formatting.
+        assert_eq!(sf.cell_styles.len(), 4);
+        assert!(sf.cell_styles.contains(&(0, 1, 0)));
         assert!(sf.cell_styles.contains(&(0, 0, 1))); // A1 → style 1
         assert!(sf.cell_styles.contains(&(0, 2, 2))); // C1 → style 2
         assert!(sf.cell_styles.contains(&(1, 0, 3))); // A2 → style 3

@@ -887,7 +887,6 @@ fn import_formatting(
     // A file can carry layout and conditional formatting without a single cell
     // style — returning here would drop both, so only the per-cell style work
     // below is skipped.
-    let has_cell_styles = style_table.len() > 0;
 
     // Build a mapping from xlsx style index → workbook style_table index
     // by interning each parsed style into the workbook's global table
@@ -902,20 +901,36 @@ fn import_formatting(
 
     // Apply per-cell style IDs and handle styled-empty cells
     for (sheet_idx, sheet_fmt) in sheet_formats.iter().enumerate() {
-        if !has_cell_styles {
-            break;
-        }
         let sheet = match workbook.sheet_mut(sheet_idx) {
             Some(s) => s,
             None => continue,
         };
 
+        sheet.frozen_panes = (sheet_fmt.frozen_rows.min(sheet.rows.saturating_sub(1)),
+            sheet_fmt.frozen_cols.min(sheet.cols.saturating_sub(1)));
+        for (&row, &id) in &sheet_fmt.row_styles {
+            if row < sheet.rows {
+                if let Some(format) = style_table.get(id) { sheet.row_formats.insert(row, format.clone()); }
+            }
+        }
+        for (&col, &id) in &sheet_fmt.col_styles {
+            if col < sheet.cols {
+                if let Some(format) = style_table.get(id) { sheet.col_formats.insert(col, format.clone()); }
+            }
+        }
+        // Values were loaded before formatting. Resolve inherited formats on
+        // those cells, then apply explicit cell styles (including style zero).
+        let coords: Vec<_> = sheet.cells_iter().map(|(rc, _)| *rc).collect();
+        for (row, col) in coords {
+            if let Some(format) = sheet.row_formats.get(&row).or_else(|| sheet.col_formats.get(&col)).cloned() {
+                sheet.set_format_from_import(row, col, format);
+            }
+        }
+        sheet.scan_border_flag();
+
         for &(row, col, xlsx_style_id) in &sheet_fmt.cell_styles {
             // Look up the workbook style_id for this xlsx style index
-            let wb_style_id = match style_id_map.get(xlsx_style_id) {
-                Some(Some(id)) => *id,
-                _ => continue, // Default style or out of range
-            };
+            let wb_style_id = style_id_map.get(xlsx_style_id).copied().flatten();
 
             // Get the resolved format for this style
             let resolved_format = match style_table.get(xlsx_style_id) {
@@ -928,12 +943,13 @@ fn import_formatting(
 
             if cell_exists {
                 // Cell has data: apply the style and set format
-                sheet.set_style_id(row, col, wb_style_id);
+                if let Some(id) = wb_style_id { sheet.set_style_id(row, col, id); }
                 sheet.set_format_from_import(row, col, resolved_format.clone());
                 result.styles_imported += 1;
-            } else if xlsx_styles::is_style_visually_relevant(resolved_format) {
+            } else if xlsx_styles::is_style_visually_relevant(resolved_format)
+                || sheet.row_formats.contains_key(&row) || sheet.col_formats.contains_key(&col) {
                 // Styled-empty cell with visual formatting: materialize it
-                sheet.set_style_id(row, col, wb_style_id);
+                if let Some(id) = wb_style_id { sheet.set_style_id(row, col, id); }
                 sheet.set_format_from_import(row, col, resolved_format.clone());
                 result.styles_imported += 1;
             }
@@ -1360,6 +1376,17 @@ fn build_export(
             ));
         }
 
+        for (&row, format) in &sheet.row_formats {
+            worksheet.set_row_format(row as u32, &build_excel_format(format))
+                .map_err(|e| format!("Failed to export row style: {e}"))?;
+        }
+        for (&col, format) in &sheet.col_formats {
+            worksheet.set_column_format(col as u16, &build_excel_format(format))
+                .map_err(|e| format!("Failed to export column style: {e}"))?;
+        }
+        worksheet.set_freeze_panes(sheet.frozen_panes.0 as u32, sheet.frozen_panes.1 as u16)
+            .map_err(|e| format!("Failed to export frozen panes: {e}"))?;
+
         // Get layout for this sheet if provided
         let layout = layouts.and_then(|l| l.get(sheet_idx));
 
@@ -1531,12 +1558,20 @@ fn export_sheet_cells(
         let col16 = *col as u16;
 
         // Build format for this cell
-        let format = build_excel_format(&cell.format);
+        let mut format = build_excel_format(&cell.format);
+        if cell.format.is_default()
+            && (sheet.row_formats.contains_key(row) || sheet.col_formats.contains_key(col)) {
+            // The writer treats its empty Format as "inherit row/column".
+            // Explicitly request Excel's default foreground to emit an XF
+            // that clears the inherited fill while retaining default appearance.
+            format = format.set_font_color(rust_xlsxwriter::Color::Theme(1, 0));
+        }
 
         match &cell.value {
             CellValue::Empty => {
                 // Only write format if cell has formatting
-                if has_formatting(&cell.format) {
+                if has_formatting(&cell.format) || sheet.row_formats.contains_key(row)
+                    || sheet.col_formats.contains_key(col) {
                     worksheet
                         .write_blank(row32, col16, &format)
                         .map_err(|e| format!("Failed to write cell ({}, {}): {}", row, col, e))?;
@@ -2672,6 +2707,73 @@ fn apply_layout(worksheet: &mut Worksheet, layout: &ExportLayout) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue_17_import_and_roundtrip() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/issue17-formatting.xlsx");
+        let (mut wb, _) = super::import(&fixture).unwrap();
+        fn check(wb: &visigrid_engine::workbook::Workbook) {
+            let sheet = wb.active_sheet();
+            assert_eq!(sheet.get_formatted_display(8, 2), "Test Coverage");
+            assert_eq!(sheet.get_format(8, 2).font_color, Some([255, 255, 255, 255]));
+            assert_eq!(sheet.get_format(8, 2).background_color, Some([0, 176, 80, 255]));
+            assert_eq!(sheet.get_format(1000, 0).background_color, sheet.get_format(0, 0).background_color);
+            assert!(sheet.get_format(1000, 0).background_color.is_some());
+            assert_eq!(sheet.get_format(5, 100).background_color, sheet.get_format(5, 1).background_color);
+            assert!(sheet.get_format(5, 100).bold);
+            // A6 explicitly keeps the column fill over the row fill.
+            assert_eq!(sheet.get_format(5, 0).background_color, sheet.get_format(0, 0).background_color);
+            assert_eq!(sheet.frozen_panes, (0, 1));
+            assert!(sheet.cells_iter().count() < 30, "axis fills must stay sparse");
+        }
+        check(&wb);
+        // Clearing one blank cell's formatting must survive native saving,
+        // rather than reverting to the surrounding column's fill.
+        wb.active_sheet_mut().set_format(1, 0, Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let native = dir.path().join("example.sheet");
+        crate::native::save_workbook(&wb, &native).unwrap();
+        let restored = crate::native::load_workbook(&native).unwrap();
+        check(&restored);
+        assert_eq!(restored.active_sheet().get_format(1, 0).background_color, None);
+        let full = dir.path().join("full.sheet");
+        crate::native::save_workbook_full(&wb, &Default::default(), &[], &[], &full).unwrap();
+        check(&crate::native::load_workbook(&full).unwrap());
+        let xlsx = dir.path().join("roundtrip.xlsx");
+        super::export(&restored, &xlsx, None).unwrap();
+        let exported = super::import(&xlsx).unwrap().0;
+        check(&exported);
+        assert_eq!(exported.active_sheet().get_format(1, 0).background_color, None);
+    }
+
+    #[test]
+    fn issue_17_axis_precedence_and_explicit_cell_override() {
+        use rust_xlsxwriter::{Workbook, Format, Color};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("axis.xlsx");
+        let mut excel = Workbook::new();
+        let sheet = excel.add_worksheet();
+        sheet.set_column_format(0, &Format::new().set_background_color(Color::Red)).unwrap();
+        sheet.set_row_format(2, &Format::new().set_background_color(Color::Blue)).unwrap();
+        sheet.write_string(0, 0, "inherits").unwrap();
+        sheet.write_blank(2, 0, &Format::new().set_font_name("Arial")).unwrap();
+        sheet.write_string(3, 1, "extent").unwrap();
+        excel.add_worksheet().set_freeze_panes(2, 1).unwrap();
+        excel.save(&path).unwrap();
+        let (wb, _) = super::import(&path).unwrap();
+        let s = wb.active_sheet();
+        assert_eq!(s.get_format(1, 0).background_color, Some([255, 0, 0, 255]));
+        assert_eq!(s.get_format(2, 1).background_color, Some([0, 0, 255, 255]));
+        assert_eq!(s.get_format(0, 0).background_color, Some([255, 0, 0, 255]));
+        assert_eq!(s.get_format(2, 0).background_color, None);
+        let native = dir.path().join("axis.sheet");
+        crate::native::save_workbook(&wb, &native).unwrap();
+        let restored = crate::native::load_workbook(&native).unwrap();
+        assert_eq!(restored.active_sheet().get_format(2, 0).background_color, None);
+        assert_eq!(restored.sheet(0).unwrap().frozen_panes, (0, 0));
+        assert_eq!(restored.sheet(1).unwrap().frozen_panes, (2, 1));
+    }
+
     /// A width attribute is a string in the file, and `"NaN".parse::<f64>()`
     /// succeeds — so a hand-edited or hostile xlsx can hand us a real NaN, and
     /// these conversions carry it through unchanged.

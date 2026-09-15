@@ -302,6 +302,14 @@ pub struct Sheet {
     /// green = reconciled), so losing it on import loses information.
     #[serde(default)]
     pub tab_color: Option<[u8; 4]>,
+    /// Sparse defaults for cells not explicitly formatted. Row styles win over columns.
+    #[serde(default)]
+    pub row_formats: HashMap<usize, CellFormat>,
+    #[serde(default)]
+    pub col_formats: HashMap<usize, CellFormat>,
+    /// Initial/saved freeze configuration (rows, columns).
+    #[serde(default)]
+    pub frozen_panes: (usize, usize),
     /// Fast lookup: (row, col) → index into merged_regions
     #[serde(skip)]
     merge_index: HashMap<(usize, usize), usize>,
@@ -434,6 +442,9 @@ impl Sheet {
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
             tab_color: None,
+            row_formats: HashMap::new(),
+            col_formats: HashMap::new(),
+            frozen_panes: (0, 0),
             merged_regions: Vec::new(),
             merge_index: HashMap::new(),
             has_any_borders: false,
@@ -458,6 +469,9 @@ impl Sheet {
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
             tab_color: None,
+            row_formats: HashMap::new(),
+            col_formats: HashMap::new(),
+            frozen_panes: (0, 0),
             merged_regions: Vec::new(),
             merge_index: HashMap::new(),
             has_any_borders: false,
@@ -508,7 +522,7 @@ impl Sheet {
         // Invalidate computed cache (cell changed, dependents may need recompute)
         self.computed_cache.borrow_mut().remove(&(row, col));
 
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.set(value);
 
         // If this is a formula, evaluate it and apply spill if it returns an array
@@ -523,7 +537,7 @@ impl Sheet {
         let (row, col) = self.merge_origin_coord(row, col);
         self.clear_spill_from(row, col);
         self.computed_cache.borrow_mut().remove(&(row, col));
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.set_text(text);
     }
 
@@ -542,7 +556,7 @@ impl Sheet {
         let (row, col) = self.merge_origin_coord(row, col);
         self.clear_spill_from(row, col);
         self.computed_cache.borrow_mut().remove(&(row, col));
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.set(value);
     }
 
@@ -577,14 +591,14 @@ impl Sheet {
         // Store #CYCLE! as the cell value while preserving the formula source
         // For now, we just set a text value - the original formula is lost
         // A future improvement could preserve the formula for editing
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.value = CellValue::Text("#CYCLE!".to_string());
     }
 
     /// Replace a formula cell with a static cached value, preserving the
     /// original formula as audit metadata. Used during cycle freeze on import.
     pub fn freeze_cell(&mut self, row: usize, col: usize, cached: CellValue, formula_source: String) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.value = cached;
         cell.clear_spill_state(); // Runtime state only — must not touch frozen_formula
         cell.frozen_formula = Some(formula_source); // Set AFTER clearing runtime state
@@ -820,12 +834,12 @@ impl Sheet {
                 if let Some(value) = array.get(dr, dc) {
                     if dr == 0 && dc == 0 {
                         // Parent cell - just set spill_info
-                        let cell = self.cells.entry((r, c)).or_default();
+                        let cell = self.cell_with_inherited_format(r, c);
                         cell.spill_info = Some(SpillInfo { rows, cols });
                     } else {
                         // Receiving cell
                         self.spill_values.insert((r, c), value.clone());
-                        let cell = self.cells.entry((r, c)).or_default();
+                        let cell = self.cell_with_inherited_format(r, c);
                         cell.spill_parent = Some((parent_row, parent_col));
                     }
                 }
@@ -1037,7 +1051,7 @@ impl Sheet {
         self.cells
             .get(&(row, col))
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_else(|| Cell { format: self.inherited_format(row, col), ..Cell::default() })
     }
 
     fn display_cell_value(&self, value: &CellValue, row: usize, col: usize) -> String {
@@ -1071,11 +1085,26 @@ impl Sheet {
         }
     }
 
+    fn inherited_format(&self, row: usize, col: usize) -> CellFormat {
+        self.row_formats.get(&row).or_else(|| self.col_formats.get(&col))
+            .cloned().unwrap_or_default()
+    }
+
+    fn cell_with_inherited_format(&mut self, row: usize, col: usize) -> &mut Cell {
+        let row_formats = &self.row_formats;
+        let col_formats = &self.col_formats;
+        self.cells.entry((row, col)).or_insert_with(|| Cell {
+            format: row_formats.get(&row).or_else(|| col_formats.get(&col))
+                .cloned().unwrap_or_default(),
+            ..Cell::default()
+        })
+    }
+
     pub fn get_format(&self, row: usize, col: usize) -> CellFormat {
         self.cells
             .get(&(row, col))
             .map(|c| c.format.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(|| self.inherited_format(row, col))
     }
 
     /// Iterate over all populated cells
@@ -1106,13 +1135,13 @@ impl Sheet {
         if !self.has_any_borders && format.has_any_border() {
             self.has_any_borders = true;
         }
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format = format;
     }
 
     /// Set the style_id on a cell (imported style provenance).
     pub fn set_style_id(&mut self, row: usize, col: usize, style_id: u32) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.style_id = Some(style_id);
     }
 
@@ -1122,111 +1151,104 @@ impl Sheet {
         if !self.has_any_borders && format.has_any_border() {
             self.has_any_borders = true;
         }
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format = format;
     }
 
     pub fn toggle_bold(&mut self, row: usize, col: usize) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.bold = !cell.format.bold;
     }
 
     pub fn toggle_italic(&mut self, row: usize, col: usize) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.italic = !cell.format.italic;
     }
 
     pub fn toggle_underline(&mut self, row: usize, col: usize) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.underline = !cell.format.underline;
     }
 
     pub fn toggle_strikethrough(&mut self, row: usize, col: usize) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.strikethrough = !cell.format.strikethrough;
     }
 
     pub fn set_bold(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.bold = value;
     }
 
     pub fn set_italic(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.italic = value;
     }
 
     pub fn set_underline(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.underline = value;
     }
 
     pub fn set_strikethrough(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.strikethrough = value;
     }
 
     pub fn set_alignment(&mut self, row: usize, col: usize, alignment: Alignment) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.alignment = alignment;
     }
 
     pub fn set_vertical_alignment(&mut self, row: usize, col: usize, vertical_alignment: VerticalAlignment) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.vertical_alignment = vertical_alignment;
     }
 
     pub fn set_text_overflow(&mut self, row: usize, col: usize, text_overflow: TextOverflow) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.text_overflow = text_overflow;
     }
 
     pub fn set_number_format(&mut self, row: usize, col: usize, number_format: NumberFormat) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.number_format = number_format;
     }
 
     pub fn get_number_format(&self, row: usize, col: usize) -> NumberFormat {
-        self.cells
-            .get(&(row, col))
-            .map(|c| c.format.number_format.clone())
-            .unwrap_or_default()
+        self.get_format(row, col).number_format
     }
 
     pub fn set_font_family(&mut self, row: usize, col: usize, font_family: Option<String>) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.font_family = font_family;
     }
 
     pub fn get_font_family(&self, row: usize, col: usize) -> Option<String> {
-        self.cells
-            .get(&(row, col))
-            .and_then(|c| c.format.font_family.clone())
+        self.get_format(row, col).font_family
     }
 
     pub fn set_background_color(&mut self, row: usize, col: usize, color: Option<[u8; 4]>) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.background_color = color;
     }
 
     pub fn get_background_color(&self, row: usize, col: usize) -> Option<[u8; 4]> {
-        self.cells
-            .get(&(row, col))
-            .and_then(|c| c.format.background_color)
+        self.get_format(row, col).background_color
     }
 
     pub fn set_font_size(&mut self, row: usize, col: usize, size: Option<f32>) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.font_size = size;
     }
 
     pub fn set_font_color(&mut self, row: usize, col: usize, color: Option<[u8; 4]>) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.font_color = color;
     }
 
     pub fn set_cell_style(&mut self, row: usize, col: usize, style: CellStyle) {
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.cell_style = style;
     }
 
@@ -1243,7 +1265,7 @@ impl Sheet {
         if !self.has_any_borders && (top.is_set() || right.is_set() || bottom.is_set() || left.is_set()) {
             self.has_any_borders = true;
         }
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.border_top = top;
         cell.format.border_right = right;
         cell.format.border_bottom = bottom;
@@ -1253,28 +1275,28 @@ impl Sheet {
     /// Set the top border on a cell
     pub fn set_border_top(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.border_top = border;
     }
 
     /// Set the right border on a cell
     pub fn set_border_right(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.border_right = border;
     }
 
     /// Set the bottom border on a cell
     pub fn set_border_bottom(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.border_bottom = border;
     }
 
     /// Set the left border on a cell
     pub fn set_border_left(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cells.entry((row, col)).or_default();
+        let cell = self.cell_with_inherited_format(row, col);
         cell.format.border_left = border;
     }
 
@@ -1282,7 +1304,8 @@ impl Sheet {
     /// Call after bulk operations that may have cleared borders (e.g., undo/redo
     /// restoring a previous workbook snapshot).
     pub fn scan_border_flag(&mut self) {
-        self.has_any_borders = self.cells.values().any(|c| c.format.has_any_border());
+        self.has_any_borders = self.cells.values().any(|c| c.format.has_any_border())
+            || self.row_formats.values().chain(self.col_formats.values()).any(CellFormat::has_any_border);
     }
 
     // =========================================================================
@@ -1492,6 +1515,8 @@ impl Sheet {
             }
         }
         self.normalize_merges();
+        self.row_formats = self.row_formats.drain().map(|(i, f)|
+            (if i >= at_row { i + count } else { i }, f)).collect();
         self.cond_formats.insert_rows(at_row, count);
     }
 
@@ -1549,6 +1574,10 @@ impl Sheet {
             }
         }
         self.normalize_merges();
+        self.row_formats = self.row_formats.drain().filter_map(|(i, f)| {
+            if i >= start_row && i < start_row + count { None }
+            else { Some((if i >= start_row + count { i - count } else { i }, f)) }
+        }).collect();
         self.cond_formats.delete_rows(start_row, count);
         // Deleted rows may have removed the only bordered cells.
         // Only rescan when the flag is currently true (can't flip false→false).
@@ -1591,6 +1620,8 @@ impl Sheet {
             }
         }
         self.normalize_merges();
+        self.col_formats = self.col_formats.drain().map(|(i, f)|
+            (if i >= at_col { i + count } else { i }, f)).collect();
         self.cond_formats.insert_cols(at_col, count);
     }
 
@@ -1648,6 +1679,10 @@ impl Sheet {
             }
         }
         self.normalize_merges();
+        self.col_formats = self.col_formats.drain().filter_map(|(i, f)| {
+            if i >= start_col && i < start_col + count { None }
+            else { Some((if i >= start_col + count { i - count } else { i }, f)) }
+        }).collect();
         self.cond_formats.delete_cols(start_col, count);
         // Deleted columns may have removed the only bordered cells.
         // Only rescan when the flag is currently true (can't flip false→false).
@@ -2086,6 +2121,37 @@ fn custom_code_iso(code: &str) -> Option<Iso> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue_17_axis_styles_follow_edits_and_structure() {
+        let mut sheet = super::Sheet::new(super::SheetId(1), 1000, 100);
+        let mut column = super::CellFormat::default();
+        column.background_color = Some([128, 128, 128, 255]);
+        sheet.col_formats.insert(0, column.clone());
+        let mut row = super::CellFormat::default();
+        row.background_color = Some([0, 0, 100, 255]);
+        row.bold = true;
+        sheet.row_formats.insert(5, row.clone());
+        assert_eq!(sheet.get_format(500, 0), column);
+        assert_eq!(sheet.get_format(5, 0), row);
+        sheet.set_value(500, 0, "new value");
+        assert_eq!(sheet.get_format(500, 0), column);
+        sheet.toggle_italic(5, 20);
+        assert!(sheet.get_format(5, 20).bold);
+        assert!(sheet.get_format(5, 20).italic);
+        // An explicit default is a real override, not a missing style.
+        sheet.set_format(5, 0, super::CellFormat::default());
+        assert_eq!(sheet.get_format(5, 0), super::CellFormat::default());
+        sheet.insert_rows(2, 2);
+        assert_eq!(sheet.get_format(7, 90), row);
+        sheet.delete_rows(2, 2);
+        assert_eq!(sheet.get_format(5, 90), row);
+        sheet.insert_cols(0, 2);
+        assert_eq!(sheet.get_format(900, 2), column);
+        sheet.delete_cols(0, 2);
+        assert_eq!(sheet.get_format(900, 0), column);
+        assert!(sheet.cells_iter().count() < 10);
+    }
+
     use super::*;
     use crate::cell::{DateStyle, NegativeStyle};
 

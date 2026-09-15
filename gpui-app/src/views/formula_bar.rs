@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{
-    Spreadsheet, CELL_HEIGHT, REF_COLORS, EditorSurface,
+    Spreadsheet, FORMULA_BAR_HEIGHT, REF_COLORS, EditorSurface,
     FORMULA_BAR_CELL_REF_WIDTH, FORMULA_BAR_FX_WIDTH,
 };
 use crate::theme::TokenKey;
@@ -58,7 +58,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
     let is_formula_editing = editing && app.edit_value.starts_with('=');
 
     // Expanded mode: 2.5x height for long formulas
-    let bar_height = if app.formula_bar_expanded { CELL_HEIGHT * 2.5 } else { CELL_HEIGHT };
+    let bar_height = if app.formula_bar_expanded { FORMULA_BAR_HEIGHT * 2.5 } else { FORMULA_BAR_HEIGHT };
 
     div()
         .relative()
@@ -1188,7 +1188,7 @@ pub fn render_hover_docs(
     // Position below the formula bar — flat, terminal-style
     div()
         .absolute()
-        .top(px(CELL_HEIGHT * 2.0))
+        .top(px(FORMULA_BAR_HEIGHT * 2.0))
         .left(px(90.0))
         .bg(panel_bg)
         .border_1()

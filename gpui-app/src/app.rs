@@ -191,8 +191,10 @@ pub struct PairingPrompt {
     pub reply: Option<crate::session_server::bridge::oneshot::Sender<bool>>,
 }
 
-pub const CELL_WIDTH: f32 = 80.0;
-pub const CELL_HEIGHT: f32 = 24.0;
+// Give default cell text breathing room without enlarging the font. Explicit
+// workbook column widths and row heights still take precedence.
+pub const CELL_WIDTH: f32 = 96.0;
+pub const CELL_HEIGHT: f32 = 28.0;
 pub const HEADER_WIDTH: f32 = 50.0;
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
 pub const FORMULA_BAR_HEIGHT: f32 = 28.0;
@@ -3293,7 +3295,13 @@ impl Spreadsheet {
     /// Update cached sheet ID from the workbook.
     /// Call this after switching sheets.
     pub fn update_cached_sheet_id(&mut self, cx: &mut Context<Self>) {
-        self.cached_sheet_id = self.workbook.read(cx).active_sheet().id;
+        let sheet = self.workbook.read(cx).active_sheet();
+        self.cached_sheet_id = sheet.id;
+        let (rows, cols) = sheet.frozen_panes;
+        self.view_state.frozen_rows = rows;
+        self.view_state.frozen_cols = cols;
+        self.view_state.scroll_row = self.view_state.scroll_row.max(rows);
+        self.view_state.scroll_col = self.view_state.scroll_col.max(cols);
     }
 
     /// Get the cached sheet ID (for use in views without context access)

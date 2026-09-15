@@ -1328,7 +1328,6 @@ impl Spreadsheet {
     }
 
     /// Build ExportLayout for each sheet (column widths, row heights)
-    /// Note: Frozen panes will be added when that feature is implemented (see roadmap)
     fn build_export_layouts(&self, cx: &App) -> Vec<xlsx::ExportLayout> {
         let mut layouts = Vec::new();
         let wb = self.wb(cx);
@@ -1355,9 +1354,13 @@ impl Spreadsheet {
                 }
             }
 
-            // Frozen panes: Not yet implemented in VisiGrid (see roadmap)
-            // layout.frozen_rows = ...;
-            // layout.frozen_cols = ...;
+            if let Some(sheet) = wb.sheet(sheet_idx) {
+                let (rows, cols) = if sheet_idx == wb.active_sheet_index() {
+                    (self.view_state.frozen_rows, self.view_state.frozen_cols)
+                } else { sheet.frozen_panes };
+                layout.frozen_rows = rows;
+                layout.frozen_cols = cols;
+            }
 
             // AutoFilter state (only on active sheet — per-sheet filter persistence not yet implemented)
             if sheet_idx == wb.active_sheet_index() && self.filter_state.is_enabled() {

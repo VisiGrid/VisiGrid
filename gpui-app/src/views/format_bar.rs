@@ -1,6 +1,6 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, TriState, CELL_HEIGHT};
+use crate::app::{Spreadsheet, TriState, FORMULA_BAR_HEIGHT};
 use crate::mode::Mode;
 use crate::theme::TokenKey;
 use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment, NumberFormat};
@@ -368,10 +368,10 @@ pub fn render_font_size_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
     // Vertical offset from root div top to below the format bar.
-    // macOS: titlebar(34) + formula_bar(CELL_HEIGHT=24) + format_bar(28) = 86
-    // Other: menu_bar(28) + formula_bar(24) + format_bar(28) = 80
+    // macOS: titlebar(34) + formula_bar(28) + format_bar(28) = 90
+    // Other: menu_bar(28) + formula_bar(28) + format_bar(28) = 84
     let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + CELL_HEIGHT + FORMAT_BAR_HEIGHT;
+    let top_offset = chrome_above + FORMULA_BAR_HEIGHT + FORMAT_BAR_HEIGHT;
 
     // Horizontal offset: px_2 padding (8) + font family (~84) + gap_1 (4) = ~96
     let left_offset: f32 = 8.0 + 84.0 + 4.0;
@@ -585,9 +585,9 @@ pub fn render_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let align_cas = matches!(state.alignment, TriState::Uniform(Alignment::CenterAcrossSelection));
 
     // Position below format bar, roughly under Format button
-    // macOS: titlebar(34) + formula_bar(24) + format_bar(28) = 86
+    // macOS: titlebar(34) + formula_bar(28) + format_bar(28) = 90
     let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + CELL_HEIGHT + FORMAT_BAR_HEIGHT;
+    let top_offset = chrome_above + FORMULA_BAR_HEIGHT + FORMAT_BAR_HEIGHT;
     // Horizontal: after font family + size + separator
     let left_offset: f32 = 8.0 + 84.0 + 54.0 + 4.0 + 4.0;
 
@@ -1211,7 +1211,7 @@ pub fn render_number_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreads
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
     let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + CELL_HEIGHT + FORMAT_BAR_HEIGHT;
+    let top_offset = chrome_above + FORMULA_BAR_HEIGHT + FORMAT_BAR_HEIGHT;
 
     // Horizontal offset: sum of all preceding button widths + gaps + padding.
     // px_2 padding(8) + font family(84+4) + font size(52+4) + sep(5) + format dropdown(~60+4)
@@ -1338,7 +1338,7 @@ pub fn render_cell_style_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadshee
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
     let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + CELL_HEIGHT + FORMAT_BAR_HEIGHT;
+    let top_offset = chrome_above + FORMULA_BAR_HEIGHT + FORMAT_BAR_HEIGHT;
 
     // Horizontal offset: number format btn left (541) + btn width (~40) + sep (5) ≈ 586
     let left_offset: f32 = 586.0;

@@ -583,7 +583,8 @@ fn write_sheet(conn: &Connection, sheet: &Sheet) -> Result<(), String> {
                 let format = &cell.format;
 
                 // Skip cells with no value and default formatting
-                if raw.is_empty() && format.is_default() {
+                if raw.is_empty() && format.is_default()
+                    && !sheet.row_formats.contains_key(&row) && !sheet.col_formats.contains_key(&col) {
                     continue;
                 }
 
@@ -824,7 +825,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             border_left: CellBorder::default(),
             cell_style: CellStyle::default(),
         };
-        if !format.is_default() {
+        if !format.is_default() || value_type == TYPE_EMPTY {
             sheet.set_format(row, col, format);
         }
     }
@@ -889,7 +890,8 @@ fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> 
                 let format = &cell.format;
 
                 // Skip cells with no value and default formatting
-                if raw.is_empty() && format.is_default() {
+                if raw.is_empty() && format.is_default()
+                    && !sheet.row_formats.contains_key(&row) && !sheet.col_formats.contains_key(&col) {
                     continue;
                 }
 
@@ -985,6 +987,7 @@ fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> 
 
     save_cond_formats(&conn, workbook)?;
     save_tab_colors(&conn, workbook)?;
+    save_sheet_defaults(&conn, workbook)?;
 
     conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
 
@@ -1045,7 +1048,8 @@ fn write_workbook_with_metadata(
                 let raw = cell.value.raw_display();
                 let format = &cell.format;
 
-                if raw.is_empty() && format.is_default() {
+                if raw.is_empty() && format.is_default()
+                    && !sheet.row_formats.contains_key(&row) && !sheet.col_formats.contains_key(&col) {
                     continue;
                 }
 
@@ -1154,6 +1158,7 @@ fn write_workbook_with_metadata(
 
     save_cond_formats(&conn, workbook)?;
     save_tab_colors(&conn, workbook)?;
+    save_sheet_defaults(&conn, workbook)?;
 
     conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
 
@@ -1331,7 +1336,7 @@ fn load_workbook_v2(
                 ..Default::default()
             };
 
-            if !format.is_default() {
+            if !format.is_default() || value_type == TYPE_EMPTY {
                 sheet.set_format(row, col, format);
             }
         }
@@ -1456,6 +1461,7 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
     // Load conditional formatting rules (stored as JSON blobs in meta)
     load_cond_formats(&conn, &mut workbook);
     load_tab_colors(&conn, &mut workbook);
+    load_sheet_defaults(&conn, &mut workbook);
 
     // Rebuild dependency graph and compute all formulas after loading
     workbook.rebuild_dep_graph();
@@ -1487,10 +1493,36 @@ fn save_cond_formats_sheet(
     Ok(())
 }
 
-/// Persist conditional formatting rules for every sheet in the workbook.
-/// Tab colours live in `meta` rather than a `sheets` column so that opening a
-/// file written by an older build needs no schema migration — the key is
-/// simply absent and the tab renders with the theme default.
+/// Sparse sheet formatting and initial pane configuration. Old files omit
+/// this metadata key and retain the default empty maps and unfrozen view.
+fn save_sheet_defaults(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
+    for (i, sheet) in workbook.sheets().iter().enumerate() {
+        let json = serde_json::to_string(&(&sheet.row_formats, &sheet.col_formats, sheet.frozen_panes))
+            .map_err(|e| e.to_string())?;
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![format!("sheet_defaults_{i}"), json]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn load_sheet_defaults(conn: &Connection, workbook: &mut Workbook) {
+    for i in 0..workbook.sheet_count() {
+        let raw: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = ?1",
+            params![format!("sheet_defaults_{i}")], |row| row.get(0)).ok();
+        if let Some(raw) = raw {
+            if let Ok((rows, cols, frozen)) = serde_json::from_str(&raw) {
+                if let Some(sheet) = workbook.sheet_mut(i) {
+                    sheet.row_formats = rows;
+                    sheet.col_formats = cols;
+                    sheet.frozen_panes = frozen;
+                    sheet.scan_border_flag();
+                }
+            }
+        }
+    }
+}
+
+/// Tab colours live in metadata so old files need no schema migration.
 fn save_tab_colors(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
     for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
         let Some([r, g, b, a]) = sheet.tab_color else {
@@ -2402,7 +2434,8 @@ fn write_workbook_full(
                 let raw = cell.value.raw_display();
                 let format = &cell.format;
 
-                if raw.is_empty() && format.is_default() {
+                if raw.is_empty() && format.is_default()
+                    && !sheet.row_formats.contains_key(&row) && !sheet.col_formats.contains_key(&col) {
                     continue;
                 }
 
@@ -2486,6 +2519,8 @@ fn write_workbook_full(
             ]).map_err(|e| e.to_string())?;
         }
     }
+
+    save_sheet_defaults(conn, workbook)?;
 
     // Save scripts
     save_scripts(&conn, scripts).map_err(|e| e.to_string())?;

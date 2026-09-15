@@ -284,8 +284,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             // Grid
-            default_column_width: 80.0,
-            row_height: 24.0,
+            default_column_width: 96.0,
+            row_height: 28.0,
             row_header_width: 50.0,
             show_grid_lines: true,
             // Editor
@@ -388,8 +388,8 @@ impl Settings {
 
         let default_config = r#"{
     // Grid appearance
-    "grid.defaultColumnWidth": 80,
-    "grid.rowHeight": 24,
+    "grid.defaultColumnWidth": 96,
+    "grid.rowHeight": 28,
     "grid.rowHeaderWidth": 50,
     "grid.showGridLines": true,
 
