@@ -402,26 +402,19 @@ impl Spreadsheet {
     // Pro-gated entry point: preview if Pro, immediate if Free
     // ========================================================================
 
-    /// Apply a transform with Pro gating: if Pro is active, show diff preview;
-    /// if Free, apply immediately.
+    /// Apply a transform through its diff preview, so the change is seen
+    /// before it lands. Applying immediately was the unlicensed behaviour.
     pub fn apply_transform_pro(
         &mut self,
         op: TransformOp,
         cx: &mut Context<Self>,
     ) {
-        let is_pro = visigrid_license::is_feature_enabled("transforms");
-
-        if is_pro {
-            // Dry-run: compute preview, store it, switch to preview mode
-            if let Some(preview) = self.apply_transform_preview(op, cx) {
-                self.transform_preview = Some(preview);
-                self.mode = crate::mode::Mode::TransformPreview;
-                cx.notify();
-            }
-            // If None, status_message was already set by apply_transform_preview
-        } else {
-            // Free: apply immediately
-            self.apply_transform(op, cx);
+        // Dry-run: compute preview, store it, switch to preview mode.
+        // On None, status_message was already set by apply_transform_preview.
+        if let Some(preview) = self.apply_transform_preview(op, cx) {
+            self.transform_preview = Some(preview);
+            self.mode = crate::mode::Mode::TransformPreview;
+            cx.notify();
         }
     }
 

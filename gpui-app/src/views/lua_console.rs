@@ -54,7 +54,6 @@ use crate::scripting::{
 };
 use crate::scripting::examples::{EXAMPLES, get_example, find_example};
 use crate::theme::TokenKey;
-use crate::ui::render_locked_feature_panel;
 
 /// Render the Lua console panel (if visible)
 pub fn render_lua_console(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -1614,19 +1613,6 @@ fn render_debug_tab_content(
                 text_primary, text_muted, accent, error_color, panel_border,
             ))
             .into_any_element()
-    } else if !visigrid_license::is_feature_enabled("lua_tooling") {
-        let preview = debug_ui::render_locked_preview(text_muted, accent, panel_border);
-        match render_locked_feature_panel(
-            "Lua Debugger",
-            "Set breakpoints, step through code, inspect variables, and trace execution in your Lua scripts.",
-            preview,
-            app.locked_panels_dismissed,
-            panel_border, text_primary, text_muted, accent, text_inverse,
-            cx,
-        ) {
-            Some(panel) => panel,
-            None => debug_ui::render_idle_help(text_muted).into_any_element(),
-        }
     } else {
         debug_ui::render_idle_help(text_muted).into_any_element()
     };
@@ -1829,41 +1815,6 @@ mod debug_ui {
                     .child(kbd("Shift+F5", "Stop"))
                     .child(kbd("F9", "Breakpoint"))
             )
-    }
-
-    /// Preview skeleton for the locked feature panel.
-    pub(super) fn render_locked_preview(
-        text_muted: Hsla,
-        accent: Hsla,
-        panel_border: Hsla,
-    ) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            // Fake controls bar
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(div().h(px(6.0)).w(px(60.0)).rounded_sm().bg(accent.opacity(0.15)))
-                    .child(div().h(px(6.0)).w(px(30.0)).rounded_sm().bg(panel_border.opacity(0.3)))
-                    .child(div().h(px(6.0)).w(px(30.0)).rounded_sm().bg(panel_border.opacity(0.3)))
-                    .child(div().h(px(6.0)).w(px(30.0)).rounded_sm().bg(panel_border.opacity(0.3)))
-            )
-            // Fake source lines
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(div().h(px(6.0)).w(px(140.0)).rounded_sm().bg(text_muted.opacity(0.08)))
-                    .child(div().h(px(6.0)).w(px(100.0)).rounded_sm().bg(accent.opacity(0.1)))
-                    .child(div().h(px(6.0)).w(px(120.0)).rounded_sm().bg(text_muted.opacity(0.08)))
-            )
-            .into_any_element()
     }
 
     /// Controls bar: status label + step buttons (fixed 24px height).

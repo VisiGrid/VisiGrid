@@ -2,7 +2,6 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
-use crate::ui::render_locked_feature_panel;
 
 pub const PANEL_WIDTH: f32 = 280.0;
 
@@ -88,7 +87,6 @@ fn render_profiler_header(
 
 /// Render the profiler content sections.
 fn render_profiler_content(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    let is_pro = visigrid_license::is_feature_enabled("performance");
     let has_report = app.profiler_report.is_some();
 
     let mut content = div()
@@ -97,20 +95,20 @@ fn render_profiler_content(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>)
         .p_3()
         .gap_3();
 
-    // Summary section (always visible — Free + Pro)
+    // Summary section
     content = content.child(render_summary_section(app, cx));
 
     if has_report {
-        // Phase Timing section (Pro gated)
-        content = content.child(render_phase_timing_section(app, is_pro, cx));
+        // Phase Timing section
+        content = content.child(render_phase_timing_section(app, cx));
 
-        // Hotspot Suspects section (Pro gated)
-        content = content.child(render_hotspot_section(app, is_pro, cx));
+        // Hotspot Suspects section
+        content = content.child(render_hotspot_section(app, cx));
 
-        // Cycle Analysis section (Pro gated, conditional)
+        // Cycle Analysis section (conditional)
         if let Some(ref report) = app.profiler_report {
             if report.had_cycles {
-                content = content.child(render_cycle_section(app, is_pro, cx));
+                content = content.child(render_cycle_section(app, cx));
             }
         }
     }
@@ -300,10 +298,9 @@ fn format_us(us: u64) -> String {
     }
 }
 
-/// Phase Timing section — Pro gated.
+/// Phase Timing section.
 fn render_phase_timing_section(
     app: &mut Spreadsheet,
-    is_pro: bool,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let panel_border = app.token(TokenKey::PanelBorder);
@@ -311,33 +308,6 @@ fn render_phase_timing_section(
     let text_muted = app.token(TokenKey::TextMuted);
     let accent = app.token(TokenKey::Accent);
 
-    if !is_pro {
-        let text_inverse = app.token(TokenKey::TextInverse);
-        // Skeleton preview for locked panel
-        let preview = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().h(px(8.0)).w(px(120.0)).rounded_sm().bg(panel_border.opacity(0.3)))
-            .child(div().h(px(8.0)).w(px(80.0)).rounded_sm().bg(panel_border.opacity(0.3)))
-            .child(div().h(px(8.0)).w(px(160.0)).rounded_sm().bg(panel_border.opacity(0.3)));
-
-        return match render_locked_feature_panel(
-            "Phase Timing",
-            "See where recalc time is spent: invalidation, topo sort, evaluation, and Lua functions.",
-            preview.into_any_element(),
-            app.locked_panels_dismissed,
-            panel_border,
-            text_primary,
-            text_muted,
-            accent,
-            text_inverse,
-            cx,
-        ) {
-            Some(el) => div().child(el),
-            None => div(),
-        };
-    }
 
     let report = match &app.profiler_report {
         Some(r) => r,
@@ -419,10 +389,9 @@ fn render_phase_timing_section(
     section
 }
 
-/// Hotspot Suspects section — Pro gated.
+/// Hotspot Suspects section.
 fn render_hotspot_section(
     app: &mut Spreadsheet,
-    is_pro: bool,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let panel_border = app.token(TokenKey::PanelBorder);
@@ -430,32 +399,6 @@ fn render_hotspot_section(
     let text_muted = app.token(TokenKey::TextMuted);
     let accent = app.token(TokenKey::Accent);
 
-    if !is_pro {
-        let text_inverse = app.token(TokenKey::TextInverse);
-        let preview = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().h(px(14.0)).w(px(200.0)).rounded_sm().bg(panel_border.opacity(0.3)))
-            .child(div().h(px(14.0)).w(px(180.0)).rounded_sm().bg(panel_border.opacity(0.3)))
-            .child(div().h(px(14.0)).w(px(160.0)).rounded_sm().bg(panel_border.opacity(0.3)));
-
-        return match render_locked_feature_panel(
-            "Hotspot Suspects",
-            "Find cells with high fan-out, deep dependency chains, or dynamic references that slow recalc.",
-            preview.into_any_element(),
-            app.locked_panels_dismissed,
-            panel_border,
-            text_primary,
-            text_muted,
-            accent,
-            text_inverse,
-            cx,
-        ) {
-            Some(el) => div().child(el),
-            None => div(),
-        };
-    }
 
     let hotspots = &app.profiler_hotspots;
 
@@ -649,7 +592,6 @@ fn app_warn_color() -> Hsla {
 /// Cycle Analysis section — Pro gated, only shown if cycles detected.
 fn render_cycle_section(
     app: &mut Spreadsheet,
-    is_pro: bool,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let panel_border = app.token(TokenKey::PanelBorder);
@@ -661,33 +603,6 @@ fn render_cycle_section(
         None => return div(),
     };
 
-    if !is_pro {
-        let accent = app.token(TokenKey::Accent);
-        let text_inverse = app.token(TokenKey::TextInverse);
-        let preview = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().h(px(10.0)).w(px(140.0)).rounded_sm().bg(panel_border.opacity(0.3)))
-            .child(div().h(px(10.0)).w(px(100.0)).rounded_sm().bg(panel_border.opacity(0.3)))
-            .child(div().h(px(10.0)).w(px(120.0)).rounded_sm().bg(panel_border.opacity(0.3)));
-
-        return match render_locked_feature_panel(
-            "Cycle Analysis",
-            "See SCC count, iteration depth, and convergence status for circular references.",
-            preview.into_any_element(),
-            app.locked_panels_dismissed,
-            panel_border,
-            text_primary,
-            text_muted,
-            accent,
-            text_inverse,
-            cx,
-        ) {
-            Some(el) => div().child(el),
-            None => div(),
-        };
-    }
 
     let mut section = div()
         .flex()

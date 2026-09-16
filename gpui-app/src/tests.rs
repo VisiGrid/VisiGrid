@@ -3110,10 +3110,8 @@ fn review_mode_workbook_mutators_are_guarded() {
         "load_file",
         "start_excel_import",
         "start_csv_import",
-        "load_excel_sync",
         "reimport_with_freeze",
         "start_excel_import_with_options",
-        "load_excel_sync_with_options",
     ] {
         assert_guarded(file_ops, function);
     }

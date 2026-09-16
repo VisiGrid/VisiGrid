@@ -81,16 +81,11 @@ impl Spreadsheet {
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let ext_lower = extension.to_lowercase();
 
-        // Excel files: background import for Pro, synchronous for Free
+        // Excel files import in the background, for everyone. The
+        // synchronous path froze the window for the length of the import and
+        // told the user to buy a licence to stop it.
         if matches!(ext_lower.as_str(), "xlsx" | "xls" | "xlsb" | "xlsm" | "ods") {
-            if visigrid_license::is_feature_enabled("fast_large_files") {
-                self.start_excel_import(path, cx);
-            } else {
-                // Free users: synchronous import with upgrade hint
-                self.status_message = Some("Importing... (upgrade to Pro for faster large file imports)".to_string());
-                cx.notify();
-                self.load_excel_sync(path, cx);
-            }
+            self.start_excel_import(path, cx);
             return;
         }
 
@@ -526,91 +521,6 @@ impl Spreadsheet {
         .detach();
     }
 
-    /// Synchronous Excel import for Free users (no background processing)
-    fn load_excel_sync(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        let filename = path.file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "file".to_string());
-        let source_dir = path.parent().map(|p| p.to_path_buf());
-        self.cycle_banner.reset_for_new_file();
-        let start_time = std::time::Instant::now();
-
-        match xlsx::import(path) {
-            Ok((workbook, mut result)) => {
-                let duration_ms = start_time.elapsed().as_millis();
-
-                self.wb_mut(cx, |wb| *wb = workbook);
-                self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
-                self.debug_assert_sheet_cache_sync(cx);
-                self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
-                self.rewind_preview = crate::app::RewindPreviewState::Off;
-                self.import_filename = Some(filename.clone());
-                self.import_source_dir = source_dir;
-                self.doc_settings = DocumentSettings::default();
-                self.view_state.selected = (0, 0);
-                self.view_state.selection_end = None;
-                self.view_state.scroll_row = 0;
-                self.view_state.scroll_col = 0;
-                self.history.clear();
-                self.bump_cells_rev();
-                self.add_recent_file(path);
-
-                // Set up document identity (XLSX is native per spec)
-                self.finalize_load(path);
-                self.request_title_refresh(cx);
-
-                let duration_str = if duration_ms >= 1000 {
-                    format!("{:.2}s", duration_ms as f64 / 1000.0)
-                } else {
-                    format!("{}ms", duration_ms)
-                };
-
-                let total_errors = result.recalc_errors + result.recalc_circular;
-                let status = if total_errors > 0 {
-                    format!(
-                        "Opened {} in {} \u{2014} {} errors (Import Report)",
-                        filename, duration_str, total_errors
-                    )
-                } else {
-                    format!(
-                        "Opened {} in {} \u{2014} 0 errors",
-                        filename, duration_str
-                    )
-                };
-
-                result.import_duration_ms = duration_ms;
-                let has_recalc_errors = result.recalc_errors > 0 || result.recalc_circular > 0;
-
-                // Apply imported column widths and row heights
-                self.apply_imported_layouts(&result, cx);
-
-                self.import_result = Some(result);
-                self.status_message = Some(status);
-
-                // Show cycle banner if applicable
-                if self.should_show_cycle_banner(cx) {
-                    self.cycle_banner.show_force();
-                }
-
-                // Auto-show import report when recalc errors are detected
-                if has_recalc_errors {
-                    self.show_import_report(cx);
-                }
-            }
-            Err(e) => {
-                self.import_result = None;
-                self.import_filename = None;
-                self.import_source_dir = None;
-                self.status_message = Some(format!("Import failed: {}", e));
-            }
-        }
-        cx.notify();
-    }
-
-    /// Re-import the current file with freeze_cycles enabled.
-    /// Called from the import report dialog's "Freeze Cycle Values" button.
     pub fn reimport_with_freeze(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         let Some(path) = self.current_file.clone() else { return; };
@@ -622,11 +532,7 @@ impl Spreadsheet {
 
         let options = xlsx::ImportOptions { freeze_cycles: true, ..Default::default() };
 
-        if visigrid_license::is_feature_enabled("fast_large_files") {
-            self.start_excel_import_with_options(&path, options, current_sheet, cx);
-        } else {
-            self.load_excel_sync_with_options(&path, options, current_sheet, cx);
-        }
+        self.start_excel_import_with_options(&path, options, current_sheet, cx);
     }
 
     /// Enable iterative calculation and recompute all formulas in-place.
@@ -799,102 +705,6 @@ impl Spreadsheet {
         .detach();
     }
 
-    /// Synchronous Excel import with options and optional sheet restore
-    fn load_excel_sync_with_options(
-        &mut self,
-        path: &PathBuf,
-        options: xlsx::ImportOptions,
-        restore_sheet: usize,
-        cx: &mut Context<Self>,
-    ) {
-        if self.block_if_previewing(cx) { return; }
-        let filename = path.file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "file".to_string());
-        let source_dir = path.parent().map(|p| p.to_path_buf());
-        self.cycle_banner.reset_for_new_file();
-        let start_time = std::time::Instant::now();
-
-        match xlsx::import_with_options(path, &options) {
-            Ok((workbook, mut result)) => {
-                let duration_ms = start_time.elapsed().as_millis();
-
-                self.wb_mut(cx, |wb| *wb = workbook);
-                self.update_cached_sheet_id(cx);
-                self.debug_assert_sheet_cache_sync(cx);
-                self.base_workbook = self.wb(cx).clone();
-                self.rewind_preview = crate::app::RewindPreviewState::Off;
-                self.import_filename = Some(filename.clone());
-                self.import_source_dir = source_dir;
-                self.doc_settings = DocumentSettings::default();
-                self.view_state.selected = (0, 0);
-                self.view_state.selection_end = None;
-                self.view_state.scroll_row = 0;
-                self.view_state.scroll_col = 0;
-                self.history.clear();
-                self.bump_cells_rev();
-                self.add_recent_file(path);
-
-                self.finalize_load(path);
-                self.request_title_refresh(cx);
-
-                // Restore sheet selection
-                if restore_sheet < self.wb(cx).sheet_count() {
-                    self.activate_sheet(restore_sheet, cx);
-                }
-
-                let duration_str = if duration_ms >= 1000 {
-                    format!("{:.2}s", duration_ms as f64 / 1000.0)
-                } else {
-                    format!("{}ms", duration_ms)
-                };
-
-                let total_errors = result.recalc_errors + result.recalc_circular;
-                let freeze_note = if result.freeze_applied {
-                    format!(" ({} cycles frozen)", result.cycles_frozen)
-                } else {
-                    String::new()
-                };
-                let status = if total_errors > 0 {
-                    format!("Opened {} in {} \u{2014} {} errors{}",
-                        filename, duration_str, total_errors, freeze_note)
-                } else {
-                    format!("Opened {} in {} \u{2014} 0 errors{}",
-                        filename, duration_str, freeze_note)
-                };
-
-                result.import_duration_ms = duration_ms;
-                let show_report = result.recalc_errors > 0
-                    || result.recalc_circular > 0
-                    || result.freeze_applied;
-
-                self.apply_imported_layouts(&result, cx);
-
-                self.import_result = Some(result);
-                self.status_message = Some(status);
-
-                // Show cycle banner if applicable
-                if self.should_show_cycle_banner(cx) {
-                    self.cycle_banner.show_force();
-                }
-
-                if show_report {
-                    self.show_import_report(cx);
-                }
-            }
-            Err(e) => {
-                self.import_result = None;
-                self.import_filename = None;
-                self.import_source_dir = None;
-                self.status_message = Some(format!("Import failed: {}", e));
-            }
-        }
-        cx.notify();
-    }
-
-    /// Apply imported column widths and row heights from XLSX formatting.
-    /// Converts raw Excel units to pixel values used by the app.
     fn apply_imported_layouts(&mut self, result: &xlsx::ImportResult, cx: &mut Context<Self>) {
         for (sheet_idx, layout) in result.imported_layouts.iter().enumerate() {
             if layout.col_widths.is_empty()

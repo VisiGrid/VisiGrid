@@ -630,7 +630,6 @@ pub struct Spreadsheet {
     pub profiler_capture_next: bool,
 
     // Locked feature panel dismiss (session-only)
-    pub locked_panels_dismissed: bool,
 
     // Inspector panel state
     pub inspector_visible: bool,
@@ -1214,7 +1213,6 @@ impl Spreadsheet {
             profiler_report: None,
             profiler_hotspots: Vec::new(),
             profiler_capture_next: false,
-            locked_panels_dismissed: false,
             inspector_visible: false,
             inspector_tab: crate::mode::InspectorTab::default(),
             inspector_pinned: None,

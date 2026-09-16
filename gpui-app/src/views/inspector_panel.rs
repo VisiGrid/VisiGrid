@@ -4,7 +4,7 @@ use crate::app::{Spreadsheet, SelectionFormatState, TriState};
 use crate::formatting::BorderApplyMode;
 use crate::mode::InspectorTab;
 use crate::theme::TokenKey;
-use crate::ui::{popup, render_locked_feature_panel};
+use crate::ui::popup;
 use visigrid_engine::formula::parser::{parse, extract_cell_refs};
 use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment, TextOverflow, NumberFormat, DateStyle, NegativeStyle, CellValue};
 use visigrid_engine::cell_id::CellId;
@@ -281,10 +281,6 @@ fn render_inspector_tab(
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> AnyElement {
-    // Basic Inspector is now FREE - only advanced explainability features are Pro
-    // Free: Identity, Inputs list, Outputs list, Spill info
-    // Pro: Verification Certificate, Impact Summary, Mini DAG, Trust Metrics
-    let is_pro = visigrid_license::is_feature_enabled("inspector");
 
     let raw_value = app.sheet(cx).get_raw(row, col);
     let display_value = app.sheet(cx).get_display(row, col);
@@ -327,7 +323,7 @@ fn render_inspector_tab(
     let has_no_deps = precedents.is_empty() && dependents.is_empty() && !is_formula && !has_spill_info;
 
     // Get verification data for Pro features
-    let recalc_info = if is_pro && app.verified_mode {
+    let recalc_info = if app.verified_mode {
         if let Some(report) = &app.last_recalc_report {
             let sheet_id = app.sheet(cx).id;
             let cell_id = CellId::new(sheet_id, row, col);
@@ -346,7 +342,7 @@ fn render_inspector_tab(
         .gap_4();
 
     // ========== PRO: TRUST BLOCK (the certificate) ==========
-    if is_pro && app.verified_mode && is_formula {
+    if app.verified_mode && is_formula {
         let verification_section = if let Some(ref info) = recalc_info {
             // Complexity label based on depth
             let complexity_label = if info.has_unknown_deps {
@@ -457,7 +453,7 @@ fn render_inspector_tab(
 
     // ========== PRO: TRUST HEADER (Phase 3.5 — Impact + Risk Semantics) ==========
     // This is the "certificate" feel — shows impact and any trust issues
-    if is_pro {
+    {
         let sheet_id = app.sheet(cx).id;
         let impact = app.wb(cx).compute_impact(sheet_id, row, col);
 
@@ -581,7 +577,7 @@ fn render_inspector_tab(
 
     // ========== PRO: TRACE PATH (Phase 3.5b) ==========
     // Show the current trace path when active
-    if is_pro {
+    {
         if let Some(ref trace_path) = app.inspector_trace_path {
             if !trace_path.is_empty() {
                 let sheet_id = app.sheet(cx).id;
@@ -848,8 +844,8 @@ fn render_inspector_tab(
         content = content.child(spill_section);
     }
 
-    // Mini DAG visualization (Pro feature)
-    if is_pro && (!precedents.is_empty() || !dependents.is_empty()) {
+    // Mini DAG visualization 
+    if (!precedents.is_empty() || !dependents.is_empty()) {
         content = content.child(render_mini_dag(
             app,
             &cell_address,
@@ -932,7 +928,7 @@ fn render_inspector_tab(
     }
 
     // Proof section (Pro feature, only when verified mode is enabled)
-    if is_pro && app.verified_mode {
+    if app.verified_mode {
         if let Some(report) = &app.last_recalc_report {
             let sheet_id = app.sheet(cx).id;
             let cell_id = CellId::new(sheet_id, row, col);
@@ -1020,8 +1016,8 @@ fn render_inspector_tab(
                 );
             }
         }
-    } else if is_pro && is_formula {
-        // Hint to enable verified mode (Pro users only)
+    } else if is_formula {
+        // Hint to enable verified mode
         content = content.child(
             div()
                 .py_2()
@@ -1031,24 +1027,6 @@ fn render_inspector_tab(
         );
     }
 
-    // Locked panel for Free users (replaces hidden Pro features)
-    if !is_pro && (!precedents.is_empty() || !dependents.is_empty() || is_formula) {
-        let text_inverse = app.token(TokenKey::TextInverse);
-        if let Some(panel) = render_locked_feature_panel(
-            "Dependency Graph & Impact",
-            "Visualize cross-sheet dependencies, trace upstream and downstream impact, and see verification certificates proving correct evaluation order.",
-            render_inspector_skeleton_preview(text_muted),
-            app.locked_panels_dismissed,
-            panel_border,
-            text_primary,
-            text_muted,
-            accent,
-            text_inverse,
-            cx,
-        ) {
-            content = content.child(panel);
-        }
-    }
 
     // Empty state for non-formula cells with no dependencies
     if has_no_deps {
@@ -1064,83 +1042,6 @@ fn render_inspector_tab(
     content.into_any_element()
 }
 
-/// Skeleton preview for the Inspector tab locked panel (mock verification badge + DAG nodes)
-fn render_inspector_skeleton_preview(text_muted: Hsla) -> AnyElement {
-    div()
-        .p_2()
-        .rounded(px(4.0))
-        .bg(text_muted.opacity(0.04))
-        .border_1()
-        .border_color(text_muted.opacity(0.08))
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(div().w(px(90.0)).h(px(14.0)).rounded_sm().bg(text_muted.opacity(0.1)))
-        .child(div().w(px(130.0)).h(px(12.0)).rounded_sm().bg(text_muted.opacity(0.08)))
-        .child(div().w(px(180.0)).h(px(10.0)).rounded_sm().bg(text_muted.opacity(0.06)))
-        .child(
-            div()
-                .flex()
-                .gap_1()
-                .mt_1()
-                .child(div().w(px(60.0)).h(px(16.0)).rounded(px(3.0)).bg(text_muted.opacity(0.08)))
-                .child(div().w(px(50.0)).h(px(16.0)).rounded(px(3.0)).bg(text_muted.opacity(0.06)))
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .mt_2()
-                .py_2()
-                .child(div().w(px(24.0)).h(px(24.0)).rounded_full().bg(text_muted.opacity(0.08)))
-                .child(div().w(px(20.0)).h(px(2.0)).bg(text_muted.opacity(0.06)))
-                .child(div().w(px(28.0)).h(px(28.0)).rounded_full().border_1().border_color(text_muted.opacity(0.12)))
-                .child(div().w(px(20.0)).h(px(2.0)).bg(text_muted.opacity(0.06)))
-                .child(div().w(px(24.0)).h(px(24.0)).rounded_full().bg(text_muted.opacity(0.08)))
-        )
-        .into_any_element()
-}
-
-/// Skeleton preview for the History tab locked panel (mock code lines)
-fn render_code_skeleton_preview(text_muted: Hsla) -> AnyElement {
-    div()
-        .p_2()
-        .rounded_md()
-        .bg(text_muted.opacity(0.04))
-        .border_1()
-        .border_color(text_muted.opacity(0.08))
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(div().w(px(140.0)).h(px(10.0)).rounded_sm().bg(text_muted.opacity(0.08)))
-        .child(div().w(px(180.0)).h(px(10.0)).rounded_sm().bg(text_muted.opacity(0.06)))
-        .child(div().w(px(100.0)).h(px(10.0)).rounded_sm().bg(text_muted.opacity(0.08)))
-        .child(div().w(px(160.0)).h(px(10.0)).rounded_sm().bg(text_muted.opacity(0.06)))
-        .into_any_element()
-}
-
-/// Skeleton preview for the Names tab locked panel (mock detail rows)
-fn render_names_skeleton_preview(text_muted: Hsla) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(skeleton_row(px(50.0), px(80.0), text_muted))
-        .child(skeleton_row(px(45.0), px(60.0), text_muted))
-        .child(skeleton_row(px(55.0), px(70.0), text_muted))
-        .into_any_element()
-}
-
-fn skeleton_row(label_w: Pixels, value_w: Pixels, color: Hsla) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(div().w(label_w).h(px(10.0)).rounded_sm().bg(color.opacity(0.08)))
-        .child(div().w(value_w).h(px(10.0)).rounded_sm().bg(color.opacity(0.06)))
-}
 
 /// Render a mini DAG visualization showing precedents → cell → dependents flow
 fn render_mini_dag(
@@ -1426,16 +1327,11 @@ fn render_names_tab(
     let has_filtered_results = !named_ranges.is_empty();
     let name_count = all_names.len();
     let selected_name = app.selected_named_range.clone();
-    let is_pro = visigrid_license::is_feature_enabled("inspector");
 
-    // Get detail info for selected named range (Pro feature)
-    let selected_detail = if is_pro {
-        selected_name.as_ref().and_then(|name| {
-            get_named_range_detail(app, name, cx)
-        })
-    } else {
-        None
-    };
+    // Get detail info for selected named range 
+    let selected_detail = selected_name.as_ref().and_then(|name| {
+        get_named_range_detail(app, name, cx)
+    });
 
     // Build the list content based on state
     let list_content = if !has_names {
@@ -1626,23 +1522,7 @@ fn render_names_tab(
     };
 
     // Pre-build locked panel (needs &mut cx, can't go inside .when() closure)
-    let names_locked_panel: Option<AnyElement> = if !is_pro && selected_name.is_some() {
-        let text_inverse = app.token(TokenKey::TextInverse);
-        render_locked_feature_panel(
-            "Named Range Detail",
-            "View value previews, formula depth, and verification status for each named range.",
-            render_names_skeleton_preview(text_muted),
-            app.locked_panels_dismissed,
-            panel_border,
-            text_primary,
-            text_muted,
-            accent,
-            text_inverse,
-            cx,
-        )
-    } else {
-        None
-    };
+    let names_locked_panel: Option<AnyElement> = None;
 
     div()
         .p_3()
@@ -1713,7 +1593,7 @@ fn render_names_tab(
         )
         // Named ranges list
         .child(list_content)
-        // Detail panel for selected named range (Pro feature)
+        // Detail panel for selected named range 
         .when(selected_detail.is_some(), |el| {
             let detail = selected_detail.as_ref().unwrap();
             el.child(render_named_range_detail(detail, text_primary, text_muted, accent, panel_border))
@@ -3715,8 +3595,6 @@ fn render_history_tab(
     let active_sheet_idx = app.sheet_index(cx);
     let selected_id = app.selected_history_id;
     let view_start = app.history_view_start;
-    let is_pro = visigrid_license::is_feature_enabled("inspector");
-    let locked_dismissed = app.locked_panels_dismissed;
     let text_inverse = app.token(TokenKey::TextInverse);
 
     // Filter entries by mode first
@@ -4085,7 +3963,7 @@ fn render_history_tab(
         // Detail panel for selected entry
         .when(selected_entry.is_some(), |el| {
             let entry = selected_entry.unwrap();
-            el.child(render_history_detail(&entry, is_pro, locked_dismissed, text_primary, text_muted, accent, text_inverse, panel_border, cx))
+            el.child(render_history_detail(&entry, text_primary, text_muted, accent, text_inverse, panel_border, cx))
         })
 }
 
@@ -4250,8 +4128,6 @@ fn render_history_entry(
 
 fn render_history_detail(
     entry: &crate::history::HistoryDisplayEntry,
-    is_pro: bool,
-    locked_dismissed: bool,
     text_primary: Hsla,
     text_muted: Hsla,
     accent: Hsla,
@@ -4265,24 +4141,6 @@ fn render_history_detail(
     let ai_source = entry.ai_source.clone();
     let has_changes = !entry.affected_cells.is_empty();
     let entry_is_undoable = entry.is_undoable;
-
-    // Pre-build locked Lua panel for Free users (needs &mut cx, can't go inside .when())
-    let lua_locked_panel: Option<AnyElement> = if !is_pro && (lua_code.is_some() || generated_lua.is_some()) {
-        render_locked_feature_panel(
-            "Lua Provenance",
-            "View the Lua script that produced this change, with full source and execution context.",
-            render_code_skeleton_preview(text_muted),
-            locked_dismissed,
-            panel_border,
-            text_primary,
-            text_muted,
-            accent,
-            text_inverse,
-            cx,
-        )
-    } else {
-        None
-    };
 
     // AI badge color
     let ai_badge_color = hsla(0.8, 0.6, 0.55, 1.0);
@@ -4437,7 +4295,7 @@ fn render_history_detail(
             )
         })
         // Provenance section (when there's Lua code and user is Pro)
-        .when(lua_code.is_some() && is_pro, |el: Div| {
+        .when(lua_code.is_some(), |el: Div| {
             let code = lua_code.clone().unwrap();
             el.child(
                 div()
@@ -4470,10 +4328,6 @@ fn render_history_detail(
                             )
                     )
             )
-        })
-        // Locked Lua panel for Free users
-        .when(lua_locked_panel.is_some(), |el: Div| {
-            el.child(lua_locked_panel.unwrap())
         })
         // Empty state
         .when(!has_changes && lua_code.is_none(), |el: Div| {
