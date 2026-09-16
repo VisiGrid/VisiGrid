@@ -373,8 +373,8 @@ pub fn ledger_dark_theme() -> Theme {
     tokens.insert(TokenKey::HeaderTextMuted, text_muted);
     tokens.insert(TokenKey::HeaderBorder, grid_bold);
     tokens.insert(TokenKey::HeaderHoverBg, rgb(0x232a38));
-    tokens.insert(TokenKey::HeaderActiveBg, accent);
-    tokens.insert(TokenKey::HeaderActiveText, text_muted);
+    tokens.insert(TokenKey::HeaderActiveBg, rgb(0x253551));
+    tokens.insert(TokenKey::HeaderActiveText, rgb(0xb8d2ff));
 
     // Cells
     tokens.insert(TokenKey::CellBg, bg_dark);
@@ -519,8 +519,8 @@ pub fn slate_dark_theme() -> Theme {
     tokens.insert(TokenKey::HeaderTextMuted, grid_400);
     tokens.insert(TokenKey::HeaderBorder, grid_700);
     tokens.insert(TokenKey::HeaderHoverBg, grid_700);
-    tokens.insert(TokenKey::HeaderActiveBg, accent_hover);
-    tokens.insert(TokenKey::HeaderActiveText, grid_400);
+    tokens.insert(TokenKey::HeaderActiveBg, rgb(0x253c60));
+    tokens.insert(TokenKey::HeaderActiveText, rgb(0xbfdbfe));
 
     // Cells
     tokens.insert(TokenKey::CellBg, grid_900);
@@ -678,8 +678,9 @@ pub fn ledger_light_theme() -> Theme {
     tokens.insert(TokenKey::HeaderTextMuted, text_muted);
     tokens.insert(TokenKey::HeaderBorder, border);
     tokens.insert(TokenKey::HeaderHoverBg, rgb(0xdce0e8));
-    tokens.insert(TokenKey::HeaderActiveBg, accent_light);
-    tokens.insert(TokenKey::HeaderActiveText, text_muted);
+    // Soft blue tint with a darker label; the header renderer adds the active edge.
+    tokens.insert(TokenKey::HeaderActiveBg, rgb(0xdbe7fb));
+    tokens.insert(TokenKey::HeaderActiveText, rgb(0x1e4794));
 
     // Cells
     tokens.insert(TokenKey::CellBg, white);
@@ -980,8 +981,8 @@ pub fn catppuccin_theme() -> Theme {
     tokens.insert(TokenKey::HeaderTextMuted, subtext0);
     tokens.insert(TokenKey::HeaderBorder, surface0);
     tokens.insert(TokenKey::HeaderHoverBg, crust);
-    tokens.insert(TokenKey::HeaderActiveBg, surface1);
-    tokens.insert(TokenKey::HeaderActiveText, subtext0);
+    tokens.insert(TokenKey::HeaderActiveBg, rgb(0xdce4fa));
+    tokens.insert(TokenKey::HeaderActiveText, rgb(0x244da3));
 
     // Cells
     tokens.insert(TokenKey::CellBg, rgb(0xffffff));

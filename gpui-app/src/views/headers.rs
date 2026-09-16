@@ -183,7 +183,12 @@ fn render_column_header(
         .when(!is_selected, |div| div.text_color(header_text))
         .text_sm()
         .cursor_pointer()
-        .hover(|s| s.bg(selection_bg.opacity(0.3)))
+        .when(!is_selected, |d| d.hover(|s| s.bg(selection_bg.opacity(0.3))))
+        // Active edge is an overlay so selection does not move the header label.
+        .when(is_selected, |d| d.child(
+            div().absolute().left_0().right_0().bottom_0().h(px(2.0))
+                .bg(if review_focus_selected { proposal } else { accent })
+        ))
         // Column letter with optional sort indicator
         // Add right padding when filter button is shown to prevent overlap
         .child(
@@ -319,7 +324,11 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
         .when(!is_selected, |div| div.text_color(header_text))
         .text_size(px(app.metrics.font_size))  // Scaled font size
         .cursor_pointer()
-        .hover(|s| s.bg(selection_bg.opacity(0.3)))
+        .when(!is_selected, |d| d.hover(|s| s.bg(selection_bg.opacity(0.3))))
+        .when(is_selected, |d| d.child(
+            div().absolute().top_0().bottom_0().right_0().w(px(2.0))
+                .bg(if review_focus_selected { proposal } else { accent })
+        ))
         .child(format!("{}", data_row + 1))
         // Click handler for row selection
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
