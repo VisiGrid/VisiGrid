@@ -606,8 +606,8 @@ impl Spreadsheet {
                 // Reset scroll/selection on the target sheet but stay in formula mode
                 self.view_state.selected = (0, 0);
                 self.view_state.selection_end = None;
-                self.view_state.scroll_row = 0;
-                self.view_state.scroll_col = 0;
+                self.view_state.scroll_row = self.view_state.frozen_rows;
+                self.view_state.scroll_col = self.view_state.frozen_cols;
                 // Track which sheet the ref target is on
                 let home = self.formula_home_sheet.unwrap_or(0);
                 if index != home {
@@ -665,8 +665,8 @@ impl Spreadsheet {
     pub(crate) fn clear_selection_state(&mut self) {
         self.view_state.selected = (0, 0);
         self.view_state.selection_end = None;
-        self.view_state.scroll_row = 0;
-        self.view_state.scroll_col = 0;
+        self.view_state.scroll_row = self.view_state.frozen_rows;
+        self.view_state.scroll_col = self.view_state.frozen_cols;
         self.mode = Mode::Navigation;
         self.edit_value.clear();
         self.edit_original.clear();

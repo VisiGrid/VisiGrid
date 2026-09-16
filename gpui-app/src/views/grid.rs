@@ -2343,6 +2343,64 @@ fn render_clipboard_border(app: &Spreadsheet, pane_side: Option<SplitSide>) -> i
     .into_any_element()
 }
 
+/// Each overlay uses the same four regions and one-pixel dividers as the cell grid.
+/// Coordinates inside a region are relative to its own first row/column.
+#[derive(Clone, Copy, Debug)]
+struct OverlayRegion {
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+    x: f32,
+    y: f32,
+    width: Option<f32>,
+    height: Option<f32>,
+}
+
+fn overlay_regions(
+    view: &WorkbookViewState, rows: usize, cols: usize,
+    frozen_width: f32, frozen_height: f32,
+) -> Vec<OverlayRegion> {
+    let fr = view.frozen_rows;
+    let fc = view.frozen_cols;
+    let mut regions = Vec::new();
+    let xs = if fc == 0 {
+        vec![(view.scroll_col, cols, 0.0, None)]
+    } else {
+        vec![(0, fc, 0.0, Some(frozen_width)),
+             (view.scroll_col, cols.saturating_sub(fc), frozen_width + 1.0, None)]
+    };
+    let ys = if fr == 0 {
+        vec![(view.scroll_row, rows, 0.0, None)]
+    } else {
+        vec![(0, fr, 0.0, Some(frozen_height)),
+             (view.scroll_row, rows.saturating_sub(fr), frozen_height + 1.0, None)]
+    };
+    for (row, rows, y, height) in ys {
+        for &(col, cols, x, width) in &xs {
+            if rows > 0 && cols > 0 {
+                regions.push(OverlayRegion { row, col, rows, cols, x, y, width, height });
+            }
+        }
+    }
+    regions
+}
+
+fn grid_overlay_regions(app: &Spreadsheet, view: &WorkbookViewState) -> Vec<OverlayRegion> {
+    let width = (0..view.frozen_cols).filter(|&c| !app.is_col_hidden(c))
+        .map(|c| app.metrics.col_width(app.col_width(c))).sum();
+    let height = (0..view.frozen_rows)
+        .map(|r| app.metrics.row_height(app.row_height(r))).sum();
+    overlay_regions(view, app.visible_rows(), app.visible_cols(), width, height)
+}
+
+fn overlay_region_container(region: OverlayRegion, header_width: f32) -> Div {
+    let mut layer = div().absolute().left(px(header_width + region.x)).top(px(region.y))
+        .overflow_hidden();
+    layer = if let Some(width) = region.width { layer.w(px(width)) } else { layer.right_0() };
+    if let Some(height) = region.height { layer.h(px(height)) } else { layer.bottom_0() }
+}
+
 /// Pre-computed geometry for a visible merge overlay.
 struct VisibleMerge {
     origin_row: usize,
@@ -2675,36 +2733,24 @@ fn render_merge_overlays(
         Setting::Inherit => true,
     };
 
-    let visible_merges = collect_visible_merges(
-        app, cx,
-        view_state.scroll_row, view_state.scroll_col,
-        app.visible_rows(), app.visible_cols(),
-    );
-
-    if visible_merges.is_empty() {
-        return div().into_any_element();
-    }
-
+    let regions = grid_overlay_regions(app, view_state);
     let header_width = crate::app::HEADER_WIDTH * app.metrics.zoom;
     let gridline_color = app.token(TokenKey::GridLines);
     let sel_border_color = app.token(TokenKey::SelectionBorder);
     let user_border_color = app.token(TokenKey::UserBorder);
-
-    div()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        .left(px(header_width))
-        .right_0()
-        .overflow_hidden()
-        .cursor(CursorStyle::Crosshair) // Match child merge overlays to prevent flicker on transition
-        .children(visible_merges.iter().map(|m| {
-            render_merge_div(
-                m, app, window, cx, view_state, pane_side, editing,
-                show_gridlines, gridline_color, sel_border_color, user_border_color,
-            )
-        }))
-        .into_any_element()
+    let mut layers = Vec::new();
+    for region in regions {
+        let visible_merges = collect_visible_merges(
+            app, cx, region.row, region.col, region.rows, region.cols,
+        );
+        layers.push(overlay_region_container(region, header_width)
+            .cursor(CursorStyle::Crosshair)
+            .children(visible_merges.iter().map(|m| {
+                render_merge_div(m, app, window, cx, view_state, pane_side, editing,
+                    show_gridlines, gridline_color, sel_border_color, user_border_color)
+            })));
+    }
+    div().absolute().inset_0().children(layers).into_any_element()
 }
 
 /// Check if a merge region overlaps the current selection.
@@ -2832,12 +2878,24 @@ fn render_text_spill_overlay(
     cx: &App,
     pane_side: Option<SplitSide>,
 ) -> impl IntoElement {
+    let view = get_pane_view_state(app, pane_side);
+    let header_width = crate::app::HEADER_WIDTH * app.metrics.zoom;
+    div().absolute().inset_0().children(grid_overlay_regions(app, view).into_iter().map(|region| {
+        overlay_region_container(region, header_width)
+            .child(render_region_text_spill(app, window, cx, pane_side, region))
+    }))
+}
+
+fn render_region_text_spill(
+    app: &Spreadsheet, window: &Window, cx: &App,
+    pane_side: Option<SplitSide>, region: OverlayRegion,
+) -> AnyElement {
     // Get view state for this pane
     let view_state = get_pane_view_state(app, pane_side);
-    let scroll_row = view_state.scroll_row;
-    let scroll_col = view_state.scroll_col;
-    let visible_rows = app.visible_rows();
-    let visible_cols = app.visible_cols();
+    let scroll_row = region.row;
+    let scroll_col = region.col;
+    let visible_rows = region.rows;
+    let visible_cols = region.cols;
     let metrics = &app.metrics;
 
     // Collect spill runs: cells whose text overflows into adjacent empty cells
@@ -2870,22 +2928,30 @@ fn render_text_spill_overlay(
         let visible_index = scroll_row + screen_row;
 
         // Get view_row and data_row for this screen position
-        let Some((view_row, data_row)) = app.nth_visible_row_with_hidden(visible_index, cx) else {
-            continue;
-        };
+        let row_at = |index| if region.height.is_some() {
+            Some((index, app.view_to_data(index, cx)))
+        } else { app.nth_visible_row_with_hidden(index, cx) };
+        let Some((view_row, data_row)) = row_at(visible_index) else { continue; };
 
         // Calculate Y position for this row
         let mut y: f32 = 0.0;
         for r in 0..screen_row {
             let idx = scroll_row + r;
-            if let Some((vr, _)) = app.nth_visible_row_with_hidden(idx, cx) {
+            if let Some((vr, _)) = row_at(idx) {
                 y += metrics.row_height(app.row_height(vr));
             }
         }
         let row_height = metrics.row_height(app.row_height(view_row));
 
         for screen_col in 0..visible_cols {
-            let Some(col) = app.nth_visible_col(screen_col, scroll_col) else { continue; };
+            let col = if region.width.is_some() {
+                let col = screen_col;
+                if app.is_col_hidden(col) { continue; }
+                col
+            } else {
+                let Some(col) = app.nth_visible_col(screen_col, scroll_col) else { continue; };
+                col
+            };
             let sheet_id = app.sheet(cx).id;
             let (display_sheet, display_data_row) = app
                 .review_endpoint_sheet_row(sheet_id, data_row)
@@ -2981,7 +3047,7 @@ fn render_text_spill_overlay(
             // Calculate X position for this cell
             let mut x: f32 = 0.0;
             for c in scroll_col..col {
-                x += metrics.col_width(app.col_width(c));
+                if !app.is_col_hidden(c) { x += metrics.col_width(app.col_width(c)); }
             }
 
             // Use entry to dedupe - keep first entry for each (data_row, col)
@@ -3038,16 +3104,12 @@ fn render_text_spill_overlay(
     // - Right-aligned: text right-aligned within original cell (shouldn't spill, but handle gracefully)
     let padding = 4.0; // Same as px_1() = 4px each side
 
-    // The overlay must be clipped to the grid content area (excluding row headers).
-    // Row headers are HEADER_WIDTH (50px) wide, rendered inside each row.
-    // Position overlay at left=HEADER_WIDTH to align with cell content area.
-    let header_width = crate::app::HEADER_WIDTH * app.metrics.zoom;
-
+    // The parent region clips at the frozen dividers and excludes row headers.
     div()
         .absolute()
         .top_0()
         .bottom_0()
-        .left(px(header_width))  // Offset past row headers
+        .left_0() // The region container already accounts for headers and frozen panes.
         .right_0()
         .overflow_hidden()       // Clip spills at grid boundary
         .children(
@@ -3219,3 +3281,61 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
 // Tests for spill logic are in visigrid-engine/src/sheet.rs (test_text_spill_*)
 // because the binary crate doesn't support unit tests well.
 //
+
+#[cfg(test)]
+mod frozen_overlay_tests {
+    use super::{overlay_regions, WorkbookViewState};
+
+    #[test]
+    fn issue17_example2_preserves_merge_and_text_positions() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/issue17-frozen-overlays.xlsx");
+        let (workbook, _) = visigrid_io::xlsx::import(&path).unwrap();
+        let sheet = workbook.sheet(1).unwrap();
+        assert_eq!(sheet.frozen_panes, (0, 2));
+        assert_eq!(sheet.get_formatted_display(8, 9), "FC Standalone UAT");
+        assert_eq!(sheet.get_formatted_display(13, 9), "FC Report Imprvmnt");
+        let mut view = WorkbookViewState::default();
+        view.frozen_cols = 2;
+        view.scroll_col = 2;
+        let regions = overlay_regions(&view, 20, 13, 192.0, 0.0);
+        assert_eq!(regions.len(), 2);
+        let frozen = regions[0];
+        let scrolling = regions[1];
+        let merge = &sheet.merged_regions[0];
+        assert_eq!(merge.start, (0, 0));
+        assert_eq!(merge.end, (3, 1));
+        assert!(merge.overlaps_viewport(frozen.row, frozen.col, frozen.rows, frozen.cols));
+        assert!(!merge.overlaps_viewport(scrolling.row, scrolling.col, scrolling.rows, scrolling.cols));
+        assert_eq!(merge.pixel_rect(frozen.row, frozen.col, |_| 96.0, |_| 28.0),
+                   (0.0, 0.0, 192.0, 112.0));
+        // J9 is the tenth column, not H9: include the two frozen columns + divider.
+        assert_eq!(scrolling.x + (9 - scrolling.col) as f32 * 96.0, 865.0);
+        view.scroll_col = 6;
+        let moved = overlay_regions(&view, 20, 13, 192.0, 0.0);
+        assert_eq!(moved[0].col, 0);
+        assert_eq!(moved[0].x, 0.0);
+        assert_eq!(moved[1].x + (9 - moved[1].col) as f32 * 96.0, 481.0);
+    }
+
+    #[test]
+    fn frozen_overlay_regions_cover_both_axes_and_zoom() {
+        let mut view = WorkbookViewState::default();
+        view.frozen_rows = 2;
+        view.frozen_cols = 2;
+        view.scroll_row = 10;
+        view.scroll_col = 8;
+        // Non-default, zoomed dimensions; dividers remain one pixel.
+        let regions = overlay_regions(&view, 20, 12, 310.0, 84.0);
+        assert_eq!(regions.len(), 4);
+        assert_eq!((regions[0].row, regions[0].col), (0, 0));
+        assert_eq!((regions[1].row, regions[1].col, regions[1].x), (0, 8, 311.0));
+        assert_eq!((regions[2].row, regions[2].col, regions[2].y), (10, 0, 85.0));
+        assert_eq!((regions[3].row, regions[3].col, regions[3].x, regions[3].y), (10, 8, 311.0, 85.0));
+        assert_eq!((regions[3].rows, regions[3].cols), (18, 10));
+        let plain = overlay_regions(&WorkbookViewState::default(), 20, 12, 0.0, 0.0);
+        assert_eq!(plain.len(), 1);
+        assert_eq!((plain[0].x, plain[0].y), (0.0, 0.0));
+        assert!(plain[0].width.is_none() && plain[0].height.is_none());
+    }
+}
