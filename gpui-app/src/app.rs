@@ -3579,9 +3579,8 @@ impl Spreadsheet {
         if cols.is_empty() {
             cols.push(self.view_state.active_cell().1);
         }
-        // A whole-sheet selection (Ctrl+A) would mean every column in the grid;
-        // fit only
-        // those that actually hold something.
+        // A whole-sheet selection (Ctrl+A) would mean every column in the
+        // grid; fit only those that actually hold something.
         if cols.len() > 1 {
             let populated: std::collections::HashSet<usize> =
                 self.sheet(cx).cells_iter().map(|(&(_, c), _)| c).collect();
