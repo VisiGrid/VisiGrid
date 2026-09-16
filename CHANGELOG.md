@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.35.1
+
+### Excel
+
+- **Merged cells and overflowing text render in the correct frozen-pane region.** Merged labels in the frozen corner no longer disappear, and text that spills into empty neighbours no longer shifts left by the number of frozen rows or columns. Switching sheets also keeps the scrollable pane beyond the frozen area.
+
+### Interface
+
+- **Active row and column headers use a softer tint with a clear selection edge.** The selected headers stay easy to find without filling the entire header with the stronger accent colour.
+
 ## 0.35.0
 
 ### Grid
