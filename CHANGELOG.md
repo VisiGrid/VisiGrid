@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.34.4
+
+### Files
+
+- **Whole-row and whole-column fills import from Excel** — a sheet whose banded rows or columns are filled at the row or column level, rather than cell by cell, imported blank wherever the cells were empty: the shading only appeared under text. Row and column formats now import, apply to empty cells, and export back to xlsx. A cell Excel marks with the default style still clears the fill it would otherwise inherit, which is how Excel punches a hole in a banded row. ([#17](https://github.com/VisiGrid/VisiGrid/issues/17))
+- **Frozen panes survive a round trip** — a sheet frozen in Excel opened unfrozen. Freezes now import, save in `.sheet` files, and export to xlsx. ([#17](https://github.com/VisiGrid/VisiGrid/issues/17))
+
+### Interface
+
+- **Roomier default grid** — new sheets use 96px columns and 28px rows, up from 80 and 24; text sat tight against the cell edges at the old size. Existing settings and saved files keep their own widths and heights.
+- Format bar and formula bar spacing polished to match.
+
 ## 0.34.3
 
 ### Files
