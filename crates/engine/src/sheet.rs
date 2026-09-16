@@ -257,9 +257,15 @@ impl MergedRegion {
 /// This is the only definition. Copies drifted once: four desktop modules
 /// carried 1,000,000 x 16,384 while the grid was 65,536 x 256, so Go To, paste
 /// and formula-mode arrowing reached cells the grid could not show.
-pub const NUM_ROWS: usize = 65_536;
+///
+/// Excel's size, and since 0.35.0 ours. The old 65,536 x 256 was Excel 2003's,
+/// and it turned away real files: a Parquet or CSV export with more than 65,536
+/// rows was refused outright, and an xlsx wider than column IV lost everything
+/// past it. Cells are stored sparsely, so an empty grid of any size costs
+/// nothing; what the size does bound is imports, session writes and A:A.
+pub const NUM_ROWS: usize = 1_048_576;
 /// Columns in a sheet. See [`NUM_ROWS`].
-pub const NUM_COLS: usize = 256;
+pub const NUM_COLS: usize = 16_384;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sheet {
@@ -641,6 +647,30 @@ impl Sheet {
             has_data = true;
         }
         (max_row, max_col)
+    }
+
+    /// Exclusive `(rows, cols)` bounds of the sheet's data: `(0, 0)` when the
+    /// sheet holds nothing, `(1, 1)` when only A1 does.
+    ///
+    /// Exporters and CLI views used to find this by walking the grid, which is
+    /// 17 billion lookups at full size and was already 16.7 million at the old
+    /// one. Cells are sparse; ask them.
+    pub fn data_bounds(&self) -> (usize, usize) {
+        let mut bounds: Option<(usize, usize)> = None;
+        let mut widen = |r: usize, c: usize| {
+            let (mr, mc) = bounds.get_or_insert((0, 0));
+            *mr = (*mr).max(r + 1);
+            *mc = (*mc).max(c + 1);
+        };
+        for (&(r, c), cell) in &self.cells {
+            if !matches!(cell.value, CellValue::Empty) {
+                widen(r, c);
+            }
+        }
+        for (r, c) in self.spill_receiver_coords() {
+            widen(r, c);
+        }
+        bounds.unwrap_or((0, 0))
     }
 
     /// Get a reference to a cell if it exists, without creating one.
@@ -2289,10 +2319,12 @@ mod tests {
     }
 
     #[test]
-    fn grid_constants_match_excel_2003_limits() {
+    fn grid_constants_match_excel_limits() {
         // Changing these is a product decision, not a refactor: imports clamp
         // here, session writes are bounded here, and A:A covers this many rows.
-        assert_eq!((NUM_ROWS, NUM_COLS), (65_536, 256));
+        assert_eq!((NUM_ROWS, NUM_COLS), (1_048_576, 16_384));
+        // XFD is Excel's last column; a two-letter scheme would stop at ZZ.
+        assert_eq!(crate::formula::parser::col_to_letters(NUM_COLS - 1), "XFD");
     }
 
     #[test]

@@ -173,11 +173,14 @@ fn export_with_delimiter(sheet: &Sheet, path: &Path, delimiter: u8) -> Result<()
         .from_path(path)
         .map_err(|e| e.to_string())?;
 
-    for row in 0..sheet.rows {
+    // Bounded by the data, not the grid: a sheet is 1,048,576 x 16,384, so
+    // walking it to find 20 rows of CSV is 17 billion lookups.
+    let (last_row, last_col) = sheet.data_extent();
+    for row in 0..=last_row {
         let mut record: Vec<String> = Vec::new();
         let mut last_non_empty = 0;
 
-        for col in 0..sheet.cols {
+        for col in 0..=last_col {
             let value = if sheet.is_merge_hidden(row, col) {
                 String::new()
             } else {

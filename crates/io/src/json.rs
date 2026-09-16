@@ -15,11 +15,13 @@ pub fn export(sheet: &Sheet, path: &Path) -> Result<(), String> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut last_non_empty_row = 0;
 
-    for row in 0..sheet.rows {
+    // Bounded by the data, not the grid — see the CSV exporter.
+    let (last_row, last_col) = sheet.data_extent();
+    for row in 0..=last_row {
         let mut record: Vec<String> = Vec::new();
         let mut last_non_empty_col = 0;
 
-        for col in 0..sheet.cols {
+        for col in 0..=last_col {
             let value = sheet.get_display(row, col);
             if !value.is_empty() {
                 last_non_empty_col = col + 1;
@@ -701,11 +703,10 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
 
     // Cells a formula spilled into. They hold no Cell of their own, so the loop
     // above never sees them.
-    for row in 0..sheet.rows {
-        for col in 0..sheet.cols {
-            if !sheet.is_spill_receiver(row, col) {
-                continue;
-            }
+    let mut receivers: Vec<(usize, usize)> = sheet.spill_receiver_coords().collect();
+    receivers.sort_unstable();
+    for (row, col) in receivers {
+        {
             let Some(parent) = sheet.get_spill_parent(row, col) else {
                 continue;
             };

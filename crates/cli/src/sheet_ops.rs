@@ -652,17 +652,7 @@ pub fn compute_sheet_fingerprint_with_meta(workbook: &Workbook, metadata: &CellM
 
 /// Compute (rows, cols) non-empty data bounds of a sheet.
 pub fn get_data_bounds(sheet: &Sheet) -> (usize, usize) {
-    let mut max_row = 0;
-    let mut max_col = 0;
-    for row in 0..sheet.rows {
-        for col in 0..sheet.cols {
-            if !sheet.get_display(row, col).is_empty() {
-                max_row = max_row.max(row + 1);
-                max_col = max_col.max(col + 1);
-            }
-        }
-    }
-    (max_row, max_col)
+    sheet.data_bounds()
 }
 
 /// Resolve sheet by arg (index or name, case-insensitive).

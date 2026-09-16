@@ -2824,13 +2824,10 @@ pub fn upgrade_sheet(path: &Path, out_path: Option<&Path>) -> Result<UpgradeResu
     // Count formula cells
     let mut formula_cells_total = 0;
     for sheet in workbook.sheets() {
-        for row in 0..sheet.rows {
-            for col in 0..sheet.cols {
-                if matches!(sheet.get_cell(row, col).value, CellValue::Formula { .. }) {
-                    formula_cells_total += 1;
-                }
-            }
-        }
+        formula_cells_total += sheet
+            .cells_iter()
+            .filter(|(_, cell)| matches!(cell.value, CellValue::Formula { .. }))
+            .count();
     }
 
     // Save to target path (in-place or out_path)

@@ -6,7 +6,8 @@
 //                               (one with .123 s), ship_date date32,
 //                               amount decimal(10,2), status string; 3 rows
 //   parquet_70000_rows.parquet  one int32 column `n`, every value 1; 70,000
-//                               rows, more than a sheet holds
+//                               rows — more than a sheet held before 0.35.0,
+//                               and an ordinary file since
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -36,38 +37,43 @@ fn stderr(output: &Output) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Oversized files: an aggregate over the rows that fit is a wrong answer
+// Files a sheet used to be too small for
+//
+// Until 0.35.0 a sheet held 65,536 rows, so this 70,000-row file was refused
+// by `convert` and by `--calc`, and `inspect` showed a truncated prefix with a
+// warning. The grid is now 1,048,576 rows and the file is unremarkable. The
+// refusal itself still matters for files past the new limit; that path is
+// covered in visigrid-io (parquet.rs builds a MAX_ROWS + 10 file synthetically,
+// which is cheaper than carrying a million-row fixture here).
 // ---------------------------------------------------------------------------
 
-/// `--calc` used to total the first 65,535 records of a 70,000-row file and
-/// exit 0 with no warning.
+/// The whole point of the raise: an aggregate now covers every record instead
+/// of refusing, and the answer is the true one — 70,000 values of 1.
 #[test]
-fn inspect_calc_refuses_a_file_bigger_than_a_sheet() {
+fn inspect_calc_totals_every_row_of_a_70000_row_file() {
     let out = vgrid(&["sheet", "inspect", &fixture("parquet_70000_rows.parquet"), "--headers", "--calc", "SUM(n)"]);
 
-    assert_eq!(out.status.code(), Some(4), "stdout: {}\nstderr: {}", stdout(&out), stderr(&out));
-    assert!(stdout(&out).is_empty(), "no result may be printed: {}", stdout(&out));
-    let err = stderr(&out);
-    assert!(err.contains("first 65535 of 70000 rows"), "stderr: {}", err);
-    assert!(err.contains("--calc"), "the hint should say why --calc refused: {}", err);
+    assert_eq!(out.status.code(), Some(0), "stdout: {}\nstderr: {}", stdout(&out), stderr(&out));
+    assert!(stdout(&out).contains("70000"), "SUM over every row: {}", stdout(&out));
 }
 
-/// Looking at part of an oversized file is fine, but not silently: the note
-/// goes to stderr so JSON on stdout stays parseable.
+/// Nothing is truncated, so nothing is warned about, and stdout stays JSON.
 #[test]
-fn inspect_range_of_an_oversized_file_notes_the_truncation_on_stderr() {
+fn inspect_range_of_a_70000_row_file_reports_no_truncation() {
     let out = vgrid(&["sheet", "inspect", &fixture("parquet_70000_rows.parquet"), "A1:A3", "--json"]);
 
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     let parsed: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("stdout stays valid JSON");
     assert_eq!(parsed["cells"][1]["value"], "1");
-    assert!(stderr(&out).contains("first 65535 of 70000 rows"), "stderr: {}", stderr(&out));
+    assert!(!stderr(&out).contains("of 70000 rows"), "no truncation note: {}", stderr(&out));
 }
 
 #[test]
-fn convert_still_refuses_a_file_bigger_than_a_sheet() {
+fn convert_takes_a_70000_row_file() {
     let out = vgrid(&["convert", &fixture("parquet_70000_rows.parquet"), "-t", "csv"]);
-    assert_eq!(out.status.code(), Some(4), "stderr: {}", stderr(&out));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    // Header plus every record, none dropped.
+    assert_eq!(stdout(&out).lines().count(), 70_001, "stderr: {}", stderr(&out));
 }
 
 // ---------------------------------------------------------------------------

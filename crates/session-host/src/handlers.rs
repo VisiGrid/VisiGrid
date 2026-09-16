@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn ghost_cell_rejected_without_host() {
         let mut wb = Workbook::new();
-        let out = apply_ops(&mut wb, &req(vec![write(0, 70_000, 0, "ghost")]));
+        let out = apply_ops(&mut wb, &req(vec![write(0, NUM_ROWS + 1, 0, "ghost")]));
         let err = out.response.error.unwrap();
         match err {
             ApplyOpsError::OpFailed(e) => assert_eq!(e.code, "out_of_bounds"),
@@ -919,10 +919,12 @@ mod validation_tests {
 
     #[test]
     fn out_of_bounds_cell_rejected() {
-        // The exact ghost-cell case: row 70,000 on the 65,536-row grid
-        let (code, msg, _) = validate_session_op(&set_value(0, 70_000, 0), 1).unwrap();
+        // The ghost-cell case: a row past the end of the grid. 70,000 was that
+        // row until 0.35.0 and is ordinary now, which is the point of pinning
+        // this to NUM_ROWS rather than to a number.
+        let (code, msg, _) = validate_session_op(&set_value(0, NUM_ROWS, 0), 1).unwrap();
         assert_eq!(code, "out_of_bounds");
-        assert!(msg.contains("70000") && msg.contains("65536"));
+        assert!(msg.contains(&NUM_ROWS.to_string()));
         let (code, _, _) = validate_session_op(&set_value(0, 0, NUM_COLS), 1).unwrap();
         assert_eq!(code, "out_of_bounds");
     }
@@ -948,9 +950,13 @@ mod validation_tests {
         // Whole grid exceeds the per-op cap
         let (code, _, _) = validate_session_op(&style(0, 0, NUM_ROWS - 1, NUM_COLS - 1), 1).unwrap();
         assert_eq!(code, "cells_limit_exceeded");
-        // One full column (65,536 cells) is comfortably under the cap
-        assert!(NUM_ROWS <= MAX_SESSION_FORMAT_CELLS);
-        assert!(validate_session_op(&style(0, 0, NUM_ROWS - 1, 0), 1).is_none());
+        // A full column used to fit under the cap and no longer does: the grid
+        // grew to 1,048,576 rows while the cap stayed where undo-patch memory
+        // wants it. Agents format a bounded range, and the error says so.
+        assert!(NUM_ROWS > MAX_SESSION_FORMAT_CELLS);
+        let (code, _, _) = validate_session_op(&style(0, 0, NUM_ROWS - 1, 0), 1).unwrap();
+        assert_eq!(code, "cells_limit_exceeded");
+        assert!(validate_session_op(&style(0, 0, MAX_SESSION_FORMAT_CELLS - 1, 0), 1).is_none());
     }
 
     #[test]
@@ -981,7 +987,7 @@ mod validation_tests {
         // Bad sheet is an error, not a redirect to the active sheet
         let (code, _) = validate_inspect_target(&InspectTarget::Cell { sheet: 3, row: 0, col: 0 }, 1).unwrap();
         assert_eq!(code, "sheet_not_found");
-        let (code, _) = validate_inspect_target(&InspectTarget::Cell { sheet: 0, row: 70_000, col: 0 }, 1).unwrap();
+        let (code, _) = validate_inspect_target(&InspectTarget::Cell { sheet: 0, row: NUM_ROWS, col: 0 }, 1).unwrap();
         assert_eq!(code, "out_of_bounds");
 
         assert!(validate_inspect_target(&range(0, 0, 0, 19, 9), 1).is_none());
@@ -989,9 +995,10 @@ mod validation_tests {
         assert_eq!(code, "invalid_op");
         let (code, _) = validate_inspect_target(&range(0, 0, 0, NUM_ROWS - 1, NUM_COLS - 1), 1).unwrap();
         assert_eq!(code, "cells_limit_exceeded");
-        // One full column is exactly at the cap
-        assert_eq!(NUM_ROWS, MAX_SESSION_INSPECT_CELLS);
-        assert!(validate_inspect_target(&range(0, 0, 0, NUM_ROWS - 1, 0), 1).is_none());
+        // A full column was exactly at the inspect cap before the grid grew.
+        assert!(NUM_ROWS > MAX_SESSION_INSPECT_CELLS);
+        assert!(validate_inspect_target(
+            &range(0, 0, 0, MAX_SESSION_INSPECT_CELLS - 1, 0), 1).is_none());
     }
 
     #[test]

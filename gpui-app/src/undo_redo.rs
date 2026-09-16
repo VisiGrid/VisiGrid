@@ -14,13 +14,9 @@ use crate::history::UndoAction;
 
 /// Convert column index to letter (0 = A, 25 = Z, 26 = AA)
 fn col_to_letter(col: usize) -> String {
-    if col < 26 {
-        ((b'A' + col as u8) as char).to_string()
-    } else {
-        let first = (b'A' + (col / 26 - 1) as u8) as char;
-        let second = (b'A' + (col % 26) as u8) as char;
-        format!("{}{}", first, second)
-    }
+    // Two letters stopped at ZZ, which was past the old grid's last column and
+    // is not past this one.
+    Spreadsheet::col_letter(col)
 }
 impl Spreadsheet {
     fn finish_workbook_snapshot_restore(
