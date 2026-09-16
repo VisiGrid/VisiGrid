@@ -149,18 +149,11 @@ impl Spreadsheet {
         let sheet_index = self.sheet_index(cx);
 
         // Capture cells to be deleted for undo
-        let mut deleted_cells = Vec::new();
+        // Only cells that exist can be deleted, so ask the sparse store rather
+        // than walking the whole band: at grid size that walk is 16.7M lookups
+        // for a one-row delete.
         let sheet = self.sheet(cx);
-        for row in at_row..at_row + count {
-            for col in 0..NUM_COLS {
-                let raw = sheet.get_raw(row, col);
-                let format = sheet.get_format(row, col);
-                // Only store non-empty cells
-                if !raw.is_empty() || format != Default::default() {
-                    deleted_cells.push((row, col, raw, format));
-                }
-            }
-        }
+        let deleted_cells = sheet.occupied_cells_in_rows(at_row, count);
 
         // Capture row heights for deleted rows (per-sheet)
         let sheet_heights = self.sheet_row_heights_mut();
@@ -177,9 +170,7 @@ impl Spreadsheet {
             .map(|(r, h)| (*r, *h))
             .collect();
         // Remove all affected heights
-        for r in at_row..NUM_ROWS {
-            sheet_heights.remove(&r);
-        }
+        sheet_heights.retain(|r, _| *r < at_row);
         // Re-insert shifted heights
         for (r, h) in heights_to_shift {
             sheet_heights.insert(r - count, h);
@@ -278,18 +269,9 @@ impl Spreadsheet {
         let sheet_index = self.sheet_index(cx);
 
         // Capture cells to be deleted for undo
-        let mut deleted_cells = Vec::new();
+        // See delete_rows: sparse lookup, not a full-column walk.
         let sheet = self.sheet(cx);
-        for col in at_col..at_col + count {
-            for row in 0..NUM_ROWS {
-                let raw = sheet.get_raw(row, col);
-                let format = sheet.get_format(row, col);
-                // Only store non-empty cells
-                if !raw.is_empty() || format != Default::default() {
-                    deleted_cells.push((row, col, raw, format));
-                }
-            }
-        }
+        let deleted_cells = sheet.occupied_cells_in_cols(at_col, count);
 
         // Capture column widths for deleted columns (per-sheet)
         let sheet_widths = self.sheet_col_widths_mut();
@@ -306,9 +288,7 @@ impl Spreadsheet {
             .map(|(c, w)| (*c, *w))
             .collect();
         // Remove all affected widths
-        for c in at_col..NUM_COLS {
-            sheet_widths.remove(&c);
-        }
+        sheet_widths.retain(|c, _| *c < at_col);
         // Re-insert shifted widths
         for (c, w) in widths_to_shift {
             sheet_widths.insert(c - count, w);

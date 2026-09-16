@@ -321,8 +321,8 @@ impl Default for ImportOptions {
 const MAX_CELLS: usize = 5_000_000;
 
 /// Maximum dimensions for a sheet
-const MAX_ROWS: usize = 65536;
-const MAX_COLS: usize = 256;
+const MAX_ROWS: usize = visigrid_engine::sheet::NUM_ROWS;
+const MAX_COLS: usize = visigrid_engine::sheet::NUM_COLS;
 
 /// Import an Excel file (xlsx, xls, xlsb, ods)
 pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {

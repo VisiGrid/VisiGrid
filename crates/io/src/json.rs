@@ -919,7 +919,7 @@ fn cached_formula_values(doc: &FullDoc, wb: &visigrid_engine::workbook::Workbook
 }
 
 fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usize) -> Result<(Sheet, SheetLayout), String> {
-    let mut sheet = Sheet::new(id, 65536, 256);
+    let mut sheet = Sheet::new(id, visigrid_engine::sheet::NUM_ROWS, visigrid_engine::sheet::NUM_COLS);
     // Quoted values that read as numbers. Ours are deliberate — the writer only
     // quotes text — but a foreign document may have quoted a number by accident,
     // and it now stays text. Said out loud so that is discoverable rather than

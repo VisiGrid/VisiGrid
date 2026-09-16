@@ -1516,8 +1516,9 @@ mod format_apply_range_tests {
     // Explicit import: this module glob-imports gpui, whose `test` attribute
     // macro would otherwise shadow the built-in one.
     use super::{plan_format_ranges, MAX_FORMAT_APPLY_CELLS};
+    use crate::app::{NUM_COLS, NUM_ROWS};
 
-    const SHEET: (usize, usize) = (65_536, 256);
+    const SHEET: (usize, usize) = (NUM_ROWS, NUM_COLS);
 
     fn select_all() -> Vec<((usize, usize), (usize, usize))> {
         vec![((0, 0), (SHEET.0 - 1, SHEET.1 - 1))]

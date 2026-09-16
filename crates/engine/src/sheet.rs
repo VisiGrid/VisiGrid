@@ -250,6 +250,17 @@ impl MergedRegion {
 // Sheet
 // =============================================================================
 
+/// Rows in a sheet: the grid the desktop app shows, the bound imports clamp or
+/// refuse at, the limit on session and paste writes, and the extent whole-column
+/// references like `A:A` cover.
+///
+/// This is the only definition. Copies drifted once: four desktop modules
+/// carried 1,000,000 x 16,384 while the grid was 65,536 x 256, so Go To, paste
+/// and formula-mode arrowing reached cells the grid could not show.
+pub const NUM_ROWS: usize = 65_536;
+/// Columns in a sheet. See [`NUM_ROWS`].
+pub const NUM_COLS: usize = 256;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sheet {
     /// Stable identity - never changes, never reused after deletion
@@ -1107,6 +1118,51 @@ impl Sheet {
             .unwrap_or_else(|| self.inherited_format(row, col))
     }
 
+    /// Cells in `count` rows from `start_row` that carry a value or a
+    /// non-default format, as `(row, col, raw, format)` in row-major order.
+    ///
+    /// The sparse counterpart to walking the band cell by cell: a one-row
+    /// delete on a full-width grid is 256 lookups this way and 256 the other,
+    /// but the column form below is 65,536 either way — and both scale with the
+    /// grid rather than with the data, which is what made deletes slow.
+    pub fn occupied_cells_in_rows(
+        &self,
+        start_row: usize,
+        count: usize,
+    ) -> Vec<(usize, usize, String, CellFormat)> {
+        let end_row = start_row.saturating_add(count);
+        self.occupied_cells(|(r, _)| (start_row..end_row).contains(r))
+    }
+
+    /// Columns form of [`Sheet::occupied_cells_in_rows`].
+    pub fn occupied_cells_in_cols(
+        &self,
+        start_col: usize,
+        count: usize,
+    ) -> Vec<(usize, usize, String, CellFormat)> {
+        let end_col = start_col.saturating_add(count);
+        self.occupied_cells(|(_, c)| (start_col..end_col).contains(c))
+    }
+
+    fn occupied_cells(
+        &self,
+        in_band: impl Fn(&(usize, usize)) -> bool,
+    ) -> Vec<(usize, usize, String, CellFormat)> {
+        let mut found: Vec<_> = self
+            .cells
+            .iter()
+            .filter(|(pos, _)| in_band(pos))
+            .filter(|(_, cell)| {
+                !cell.value.raw_display().is_empty() || cell.format != CellFormat::default()
+            })
+            .map(|((r, c), cell)| (*r, *c, cell.value.raw_display(), cell.format.clone()))
+            .collect();
+        // Undo restores in this order; a HashMap would hand back a different
+        // one every run.
+        found.sort_unstable_by_key(|(r, c, _, _)| (*r, *c));
+        found
+    }
+
     /// Iterate over all populated cells
     pub fn cells_iter(&self) -> impl Iterator<Item = (&(usize, usize), &Cell)> {
         self.cells.iter()
@@ -1525,11 +1581,7 @@ impl Sheet {
         let end_row = start_row + count; // exclusive
 
         // Remove cells in the deleted rows
-        for row in start_row..end_row {
-            for col in 0..self.cols {
-                self.cells.remove(&(row, col));
-            }
-        }
+        self.cells.retain(|(r, _), _| !(start_row..end_row).contains(r));
 
         // Collect cells that need to be shifted up
         let cells_to_shift: Vec<_> = self.cells
@@ -1630,11 +1682,7 @@ impl Sheet {
         let end_col = start_col + count; // exclusive
 
         // Remove cells in the deleted columns
-        for col in start_col..end_col {
-            for row in 0..self.rows {
-                self.cells.remove(&(row, col));
-            }
-        }
+        self.cells.retain(|(_, c), _| !(start_col..end_col).contains(c));
 
         // Collect cells that need to be shifted left
         let cells_to_shift: Vec<_> = self.cells
@@ -2210,6 +2258,41 @@ mod tests {
         // Text in a date-formatted cell is not a date.
         let text = formatted("not a date", NumberFormat::DateTime);
         assert_eq!(text.get_interchange_display(0, 0), "not a date");
+    }
+
+    #[test]
+    fn occupied_cells_in_band_finds_values_and_formats_in_order() {
+        let mut sheet = Sheet::new(SheetId(1), NUM_ROWS, NUM_COLS);
+        sheet.set_value(5, 2, "b");
+        sheet.set_value(5, 0, "a");
+        sheet.set_value(9, 0, "outside");
+        // Formatting alone counts: an empty but filled cell is worth restoring.
+        let mut fmt = sheet.get_format(6, 1);
+        fmt.background_color = Some([1, 2, 3, 255]);
+        sheet.set_format(6, 1, fmt);
+
+        let rows = sheet.occupied_cells_in_rows(5, 2);
+        assert_eq!(
+            rows.iter().map(|(r, c, raw, _)| (*r, *c, raw.as_str())).collect::<Vec<_>>(),
+            vec![(5, 0, "a"), (5, 2, "b"), (6, 1, "")],
+        );
+        assert_eq!(rows[2].3.background_color, Some([1, 2, 3, 255]));
+
+        let cols = sheet.occupied_cells_in_cols(0, 1);
+        assert_eq!(
+            cols.iter().map(|(r, c, raw, _)| (*r, *c, raw.as_str())).collect::<Vec<_>>(),
+            vec![(5, 0, "a"), (9, 0, "outside")],
+        );
+
+        assert!(sheet.occupied_cells_in_rows(NUM_ROWS - 1, 1).is_empty());
+        assert!(sheet.occupied_cells_in_rows(5, 0).is_empty());
+    }
+
+    #[test]
+    fn grid_constants_match_excel_2003_limits() {
+        // Changing these is a product decision, not a refactor: imports clamp
+        // here, session writes are bounded here, and A:A covers this many rows.
+        assert_eq!((NUM_ROWS, NUM_COLS), (65_536, 256));
     }
 
     #[test]

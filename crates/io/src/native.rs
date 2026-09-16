@@ -7,7 +7,7 @@ use rusqlite::{Connection, params};
 
 use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, CellStyle, CellValue, DateStyle, NegativeStyle, NumberFormat, TextOverflow, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
-use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId};
+use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId, NUM_COLS, NUM_ROWS};
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
 
@@ -712,7 +712,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
         })
         .unwrap_or(26);
 
-    let mut sheet = Sheet::new(SheetId(1), rows, cols);
+    let mut sheet = Sheet::new(SheetId(1), rows.max(NUM_ROWS), cols.max(NUM_COLS));
     sheet.set_name(&sheet_name);
 
     // Load cells - check if format columns exist for backward compatibility
@@ -1205,7 +1205,10 @@ fn load_workbook_v2(
     let mut sheets: Vec<Sheet> = Vec::new();
     let mut cached_formula_values: Vec<(usize, usize, usize, crate::CachedFormulaValue)> = Vec::new();
     for (idx, name, rows, cols) in &sheets_data {
-        let mut sheet = Sheet::new(SheetId(*idx as u64 + 1), *rows, *cols);
+        // Stored dimensions are a floor, not the size: files saved by older
+        // builds recorded 1000 x 26, and a sheet that small drops cells pushed
+        // past row 1000 by an insert and cuts A:A short.
+        let mut sheet = Sheet::new(SheetId(*idx as u64 + 1), (*rows).max(NUM_ROWS), (*cols).max(NUM_COLS));
         // Must use set_name() to update both name and name_key for correct lookup
         sheet.set_name(name);
         sheets.push(sheet);
@@ -1213,7 +1216,7 @@ fn load_workbook_v2(
 
     // If no sheets found, create a default one
     if sheets.is_empty() {
-        sheets.push(Sheet::new(SheetId(1), 1000, 26));
+        sheets.push(Sheet::new(SheetId(1), NUM_ROWS, NUM_COLS));
     }
 
     // Load cells for all sheets
@@ -1282,7 +1285,7 @@ fn load_workbook_v2(
             // Ensure sheet exists
             while sheets.len() <= sheet_idx {
                 let new_idx = sheets.len();
-                sheets.push(Sheet::new(SheetId(new_idx as u64 + 1), 1000, 26));
+                sheets.push(Sheet::new(SheetId(new_idx as u64 + 1), NUM_ROWS, NUM_COLS));
             }
 
             let sheet = &mut sheets[sheet_idx];
@@ -3833,6 +3836,27 @@ mod tests {
 
     /// Custom format codes used to save as General, so an xlsx date like
     /// `d-mmm` came back from a .sheet as a bare serial number.
+    /// Files written by older builds recorded 1000 x 26. A sheet that small
+    /// drops cells an insert pushes past row 1000 and cuts `A:A` short, so the
+    /// stored dimensions act as a floor, never as a ceiling.
+    #[test]
+    fn stored_sheet_dimensions_never_shrink_the_grid() {
+        let temp = NamedTempFile::with_suffix(".sheet").unwrap();
+        let mut workbook = Workbook::new();
+        workbook.active_sheet_mut().set_value(0, 0, "x");
+        save_workbook(&workbook, temp.path()).unwrap();
+
+        // Rewrite the recorded size the way an old build would have.
+        {
+            let conn = Connection::open(temp.path()).unwrap();
+            conn.execute("UPDATE sheets SET row_count = 1000, col_count = 26", []).unwrap();
+        }
+
+        let loaded = load_workbook(temp.path()).unwrap();
+        assert_eq!(loaded.active_sheet().rows, NUM_ROWS);
+        assert_eq!(loaded.active_sheet().cols, NUM_COLS);
+    }
+
     #[test]
     fn test_custom_number_format_roundtrip() {
         let mut workbook = Workbook::new();

@@ -17,8 +17,8 @@ use visigrid_engine::cell::{DateStyle, NumberFormat};
 use visigrid_engine::sheet::{Sheet, SheetId};
 
 /// Sheet capacity, header row included. Same limits as xlsx import.
-pub const MAX_ROWS: usize = 65536;
-pub const MAX_COLS: usize = 256;
+pub const MAX_ROWS: usize = visigrid_engine::sheet::NUM_ROWS;
+pub const MAX_COLS: usize = visigrid_engine::sheet::NUM_COLS;
 
 /// Days from the spreadsheet epoch (serial 0, 1899-12-30) to 1970-01-01.
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;

@@ -17,9 +17,8 @@ use visigrid_protocol::{InspectResult, InspectTarget, Op, OpError, CellInfo, Wor
 use crate::bridge::{ApplyOpsError, ApplyOpsRequest, ApplyOpsResponse, InspectError, InspectRequest, InspectResponse};
 use crate::wire_ext::CellRef;
 
-// Grid bounds (governing).
-pub const NUM_ROWS: usize = 65536;
-pub const NUM_COLS: usize = 256;
+// Grid bounds, owned by the engine so every crate agrees.
+pub use visigrid_engine::sheet::{NUM_COLS, NUM_ROWS};
 
 /// Largest cell count a single session format op (SetNumberFormat/SetStyle)
 /// may cover. Bounds memory for undo patches; agents get a precise error

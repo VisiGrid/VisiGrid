@@ -14,13 +14,8 @@ use visigrid_engine::sheet::MergedRegion;
 
 use visigrid_io::csv as csv_io;
 
-use crate::app::Spreadsheet;
+use crate::app::{Spreadsheet, NUM_COLS, NUM_ROWS};
 use crate::history::{CellChange, CellFormatPatch, FormatActionKind, UndoAction};
-
-/// Maximum rows in the spreadsheet
-const NUM_ROWS: usize = 1_000_000;
-/// Maximum columns in the spreadsheet
-const NUM_COLS: usize = 16_384;
 
 /// Avoid accidental multi-gigabyte allocations when a whole row/column is selected.
 const MAX_PICTURE_CELLS: usize = 10_000;

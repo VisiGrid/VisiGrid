@@ -8,13 +8,8 @@
 //! - Formula nav mode auto-switching (Caret vs Point)
 
 use gpui::*;
-use crate::app::Spreadsheet;
+use crate::app::{Spreadsheet, NUM_COLS, NUM_ROWS};
 use crate::mode::FormulaNavMode;
-
-/// Maximum rows in the spreadsheet
-const NUM_ROWS: usize = 1_000_000;
-/// Maximum columns in the spreadsheet
-const NUM_COLS: usize = 16_384;
 
 /// Determine if the caret is at a position where a cell reference can be inserted.
 ///

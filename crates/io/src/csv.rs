@@ -124,7 +124,7 @@ fn import_from_string(content: &str, delimiter: u8) -> Result<Sheet, String> {
         .from_reader(content.as_bytes());
 
     // Start with reasonable defaults, will track actual extent
-    let mut sheet = Sheet::new(SheetId(1), 65536, 256);
+    let mut sheet = Sheet::new(SheetId(1), visigrid_engine::sheet::NUM_ROWS, visigrid_engine::sheet::NUM_COLS);
     let mut max_row = 0usize;
     let mut max_col = 0usize;
 

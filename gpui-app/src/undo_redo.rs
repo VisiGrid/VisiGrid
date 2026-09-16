@@ -9,11 +9,8 @@ use std::collections::HashMap;
 
 use gpui::*;
 
-use crate::app::Spreadsheet;
+use crate::app::{Spreadsheet, NUM_COLS, NUM_ROWS};
 use crate::history::UndoAction;
-
-/// Maximum rows in the spreadsheet
-const NUM_ROWS: usize = 1_000_000;
 
 /// Convert column index to letter (0 = A, 25 = Z, 26 = AA)
 fn col_to_letter(col: usize) -> String {
@@ -25,9 +22,6 @@ fn col_to_letter(col: usize) -> String {
         format!("{}{}", first, second)
     }
 }
-/// Maximum columns in the spreadsheet
-const NUM_COLS: usize = 16_384;
-
 impl Spreadsheet {
     fn finish_workbook_snapshot_restore(
         &mut self,
@@ -155,9 +149,7 @@ impl Spreadsheet {
                         .filter(|(r, _)| **r >= at_row + count)
                         .map(|(r, h)| (*r, *h))
                         .collect();
-                    for r in at_row..NUM_ROWS {
-                        sheet_heights.remove(&r);
-                    }
+                    sheet_heights.retain(|r, _| *r < at_row);
                     for (r, h) in heights_to_shift {
                         sheet_heights.insert(r - count, h);
                     }
@@ -236,9 +228,7 @@ impl Spreadsheet {
                         .filter(|(c, _)| **c >= at_col + count)
                         .map(|(c, w)| (*c, *w))
                         .collect();
-                    for c in at_col..NUM_COLS {
-                        sheet_widths.remove(&c);
-                    }
+                    sheet_widths.retain(|c, _| *c < at_col);
                     for (c, w) in widths_to_shift {
                         sheet_widths.insert(c - count, w);
                     }
@@ -578,9 +568,7 @@ impl Spreadsheet {
                     .filter(|(r, _)| **r >= at_row + count)
                     .map(|(r, h)| (*r, *h))
                     .collect();
-                for r in at_row..NUM_ROWS {
-                    sheet_heights.remove(&r);
-                }
+                sheet_heights.retain(|r, _| *r < at_row);
                 for (r, h) in heights_to_shift {
                     sheet_heights.insert(r - count, h);
                 }
@@ -650,9 +638,7 @@ impl Spreadsheet {
                     .filter(|(c, _)| **c >= at_col + count)
                     .map(|(c, w)| (*c, *w))
                     .collect();
-                for c in at_col..NUM_COLS {
-                    sheet_widths.remove(&c);
-                }
+                sheet_widths.retain(|c, _| *c < at_col);
                 for (c, w) in widths_to_shift {
                     sheet_widths.insert(c - count, w);
                 }
@@ -959,9 +945,7 @@ impl Spreadsheet {
                     .filter(|(r, _)| **r >= at_row + count)
                     .map(|(r, h)| (*r, *h))
                     .collect();
-                for r in at_row..NUM_ROWS {
-                    sheet_heights.remove(&r);
-                }
+                sheet_heights.retain(|r, _| *r < at_row);
                 for (r, h) in heights_to_shift {
                     sheet_heights.insert(r - count, h);
                 }
@@ -1005,9 +989,7 @@ impl Spreadsheet {
                     .filter(|(c, _)| **c >= at_col + count)
                     .map(|(c, w)| (*c, *w))
                     .collect();
-                for c in at_col..NUM_COLS {
-                    sheet_widths.remove(&c);
-                }
+                sheet_widths.retain(|c, _| *c < at_col);
                 for (c, w) in widths_to_shift {
                     sheet_widths.insert(c - count, w);
                 }

@@ -3640,8 +3640,7 @@ fn test_format_shortcut_only_mutates_number_format() {
 #[test]
 fn test_extend_to_start_and_end_selection_range() {
     // These are pure view_state operations, tested via selection math
-    const NUM_ROWS: usize = 65536;
-    const NUM_COLS: usize = 256;
+    use crate::app::{NUM_COLS, NUM_ROWS};
 
     // Simulate: active cell at (50, 10), then extend to start
     let selected = (50usize, 10usize);
@@ -4259,4 +4258,56 @@ fn test_column_differences_mirror_rows() {
     let diffs = find_column_differences(&sheet, (0, 0), (2, 1), 0);
     assert_eq!(diffs, vec![(2, 0), (1, 1)]);
     assert!(find_column_differences(&sheet, (0, 0), (0, 1), 0).is_empty(), "single row: nothing to compare");
+}
+
+/// The grid size has exactly one definition, `visigrid_engine::sheet::NUM_ROWS`
+/// and `NUM_COLS`, re-exported through `app.rs`.
+///
+/// It did not always. Four modules declared their own 1,000,000 x 16,384 while
+/// the grid was 65,536 x 256, so Go To jumped to rows that could not exist,
+/// paste wrote cells past the last column, and formula-mode arrowing built
+/// references to both. A local `const NUM_ROWS` reads so ordinary that the
+/// drift survived for months; this test is what notices.
+#[test]
+fn grid_size_has_a_single_definition() {
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+
+    fn scan(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                scan(&path, root, out);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") { continue; }
+            let content = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") { continue; }
+                let declares = trimmed.starts_with("const NUM_ROWS")
+                    || trimmed.starts_with("const NUM_COLS")
+                    || trimmed.starts_with("pub const NUM_ROWS")
+                    || trimmed.starts_with("pub const NUM_COLS");
+                if declares {
+                    let rel = path.strip_prefix(root).unwrap_or(&path);
+                    out.push(format!("  {}:{}: {}", rel.display(), i + 1, trimmed));
+                }
+            }
+        }
+    }
+
+    scan(&src_dir, &src_dir, &mut violations);
+
+    assert!(
+        violations.is_empty(),
+        "\n\nThe grid size is declared outside the engine:\n{}\n\n\
+         Import it instead: `use crate::app::{{NUM_COLS, NUM_ROWS}};`\n",
+        violations.join("\n")
+    );
+
+    // And the re-export still points at the engine's definition.
+    assert_eq!(crate::app::NUM_ROWS, visigrid_engine::sheet::NUM_ROWS);
+    assert_eq!(crate::app::NUM_COLS, visigrid_engine::sheet::NUM_COLS);
 }

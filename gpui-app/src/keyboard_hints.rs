@@ -316,7 +316,8 @@ impl Spreadsheet {
     /// First column holding data in a row, for `^`.
     fn find_first_data_col_in_row(&self, row: usize, cx: &App) -> usize {
         let sheet = self.sheet(cx);
-        for col in 0..NUM_COLS {
+        let (_, last_col) = sheet.data_extent();
+        for col in 0..=last_col.min(NUM_COLS - 1) {
             if !sheet.get_cell(row, col).value.raw_display().is_empty() {
                 return col;
             }
@@ -341,7 +342,8 @@ impl Spreadsheet {
 
     fn find_last_data_col_in_row(&self, row: usize, cx: &App) -> usize {
         let sheet = self.sheet(cx);
-        for col in (0..NUM_COLS).rev() {
+        let (_, last_col) = sheet.data_extent();
+        for col in (0..=last_col.min(NUM_COLS - 1)).rev() {
             let cell = sheet.get_cell(row, col);
             if !cell.value.raw_display().is_empty() {
                 return col;

@@ -10,15 +10,10 @@
 //! - Inspector panel
 
 use gpui::{*};
-use crate::app::Spreadsheet;
+use crate::app::{Spreadsheet, NUM_COLS, NUM_ROWS};
 use crate::mode::Mode;
 use crate::settings::{update_user_settings, Setting};
 use crate::theme::{Theme, builtin_themes, system_placeholder_theme, SYSTEM_THEME_ID, resolve_system_theme_id, get_theme, default_theme};
-
-/// Maximum rows in the spreadsheet
-const NUM_ROWS: usize = 1_000_000;
-/// Maximum columns in the spreadsheet
-const NUM_COLS: usize = 16_384;
 
 impl Spreadsheet {
     // =========================================================================

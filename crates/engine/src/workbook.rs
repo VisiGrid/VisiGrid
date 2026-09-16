@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::cell::{CellFormat, CellValue};
 use crate::cell_id::CellId;
 use crate::dep_graph::DepGraph;
-use crate::sheet::{Sheet, SheetId, normalize_sheet_name, is_valid_sheet_name};
+use crate::sheet::{Sheet, SheetId, normalize_sheet_name, is_valid_sheet_name, NUM_COLS, NUM_ROWS};
 use crate::named_range::{NamedRange, NamedRangeStore};
 use crate::formula::eval::{CellLookup, EvalArg, EvalResult, NamedRangeResolution, Value};
 use crate::formula::parser::bind_expr;
@@ -143,7 +143,7 @@ impl Default for Workbook {
 impl Workbook {
     /// Create a new workbook with one default sheet
     pub fn new() -> Self {
-        let sheet = Sheet::new(SheetId(1), 65536, 256);
+        let sheet = Sheet::new(SheetId(1), NUM_ROWS, NUM_COLS);
         Self {
             sheets: vec![sheet],
             active_sheet: 0,
@@ -253,7 +253,7 @@ impl Workbook {
         }
 
         let id = self.generate_sheet_id();
-        let sheet = Sheet::new_with_name(id, 65536, 256, &new_name);
+        let sheet = Sheet::new_with_name(id, NUM_ROWS, NUM_COLS, &new_name);
         self.sheets.push(sheet);
         self.sheets.len() - 1
     }
@@ -268,7 +268,7 @@ impl Workbook {
             return None;
         }
         let id = self.generate_sheet_id();
-        let sheet = Sheet::new_with_name(id, 65536, 256, name);
+        let sheet = Sheet::new_with_name(id, NUM_ROWS, NUM_COLS, name);
         self.sheets.push(sheet);
         Some(self.sheets.len() - 1)
     }
