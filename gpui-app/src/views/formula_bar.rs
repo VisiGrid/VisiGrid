@@ -48,7 +48,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
     let frozen_formula = if !editing {
         app.sheet(cx)
             .get_cell_opt(data_row, view_col)
-            .and_then(|c| c.frozen_formula.clone())
+            .and_then(|c| c.frozen_formula().map(str::to_owned))
     } else {
         None
     };

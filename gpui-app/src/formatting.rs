@@ -67,7 +67,7 @@ impl Spreadsheet {
     /// what exists, not the 16.7M coordinates that could exist.
     fn populated_bounds(&self, cx: &App) -> Option<(usize, usize, usize, usize)> {
         let mut bounds: Option<(usize, usize, usize, usize)> = None;
-        for (&(row, col), _) in self.sheet(cx).cells_iter() {
+        for ((row, col), _) in self.sheet(cx).cells_iter() {
             bounds = Some(match bounds {
                 None => (row, col, row, col),
                 Some((r0, c0, r1, c1)) => (r0.min(row), c0.min(col), r1.max(row), c1.max(col)),

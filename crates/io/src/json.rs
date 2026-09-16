@@ -605,7 +605,7 @@ pub fn export_workbook(
 fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
     let mut cells: Vec<FullCell> = Vec::new();
 
-    let mut coords: Vec<(usize, usize)> = sheet.cells_iter().map(|(&rc, _)| rc).collect();
+    let mut coords: Vec<(usize, usize)> = sheet.cells_iter().map(|(rc, _)| rc).collect();
     coords.sort_unstable();
 
     for (row, col) in coords {

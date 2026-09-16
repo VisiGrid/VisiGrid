@@ -125,7 +125,7 @@ impl Spreadsheet {
 
         // Collect cells to check (to avoid borrowing conflict with self.rename_affected_cells)
         let cells_to_check: Vec<_> = self.sheet(cx).cells_iter()
-            .filter_map(|(&(row, col), cell)| {
+            .filter_map(|((row, col), cell)| {
                 self.get_formula_source(&cell.value).map(|formula| (row, col, formula))
             })
             .collect();
@@ -217,7 +217,7 @@ impl Spreadsheet {
                         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
                         .any(|word| word == old_name_upper);
                     if contains_name {
-                        return Some((*row, *col));
+                        return Some((row, col));
                     }
                 }
                 None

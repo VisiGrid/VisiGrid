@@ -196,7 +196,7 @@ impl Session {
             let mut coords: Vec<(usize, usize)> = sheet
                 .cells_iter()
                 .filter(|(_, cell)| cell.value.formula_ast().is_some())
-                .map(|((row, col), _)| (*row, *col))
+                .map(|((row, col), _)| (row, col))
                 .collect();
             // Sparse storage iterates in hash order; sort so the same workbook
             // always produces the same list.

@@ -1647,7 +1647,7 @@ fn materialize_changes(
                     let mut coordinates: Vec<_> = before_sheet
                         .cells_iter()
                         .filter(|((cell_row, _), _)| *cell_row == before_row)
-                        .map(|(&(cell_row, col), _)| CellCoordinate { row: cell_row, col })
+                        .map(|((cell_row, col), _)| CellCoordinate { row: cell_row, col })
                         .collect();
                     coordinates.sort_unstable();
                     for coordinate in coordinates {
@@ -1682,13 +1682,13 @@ fn materialize_changes(
                     before_sheet
                         .cells_iter()
                         .filter(|((r, _), _)| *r == before_row)
-                        .map(|((_, c), _)| *c),
+                        .map(|((_, c), _)| c),
                 );
                 cols.extend(
                     after_sheet
                         .cells_iter()
                         .filter(|((r, _), _)| *r == after_row)
-                        .map(|((_, c), _)| *c),
+                        .map(|((_, c), _)| c),
                 );
                 for col in cols {
                     let before_coordinate = CellCoordinate {
@@ -1716,12 +1716,12 @@ fn materialize_changes(
             coordinates.extend(
                 before_sheet
                     .cells_iter()
-                    .map(|(&(row, col), _)| CellCoordinate { row, col }),
+                    .map(|((row, col), _)| CellCoordinate { row, col }),
             );
             coordinates.extend(
                 after_sheet
                     .cells_iter()
-                    .map(|(&(row, col), _)| CellCoordinate { row, col }),
+                    .map(|((row, col), _)| CellCoordinate { row, col }),
             );
             for coordinate in coordinates {
                 let before = CellSnapshot::from_sheet(before_sheet, coordinate.row, coordinate.col);
@@ -1942,7 +1942,7 @@ pub fn workbook_fingerprint(workbook: &Workbook) -> String {
         }
         let mut coordinates: Vec<_> = sheet
             .cells_iter()
-            .map(|(&(row, col), _)| (row, col))
+            .map(|((row, col), _)| (row, col))
             .collect();
         coordinates.sort_unstable();
         for (row, col) in coordinates {

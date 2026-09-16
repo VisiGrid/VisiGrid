@@ -67,7 +67,7 @@ fn find_row_extent(sheet: &Sheet) -> Option<(usize, usize)> {
     let mut min = usize::MAX;
     let mut max = 0;
     let mut found = false;
-    for (&(r, _), cell) in sheet.cells_iter() {
+    for ((r, _), cell) in sheet.cells_iter() {
         if cell_has_content(cell) {
             min = min.min(r);
             max = max.max(r);
@@ -79,7 +79,7 @@ fn find_row_extent(sheet: &Sheet) -> Option<(usize, usize)> {
 
 /// Pass 2: fill bucket array from cell positions.
 fn fill_buckets(sheet: &Sheet, used_min: usize, rows_per_bucket: usize, buckets: &mut [u8]) {
-    for (&(r, _), cell) in sheet.cells_iter() {
+    for ((r, _), cell) in sheet.cells_iter() {
         if cell_has_content(cell) {
             let b = (r - used_min) / rows_per_bucket;
             if b < buckets.len() {

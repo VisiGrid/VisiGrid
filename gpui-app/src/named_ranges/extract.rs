@@ -199,7 +199,7 @@ impl Spreadsheet {
             let formula_upper = raw.to_uppercase();
             let count = self.count_range_occurrences(&formula_upper, &range_upper);
             if count > 0 {
-                cells.push((*row, *col));
+                cells.push((row, col));
                 total_count += count;
             }
         }

@@ -187,7 +187,7 @@ pub fn load_sheet(
         let mut max_row: usize = 0;
         let mut max_col: usize = 0;
         let mut has_cells = false;
-        for (&(r, c), _) in sheet.cells_iter() {
+        for ((r, c), _) in sheet.cells_iter() {
             has_cells = true;
             if r > max_row {
                 max_row = r;
@@ -315,7 +315,7 @@ pub fn load_workbook_peek(
         let mut max_row: usize = 0;
         let mut max_col: usize = 0;
         let mut has_cells = false;
-        for (&(r, c), cell) in sheet.cells_iter() {
+        for ((r, c), cell) in sheet.cells_iter() {
             if cell.value.raw_display().is_empty() {
                 continue;
             }

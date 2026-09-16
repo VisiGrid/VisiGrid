@@ -114,7 +114,7 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     let first_empty_col = prepared
         .source_workbook()
         .sheet_by_id(state.source_sheet_id)
-        .and_then(|sheet| sheet.cells_iter().map(|(&(_, col), _)| col).max())
+        .and_then(|sheet| sheet.cells_iter().map(|((_, col), _)| col).max())
         .map_or(0, |col| col.saturating_add(1));
     // Keep one empty grid column between populated data and the card. Text can
     // spill into the first empty column, so merely docking at its left edge can
@@ -737,7 +737,7 @@ fn change_address(app: &Spreadsheet, change: &MaterializedChange) -> String {
             .map_or(1, |coordinate| coordinate.row + 1);
         let last_col = app
             .review_source_sheet(change.sheet_id)
-            .and_then(|sheet| sheet.cells_iter().map(|(&(_, col), _)| col).max())
+            .and_then(|sheet| sheet.cells_iter().map(|((_, col), _)| col).max())
             .unwrap_or(0);
         return format!("Row {row} · A{row}:{}{}", column_letters(last_col), row);
     }

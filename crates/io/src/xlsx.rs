@@ -808,7 +808,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                     if result.recalc_error_examples.len() < MAX_ERROR_EXAMPLES {
                         result.recalc_error_examples.push(RecalcErrorExample {
                             sheet: sheet.name.clone(),
-                            address: cell_address(*_row, *_col),
+                            address: cell_address(_row, _col),
                             kind: "circular",
                             error: "#CYCLE!".to_string(),
                             formula: None, // Source is lost when cycle is detected
@@ -818,7 +818,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                 }
                 // Formula errors: evaluate formula cells, check for Value::Error
                 if cell.value.formula_ast().is_some() {
-                    if let Value::Error(ref e) = sheet.get_computed_value(*_row, *_col) {
+                    if let Value::Error(ref e) = sheet.get_computed_value(_row, _col) {
                         sheet_errors += 1;
                         if result.recalc_error_examples.len() < MAX_ERROR_EXAMPLES {
                             let formula_source = match &cell.value {
@@ -827,7 +827,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                             };
                             result.recalc_error_examples.push(RecalcErrorExample {
                                 sheet: sheet.name.clone(),
-                                address: cell_address(*_row, *_col),
+                                address: cell_address(_row, _col),
                                 kind: "error",
                                 error: e.clone(),
                                 formula: formula_source,
@@ -920,7 +920,7 @@ fn import_formatting(
         }
         // Values were loaded before formatting. Resolve inherited formats on
         // those cells, then apply explicit cell styles (including style zero).
-        let coords: Vec<_> = sheet.cells_iter().map(|(rc, _)| *rc).collect();
+        let coords: Vec<_> = sheet.cells_iter().map(|(rc, _)| rc).collect();
         for (row, col) in coords {
             if let Some(format) = sheet.row_formats.get(&row).or_else(|| sheet.col_formats.get(&col)).cloned() {
                 sheet.set_format_from_import(row, col, format);
@@ -1550,17 +1550,17 @@ fn export_sheet_cells(
         }
 
         // Skip merge-hidden cells - only the origin cell exports its value
-        if sheet.is_merge_hidden(*row, *col) {
+        if sheet.is_merge_hidden(row, col) {
             continue;
         }
 
-        let row32 = *row as u32;
-        let col16 = *col as u16;
+        let row32 = row as u32;
+        let col16 = col as u16;
 
         // Build format for this cell
         let mut format = build_excel_format(&cell.format);
         if cell.format.is_default()
-            && (sheet.row_formats.contains_key(row) || sheet.col_formats.contains_key(col)) {
+            && (sheet.row_formats.contains_key(&row) || sheet.col_formats.contains_key(&col)) {
             // The writer treats its empty Format as "inherit row/column".
             // Explicitly request Excel's default foreground to emit an XF
             // that clears the inherited fill while retaining default appearance.
@@ -1570,8 +1570,8 @@ fn export_sheet_cells(
         match &cell.value {
             CellValue::Empty => {
                 // Only write format if cell has formatting
-                if has_formatting(&cell.format) || sheet.row_formats.contains_key(row)
-                    || sheet.col_formats.contains_key(col) {
+                if has_formatting(&cell.format) || sheet.row_formats.contains_key(&row)
+                    || sheet.col_formats.contains_key(&col) {
                     worksheet
                         .write_blank(row32, col16, &format)
                         .map_err(|e| format!("Failed to write cell ({}, {}): {}", row, col, e))?;
@@ -1595,7 +1595,7 @@ fn export_sheet_cells(
 
                     precision_warnings.push(PrecisionWarning {
                         sheet: sheet.name.clone(),
-                        address: cell_address(*row, *col),
+                        address: cell_address(row, col),
                         value: text_value,
                     });
                 } else {
@@ -1620,7 +1620,7 @@ fn export_sheet_cells(
                     formulas_exported += 1;
                 } else {
                     // Invalid formula - export computed value instead
-                    let display = sheet.get_formatted_display(*row, *col);
+                    let display = sheet.get_formatted_display(row, col);
                     if let Ok(n) = display.parse::<f64>() {
                         let format = apply_number_format(format, &cell.format.number_format);
                         worksheet
@@ -1635,7 +1635,7 @@ fn export_sheet_cells(
                     // Track this conversion for user review
                     converted_formulas.push(ConvertedFormula {
                         sheet: sheet.name.clone(),
-                        address: cell_address(*row, *col),
+                        address: cell_address(row, col),
                         formula: source.clone(),
                         value: display,
                     });

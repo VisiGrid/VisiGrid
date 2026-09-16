@@ -5375,7 +5375,7 @@ fn cmd_sheet_inspect(
             let mut non_empty_cells = 0usize;
             let mut max_row = 0usize;
             let mut max_col = 0usize;
-            for (&(r, c), cell) in s.cells_iter() {
+            for ((r, c), cell) in s.cells_iter() {
                 if !cell.value.raw_display().is_empty() {
                     non_empty_cells += 1;
                     if r + 1 > max_row { max_row = r + 1; }
@@ -5472,7 +5472,7 @@ fn cmd_sheet_inspect(
         };
 
         let mut cells: Vec<((usize, usize), sheet_ops::CellInspectResult)> = Vec::new();
-        for (&(row, col), cell) in sheet.cells_iter() {
+        for ((row, col), cell) in sheet.cells_iter() {
             let raw_str = cell.value.raw_display();
             if raw_str.is_empty() { continue; }
             let display = sheet.get_display(row, col);
@@ -6036,7 +6036,7 @@ fn cmd_sheet_import(
         .ok_or_else(|| CliError::io("no sheets in workbook"))?;
     let (rows, cols) = get_data_bounds(sheet);
     let mut cells = 0;
-    for (&(_row, _col), cell) in sheet.cells_iter() {
+    for ((_row, _col), cell) in sheet.cells_iter() {
         if !cell.value.raw_display().is_empty() {
             cells += 1;
         }

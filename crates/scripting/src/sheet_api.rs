@@ -1069,7 +1069,7 @@ impl SheetSnapshot {
         let mut formulas = std::collections::HashMap::new();
 
         // Sparse iteration - only populated cells
-        for (&(row, col), cell) in sheet.cells_iter() {
+        for ((row, col), cell) in sheet.cells_iter() {
             let raw = cell.value.raw_display();
             if !raw.is_empty() {
                 // Convert CellValue to LuaCellValue

@@ -1785,7 +1785,7 @@ impl Spreadsheet {
                     .filter(|((r, c), _)| {
                         *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col
                     })
-                    .map(|(&(r, c), _)| (r, c))
+                    .map(|((r, c), _)| (r, c))
                     .collect();
                 targets.sort_unstable(); // deterministic change/undo order
 

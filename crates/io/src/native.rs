@@ -64,7 +64,7 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
         if let Some(sheet) = workbook.sheet(sheet_idx) {
             // Collect cells and sort for deterministic order
             let mut cells: Vec<((usize, usize), String)> = Vec::new();
-            for (&(row, col), cell) in sheet.cells_iter() {
+            for ((row, col), cell) in sheet.cells_iter() {
                 let raw = cell.value.raw_display();
                 if !raw.is_empty() {
                     cells.push(((row, col), raw.to_string()));
@@ -578,7 +578,7 @@ fn write_sheet(conn: &Connection, sheet: &Sheet) -> Result<(), String> {
             "INSERT INTO cells (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, formula_source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
         ).map_err(|e| e.to_string())?;
 
-        for (&(row, col), cell) in sheet.cells_iter() {
+        for ((row, col), cell) in sheet.cells_iter() {
                 let raw = cell.value.raw_display();
                 let format = &cell.format;
 
@@ -885,7 +885,7 @@ fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> 
             ]).map_err(|e| e.to_string())?;
 
             // Save cells for this sheet
-            for (&(row, col), cell) in sheet.cells_iter() {
+            for ((row, col), cell) in sheet.cells_iter() {
                 let raw = cell.value.raw_display();
                 let format = &cell.format;
 
@@ -1044,7 +1044,7 @@ fn write_workbook_with_metadata(
             ]).map_err(|e| e.to_string())?;
 
             // Save cells for this sheet
-            for (&(row, col), cell) in sheet.cells_iter() {
+            for ((row, col), cell) in sheet.cells_iter() {
                 let raw = cell.value.raw_display();
                 let format = &cell.format;
 
@@ -2433,7 +2433,7 @@ fn write_workbook_full(
                 sheet_idx as i64, &sheet.name, sheet.rows as i64, sheet.cols as i64,
             ]).map_err(|e| e.to_string())?;
 
-            for (&(row, col), cell) in sheet.cells_iter() {
+            for ((row, col), cell) in sheet.cells_iter() {
                 let raw = cell.value.raw_display();
                 let format = &cell.format;
 

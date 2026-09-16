@@ -971,7 +971,7 @@ impl Workbook {
                         |idx| self.sheet_id_at_idx(idx),
                     );
 
-                    let formula_cell = CellId::new(sheet_id, *row, *col);
+                    let formula_cell = CellId::new(sheet_id, row, col);
                     if !refs.is_empty() {
                         let preds: FxHashSet<CellId> = refs.into_iter().collect();
                         self.dep_graph.replace_edges(formula_cell, preds);
@@ -1056,7 +1056,7 @@ impl Workbook {
 
         // Check if the source cell itself has unknown deps
         if let Some(sheet) = self.sheet_by_id(sheet_id) {
-            if let Some(cell) = sheet.cells.get(&(row, col)) {
+            if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(row, col)) {
                 if let Some(ast) = cell.value.formula_ast() {
                     if has_dynamic_deps(ast) {
                         has_unknown_in_chain = true;
@@ -1079,7 +1079,7 @@ impl Workbook {
                 // Check for unknown deps in this cell
                 if !has_unknown_in_chain {
                     if let Some(sheet) = self.sheet_by_id(current.sheet) {
-                        if let Some(cell) = sheet.cells.get(&(current.row, current.col)) {
+                        if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(current.row, current.col)) {
                             if let Some(ast) = cell.value.formula_ast() {
                                 if has_dynamic_deps(ast) {
                                     has_unknown_in_chain = true;
@@ -1130,7 +1130,7 @@ impl Workbook {
 
             // Check if this cell has a cycle error
             if let Some(sheet) = self.sheet_by_id(current.sheet) {
-                if let Some(cell) = sheet.cells.get(&(current.row, current.col)) {
+                if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(current.row, current.col)) {
                     if cell.value.is_cycle_error() {
                         return true;
                     }
@@ -1174,7 +1174,7 @@ impl Workbook {
 
         // Check if source has dynamic refs
         if let Some(sheet) = self.sheet_by_id(from.sheet) {
-            if let Some(cell) = sheet.cells.get(&(from.row, from.col)) {
+            if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(from.row, from.col)) {
                 if let Some(ast) = cell.value.formula_ast() {
                     if has_dynamic_deps(ast) {
                         has_dynamic_refs = true;
@@ -1234,7 +1234,7 @@ impl Workbook {
                 // Check for dynamic refs
                 if !has_dynamic_refs {
                     if let Some(sheet) = self.sheet_by_id(neighbor.sheet) {
-                        if let Some(cell) = sheet.cells.get(&(neighbor.row, neighbor.col)) {
+                        if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(neighbor.row, neighbor.col)) {
                             if let Some(ast) = cell.value.formula_ast() {
                                 if has_dynamic_deps(ast) {
                                     has_dynamic_refs = true;
@@ -1358,7 +1358,7 @@ impl Workbook {
             let mut unknown_deps_cells = Vec::new();
             for cell_id in &non_cycle_cells {
                 if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
-                    if let Some(cell) = sheet.cells.get(&(cell_id.row, cell_id.col)) {
+                    if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(cell_id.row, cell_id.col)) {
                         if let Some(ast) = cell.value.formula_ast() {
                             if has_dynamic_deps(ast) {
                                 unknown_deps_cells.push(*cell_id);
@@ -1606,7 +1606,7 @@ impl Workbook {
             let mut unknown_deps_cells = Vec::new();
             for cell_id in order {
                 if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
-                    if let Some(cell) = sheet.cells.get(&(cell_id.row, cell_id.col)) {
+                    if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(cell_id.row, cell_id.col)) {
                         if let Some(ast) = cell.value.formula_ast() {
                             if has_dynamic_deps(ast) {
                                 unknown_deps_cells.push(cell_id);
@@ -1746,7 +1746,7 @@ impl Workbook {
             .formula_cells()
             .filter(|cell_id| {
                 self.sheet_by_id(cell_id.sheet)
-                    .and_then(|sheet| sheet.cells.get(&(cell_id.row, cell_id.col)))
+                    .and_then(|sheet| sheet.cells.get(&crate::sheet::cell_key(cell_id.row, cell_id.col)))
                     .and_then(|cell| cell.value.formula_ast())
                     .map(crate::formula::analyze::has_dynamic_deps)
                     .unwrap_or(false)
@@ -1792,7 +1792,7 @@ impl Workbook {
                 // way in.
                 let mut cleared: FxHashSet<CellId> = FxHashSet::default();
                 for (row, col, _) in &pending {
-                    if let Some(info) = sheet.cells.get(&(*row, *col)).and_then(|c| c.spill_info.clone()) {
+                    if let Some(info) = sheet.cells.get(&crate::sheet::cell_key(*row, *col)).and_then(|c| c.spill_info().cloned()) {
                         for dr in 0..info.rows {
                             for dc in 0..info.cols {
                                 if dr != 0 || dc != 0 {
@@ -1937,7 +1937,7 @@ impl Workbook {
         let sheet = self.sheet_by_id(cell_id.sheet)
             .ok_or_else(|| format!("Sheet not found: {:?}", cell_id.sheet))?;
 
-        let cell = sheet.cells.get(&(cell_id.row, cell_id.col))
+        let cell = sheet.cells.get(&crate::sheet::cell_key(cell_id.row, cell_id.col))
             .ok_or_else(|| format!("Cell not found: {:?}", cell_id))?;
 
         if let Some(ast) = cell.value.formula_ast() {
@@ -1958,7 +1958,7 @@ impl Workbook {
             // the order its cells were listed in.
             if let EvalResult::Array(array) = &result {
                 sheet.record_pending_spill(cell_id.row, cell_id.col, array.clone());
-            } else if cell.spill_info.is_some() || cell.spill_error.is_some() {
+            } else if cell.spill_info().is_some() || cell.spill_error().is_some() {
                 // This cell spilled (or tried to) last time and no longer
                 // answers with an array. Its old receivers and any #SPILL!
                 // must go, and they go in the placement phase like everything
@@ -2145,7 +2145,10 @@ impl Workbook {
                 .cells
                 .iter()
                 .filter(|(_, cell)| !cell.value.raw_display().is_empty())
-                .map(|((r, c), _)| if is_row { *r } else { *c })
+                .map(|(key, _)| {
+                    let (r, c) = crate::sheet::from_cell_key(*key);
+                    if is_row { r } else { c }
+                })
                 .max();
             if let Some(last) = last_used {
                 if last >= at && last + count >= limit {
@@ -2199,7 +2202,10 @@ impl Workbook {
         let mut writes = Vec::new();
         for (idx, sheet) in self.sheets.iter().enumerate() {
             let formula_sheet = sheet.name.clone();
-            for (&(row, col), cell) in sheet.cells.iter() {
+            for (row, col, cell) in sheet.cells.iter().map(|(key, cell)| {
+                let (row, col) = crate::sheet::from_cell_key(*key);
+                (row, col, cell)
+            }) {
                 let raw = cell.value.raw_display();
                 if !raw.starts_with('=') {
                     continue;
@@ -2345,7 +2351,7 @@ impl Workbook {
             // "Unknown function" for any custom function or =LUA cell.
             let is_formula = self
                 .sheet_by_id(cell_id.sheet)
-                .and_then(|s| s.cells.get(&(cell_id.row, cell_id.col)))
+                .and_then(|s| s.cells.get(&crate::sheet::cell_key(cell_id.row, cell_id.col)))
                 .map(|c| c.value.formula_ast().is_some())
                 .unwrap_or(false);
             if is_formula && dirty_set.insert(cell_id) {
@@ -3109,7 +3115,7 @@ mod tests {
         assert!(!sheet.is_spill_parent(0, 0), "no longer a spill parent");
         assert_eq!(sheet.get_display(1, 0), "", "old receiver cleared");
         assert_eq!(sheet.get_display(2, 0), "", "old receiver cleared");
-        assert!(sheet.get_cell(2, 0).spill_parent.is_none(), "receiver mark removed");
+        assert!(sheet.get_cell(2, 0).spill_parent().is_none(), "receiver mark removed");
         assert_eq!(sheet.get_display(0, 1), "", "reader of the old receiver re-evaluated");
     }
 

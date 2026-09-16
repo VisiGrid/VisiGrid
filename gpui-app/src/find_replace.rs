@@ -260,7 +260,7 @@ impl Spreadsheet {
         let mut cells_to_search: Vec<(usize, usize, Option<MatchKind>, String)> = Vec::new();
         let mut display_cells: Vec<(usize, usize)> = Vec::new();
 
-        for (&(row, col), cell) in self.sheet(cx).cells_iter() {
+        for ((row, col), cell) in self.sheet(cx).cells_iter() {
             match &cell.value {
                 CellValue::Empty => {}
                 CellValue::Text(text) => {

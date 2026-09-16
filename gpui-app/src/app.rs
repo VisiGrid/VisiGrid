@@ -1496,7 +1496,7 @@ impl Spreadsheet {
                 Recalculated::All => {
                     for sheet in wb.sheets() {
                         let id = sheet.id;
-                        cells.extend(sheet.cells_iter().map(|(&(row, col), _)| {
+                        cells.extend(sheet.cells_iter().map(|((row, col), _)| {
                             visigrid_engine::cell_id::CellId { sheet: id, row, col }
                         }));
                         cells.extend(sheet.spill_receiver_coords().map(|(row, col)| {
@@ -2214,7 +2214,7 @@ impl Spreadsheet {
             let entries: Vec<CellEntry> = sheet.cells_iter()
                 .filter(|(_, cell)| !matches!(cell.value, CellValue::Empty))
                 .take(1000)  // Cap cells scanned for performance
-                .map(|(&(row, col), cell)| {
+                .map(|((row, col), cell)| {
                     let display = sheet.get_display(row, col);
                     let formula = match &cell.value {
                         CellValue::Formula { source, .. } => Some(source.clone()),
@@ -3464,7 +3464,7 @@ impl Spreadsheet {
 
         let coords: Vec<(usize, usize)> = sheet
             .cells_iter()
-            .map(|(&rc, _)| rc)
+            .map(|(rc, _)| rc)
             .filter(|(_, c)| wanted.contains(c))
             .collect();
 
@@ -3583,7 +3583,7 @@ impl Spreadsheet {
         // grid; fit only those that actually hold something.
         if cols.len() > 1 {
             let populated: std::collections::HashSet<usize> =
-                self.sheet(cx).cells_iter().map(|(&(_, c), _)| c).collect();
+                self.sheet(cx).cells_iter().map(|((_, c), _)| c).collect();
             cols.retain(|c| populated.contains(c));
         }
         self.fit_columns(cols, Some(window), cx);
@@ -3622,7 +3622,7 @@ impl Spreadsheet {
     /// `measure_columns` for what that costs.
     pub fn auto_fit_all_data_columns(&mut self, cx: &App) {
         let cols: Vec<usize> = {
-            let mut seen: Vec<usize> = self.sheet(cx).cells_iter().map(|(&(_, c), _)| c).collect();
+            let mut seen: Vec<usize> = self.sheet(cx).cells_iter().map(|((_, c), _)| c).collect();
             seen.sort_unstable();
             seen.dedup();
             seen
@@ -4543,7 +4543,7 @@ pub(crate) fn sheet_fingerprint(sheet: &visigrid_engine::sheet::Sheet) -> u64 {
     sheet.name.hash(&mut hasher);
 
     // Collect cell positions for sampling — cells_iter yields populated cells only
-    let cells: Vec<(&(usize, usize), &visigrid_engine::cell::Cell)> =
+    let cells: Vec<((usize, usize), &visigrid_engine::cell::Cell)> =
         sheet.cells_iter().collect();
     let count = cells.len();
     count.hash(&mut hasher);
@@ -4555,11 +4555,11 @@ pub(crate) fn sheet_fingerprint(sheet: &visigrid_engine::sheet::Sheet) -> u64 {
     // Used range bounds (min/max row/col across all populated cells)
     let (mut min_r, mut min_c) = (usize::MAX, usize::MAX);
     let (mut max_r, mut max_c) = (0usize, 0usize);
-    for (&(r, c), _) in &cells {
-        min_r = min_r.min(r);
-        min_c = min_c.min(c);
-        max_r = max_r.max(r);
-        max_c = max_c.max(c);
+    for ((r, c), _) in &cells {
+        min_r = min_r.min(*r);
+        min_c = min_c.min(*c);
+        max_r = max_r.max(*r);
+        max_c = max_c.max(*c);
     }
     min_r.hash(&mut hasher);
     min_c.hash(&mut hasher);
@@ -4582,14 +4582,14 @@ pub(crate) fn sheet_fingerprint(sheet: &visigrid_engine::sheet::Sheet) -> u64 {
 
     if count <= TOTAL_SAMPLES {
         // Small sheet: hash everything
-        for (&pos, cell) in &cells {
-            hash_cell(&mut hasher, &pos, cell);
+        for (pos, cell) in &cells {
+            hash_cell(&mut hasher, pos, cell);
         }
     } else {
         // Head
         for i in 0..HEAD {
-            let (&pos, cell) = cells[i];
-            hash_cell(&mut hasher, &pos, cell);
+            let (pos, cell) = &cells[i];
+            hash_cell(&mut hasher, pos, cell);
         }
         // Evenly spaced middle
         let middle_start = HEAD;
@@ -4597,13 +4597,13 @@ pub(crate) fn sheet_fingerprint(sheet: &visigrid_engine::sheet::Sheet) -> u64 {
         let middle_len = middle_end - middle_start;
         for i in 0..middle_budget {
             let idx = middle_start + (i * middle_len) / middle_budget;
-            let (&pos, cell) = cells[idx];
-            hash_cell(&mut hasher, &pos, cell);
+            let (pos, cell) = &cells[idx];
+            hash_cell(&mut hasher, pos, cell);
         }
         // Tail
         for i in (count - TAIL)..count {
-            let (&pos, cell) = cells[i];
-            hash_cell(&mut hasher, &pos, cell);
+            let (pos, cell) = &cells[i];
+            hash_cell(&mut hasher, pos, cell);
         }
     }
 

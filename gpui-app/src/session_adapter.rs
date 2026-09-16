@@ -693,7 +693,7 @@ impl Spreadsheet {
         let mut problems = Vec::new();
         let mut truncated = false;
         'outer: for (sheet_idx, sheet) in wb.sheets().iter().enumerate() {
-            let mut coords: Vec<(usize, usize)> = sheet.cells_iter().map(|(&rc, _)| rc).collect();
+            let mut coords: Vec<(usize, usize)> = sheet.cells_iter().map(|(rc, _)| rc).collect();
             coords.sort_unstable();
             for (row, col) in coords {
                 // Computed errors surface as Value::Error; cycle-marked cells

@@ -816,7 +816,7 @@ struct SheetState {
 impl SheetState {
     fn from_sheet(sheet: &Sheet) -> Self {
         let mut cells: Vec<_> = sheet.cells_iter()
-            .map(|(&(row, col), cell)| (row, col, cell.value.raw_display()))
+            .map(|((row, col), cell)| (row, col, cell.value.raw_display()))
             .filter(|(_, _, val)| !val.is_empty())
             .collect();
         cells.sort_by_key(|(r, c, _)| (*r, *c));

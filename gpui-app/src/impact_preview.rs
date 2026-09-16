@@ -41,13 +41,13 @@ impl Spreadsheet {
                 // Format cell reference
                 let cell_ref = {
                     let mut col_name = String::new();
-                    let mut c = *col;
+                    let mut c = col;
                     loop {
                         col_name.insert(0, (b'A' + (c % 26) as u8) as char);
                         if c < 26 { break; }
                         c = c / 26 - 1;
                     }
-                    format!("{}{}", col_name, *row + 1)
+                    format!("{}{}", col_name, row + 1)
                 };
 
                 usages.push(ImpactedFormula {

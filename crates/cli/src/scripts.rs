@@ -706,7 +706,7 @@ fn create_cli_snapshot(sheet: &Sheet) -> CliSnapshot {
     let mut values = std::collections::HashMap::new();
     let mut formulas = std::collections::HashMap::new();
 
-    for (&(row, col), cell) in sheet.cells_iter() {
+    for ((row, col), cell) in sheet.cells_iter() {
         let raw = cell.value.raw_display();
         if !raw.is_empty() {
             if raw.starts_with('=') {

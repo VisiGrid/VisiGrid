@@ -583,7 +583,7 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
                     let id = sheet.id;
                     sheet
                         .cells_iter()
-                        .map(move |(&(row, col), _)| CellId { sheet: id, row, col })
+                        .map(move |((row, col), _)| CellId { sheet: id, row, col })
                         .chain(sheet.spill_receiver_coords().map(move |(row, col)| CellId { sheet: id, row, col }))
                 })
                 .collect(),

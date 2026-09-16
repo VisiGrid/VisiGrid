@@ -1,9 +1,10 @@
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::formula::parser::{self, ParsedExpr};
 
 /// Horizontal text alignment
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Hash)]
 pub enum Alignment {
     #[default]
     General,  // Auto: numbers right-align, text left-aligns (Excel default)
@@ -15,7 +16,7 @@ pub enum Alignment {
 }
 
 /// Vertical text alignment
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Hash)]
 pub enum VerticalAlignment {
     Top,
     #[default]
@@ -24,7 +25,7 @@ pub enum VerticalAlignment {
 }
 
 /// Text overflow behavior
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Hash)]
 pub enum TextOverflow {
     #[default]
     Clip,       // Text is clipped at cell boundary
@@ -89,7 +90,7 @@ impl CellStyle {
 }
 
 /// Date format style
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Hash)]
 pub enum DateStyle {
     #[default]
     Short,      // 1/18/2026
@@ -98,7 +99,7 @@ pub enum DateStyle {
 }
 
 /// Negative number display style
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Hash)]
 pub enum NegativeStyle {
     #[default]
     Minus,       // -1,234.56
@@ -140,7 +141,7 @@ impl NegativeStyle {
 }
 
 /// Number format type
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Hash)]
 pub enum NumberFormat {
     #[default]
     General,
@@ -343,6 +344,36 @@ pub struct CellFormat {
     pub cell_style: CellStyle,
 }
 
+/// Formats key the intern pool, so they hash and compare exactly.
+///
+/// `font_size` is the only float, and it is compared and hashed by its bits:
+/// two cells asking for 11.0pt share one format. A NaN size would break the
+/// reflexivity `Eq` promises, and nothing can produce one — sizes come from a
+/// picker, a settings file or an xlsx `sz`, all parsed into finite values.
+impl Eq for CellFormat {}
+
+impl std::hash::Hash for CellFormat {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bold.hash(state);
+        self.italic.hash(state);
+        self.underline.hash(state);
+        self.strikethrough.hash(state);
+        self.alignment.hash(state);
+        self.vertical_alignment.hash(state);
+        self.text_overflow.hash(state);
+        self.number_format.hash(state);
+        self.font_family.hash(state);
+        self.font_size.map(f32::to_bits).hash(state);
+        self.font_color.hash(state);
+        self.background_color.hash(state);
+        self.border_top.hash(state);
+        self.border_right.hash(state);
+        self.border_bottom.hash(state);
+        self.border_left.hash(state);
+        self.cell_style.hash(state);
+    }
+}
+
 impl CellFormat {
     /// Returns true when every field matches `CellFormat::default()`.
     ///
@@ -520,7 +551,9 @@ pub enum CellValue {
     Text(String),
     Number(f64),
     #[serde(skip)]
-    Formula { source: String, ast: Option<ParsedExpr> },
+    /// The AST is boxed: it is 64 bytes, and every variant of this enum — so
+    /// every cell in the workbook, formula or not — was sized to hold it.
+    Formula { source: String, ast: Option<Box<ParsedExpr>> },
 }
 
 
@@ -1097,7 +1130,7 @@ impl CellValue {
         }
 
         if trimmed.starts_with('=') {
-            let ast = parser::parse(trimmed).ok();
+            let ast = parser::parse(trimmed).ok().map(Box::new);
             return CellValue::Formula {
                 source: trimmed.to_string(),
                 ast,
@@ -1223,7 +1256,7 @@ impl CellValue {
     /// Get the parsed AST for formula cells, if available.
     pub fn formula_ast(&self) -> Option<&parser::ParsedExpr> {
         match self {
-            CellValue::Formula { ast, .. } => ast.as_ref(),
+            CellValue::Formula { ast, .. } => ast.as_deref(),
             _ => None,
         }
     }
@@ -1244,30 +1277,133 @@ pub struct SpillError {
     pub blocked_by: (usize, usize),
 }
 
+/// Everything a cell rarely has.
+///
+/// These five fields were inline on every cell and cost ~96 of its 304 bytes,
+/// paid by all of them so that the few with a spill or an import style could
+/// have it. Boxed together, an ordinary cell pays 8.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Cell {
-    pub value: CellValue,
-    pub format: CellFormat,
+pub struct CellExtras {
     /// Index into workbook.style_table — tracks the base style from XLSX import.
-    /// User edits modify `format` directly; this field preserves import provenance
-    /// for future "reset to imported style" functionality.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style_id: Option<u32>,
-    /// If this cell receives spill data, points to the parent formula cell (row, col)
+    /// If this cell receives spill data, points to the parent formula cell.
     #[serde(skip)]
     pub spill_parent: Option<(usize, usize)>,
-    /// If this cell has a formula that produces an array, contains spill info
+    /// If this cell has a formula that produces an array, its spill extent.
     #[serde(skip)]
     pub spill_info: Option<SpillInfo>,
-    /// If this cell has an array formula that can't spill, contains error info
+    /// If this cell has an array formula that cannot spill, why not.
     #[serde(skip)]
     pub spill_error: Option<SpillError>,
     /// Original formula preserved when a cycle cell was frozen during import.
-    /// The cell's value holds the frozen cached value; this field holds the formula
-    /// that was replaced, for auditability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_formula: Option<String>,
 }
+
+impl CellExtras {
+    fn is_empty(&self) -> bool {
+        self.style_id.is_none()
+            && self.spill_parent.is_none()
+            && self.spill_info.is_none()
+            && self.spill_error.is_none()
+            && self.frozen_formula.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cell {
+    pub value: CellValue,
+    /// Shared, not owned: a million rows of one banded table have a handful of
+    /// distinct formats between them, and this used to store 112 bytes of
+    /// identical fields on every one. [`Sheet`](crate::sheet::Sheet) interns
+    /// them, so equal formats are one allocation and each cell holds a pointer.
+    /// Reads work unchanged through `Deref`; write through the sheet's format
+    /// methods, which re-intern.
+    pub format: Arc<CellFormat>,
+    /// See [`CellExtras`]. `None` for almost every cell; read it through the
+    /// accessors so the box stays an implementation detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extras: Option<Box<CellExtras>>,
+}
+
+/// The format every unformatted cell points at, so `Cell::default()` costs a
+/// refcount bump rather than an allocation.
+pub fn default_format() -> Arc<CellFormat> {
+    static DEFAULT: std::sync::OnceLock<Arc<CellFormat>> = std::sync::OnceLock::new();
+    DEFAULT.get_or_init(|| Arc::new(CellFormat::default())).clone()
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Cell {
+            value: CellValue::default(),
+            format: default_format(),
+            extras: None,
+        }
+    }
+}
+
+impl Cell {
+    /// An empty cell carrying `format`, for the row/column formats a cell
+    /// inherits when it is first materialised.
+    pub fn with_format(format: Arc<CellFormat>) -> Self {
+        Cell { format, ..Cell::default() }
+    }
+
+    pub fn style_id(&self) -> Option<u32> {
+        self.extras.as_ref().and_then(|e| e.style_id)
+    }
+
+    pub fn set_style_id(&mut self, value: Option<u32>) {
+        self.with_extras(|e| e.style_id = value);
+    }
+
+    pub fn spill_parent(&self) -> Option<(usize, usize)> {
+        self.extras.as_ref().and_then(|e| e.spill_parent)
+    }
+
+    pub fn set_spill_parent(&mut self, value: Option<(usize, usize)>) {
+        self.with_extras(|e| e.spill_parent = value);
+    }
+
+    pub fn spill_info(&self) -> Option<&SpillInfo> {
+        self.extras.as_ref().and_then(|e| e.spill_info.as_ref())
+    }
+
+    pub fn set_spill_info(&mut self, value: Option<SpillInfo>) {
+        self.with_extras(|e| e.spill_info = value);
+    }
+
+    pub fn spill_error(&self) -> Option<&SpillError> {
+        self.extras.as_ref().and_then(|e| e.spill_error.as_ref())
+    }
+
+    pub fn set_spill_error(&mut self, value: Option<SpillError>) {
+        self.with_extras(|e| e.spill_error = value);
+    }
+
+    pub fn frozen_formula(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|e| e.frozen_formula.as_deref())
+    }
+
+    pub fn set_frozen_formula(&mut self, value: Option<String>) {
+        self.with_extras(|e| e.frozen_formula = value);
+    }
+
+    /// Mutate the extras, allocating the box only if one is needed and
+    /// dropping it again when the last field is cleared — so a cell that had a
+    /// spill and lost it goes back to costing 8 bytes, and two cells that look
+    /// alike compare alike.
+    fn with_extras(&mut self, f: impl FnOnce(&mut CellExtras)) {
+        let mut extras = self.extras.take().unwrap_or_default();
+        f(&mut extras);
+        if !extras.is_empty() {
+            self.extras = Some(extras);
+        }
+    }
+}
+
 
 impl Cell {
     pub fn new() -> Self {
@@ -1277,7 +1413,7 @@ impl Cell {
     pub fn set(&mut self, input: &str) {
         self.value = CellValue::from_input(input);
         self.clear_spill_state();
-        self.frozen_formula = None; // User edit clears freeze provenance
+        self.set_frozen_formula(None); // User edit clears freeze provenance
     }
 
     /// Store text as text, whatever it looks like.
@@ -1293,31 +1429,31 @@ impl Cell {
     pub fn set_text(&mut self, text: &str) {
         self.value = CellValue::Text(text.trim().to_string());
         self.clear_spill_state();
-        self.frozen_formula = None;
+        self.set_frozen_formula(None);
     }
 
     /// Clear formula runtime/computed state (spill chains, caches).
     /// Does NOT touch frozen_formula — that's provenance metadata managed
     /// separately by freeze_cell() and set().
     pub fn clear_spill_state(&mut self) {
-        self.spill_parent = None;
-        self.spill_info = None;
-        self.spill_error = None;
+        self.set_spill_parent(None);
+        self.set_spill_info(None);
+        self.set_spill_error(None);
     }
 
     /// Check if this cell is receiving spill data from another cell
     pub fn is_spill_receiver(&self) -> bool {
-        self.spill_parent.is_some()
+        self.spill_parent().is_some()
     }
 
     /// Check if this cell is a spill parent (has array formula that spills)
     pub fn is_spill_parent(&self) -> bool {
-        self.spill_info.is_some()
+        self.spill_info().is_some()
     }
 
     /// Check if this cell has a blocked spill error
     pub fn has_spill_error(&self) -> bool {
-        self.spill_error.is_some()
+        self.spill_error().is_some()
     }
 }
 
@@ -1613,16 +1749,16 @@ mod tests {
     fn test_cell_style_id_serde_backward_compat() {
         let json = r#"{"value":{"Empty":null},"format":{"bold":false,"italic":false,"underline":false,"strikethrough":false,"alignment":"General","vertical_alignment":"Middle","text_overflow":"Clip","number_format":"General"}}"#;
         let cell: Cell = serde_json::from_str(json).unwrap();
-        assert_eq!(cell.style_id, None);
+        assert_eq!(cell.style_id(), None);
     }
 
     #[test]
     fn test_cell_style_id_roundtrip() {
         let mut cell = Cell::default();
-        cell.style_id = Some(42);
+        cell.set_style_id(Some(42));
         let json = serde_json::to_string(&cell).unwrap();
         let restored: Cell = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.style_id, Some(42));
+        assert_eq!(restored.style_id(), Some(42));
     }
 
     #[test]

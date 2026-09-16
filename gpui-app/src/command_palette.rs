@@ -113,7 +113,7 @@ impl Spreadsheet {
 
         // Find all cells that reference this cell (dependents)
         let mut references = Vec::new();
-        for (&(cell_row, cell_col), cell) in self.sheet(cx).cells_iter() {
+        for ((cell_row, cell_col), cell) in self.sheet(cx).cells_iter() {
             if let CellValue::Formula { source, .. } = &cell.value {
                 if let Ok(expr) = parse(source) {
                     let refs = extract_cell_refs(&expr);
@@ -298,7 +298,7 @@ impl Spreadsheet {
 
         // Find all cells that use this named range
         let mut references = Vec::new();
-        for (&(cell_row, cell_col), cell) in self.sheet(cx).cells_iter() {
+        for ((cell_row, cell_col), cell) in self.sheet(cx).cells_iter() {
             if let CellValue::Formula { source, .. } = &cell.value {
                 // Check if formula references this named range (word-boundary aware)
                 if self.formula_references_name(source, &name_upper) {

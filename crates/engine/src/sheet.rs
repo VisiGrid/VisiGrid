@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -267,6 +268,27 @@ pub const NUM_ROWS: usize = 1_048_576;
 /// Columns in a sheet. See [`NUM_ROWS`].
 pub const NUM_COLS: usize = 16_384;
 
+/// The cell map's key: two u32 rather than two usize.
+///
+/// The grid is 1,048,576 x 16,384, so neither coordinate can approach u32, and
+/// the map holds one entry per populated cell — 8 bytes of key instead of 16 is
+/// the difference between a 1M-row import fitting in memory and not. Public
+/// APIs still speak usize; this is the storage shape.
+pub(crate) type CellKey = (u32, u32);
+
+/// Coordinates to the storage key. Debug builds catch a coordinate past the
+/// grid here rather than storing a cell nothing can address.
+#[inline]
+pub(crate) fn cell_key(row: usize, col: usize) -> CellKey {
+    debug_assert!(row < NUM_ROWS && col < NUM_COLS, "cell ({row}, {col}) is outside the grid");
+    (row as u32, col as u32)
+}
+
+#[inline]
+pub(crate) fn from_cell_key((row, col): CellKey) -> (usize, usize) {
+    (row as usize, col as usize)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sheet {
     /// Stable identity - never changes, never reused after deletion
@@ -277,7 +299,12 @@ pub struct Sheet {
     #[serde(default)]
     pub name_key: String,
     /// Cell storage - pub(crate) for workbook-level access during recompute
-    pub(crate) cells: HashMap<(usize, usize), Cell>,
+    pub(crate) cells: HashMap<CellKey, Cell>,
+    /// Distinct formats in this sheet, so cells that look alike share one
+    /// allocation instead of carrying 112 bytes each. Rebuilt on load; never
+    /// serialized.
+    #[serde(skip)]
+    format_pool: HashSet<Arc<CellFormat>>,
     pub rows: usize,
     pub cols: usize,
     /// Spilled values from array formulas: (row, col) -> Value
@@ -365,7 +392,7 @@ impl CellLookup for Sheet {
             return spill_value.to_number().unwrap_or(0.0);
         }
 
-        match self.cells.get(&(row, col)) {
+        match self.cells.get(&cell_key(row, col)) {
             Some(cell) => match &cell.value {
                 CellValue::Empty => 0.0,
                 CellValue::Number(n) => *n,
@@ -399,7 +426,7 @@ impl CellLookup for Sheet {
             return spill_value.to_text();
         }
 
-        match self.cells.get(&(row, col)) {
+        match self.cells.get(&cell_key(row, col)) {
             Some(cell) => match &cell.value {
                 CellValue::Empty => String::new(),
                 CellValue::Text(s) => s.clone(),
@@ -450,6 +477,7 @@ impl Sheet {
             name,
             name_key,
             cells: HashMap::new(),
+            format_pool: HashSet::new(),
             rows,
             cols,
             spill_values: HashMap::new(),
@@ -477,6 +505,7 @@ impl Sheet {
             name,
             name_key,
             cells: HashMap::new(),
+            format_pool: HashSet::new(),
             rows,
             cols,
             spill_values: HashMap::new(),
@@ -618,7 +647,7 @@ impl Sheet {
         let cell = self.cell_with_inherited_format(row, col);
         cell.value = cached;
         cell.clear_spill_state(); // Runtime state only — must not touch frozen_formula
-        cell.frozen_formula = Some(formula_source); // Set AFTER clearing runtime state
+        cell.set_frozen_formula(Some(formula_source)); // Set AFTER clearing runtime state
     }
 
     /// Return the (max_row, max_col) of the last cell with non-empty data.
@@ -627,7 +656,8 @@ impl Sheet {
         let mut max_row: usize = 0;
         let mut max_col: usize = 0;
         let mut has_data = false;
-        for (&(r, c), cell) in &self.cells {
+        for (&key, cell) in &self.cells {
+            let (r, c) = from_cell_key(key);
             if !matches!(cell.value, CellValue::Empty) {
                 if !has_data || r > max_row { max_row = r; }
                 if !has_data || c > max_col { max_col = c; }
@@ -662,7 +692,8 @@ impl Sheet {
             *mr = (*mr).max(r + 1);
             *mc = (*mc).max(c + 1);
         };
-        for (&(r, c), cell) in &self.cells {
+        for (&key, cell) in &self.cells {
+            let (r, c) = from_cell_key(key);
             if !matches!(cell.value, CellValue::Empty) {
                 widen(r, c);
             }
@@ -675,13 +706,13 @@ impl Sheet {
 
     /// Get a reference to a cell if it exists, without creating one.
     pub fn get_cell_opt(&self, row: usize, col: usize) -> Option<&Cell> {
-        self.cells.get(&(row, col))
+        self.cells.get(&cell_key(row, col))
     }
 
     /// Evaluate a cell's formula and apply spill if it returns an array
     fn evaluate_and_spill(&mut self, row: usize, col: usize) {
         // Get the AST if this is a formula
-        let ast = match self.cells.get(&(row, col)) {
+        let ast = match self.cells.get(&cell_key(row, col)) {
             Some(cell) => match &cell.value {
                 CellValue::Formula { ast: Some(ast), .. } => ast.clone(),
                 _ => return, // Not a formula or no AST
@@ -733,8 +764,8 @@ impl Sheet {
                 self.apply_spill(row, col, array);
             }
             Err(blocked_by) => {
-                if let Some(cell) = self.cells.get_mut(&(row, col)) {
-                    cell.spill_error = Some(SpillError { blocked_by });
+                if let Some(cell) = self.cells.get_mut(&cell_key(row, col)) {
+                    cell.set_spill_error(Some(SpillError { blocked_by }));
                 }
             }
         }
@@ -751,8 +782,8 @@ impl Sheet {
 
     /// Forget a #SPILL! on a cell, whatever it currently holds.
     pub fn clear_spill_error(&mut self, row: usize, col: usize) {
-        if let Some(cell) = self.cells.get_mut(&(row, col)) {
-            cell.spill_error = None;
+        if let Some(cell) = self.cells.get_mut(&cell_key(row, col)) {
+            cell.set_spill_error(None);
         }
     }
 
@@ -764,8 +795,8 @@ impl Sheet {
     /// Clear spill data originating from a specific cell
     pub fn clear_spill_from(&mut self, parent_row: usize, parent_col: usize) {
         // Get the spill info from the parent cell
-        let spill_info = match self.cells.get(&(parent_row, parent_col)) {
-            Some(cell) => cell.spill_info.clone(),
+        let spill_info = match self.cells.get(&cell_key(parent_row, parent_col)) {
+            Some(cell) => cell.spill_info().cloned(),
             None => return,
         };
 
@@ -783,17 +814,17 @@ impl Sheet {
                     self.spill_values.remove(&(r, c));
 
                     // Clear spill_parent reference
-                    if let Some(cell) = self.cells.get_mut(&(r, c)) {
-                        if cell.spill_parent == Some((parent_row, parent_col)) {
-                            cell.spill_parent = None;
+                    if let Some(cell) = self.cells.get_mut(&cell_key(r, c)) {
+                        if cell.spill_parent() == Some((parent_row, parent_col)) {
+                            cell.set_spill_parent(None);
                         }
                     }
                 }
             }
 
             // Clear spill_info on parent
-            if let Some(cell) = self.cells.get_mut(&(parent_row, parent_col)) {
-                cell.spill_info = None;
+            if let Some(cell) = self.cells.get_mut(&cell_key(parent_row, parent_col)) {
+                cell.set_spill_info(None);
             }
         }
     }
@@ -816,16 +847,16 @@ impl Sheet {
                 let c = parent_col + dc;
 
                 // Check if cell exists and has content
-                if let Some(cell) = self.cells.get(&(r, c)) {
+                if let Some(cell) = self.cells.get(&cell_key(r, c)) {
                     // Check if it has its own value (not a spill receiver from us)
-                    let is_our_receiver = cell.spill_parent == Some((parent_row, parent_col));
+                    let is_our_receiver = cell.spill_parent() == Some((parent_row, parent_col));
                     if !is_our_receiver {
                         match &cell.value {
                             CellValue::Empty => {}
                             _ => return Err((r, c)),
                         }
                         // Also blocked if it's receiving spill from another cell
-                        if cell.spill_parent.is_some() {
+                        if cell.spill_parent().is_some() {
                             return Err((r, c));
                         }
                     }
@@ -834,8 +865,8 @@ impl Sheet {
                 // Check if there's a spill value from another parent
                 if self.spill_values.get(&(r, c)).is_some() {
                     // Check if this spill is from us or another parent
-                    if let Some(cell) = self.cells.get(&(r, c)) {
-                        if cell.spill_parent != Some((parent_row, parent_col)) {
+                    if let Some(cell) = self.cells.get(&cell_key(r, c)) {
+                        if cell.spill_parent() != Some((parent_row, parent_col)) {
                             return Err((r, c));
                         }
                     } else {
@@ -876,12 +907,12 @@ impl Sheet {
                     if dr == 0 && dc == 0 {
                         // Parent cell - just set spill_info
                         let cell = self.cell_with_inherited_format(r, c);
-                        cell.spill_info = Some(SpillInfo { rows, cols });
+                        cell.set_spill_info(Some(SpillInfo { rows, cols }));
                     } else {
                         // Receiving cell
                         self.spill_values.insert((r, c), value.clone());
                         let cell = self.cell_with_inherited_format(r, c);
-                        cell.spill_parent = Some((parent_row, parent_col));
+                        cell.set_spill_parent(Some((parent_row, parent_col)));
                     }
                 }
             }
@@ -898,7 +929,7 @@ impl Sheet {
     /// Check if a cell is receiving spill data
     pub fn is_spill_receiver(&self, row: usize, col: usize) -> bool {
         self.cells
-            .get(&(row, col))
+            .get(&cell_key(row, col))
             .map(|c| c.is_spill_receiver())
             .unwrap_or(false)
     }
@@ -906,7 +937,7 @@ impl Sheet {
     /// Check if a cell is a spill parent
     pub fn is_spill_parent(&self, row: usize, col: usize) -> bool {
         self.cells
-            .get(&(row, col))
+            .get(&cell_key(row, col))
             .map(|c| c.is_spill_parent())
             .unwrap_or(false)
     }
@@ -914,21 +945,21 @@ impl Sheet {
     /// Get the spill parent for a cell (if it's a spill receiver)
     pub fn get_spill_parent(&self, row: usize, col: usize) -> Option<(usize, usize)> {
         self.cells
-            .get(&(row, col))
-            .and_then(|c| c.spill_parent)
+            .get(&cell_key(row, col))
+            .and_then(|c| c.spill_parent())
     }
 
     /// Get spill info for a cell (if it's a spill parent)
     pub fn get_spill_info(&self, row: usize, col: usize) -> Option<SpillInfo> {
         self.cells
-            .get(&(row, col))
-            .and_then(|c| c.spill_info.clone())
+            .get(&cell_key(row, col))
+            .and_then(|c| c.spill_info().cloned())
     }
 
     /// Check if a cell has a spill error
     pub fn has_spill_error(&self, row: usize, col: usize) -> bool {
         self.cells
-            .get(&(row, col))
+            .get(&cell_key(row, col))
             .map(|c| c.has_spill_error())
             .unwrap_or(false)
     }
@@ -939,10 +970,10 @@ impl Sheet {
             return spill_value.to_text();
         }
 
-        match self.cells.get(&(row, col)) {
+        match self.cells.get(&cell_key(row, col)) {
             Some(cell) => {
                 // Check for spill error
-                if cell.spill_error.is_some() {
+                if cell.spill_error().is_some() {
                     return "#SPILL!".to_string();
                 }
                 self.display_cell_value(&cell.value, row, col)
@@ -961,7 +992,7 @@ impl Sheet {
     /// Every other format stays raw on purpose: currency and percent cells are
     /// written as plain numbers so the file remains machine-readable.
     pub fn get_interchange_display(&self, row: usize, col: usize) -> String {
-        let iso = match self.cells.get(&(row, col)).map(|c| &c.format.number_format) {
+        let iso = match self.cells.get(&cell_key(row, col)).map(|c| &c.format.number_format) {
             Some(NumberFormat::Date { .. }) => Iso::Date,
             Some(NumberFormat::Time) => Iso::Time,
             Some(NumberFormat::DateTime) => Iso::DateTime,
@@ -1006,7 +1037,7 @@ impl Sheet {
         // Check for spilled value first
         if let Some(spill_value) = self.spill_values.get(&(row, col)) {
             // Apply formatting from the cell if it exists
-            if let Some(cell) = self.cells.get(&(row, col)) {
+            if let Some(cell) = self.cells.get(&cell_key(row, col)) {
                 match spill_value {
                     Value::Number(n) => return CellValue::format_number(*n, &cell.format.number_format),
                     _ => return spill_value.to_text(),
@@ -1015,10 +1046,10 @@ impl Sheet {
             return spill_value.to_text();
         }
 
-        match self.cells.get(&(row, col)) {
+        match self.cells.get(&cell_key(row, col)) {
             Some(cell) => {
                 // Check for spill error
-                if cell.spill_error.is_some() {
+                if cell.spill_error().is_some() {
                     return "#SPILL!".to_string();
                 }
                 // Get the cached Value for formatting (never evaluate on cache miss)
@@ -1051,7 +1082,7 @@ impl Sheet {
 
     pub fn get_raw(&self, row: usize, col: usize) -> String {
         self.cells
-            .get(&(row, col))
+            .get(&cell_key(row, col))
             .map(|c| c.value.raw_display())
             .unwrap_or_default()
     }
@@ -1064,10 +1095,10 @@ impl Sheet {
             return spill_value.clone();
         }
 
-        match self.cells.get(&(row, col)) {
+        match self.cells.get(&cell_key(row, col)) {
             Some(cell) => {
                 // Check for spill error
-                if cell.spill_error.is_some() {
+                if cell.spill_error().is_some() {
                     return Value::Error("#SPILL!".to_string());
                 }
                 // Evaluate the cell value
@@ -1090,9 +1121,9 @@ impl Sheet {
     /// Get a reference to a cell (returns default empty cell if not found)
     pub fn get_cell(&self, row: usize, col: usize) -> Cell {
         self.cells
-            .get(&(row, col))
+            .get(&cell_key(row, col))
             .cloned()
-            .unwrap_or_else(|| Cell { format: self.inherited_format(row, col), ..Cell::default() })
+            .unwrap_or_else(|| Cell::with_format(Arc::new(self.inherited_format(row, col))))
     }
 
     fn display_cell_value(&self, value: &CellValue, row: usize, col: usize) -> String {
@@ -1134,18 +1165,44 @@ impl Sheet {
     fn cell_with_inherited_format(&mut self, row: usize, col: usize) -> &mut Cell {
         let row_formats = &self.row_formats;
         let col_formats = &self.col_formats;
-        self.cells.entry((row, col)).or_insert_with(|| Cell {
-            format: row_formats.get(&row).or_else(|| col_formats.get(&col))
-                .cloned().unwrap_or_default(),
-            ..Cell::default()
+        self.cells.entry(cell_key(row, col)).or_insert_with(|| {
+            match row_formats.get(&row).or_else(|| col_formats.get(&col)) {
+                // Inherited formats are shared per row/column already, so one
+                // Arc here covers every cell that inherits it.
+                Some(inherited) => Cell::with_format(Arc::new(inherited.clone())),
+                None => Cell::default(),
+            }
         })
     }
 
     pub fn get_format(&self, row: usize, col: usize) -> CellFormat {
         self.cells
-            .get(&(row, col))
-            .map(|c| c.format.clone())
+            .get(&cell_key(row, col))
+            .map(|c| (*c.format).clone())
             .unwrap_or_else(|| self.inherited_format(row, col))
+    }
+
+    /// The shared format for `fmt`, adding it to the pool the first time it is
+    /// seen. Two cells formatted alike end up pointing at the same allocation.
+    fn intern_format(&mut self, fmt: CellFormat) -> Arc<CellFormat> {
+        if let Some(existing) = self.format_pool.get(&fmt) {
+            return existing.clone();
+        }
+        let shared = Arc::new(fmt);
+        self.format_pool.insert(shared.clone());
+        shared
+    }
+
+    /// Change one cell's format: copy it out, edit, re-intern. Editing in
+    /// place would fork the shared allocation and lose the sharing.
+    fn edit_format(&mut self, row: usize, col: usize, edit: impl FnOnce(&mut CellFormat)) {
+        let mut fmt = (*self.cell_with_inherited_format(row, col).format).clone();
+        edit(&mut fmt);
+        if !self.has_any_borders && fmt.has_any_border() {
+            self.has_any_borders = true;
+        }
+        let shared = self.intern_format(fmt);
+        self.cell_with_inherited_format(row, col).format = shared;
     }
 
     /// Cells in `count` rows from `start_row` that carry a value or a
@@ -1181,11 +1238,14 @@ impl Sheet {
         let mut found: Vec<_> = self
             .cells
             .iter()
-            .filter(|(pos, _)| in_band(pos))
+            .filter(|(pos, _)| in_band(&from_cell_key(**pos)))
             .filter(|(_, cell)| {
-                !cell.value.raw_display().is_empty() || cell.format != CellFormat::default()
+                !cell.value.raw_display().is_empty() || *cell.format != CellFormat::default()
             })
-            .map(|((r, c), cell)| (*r, *c, cell.value.raw_display(), cell.format.clone()))
+            .map(|(key, cell)| {
+                let (r, c) = from_cell_key(*key);
+                (r, c, cell.value.raw_display(), (*cell.format).clone())
+            })
             .collect();
         // Undo restores in this order; a HashMap would hand back a different
         // one every run.
@@ -1193,17 +1253,20 @@ impl Sheet {
         found
     }
 
-    /// Iterate over all populated cells
-    pub fn cells_iter(&self) -> impl Iterator<Item = (&(usize, usize), &Cell)> {
-        self.cells.iter()
+    /// Iterate over all populated cells.
+    ///
+    /// Yields owned coordinates, not a reference to them: storage keys are
+    /// u32 pairs and callers speak usize.
+    pub fn cells_iter(&self) -> impl Iterator<Item = ((usize, usize), &Cell)> {
+        self.cells.iter().map(|(key, cell)| (from_cell_key(*key), cell))
     }
 
     /// Get coordinates of non-empty cells within a range
     pub fn cells_in_range(&self, min_row: usize, max_row: usize, min_col: usize, max_col: usize) -> Vec<(usize, usize)> {
         self.cells
             .keys()
+            .map(|key| from_cell_key(*key))
             .filter(|(r, c)| *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col)
-            .copied()
             .collect()
     }
 
@@ -1213,7 +1276,7 @@ impl Sheet {
         let (row, col) = self.merge_origin_coord(row, col);
 
         self.clear_spill_from(row, col);
-        self.cells.remove(&(row, col));
+        self.cells.remove(&cell_key(row, col));
         self.spill_values.remove(&(row, col));
     }
 
@@ -1221,14 +1284,14 @@ impl Sheet {
         if !self.has_any_borders && format.has_any_border() {
             self.has_any_borders = true;
         }
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format = format;
+        let shared = self.intern_format(format);
+        self.cell_with_inherited_format(row, col).format = shared;
     }
 
     /// Set the style_id on a cell (imported style provenance).
     pub fn set_style_id(&mut self, row: usize, col: usize, style_id: u32) {
         let cell = self.cell_with_inherited_format(row, col);
-        cell.style_id = Some(style_id);
+        cell.set_style_id(Some(style_id));
     }
 
     /// Set format from import: applies the full CellFormat as the resolved format
@@ -1237,68 +1300,80 @@ impl Sheet {
         if !self.has_any_borders && format.has_any_border() {
             self.has_any_borders = true;
         }
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format = format;
+        let shared = self.intern_format(format);
+        self.cell_with_inherited_format(row, col).format = shared;
     }
 
     pub fn toggle_bold(&mut self, row: usize, col: usize) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.bold = !cell.format.bold;
+        self.edit_format(row, col, |f| {
+            f.bold = !f.bold;
+        });
     }
 
     pub fn toggle_italic(&mut self, row: usize, col: usize) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.italic = !cell.format.italic;
+        self.edit_format(row, col, |f| {
+            f.italic = !f.italic;
+        });
     }
 
     pub fn toggle_underline(&mut self, row: usize, col: usize) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.underline = !cell.format.underline;
+        self.edit_format(row, col, |f| {
+            f.underline = !f.underline;
+        });
     }
 
     pub fn toggle_strikethrough(&mut self, row: usize, col: usize) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.strikethrough = !cell.format.strikethrough;
+        self.edit_format(row, col, |f| {
+            f.strikethrough = !f.strikethrough;
+        });
     }
 
     pub fn set_bold(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.bold = value;
+        self.edit_format(row, col, |f| {
+            f.bold = value;
+        });
     }
 
     pub fn set_italic(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.italic = value;
+        self.edit_format(row, col, |f| {
+            f.italic = value;
+        });
     }
 
     pub fn set_underline(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.underline = value;
+        self.edit_format(row, col, |f| {
+            f.underline = value;
+        });
     }
 
     pub fn set_strikethrough(&mut self, row: usize, col: usize, value: bool) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.strikethrough = value;
+        self.edit_format(row, col, |f| {
+            f.strikethrough = value;
+        });
     }
 
     pub fn set_alignment(&mut self, row: usize, col: usize, alignment: Alignment) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.alignment = alignment;
+        self.edit_format(row, col, |f| {
+            f.alignment = alignment;
+        });
     }
 
     pub fn set_vertical_alignment(&mut self, row: usize, col: usize, vertical_alignment: VerticalAlignment) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.vertical_alignment = vertical_alignment;
+        self.edit_format(row, col, |f| {
+            f.vertical_alignment = vertical_alignment;
+        });
     }
 
     pub fn set_text_overflow(&mut self, row: usize, col: usize, text_overflow: TextOverflow) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.text_overflow = text_overflow;
+        self.edit_format(row, col, |f| {
+            f.text_overflow = text_overflow;
+        });
     }
 
     pub fn set_number_format(&mut self, row: usize, col: usize, number_format: NumberFormat) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.number_format = number_format;
+        self.edit_format(row, col, |f| {
+            f.number_format = number_format;
+        });
     }
 
     pub fn get_number_format(&self, row: usize, col: usize) -> NumberFormat {
@@ -1306,8 +1381,9 @@ impl Sheet {
     }
 
     pub fn set_font_family(&mut self, row: usize, col: usize, font_family: Option<String>) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.font_family = font_family;
+        self.edit_format(row, col, |f| {
+            f.font_family = font_family;
+        });
     }
 
     pub fn get_font_family(&self, row: usize, col: usize) -> Option<String> {
@@ -1315,8 +1391,9 @@ impl Sheet {
     }
 
     pub fn set_background_color(&mut self, row: usize, col: usize, color: Option<[u8; 4]>) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.background_color = color;
+        self.edit_format(row, col, |f| {
+            f.background_color = color;
+        });
     }
 
     pub fn get_background_color(&self, row: usize, col: usize) -> Option<[u8; 4]> {
@@ -1324,18 +1401,21 @@ impl Sheet {
     }
 
     pub fn set_font_size(&mut self, row: usize, col: usize, size: Option<f32>) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.font_size = size;
+        self.edit_format(row, col, |f| {
+            f.font_size = size;
+        });
     }
 
     pub fn set_font_color(&mut self, row: usize, col: usize, color: Option<[u8; 4]>) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.font_color = color;
+        self.edit_format(row, col, |f| {
+            f.font_color = color;
+        });
     }
 
     pub fn set_cell_style(&mut self, row: usize, col: usize, style: CellStyle) {
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.cell_style = style;
+        self.edit_format(row, col, |f| {
+            f.cell_style = style;
+        });
     }
 
     /// Set all 4 borders on a cell at once
@@ -1351,39 +1431,44 @@ impl Sheet {
         if !self.has_any_borders && (top.is_set() || right.is_set() || bottom.is_set() || left.is_set()) {
             self.has_any_borders = true;
         }
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.border_top = top;
-        cell.format.border_right = right;
-        cell.format.border_bottom = bottom;
-        cell.format.border_left = left;
+        self.edit_format(row, col, |f| {
+            f.border_top = top;
+            f.border_right = right;
+            f.border_bottom = bottom;
+            f.border_left = left;
+        });
     }
 
     /// Set the top border on a cell
     pub fn set_border_top(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.border_top = border;
+        self.edit_format(row, col, |f| {
+            f.border_top = border;
+        });
     }
 
     /// Set the right border on a cell
     pub fn set_border_right(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.border_right = border;
+        self.edit_format(row, col, |f| {
+            f.border_right = border;
+        });
     }
 
     /// Set the bottom border on a cell
     pub fn set_border_bottom(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.border_bottom = border;
+        self.edit_format(row, col, |f| {
+            f.border_bottom = border;
+        });
     }
 
     /// Set the left border on a cell
     pub fn set_border_left(&mut self, row: usize, col: usize, border: CellBorder) {
         if !self.has_any_borders && border.is_set() { self.has_any_borders = true; }
-        let cell = self.cell_with_inherited_format(row, col);
-        cell.format.border_left = border;
+        self.edit_format(row, col, |f| {
+            f.border_left = border;
+        });
     }
 
     /// Rescan all cells to recompute `has_any_borders`.
@@ -1573,19 +1658,20 @@ impl Sheet {
         // Collect all cells that need to be shifted
         let cells_to_shift: Vec<_> = self.cells
             .iter()
+            .map(|(key, cell)| (from_cell_key(*key), cell))
             .filter(|((r, _), _)| *r >= at_row)
-            .map(|((r, c), cell)| ((*r, *c), cell.clone()))
+            .map(|((r, c), cell)| ((r, c), cell.clone()))
             .collect();
 
         // Remove old positions
         for ((r, c), _) in &cells_to_shift {
-            self.cells.remove(&(*r, *c));
+            self.cells.remove(&cell_key(*r, *c));
         }
 
         // Insert at new positions (shifted down)
         for ((r, c), cell) in cells_to_shift {
             if r + count < self.rows {
-                self.cells.insert((r + count, c), cell);
+                self.cells.insert(cell_key(r + count, c), cell);
             }
         }
 
@@ -1611,23 +1697,25 @@ impl Sheet {
         let end_row = start_row + count; // exclusive
 
         // Remove cells in the deleted rows
-        self.cells.retain(|(r, _), _| !(start_row..end_row).contains(r));
+        let (start, end) = (start_row as u32, end_row as u32);
+        self.cells.retain(|(r, _), _| !(start..end).contains(r));
 
         // Collect cells that need to be shifted up
         let cells_to_shift: Vec<_> = self.cells
             .iter()
+            .map(|(key, cell)| (from_cell_key(*key), cell))
             .filter(|((r, _), _)| *r >= end_row)
-            .map(|((r, c), cell)| ((*r, *c), cell.clone()))
+            .map(|((r, c), cell)| ((r, c), cell.clone()))
             .collect();
 
         // Remove old positions
         for ((r, c), _) in &cells_to_shift {
-            self.cells.remove(&(*r, *c));
+            self.cells.remove(&cell_key(*r, *c));
         }
 
         // Insert at new positions (shifted up)
         for ((r, c), cell) in cells_to_shift {
-            self.cells.insert((r - count, c), cell);
+            self.cells.insert(cell_key(r - count, c), cell);
         }
 
         // Adjust merged regions (grid-line semantics)
@@ -1676,19 +1764,20 @@ impl Sheet {
         // Collect all cells that need to be shifted
         let cells_to_shift: Vec<_> = self.cells
             .iter()
+            .map(|(key, cell)| (from_cell_key(*key), cell))
             .filter(|((_, c), _)| *c >= at_col)
-            .map(|((r, c), cell)| ((*r, *c), cell.clone()))
+            .map(|((r, c), cell)| ((r, c), cell.clone()))
             .collect();
 
         // Remove old positions
         for ((r, c), _) in &cells_to_shift {
-            self.cells.remove(&(*r, *c));
+            self.cells.remove(&cell_key(*r, *c));
         }
 
         // Insert at new positions (shifted right)
         for ((r, c), cell) in cells_to_shift {
             if c + count < self.cols {
-                self.cells.insert((r, c + count), cell);
+                self.cells.insert(cell_key(r, c + count), cell);
             }
         }
 
@@ -1712,23 +1801,25 @@ impl Sheet {
         let end_col = start_col + count; // exclusive
 
         // Remove cells in the deleted columns
-        self.cells.retain(|(_, c), _| !(start_col..end_col).contains(c));
+        let (start, end) = (start_col as u32, end_col as u32);
+        self.cells.retain(|(_, c), _| !(start..end).contains(c));
 
         // Collect cells that need to be shifted left
         let cells_to_shift: Vec<_> = self.cells
             .iter()
+            .map(|(key, cell)| (from_cell_key(*key), cell))
             .filter(|((_, c), _)| *c >= end_col)
-            .map(|((r, c), cell)| ((*r, *c), cell.clone()))
+            .map(|((r, c), cell)| ((r, c), cell.clone()))
             .collect();
 
         // Remove old positions
         for ((r, c), _) in &cells_to_shift {
-            self.cells.remove(&(*r, *c));
+            self.cells.remove(&cell_key(*r, *c));
         }
 
         // Insert at new positions (shifted left)
         for ((r, c), cell) in cells_to_shift {
-            self.cells.insert((r, c - count), cell);
+            self.cells.insert(cell_key(r, c - count), cell);
         }
 
         // Adjust merged regions (grid-line semantics)

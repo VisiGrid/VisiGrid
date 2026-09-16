@@ -382,7 +382,7 @@ fn clear_sheet(workbook: &mut visigrid_engine::workbook::Workbook, sheet_idx: us
         sheet
             .cells_iter()
             .filter(|(_, cell)| !matches!(cell.value, CellValue::Formula { .. }))
-            .map(|(&(r, c), _)| (r, c))
+            .map(|((r, c), _)| (r, c))
             .collect()
     } else {
         return;
