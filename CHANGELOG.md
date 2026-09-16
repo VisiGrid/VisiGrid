@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.35.0
+
+### Grid
+
+- **A sheet holds 1,048,576 rows and 16,384 columns** — Excel's size. The old grid was 65,536 x 256, which is Excel 2003's, and it turned away files people actually have: a Parquet or CSV export with more than 65,536 rows was refused outright, and an xlsx wider than column IV lost everything past it. Cells are stored sparsely, so an empty grid of any size costs nothing.
+- **A file that fits the grid still has to fit in memory.** A million rows of five columns needs roughly a gigabyte while open, so the machine, not the grid, is what limits a very large import now. Excel import still stops at 5,000,000 cells and says so; other formats do not have that cap.
+- **Go To, paste and formula-mode arrowing no longer accept cells that cannot exist.** Four parts of the app carried their own copy of the grid size, all of them wrong — they said 1,000,000 x 16,384 while the grid was 65,536 x 256. Paste could write past the last column, and Go To could jump to a row nothing could show. There is now one definition, and a test fails if a second appears.
+
+### Performance
+
+- **Cells use about a fifth of the memory they did.** 685 bytes each, now 132. A million-row CSV import peaks at 1.07 GB instead of 5.3 GB, and finishes faster for having less to allocate. Formats are shared between cells that look alike instead of copied onto each one, rarely-used fields no longer take space on cells that do not have them, and a formula's parsed form no longer sets the size of every cell in the workbook.
+- **Deleting a column, exporting CSV or JSON, and `vgrid convert` no longer walk the whole grid.** They visited every cell position — 17 billion of them at the new size — rather than the cells that exist. They now cost what the data costs.
+
+### Licensing
+
+- **The desktop app is free, and the five licensed features are unlocked.** Background Excel import (the free path froze the window and suggested an upgrade), the inspector's verification certificates, impact summary, dependency graph and named-range detail, the Lua debugger, the diff preview before a transform applies, and the profiler's phase timing, hotspots and cycle analysis. Nobody using a released build could reach any of them, because they were only ever enabled in builds compiled with a licence. The Mac App Store version remains a paid download of the same source.
+
+### Agents and sessions
+
+- **A whole-column format or read through MCP now has to be split into ranges.** The per-call caps are unchanged — 250,000 cells to format, 65,536 to read — but a column is 1,048,576 cells now and no longer fits in either. The error says which cap was exceeded and by how much.
+
 ## 0.34.4
 
 ### Files
