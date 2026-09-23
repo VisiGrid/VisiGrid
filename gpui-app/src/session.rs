@@ -746,7 +746,7 @@ impl Spreadsheet {
             .max(ZOOM_STEPS[0])
             .min(ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
         self.view_state.zoom_level = zoom;
-        self.metrics = GridMetrics::with_scale(zoom, self.metrics.scale);
+        self.metrics = GridMetrics::with_cell_sizes(zoom, self.metrics.scale, self.metrics.default_cell_sizes);
     }
 }
 

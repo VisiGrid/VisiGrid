@@ -24,6 +24,8 @@ use super::parser::BoundExpr;
 ///
 /// # Known Limitations
 ///
+/// - Whole-row/column references are returned separately by
+///   `whole_range::extract_whole_ranges`, never expanded to the full grid.
 /// - Dynamic references (INDIRECT, OFFSET) cannot be statically analyzed.
 ///   These functions are evaluated at runtime, not during extraction.
 /// - If a named range points to a deleted sheet or invalid index, it's skipped.
@@ -54,7 +56,7 @@ fn collect_refs<F>(
     use super::parser::Expr;
 
     match expr {
-        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::Empty | Expr::RefError => {
+        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::Empty | Expr::RefError | Expr::WholeRange { .. } => {
             // Literals have no dependencies; a dead reference has no target
         }
 
@@ -187,6 +189,10 @@ mod tests {
                     end_row_abs: *end_row_abs,
                 }
             }
+            Expr::WholeRange { axis, start, end, start_abs, end_abs, .. } => Expr::WholeRange {
+                sheet: SheetRef::Current, axis: *axis, start: *start, end: *end,
+                start_abs: *start_abs, end_abs: *end_abs,
+            },
             Expr::NamedRange(name) => Expr::NamedRange(name.clone()),
             Expr::Function { name, args } => {
                 Expr::Function {

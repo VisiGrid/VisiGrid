@@ -1,21 +1,18 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, TriState, FORMULA_BAR_HEIGHT};
+use crate::app::{Spreadsheet, TriState};
 use crate::mode::Mode;
 use crate::theme::TokenKey;
 use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment, NumberFormat};
 
-pub const FORMAT_BAR_HEIGHT: f32 = 28.0;
+pub const FORMAT_BAR_HEIGHT: f32 = 44.0;
 
 /// Common font sizes for the dropdown.
 const FONT_SIZES: &[u32] = &[8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 36, 48, 72];
 
-/// Default font size (matches engine default).
-const DEFAULT_FONT_SIZE: u32 = 11;
-
 /// Render the format bar (between formula bar and column headers).
 pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    let toolbar_bg = app.token(TokenKey::HeaderBg);
+    let toolbar_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
     let text_muted = app.token(TokenKey::TextMuted);
@@ -31,10 +28,16 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
     // Font family display
     let font_display: SharedString = match &state.font_family {
         TriState::Uniform(Some(f)) => f.clone().into(),
-        TriState::Uniform(None) | TriState::Empty => "(Default)".into(),
+        TriState::Uniform(None) | TriState::Empty => app.cell_font.family.clone().into(),
         TriState::Mixed => "\u{2014}".into(), // em dash
     };
     let font_is_mixed = state.font_family.is_mixed();
+    let font_missing = !font_is_mixed && app.font_catalog.is_missing(font_display.as_ref());
+    let font_tooltip = if font_missing {
+        format!("{} is unavailable. Displaying {}; the original font is preserved in the workbook.", font_display, crate::settings::DEFAULT_FONT_FAMILY)
+    } else {
+        format!("{} — Font (Format → Font...)", font_display)
+    };
 
     // Font size display
     let size_replace_next = app.ui.format_bar.size_replace_next;
@@ -48,8 +51,8 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
         }
     } else {
         match &state.font_size {
-            TriState::Uniform(Some(s)) => format!("{}", *s as u32).into(),
-            TriState::Uniform(None) | TriState::Empty => format!("{}", DEFAULT_FONT_SIZE).into(),
+            TriState::Uniform(Some(s)) => format!("{}", s).into(),
+            TriState::Uniform(None) | TriState::Empty => app.cell_font.size.to_string().into(),
             TriState::Mixed => "\u{2014}".into(),
         }
     };
@@ -86,19 +89,23 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
     let size_focus = app.ui.format_bar.size_focus.clone();
 
     div()
+        .id("format-toolbar")
+        .overflow_x_scroll()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .flex()
         .flex_shrink_0()
         .relative()
         .h(px(FORMAT_BAR_HEIGHT))
         .w_full()
         .bg(toolbar_bg)
-        // No bottom border - let spacing and background separation do the work
+        .border_b_1()
+        .border_color(panel_border)
         .items_center()
         .px_2()
         .gap_1()
         // Font family button
         .child(render_font_family_btn(
-            font_display, font_is_mixed, text_primary, text_muted, panel_border, cx,
+            font_display, font_is_mixed, font_missing, font_tooltip, text_primary, text_muted, panel_border, cx,
         ))
         // Font size input
         .child(render_font_size_input(
@@ -174,12 +181,32 @@ fn rgba_to_hsla(tri: &TriState<Option<[u8; 4]>>) -> Option<Hsla> {
 // Controls
 // ============================================================================
 
+/// Draw at a fixed size so dropdown indicators remain legible across UI fonts.
+fn dropdown_chevron(color: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let origin = bounds.origin;
+            let mut path = PathBuilder::stroke(px(1.5));
+            path.move_to(origin + point(px(2.0), px(4.0)));
+            path.line_to(origin + point(px(6.0), px(8.0)));
+            path.line_to(origin + point(px(10.0), px(4.0)));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .size(px(12.0))
+    .flex_shrink_0()
+}
+
 /// Thin vertical separator between toolbar groups.
 fn toolbar_separator(border: Hsla) -> impl IntoElement {
     div()
         .w(px(1.0))
-        .h(px(16.0))
-        .mx(px(2.0))
+        .h(px(20.0))
+        .flex_shrink_0()
+        .mx(px(4.0))
         .bg(border.opacity(0.5))
 }
 
@@ -187,6 +214,8 @@ fn toolbar_separator(border: Hsla) -> impl IntoElement {
 fn render_font_family_btn(
     display: SharedString,
     is_mixed: bool,
+    is_missing: bool,
+    tooltip: String,
     text_primary: Hsla,
     text_muted: Hsla,
     panel_border: Hsla,
@@ -196,9 +225,9 @@ fn render_font_family_btn(
 
     div()
         .id("fmt-font-family")
-        .min_w(px(80.0))
-        .max_w(px(120.0))
-        .h(px(20.0))
+        .w(px(if is_missing { 194.0 } else { 140.0 }))
+        .h(px(30.0))
+        .flex_shrink_0()
         .px_2()
         .flex()
         .items_center()
@@ -206,7 +235,7 @@ fn render_font_family_btn(
         .cursor_pointer()
         .border_1()
         .border_color(panel_border)
-        .text_size(px(11.0))
+        .text_size(px(13.0))
         .text_color(text_color)
         .overflow_hidden()
         .when(is_mixed, |d| d.italic())
@@ -214,10 +243,11 @@ fn render_font_family_btn(
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.show_font_picker(window, cx);
         }))
-        .tooltip(|_window, cx| {
-            cx.new(|_| FormatBarTooltip("Font (Format \u{2192} Font...)")).into()
+        .tooltip(move |_window, cx| {
+            cx.new(|_| FontTooltip(tooltip.clone())).into()
         })
-        .child(display)
+        .child(div().flex_1().overflow_hidden().text_ellipsis().child(display))
+        .when(is_missing, |d| d.child(div().ml_1().text_size(px(10.0)).text_color(text_muted).child("Substituted")))
 }
 
 /// Font size editable input with dropdown arrow.
@@ -239,13 +269,15 @@ fn render_font_size_input(
 
     div()
         .flex()
+        .flex_shrink_0()
         .items_center()
         .child(
             div()
                 .id("fmt-font-size")
                 .track_focus(&focus_handle)
                 .w(px(38.0))
-                .h(px(20.0))
+                .h(px(30.0))
+                .flex_shrink_0()
                 .px(px(4.0))
                 .flex()
                 .items_center()
@@ -254,7 +286,7 @@ fn render_font_size_input(
                 .border_1()
                 .border_color(if is_editing { accent } else { panel_border })
                 .bg(if is_editing { editor_bg } else { gpui::transparent_black() })
-                .text_size(px(11.0))
+                .text_size(px(13.0))
                 .text_color(text_color)
                 .when(!is_editing, |d| d.cursor_pointer())
                 .when(is_editing, |d| d.cursor_text())
@@ -266,8 +298,8 @@ fn render_font_size_input(
                         // Enter editing mode: populate buffer with current display value
                         let state = this.selection_format_state(cx);
                         this.ui.format_bar.size_input = match &state.font_size {
-                            TriState::Uniform(Some(s)) => format!("{}", *s as u32),
-                            TriState::Uniform(None) | TriState::Empty => format!("{}", DEFAULT_FONT_SIZE),
+                            TriState::Uniform(Some(s)) => format!("{}", s),
+                            TriState::Uniform(None) | TriState::Empty => this.cell_font.size.to_string(),
                             TriState::Mixed => String::new(),
                         };
                         this.ui.format_bar.size_editing = true;
@@ -299,8 +331,8 @@ fn render_font_size_input(
                         }
                         _ => {
                             if let Some(ch) = &event.keystroke.key_char {
-                                // Only allow digits
-                                if ch.chars().all(|c| c.is_ascii_digit()) {
+                                // Point sizes may include a decimal fraction
+                                if ch.chars().all(|c| c.is_ascii_digit() || c == '.') {
                                     // First keypress after entering edit: replace entire value
                                     if this.ui.format_bar.size_replace_next {
                                         this.ui.format_bar.size_input.clear();
@@ -314,7 +346,7 @@ fn render_font_size_input(
                     }
                 }))
                 .tooltip(|_window, cx: &mut App| {
-                    cx.new(|_| FormatBarTooltip("Font Size")).into()
+                    cx.new(|_| FormatBarTooltip("Font Size (points)")).into()
                 })
                 .when(is_editing && is_selected_all, |d| {
                     // "Select all" visual: accent background on the text to show it will be replaced
@@ -334,8 +366,9 @@ fn render_font_size_input(
         .child(
             div()
                 .id("fmt-font-size-dropdown")
-                .w(px(14.0))
-                .h(px(20.0))
+                .w(px(22.0))
+                .h(px(30.0))
+                .flex_shrink_0()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -348,13 +381,14 @@ fn render_font_size_input(
                 .text_size(px(8.0))
                 .text_color(text_muted)
                 .hover(|s| s.bg(panel_border.opacity(0.3)))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
+                    this.ui.format_bar.popup_x = (f32::from(event.position.x) - 16.0).max(8.0);
                     this.ui.format_bar.size_dropdown = !this.ui.format_bar.size_dropdown;
                     this.ui.format_bar.size_editing = false;
                     cx.notify();
                 }))
-                .child("\u{25BC}") // ▼
+                .child(dropdown_chevron(if app.ui.format_bar.size_dropdown { accent } else { text_primary }))
         )
 }
 
@@ -368,13 +402,11 @@ pub fn render_font_size_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
     // Vertical offset from root div top to below the format bar.
-    // macOS: titlebar(34) + formula_bar(28) + format_bar(28) = 90
-    // Other: menu_bar(28) + formula_bar(28) + format_bar(28) = 84
     let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + FORMULA_BAR_HEIGHT + FORMAT_BAR_HEIGHT;
+    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
 
-    // Horizontal offset: px_2 padding (8) + font family (~84) + gap_1 (4) = ~96
-    let left_offset: f32 = 8.0 + 84.0 + 4.0;
+    // Anchor at the clicked control, clamped to the window.
+    let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));
 
     let mut dropdown = div()
         .id("fmt-size-dropdown-panel")
@@ -403,7 +435,7 @@ pub fn render_font_size_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet
                 .id(SharedString::from(format!("fmt-size-{}", size)))
                 .px_2()
                 .py(px(2.0))
-                .text_size(px(11.0))
+                .text_size(px(13.0))
                 .text_color(text_primary)
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover_bg))
@@ -424,7 +456,7 @@ pub fn render_font_size_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet
             .id("fmt-size-auto")
             .px_2()
             .py(px(2.0))
-            .text_size(px(11.0))
+            .text_size(px(13.0))
             .text_color(text_muted)
             .italic()
             .cursor_pointer()
@@ -441,16 +473,10 @@ pub fn render_font_size_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet
 }
 
 /// Parse font size input text into a validated font size.
-/// Returns `Some(size)` for valid integers 1..=400, `None` otherwise.
+/// Returns `Some(size)` for finite point sizes 1..=400, including fractional points.
 /// This is the pure-logic core of commit_font_size, extracted for testability.
 pub(crate) fn parse_font_size_input(input: &str) -> Option<f32> {
-    let trimmed = input.trim();
-    if let Ok(size) = trimmed.parse::<u32>() {
-        if size >= 1 && size <= 400 {
-            return Some(size as f32);
-        }
-    }
-    None
+    input.trim().parse::<f32>().ok().filter(|size| size.is_finite() && (1.0..=400.0).contains(size))
 }
 
 /// Commit the font size input value and exit editing mode.
@@ -488,29 +514,31 @@ fn render_format_dropdown_btn(
     // Show indicator if any formatting is active
     let has_active = bold_active || italic_active || underline_active;
     let btn_bg = if is_open { accent.opacity(0.15) } else { gpui::transparent_black() };
-    let btn_border = if is_open { accent.opacity(0.5) } else { panel_border };
+    let btn_border = if is_open { accent.opacity(0.5) } else { gpui::transparent_black() };
     let btn_color = if is_open { accent } else if has_active { text_primary } else { text_muted };
 
     div()
         .id("fmt-format-dropdown")
         .flex()
         .items_center()
-        .gap(px(3.0))
+        .gap(px(6.0))
         .px(px(6.0))
-        .h(px(22.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .rounded_sm()
         .cursor_pointer()
         .border_1()
         .border_color(btn_border)
         .bg(btn_bg)
-        .text_size(px(11.0))
+        .text_size(px(13.0))
         .text_color(btn_color)
         .hover(|s| s.bg(panel_border.opacity(0.3)))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+            this.ui.format_bar.popup_x = (f32::from(event.position.x) - 16.0).max(8.0);
             this.toggle_format_menu(cx);
         }))
         .child("Format")
-        .child(div().text_size(px(7.0)).child("▾"))
+        .child(dropdown_chevron(if is_open { accent } else { text_primary }))
 }
 
 /// Format Painter toggle button (paintbrush icon).
@@ -524,7 +552,7 @@ fn render_format_painter_btn(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let btn_bg = if is_active { accent.opacity(0.2) } else { gpui::transparent_black() };
-    let btn_border = if is_active { accent } else { panel_border };
+    let btn_border = if is_active { accent } else { gpui::transparent_black() };
     let btn_color = if is_active { text_primary } else { text_muted };
 
     #[cfg(target_os = "macos")]
@@ -534,8 +562,9 @@ fn render_format_painter_btn(
 
     div()
         .id("fmt-painter")
-        .w(px(26.0))
-        .h(px(22.0))
+        .w(px(30.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
@@ -585,18 +614,16 @@ pub fn render_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let align_cas = matches!(state.alignment, TriState::Uniform(Alignment::CenterAcrossSelection));
 
     // Position below format bar, roughly under Format button
-    // macOS: titlebar(34) + formula_bar(28) + format_bar(28) = 90
     let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + FORMULA_BAR_HEIGHT + FORMAT_BAR_HEIGHT;
-    // Horizontal: after font family + size + separator
-    let left_offset: f32 = 8.0 + 84.0 + 54.0 + 4.0 + 4.0;
+    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
+    let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));
 
     div()
         .id("fmt-format-dropdown-panel")
         .absolute()
         .top(px(top_offset))
         .left(px(left_offset))
-        .w(px(140.0))
+        .w(px(224.0))
         .bg(panel_bg)
         .border_1()
         .border_color(panel_border)
@@ -740,8 +767,9 @@ fn render_style_btn(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let mut btn = div()
-        .w(px(26.0))
-        .h(px(22.0))
+        .w(px(30.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
@@ -825,15 +853,16 @@ fn render_fill_color_btn(
 
     div()
         .id("fmt-fill-color")
-        .w(px(26.0))
-        .h(px(22.0))
+        .w(px(30.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
         .rounded_sm()
         .cursor_pointer()
         .border_1()
-        .border_color(panel_border)
+        .border_color(gpui::transparent_black())
         .hover(|s| s.bg(panel_border.opacity(0.3)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.show_color_picker(crate::color_palette::ColorTarget::Fill, window, cx);
@@ -858,8 +887,9 @@ fn render_text_color_btn(
 
     div()
         .id("fmt-text-color")
-        .w(px(26.0))
-        .h(px(22.0))
+        .w(px(30.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .flex()
         .flex_col()
         .items_center()
@@ -867,7 +897,7 @@ fn render_text_color_btn(
         .rounded_sm()
         .cursor_pointer()
         .border_1()
-        .border_color(panel_border)
+        .border_color(gpui::transparent_black())
         .hover(|s| s.bg(panel_border.opacity(0.3)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.show_color_picker(crate::color_palette::ColorTarget::Text, window, cx);
@@ -878,7 +908,7 @@ fn render_text_color_btn(
         // "A" letter
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(px(13.0))
                 .font_weight(FontWeight::BOLD)
                 .text_color(if is_mixed { text_muted } else { text_primary })
                 .child(if is_mixed { "\u{2014}" } else { "A" })
@@ -947,8 +977,9 @@ fn render_align_btn(
     let line_color = if is_active { text_primary } else { text_muted };
 
     let mut btn = div()
-        .w(px(22.0))
-        .h(px(22.0))
+        .w(px(30.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
@@ -963,7 +994,7 @@ fn render_align_btn(
     } else {
         btn = btn
             .bg(gpui::transparent_black())
-            .border_color(panel_border);
+            .border_color(gpui::transparent_black());
     }
 
     btn = btn.hover(|s| s.bg(panel_border.opacity(0.5)));
@@ -1030,7 +1061,7 @@ fn render_sort_btn(
     let id: &str = if ascending { "fmt-sort-asc" } else { "fmt-sort-desc" };
 
     let btn_bg = if is_active { accent.opacity(0.2) } else { gpui::transparent_black() };
-    let btn_border = if is_active { accent } else { panel_border };
+    let btn_border = if is_active { accent } else { gpui::transparent_black() };
     let btn_color = if is_active { text_primary } else { text_muted };
 
     #[cfg(not(target_os = "macos"))]
@@ -1040,8 +1071,9 @@ fn render_sort_btn(
 
     div()
         .id(SharedString::from(id))
-        .w(px(34.0))
-        .h(px(22.0))
+        .w(px(38.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
@@ -1050,7 +1082,7 @@ fn render_sort_btn(
         .border_1()
         .border_color(btn_border)
         .bg(btn_bg)
-        .text_size(px(10.0))
+        .text_size(px(12.0))
         .text_color(btn_color)
         .hover(|s| s.bg(panel_border.opacity(0.5)))
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
@@ -1075,7 +1107,7 @@ fn render_filter_btn(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let btn_bg = if is_active { accent.opacity(0.2) } else { gpui::transparent_black() };
-    let btn_border = if is_active { accent } else { panel_border };
+    let btn_border = if is_active { accent } else { gpui::transparent_black() };
     let line_color = if is_active { text_primary } else { text_muted };
 
     #[cfg(not(target_os = "macos"))]
@@ -1085,8 +1117,9 @@ fn render_filter_btn(
 
     div()
         .id("fmt-filter")
-        .w(px(26.0))
-        .h(px(22.0))
+        .w(px(30.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
@@ -1135,15 +1168,16 @@ fn render_autosum_btn(
 
     div()
         .id("fmt-autosum")
-        .w(px(26.0))
-        .h(px(22.0))
+        .w(px(30.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
         .rounded_sm()
         .cursor_pointer()
         .border_1()
-        .border_color(panel_border)
+        .border_color(gpui::transparent_black())
         .bg(gpui::transparent_black())
         .text_size(px(13.0))
         .text_color(text_muted)
@@ -1159,7 +1193,7 @@ fn render_autosum_btn(
 
 /// Number Format dropdown button — "123 ▾".
 fn render_number_format_btn(
-    _text_primary: Hsla,
+    text_primary: Hsla,
     text_muted: Hsla,
     accent: Hsla,
     panel_border: Hsla,
@@ -1167,7 +1201,7 @@ fn render_number_format_btn(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let btn_bg = if is_open { accent.opacity(0.15) } else { gpui::transparent_black() };
-    let btn_border = if is_open { accent.opacity(0.5) } else { panel_border };
+    let btn_border = if is_open { accent.opacity(0.5) } else { gpui::transparent_black() };
     let btn_color = if is_open { accent } else { text_muted };
 
     #[cfg(not(target_os = "macos"))]
@@ -1179,18 +1213,20 @@ fn render_number_format_btn(
         .id("fmt-number-format")
         .flex()
         .items_center()
-        .gap(px(2.0))
+        .gap(px(6.0))
         .px(px(4.0))
-        .h(px(22.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .rounded_sm()
         .cursor_pointer()
         .border_1()
         .border_color(btn_border)
         .bg(btn_bg)
-        .text_size(px(11.0))
+        .text_size(px(13.0))
         .text_color(btn_color)
         .hover(|s| s.bg(panel_border.opacity(0.3)))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+            this.ui.format_bar.popup_x = (f32::from(event.position.x) - 16.0).max(8.0);
             this.ui.format_bar.number_format_menu_open = !this.ui.format_bar.number_format_menu_open;
             this.ui.format_bar.cell_style_menu_open = false;
             cx.notify();
@@ -1199,7 +1235,7 @@ fn render_number_format_btn(
             cx.new(|_| FormatBarTooltip(tooltip_text)).into()
         })
         .child("123")
-        .child(div().text_size(px(7.0)).child("\u{25be}"))
+        .child(dropdown_chevron(if is_open { accent } else { text_primary }))
 }
 
 /// Number format quick-menu dropdown overlay — rendered at root level.
@@ -1211,14 +1247,10 @@ pub fn render_number_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreads
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
     let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + FORMULA_BAR_HEIGHT + FORMAT_BAR_HEIGHT;
+    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
 
-    // Horizontal offset: sum of all preceding button widths + gaps + padding.
-    // px_2 padding(8) + font family(84+4) + font size(52+4) + sep(5) + format dropdown(~60+4)
-    // + painter(26+4) + sep(5) + fill(26+4) + text(26+4) + sep(5) + align×3(22×3+4×2+4)
-    // + sep(5) + sort×2(34×2+4+4) + filter(26+4) + sep(5) + autosum(26+4)
-    // ≈ 8 + 88 + 56 + 5 + 64 + 30 + 5 + 30 + 30 + 5 + 74 + 5 + 76 + 30 + 5 + 30 = 541
-    let left_offset: f32 = 541.0;
+    // Anchor at the clicked control, clamped to the window.
+    let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));
 
     div()
         .id("fmt-number-format-dropdown")
@@ -1291,7 +1323,7 @@ fn render_numfmt_item(
 
 /// Cell Styles dropdown button — "Styles ▾".
 fn render_cell_style_btn(
-    _text_primary: Hsla,
+    text_primary: Hsla,
     text_muted: Hsla,
     accent: Hsla,
     panel_border: Hsla,
@@ -1299,25 +1331,27 @@ fn render_cell_style_btn(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let btn_bg = if is_open { accent.opacity(0.15) } else { gpui::transparent_black() };
-    let btn_border = if is_open { accent.opacity(0.5) } else { panel_border };
+    let btn_border = if is_open { accent.opacity(0.5) } else { gpui::transparent_black() };
     let btn_color = if is_open { accent } else { text_muted };
 
     div()
         .id("fmt-cell-styles")
         .flex()
         .items_center()
-        .gap(px(2.0))
+        .gap(px(6.0))
         .px(px(4.0))
-        .h(px(22.0))
+        .h(px(30.0))
+        .flex_shrink_0()
         .rounded_sm()
         .cursor_pointer()
         .border_1()
         .border_color(btn_border)
         .bg(btn_bg)
-        .text_size(px(11.0))
+        .text_size(px(13.0))
         .text_color(btn_color)
         .hover(|s| s.bg(panel_border.opacity(0.3)))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+            this.ui.format_bar.popup_x = (f32::from(event.position.x) - 16.0).max(8.0);
             this.ui.format_bar.cell_style_menu_open = !this.ui.format_bar.cell_style_menu_open;
             this.ui.format_bar.number_format_menu_open = false;
             cx.notify();
@@ -1326,7 +1360,7 @@ fn render_cell_style_btn(
             cx.new(|_| FormatBarTooltip("Cell Styles")).into()
         })
         .child("Styles")
-        .child(div().text_size(px(7.0)).child("\u{25be}"))
+        .child(dropdown_chevron(if is_open { accent } else { text_primary }))
 }
 
 /// Cell styles quick-menu dropdown overlay — rendered at root level.
@@ -1338,10 +1372,10 @@ pub fn render_cell_style_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadshee
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
     let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + FORMULA_BAR_HEIGHT + FORMAT_BAR_HEIGHT;
+    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
 
-    // Horizontal offset: number format btn left (541) + btn width (~40) + sep (5) ≈ 586
-    let left_offset: f32 = 586.0;
+    // Anchor at the clicked control, clamped to the window.
+    let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));
 
     div()
         .id("fmt-cell-style-dropdown")
@@ -1484,6 +1518,14 @@ pub(super) fn render_valign_icon(alignment: VerticalAlignment, color: Hsla) -> i
 // Tooltip
 // ============================================================================
 
+struct FontTooltip(String);
+impl Render for FontTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().max_w(px(350.0)).px_2().py_1().rounded_sm().bg(rgb(0x2d2d2d))
+            .text_size(px(13.0)).text_color(rgb(0xeeeeee)).child(self.0.clone())
+    }
+}
+
 /// Minimal tooltip for format bar buttons.
 struct FormatBarTooltip(&'static str);
 
@@ -1496,7 +1538,7 @@ impl Render for FormatBarTooltip {
             .bg(rgb(0x2d2d2d))
             .border_1()
             .border_color(rgb(0x3d3d3d))
-            .text_size(px(11.0))
+            .text_size(px(13.0))
             .text_color(rgb(0xcccccc))
             .child(self.0)
     }

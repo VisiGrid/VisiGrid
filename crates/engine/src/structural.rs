@@ -192,6 +192,22 @@ pub fn adjust_expr(expr: &ParsedExpr, edit: &StructuralEdit, formula_sheet: &str
                 }
             }
         }
+        Expr::WholeRange { sheet, axis, start, end, start_abs, end_abs } => {
+            let edited_axis = match axis {
+                crate::formula::parser::RangeAxis::Row => Axis::Row,
+                crate::formula::parser::RangeAxis::Column => Axis::Col,
+            };
+            if edited_axis != edit.axis || !targets_edited_sheet(sheet, edit, formula_sheet) {
+                return expr.clone();
+            }
+            match adjust_span((*start).min(*end), (*start).max(*end), edit) {
+                None => Expr::RefError,
+                Some((start, end)) => Expr::WholeRange {
+                    sheet: sheet.clone(), axis: *axis, start, end,
+                    start_abs: *start_abs, end_abs: *end_abs,
+                },
+            }
+        }
         Expr::Function { name, args } => Expr::Function {
             name: name.clone(),
             args: args.iter().map(|a| adjust_expr(a, edit, formula_sheet)).collect(),

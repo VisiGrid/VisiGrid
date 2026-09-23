@@ -991,10 +991,8 @@ pub fn cmd_pipeline_publish(
             .ok_or_else(|| CliError::io("no sheets in workbook"))?;
         let sheet_id = workbook.sheet_id_at_idx(0)
             .ok_or_else(|| CliError::io("cannot resolve sheet ID"))?;
-        let (max_row, max_col) = sheet_ops::get_data_bounds(sheet);
+        let (_, max_col) = sheet_ops::get_data_bounds(sheet);
 
-        let start_row1 = if headers { 2 } else { 1 };
-        let end_row1 = if max_row < start_row1 { start_row1 } else { max_row };
 
         // Build header map for column-name resolution
         let header_map: HashMap<String, String> = if headers {
@@ -1013,7 +1011,8 @@ pub fn cmd_pipeline_publish(
             HashMap::new()
         };
 
-        let lookup = visigrid_engine::workbook::WorkbookLookup::new(&workbook, sheet_id);
+        let workbook_lookup = visigrid_engine::workbook::WorkbookLookup::new(&workbook, sheet_id);
+        let lookup = visigrid_engine::formula::eval::LookupWithContext::for_data_rows(&workbook_lookup, usize::from(headers));
         let mut results: Vec<CalcResult> = Vec::new();
         let mut any_error = false;
 
@@ -1024,11 +1023,11 @@ pub fn cmd_pipeline_publish(
                 format!("={}", expr_str)
             };
             let resolved = sheet_ops::resolve_header_refs(&with_eq, &header_map);
-            let formula_str = sheet_ops::translate_column_refs(&resolved, start_row1, end_row1);
+            let formula_str = resolved;
 
             let result = match visigrid_engine::formula::parser::parse(&formula_str) {
                 Ok(parsed) => {
-                    let bound = visigrid_engine::formula::parser::bind_expr_same_sheet(&parsed);
+                    let bound = visigrid_engine::formula::parser::bind_expr(&parsed, |name| workbook.sheet_id_by_name(name));
                     let eval = visigrid_engine::formula::eval::evaluate(&bound, &lookup);
                     let display = eval.to_text();
                     let is_error = matches!(eval, visigrid_engine::formula::eval::EvalResult::Error(_));

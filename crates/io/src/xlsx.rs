@@ -2114,60 +2114,7 @@ fn extract_formulas_from_xml(
 /// Adjust cell references in a formula by row/col deltas, respecting $ anchors.
 /// Used for expanding shared formula followers from their master definition.
 fn adjust_formula_refs_for_shared(formula: &str, row_delta: i32, col_delta: i32) -> String {
-    use regex::Regex;
-
-    // Match cell references: optional $ before col letters, col letters, optional $ before row, row digits
-    // Examples: A1, $A$1, A$1, $A1, AA100, R103
-    let re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
-
-    re.replace_all(formula, |caps: &regex::Captures| {
-        let col_absolute = &caps[1] == "$";
-        let col_letters = &caps[2];
-        let row_absolute = &caps[3] == "$";
-        let row_num: i32 = caps[4].parse().unwrap_or(1);
-
-        // Don't adjust function names that look like cell refs (they won't have digits though)
-        // The regex requires trailing digits, so function names like SUM, IF won't match.
-
-        // Parse column letters to 0-indexed number
-        let col = col_letters.to_uppercase().chars().fold(0i32, |acc, c| {
-            acc * 26 + (c as i32 - 'A' as i32 + 1)
-        }) - 1;
-
-        // Apply deltas (skip if absolute)
-        let new_col = if col_absolute { col } else { col + col_delta };
-        let new_row = if row_absolute { row_num } else { row_num + row_delta };
-
-        // Bounds check
-        if new_col < 0 || new_row < 1 {
-            return "#REF!".to_string();
-        }
-
-        // Convert column back to letters
-        let col_str = col_num_to_letters(new_col as usize);
-
-        format!(
-            "{}{}{}{}",
-            if col_absolute { "$" } else { "" },
-            col_str,
-            if row_absolute { "$" } else { "" },
-            new_row
-        )
-    })
-    .to_string()
-}
-
-/// Convert a 0-indexed column number to Excel column letters (0=A, 1=B, ..., 25=Z, 26=AA)
-fn col_num_to_letters(mut col: usize) -> String {
-    let mut result = String::new();
-    loop {
-        result.insert(0, (b'A' + (col % 26) as u8) as char);
-        if col < 26 {
-            break;
-        }
-        col = col / 26 - 1;
-    }
-    result
+    visigrid_engine::formula::parser::adjust_formula_refs(formula, row_delta, col_delta)
 }
 
 /// Extract value-only cells from XLSX XML that calamine may have missed.
@@ -4705,11 +4652,8 @@ mod tests {
             "SUM(A6:A15)"
         );
 
-        // col_num_to_letters
-        assert_eq!(col_num_to_letters(0), "A");
-        assert_eq!(col_num_to_letters(25), "Z");
-        assert_eq!(col_num_to_letters(26), "AA");
-        assert_eq!(col_num_to_letters(27), "AB");
+        assert_eq!(adjust_formula_refs_for_shared("SUM(A:A,$B:$C,1:2)", 2, 1), "SUM(B:B,$B:$C,3:4)");
+
     }
 
     #[test]
@@ -4819,6 +4763,30 @@ mod tests {
         // S10: inline string "Inline"
         assert_eq!(out[4], (0, 9, 18, "Inline".to_string()));
         // Note: T11 has a formula, so it should NOT appear
+    }
+
+    #[test]
+    fn font_roundtrip_preserves_requested_family_and_fractional_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("font_points.xlsx");
+        let mut wb = Workbook::new();
+        let sheet = wb.sheet_mut(0).unwrap();
+        sheet.set_value(0, 0, "Missing font stays in the workbook");
+        let mut format = visigrid_engine::cell::CellFormat::default();
+        format.font_family = Some("VisiGrid Test Missing Font".into());
+        format.font_size = Some(11.5);
+        format.bold = true;
+        format.italic = true;
+        sheet.set_format_from_import(0, 0, format);
+        for _ in 0..2 {
+            export(&wb, &path, None).unwrap();
+            let (imported, _) = import(&path).unwrap();
+            let format = imported.sheets()[0].get_format(0, 0);
+            assert_eq!(format.font_family.as_deref(), Some("VisiGrid Test Missing Font"));
+            assert_eq!(format.font_size, Some(11.5), "points must not be converted in storage");
+            assert!(format.bold && format.italic);
+            wb = imported;
+        }
     }
 
     #[test]

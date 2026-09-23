@@ -658,7 +658,7 @@ impl Spreadsheet {
 
     /// Call after any caret/text change to update scroll if needed.
     /// Only does work if edit_scroll_dirty is set.
-    pub fn update_edit_scroll(&mut self, window: &Window) {
+    pub fn update_edit_scroll(&mut self, window: &Window, cx: &App) {
         if !self.edit_scroll_dirty || !self.mode.is_editing() {
             return;
         }
@@ -666,13 +666,13 @@ impl Spreadsheet {
 
         let (_, col) = self.view_state.selected;
         let col_width = self.metrics.col_width(self.col_width(col));
-        self.ensure_caret_visible(window, col_width);
+        self.ensure_caret_visible(window, col_width, cx);
     }
 
     /// Update edit_scroll_x to ensure the caret is visible within the cell.
     /// Only adjusts scroll when caret would go out of view - otherwise preserves position.
     /// This gives smooth "only when necessary" scrolling like Excel.
-    fn ensure_caret_visible(&mut self, window: &Window, col_width: f32) {
+    fn ensure_caret_visible(&mut self, window: &Window, col_width: f32, cx: &App) {
         let text = &self.edit_value;
         let total_bytes = text.len();
         let cursor_byte = self.edit_cursor.min(total_bytes);
@@ -691,12 +691,14 @@ impl Spreadsheet {
         let shape_text: SharedString = text.clone().into();
         let shape_len = shape_text.len();
 
+        let (row, col) = self.view_state.selected;
+        let format = self.sheet(cx).get_format(self.view_to_data(row, cx), col);
         let shaped = window.text_system().shape_line(
             shape_text,
-            px(self.metrics.font_size),
+            px(self.cell_font_size(format.font_size)),
             &[TextRun {
                 len: shape_len,
-                font: Font::default(),
+                font: self.cell_font(&format),
                 color: Hsla::default(),
                 background_color: None,
                 underline: None,

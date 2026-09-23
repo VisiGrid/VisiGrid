@@ -1,6 +1,6 @@
 use gpui::{*};
 use gpui::prelude::FluentBuilder;
-use crate::app::Spreadsheet;
+use crate::app::{Spreadsheet, STATUS_BAR_HEIGHT};
 use crate::links::LinkTarget;
 use crate::mode::Mode;
 use crate::theme::TokenKey;
@@ -80,7 +80,7 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
     div()
         .relative()
         .flex_shrink_0()
-        .h(px(22.0))
+        .h(px(STATUS_BAR_HEIGHT))
         .bg(panel_bg)
         .border_t_1()
         .border_color(panel_border)
@@ -89,7 +89,7 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
         .justify_between()
         .px_2()
         .text_color(text_muted)
-        .text_xs()
+        .text_size(px(12.0))
         .child(
             // Left side: sheet tabs + add button + mode
             div()
@@ -109,8 +109,9 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                 .child(
                     div()
                         .id("add-sheet-btn")
-                        .px_1()
-                        .py_px()
+                        .size(px(28.0))
+                        .flex().items_center().justify_center()
+                        .text_size(px(18.0))
                         .cursor_pointer()
                         .text_color(text_muted)
                         .hover(move |s| s.text_color(text_primary).bg(panel_border))
@@ -342,21 +343,25 @@ fn sheet_tab(app: &Spreadsheet, name: String, index: usize, is_active: bool, cx:
             .into()
         });
     let app_bg = app.token(TokenKey::AppBg);
-    let panel_border = app.token(TokenKey::PanelBorder);
+    let accent = app.token(TokenKey::Accent);
     let text_primary = app.token(TokenKey::TextPrimary);
     let text_muted = app.token(TokenKey::TextMuted);
     let header_bg = app.token(TokenKey::HeaderBg);
 
     div()
         .id(ElementId::Name(format!("sheet-tab-{}", index).into()))
-        .px_2()
-        .py_px()
+        .px_3()
+        .h(px(STATUS_BAR_HEIGHT - 1.0))
+        .flex().items_center()
+        .flex_shrink_0()
+        .text_size(px(13.0))
+        .border_b_2()
+        .border_color(gpui::transparent_black())
         .cursor_pointer()
-        .rounded_sm()
         .when(is_active, move |d: Stateful<Div>| {
             d.bg(app_bg)
-                .border_1()
-                .border_color(panel_border)
+                .border_color(accent)
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(text_primary)
         })
         .when(!is_active, move |d: Stateful<Div>| {
@@ -377,13 +382,7 @@ fn sheet_tab(app: &Spreadsheet, name: String, index: usize, is_active: bool, cx:
         .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
             this.show_sheet_context_menu(index, cx);
         }))
-        // A leading chip rather than an underline. Two earlier attempts
-        // failed for structural reasons worth recording: a bottom border
-        // colours all four sides (GPUI has one border_color), which turned
-        // the active tab — the only one with a full border — into a coloured
-        // box; and a stacked colour bar is clipped, because the tab strip is
-        // a fixed-height centre-aligned row with no vertical room to give.
-        // A chip needs only horizontal space, which the row has.
+        // Preserve workbook tab colors independently of the active underline.
         .child(
             div()
                 .flex()
@@ -447,8 +446,10 @@ fn sheet_tab_editing(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> Statef
 
     div()
         .id(ElementId::Name(format!("sheet-tab-edit-{}", index).into()))
-        .px_1()
-        .py_px()
+        .px_3()
+        .h(px(30.0))
+        .flex().items_center()
+        .text_size(px(13.0))
         .bg(app_bg)
         .border_1()
         .border_color(accent)
@@ -476,7 +477,7 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
     let selection_bg = app.token(TokenKey::SelectionBg);
 
     popup("sheet-context-menu", panel_bg, panel_border, |this, cx| this.hide_sheet_context_menu(cx), cx)
-        .bottom(px(24.0))
+        .bottom(px(STATUS_BAR_HEIGHT))
         .left(px(4.0 + (sheet_index as f32 * 70.0))) // Approximate position
         .w(px(120.0))
         .child(

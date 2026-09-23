@@ -3,7 +3,6 @@
 //! This module contains Fill Down, Fill Right, AutoSum, Fill Handle, and transform operations.
 
 use gpui::{*};
-use regex::Regex;
 
 use crate::app::{Spreadsheet, FillDrag, FillAxis};
 use crate::history::CellChange;
@@ -397,41 +396,7 @@ impl Spreadsheet {
     /// Handles relative (A1), absolute ($A$1), and mixed ($A1, A$1) references
     /// Used by fill operations and multi-edit
     pub fn adjust_formula_refs(&self, formula: &str, delta_row: i32, delta_col: i32) -> String {
-        // Match cell references: optional $ before col, col letters, optional $ before row, row numbers
-        let re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
-
-        re.replace_all(formula, |caps: &regex::Captures| {
-            let col_absolute = &caps[1] == "$";
-            let col_letters = &caps[2];
-            let row_absolute = &caps[3] == "$";
-            let row_num: i32 = caps[4].parse().unwrap_or(1);
-
-            // Parse column
-            let col = col_letters.to_uppercase().chars().fold(0i32, |acc, c| {
-                acc * 26 + (c as i32 - 'A' as i32 + 1)
-            }) - 1;
-
-            // Apply deltas if not absolute
-            let new_col = if col_absolute { col } else { col + delta_col };
-            let new_row = if row_absolute { row_num } else { row_num + delta_row };
-
-            // Bounds check
-            if new_col < 0 || new_row < 1 {
-                return format!("#REF!");
-            }
-
-            // Convert column back to letters
-            let col_str = Self::col_letter(new_col as usize);
-
-            format!(
-                "{}{}{}{}",
-                if col_absolute { "$" } else { "" },
-                col_str,
-                if row_absolute { "$" } else { "" },
-                new_row
-            )
-        })
-        .to_string()
+        visigrid_engine::formula::parser::adjust_formula_refs(formula, delta_row, delta_col)
     }
 
     // Transform operations

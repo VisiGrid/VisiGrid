@@ -15,6 +15,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cell_id::CellId;
 use crate::recalc::CycleReport;
+use crate::formula::whole_range::WholeRangeRef;
 
 /// Persistent dependency graph for formula cells.
 ///
@@ -27,7 +28,7 @@ use crate::recalc::CycleReport;
 /// 1. **Bidirectional consistency:** If A ∈ preds[B] then B ∈ succs[A], and vice versa.
 /// 2. **No dangling entries:** Empty sets are removed, not stored.
 /// 3. **No duplicate edges:** Set semantics enforced by FxHashSet.
-/// 4. **Atomic updates:** `replace_edges` is the only mutator that touches both maps.
+/// 4. **Atomic updates:** edge replacement and range materialization update both maps.
 #[derive(Default, Debug, Clone)]
 pub struct DepGraph {
     /// Precedents: for each formula cell B, the cells A it depends on.
@@ -37,6 +38,10 @@ pub struct DepGraph {
     /// Dependents: for each referenced cell A, the formula cells B that depend on it.
     /// A -> {B1, B2, ...}
     succs: FxHashMap<CellId, FxHashSet<CellId>>,
+
+    /// Open-ended subscriptions, separate from the concrete edges used for
+    /// topological ordering. Group by target sheet to avoid unrelated scans.
+    whole_ranges: FxHashMap<crate::sheet::SheetId, Vec<(CellId, WholeRangeRef)>>,
 }
 
 impl DepGraph {
@@ -59,10 +64,16 @@ impl DepGraph {
     ///
     /// These are the outgoing edges from the cell.
     pub fn dependents(&self, cell: CellId) -> impl Iterator<Item = CellId> + '_ {
-        self.succs
-            .get(&cell)
-            .into_iter()
-            .flat_map(|s| s.iter().copied())
+        let concrete = self.succs.get(&cell);
+        let mut subscribers = FxHashSet::default();
+        if let Some(ranges) = self.whole_ranges.get(&cell.sheet) {
+            for &(formula, range) in ranges {
+                if range.contains(cell) && !concrete.is_some_and(|s| s.contains(&formula)) {
+                    subscribers.insert(formula);
+                }
+            }
+        }
+        concrete.into_iter().flat_map(|s| s.iter().copied()).chain(subscribers)
     }
 
     /// Number of precedents for a cell. O(1) — reads FxHashSet::len().
@@ -70,9 +81,9 @@ impl DepGraph {
         self.preds.get(&cell).map_or(0, |s| s.len())
     }
 
-    /// Number of dependents for a cell. O(1) — reads FxHashSet::len().
+    /// Number of dependents, including open-range subscribers for empty cells.
     pub fn dependent_count(&self, cell: CellId) -> usize {
-        self.succs.get(&cell).map_or(0, |s| s.len())
+        self.dependents(cell).count()
     }
 
     /// Register a formula cell that has no cell references (e.g., `=1/0`, `=PI()`).
@@ -108,6 +119,10 @@ impl DepGraph {
     ///
     /// Pass an empty set to clear all edges for this cell.
     pub fn replace_edges(&mut self, formula_cell: CellId, new_preds: FxHashSet<CellId>) {
+        self.whole_ranges.retain(|_, ranges| {
+            ranges.retain(|(cell, _)| *cell != formula_cell);
+            !ranges.is_empty()
+        });
         // Step 1: Remove old edges
         if let Some(old_preds) = self.preds.remove(&formula_cell) {
             for pred in old_preds {
@@ -135,6 +150,27 @@ impl DepGraph {
         self.preds.insert(formula_cell, new_preds);
     }
 
+    /// Register ranges after replacing the formula's concrete edges.
+    pub fn set_whole_ranges(&mut self, formula: CellId, ranges: Vec<WholeRangeRef>) {
+        for range in ranges {
+            self.whole_ranges.entry(range.sheet).or_default().push((formula, range));
+        }
+    }
+
+    /// Materialize a new cell's edges before topological sorting. This handles
+    /// values AND newly inserted formulas, including cycles and chains whose
+    /// newest precedent lies beyond the old data extent.
+    pub fn track_whole_range_cell(&mut self, cell: CellId) {
+        if let Some(ranges) = self.whole_ranges.get(&cell.sheet) {
+            for &(formula, range) in ranges {
+                if range.contains(cell) {
+                    self.preds.entry(formula).or_default().insert(cell);
+                    self.succs.entry(cell).or_default().insert(formula);
+                }
+            }
+        }
+    }
+
     /// Clear all edges for a cell (formula removed or cell deleted).
     ///
     /// Convenience wrapper around `replace_edges` with an empty set.
@@ -146,6 +182,7 @@ impl DepGraph {
     ///
     /// Called when a sheet is deleted.
     pub fn remove_sheet(&mut self, sheet: crate::sheet::SheetId) {
+        self.whole_ranges.remove(&sheet);
         // Collect cells to remove (can't mutate while iterating)
         let cells_to_remove: Vec<CellId> = self
             .preds
@@ -221,6 +258,40 @@ impl DepGraph {
             new_preds.insert(new_formula_cell, mapped_preds);
         }
 
+        let old_ranges = std::mem::take(&mut self.whole_ranges);
+        for ranges in old_ranges.into_values() {
+            for (formula, range) in ranges {
+                let Some(formula) = map(formula) else { continue };
+                // Structural mappings preserve axes and order. Find surviving
+                // finite endpoints; deleting the first row must not remove a
+                // whole-column subscription (and vice versa).
+                let project = |n| {
+                    let (first, last) = match range.axis {
+                        crate::formula::parser::RangeAxis::Row => (
+                            CellId::new(range.sheet, n, 0),
+                            CellId::new(range.sheet, n, crate::sheet::NUM_COLS - 1),
+                        ),
+                        crate::formula::parser::RangeAxis::Column => (
+                            CellId::new(range.sheet, 0, n),
+                            CellId::new(range.sheet, crate::sheet::NUM_ROWS - 1, n),
+                        ),
+                    };
+                    map(first).or_else(|| map(last))
+                };
+                let start = (range.start..=range.end).find_map(project);
+                let end = (range.start..=range.end).rev().find_map(project);
+                if let (Some(start), Some(end)) = (start, end) {
+                    let coord = |c: CellId| match range.axis {
+                        crate::formula::parser::RangeAxis::Row => c.row,
+                        crate::formula::parser::RangeAxis::Column => c.col,
+                    };
+                    self.set_whole_ranges(formula, vec![WholeRangeRef {
+                        sheet: start.sheet, axis: range.axis, start: coord(start), end: coord(end),
+                    }]);
+                    new_preds.entry(formula).or_default();
+                }
+            }
+        }
         self.preds = new_preds;
         self.succs = new_succs;
     }
@@ -751,15 +822,11 @@ impl DepGraph {
                 continue;
             }
 
-            if let Some(deps) = self.succs.get(&current) {
-                for &dep in deps {
-                    if new_preds_set.contains(&dep) {
-                        // Found a path from cell to one of its would-be precedents
-                        // This means new_pred -> ... -> cell -> new_pred (cycle!)
-                        return Some(CycleReport::cycle(vec![dep, cell]));
-                    }
-                    stack.push(dep);
+            for dep in self.dependents(current) {
+                if new_preds_set.contains(&dep) {
+                    return Some(CycleReport::cycle(vec![dep, cell]));
                 }
+                stack.push(dep);
             }
         }
 

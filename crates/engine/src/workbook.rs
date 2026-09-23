@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::cell::{CellFormat, CellValue};
 use crate::cell_id::CellId;
 use crate::dep_graph::DepGraph;
-use crate::sheet::{Sheet, SheetId, normalize_sheet_name, is_valid_sheet_name, NUM_COLS, NUM_ROWS};
+use crate::sheet::{Sheet, SheetId, SheetRef, normalize_sheet_name, is_valid_sheet_name, NUM_COLS, NUM_ROWS};
 use crate::named_range::{NamedRange, NamedRangeStore};
 use crate::formula::eval::{CellLookup, EvalArg, EvalResult, NamedRangeResolution, Value};
 use crate::formula::parser::bind_expr;
@@ -947,6 +947,25 @@ impl Workbook {
         &self.dep_graph
     }
 
+    /// Extract finite references plus occupied cells in open ranges. Empty
+    /// coordinates are represented by subscriptions rather than grid-sized
+    /// edge sets. Spill receivers participate just like stored cells.
+    fn formula_dependencies(&self, bound: &crate::formula::parser::BoundExpr, sheet_id: SheetId)
+        -> (FxHashSet<CellId>, Vec<crate::formula::whole_range::WholeRangeRef>)
+    {
+        let mut refs: FxHashSet<_> = extract_cell_ids(bound, sheet_id, &self.named_ranges, |idx| self.sheet_id_at_idx(idx)).into_iter().collect();
+        let ranges = crate::formula::whole_range::extract_whole_ranges(bound, sheet_id);
+        for range in &ranges {
+            if let Some(sheet) = self.sheet_by_id(range.sheet) {
+                for (row, col) in sheet.cells_iter().map(|(pos, _)| pos).chain(sheet.spill_receiver_coords()) {
+                    let cell = CellId::new(range.sheet, row, col);
+                    if range.contains(cell) { refs.insert(cell); }
+                }
+            }
+        }
+        (refs, ranges)
+    }
+
     /// Rebuild the dependency graph from scratch.
     ///
     /// Call this after loading a workbook to populate the graph.
@@ -964,22 +983,17 @@ impl Workbook {
                     let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
 
                     // Extract cell references
-                    let refs = extract_cell_ids(
-                        &bound,
-                        sheet_id,
-                        &self.named_ranges,
-                        |idx| self.sheet_id_at_idx(idx),
-                    );
+                    let (refs, ranges) = self.formula_dependencies(&bound, sheet_id);
 
                     let formula_cell = CellId::new(sheet_id, row, col);
                     if !refs.is_empty() {
-                        let preds: FxHashSet<CellId> = refs.into_iter().collect();
-                        self.dep_graph.replace_edges(formula_cell, preds);
+                        self.dep_graph.replace_edges(formula_cell, refs);
                     } else {
                         // Leaf formula (no cell refs, e.g. =1/0, =PI())
                         // Must still be tracked so recompute evaluates it.
                         self.dep_graph.register_leaf_formula(formula_cell);
                     }
+                    self.dep_graph.set_whole_ranges(formula_cell, ranges);
                 }
             }
         }
@@ -1000,15 +1014,10 @@ impl Workbook {
         if let Some(ast) = ast {
             // Bind and extract references
             let bound = bind_expr(&ast, |name| self.sheet_id_by_name(name));
-            let refs = extract_cell_ids(
-                &bound,
-                sheet_id,
-                &self.named_ranges,
-                |idx| self.sheet_id_at_idx(idx),
-            );
+            let (refs, ranges) = self.formula_dependencies(&bound, sheet_id);
 
-            let preds: FxHashSet<CellId> = refs.into_iter().collect();
-            self.dep_graph.replace_edges(cell_id, preds);
+            self.dep_graph.replace_edges(cell_id, refs);
+            self.dep_graph.set_whole_ranges(cell_id, ranges);
             // replace_edges skips registering a cell that has no precedents, so a formula
             // with no static cell references (=1+1, =TODAY(), =INDIRECT("A1")) would be left
             // out of the dep graph and never evaluated by recompute. Register it as a leaf
@@ -1018,6 +1027,7 @@ impl Workbook {
             // Not a formula, clear any existing edges
             self.dep_graph.clear_cell(cell_id);
         }
+        self.dep_graph.track_whole_range_cell(cell_id);
     }
 
     /// Clear dependencies for a cell (e.g., when the cell is deleted or cleared).
@@ -1850,6 +1860,7 @@ impl Workbook {
                 break;
             }
             for cell in &touched {
+                self.dep_graph.track_whole_range_cell(*cell);
                 if affected_set.insert(*cell) {
                     affected.push(*cell);
                 }
@@ -2461,7 +2472,6 @@ impl Workbook {
         formula: &str,
     ) -> Result<(), crate::recalc::CycleReport> {
         use crate::formula::parser::{parse, bind_expr};
-        use crate::formula::refs::extract_cell_ids;
 
         // Parse and bind
         let parsed = parse(formula).map_err(|e| {
@@ -2470,15 +2480,15 @@ impl Workbook {
         let bound = bind_expr(&parsed, |name| self.sheet_id_by_name(name));
 
         // Extract new precedents
-        let new_preds = extract_cell_ids(
-            &bound,
-            sheet_id,
-            &self.named_ranges,
-            |idx| self.sheet_id_at_idx(idx),
-        );
+        let (mut new_preds, ranges) = self.formula_dependencies(&bound, sheet_id);
+        let cell_id = CellId::new(sheet_id, row, col);
+        // The proposed formula may occupy a previously empty coordinate.
+        if ranges.iter().any(|range| range.contains(cell_id)) {
+            new_preds.insert(cell_id);
+        }
+        let new_preds: Vec<_> = new_preds.into_iter().collect();
 
         // Check for cycle
-        let cell_id = CellId::new(sheet_id, row, col);
         if let Some(cycle) = self.dep_graph.would_create_cycle(cell_id, &new_preds) {
             return Err(cycle);
         }
@@ -2713,6 +2723,15 @@ impl<'a> WorkbookLookup<'a> {
 }
 
 impl<'a> CellLookup for WorkbookLookup<'a> {
+    fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) {
+        let sheet = match sheet {
+            SheetRef::Current => self.current_sheet(),
+            SheetRef::Id(id) => self.workbook.sheet_by_id(*id),
+            SheetRef::RefError { .. } => None,
+        };
+        sheet.map(Sheet::data_bounds).unwrap_or((0, 0))
+    }
+
     /// The sheet's own typed value, not a guess reconstructed from its text.
     fn get_typed(&self, row: usize, col: usize) -> Value {
         self.current_sheet()

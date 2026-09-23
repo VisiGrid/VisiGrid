@@ -58,7 +58,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
     let is_formula_editing = editing && app.edit_value.starts_with('=');
 
     // Expanded mode: 2.5x height for long formulas
-    let bar_height = if app.formula_bar_expanded { FORMULA_BAR_HEIGHT * 2.5 } else { FORMULA_BAR_HEIGHT };
+    let bar_height = app.formula_bar_height();
 
     div()
         .relative()
@@ -98,15 +98,17 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 .id("name-box")
                 .track_focus(&name_box_focus)
                 .w(px(FORMULA_BAR_CELL_REF_WIDTH))
-                .h(px(20.0))
+                .flex_shrink_0()
+                .h(px(28.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .mx_1()
-                .border_r_1()
+                .border_1()
+                .rounded_md()
                 .border_color(panel_border)
                 .when(name_box_editing, |d| d.border_b_2().border_color(accent))
-                .bg(formula_bar_bg)
+                .bg(panel_bg)
                 .text_color(text_primary)
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
@@ -172,7 +174,8 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
             div()
                 .id("fx-button")
                 .w(px(FORMULA_BAR_FX_WIDTH))
-                .h(px(20.0))
+                .flex_shrink_0()
+                .h(px(28.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -180,7 +183,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 .border_color(panel_border)
                 .cursor_pointer()
                 .text_color(fx_color)
-                .text_size(px(12.0))
+                .text_size(px(16.0))
                 .font_family("monospace")
                 .hover(|s| s.text_color(text_primary))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
@@ -226,7 +229,11 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
             div()
                 .id("formula-bar-input")
                 .flex_1()
-                .h_full()
+                .min_w(px(0.0))
+                .h(px(bar_height - 10.0))
+                .rounded_md()
+                .border_1()
+                .border_color(if editing { accent } else { panel_border })
                 .flex()
                 .items_center()
                 .px_2()
@@ -366,7 +373,8 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
         .child(
             div()
                 .id("formula-bar-expand")
-                .w(px(20.0))
+                .w(px(28.0))
+                .flex_shrink_0()
                 .h_full()
                 .flex()
                 .items_center()

@@ -29,6 +29,7 @@ mod file_ops;
 mod fill;
 mod find_replace;
 mod formatting;
+mod fonts;
 mod formula_context;
 mod formula_refs;
 mod grid_ops;
@@ -1212,8 +1213,8 @@ mod symbol_font_tests {
 /// costs every symbol in the UI rather than failing to build.
 pub const SYMBOL_FONT_FAMILY: &str = "VisiGrid Symbols";
 
-fn load_embedded_fonts(cx: &App) {
-    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
+pub(crate) fn embedded_fonts() -> Vec<std::borrow::Cow<'static, [u8]>> {
+    vec![
         // IBM Plex Sans (UI font)
         std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf")),
         std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/ibm-plex-sans/IBMPlexSans-Italic.ttf")),
@@ -1232,10 +1233,12 @@ fn load_embedded_fonts(cx: &App) {
         // OFL, no reserved font name) covering exactly the glyphs this UI
         // uses; 9.6 KB rather than the 1.4 MB original.
         std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/visigrid-symbols/VisiGridSymbols-Regular.ttf")),
-    ];
+    ]
+}
 
+fn load_embedded_fonts(cx: &App) {
     cx.text_system()
-        .add_fonts(fonts)
+        .add_fonts(embedded_fonts())
         .expect("failed to load embedded fonts");
 }
 

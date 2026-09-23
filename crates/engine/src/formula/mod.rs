@@ -5,6 +5,7 @@ pub mod eval;
 pub mod functions;
 pub mod analyze;
 pub mod refs;
+pub mod whole_range;
 
 pub(crate) mod eval_helpers;
 pub(crate) mod eval_math;

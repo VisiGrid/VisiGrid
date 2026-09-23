@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.36.0
+
+### Formulas
+
+- **Whole-column and whole-row references work in cell formulas and CLI calculations.** Use `SUM(A:A)`, `SUM(A:B)`, or `SUM(1:3)`, including absolute references and references to other sheets. Copy, fill, structural edits, dependency tracking, and XLSX round trips preserve the open range. Adding data beyond the previous end triggers recalculation. Evaluation uses the sheet's current data extent, so functions that count blanks or inspect range dimensions do not include unused trailing rows or columns. ([#19](https://github.com/VisiGrid/VisiGrid/issues/19))
+
+### Appearance
+
+- **Choose default column width, row height, font family, and font size in Preferences → Appearance or `settings.json`.** Changes apply across open windows to cells and dimensions without explicit formatting. Imported and manually assigned sizes remain intact. Built-in defaults are 96px columns, 28px rows, and bundled IBM Plex Sans at 11 points. ([#17](https://github.com/VisiGrid/VisiGrid/issues/17))
+- **Imported Excel text renders at its correct point size.** Font sizes were treated as pixels, making 11-point text render at 11px instead of approximately 14.7px at 100% zoom. Existing workbooks may look larger. Rendering, editing, text overflow, merged cells, autofit, and copied images now use the same conversion. Fractional sizes such as 12.5 points are supported.
+- **Unavailable fonts are marked “Substituted” in the toolbar.** Hover to see the fallback. Text displays in bundled IBM Plex Sans while retaining bold and italic; the requested font family and point size remain in the workbook for saving and export. The font picker includes bundled fonts alongside installed fonts.
+- **Roomier controls and clearer selections.** Menus, formula input, formatting controls, and sheet tabs have more space. Dropdown arrows are easier to see, menus follow their controls, and selection outlines use a solid 2px perimeter that meets the row and column headers without an extra border.
+
 ## 0.35.1
 
 ### Excel

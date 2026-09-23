@@ -273,7 +273,7 @@ impl Spreadsheet {
                             }
                             Alignment::Left | Alignment::General => (4.0, "start"),
                         };
-                        let font_size = format.font_size.unwrap_or(13.0);
+                        let font_size = self.cell_font.pixels(format.font_size, 1.0);
                         let (text_y, baseline) = match format.vertical_alignment {
                             VerticalAlignment::Top => (3.0, "hanging"),
                             VerticalAlignment::Middle => (text_height / 2.0, "central"),
@@ -281,7 +281,7 @@ impl Spreadsheet {
                         };
                         let color =
                             css_rgb(format.font_color.map(opaque_rgb).unwrap_or([32, 32, 32]));
-                        let family = svg_escape(format.font_family.as_deref().unwrap_or("Arial"));
+                        let family = svg_escape(self.cell_font_family(format.font_family.as_deref()).as_ref());
                         let weight = if format.bold || format.cell_style == CellStyle::Total {
                             "700"
                         } else {
@@ -310,6 +310,11 @@ impl Spreadsheet {
 
         let mut options = resvg::usvg::Options::default();
         options.fontdb_mut().load_system_fonts();
+        // Pictures must use the same bundled fonts as the grid, even when they
+        // aren't installed on the host OS.
+        for font in crate::embedded_fonts() {
+            options.fontdb_mut().load_font_data(font.into_owned());
+        }
         let tree = match resvg::usvg::Tree::from_str(&svg, &options) {
             Ok(tree) => tree,
             Err(error) => {

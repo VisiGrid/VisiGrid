@@ -137,6 +137,7 @@ impl Mode {
             self,
             Mode::Edit
                 | Mode::Formula
+                | Mode::Preferences    // Default cell dimensions
                 | Mode::GoTo           // GoTo cell input
                 | Mode::Find           // Find/Replace input
                 | Mode::Command        // Command palette input

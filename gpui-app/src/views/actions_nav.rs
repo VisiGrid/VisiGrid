@@ -183,7 +183,7 @@ pub(crate) fn bind(
                 if this.formula_is_caret_mode() {
                     // Caret mode: move cursor in formula text
                     this.move_edit_cursor_left(cx);
-                    this.update_edit_scroll(window);
+                    this.update_edit_scroll(window, cx);
                 } else {
                     // Point mode: ref-picking
                     this.formula_move_ref(0, -1, cx);
@@ -243,7 +243,7 @@ pub(crate) fn bind(
                 if this.formula_is_caret_mode() {
                     // Caret mode: move cursor in formula text
                     this.move_edit_cursor_right(cx);
-                    this.update_edit_scroll(window);
+                    this.update_edit_scroll(window, cx);
                 } else {
                     // Point mode: ref-picking
                     this.formula_move_ref(0, 1, cx);
@@ -321,7 +321,7 @@ pub(crate) fn bind(
             } else {
                 this.jump_selection(0, -1, cx);
             }
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
         }))
         .on_action(cx.listener(|this, _: &JumpRight, window, cx| {
             if this.mode.is_formula() {
@@ -342,7 +342,7 @@ pub(crate) fn bind(
             } else {
                 this.jump_selection(0, 1, cx);
             }
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
         }))
         .on_action(cx.listener(|this, _: &MoveToStart, _, cx| {
             if this.mode.is_overlay() { return; }
@@ -441,7 +441,7 @@ pub(crate) fn bind(
             } else {
                 this.extend_selection(0, -1, cx);
             }
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
         }))
         .on_action(cx.listener(|this, _: &ExtendRight, window, cx| {
             if this.mode.is_formula() {
@@ -462,7 +462,7 @@ pub(crate) fn bind(
             } else {
                 this.extend_selection(0, 1, cx);
             }
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpUp, _, cx| {
             if this.mode.is_formula() {
@@ -517,7 +517,7 @@ pub(crate) fn bind(
             } else {
                 this.extend_jump_selection(0, -1, cx);
             }
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
         }))
         .on_action(cx.listener(|this, _: &ExtendJumpRight, window, cx| {
             if this.mode.is_formula() {
@@ -538,7 +538,7 @@ pub(crate) fn bind(
             } else {
                 this.extend_jump_selection(0, 1, cx);
             }
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
         }))
         .on_action(cx.listener(|this, _: &ExtendToStart, _, cx| {
             if this.mode.is_formula() || this.mode.is_overlay() { return; }
@@ -553,6 +553,11 @@ pub(crate) fn bind(
             this.select_current_region(cx);
         }))
         .on_action(cx.listener(|this, _: &SelectAll, window, cx| {
+            if this.mode == Mode::Preferences {
+                this.ui.cell_size_input.all_selected = true;
+                cx.notify();
+                return;
+            }
             if this.mode == Mode::ColorPicker {
                 this.color_picker_select_all(cx);
                 return;
@@ -564,7 +569,7 @@ pub(crate) fn bind(
             } else {
                 this.select_all(cx);
             }
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
         }))
         .on_action(cx.listener(|this, _: &SelectRowDifferences, _, cx| {
             if !this.mode.is_editing() {

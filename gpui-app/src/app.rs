@@ -193,13 +193,13 @@ pub struct PairingPrompt {
 
 // Give default cell text breathing room without enlarging the font. Explicit
 // workbook column widths and row heights still take precedence.
-pub const CELL_WIDTH: f32 = 96.0;
-pub const CELL_HEIGHT: f32 = 28.0;
+pub const CELL_WIDTH: f32 = crate::settings::CellSizeDefaults::COLUMN_WIDTH;
+pub const CELL_HEIGHT: f32 = crate::settings::CellSizeDefaults::ROW_HEIGHT;
 pub const HEADER_WIDTH: f32 = 50.0;
-pub const MENU_BAR_HEIGHT: f32 = 28.0;
-pub const FORMULA_BAR_HEIGHT: f32 = 28.0;
+pub const MENU_BAR_HEIGHT: f32 = 32.0;
+pub const FORMULA_BAR_HEIGHT: f32 = 40.0;
 pub const COLUMN_HEADER_HEIGHT: f32 = 24.0;
-pub const STATUS_BAR_HEIGHT: f32 = 24.0;
+pub const STATUS_BAR_HEIGHT: f32 = 36.0;
 pub const MACOS_TITLEBAR_HEIGHT: f32 = 34.0;
 
 // Resize grab zones — the clickable area at header edges for resizing.
@@ -208,11 +208,11 @@ pub const ROW_RESIZE_GRAB_PX: f32 = 4.0;
 pub const COL_RESIZE_GRAB_PX: f32 = 6.0;
 
 // Formula bar layout (single source of truth for hit-testing + rendering)
-pub const FORMULA_BAR_CELL_REF_WIDTH: f32 = 60.0;
+pub const FORMULA_BAR_CELL_REF_WIDTH: f32 = 88.0;
 pub const FORMULA_BAR_FX_WIDTH: f32 = 30.0;
 pub const FORMULA_BAR_PADDING: f32 = 8.0;  // px_2
-/// X offset where text content starts (cell ref + fx button + padding)
-pub const FORMULA_BAR_TEXT_LEFT: f32 = FORMULA_BAR_CELL_REF_WIDTH + FORMULA_BAR_FX_WIDTH + FORMULA_BAR_PADDING;
+/// Text origin: name box + its margins + fx button + input padding and border.
+pub const FORMULA_BAR_TEXT_LEFT: f32 = FORMULA_BAR_CELL_REF_WIDTH + 8.0 + FORMULA_BAR_FX_WIDTH + FORMULA_BAR_PADDING + 1.0;
 
 // Zoom configuration
 pub const ZOOM_STEPS: &[f32] = &[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
@@ -227,10 +227,12 @@ pub struct GridMetrics {
     pub zoom: f32,
     /// Device scale factor (e.g. 2.0 on Retina). Used for pixel snapping.
     pub scale: f32,
+    pub default_cell_sizes: crate::settings::CellSizeDefaults,
     pub cell_w: f32,
     pub cell_h: f32,
     pub header_w: f32,
     pub header_h: f32,
+    /// Header text size in logical pixels; cell fonts use point-based defaults.
     pub font_size: f32,
 }
 
@@ -240,11 +242,16 @@ impl GridMetrics {
     }
 
     pub fn with_scale(zoom: f32, scale: f32) -> Self {
+        Self::with_cell_sizes(zoom, scale, crate::settings::CellSizeDefaults::default())
+    }
+
+    pub fn with_cell_sizes(zoom: f32, scale: f32, sizes: crate::settings::CellSizeDefaults) -> Self {
         Self {
             zoom,
             scale,
-            cell_w: Self::snap(CELL_WIDTH * zoom, scale),
-            cell_h: Self::snap(CELL_HEIGHT * zoom, scale),
+            default_cell_sizes: sizes,
+            cell_w: Self::snap(sizes.column_width * zoom, scale),
+            cell_h: Self::snap(sizes.row_height * zoom, scale),
             header_w: Self::snap(HEADER_WIDTH * zoom, scale),
             header_h: Self::snap(COLUMN_HEADER_HEIGHT * zoom, scale),
             font_size: 13.0 * zoom, // font size doesn't snap
@@ -331,6 +338,7 @@ impl CellRect {
 /// goto/find dialogs, command palette, etc. should migrate here
 /// incrementally (opportunistic, not a scheduled refactor).
 pub struct UiState {
+    pub cell_size_input: crate::ui::cell_size_input::CellSizeInput,
     pub color_picker: crate::color_palette::ColorPickerState,
     pub format_bar: FormatBarState,
     /// Format dropdown menu in header bar (Bold/Italic/Underline/Alignment)
@@ -340,6 +348,8 @@ pub struct UiState {
 /// Transient UI state for the format bar (font size input, dropdown).
 /// Never serialized, no undo semantics.
 pub struct FormatBarState {
+    /// Click position anchors menus even when the toolbar is scrolled.
+    pub popup_x: f32,
     pub size_input: String,
     pub size_editing: bool,
     pub size_dropdown: bool,
@@ -529,6 +539,9 @@ pub struct Spreadsheet {
     pub context_menu: Option<ContextMenuState>, // Right-click context menu on cells/headers
 
     // Font picker state
+    pub cell_font: crate::settings::CellFontDefaults,
+    pub font_catalog: crate::fonts::FontCatalog,
+    pub font_picker_for_default: bool,
     pub available_fonts: Vec<String>,      // System fonts
     pub font_picker_query: String,         // Filter query
     pub font_picker_selected: usize,       // Selected item index
@@ -994,6 +1007,7 @@ impl Default for NamedRangeUsageCache {
 
 impl Spreadsheet {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let font_catalog = crate::fonts::FontCatalog::new(cx);
         let workbook_data = Workbook::new();
         let initial_sheet_id = workbook_data.active_sheet().id;
         let base_workbook = workbook_data.clone(); // Capture initial state for replay
@@ -1005,8 +1019,10 @@ impl Spreadsheet {
         let script_view_focus_handle = cx.focus_handle();
         let font_picker_focus = cx.focus_handle();
         let ui = UiState {
+            cell_size_input: Default::default(),
             color_picker: crate::color_palette::ColorPickerState::new(cx.focus_handle()),
             format_bar: FormatBarState {
+                popup_x: 8.0,
                 size_input: String::new(),
                 size_editing: false,
                 size_dropdown: false,
@@ -1158,7 +1174,10 @@ impl Spreadsheet {
             sheet_rename_select_all: false,
             sheet_context_menu: None,
             context_menu: None,
-            available_fonts: Self::enumerate_fonts(),
+            available_fonts: font_catalog.names(),
+            font_catalog,
+            cell_font: crate::settings::CellFontDefaults::from_user(user_settings(cx)),
+            font_picker_for_default: false,
             font_picker_query: String::new(),
             font_picker_selected: 0,
             font_picker_scroll_offset: 0,
@@ -1307,7 +1326,8 @@ impl Spreadsheet {
 
             zen_mode: false,
             f1_help_visible: false,
-            metrics: GridMetrics::default(),
+            metrics: GridMetrics::with_cell_sizes(DEFAULT_ZOOM, window.scale_factor(),
+                crate::settings::CellSizeDefaults::from_user(user_settings(cx))),
             debug_grid_alignment: false,
             #[cfg(debug_assertions)]
             debug_border_call_count: std::cell::Cell::new(0),
@@ -2003,7 +2023,7 @@ impl Spreadsheet {
             return; // No change
         }
         self.view_state.zoom_level = clamped;
-        self.metrics = GridMetrics::with_scale(clamped, self.metrics.scale);
+        self.metrics = GridMetrics::with_cell_sizes(clamped, self.metrics.scale, self.metrics.default_cell_sizes);
         self.ensure_visible(cx);
         // Show status message
         let percent = (clamped * 100.0).round() as i32;
@@ -2048,99 +2068,6 @@ impl Spreadsheet {
     pub fn zoom_display(&self) -> String {
         let percent = (self.view_state.zoom_level * 100.0).round() as i32;
         format!("{}%", percent)
-    }
-
-    /// Enumerate available system fonts.
-    ///
-    /// Uses platform-native APIs where available (macOS Core Text, Linux fontconfig),
-    /// with hardcoded fallbacks for safety.
-    fn enumerate_fonts() -> Vec<String> {
-        let mut fonts = Self::enumerate_system_fonts();
-        fonts.sort();
-        fonts.dedup();
-        // Filter out hidden/internal fonts (starting with '.' or '#')
-        fonts.retain(|f| !f.starts_with('.') && !f.starts_with('#') && !f.is_empty());
-        fonts
-    }
-
-    #[cfg(target_os = "macos")]
-    fn enumerate_system_fonts() -> Vec<String> {
-        use core_text::font_manager;
-
-        let cf_names = font_manager::copy_available_font_family_names();
-        let count = cf_names.len();
-        let mut names = Vec::with_capacity(count as usize);
-        for i in 0..count {
-            if let Some(name) = cf_names.get(i) {
-                let s: String = name.to_string();
-                if !s.is_empty() {
-                    names.push(s);
-                }
-            }
-        }
-
-        if names.is_empty() {
-            // Fallback if Core Text fails
-            return vec![
-                "Menlo".into(), "Monaco".into(), "Courier New".into(),
-                "Helvetica".into(), "Arial".into(), "Times New Roman".into(),
-                "Georgia".into(), "Verdana".into(),
-            ];
-        }
-
-        names
-    }
-
-    #[cfg(target_os = "linux")]
-    fn enumerate_system_fonts() -> Vec<String> {
-        // Use fontconfig CLI (standard on Linux desktops)
-        if let Ok(output) = std::process::Command::new("fc-list")
-            .args([":family", "--format=%{family}\n"])
-            .output()
-        {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let names: Vec<String> = text
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    // fc-list returns comma-separated variants; take first
-                    .map(|l| l.split(',').next().unwrap_or(l).trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-
-                if !names.is_empty() {
-                    return names;
-                }
-            }
-        }
-
-        // Fallback
-        vec![
-            "DejaVu Sans".into(), "DejaVu Sans Mono".into(), "DejaVu Serif".into(),
-            "Liberation Mono".into(), "Liberation Sans".into(), "Liberation Serif".into(),
-            "Noto Sans".into(), "Noto Sans Mono".into(),
-        ]
-    }
-
-    #[cfg(target_os = "windows")]
-    fn enumerate_system_fonts() -> Vec<String> {
-        // No easy zero-dep enumeration on Windows; use safe defaults
-        // These fonts ship with every Windows installation since Vista+
-        vec![
-            "Consolas".into(), "Cascadia Mono".into(), "Courier New".into(),
-            "Arial".into(), "Calibri".into(), "Cambria".into(),
-            "Times New Roman".into(), "Georgia".into(), "Verdana".into(),
-            "Segoe UI".into(), "Tahoma".into(), "Trebuchet MS".into(),
-            "Lucida Console".into(), "Comic Sans MS".into(),
-        ]
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    fn enumerate_system_fonts() -> Vec<String> {
-        vec![
-            "Courier New".into(), "Arial".into(), "Times New Roman".into(),
-            "Georgia".into(), "Verdana".into(),
-        ]
     }
 
     /// Create and configure the search engine with all providers
@@ -3106,7 +3033,7 @@ impl Spreadsheet {
             .get(&self.cached_sheet_id)
             .and_then(|sheet_widths| sheet_widths.get(&col))
             .copied()
-            .unwrap_or(CELL_WIDTH)
+            .unwrap_or(self.metrics.default_cell_sizes.column_width)
     }
 
     /// Get height for a row (custom or default) for the current sheet
@@ -3115,41 +3042,32 @@ impl Spreadsheet {
             .get(&self.cached_sheet_id)
             .and_then(|sheet_heights| sheet_heights.get(&row))
             .copied()
-            .unwrap_or(CELL_HEIGHT)
+            .unwrap_or(self.metrics.default_cell_sizes.row_height)
     }
 
     /// Set column width for the current sheet
     pub fn set_col_width(&mut self, col: usize, width: f32) {
         // Deliberately not `clamp`. For a NaN input `max(20.0)` yields
         // 20.0, because f32::max prefers the non-NaN operand, while
-        // `clamp` propagates NaN — and the test below sends NaN down the
-        // `insert` arm rather than `remove`, writing NaN into the size map.
+        // `clamp` propagates NaN into the size map.
         // Sizes are persisted with the session, so it would outlive a restart.
         #[allow(clippy::manual_clamp)]
         let width = width.max(20.0).min(500.0); // 20-500px
         let sheet_widths = self.col_widths.entry(self.cached_sheet_id).or_insert_with(HashMap::new);
-        if (width - CELL_WIDTH).abs() < 1.0 {
-            sheet_widths.remove(&col); // Remove if close to default
-        } else {
-            sheet_widths.insert(col, width);
-        }
+        // A manual resize is explicit even when it equals today's preference.
+        sheet_widths.insert(col, width);
     }
 
     /// Set row height for the current sheet
     pub fn set_row_height(&mut self, row: usize, height: f32) {
         // Deliberately not `clamp`. For a NaN input `max(12.0)` yields
         // 12.0, because f32::max prefers the non-NaN operand, while
-        // `clamp` propagates NaN — and the test below sends NaN down the
-        // `insert` arm rather than `remove`, writing NaN into the size map.
+        // `clamp` propagates NaN into the size map.
         // Sizes are persisted with the session, so it would outlive a restart.
         #[allow(clippy::manual_clamp)]
         let height = height.max(12.0).min(200.0); // 12-200px
         let sheet_heights = self.row_heights.entry(self.cached_sheet_id).or_insert_with(HashMap::new);
-        if (height - CELL_HEIGHT).abs() < 1.0 {
-            sheet_heights.remove(&row); // Remove if close to default
-        } else {
-            sheet_heights.insert(row, height);
-        }
+        sheet_heights.insert(row, height);
     }
 
     /// Record a column width change to history (for undo/redo support).
@@ -3472,16 +3390,13 @@ impl Spreadsheet {
                 continue;
             }
             let format = sheet.get_format(row, col);
-            let font_size = format.font_size.unwrap_or(self.metrics.font_size);
+            // Column widths are stored before zoom. Measure in logical pixels at 100%.
+            let font_size = self.cell_font.pixels(format.font_size, 1.0);
             let width = match window {
                 Some(w) => {
                     let shared: SharedString = text.into();
                     let len = shared.len();
-                    let font = Font {
-                        weight: if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
-                        style: if format.italic { FontStyle::Italic } else { FontStyle::Normal },
-                        ..Font::default()
-                    };
+                    let font = self.cell_font(&format);
                     let shaped = w.text_system().shape_line(
                         shared,
                         px(font_size),
@@ -3851,7 +3766,7 @@ impl Spreadsheet {
         }
         let titlebar_h = if cfg!(target_os = "macos") { MACOS_TITLEBAR_HEIGHT } else { 0.0 };
         let menu_h = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
-        let formula_h = FORMULA_BAR_HEIGHT;
+        let formula_h = self.formula_bar_height();
         let format_h = {
             use crate::settings::Setting;
             match &user_settings(cx).appearance.show_format_bar {
@@ -3860,6 +3775,10 @@ impl Spreadsheet {
             }
         };
         titlebar_h + menu_h + formula_h + format_h + self.metrics.header_h
+    }
+
+    pub fn formula_bar_height(&self) -> f32 {
+        FORMULA_BAR_HEIGHT * if self.formula_bar_expanded { 2.5 } else { 1.0 }
     }
 
     /// Total height of UI chrome below the grid body.
@@ -4309,14 +4228,21 @@ impl Render for Spreadsheet {
             // Re-validate edit scroll on resize (caret may now be offscreen)
             if self.mode.is_editing() {
                 self.edit_scroll_dirty = true;
-                self.update_edit_scroll(window);
+                self.update_edit_scroll(window, cx);
             }
         }
 
         // Update grid metrics if display scale factor changed (e.g. window moved to Retina display)
+        let cell_font = crate::settings::CellFontDefaults::from_user(user_settings(cx));
+        if self.cell_font != cell_font {
+            self.cell_font = cell_font;
+            self.edit_scroll_dirty = true;
+        }
         let sf = window.scale_factor();
-        if (sf - self.metrics.scale).abs() > 0.001 {
-            self.metrics = GridMetrics::with_scale(self.metrics.zoom, sf);
+        let sizes = crate::settings::CellSizeDefaults::from_user(user_settings(cx));
+        if (sf - self.metrics.scale).abs() > 0.001 || sizes != self.metrics.default_cell_sizes {
+            self.metrics = GridMetrics::with_cell_sizes(self.metrics.zoom, sf, sizes);
+            self.ensure_visible(cx);
         }
 
         // Debug: report border instrumentation (once per second, only when debug overlay is on).
@@ -4396,8 +4322,8 @@ impl Render for Spreadsheet {
 
         // Update formula bar text rect for click-to-place-caret hit-testing
         // Uses centralized constants: FORMULA_BAR_TEXT_LEFT, FORMULA_BAR_PADDING
-        let formula_bar_input_left = FORMULA_BAR_CELL_REF_WIDTH + FORMULA_BAR_FX_WIDTH;
-        let formula_bar_text_width = (window_width - formula_bar_input_left - FORMULA_BAR_PADDING * 2.0 - right_panel_width).max(0.0);
+        let formula_bar_input_left = FORMULA_BAR_TEXT_LEFT - FORMULA_BAR_PADDING;
+        let formula_bar_text_width = (window_width - formula_bar_input_left - FORMULA_BAR_PADDING * 2.0 - 28.0).max(0.0);
         // Formula bar sits directly below the menu bar (Linux) or titlebar (macOS)
         let formula_bar_y = if cfg!(target_os = "macos") {
             MACOS_TITLEBAR_HEIGHT
@@ -4408,7 +4334,7 @@ impl Render for Spreadsheet {
         };
         self.formula_bar_text_rect = gpui::Bounds {
             origin: gpui::point(gpui::px(FORMULA_BAR_TEXT_LEFT), gpui::px(formula_bar_y)),
-            size: gpui::size(gpui::px(formula_bar_text_width), gpui::px(FORMULA_BAR_HEIGHT)),
+            size: gpui::size(gpui::px(formula_bar_text_width), gpui::px(self.formula_bar_height())),
         };
 
         // Update formula bar display cache (only when not editing)
@@ -4875,6 +4801,29 @@ mod layout_geometry_tests {
     // the actual rendered layout (missing bars, unscaled constants, etc.).
     // =========================================================================
 
+    #[test]
+    fn configured_cell_sizes_follow_zoom_and_device_pixels() {
+        use super::GridMetrics;
+        use crate::settings::CellSizeDefaults;
+        let sizes = CellSizeDefaults { column_width: 80.5, row_height: 24.5 };
+        for zoom in [0.5, 1.0, 1.25, 2.0] {
+            for scale in [1.0, 1.5, 2.0] {
+                let metrics = GridMetrics::with_cell_sizes(zoom, scale, sizes);
+                let builtin = GridMetrics::with_scale(zoom, scale);
+                assert_eq!(metrics.cell_w, metrics.col_width(sizes.column_width));
+                assert_eq!(metrics.cell_h, metrics.row_height(sizes.row_height));
+                assert!((metrics.cell_w * scale - (metrics.cell_w * scale).round()).abs() < 0.001);
+                assert!((metrics.cell_h * scale - (metrics.cell_h * scale).round()).abs() < 0.001);
+                assert_eq!(metrics.header_w, builtin.header_w);
+                assert_eq!(metrics.header_h, builtin.header_h);
+                assert_eq!(metrics.font_size, builtin.font_size);
+                // Explicit model sizes do not depend on the user's defaults.
+                assert_eq!(metrics.col_width(96.0), builtin.col_width(96.0));
+                assert_eq!(metrics.row_height(28.0), builtin.row_height(28.0));
+            }
+        }
+    }
+
     /// Resize grab zone must be less than half the minimum row height.
     /// If this fails, a click at the vertical center of a row header
     /// would land in the resize zone, making row selection impossible.
@@ -4941,11 +4890,11 @@ mod layout_geometry_tests {
     #[test]
     fn linux_top_chrome_components() {
         // Linux, not zen, format bar visible, zoom 1.0
-        let expected = MENU_BAR_HEIGHT            // 28
-            + FORMULA_BAR_HEIGHT                   // 28
-            + crate::views::format_bar::FORMAT_BAR_HEIGHT // 28
-            + COLUMN_HEADER_HEIGHT;                // 24  → 108
-        assert_eq!(expected, 108.0,
+        let expected = MENU_BAR_HEIGHT            // 32
+            + FORMULA_BAR_HEIGHT                   // 40
+            + crate::views::format_bar::FORMAT_BAR_HEIGHT // 44
+            + COLUMN_HEADER_HEIGHT;                // 24  → 140
+        assert_eq!(expected, 140.0,
             "Linux top chrome changed — update top_chrome_height() if you added/removed a bar");
     }
 
@@ -4953,10 +4902,10 @@ mod layout_geometry_tests {
     #[test]
     fn macos_top_chrome_components() {
         let expected = MACOS_TITLEBAR_HEIGHT       // 34
-            + FORMULA_BAR_HEIGHT                   // 28
-            + crate::views::format_bar::FORMAT_BAR_HEIGHT // 28
-            + COLUMN_HEADER_HEIGHT;                // 24  → 114
-        assert_eq!(expected, 114.0,
+            + FORMULA_BAR_HEIGHT                   // 40
+            + crate::views::format_bar::FORMAT_BAR_HEIGHT // 44
+            + COLUMN_HEADER_HEIGHT;                // 24  → 142
+        assert_eq!(expected, 142.0,
             "macOS top chrome changed — update top_chrome_height() if you added/removed a bar");
     }
 

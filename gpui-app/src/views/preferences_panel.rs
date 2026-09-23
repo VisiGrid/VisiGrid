@@ -7,6 +7,7 @@ use gpui::{*, BorrowAppContext, prelude::FluentBuilder};
 use crate::app::Spreadsheet;
 use crate::settings::{open_settings_file, Setting, EnterBehavior, ModifierStyle, AltAccelerators, SettingsStore};
 use crate::theme::TokenKey;
+use crate::ui::cell_size_input::CellSizeField;
 
 /// Render the preferences panel overlay
 pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -69,7 +70,8 @@ pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
         }))
         .child(
             div()
-                .w(px(380.0))
+                .w(px(420.0))
+                .max_h(px((f32::from(app.window_size.height) - 100.0).max(200.0)))
                 .bg(panel_bg)
                 .rounded_md()
                 .shadow_lg()
@@ -111,6 +113,9 @@ pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                         .flex_col()
                         .p_4()
                         .gap_5()
+                        .id("preferences-content")
+                        .overflow_y_scroll()
+                        .min_h(px(0.0))
                         // =========================================================
                         // Appearance section
                         // =========================================================
@@ -183,6 +188,54 @@ pub fn render_preferences_panel(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                                                 }))
                                         )
                                 )
+                                .child(cell_size_row(app, CellSizeField::ColumnWidth, "Default column width", cx))
+                                .child(cell_size_row(app, CellSizeField::RowHeight, "Default row height", cx))
+                                .child(div().text_size(px(11.0)).text_color(text_muted)
+                                    .child("Applies to rows and columns without an explicit size."))
+                                .child(div().flex().items_center().justify_between()
+                                    .child(div().text_size(px(11.0)).text_color(text_muted).child("Pixels at 100% zoom"))
+                                    .child(div().id("pref-reset-cell-sizes").cursor_pointer()
+                                        .text_size(px(11.0)).text_color(accent)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            crate::settings::update_user_settings(cx, |settings| {
+                                                settings.appearance.default_column_width = Setting::Inherit;
+                                                settings.appearance.default_row_height = Setting::Inherit;
+                                            });
+                                            this.ui.cell_size_input = Default::default();
+                                            cx.notify();
+                                        }))
+                                        .child("Reset sizes")))
+                                .child(div().flex().items_center().justify_between()
+                                    .child(row_label("Default font", text_muted))
+                                    .child(div().id("pref-font-family").px_2().py(px(4.0)).rounded_sm()
+                                        .border_1().border_color(editor_border).bg(editor_bg)
+                                        .text_size(px(12.0)).text_color(text_primary).cursor_pointer()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            if !this.apply_cell_size_input(cx) { return; }
+                                            this.show_font_picker(window, cx);
+                                            this.font_picker_for_default = true;
+                                        }))
+                                        .child(app.cell_font.family.clone())))
+                                .when(app.font_catalog.is_missing(&app.cell_font.family), |d| d.child(
+                                    div().text_size(px(11.0)).text_color(text_muted)
+                                        .child(format!("Font unavailable; using {}.", crate::settings::DEFAULT_FONT_FAMILY))))
+                                .child(cell_size_row(app, CellSizeField::FontSize, "Default font size", cx))
+                                .child(div().text_size(px(11.0)).text_color(text_muted)
+                                    .child("Applies to cells without an explicit font. Sizes are in points."))
+                                .child(div().id("pref-reset-font").cursor_pointer()
+                                    .text_size(px(11.0)).text_color(accent)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        crate::settings::update_user_settings(cx, |settings| {
+                                            settings.appearance.default_font_family = Setting::Inherit;
+                                            settings.appearance.default_font_size = Setting::Inherit;
+                                        });
+                                        this.ui.cell_size_input = Default::default();
+                                        cx.notify();
+                                    }))
+                                    .child("Reset font"))
+                                .when_some(app.ui.cell_size_input.error.clone(), |panel, error| {
+                                    panel.child(div().text_size(px(11.0)).text_color(app.token(TokenKey::Error)).child(error))
+                                })
                         )
                         // =========================================================
                         // Editing section
@@ -674,4 +727,32 @@ fn alt_accel_option(
             cx.notify();
         }))
         .child(label)
+}
+
+fn cell_size_row(app: &Spreadsheet, field: CellSizeField, label: &'static str, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let sizes = crate::settings::CellSizeDefaults::from_user(crate::settings::user_settings(cx));
+    let input = &app.ui.cell_size_input;
+    let editing = input.field == Some(field);
+    let text = if editing { input.text.clone() } else { field.value(sizes, app.cell_font.size).to_string() };
+    let accent = app.token(TokenKey::Accent);
+    div().flex().items_center().justify_between()
+        .child(row_label(label, app.token(TokenKey::TextMuted)))
+        .child(div().flex().items_center().gap_2()
+            .child(div().id(match field { CellSizeField::ColumnWidth => "pref-column-width", CellSizeField::RowHeight => "pref-row-height", CellSizeField::FontSize => "pref-font-size" })
+                .w(px(64.0)).px_2().py(px(4.0)).rounded_sm().border_1()
+                .border_color(if editing { accent } else { app.token(TokenKey::EditorBorder) })
+                .bg(app.token(TokenKey::EditorBg)).text_size(px(12.0)).text_color(app.token(TokenKey::TextPrimary))
+                .cursor_text()
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+                    this.begin_cell_size_input(field, cx);
+                    window.focus(&this.focus_handle, cx);
+                    cx.stop_propagation();
+                }))
+                .child(div().when(editing && input.all_selected, |d| d.bg(accent.opacity(0.3)))
+                    .child(if editing && !input.all_selected { format!("{text}|") } else { text })))
+            .child(div().text_size(px(11.0)).text_color(app.token(TokenKey::TextMuted)).child(field.unit()))
+            .when(editing, |d| d.child(div().id("pref-apply-cell-size").px_2().py(px(4.0))
+                .rounded_sm().bg(accent.opacity(0.15)).text_size(px(11.0)).text_color(app.token(TokenKey::TextPrimary))
+                .cursor_pointer().on_click(cx.listener(|this, _, _, cx| { this.apply_cell_size_input(cx); }))
+                .child("Apply"))))
 }

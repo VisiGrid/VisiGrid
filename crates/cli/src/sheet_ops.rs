@@ -754,53 +754,6 @@ pub fn resolve_header_refs(formula: &str, header_map: &std::collections::HashMap
     result
 }
 
-/// Translate column references (A:A) to bounded cell ranges (A1:A<max_row>).
-pub fn translate_column_refs(formula: &str, start_row: usize, end_row: usize) -> String {
-    use std::collections::HashSet;
-    let mut result = formula.to_string();
-    let mut seen: HashSet<String> = HashSet::new();
-    let chars: Vec<char> = formula.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let dollar1 = if i < chars.len() && chars[i] == '$' { i += 1; true } else { false };
-        if i < chars.len() && chars[i].is_ascii_alphabetic() {
-            let mut col1 = String::new();
-            while i < chars.len() && chars[i].is_ascii_alphabetic() {
-                col1.push(chars[i].to_ascii_uppercase());
-                i += 1;
-            }
-            if i < chars.len() && chars[i] == ':' {
-                i += 1;
-                let dollar2 = if i < chars.len() && chars[i] == '$' { i += 1; true } else { false };
-                let mut col2 = String::new();
-                while i < chars.len() && chars[i].is_ascii_alphabetic() {
-                    col2.push(chars[i].to_ascii_uppercase());
-                    i += 1;
-                }
-                if !col2.is_empty() && (i >= chars.len() || !chars[i].is_ascii_digit()) {
-                    let pattern = format!(
-                        "{}{}:{}{}",
-                        if dollar1 { "$" } else { "" }, col1,
-                        if dollar2 { "$" } else { "" }, col2
-                    );
-                    if !seen.contains(&pattern) {
-                        seen.insert(pattern.clone());
-                        let replacement = format!(
-                            "{}{}{}:{}{}{}",
-                            if dollar1 { "$" } else { "" }, col1, start_row,
-                            if dollar2 { "$" } else { "" }, col2, end_row
-                        );
-                        result = result.replace(&pattern, &replacement);
-                    }
-                }
-            }
-        } else {
-            i += 1;
-        }
-    }
-    result
-}
-
 /// Format a cell reference from (row, col).
 pub fn format_cell_ref(row: usize, col: usize) -> String {
     let mut col_str = String::new();

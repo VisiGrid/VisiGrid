@@ -2259,23 +2259,24 @@ fn cmd_calc(
     // Get data bounds (relative to where we loaded)
     let (data_rows, data_cols) = get_data_bounds(&sheet);
 
-    // If headers, the actual data starts one row after into_row
-    // Column refs like A:A should expand to A<start>:A<end> excluding header
-    let data_start_row = if headers { into_row + 2 } else { into_row + 1 }; // 1-indexed for formula
-
-    // Translate column references like A:A to explicit ranges
-    let formula_str = if formula.starts_with('=') {
-        translate_column_refs(&formula, data_start_row, data_rows)
-    } else {
-        translate_column_refs(&format!("={}", formula), data_start_row, data_rows)
-    };
-
-    // Put the formula in a cell outside the data area
+    let formula_str = if formula.starts_with('=') { formula } else { format!("={}", formula) };
     let formula_row = data_rows;
     let formula_col = data_cols;
-    sheet.set_value(formula_row, formula_col, &formula_str);
-
-    // Get the result
+    let lookup = visigrid_engine::formula::eval::LookupWithContext::new(&sheet, formula_row, formula_col)
+        .with_column_start(into_row + usize::from(headers));
+    let evaluated = match visigrid_engine::formula::parser::parse(&formula_str) {
+        Ok(parsed) => {
+            let bound = visigrid_engine::formula::parser::bind_expr_same_sheet(&parsed);
+            visigrid_engine::formula::eval::evaluate(&bound, &lookup)
+        }
+        Err(_) => visigrid_engine::formula::eval::EvalResult::Error("#ERR".into()),
+    };
+    // Store the result outside the input area for the existing spill exporters.
+    sheet.set_value_deferred(formula_row, formula_col, &formula_str);
+    sheet.cache_computed(formula_row, formula_col, evaluated.to_value());
+    if let visigrid_engine::formula::eval::EvalResult::Array(ref array) = evaluated {
+        sheet.place_spill(formula_row, formula_col, array);
+    }
     let result = sheet.get_display(formula_row, formula_col);
 
     // Check for error tokens
@@ -2387,10 +2388,6 @@ fn format_output_value(value: &str) -> String {
 
 fn resolve_header_refs(formula: &str, header_map: &std::collections::HashMap<String, String>) -> String {
     sheet_ops::resolve_header_refs(formula, header_map)
-}
-
-fn translate_column_refs(formula: &str, start_row: usize, end_row: usize) -> String {
-    sheet_ops::translate_column_refs(formula, start_row, end_row)
 }
 
 // ============================================================================
@@ -5235,13 +5232,6 @@ fn cmd_sheet_inspect(
         let (sheet_idx, sheet) = resolve_sheet(&workbook, sheet_arg.as_deref())?;
         let sheet_id = workbook.sheet_id_at_idx(sheet_idx)
             .ok_or_else(|| CliError::io("cannot resolve sheet ID"))?;
-        let (max_row, _max_col) = get_data_bounds(sheet);
-
-        // get_data_bounds returns (row_count, col_count) — already 1-indexed.
-        // translate_column_refs expects (start_row_1indexed, end_row_1indexed).
-        let start_row1 = if headers { 2 } else { 1 };
-        let end_row1 = if max_row < start_row1 { start_row1 } else { max_row };
-
         // Build header map for semantic column-name resolution (only when --headers).
         // Normalization: trim + to_ascii_lowercase. Duplicate keys are an error.
         let header_map: HashMap<String, String> = if headers {
@@ -5269,7 +5259,8 @@ fn cmd_sheet_inspect(
             HashMap::new()
         };
 
-        let lookup = visigrid_engine::workbook::WorkbookLookup::new(&workbook, sheet_id);
+        let workbook_lookup = visigrid_engine::workbook::WorkbookLookup::new(&workbook, sheet_id);
+        let lookup = visigrid_engine::formula::eval::LookupWithContext::for_data_rows(&workbook_lookup, usize::from(headers));
         let mut results: Vec<sheet_ops::CalcResult> = Vec::new();
         let mut any_error = false;
 
@@ -5280,11 +5271,11 @@ fn cmd_sheet_inspect(
                 format!("={}", expr_str)
             };
             let resolved = resolve_header_refs(&with_eq, &header_map);
-            let formula_str = translate_column_refs(&resolved, start_row1, end_row1);
+            let formula_str = resolved;
 
             let result = match visigrid_engine::formula::parser::parse(&formula_str) {
                 Ok(parsed) => {
-                    let bound = visigrid_engine::formula::parser::bind_expr_same_sheet(&parsed);
+                    let bound = visigrid_engine::formula::parser::bind_expr(&parsed, |name| workbook.sheet_id_by_name(name));
                     let eval = visigrid_engine::formula::eval::evaluate(&bound, &lookup);
                     let display = eval.to_text();
                     let is_error = matches!(eval, visigrid_engine::formula::eval::EvalResult::Error(_));

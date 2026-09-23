@@ -27,6 +27,8 @@ pub struct ResolvedSettings {
 pub struct ResolvedAppearance {
     /// Theme ID (or None for app default)
     pub theme_id: Option<String>,
+    pub cell_sizes: super::CellSizeDefaults,
+    pub cell_font: super::CellFontDefaults,
     /// Show gridlines
     pub show_gridlines: bool,
     /// Show format bar
@@ -107,6 +109,8 @@ impl ResolvedSettings {
         Self {
             appearance: ResolvedAppearance {
                 theme_id: resolve_option(&user.appearance.theme_id),
+                cell_sizes: super::CellSizeDefaults::from_user(user),
+                cell_font: super::CellFontDefaults::from_user(user),
                 show_gridlines: resolve_layered(
                     &doc.display.show_gridlines,
                     &user.appearance.show_gridlines,
@@ -289,6 +293,10 @@ mod tests {
         let user = UserSettings {
             appearance: crate::settings::user::AppearanceSettings {
                 theme_id: Setting::Inherit,
+                default_column_width: Setting::Inherit,
+                default_row_height: Setting::Inherit,
+                default_font_family: Setting::Inherit,
+                default_font_size: Setting::Inherit,
                 show_gridlines: Setting::Inherit,
                 show_format_bar: Setting::Inherit,
             },

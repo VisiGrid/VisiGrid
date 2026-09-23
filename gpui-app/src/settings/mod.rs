@@ -16,6 +16,10 @@ mod document;
 mod resolved;
 mod persistence;
 mod store;
+mod fonts;
+pub use fonts::*;
+mod cell_sizes;
+pub use cell_sizes::*;
 
 pub use types::*;
 pub use document::*;

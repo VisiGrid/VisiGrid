@@ -138,6 +138,7 @@ fn has_cross_sheet_refs(expr: &ExprAst<UnboundSheetRef>) -> bool {
     match expr {
         ExprAst::CellRef { sheet: UnboundSheetRef::Named(_), .. } => true,
         ExprAst::Range { sheet: UnboundSheetRef::Named(_), .. } => true,
+        ExprAst::WholeRange { sheet: UnboundSheetRef::Named(_), .. } => true,
         ExprAst::Function { args, .. } => args.iter().any(has_cross_sheet_refs),
         ExprAst::BinaryOp { left, right, .. } => {
             has_cross_sheet_refs(left) || has_cross_sheet_refs(right)
@@ -365,6 +366,10 @@ pub struct Sheet {
 }
 
 impl CellLookup for Sheet {
+    fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) {
+        match sheet { SheetRef::Current => self.data_bounds(), _ => (0, 0) }
+    }
+
     /// The value with its type, rather than its text.
     ///
     /// get_computed_value already returns a typed Value and handles spill

@@ -4,6 +4,13 @@
 
 use crate::sheet::{SheetId, SheetRef, UnboundSheetRef};
 
+/// The finite axis of an open-ended row or column reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeAxis {
+    Row,
+    Column,
+}
+
 /// Generic expression AST, parameterized over sheet reference type.
 /// - Parser outputs `ParsedExpr = Expr<UnboundSheetRef>` (sheet names unresolved)
 /// - After binding, becomes `BoundExpr = Expr<SheetRef>` (sheet IDs resolved)
@@ -32,6 +39,16 @@ pub enum Expr<S> {
         start_row_abs: bool,
         end_col_abs: bool,
         end_row_abs: bool,
+    },
+    /// Entire columns (A:B) or rows (1:3). The other axis stays open-ended
+    /// in the AST and dependency graph, and is bounded only during evaluation.
+    WholeRange {
+        sheet: S,
+        axis: RangeAxis,
+        start: usize,
+        end: usize,
+        start_abs: bool,
+        end_abs: bool,
     },
     Function {
         name: String,
@@ -99,7 +116,7 @@ pub fn parse(formula: &str) -> Result<ParsedExpr, String> {
 
 #[derive(Debug, Clone)]
 enum Token {
-    Number(f64),
+    Number(f64, bool), // true when spelled as an integer (valid row endpoint)
     StringLit(String),
     /// Cell reference with absolute/relative flags
     CellRef {
@@ -297,7 +314,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 if let Some(token) = try_parse_cell_ref(&ident) {
                     tokens.push(token);
                 } else {
-                    return Err(format!("Invalid cell reference: {}", ident));
+                    tokens.push(Token::Ident(ident.to_uppercase()));
                 }
             }
             '0'..='9' | '.' => {
@@ -311,7 +328,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     }
                 }
                 let num: f64 = num_str.parse().map_err(|_| format!("Invalid number: {}", num_str))?;
-                tokens.push(Token::Number(num));
+                tokens.push(Token::Number(num, num_str.bytes().all(|c| c.is_ascii_digit())));
             }
             // Error literals: only #REF! is representable in the AST — it is
             // what a structural edit writes over a dead reference.
@@ -394,7 +411,11 @@ fn try_parse_cell_ref(s: &str) -> Option<Token> {
 }
 
 fn parse_expr(tokens: &[Token]) -> Result<ParsedExpr, String> {
-    parse_comparison(tokens, 0).map(|(expr, _)| expr)
+    let (expr, pos) = parse_comparison(tokens, 0)?;
+    if pos != tokens.len() {
+        return Err(format!("Unexpected token at position {}", pos));
+    }
+    Ok(expr)
 }
 
 // Lowest precedence: comparison operators
@@ -546,13 +567,178 @@ fn parse_percent(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
     Ok((expr, pos))
 }
 
+/// Shift references for copy/fill without reformatting the expression. Scanning
+/// tokens preserves parentheses, strings, and sheet names, and recognizes the
+/// same whole-range endpoints as the parser. Also used for XLSX shared formulas.
+pub fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> String {
+    fn token_end(bytes: &[u8], mut i: usize) -> usize {
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || b"_$.".contains(&bytes[i])) {
+            i += 1;
+        }
+        i
+    }
+    fn skip_space(bytes: &[u8], mut i: usize) -> usize {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    }
+    fn endpoint(text: &str) -> Option<(RangeAxis, usize, bool)> {
+        let tokens = tokenize(text).ok()?;
+        if tokens.len() != 1 {
+            return None;
+        }
+        whole_range_endpoint(&tokens[0])
+    }
+    fn shift(n: usize, abs: bool, delta: i32) -> Option<usize> {
+        if abs {
+            Some(n)
+        } else {
+            n.checked_add_signed(delta as isize)
+        }
+    }
+    let bytes = formula.as_bytes();
+    let mut result = String::with_capacity(formula.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == quote {
+                    i += 1;
+                    if bytes.get(i) == Some(&quote) {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            result.push_str(&formula[start..i]);
+            continue;
+        }
+        let end = token_end(bytes, i);
+        if end == i {
+            let ch = formula[i..].chars().next().unwrap();
+            result.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        i = end;
+        let next = skip_space(bytes, end);
+        // Sheet names and function names may themselves look like cell refs.
+        if matches!(bytes.get(next), Some(b'!' | b'(')) {
+            result.push_str(&formula[start..end]);
+            continue;
+        }
+        if bytes.get(next) == Some(&b':') {
+            let last_start = skip_space(bytes, next + 1);
+            let last_end = token_end(bytes, last_start);
+            if let (Some((axis, first, first_abs)), Some((last_axis, last, last_abs))) = (
+                endpoint(&formula[start..end]),
+                endpoint(&formula[last_start..last_end]),
+            ) {
+                if axis == last_axis {
+                    let delta = match axis {
+                        RangeAxis::Row => delta_row,
+                        RangeAxis::Column => delta_col,
+                    };
+                    let limit = match axis {
+                        RangeAxis::Row => crate::sheet::NUM_ROWS,
+                        RangeAxis::Column => crate::sheet::NUM_COLS,
+                    };
+                    match (shift(first, first_abs, delta), shift(last, last_abs, delta)) {
+                        (Some(first), Some(last)) if first < limit && last < limit => result
+                            .push_str(&format_whole_range(axis, first, last, first_abs, last_abs)),
+                        _ => result.push_str("#REF!"),
+                    }
+                    i = last_end;
+                    continue;
+                }
+            }
+        }
+        if let Some(Token::CellRef {
+            col,
+            row,
+            col_abs,
+            row_abs,
+        }) = try_parse_cell_ref(&formula[start..end])
+        {
+            match (
+                shift(col, col_abs, delta_col),
+                shift(row, row_abs, delta_row),
+            ) {
+                (Some(col), Some(row)) => {
+                    result.push_str(&format_cell_addr(col, row, col_abs, row_abs))
+                }
+                _ => result.push_str("#REF!"),
+            }
+        } else {
+            result.push_str(&formula[start..end]);
+        }
+    }
+    result
+}
+
+fn whole_range_endpoint(token: &Token) -> Option<(RangeAxis, usize, bool)> {
+    use crate::sheet::{NUM_COLS, NUM_ROWS};
+    match token {
+        Token::Ident(name) => {
+            let abs = name.starts_with('$');
+            let name = name.strip_prefix('$').unwrap_or(name);
+            if !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphabetic()) {
+                let col = name.bytes().try_fold(0usize, |n, c| {
+                    n.checked_mul(26)?
+                        .checked_add((c.to_ascii_uppercase() - b'A' + 1) as usize)
+                })?;
+                if col <= NUM_COLS {
+                    Some((RangeAxis::Column, col - 1, abs))
+                } else {
+                    None
+                }
+            } else if abs && !name.is_empty() && name.bytes().all(|c| c.is_ascii_digit()) {
+                let row: usize = name.parse().ok()?;
+                if (1..=NUM_ROWS).contains(&row) {
+                    Some((RangeAxis::Row, row - 1, true))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        Token::Number(n, true) if n.fract() == 0.0 && *n >= 1.0 && *n <= NUM_ROWS as f64 => {
+            Some((RangeAxis::Row, *n as usize - 1, false))
+        }
+        _ => None,
+    }
+}
+
 fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), String> {
     if pos >= tokens.len() {
         return Err("Unexpected end of expression".to_string());
     }
 
+    let (sheet, range_pos) = match &tokens[pos] {
+        Token::SheetPrefix(name) => (UnboundSheetRef::Named(name.clone()), pos + 1),
+        _ => (UnboundSheetRef::Current, pos),
+    };
+    if matches!(tokens.get(range_pos + 1), Some(Token::Colon)) {
+        if let (Some(first), Some(last)) = (tokens.get(range_pos), tokens.get(range_pos + 2)) {
+            if let (Some((axis, start, start_abs)), Some((end_axis, end, end_abs))) =
+                (whole_range_endpoint(first), whole_range_endpoint(last))
+            {
+                if axis != end_axis { return Err("Range endpoints must use the same axis".into()); }
+                return Ok((Expr::WholeRange { sheet, axis, start, end, start_abs, end_abs }, range_pos + 3));
+            }
+        }
+    }
+
     match &tokens[pos] {
-        Token::Number(n) => Ok((Expr::Number(*n), pos + 1)),
+        Token::Number(n, _) => Ok((Expr::Number(*n), pos + 1)),
         Token::RefError => Ok((Expr::RefError, pos + 1)),
         Token::StringLit(s) => Ok((Expr::Text(s.clone()), pos + 1)),
         Token::SheetPrefix(sheet_name) => {
@@ -626,6 +812,7 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
             Ok((Expr::CellRef { sheet: UnboundSheetRef::Current, col: *col, row: *row, col_abs: *col_abs, row_abs: *row_abs }, pos + 1))
         }
         Token::Ident(name) => {
+            if name.contains('$') { return Err(format!("Invalid reference: {}", name)); }
             // Check for boolean literals
             if name == "TRUE" {
                 return Ok((Expr::Boolean(true), pos + 1));
@@ -761,6 +948,10 @@ where
                 end_row_abs: *end_row_abs,
             }
         }
+        Expr::WholeRange { sheet, axis, start, end, start_abs, end_abs } => Expr::WholeRange {
+            sheet: bind_sheet_ref(sheet, resolver), axis: *axis, start: *start, end: *end,
+            start_abs: *start_abs, end_abs: *end_abs,
+        },
         Expr::Function { name, args } => {
             let bound_args = args.iter().map(|arg| bind_expr(arg, resolver)).collect();
             Expr::Function {
@@ -827,6 +1018,26 @@ fn format_op(op: Op) -> &'static str {
             }
 }
 
+fn format_whole_range(
+    axis: RangeAxis,
+    start: usize,
+    end: usize,
+    start_abs: bool,
+    end_abs: bool,
+) -> String {
+    let endpoint = |n, abs| {
+        format!(
+            "{}{}",
+            if abs { "$" } else { "" },
+            match axis {
+                RangeAxis::Column => column_letters(n),
+                RangeAxis::Row => (n + 1).to_string(),
+            }
+        )
+    };
+    format!("{}:{}", endpoint(start, start_abs), endpoint(end, end_abs))
+}
+
 pub fn format_parsed_expr(expr: &ParsedExpr) -> String {
     format!("={}", format_parsed_expr_inner(expr))
 }
@@ -861,6 +1072,8 @@ fn format_parsed_expr_inner(expr: &ParsedExpr) -> String {
             format_cell_addr(*start_col, *start_row, *start_col_abs, *start_row_abs),
             format_cell_addr(*end_col, *end_row, *end_col_abs, *end_row_abs),
         ),
+        Expr::WholeRange { sheet, axis, start, end, start_abs, end_abs } =>
+            format!("{}{}", prefix(sheet), format_whole_range(*axis, *start, *end, *start_abs, *end_abs)),
         Expr::Function { name, args } => format!(
             "{}({})",
             name,
@@ -915,6 +1128,8 @@ where
             let end = format_cell_addr(*end_col, *end_row, *end_col_abs, *end_row_abs);
             format!("{}{}:{}", prefix, start, end)
         }
+        Expr::WholeRange { sheet, axis, start, end, start_abs, end_abs } =>
+            format!("{}{}", format_sheet_prefix(sheet, name_resolver), format_whole_range(*axis, *start, *end, *start_abs, *end_abs)),
         Expr::Function { name, args } => {
             let args_str: Vec<String> = args.iter()
                 .map(|arg| format_expr_inner(arg, name_resolver))
@@ -1016,7 +1231,8 @@ pub(crate) fn col_to_letters(col: usize) -> String {
 // =============================================================================
 
 /// Extract all cell references from an expression (for dependency tracking)
-/// Returns a list of (row, col) tuples for single cells and expanded ranges
+/// Returns a list of (row, col) tuples for single cells and expanded finite ranges.
+/// Whole-row/column refs require sheet context and are handled by the workbook.
 pub fn extract_cell_refs<S>(expr: &Expr<S>) -> Vec<(usize, usize)> {
     let mut refs = Vec::new();
     collect_cell_refs(expr, &mut refs);
@@ -1026,7 +1242,7 @@ pub fn extract_cell_refs<S>(expr: &Expr<S>) -> Vec<(usize, usize)> {
 fn collect_cell_refs<S>(expr: &Expr<S>, refs: &mut Vec<(usize, usize)>) {
     match expr {
         Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::NamedRange(_) | Expr::Empty
-        | Expr::RefError => {
+        | Expr::RefError | Expr::WholeRange { .. } => {
             // NamedRange refs are resolved at evaluation time with access to NamedRangeStore;
             // RefError has no target by definition.
         }

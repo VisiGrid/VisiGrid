@@ -57,7 +57,7 @@ mod transform_diff_dialog;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use crate::app::{Spreadsheet, CELL_HEIGHT};
+use crate::app::Spreadsheet;
 use crate::mode::Mode;
 use crate::theme::TokenKey;
 
@@ -174,7 +174,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             // Don't scroll the grid when the terminal panel has focus —
             // the terminal's own scroll handler handles it and calls stop_propagation,
             // but this guard is defense-in-depth for edge cases.
-            if this.terminal_has_focus(window) {
+            if this.terminal_has_focus(window) || this.mode == Mode::Preferences {
                 return;
             }
             // Check for zoom modifier (Ctrl on Linux/Windows, Cmd on macOS)
@@ -184,7 +184,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             #[cfg(not(target_os = "macos"))]
             let zoom_modifier = event.modifiers.control;
 
-            let delta = event.delta.pixel_delta(px(CELL_HEIGHT));
+            let delta = event.delta.pixel_delta(px(this.metrics.cell_h));
             let dy: f32 = delta.y.into();
 
             if zoom_modifier {
@@ -195,8 +195,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
 
             // Normal scrolling
             let dx: f32 = delta.x.into();
-            let delta_rows = (-dy / CELL_HEIGHT).round() as i32;
-            let delta_cols = (-dx / CELL_HEIGHT).round() as i32;
+            let delta_rows = (-dy / this.metrics.cell_h).round() as i32;
+            let delta_cols = (-dx / this.metrics.cell_h).round() as i32;
             if delta_rows != 0 || delta_cols != 0 {
                 this.scroll(delta_rows, delta_cols, cx);
             }

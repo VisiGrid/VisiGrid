@@ -45,6 +45,18 @@ pub struct AppearanceSettings {
     #[serde(default, skip_serializing_if = "Setting::is_inherit")]
     pub theme_id: Setting<String>,
 
+    /// Default dimensions in logical pixels, before zoom. Explicit sheet sizes win.
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub default_column_width: Setting<f32>,
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub default_row_height: Setting<f32>,
+
+    /// Cell font defaults. Sizes are points; explicit workbook formatting wins.
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub default_font_family: Setting<String>,
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub default_font_size: Setting<f32>,
+
     /// Show gridlines by default
     #[serde(default = "default_show_gridlines", skip_serializing_if = "Setting::is_inherit")]
     pub show_gridlines: Setting<bool>,
@@ -66,6 +78,10 @@ impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
             theme_id: Setting::Inherit, // Use app default theme
+            default_column_width: Setting::Inherit,
+            default_row_height: Setting::Inherit,
+            default_font_family: Setting::Inherit,
+            default_font_size: Setting::Inherit,
             show_gridlines: Setting::Value(true),
             show_format_bar: Setting::Value(true),
         }

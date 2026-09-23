@@ -11,6 +11,13 @@ pub enum NamedRangeResolution {
 }
 
 pub trait CellLookup {
+    /// Exclusive data bounds on the requested sheet. Empty lookups default
+    /// to no data; real sheet lookups include formulas and spill receivers.
+    fn data_bounds(&self, _sheet: &SheetRef) -> (usize, usize) { (0, 0) }
+
+    /// Optional data-view offset for CLI header exclusion. Cell formulas use 0.
+    fn whole_column_start(&self) -> usize { 0 }
+
     fn get_value(&self, row: usize, col: usize) -> f64;
     fn get_text(&self, row: usize, col: usize) -> String;
 
@@ -139,6 +146,9 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> LookupWithN
 }
 
 impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup for LookupWithNamedRanges<'a, L, F> {
+    fn whole_column_start(&self) -> usize { self.inner.whole_column_start() }
+    fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) { self.inner.data_bounds(sheet) }
+
     fn get_value(&self, row: usize, col: usize) -> f64 {
         self.inner.get_value(row, col)
     }
@@ -191,17 +201,32 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup 
 /// A lookup wrapper that provides current cell context for ROW()/COLUMN()
 pub struct LookupWithContext<'a, L: CellLookup> {
     inner: &'a L,
-    current_row: usize,
-    current_col: usize,
+    current_cell: Option<(usize, usize)>,
+    column_start: Option<usize>,
 }
 
 impl<'a, L: CellLookup> LookupWithContext<'a, L> {
     pub fn new(inner: &'a L, current_row: usize, current_col: usize) -> Self {
-        Self { inner, current_row, current_col }
+        Self { inner, current_cell: Some((current_row, current_col)), column_start: None }
+    }
+
+    /// A CLI data view without inventing a current cell for ROW()/COLUMN().
+    pub fn for_data_rows(inner: &'a L, row: usize) -> Self {
+        Self { inner, current_cell: inner.current_cell(), column_start: Some(row) }
+    }
+
+    /// Restrict whole-column references to data rows in a CLI view. Explicit
+    /// cell/row references still address the original sheet coordinates.
+    pub fn with_column_start(mut self, row: usize) -> Self {
+        self.column_start = Some(row);
+        self
     }
 }
 
 impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
+    fn whole_column_start(&self) -> usize { self.column_start.unwrap_or_else(|| self.inner.whole_column_start()) }
+    fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) { self.inner.data_bounds(sheet) }
+
     fn get_value(&self, row: usize, col: usize) -> f64 {
         self.inner.get_value(row, col)
     }
@@ -231,7 +256,7 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
     }
 
     fn current_cell(&self) -> Option<(usize, usize)> {
-        Some((self.current_row, self.current_col))
+        self.current_cell
     }
 
     fn get_merge_start(&self, row: usize, col: usize) -> Option<(usize, usize)> {
@@ -605,7 +630,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
             };
             EvalResult::from_value(&value)
         }
-        Expr::Range { .. } => {
+        Expr::Range { .. } | Expr::WholeRange { .. } => {
             // Ranges can't be evaluated directly, only within functions
             EvalResult::Error("#VALUE! Array arithmetic not supported".to_string())
         }
@@ -814,6 +839,13 @@ fn eval_function_args<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Vec<Eval
 }
 
 fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) -> EvalResult {
+    // Keep open ranges in the stored AST. Only the arguments being consumed
+    // are bounded, so nested/lazy functions still evaluate through this path.
+    let bounded;
+    let args = if args.iter().any(|arg| matches!(arg, Expr::WholeRange { .. })) {
+        bounded = args.iter().map(|arg| super::whole_range::bound_for_evaluation(arg, lookup)).collect::<Vec<_>>();
+        bounded.as_slice()
+    } else { args };
     None
         .or_else(|| super::eval_math::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_logical::try_evaluate(name, args, lookup))

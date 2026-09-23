@@ -61,6 +61,10 @@ pub(crate) fn bind(
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &Paste, window, cx| {
+            if this.mode == Mode::Preferences {
+                this.cell_size_input_paste(cx);
+                return;
+            }
             // Terminal handles its own paste (Cmd+V on Mac, Ctrl+Shift+V on Linux)
             if this.terminal_has_focus(window) { return; }
             // Script view: paste into script buffer
@@ -154,12 +158,12 @@ pub(crate) fn bind(
                 return;
             }
             this.paste(cx);
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &PasteValues, window, cx| {
             this.paste_values(cx);
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &PasteSpecial, _, cx| {
@@ -167,7 +171,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &PasteFormulas, window, cx| {
             this.paste_formulas(cx);
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
             this.update_title_if_needed(window, cx);
         }))
         .on_action(cx.listener(|this, _: &PasteFormats, window, cx| {
@@ -233,7 +237,7 @@ pub(crate) fn bind(
                 return;
             }
             this.start_edit(cx);
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
             // On macOS, show tip about enabling F2 (catches Ctrl+U and menu-driven edit)
             this.maybe_show_f2_tip(cx);
         }))
@@ -300,6 +304,7 @@ pub(crate) fn bind(
             }
             // Handle Enter key based on current mode
             match this.mode {
+                Mode::Preferences => { this.apply_cell_size_input(cx); }
                 Mode::ColorPicker => this.color_picker_execute(window, cx),
                 Mode::ThemePicker => this.theme_picker_execute(window, cx),
                 Mode::FontPicker => this.font_picker_execute(cx),
@@ -466,6 +471,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &TabNext, window, cx| {
+            if this.mode == Mode::Preferences { this.cell_size_input_tab(cx); return; }
             if this.guard_terminal_focus(window, cx, "TabNext") { return; }
             // Close-confirm dialog traps Tab
             if this.close_confirm_visible {
@@ -507,6 +513,7 @@ pub(crate) fn bind(
             }
         }))
         .on_action(cx.listener(|this, _: &TabPrev, window, cx| {
+            if this.mode == Mode::Preferences { this.cell_size_input_tab(cx); return; }
             if this.guard_terminal_focus(window, cx, "TabPrev") { return; }
             // Close-confirm dialog traps Shift+Tab
             if this.close_confirm_visible {
@@ -573,7 +580,9 @@ pub(crate) fn bind(
                 cx.notify();
                 return;
             }
-            if this.mode == Mode::ColorPicker {
+            if this.mode == Mode::Preferences {
+                this.cell_size_input_key("backspace", None, false, cx);
+            } else if this.mode == Mode::ColorPicker {
                 this.color_picker_handle_key("backspace", None, false, window, cx);
             } else if this.mode == Mode::Command {
                 this.palette_backspace(cx);
@@ -598,7 +607,7 @@ pub(crate) fn bind(
                 this.license_backspace(cx);
             } else if this.mode.is_editing() {
                 this.backspace(cx);
-                this.update_edit_scroll(window);
+                this.update_edit_scroll(window, cx);
             } else if this.mode == Mode::Navigation {
                 // Single text cell: enter edit mode and delete last char
                 let is_single_cell = this.view_state.selection_end.is_none()
@@ -614,7 +623,7 @@ pub(crate) fn bind(
                     if !this.edit_value.is_empty() {
                         this.backspace(cx);
                     }
-                    this.update_edit_scroll(window);
+                    this.update_edit_scroll(window, cx);
                 } else {
                     this.delete_selection(cx);
                     this.update_title_if_needed(window, cx);
@@ -644,7 +653,7 @@ pub(crate) fn bind(
                 return;
             }
             this.delete_char(cx);
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
         }))
         .on_action(cx.listener(|this, _: &FillDown, window, cx| {
             this.fill_down(cx);
@@ -677,16 +686,16 @@ pub(crate) fn bind(
         // Edit mode cursor movement
         .on_action(cx.listener(|this, _: &EditCursorLeft, window, cx| {
             this.move_edit_cursor_left(cx);
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
         }))
         .on_action(cx.listener(|this, _: &EditCursorRight, window, cx| {
             this.move_edit_cursor_right(cx);
-            this.update_edit_scroll(window);
+            this.update_edit_scroll(window, cx);
         }))
         .on_action(cx.listener(|this, _: &EditCursorHome, window, cx| {
             if this.mode.is_editing() {
                 this.move_edit_cursor_home(cx);
-                this.update_edit_scroll(window);
+                this.update_edit_scroll(window, cx);
             } else {
                 // Navigation mode: go to first column of current row
                 this.view_state.selected.1 = 0;
@@ -698,7 +707,7 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &EditCursorEnd, window, cx| {
             if this.mode.is_editing() {
                 this.move_edit_cursor_end(cx);
-                this.update_edit_scroll(window);
+                this.update_edit_scroll(window, cx);
             } else {
                 // Navigation mode: go to last column of current row
                 this.view_state.selected.1 = crate::app::NUM_COLS - 1;
@@ -712,7 +721,7 @@ pub(crate) fn bind(
             if this.mode.is_editing() {
                 this.edit_selection_anchor = None;
                 this.edit_cursor = this.prev_word_start(this.edit_cursor);
-                this.update_edit_scroll(window);
+                this.update_edit_scroll(window, cx);
                 this.ensure_formula_bar_caret_visible(window);
                 cx.notify();
             }
@@ -721,7 +730,7 @@ pub(crate) fn bind(
             if this.mode.is_editing() {
                 this.edit_selection_anchor = None;
                 this.edit_cursor = this.next_word_end(this.edit_cursor);
-                this.update_edit_scroll(window);
+                this.update_edit_scroll(window, cx);
                 this.ensure_formula_bar_caret_visible(window);
                 cx.notify();
             }
@@ -732,7 +741,7 @@ pub(crate) fn bind(
                     this.edit_selection_anchor = Some(this.edit_cursor);
                 }
                 this.edit_cursor = this.prev_word_start(this.edit_cursor);
-                this.update_edit_scroll(window);
+                this.update_edit_scroll(window, cx);
                 this.ensure_formula_bar_caret_visible(window);
                 cx.notify();
             }
@@ -743,7 +752,7 @@ pub(crate) fn bind(
                     this.edit_selection_anchor = Some(this.edit_cursor);
                 }
                 this.edit_cursor = this.next_word_end(this.edit_cursor);
-                this.update_edit_scroll(window);
+                this.update_edit_scroll(window, cx);
                 this.ensure_formula_bar_caret_visible(window);
                 cx.notify();
             }

@@ -5,20 +5,19 @@ use crate::formatting::BorderApplyMode;
 use crate::mode::Menu;
 use crate::theme::TokenKey;
 
-pub const MENU_HEIGHT: f32 = 22.0;  // Compact chrome height
+pub const MENU_HEIGHT: f32 = crate::app::MENU_BAR_HEIGHT;
 const DROPDOWN_WIDTH: f32 = 260.0;
 
 /// Render the modern menu bar - compact chrome, not content
 pub fn render_menu_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let open_menu = app.open_menu;
-    let header_bg = app.token(TokenKey::HeaderBg);
+    let header_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
     let selection_bg = app.token(TokenKey::SelectionBg);
     let toolbar_hover = app.token(TokenKey::ToolbarButtonHoverBg);
 
-    // Menu text at ~75% opacity for chrome feel (hover restores full)
-    let menu_text = text_primary.opacity(0.75);
+    let menu_text = text_primary;
 
     div()
         .flex()
@@ -31,7 +30,7 @@ pub fn render_menu_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl
         .items_center()
         .px_1()
         .gap_0()
-        .text_size(px(11.0))  // Smaller than content text
+        .text_size(px(13.0))
         .font_weight(FontWeight::NORMAL)  // Light weight for chrome
         .text_color(menu_text)
         // Group 1: File, Edit, View
@@ -90,6 +89,15 @@ pub fn render_menu_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) ->
         .child(dropdown)
 }
 
+fn menu_width(menu: Menu) -> f32 {
+    match menu {
+        Menu::File | Menu::Edit => 48.0,
+        Menu::View | Menu::Data | Menu::Help => 56.0,
+        Menu::Insert => 64.0,
+        Menu::Format => 72.0,
+    }
+}
+
 /// Render a menu header button with underlined accelerator
 fn menu_header(
     label: &'static str,
@@ -110,7 +118,8 @@ fn menu_header(
         .id(ElementId::Name(format!("menu-{:?}", menu).into()))
         .flex()
         .items_center()
-        .px_3()  // Slightly more horizontal padding
+        .w(px(menu_width(menu)))
+        .justify_center()
         .h_full()
         .cursor_pointer()
         .when(is_open, move |d: Stateful<Div>| d.bg(selection_bg).text_color(text_full))
@@ -159,16 +168,13 @@ fn render_dropdown(
     selection_bg: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    // Offsets account for: px_1 (4px), px_3 per item (12px each side), 8px spacers
-    let left_offset = match menu {
-        Menu::File => 4.0,
-        Menu::Edit => 48.0,      // File width ~44px
-        Menu::View => 92.0,      // + Edit width ~44px
-        Menu::Insert => 148.0,   // + View ~44px + 8px spacer
-        Menu::Format => 204.0,   // + Insert ~56px
-        Menu::Data => 276.0,     // + Format ~64px + 8px spacer
-        Menu::Help => 328.0,     // + Data ~52px
-    };
+    let menus = [Menu::File, Menu::Edit, Menu::View, Menu::Insert, Menu::Format, Menu::Data, Menu::Help];
+    let mut left_offset = 4.0;
+    for item in menus {
+        if item == menu { break; }
+        left_offset += menu_width(item);
+        if matches!(item, Menu::View | Menu::Format) { left_offset += 8.0; }
+    }
 
     let menu_content = match menu {
         Menu::File => render_file_menu(highlight, text_primary, text_muted, selection_bg, panel_border, cx),
@@ -400,7 +406,7 @@ fn menu_item_with_accel(
         .py(px(4.0))  // Slightly tighter vertical padding
         .mx_1()
         .rounded_sm()
-        .text_size(px(12.0))  // Match menu bar scale
+        .text_size(px(13.0))
         .text_color(text_color)
         .cursor_pointer()
         .when(is_highlighted, move |d: Stateful<Div>| d.bg(hover_bg))
@@ -432,7 +438,7 @@ fn menu_item_with_accel(
             d.child(
                 div()
                     .text_color(shortcut_color)
-                    .text_size(px(10.0))  // Smaller shortcuts
+                    .text_size(px(11.0))
                     .flex_shrink_0()
                     .child(shortcut.unwrap_or(""))
             )

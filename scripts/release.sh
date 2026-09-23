@@ -14,7 +14,7 @@ DRY_RUN=false
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AUR_DIR="$HOME/Code/visigrid-bin"
 GITHUB_REPO="VisiGrid/VisiGrid"
-HOMEBREW_REPO="VisiGrid/homebrew-visigrid"
+HOMEBREW_REPO="VisiGrid/homebrew-tap"
 
 # --- Platform detection ---
 
@@ -281,7 +281,21 @@ green "CI complete."
 
 bold "=== Phase 4: Publish release ==="
 
-run gh release edit "v$VERSION" --draft=false
+if $DRY_RUN; then
+    yellow "[dry-run] Would insert CHANGELOG.md entry and publish v$VERSION."
+else
+    CHANGELOG_ENTRY="$(awk -v version="$VERSION" '
+        $0 == "## " version { found=1; next }
+        found && /^## / { exit }
+        found { print }
+    ' "$REPO_ROOT/CHANGELOG.md")"
+    [[ -n "$CHANGELOG_ENTRY" ]] || die "No changelog entry for $VERSION; refusing to publish empty release notes."
+    NOTES_FILE="$(mktemp)"
+    gh release view "v$VERSION" --json body |
+        jq -r --arg changes "$CHANGELOG_ENTRY" '.body | split("<!-- Add changelog here -->") | join($changes)' > "$NOTES_FILE"
+    gh release edit "v$VERSION" --notes-file "$NOTES_FILE" --draft=false
+    rm -f "$NOTES_FILE"
+fi
 
 green "Release v$VERSION published. Homebrew and Winget workflows triggered."
 

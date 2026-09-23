@@ -796,12 +796,16 @@ pub(crate) fn handle_key_down(
         return; // Consume all keystrokes in about mode
     }
 
-    // Handle Preferences mode (consume keystrokes, only escape closes)
+    // Preferences numeric fields use the same lightweight editor as other dialogs.
     if this.mode == Mode::Preferences {
         if event.keystroke.key == "escape" {
             this.hide_preferences(cx);
+        } else {
+            let modifiers = event.keystroke.modifiers;
+            this.cell_size_input_key(&event.keystroke.key, event.keystroke.key_char.as_deref(),
+                modifiers.control || modifiers.platform || modifiers.alt, cx);
         }
-        return; // Consume all keystrokes in preferences mode
+        return;
     }
 
     // Handle Hint mode (Vimium-style jump navigation)
@@ -1032,7 +1036,7 @@ pub(crate) fn handle_key_down(
                     for c in printable_chars.chars() {
                         this.insert_char(c, cx);
                     }
-                    this.update_edit_scroll(window);
+                    this.update_edit_scroll(window, cx);
                 }
             }
         }

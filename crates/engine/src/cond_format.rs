@@ -228,6 +228,12 @@ fn offset_expr(expr: &ParsedExpr, dr: i64, dc: i64) -> Option<ParsedExpr> {
             end_col_abs: *end_col_abs,
             end_row_abs: *end_row_abs,
         },
+        Expr::WholeRange { sheet, axis, start, end, start_abs, end_abs } => {
+            let delta = match axis { crate::formula::parser::RangeAxis::Row => dr, crate::formula::parser::RangeAxis::Column => dc };
+            Expr::WholeRange { sheet: sheet.clone(), axis: *axis,
+                start: shift(*start, *start_abs, delta)?, end: shift(*end, *end_abs, delta)?,
+                start_abs: *start_abs, end_abs: *end_abs }
+        }
         Expr::Function { name, args } => Expr::Function {
             name: name.clone(),
             args: args

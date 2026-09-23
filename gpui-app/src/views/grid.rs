@@ -110,7 +110,7 @@ fn is_selected_in_pane(
 
 /// Get selection borders for a cell based on pane view state.
 /// Returns (top, right, bottom, left) indicating which edges need borders.
-fn selection_borders_for_pane(
+pub(super) fn selection_borders_for_pane(
     view_state: &WorkbookViewState,
     row: usize,
     col: usize,
@@ -909,17 +909,17 @@ fn render_cell(
     // For formula refs, only draw outer edges of the range (not interior borders)
     // Spill parent/blocked get 2px border, receiver gets 1px
     cell = if is_editing {
-        // Editing cell gets full border
-        cell.border_1()
+        // Editing and selection share the same strong outline.
+        cell.border_2()
     } else if is_selected {
         // Selected cells: selection border on outer edges (accent blue)
         // Use pane-specific view state for selection border calculation
         let (top, right, bottom, left) = selection_borders_for_pane(view_state, view_row, col);
         let mut c = cell;
-        if top { c = c.border_t_1(); }
-        if right { c = c.border_r_1(); }
-        if bottom { c = c.border_b_1(); }
-        if left { c = c.border_l_1(); }
+        if top { c = c.border_t_2(); }
+        if right { c = c.border_r_2(); }
+        if bottom { c = c.border_b_2(); }
+        if left { c = c.border_l_2(); }
 
         // Interior gridlines (GridLines color via overlay child, since cell border_color
         // is already SelectionBorder for outer edges)
@@ -1101,10 +1101,14 @@ fn render_cell(
     };
     cell = cell
         .text_color(cell_text)
-        .text_size(px(app.metrics.font_size));  // Scaled font size for zoom
+        .text_size(px(app.cell_font_size(None)))
+        .font_family(app.cell_font_family(None));
 
     // Build the text content with selection highlight (caret drawn as overlay)
     if is_editing {
+        let edit_font = app.cell_font(&format);
+        let edit_size = app.cell_font_size(format.font_size);
+        cell = cell.font(edit_font.clone()).text_size(px(edit_size));
         // edit_cursor and selection range are already byte offsets
         let cursor_byte = app.edit_cursor;
         let selection = app.edit_selection_range();
@@ -1125,10 +1129,10 @@ fn render_cell(
         let shape_len = shape_text.len();
         let shaped = window.text_system().shape_line(
             shape_text,
-            px(app.metrics.font_size),
+            px(edit_size),
             &[TextRun {
                 len: shape_len,
-                font: Font::default(),
+                font: edit_font.clone(),
                 color: Hsla::default(),
                 background_color: None,
                 underline: None,
@@ -1162,7 +1166,7 @@ fn render_cell(
             if byte_sel_start > 0 {
                 runs.push(TextRun {
                     len: byte_sel_start,
-                    font: Font::default(),
+                    font: edit_font.clone(),
                     color: normal_color,
                     background_color: None,
                     underline: None,
@@ -1174,7 +1178,7 @@ fn render_cell(
             if byte_sel_end > byte_sel_start {
                 runs.push(TextRun {
                     len: byte_sel_end - byte_sel_start,
-                    font: Font::default(),
+                    font: edit_font.clone(),
                     color: selection_fg,
                     background_color: Some(selection_bg),
                     underline: None,
@@ -1186,7 +1190,7 @@ fn render_cell(
             if total_bytes > byte_sel_end {
                 runs.push(TextRun {
                     len: total_bytes - byte_sel_end,
-                    font: Font::default(),
+                    font: edit_font.clone(),
                     color: normal_color,
                     background_color: None,
                     underline: None,
@@ -1332,9 +1336,7 @@ fn render_cell(
                     });
                 }
                 // Font family must be on text_style for StyledText to use it
-                if let Some(ref family) = format.font_family {
-                    text_style.font_family = family.clone().into();
-                }
+                text_style.font_family = app.cell_font_family(format.font_family.as_deref());
                 // Font color: only apply for non-editing/non-selected cells
                 if let Some(rgba) = format.font_color {
                     if !is_editing && !is_selected && !is_multi_edit_preview {
@@ -1360,7 +1362,7 @@ fn render_cell(
                 // on a parent div to cascade via the element tree's text style.
                 if let Some(size) = format.font_size {
                     div()
-                        .text_size(px(size * app.metrics.zoom))
+                        .text_size(px(app.cell_font_size(Some(size))))
                         .child(styled)
                         .into_any_element()
                 } else {
@@ -1663,7 +1665,7 @@ fn render_cell(
     if show_fill_handle {
         // Solid dark fill - darker than selection border for contrast
         // Use selection border color darkened, or fall back to accent
-        let handle_fill = app.token(TokenKey::SelectionBorder);
+        let handle_fill = selection_outline_color(app);
         // Use cell background for border (white on light themes, dark on dark themes)
         let handle_border = app.token(TokenKey::CellBg);
         // Hover glow: subtle accent halo
@@ -1841,11 +1843,10 @@ fn is_center_across_continuation(
 /// Shared font metrics for deciding which layer owns text and painting it.
 fn spill_text_metrics(format: &visigrid_engine::cell::CellFormat, app: &Spreadsheet) -> (Font, f32) {
     let style = resolve_cell_style(app, format.cell_style);
-    let mut font = Font::default();
-    if let Some(family) = &format.font_family { font.family = family.clone().into(); }
+    let mut font = app.cell_font(format);
     font.weight = if format.bold || style.bold { FontWeight::BOLD } else { FontWeight::NORMAL };
     font.style = if format.italic || style.italic { FontStyle::Italic } else { FontStyle::Normal };
-    (font, format.font_size.map(|size| size * app.metrics.zoom).unwrap_or(app.metrics.font_size))
+    (font, app.cell_font_size(format.font_size))
 }
 
 fn measure_spill_text(text: &str, format: &visigrid_engine::cell::CellFormat,
@@ -2107,6 +2108,13 @@ fn ref_color_hsla(color_idx: usize) -> Hsla {
     rgb(color).into()
 }
 
+/// Selection tint may be translucent; the perimeter must stay solid on every cell.
+fn selection_outline_color(app: &Spreadsheet) -> Hsla {
+    let mut color = app.token(TokenKey::CellBorderFocus);
+    color.a = 1.0;
+    color
+}
+
 fn cell_border(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected: bool, _formula_ref_color: Option<usize>) -> Hsla {
     // Selection border ALWAYS wins over formula ref (user needs to see what they've selected)
     // Formula ref borders are now drawn as dashed overlays (render_formula_ref_borders)
@@ -2117,7 +2125,7 @@ fn cell_border(app: &Spreadsheet, is_editing: bool, is_active: bool, is_selected
         if app.mode == crate::mode::Mode::FormatPainter {
             app.token(TokenKey::Accent)
         } else {
-            app.token(TokenKey::SelectionBorder)
+            selection_outline_color(app)
         }
     } else {
         // Formula refs use dashed border overlay, not per-cell solid borders
@@ -2581,7 +2589,7 @@ fn render_merge_div(
             },
             |merge| sheet.resolve_merge_borders(merge),
         );
-    if b_top.is_set() || b_right.is_set() || b_bottom.is_set() || b_left.is_set() {
+    if !is_selected && !is_active && (b_top.is_set() || b_right.is_set() || b_bottom.is_set() || b_left.is_set()) {
         merge_div = merge_div.child(
             non_interactive_overlay()
                 .border_color(user_border_color)
@@ -2594,11 +2602,8 @@ fn render_merge_div(
 
     // 5. Selection border (on top of everything — wins over user borders visually)
     if is_selected || is_active {
-        merge_div = merge_div.child(
-            non_interactive_overlay()
-                .border_color(sel_border_color)
-                .border_1()
-        );
+        // Replace the merge perimeter rather than nesting another outline inside it.
+        merge_div = merge_div.border_2().border_color(sel_border_color);
     }
 
     // Mouse handlers: the overlay IS the interactive surface for merges.
@@ -2736,7 +2741,7 @@ fn render_merge_overlays(
     let regions = grid_overlay_regions(app, view_state);
     let header_width = crate::app::HEADER_WIDTH * app.metrics.zoom;
     let gridline_color = app.token(TokenKey::GridLines);
-    let sel_border_color = app.token(TokenKey::SelectionBorder);
+    let sel_border_color = selection_outline_color(app);
     let user_border_color = app.token(TokenKey::UserBorder);
     let mut layers = Vec::new();
     for region in regions {
@@ -2800,7 +2805,7 @@ fn render_merge_text(
     if has_formatting {
         let mut text_style = window.text_style();
         text_style.color = text_color;
-        text_style.font_size = px(app.metrics.font_size).into();
+        text_style.font_size = px(app.cell_font_size(None)).into();
 
         // Cell style text color (explicit font_color wins below)
         if let Some(style_color) = cs.text {
@@ -2825,9 +2830,7 @@ fn render_merge_text(
                 ..Default::default()
             });
         }
-        if let Some(ref family) = format.font_family {
-            text_style.font_family = family.clone().into();
-        }
+        text_style.font_family = app.cell_font_family(format.font_family.as_deref());
         if let Some(rgba) = format.font_color {
             text_style.color = gpui::Hsla::from(gpui::Rgba {
                 r: rgba[0] as f32 / 255.0,
@@ -2838,19 +2841,16 @@ fn render_merge_text(
         }
 
         let styled = StyledText::new(text_content).with_default_highlights(&text_style, []);
-        // Font size: TextRun doesn't carry font_size, so cascade via parent div.
-        if let Some(size) = format.font_size {
-            div()
-                .text_size(px(size * app.metrics.zoom))
-                .child(styled)
-                .into_any_element()
-        } else {
-            styled.into_any_element()
-        }
+        // TextRun has no size: cascade both explicit and default point sizes.
+        div()
+            .text_size(px(app.cell_font_size(format.font_size)))
+            .child(styled)
+            .into_any_element()
     } else {
         div()
             .text_color(text_color)
-            .text_size(px(app.metrics.font_size))
+            .text_size(px(app.cell_font_size(None)))
+            .font_family(app.cell_font_family(None))
             .child(text_content)
             .into_any_element()
     }
@@ -3080,8 +3080,8 @@ fn render_region_text_spill(
                 } else {
                     cell_text
                 },
-                font_size: format.font_size.map(|s| s * metrics.zoom).unwrap_or(metrics.font_size),
-                font_family: format.font_family.clone(),
+                font_size: app.cell_font_size(format.font_size),
+                font_family: Some(app.cell_font_family(format.font_family.as_deref()).to_string()),
                 alignment: effective_alignment,  // Resolved alignment for text positioning
                 bold: format.bold || spill_cs.bold,
                 italic: format.italic || spill_cs.italic,

@@ -633,6 +633,7 @@ impl Spreadsheet {
     pub fn show_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.lua_console.visible = false;
         self.mode = Mode::FontPicker;
+        self.font_picker_for_default = false;
         self.font_picker_query.clear();
         self.font_picker_selected = 0;
         self.font_picker_scroll_offset = 0;
@@ -642,7 +643,8 @@ impl Spreadsheet {
     }
 
     pub fn hide_font_picker(&mut self, cx: &mut Context<Self>) {
-        self.mode = Mode::Navigation;
+        self.mode = if self.font_picker_for_default { Mode::Preferences } else { Mode::Navigation };
+        self.font_picker_for_default = false;
         self.font_picker_query.clear();
         self.font_picker_selected = 0;
         self.font_picker_scroll_offset = 0;
@@ -706,9 +708,19 @@ impl Spreadsheet {
         let filtered = self.filter_fonts();
         if let Some(font_name) = filtered.get(self.font_picker_selected) {
             let font = font_name.clone();
-            self.apply_font_to_selection(&font, cx);
+            self.apply_picked_font(&font, cx);
         }
         self.hide_font_picker(cx);
+    }
+
+    pub fn apply_picked_font(&mut self, font: &str, cx: &mut Context<Self>) {
+        if self.font_picker_for_default {
+            crate::settings::update_user_settings(cx, |settings| {
+                settings.appearance.default_font_family = crate::settings::Setting::Value(font.to_string());
+            });
+        } else {
+            self.apply_font_to_selection(font, cx);
+        }
     }
 
     /// Filter available fonts by query

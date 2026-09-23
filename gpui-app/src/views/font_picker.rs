@@ -18,8 +18,8 @@ pub fn render_font_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
 
     // Get current font for selected cell
     let (row, col) = app.view_state.selected;
-    let current_font = app.sheet(cx).get_font_family(row, col);
-    let current_font_display = current_font.clone().unwrap_or_else(|| "(Default)".to_string());
+    let current_font = if app.font_picker_for_default { Some(app.cell_font.family.clone()) } else { app.sheet(cx).get_font_family(row, col) };
+    let current_font_display = current_font.clone().unwrap_or_else(|| app.cell_font.family.clone());
 
     // Theme colors
     let panel_bg = app.token(TokenKey::PanelBg);
@@ -67,7 +67,7 @@ pub fn render_font_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                         .text_color(text_primary)
                         .text_size(px(13.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .child("Select Font")
+                        .child(if app.font_picker_for_default { "Default Cell Font" } else { "Select Font" })
                 )
                 .child(
                     div()
@@ -250,7 +250,7 @@ fn render_font_item(
         // Single click applies immediately and closes
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
-            this.apply_font_to_selection(&font_for_action, cx);
+            this.apply_picked_font(&font_for_action, cx);
             this.hide_font_picker(cx);
         }))
         .child(

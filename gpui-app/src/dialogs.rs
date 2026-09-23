@@ -175,12 +175,67 @@ impl Spreadsheet {
     pub fn show_preferences(&mut self, cx: &mut Context<Self>) {
         self.lua_console.visible = false;
         self.mode = Mode::Preferences;
+        self.ui.cell_size_input = Default::default();
         cx.notify();
     }
 
     pub fn hide_preferences(&mut self, cx: &mut Context<Self>) {
+        self.ui.cell_size_input = Default::default();
         self.mode = Mode::Navigation;
         cx.notify();
+    }
+
+    pub fn begin_cell_size_input(&mut self, field: crate::ui::cell_size_input::CellSizeField, cx: &mut Context<Self>) {
+        if !self.apply_cell_size_input(cx) { return; }
+        let sizes = crate::settings::CellSizeDefaults::from_user(crate::settings::user_settings(cx));
+        let font = crate::settings::CellFontDefaults::from_user(crate::settings::user_settings(cx));
+        self.ui.cell_size_input.begin(field, sizes, font.size);
+        cx.notify();
+    }
+
+    pub fn apply_cell_size_input(&mut self, cx: &mut Context<Self>) -> bool {
+        use crate::ui::cell_size_input::CellSizeField;
+        let input = &mut self.ui.cell_size_input;
+        let Some(field) = input.field else { return true; };
+        let value = match field.parse(&input.text) {
+            Ok(value) => value,
+            Err(error) => { input.error = Some(error); cx.notify(); return false; }
+        };
+        update_user_settings(cx, |settings| match field {
+            CellSizeField::ColumnWidth => settings.appearance.default_column_width = Setting::Value(value),
+            CellSizeField::RowHeight => settings.appearance.default_row_height = Setting::Value(value),
+            CellSizeField::FontSize => settings.appearance.default_font_size = Setting::Value(value),
+        });
+        self.ui.cell_size_input = Default::default();
+        cx.notify();
+        true
+    }
+
+    pub fn cell_size_input_tab(&mut self, cx: &mut Context<Self>) {
+        use crate::ui::cell_size_input::CellSizeField;
+        let next = self.ui.cell_size_input.field.map(|field| field.next()).unwrap_or(CellSizeField::ColumnWidth);
+        self.begin_cell_size_input(next, cx);
+    }
+
+    pub fn cell_size_input_key(&mut self, key: &str, key_char: Option<&str>, modified: bool, cx: &mut Context<Self>) {
+        use crate::ui::text_input::{handle_input_key, InputAction};
+        let input = &mut self.ui.cell_size_input;
+        if input.field.is_none() { return; }
+        match handle_input_key(&mut input.text, &mut input.all_selected, key, key_char, modified) {
+            InputAction::Submit => { self.apply_cell_size_input(cx); }
+            InputAction::Changed => { input.error = None; cx.notify(); }
+            _ => {}
+        }
+    }
+
+    pub fn cell_size_input_paste(&mut self, cx: &mut Context<Self>) {
+        let input = &mut self.ui.cell_size_input;
+        if input.field.is_none() { return; }
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            crate::ui::text_input::handle_input_paste(&mut input.text, &mut input.all_selected, &text);
+            input.error = None;
+            cx.notify();
+        }
     }
 
     pub fn theme_picker_up(&mut self, cx: &mut Context<Self>) {

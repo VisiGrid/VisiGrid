@@ -391,7 +391,7 @@ impl EntityInputHandler for Spreadsheet {
             // Nothing typed, so nothing ran the post-edit work for the removal above.
             self.ime_after_buffer_change(cx);
         }
-        self.update_edit_scroll(window);
+        self.update_edit_scroll(window, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -426,7 +426,7 @@ impl EntityInputHandler for Spreadsheet {
         buf.replace_and_mark(range, new_text, new_selected_range_utf16);
         self.ime_put_buffer(buf);
         self.ime_after_buffer_change(cx);
-        self.update_edit_scroll(window);
+        self.update_edit_scroll(window, cx);
     }
 
     fn bounds_for_range(

@@ -3,41 +3,9 @@
 //! This module contains unit tests for fill operations, formula adjustments,
 //! multi-edit undo, and format undo coalescing.
 
-use regex::Regex;
 use visigrid_engine::sheet::{Sheet, SheetId};
 
-/// Test-only version of adjust_formula_refs (mirrors Spreadsheet::adjust_formula_refs)
-fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> String {
-    let re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
-
-    re.replace_all(formula, |caps: &regex::Captures| {
-        let col_absolute = &caps[1] == "$";
-        let col_letters = &caps[2];
-        let row_absolute = &caps[3] == "$";
-        let row_num: i32 = caps[4].parse().unwrap_or(1);
-
-        let col = col_letters.to_uppercase().chars().fold(0i32, |acc, c| {
-            acc * 26 + (c as i32 - 'A' as i32 + 1)
-        }) - 1;
-
-        let new_col = if col_absolute { col } else { col + delta_col };
-        let new_row = if row_absolute { row_num } else { row_num + delta_row };
-
-        if new_col < 0 || new_row < 1 {
-            return "#REF!".to_string();
-        }
-
-        let col_str = col_to_letter(new_col as usize);
-
-        format!(
-            "{}{}{}{}",
-            if col_absolute { "$" } else { "" },
-            col_str,
-            if row_absolute { "$" } else { "" },
-            new_row
-        )
-    }).to_string()
-}
+use visigrid_engine::formula::parser::adjust_formula_refs;
 
 fn col_to_letter(col: usize) -> String {
     let mut s = String::new();
@@ -2617,6 +2585,8 @@ fn test_format_bar_confirm_commits_valid_font_size() {
     assert_eq!(parse_font_size_input("1"), Some(1.0));
     assert_eq!(parse_font_size_input("400"), Some(400.0));
 
+    assert_eq!(parse_font_size_input("12.5"), Some(12.5));
+
     // Whitespace tolerance
     assert_eq!(parse_font_size_input(" 16 "), Some(16.0));
 }
@@ -2633,7 +2603,8 @@ fn test_format_bar_cancel_reverts_no_change() {
     assert_eq!(parse_font_size_input("0"), None, "0 is below minimum");
     assert_eq!(parse_font_size_input("401"), None, "401 exceeds maximum");
     assert_eq!(parse_font_size_input("-5"), None, "negative not allowed");
-    assert_eq!(parse_font_size_input("12.5"), None, "floats not allowed");
+    assert_eq!(parse_font_size_input("NaN"), None);
+    assert_eq!(parse_font_size_input("inf"), None);
 }
 
 /// Regression: BackspaceChar in the format bar must edit the buffer,

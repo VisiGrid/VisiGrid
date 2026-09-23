@@ -1100,31 +1100,47 @@ Settings are stored in:
 
 ### settings.json
 
-General application settings:
+The native app uses nested settings. To adjust the default cell size:
 
 ```json
 {
-  "editor.fontSize": 13,
-  "editor.vimMode": false,
-  "grid.defaultColumnWidth": 100,
-  "grid.rowHeight": 24,
-  "formula.autoRecalc": true,
-  "file.recentFilesLimit": 10,
-  "ui.showFormulaBar": true,
-  "ui.showStatusBar": true
+  "appearance": {
+    "default_column_width": 80,
+    "default_row_height": 24,
+    "default_font_family": "IBM Plex Sans",
+    "default_font_size": 11
+  }
 }
 ```
 
-| Setting | Description |
-|---------|-------------|
-| `editor.fontSize` | Font size in pixels |
-| `editor.vimMode` | Enable Vim-style navigation |
-| `grid.defaultColumnWidth` | Default column width |
-| `grid.rowHeight` | Row height in pixels |
-| `formula.autoRecalc` | Auto-recalculate formulas |
-| `file.recentFilesLimit` | Max recent files to remember |
-| `ui.showFormulaBar` | Show/hide formula bar |
-| `ui.showStatusBar` | Show/hide status bar |
+You can also edit **Default column width** and **Default row height** in
+**Preferences → Appearance** (`Ctrl+,`, or `Cmd+,` on macOS). Press Enter or
+click Apply to save a value; Tab saves and moves to the next size field.
+Changes made in Preferences apply immediately across open windows and are
+saved to `settings.json`. Restart VisiGrid after editing the file directly.
+
+Sizes are pixels at 100% zoom. Column widths accept 20–500 and row heights
+accept 12–200; values outside those ranges in JSON are clamped. Omitted or
+`null` values use the built-in defaults of 96 × 28. **Reset sizes** restores
+those defaults.
+
+These settings affect rows and columns without an explicit size, including
+in existing workbooks. Manually resized and imported explicit sizes are
+preserved. Changing these defaults does not change the font size.
+
+**Default font** and **Default font size** are also available in Appearance.
+The built-in default is bundled IBM Plex Sans at 11 points, on every platform.
+Font sizes accept 1–400 points, including fractions (for example, 10.5).
+**Reset font** restores the built-in family and size. These preferences apply
+only where a cell has no explicit font family or size; imported formatting wins.
+
+XLSX font sizes remain in points when saved and exported. For display, one point
+is converted to 96/72 logical pixels, then scaled by zoom. Display DPI is handled
+separately by the renderer. Missing fonts display in bundled IBM Plex Sans, with
+bold and italic retained. The toolbar marks the font **Substituted**; hover over
+it to see the fallback. The requested font name stays in the workbook, so opening
+it on a machine with that font restores the intended appearance. Install fonts
+and restart VisiGrid to refresh the font list.
 
 ### keybindings.json
 

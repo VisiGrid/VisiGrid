@@ -1655,3 +1655,24 @@ fn parse_cell_ref(s: &str) -> (usize, usize) {
     let row: usize = row_str.parse().unwrap();
     (row - 1, col)
 }
+
+#[test]
+fn inspect_calc_whole_rows_columns_and_literal_text() {
+    let csv = csv_fixture("whole_ranges", "100,200\n2,3\n4,5\n");
+    for (headers, expected) in [(false, ["106", "300", "6", "A:A"]), (true, ["6", "300", "6", "A:A"])] {
+        let mut command = vgrid();
+        command.args(["sheet", "inspect", csv.to_str().unwrap(),
+            "--calc", "SUM(a:a)", "--calc", "SUM(1:1)",
+            "--calc", "SUM($A:$A)-SUM(A1:A1)", "--calc", "\"A:A\""]);
+        if headers { command.arg("--headers"); }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        for (i, value) in expected.iter().enumerate() {
+            // Header exclusion applies only to whole columns, never explicit A1.
+            let value = if headers && i == 2 { "-94" } else { value };
+            assert_eq!(result["results"][i]["value"], value);
+        }
+    }
+    std::fs::remove_file(csv).ok();
+}

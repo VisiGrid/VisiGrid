@@ -74,7 +74,8 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                 .flex_shrink_0()
                 .w(px(metrics.header_w))  // Scaled header width
                 .h_full()
-                .border_1()
+                .border_r_1()
+                .border_b_1()
                 .border_color(header_border)
                 .cursor_pointer()
                 .hover(|s| s.bg(selection_bg.opacity(0.3)))
@@ -159,6 +160,14 @@ fn render_column_header(
     });
     let proposal = review_proposal_color(app);
 
+    // The grid owns a selection edge touching the header. Cover the neutral
+    // header separator with its background instead of drawing a second blue line.
+    let first_row_index = if app.view_state.frozen_rows > 0 { 0 } else { app.view_state.scroll_row };
+    let grid_owns_edge = app.split_pane.is_none() && !review_focus_selected
+        && app.nth_visible_row_with_hidden(first_row_index, cx).is_some_and(|(row, _)| {
+            super::grid::selection_borders_for_pane(&app.view_state, row, col).0
+        });
+
     // Reserve right padding when filter button is shown to prevent text/icon overlap
     let has_filter_button = app.filter_state.is_enabled() && app.filter_state.contains_column(col);
 
@@ -171,7 +180,8 @@ fn render_column_header(
         .flex()
         .items_center()
         .justify_center()
-        .border_1()
+        .border_r_1()
+        .border_b_1()
         .border_color(header_border)
         .when(is_selected && review_focus_selected, |div| {
             div.bg(proposal.opacity(0.16))
@@ -184,10 +194,11 @@ fn render_column_header(
         .text_sm()
         .cursor_pointer()
         .when(!is_selected, |d| d.hover(|s| s.bg(selection_bg.opacity(0.3))))
-        // Active edge is an overlay so selection does not move the header label.
+        // Keep one owner for the shared edge; otherwise show the header's own highlight.
         .when(is_selected, |d| d.child(
-            div().absolute().left_0().right_0().bottom_0().h(px(2.0))
-                .bg(if review_focus_selected { proposal } else { accent })
+            div().absolute().left_0().right(px(-1.0)).bottom(px(-1.0))
+                .h(px(if grid_owns_edge { 1.0 } else { 2.0 }))
+                .bg(if grid_owns_edge { header_active_bg } else if review_focus_selected { proposal } else { accent })
         ))
         // Column letter with optional sort indicator
         // Add right padding when filter button is shown to prevent overlap
@@ -302,6 +313,13 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
     });
     let proposal = review_proposal_color(app);
 
+    let first_col = (0..app.view_state.frozen_cols).find(|&col| !app.is_col_hidden(col))
+        .or_else(|| app.nth_visible_col(0, app.view_state.scroll_col));
+    let grid_owns_edge = app.split_pane.is_none() && !review_focus_selected
+        && first_col.is_some_and(|col| {
+            super::grid::selection_borders_for_pane(&app.view_state, row, col).3
+        });
+
     div()
         .id(ElementId::NamedInteger("row-header".into(), row as u64))
         .flex_shrink_0()
@@ -317,7 +335,8 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
         .when(is_selected && !review_focus_selected, |div| div.bg(header_active_bg))
         .when(!is_selected && !is_filtered, |div| div.bg(header_bg))
         .when(!is_selected && is_filtered, |div| div.bg(accent.opacity(0.1)))
-        .border_1()
+        .border_r_1()
+        .border_b_1()
         .border_color(header_border)
         .when(is_selected && review_focus_selected, |div| div.text_color(proposal))
         .when(is_selected && !review_focus_selected, |div| div.text_color(header_active_text))
@@ -326,8 +345,9 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
         .cursor_pointer()
         .when(!is_selected, |d| d.hover(|s| s.bg(selection_bg.opacity(0.3))))
         .when(is_selected, |d| d.child(
-            div().absolute().top_0().bottom_0().right_0().w(px(2.0))
-                .bg(if review_focus_selected { proposal } else { accent })
+            div().absolute().top_0().bottom(px(-1.0)).right(px(-1.0))
+                .w(px(if grid_owns_edge { 1.0 } else { 2.0 }))
+                .bg(if grid_owns_edge { header_active_bg } else if review_focus_selected { proposal } else { accent })
         ))
         .child(format!("{}", data_row + 1))
         // Click handler for row selection
