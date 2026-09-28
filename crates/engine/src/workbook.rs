@@ -420,6 +420,13 @@ impl Workbook {
         &mut self.sheets
     }
 
+    /// Take the sheets out of the workbook. For callers that want one sheet
+    /// and are done with the workbook: moving it out instead of cloning keeps
+    /// a large import from briefly holding two copies of every cell (#18).
+    pub fn into_sheets(self) -> Vec<Sheet> {
+        self.sheets
+    }
+
     /// Create a workbook from sheets (for deserialization)
     /// Note: next_sheet_id should be set separately via set_next_sheet_id if loading from file
     /// Call `rebuild_dep_graph()` after loading to populate the dependency graph.

@@ -125,6 +125,7 @@ fn import_from_string(content: &str, delimiter: u8) -> Result<Sheet, String> {
 
     // Start with reasonable defaults, will track actual extent
     let mut sheet = Sheet::new(SheetId(1), visigrid_engine::sheet::NUM_ROWS, visigrid_engine::sheet::NUM_COLS);
+    sheet.reserve_cells(estimate_cells(content, delimiter));
     let mut max_row = 0usize;
     let mut max_col = 0usize;
 
@@ -153,7 +154,30 @@ fn import_from_string(content: &str, delimiter: u8) -> Result<Sheet, String> {
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
 
-    Ok(wb.sheets()[0].clone())
+    Ok(wb.into_sheets().swap_remove(0))
+}
+
+/// Rough count of the non-empty cells in `content`, for sizing the sheet before
+/// the import fills it: non-empty fields per record in a sample from the start,
+/// times the number of lines. Capped at one cell per two bytes (a value plus a
+/// delimiter), so a sparse file can't reserve more than it could hold.
+fn estimate_cells(content: &str, delimiter: u8) -> usize {
+    const SAMPLE: usize = 1000;
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(content.as_bytes());
+    let (mut records, mut filled) = (0usize, 0usize);
+    for record in reader.records().take(SAMPLE).flatten() {
+        records += 1;
+        filled += record.iter().filter(|f| !f.is_empty()).count();
+    }
+    if records == 0 {
+        return 0;
+    }
+    let lines = content.as_bytes().iter().filter(|&&b| b == b'\n').count().max(records);
+    (filled * lines / records).min(content.len() / 2)
 }
 
 pub fn export(sheet: &Sheet, path: &Path) -> Result<(), String> {
@@ -206,6 +230,24 @@ fn export_with_delimiter(sheet: &Sheet, path: &Path, delimiter: u8) -> Result<()
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn estimate_counts_filled_fields_per_line() {
+        let content = "1,a,\n2,b,x\n3,c,\n4,d,y\n";
+        // 6 of 12 sampled fields... per record: 2,3,2,3 = 10 over 4 records
+        assert_eq!(super::estimate_cells(content, b','), 10);
+        assert_eq!(super::estimate_cells("", b','), 0);
+    }
+
+    #[test]
+    fn estimate_never_exceeds_what_the_bytes_could_hold() {
+        // Dense first rows, then a long empty tail: the per-record rate from
+        // the sample would claim ~3 cells for every line of the tail.
+        let mut content = String::from("a,b,c\n").repeat(10);
+        content.push_str(&"\n".repeat(100_000));
+        let estimate = super::estimate_cells(&content, b',');
+        assert!(estimate <= content.len() / 2, "{estimate} > {}", content.len() / 2);
+    }
 
     /// A formula may name a row further down the file.
     ///

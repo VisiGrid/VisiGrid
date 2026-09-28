@@ -474,6 +474,13 @@ impl CellLookup for Sheet {
 
 impl Sheet {
     /// Create a new sheet with the given dimensions and a unique ID
+    /// Make room for about `additional` more cells up front. An importer that
+    /// knows roughly how many cells are coming avoids the table doubling
+    /// mid-load, when the old and new tables are both alive (#18).
+    pub fn reserve_cells(&mut self, additional: usize) {
+        self.cells.reserve(additional);
+    }
+
     pub fn new(id: SheetId, rows: usize, cols: usize) -> Self {
         let name = String::from("Sheet1");
         let name_key = normalize_sheet_name(&name);

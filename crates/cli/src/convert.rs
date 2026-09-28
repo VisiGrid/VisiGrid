@@ -359,7 +359,7 @@ pub(crate) fn cmd_convert(
             let out_sheet = if row_filter.is_some() || col_filter.is_some() {
                 materialize_filtered(&sheet, header_row, headers, row_filter.as_deref(), col_filter.as_deref())
             } else {
-                sheet.clone()
+                sheet
             };
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![out_sheet], 0);
             match output {
@@ -385,7 +385,7 @@ pub(crate) fn cmd_convert(
             let out_sheet = if row_filter.is_some() || col_filter.is_some() {
                 materialize_filtered(&sheet, header_row, headers, row_filter.as_deref(), col_filter.as_deref())
             } else {
-                sheet.clone()
+                sheet
             };
             visigrid_io::native::save(&out_sheet, &path)
                 .map_err(CliError::io)?;
@@ -529,14 +529,14 @@ pub(crate) fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_
         Format::Xlsx => {
             let (workbook, _stats) = visigrid_io::xlsx::import(path)
                 .map_err(CliError::parse)?;
-            let (_, sheet) = resolve_sheet(&workbook, sheet_arg)?;
-            Ok(sheet.clone())
+            let (idx, _) = resolve_sheet(&workbook, sheet_arg)?;
+            Ok(workbook.into_sheets().swap_remove(idx))
         }
         Format::Sheet => {
             let workbook = visigrid_io::native::load_workbook(path)
                 .map_err(CliError::io)?;
-            let (_, sheet) = resolve_sheet(&workbook, sheet_arg)?;
-            Ok(sheet.clone())
+            let (idx, _) = resolve_sheet(&workbook, sheet_arg)?;
+            Ok(workbook.into_sheets().swap_remove(idx))
         }
         Format::JsonFull => {
             let content = std::fs::read_to_string(path)
@@ -544,10 +544,10 @@ pub(crate) fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_
             let (workbook, _, active) = visigrid_io::json::import_any(&content).map_err(CliError::io)?;
             match sheet_arg {
                 Some(_) => {
-                    let (_, sheet) = resolve_sheet(&workbook, sheet_arg)?;
-                    Ok(sheet.clone())
+                    let (idx, _) = resolve_sheet(&workbook, sheet_arg)?;
+                    Ok(workbook.into_sheets().swap_remove(idx))
                 }
-                None => Ok(workbook.sheets()[active].clone()),
+                None => Ok(workbook.into_sheets().swap_remove(active)),
             }
         }
         Format::Json => {

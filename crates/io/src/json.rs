@@ -827,7 +827,7 @@ pub fn import_full(content: &str) -> Result<Sheet, String> {
 /// Import visigrid-json into a Sheet plus its presentation side-car.
 pub fn import_full_with_layout(content: &str) -> Result<(Sheet, SheetLayout), String> {
     let (wb, mut layouts, active) = import_any(content)?;
-    let sheet = wb.sheets()[active].clone();
+    let sheet = wb.into_sheets().swap_remove(active);
     let layout = if active < layouts.len() { layouts.swap_remove(active) } else { SheetLayout::default() };
     Ok((sheet, layout))
 }
