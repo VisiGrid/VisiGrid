@@ -18,7 +18,7 @@ pub enum CloudSyncState {
     /// Upload failed
     Error,
     /// The cloud copy changed since this file last synced; uploads are held
-    /// until the user overwrites the cloud copy.
+    /// until the user overwrites the cloud copy or re-opens it from the cloud.
     Conflict,
 }
 

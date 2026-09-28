@@ -7,7 +7,7 @@
 // Every upload names the revision the file last synced at. If the cloud copy
 // moved past it (an edit in the browser, another machine), the server refuses
 // and the file enters Conflict: nothing is uploaded until the user chooses to
-// overwrite the cloud copy.
+// overwrite the cloud copy or re-open it from the cloud.
 
 use crate::app::Spreadsheet;
 use crate::cloud::identity::CloudSyncState;
@@ -76,7 +76,7 @@ impl Spreadsheet {
             self.cloud_last_error = Some("This file was linked before conflict checks.".to_string());
             self.status_message = Some(
                 "Cloud sync paused: can't tell whether the cloud copy changed. \
-                 Click the cloud indicator to compare in the browser, then run \"Cloud: Overwrite Cloud Copy\" to upload this file."
+                 Run \"Cloud: Overwrite Cloud Copy\" to upload this file, or File > Open Cloud to take the cloud version."
                     .to_string(),
             );
             cx.notify();
@@ -182,7 +182,7 @@ impl Spreadsheet {
                         });
                         this.status_message = Some(
                             "The cloud copy changed since this file last synced. Your file is saved locally and was not uploaded. \
-                             Click the cloud indicator to see the cloud version, or run \"Cloud: Overwrite Cloud Copy\" to replace it."
+                             Run \"Cloud: Overwrite Cloud Copy\" to replace it, or File > Open Cloud to take the cloud version (your copy is kept)."
                                 .to_string(),
                         );
                         cx.notify();

@@ -95,6 +95,10 @@ impl Spreadsheet {
 
     /// Open the cloud sheet picker: fetches sheet list, stores it, and shows the dialog.
     pub fn cloud_open(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.cloud_sheets_loading {
+            return;
+        }
+        self.status_message = Some("Loading cloud sheets...".to_string());
         self.cloud_sheets_loading = true;
         self.cloud_sheets_list = Vec::new();
         self.cloud_selected_sheet = None;
@@ -110,6 +114,7 @@ impl Spreadsheet {
                 this.cloud_sheets_loading = false;
                 match result {
                     Ok(sheets) => {
+                        this.status_message = None;
                         this.cloud_sheets_list = sheets;
                         this.cloud_selected_sheet = if this.cloud_sheets_list.is_empty() { None } else { Some(0) };
                         // Switch to GoTo mode to show the picker (reusing the dialog pattern)
@@ -127,12 +132,43 @@ impl Spreadsheet {
         }).detach();
     }
 
+    pub fn cloud_picker_up(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(idx) = self.cloud_selected_sheet {
+            if idx > 0 {
+                self.cloud_selected_sheet = Some(idx - 1);
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn cloud_picker_down(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(idx) = self.cloud_selected_sheet {
+            if idx + 1 < self.cloud_sheets_list.len() {
+                self.cloud_selected_sheet = Some(idx + 1);
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn cloud_picker_cancel(&mut self, cx: &mut gpui::Context<Self>) {
+        self.mode = crate::mode::Mode::Navigation;
+        cx.notify();
+    }
+
     /// Download and open the selected cloud sheet.
     pub fn cloud_open_selected(&mut self, cx: &mut gpui::Context<Self>) {
         let selected = match self.cloud_selected_sheet {
             Some(idx) if idx < self.cloud_sheets_list.len() => self.cloud_sheets_list[idx].clone(),
             _ => return,
         };
+
+        // Opening replaces this window's workbook.
+        if self.history.is_dirty() {
+            self.mode = crate::mode::Mode::Navigation;
+            self.status_message = Some("Save your changes before opening a cloud sheet.".to_string());
+            cx.notify();
+            return;
+        }
 
         self.mode = crate::mode::Mode::Navigation;
         self.status_message = Some(format!("Downloading {}...", selected.name));
@@ -141,6 +177,7 @@ impl Spreadsheet {
         let sheet_id = selected.id;
         let public_id = selected.public_id.clone();
         let sheet_name = selected.name.clone();
+        let sheet_name_for_status = selected.name.clone();
         let slug = selected.slug.clone();
 
         cx.spawn(async move |this, cx| {
@@ -169,20 +206,44 @@ impl Spreadsheet {
 
                     let file_path = cloud_cache_dir().join(format!("{}.sheet", slug));
 
-                    if let Some(bytes) = maybe_bytes {
+                    // The cache file may hold edits that never reached the
+                    // cloud (offline, or a conflict). Keep it rather than
+                    // writing the download over it.
+                    let backup = {
                         let fp = file_path.clone();
-                        if let Err(e) = smol::unblock(move || materialize_cloud_blob(&fp, &bytes)).await {
-                            let _ = this.update(cx, |this, cx| {
-                                this.status_message = Some(format!("Failed to write file: {}", e));
-                                cx.notify();
-                            });
-                            return;
+                        smol::unblock(move || keep_previous_copy(&fp)).await
+                    };
+
+                    let written = {
+                        let fp = file_path.clone();
+                        smol::unblock(move || match maybe_bytes {
+                            Some(bytes) => materialize_cloud_blob(&fp, &bytes),
+                            // A sheet created on the web but never saved has no data yet.
+                            None => native::save_workbook(&visigrid_engine::workbook::Workbook::new(), &fp),
+                        }).await
+                    };
+                    if let Err(e) = written {
+                        // Put the local copy back where it was.
+                        if let Some(prev) = &backup {
+                            let _ = std::fs::rename(prev, &file_path);
                         }
+                        let _ = this.update(cx, |this, cx| {
+                            this.status_message = Some(format!("Failed to write file: {}", e));
+                            cx.notify();
+                        });
+                        return;
                     }
 
                     let _ = this.update(cx, |this, cx| {
                         // Load the downloaded file
                         this.load_file(&file_path, cx);
+
+                        // load_file reports its own failure. Without this check
+                        // the identity would attach to whatever file was open
+                        // before, and its next save would upload over this sheet.
+                        if this.current_file.as_ref() != Some(&file_path) {
+                            return;
+                        }
 
                         // Attach cloud identity
                         let identity = CloudIdentity {
@@ -203,6 +264,13 @@ impl Spreadsheet {
 
                         this.cloud_identity = Some(identity);
                         this.cloud_sync_state = CloudSyncState::Synced;
+                        this.status_message = Some(match &backup {
+                            Some(prev) => format!(
+                                "Opened {} from the cloud. The previous local copy is kept at {}",
+                                sheet_name_for_status, prev.display()
+                            ),
+                            None => format!("Opened {} from the cloud", sheet_name_for_status),
+                        });
                         cx.notify();
                     });
                 }
@@ -216,6 +284,18 @@ impl Spreadsheet {
             }
         }).detach();
     }
+}
+
+/// Move an existing cache file to `<slug>.previous.sheet` (replacing any older
+/// one) so a download never overwrites local edits. Returns where it went.
+fn keep_previous_copy(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    let prev = path.with_file_name(format!("{}.previous.sheet", stem));
+    std::fs::rename(path, &prev).ok()?;
+    Some(prev)
 }
 
 /// Write a cloud blob to a local `.sheet` file, converting visigrid-json

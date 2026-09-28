@@ -487,6 +487,29 @@ pub(crate) fn handle_key_down(
         }
     }
 
+    // Handle Cloud Open picker
+    if this.mode == Mode::CloudOpen {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                this.cloud_picker_cancel(cx);
+                return;
+            }
+            "enter" => {
+                this.cloud_open_selected(cx);
+                return;
+            }
+            "up" => {
+                this.cloud_picker_up(cx);
+                return;
+            }
+            "down" => {
+                this.cloud_picker_down(cx);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     // Handle Theme Picker mode
     if this.mode == Mode::ThemePicker {
         match event.keystroke.key.as_str() {

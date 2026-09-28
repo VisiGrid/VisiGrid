@@ -307,6 +307,7 @@ pub(crate) fn bind(
                 Mode::Preferences => { this.apply_cell_size_input(cx); }
                 Mode::ColorPicker => this.color_picker_execute(window, cx),
                 Mode::ThemePicker => this.theme_picker_execute(window, cx),
+                Mode::CloudOpen => this.cloud_open_selected(cx),
                 Mode::FontPicker => this.font_picker_execute(cx),
                 Mode::Command => this.palette_execute(window, cx),
                 Mode::GoTo => this.confirm_goto(cx),
@@ -328,7 +329,7 @@ pub(crate) fn bind(
             }
             // Shift+Enter: confirm and move up (or just move up in nav mode)
             match this.mode {
-                Mode::ThemePicker | Mode::FontPicker | Mode::Command | Mode::GoTo => {
+                Mode::ThemePicker | Mode::FontPicker | Mode::Command | Mode::GoTo | Mode::CloudOpen => {
                     // Shift+Enter does nothing special in these modes
                 }
                 _ => {
@@ -400,6 +401,8 @@ pub(crate) fn bind(
                 this.cancel_format_painter(cx);
             } else if this.mode == Mode::ThemePicker {
                 this.hide_theme_picker(cx);
+            } else if this.mode == Mode::CloudOpen {
+                this.cloud_picker_cancel(cx);
             } else if this.mode == Mode::About {
                 this.hide_about(cx);
             } else if this.mode == Mode::RenameSymbol {
