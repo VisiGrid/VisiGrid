@@ -231,6 +231,23 @@ impl Spreadsheet {
             return;
         }
 
+        // A strip of cells under (or beside) data: one SUM per column (or
+        // row), written directly, as Excel does (#20). Running the scan once
+        // for the active cell and multi-editing the result put an empty
+        // =SUM() in every cell. Single cells and other shapes keep the
+        // edit-mode flow below.
+        if self.view_state.additional_selections.is_empty() {
+            let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+            if min_row == max_row && max_col > min_col {
+                self.autosum_strip(min_row, min_col, max_col, true, cx);
+                return;
+            }
+            if min_col == max_col && max_row > min_row {
+                self.autosum_strip(min_col, min_row, max_row, false, cx);
+                return;
+            }
+        }
+
         let (row, col) = self.view_state.selected;
 
         // Find contiguous numeric cells above
@@ -310,80 +327,89 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Find contiguous numeric cells above the given cell
+    /// AutoSum over a one-row strip (`horizontal`: each cell totals the data
+    /// above it) or a one-column strip (each cell totals the data to its
+    /// left). `fixed` is the strip's row (or column), `from..=to` its extent.
+    /// Cells with nothing to total are left alone. One undo step.
+    fn autosum_strip(&mut self, fixed: usize, from: usize, to: usize, horizontal: bool, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        if self.block_if_merged("AutoSum", cx) { return; }
+
+        let mut writes = Vec::new();
+        for i in from..=to {
+            let (row, col) = if horizontal { (fixed, i) } else { (i, fixed) };
+            let formula = if horizontal {
+                self.find_numeric_range_above(row, col, cx).map(|(start, end)| {
+                    format!("=SUM({}:{})", self.cell_ref_at(start, col), self.cell_ref_at(end, col))
+                })
+            } else {
+                self.find_numeric_range_left(row, col, cx).map(|(start, end)| {
+                    format!("=SUM({}:{})", self.cell_ref_at(row, start), self.cell_ref_at(row, end))
+                })
+            };
+            if let Some(formula) = formula {
+                writes.push((row, col, formula));
+            }
+        }
+
+        if writes.is_empty() {
+            self.status_message = Some(if horizontal {
+                "AutoSum: no numbers above the selection".to_string()
+            } else {
+                "AutoSum: no numbers to the left of the selection".to_string()
+            });
+            cx.notify();
+            return;
+        }
+
+        let mut changes = Vec::new();
+        self.workbook.update(cx, |wb, _| wb.begin_batch());
+        for (row, col, formula) in &writes {
+            let old_value = self.sheet(cx).get_raw(*row, *col);
+            if old_value != *formula {
+                changes.push(CellChange { row: *row, col: *col, old_value, new_value: formula.clone() });
+            }
+            self.set_cell_value(*row, *col, formula, cx);
+        }
+        self.end_batch_and_broadcast(cx);
+
+        if !changes.is_empty() {
+            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, None);
+            self.bump_cells_rev();
+            self.is_modified = true;
+            self.maybe_smoke_recalc(cx);
+        }
+        self.status_message = Some(format!("AutoSum: {} total{}", writes.len(), if writes.len() == 1 { "" } else { "s" }));
+        cx.notify();
+    }
+
+    /// Numeric run above the given cell (see [`autosum_run`]).
     /// Returns (start_row, end_row) if found, None otherwise
     fn find_numeric_range_above(&self, row: usize, col: usize, cx: &App) -> Option<(usize, usize)> {
-        if row == 0 {
-            return None;
-        }
-
-        let end_row = row - 1;
-        let mut start_row = end_row;
-
-        // Check if the cell above is numeric
-        if !self.is_cell_numeric(end_row, col, cx) {
-            return None;
-        }
-
-        // Walk upward finding contiguous numeric cells
-        while start_row > 0 && self.is_cell_numeric(start_row - 1, col, cx) {
-            start_row -= 1;
-        }
-
-        // Need at least 2 cells
-        if end_row - start_row + 1 >= 2 {
-            Some((start_row, end_row))
-        } else {
-            // Single cell - still include it
-            Some((start_row, end_row))
-        }
+        autosum_run(row, |r| self.autosum_kind(r, col, cx))
     }
 
-    /// Find contiguous numeric cells to the left of the given cell
+    /// Numeric run to the left of the given cell (see [`autosum_run`]).
     /// Returns (start_col, end_col) if found, None otherwise
     fn find_numeric_range_left(&self, row: usize, col: usize, cx: &App) -> Option<(usize, usize)> {
-        if col == 0 {
-            return None;
-        }
-
-        let end_col = col - 1;
-        let mut start_col = end_col;
-
-        // Check if the cell to the left is numeric
-        if !self.is_cell_numeric(row, end_col, cx) {
-            return None;
-        }
-
-        // Walk leftward finding contiguous numeric cells
-        while start_col > 0 && self.is_cell_numeric(row, start_col - 1, cx) {
-            start_col -= 1;
-        }
-
-        // Need at least 2 cells
-        if end_col - start_col + 1 >= 2 {
-            Some((start_col, end_col))
-        } else {
-            // Single cell - still include it
-            Some((start_col, end_col))
-        }
+        autosum_run(col, |c| self.autosum_kind(row, c, cx))
     }
 
-    /// Check if a cell contains a numeric value (not empty, not text, not error)
-    fn is_cell_numeric(&self, row: usize, col: usize, cx: &App) -> bool {
+    /// Classify a cell for AutoSum: blank, numeric (a number, or a formula
+    /// showing one), or anything else.
+    fn autosum_kind(&self, row: usize, col: usize, cx: &App) -> AutosumKind {
         let raw = self.sheet(cx).get_raw(row, col);
         if raw.is_empty() {
-            return false;
+            return AutosumKind::Blank;
         }
 
         // If it's a formula, check the result
-        if raw.starts_with('=') {
-            let display = self.sheet(cx).get_display(row, col);
-            // Check if display is a number
-            display.parse::<f64>().is_ok()
+        let numeric = if raw.starts_with('=') {
+            self.sheet(cx).get_display(row, col).parse::<f64>().is_ok()
         } else {
-            // Check if raw value is a number
             raw.parse::<f64>().is_ok()
-        }
+        };
+        if numeric { AutosumKind::Numeric } else { AutosumKind::Other }
     }
 
     /// Get cell reference string at given row, col (e.g., "A1", "B5")
@@ -1184,5 +1210,84 @@ impl Spreadsheet {
             Value::Empty => String::new(),
             Value::Error(e) => format!("{}", e),
         }
+    }
+}
+
+/// What AutoSum sees in a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutosumKind {
+    Blank,
+    Numeric,
+    Other,
+}
+
+/// The run of numeric cells AutoSum should total, looking back from `pos`
+/// (exclusive) toward 0 along one axis. Returns `(start, end)`, inclusive.
+///
+/// Blank cells directly before `pos` are skipped first, as Excel and
+/// LibreOffice do: a total separated from its data by a spacer row is the
+/// most common report layout (#20). The run then extends back while cells
+/// stay numeric. None when the first non-blank cell isn't numeric, or there
+/// is nothing before `pos`.
+pub(crate) fn autosum_run(pos: usize, kind: impl Fn(usize) -> AutosumKind) -> Option<(usize, usize)> {
+    let mut end = pos.checked_sub(1)?;
+    while kind(end) == AutosumKind::Blank {
+        end = end.checked_sub(1)?;
+    }
+    if kind(end) != AutosumKind::Numeric {
+        return None;
+    }
+    let mut start = end;
+    while start > 0 && kind(start - 1) == AutosumKind::Numeric {
+        start -= 1;
+    }
+    Some((start, end))
+}
+
+#[cfg(test)]
+mod autosum_tests {
+    use super::{autosum_run, AutosumKind};
+    use AutosumKind::{Blank as B, Numeric as N, Other as T};
+
+    fn run(cells: &[AutosumKind], pos: usize) -> Option<(usize, usize)> {
+        autosum_run(pos, |i| cells[i])
+    }
+
+    #[test]
+    fn data_directly_above() {
+        // header, 3 numbers, total at 4
+        assert_eq!(run(&[T, N, N, N, B], 4), Some((1, 3)));
+    }
+
+    #[test]
+    fn skips_a_blank_spacer_between_data_and_total() {
+        // #20: D4:D10 numbers, D11 blank, total in D12
+        let mut col = vec![B, B, B, T];
+        col.extend([N; 7]);
+        col.extend([B, B]);
+        assert_eq!(run(&col, 11), Some((4, 10)));
+    }
+
+    #[test]
+    fn skips_several_blanks_but_not_text() {
+        assert_eq!(run(&[N, N, B, B, B, B], 5), Some((0, 1)));
+        // text directly above (after blanks) is a label, not data
+        assert_eq!(run(&[N, N, T, B, B], 4), None);
+    }
+
+    #[test]
+    fn a_blank_inside_the_data_ends_the_run() {
+        assert_eq!(run(&[N, N, B, N, N, B], 5), Some((3, 4)));
+    }
+
+    #[test]
+    fn nothing_before_or_all_blank() {
+        assert_eq!(run(&[B], 0), None);
+        assert_eq!(run(&[B, B, B], 2), None);
+    }
+
+    #[test]
+    fn single_numeric_cell_is_a_run() {
+        assert_eq!(run(&[N, B], 1), Some((0, 0)));
     }
 }
