@@ -20,6 +20,15 @@ fn primary_mod(style: ModifierStyle) -> &'static str {
     }
 }
 
+/// The primary modifier as users read it ("Cmd" or "Ctrl"), matching what
+/// `register` binds, for hints that name a shortcut.
+pub fn primary_mod_label(style: ModifierStyle) -> &'static str {
+    match primary_mod(style) {
+        "cmd" => "Cmd",
+        _ => "Ctrl",
+    }
+}
+
 /// Build a keybinding string with the primary modifier
 fn kb(style: ModifierStyle, key: &str) -> String {
     format!("{}-{}", primary_mod(style), key)
@@ -419,4 +428,21 @@ pub fn register_alt_accelerators(cx: &mut App) {
 #[cfg(not(target_os = "macos"))]
 pub fn register_alt_accelerators(_cx: &mut App) {
     // On Windows/Linux, native Alt menus exist, so this is a no-op
+}
+
+#[cfg(test)]
+mod primary_mod_label_tests {
+    use super::{primary_mod_label, ModifierStyle};
+
+    /// The hint must name the key `register` binds (#21).
+    #[test]
+    fn label_matches_the_bound_modifier() {
+        assert_eq!(primary_mod_label(ModifierStyle::Ctrl), "Ctrl");
+        let platform = primary_mod_label(ModifierStyle::Platform);
+        if cfg!(target_os = "macos") {
+            assert_eq!(platform, "Cmd");
+        } else {
+            assert_eq!(platform, "Ctrl");
+        }
+    }
 }

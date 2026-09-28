@@ -140,10 +140,20 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
                 .gap_4()
                 // Multi-selection hint (context-aware)
                 .when(app.is_multi_selection(), |d| {
+                    // Name the modifier the binding actually uses: Cmd on a
+                    // Mac with the platform style, not a hard-coded Ctrl (#21).
+                    let m = crate::keybindings::primary_mod_label(
+                        crate::settings::user_settings(cx)
+                            .navigation
+                            .modifier_style
+                            .as_value()
+                            .copied()
+                            .unwrap_or_default(),
+                    );
                     let hint = if editing {
-                        "Enter: this cell · Ctrl+Enter: apply to selection · Esc: cancel"
+                        format!("Enter: this cell · {m}+Enter: apply to selection · Esc: cancel")
                     } else {
-                        "Type to edit · Ctrl+Enter fills selection"
+                        format!("Type to edit · {m}+Enter fills selection")
                     };
                     d.child(
                         div()
