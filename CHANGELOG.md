@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.37.0
+
+### Formulas
+
+- **AutoSum skips a blank row between your data and the total.** With numbers in D4:D10, an empty D11 and the total in D12, `Alt+=` now proposes `=SUM(D4:D10)`, as Excel and LibreOffice do. It used to insert an empty `=SUM()`. A text cell above the blank still counts as a label, so headers stay out of the sum. ([#20](https://github.com/VisiGrid/VisiGrid/issues/20))
+- **AutoSum over a row of cells totals each column.** Select the cells under your data, say D11:F11, and press `Alt+=`: each cell gets the SUM of its own column, in one undo step. A column of cells beside the data gets one SUM per row. Previously every cell got an empty `=SUM()`. ([#20](https://github.com/VisiGrid/VisiGrid/issues/20))
+
+### Files
+
+- **Excel text follows your theme.** Excel stores its default text colour as "automatic", and VisiGrid imported it as black, so an xlsx opened in a dark theme showed near-black text on the dark grid and looked empty. Automatic text now takes the theme's text colour. Text that was coloured on purpose, including white header text, keeps its colour. On a filled cell, automatic text is drawn black or white to contrast with the fill, so sheets filled white to hide gridlines stay readable. Files VisiGrid saves to xlsx come back the same way. ([#22](https://github.com/VisiGrid/VisiGrid/issues/22))
+- **Importing a large CSV takes about half the memory.** A 1M-row by 5-column CSV peaked at about 1 GB during import and now peaks at about 560 MB. The importer no longer holds two copies of the sheet, and it sizes its storage up front instead of growing it mid-load. `vgrid convert` benefits the same way. ([#18](https://github.com/VisiGrid/VisiGrid/issues/18))
+- **A large open workbook uses about half the memory.** The app kept a second full copy of every workbook for rewind preview. Above 1M cells it no longer does, and rewind preview says it is unavailable for workbooks that large. The same 1M-row CSV now sits at about 690 MB in the app instead of 1.26 GB. ([#18](https://github.com/VisiGrid/VisiGrid/issues/18))
+
+### Cloud
+
+- **Saving a cloud sheet on the desktop no longer overwrites edits made in the browser.** The desktop never told the server which version it had last synced, so its next save silently replaced anything changed on app.visigrid.app. It now checks. If the cloud copy has changed, the status bar shows "Cloud copy changed" and nothing is uploaded; your file stays saved locally. Run **Cloud: Overwrite Cloud Copy** from the command palette to replace the cloud version, or use File > Open Cloud to take it. Files linked to the cloud before this release pause once on their next save, since their version is unknown.
+- **File > Open Cloud works.** It fetched your sheets and then showed nothing. It now lists them, most recently edited first; double-click or press Enter to open one. A local copy with unsynced edits is kept as `.previous.sheet` rather than overwritten.
+- **An expired sign-in no longer strands cloud sync.** A rejected token showed only as an error, and Hub: Sign In refused with "Already signed in". VisiGrid now clears the stale sign-in and opens sign-in the next time you use the cloud.
+
+### Interface
+
+- **The multi-edit hint names the right key on a Mac.** With several cells selected, the status bar said `Ctrl+Enter` applies the edit to the selection. On macOS the key is `Cmd+Enter`, and the hint now says so. ([#21](https://github.com/VisiGrid/VisiGrid/issues/21))
+
 ## 0.36.0
 
 ### Formulas
