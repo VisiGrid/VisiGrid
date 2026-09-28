@@ -451,6 +451,44 @@ fn parse_color_attrs(attrs: &[(Vec<u8>, Vec<u8>)], theme: &ThemePalette) -> Opti
     Some([r, g, b, base[3]])
 }
 
+/// A font's `<color>`, with Excel's "automatic" read as no colour.
+///
+/// Excel writes its default font as `theme="1"` (Text 1), and renders it as
+/// the window text colour, not as black. Resolved through the palette it
+/// became an explicit black that overrode the editor theme, so every imported
+/// cell went black-on-dark in a dark theme (#22). `indexed="64"` (system
+/// foreground) and `auto="1"` mean the same thing in older files. Left as
+/// `None`, the cell follows the theme.
+///
+/// Only fonts: `parse_color_attrs` also serves fills and borders, where
+/// Text 1 is a real colour. A tinted Text 1 and an explicit `rgb` black stay
+/// explicit, and so does `theme="0"`: that is white chosen on purpose, as in
+/// white header text on a dark fill.
+fn parse_font_color(attrs: &[(Vec<u8>, Vec<u8>)], theme: &ThemePalette) -> Option<[u8; 4]> {
+    let get = |name: &[u8]| {
+        attrs
+            .iter()
+            .find(|(key, _)| key.as_slice() == name)
+            .map(|(_, value)| value.as_slice())
+    };
+    if matches!(get(b"auto"), Some(b"1") | Some(b"true")) {
+        return None;
+    }
+    if get(b"rgb").is_none() {
+        if get(b"indexed") == Some(b"64") {
+            return None;
+        }
+        let untinted = get(b"tint")
+            .and_then(|t| std::str::from_utf8(t).ok())
+            .and_then(|t| t.parse::<f64>().ok())
+            .map_or(true, |t| t == 0.0);
+        if get(b"indexed").is_none() && get(b"theme") == Some(b"1") && untinted {
+            return None;
+        }
+    }
+    parse_color_attrs(attrs, theme)
+}
+
 /// Parse AARRGGBB hex string to RGBA [u8; 4].
 fn parse_argb_hex(hex: &[u8]) -> Option<[u8; 4]> {
     let s = std::str::from_utf8(hex).ok()?;
@@ -610,7 +648,7 @@ fn parse_fonts(xml: &str, theme: &ThemePalette) -> Vec<ParsedFont> {
                     }
                     b"color" if depth == 2 => {
                         let attrs = collect_attrs(e);
-                        current_font.color = parse_color_attrs(&attrs, theme);
+                        current_font.color = parse_font_color(&attrs, theme);
                     }
                     _ => {}
                 }
@@ -633,7 +671,7 @@ fn parse_fonts(xml: &str, theme: &ThemePalette) -> Vec<ParsedFont> {
                     }
                     b"color" => {
                         let attrs = collect_attrs(e);
-                        current_font.color = parse_color_attrs(&attrs, theme);
+                        current_font.color = parse_font_color(&attrs, theme);
                     }
                     b"name" | b"rFont" => {
                         for attr in e.attributes().flatten() {
@@ -1737,6 +1775,38 @@ fn resolve_rel_target(target: &str) -> String {
 mod tests {
     use super::*;
 
+    /// #22: Excel's automatic font colour must import as no colour, so the
+    /// cell follows the editor theme instead of being pinned to black.
+    #[test]
+    fn automatic_font_colours_import_as_none() {
+        let xml = r#"<styleSheet><fonts count="7">
+            <font><sz val="11"/><color theme="1"/><name val="Calibri"/></font>
+            <font><sz val="11"/><color theme="1" tint="0.499984740745262"/></font>
+            <font><sz val="11"/><color rgb="FF000000"/></font>
+            <font><sz val="11"/><color auto="1"/></font>
+            <font><sz val="11"/><color indexed="64"/></font>
+            <font><sz val="11"/><color theme="0"/></font>
+            <font><sz val="11"/><color theme="1" tint="0"/></font>
+        </fonts></styleSheet>"#;
+        let fonts = parse_fonts(xml, &ThemePalette::default());
+        let colors: Vec<_> = fonts.iter().map(|f| f.color).collect();
+        assert_eq!(colors[0], None, "theme=1 is automatic");
+        let grey = colors[1].expect("tinted Text 1 is a real colour");
+        assert!(grey[0] > 100 && grey[0] == grey[1] && grey[1] == grey[2], "{grey:?}");
+        assert_eq!(colors[2], Some([0, 0, 0, 255]), "explicit rgb black stays");
+        assert_eq!(colors[3], None, "auto=1");
+        assert_eq!(colors[4], None, "indexed=64 is system foreground");
+        assert_eq!(colors[5], Some([255, 255, 255, 255]), "theme=0 is white on purpose");
+        assert_eq!(colors[6], None, "tint=0 is untinted");
+    }
+
+    /// Text 1 is still a real colour on fills and borders.
+    #[test]
+    fn text1_stays_black_outside_fonts() {
+        let attrs = vec![(b"theme".to_vec(), b"1".to_vec())];
+        assert_eq!(parse_color_attrs(&attrs, &ThemePalette::default()), Some([0, 0, 0, 255]));
+    }
+
     #[test]
     fn test_parse_argb_hex() {
         // AARRGGBB
@@ -2392,7 +2462,7 @@ pub fn parse_dxfs(xml: &str, theme: &ThemePalette) -> Vec<ParsedDxf> {
                     }
                     b"color" if in_font => {
                         let attrs = collect_attrs(e);
-                        current.font_color = parse_color_attrs(&attrs, theme);
+                        current.font_color = parse_font_color(&attrs, theme);
                     }
                     // bgColor is the solid colour in a dxf; fgColor appears too
                     // in files written by some tools, so accept either.

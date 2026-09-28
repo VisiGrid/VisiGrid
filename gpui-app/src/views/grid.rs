@@ -1278,7 +1278,7 @@ fn render_cell(
                 || format.strikethrough
                 || format.font_family.is_some()
                 || format.font_size.is_some()
-                || format.font_color.is_some()
+                || effective_font_color(&format).is_some()
                 || role_has_formatting
                 || style_has_formatting;
 
@@ -1287,6 +1287,15 @@ fn render_cell(
                 // Build text style with ALL formatting properties
                 let mut text_style = window.text_style();
                 text_style.color = cell_text;
+
+                // Automatic text on an explicit fill contrasts with the fill
+                // (#22). Lowest precedence: role, cell style and the cell's
+                // own font colour below all override it.
+                if format.font_color.is_none() && !is_editing && !is_selected && !is_multi_edit_preview {
+                    if let Some(rgba) = effective_font_color(&format) {
+                        text_style.color = rgba_to_hsla(rgba);
+                    }
+                }
 
                 // Apply role-based text color if present (overrides default, but format.font_color wins)
                 if let Some(role_color) = role_style.and_then(|rs| rs.text_color) {
@@ -2797,7 +2806,7 @@ fn render_merge_text(
         || format.strikethrough
         || format.font_family.is_some()
         || format.font_size.is_some()
-        || format.font_color.is_some()
+        || effective_font_color(&format).is_some()
         || cs.bold || cs.italic || cs.text.is_some();
 
     let text_color = app.token(TokenKey::CellText);
@@ -2806,6 +2815,14 @@ fn render_merge_text(
         let mut text_style = window.text_style();
         text_style.color = text_color;
         text_style.font_size = px(app.cell_font_size(None)).into();
+
+        // Automatic text on an explicit fill contrasts with it (#22); the
+        // cell style and an explicit font colour below override this.
+        if format.font_color.is_none() {
+            if let Some(rgba) = effective_font_color(&format) {
+                text_style.color = rgba_to_hsla(rgba);
+            }
+        }
 
         // Cell style text color (explicit font_color wins below)
         if let Some(style_color) = cs.text {
@@ -3077,6 +3094,9 @@ fn render_region_text_spill(
                     // theme's selection text color (matters for inverse-video
                     // themes like VisiCalc)
                     selection_text
+                } else if let Some(rgba) = effective_font_color(&format) {
+                    // Automatic text on an explicit fill (#22)
+                    rgba_to_hsla(rgba)
                 } else {
                     cell_text
                 },
@@ -3337,5 +3357,76 @@ mod frozen_overlay_tests {
         assert_eq!(plain.len(), 1);
         assert_eq!((plain[0].x, plain[0].y), (0.0, 0.0));
         assert!(plain[0].width.is_none() && plain[0].height.is_none());
+    }
+}
+
+/// The text colour to paint: the cell's own font colour if it has one;
+/// otherwise, on an explicit fill, black or white by the fill's luminance;
+/// otherwise `None`, meaning the editor theme's text colour.
+///
+/// Automatic text (no font colour, which is how Excel's default font now
+/// imports, #22) follows the theme. On a filled cell that would put a dark
+/// theme's light text on, say, a white fill: workbooks fill cells white on
+/// purpose, to hide gridlines. Picking by the fill keeps those readable, and
+/// is what "automatic" means against a coloured background.
+pub(crate) fn effective_font_color(format: &visigrid_engine::cell::CellFormat) -> Option<[u8; 4]> {
+    format.font_color.or_else(|| {
+        format
+            .background_color
+            .filter(|bg| bg[3] > 0)
+            .map(contrasting_text_color)
+    })
+}
+
+fn rgba_to_hsla(rgba: [u8; 4]) -> gpui::Hsla {
+    gpui::Hsla::from(gpui::Rgba {
+        r: rgba[0] as f32 / 255.0,
+        g: rgba[1] as f32 / 255.0,
+        b: rgba[2] as f32 / 255.0,
+        a: rgba[3] as f32 / 255.0,
+    })
+}
+
+/// Black or white, whichever contrasts more with `bg` (WCAG luminance).
+fn contrasting_text_color(bg: [u8; 4]) -> [u8; 4] {
+    fn linear(c: u8) -> f64 {
+        let c = c as f64 / 255.0;
+        if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    }
+    let l = 0.2126 * linear(bg[0]) + 0.7152 * linear(bg[1]) + 0.0722 * linear(bg[2]);
+    // Contrast against black is (l + 0.05) / 0.05, against white 1.05 / (l + 0.05);
+    // they are equal at l ≈ 0.179.
+    if l > 0.179 { [0, 0, 0, 255] } else { [255, 255, 255, 255] }
+}
+
+#[cfg(test)]
+mod effective_font_color_tests {
+    use super::effective_font_color;
+    use visigrid_engine::cell::CellFormat;
+
+    fn fmt(font: Option<[u8; 4]>, fill: Option<[u8; 4]>) -> CellFormat {
+        CellFormat { font_color: font, background_color: fill, ..CellFormat::default() }
+    }
+
+    #[test]
+    fn explicit_font_colour_wins() {
+        let red = [200, 0, 0, 255];
+        assert_eq!(effective_font_color(&fmt(Some(red), Some([0, 0, 0, 255]))), Some(red));
+    }
+
+    #[test]
+    fn automatic_text_without_a_fill_follows_the_theme() {
+        assert_eq!(effective_font_color(&fmt(None, None)), None);
+        assert_eq!(effective_font_color(&fmt(None, Some([255, 255, 255, 0]))), None);
+    }
+
+    #[test]
+    fn automatic_text_on_a_fill_contrasts_with_it() {
+        let black = Some([0, 0, 0, 255]);
+        let white = Some([255, 255, 255, 255]);
+        assert_eq!(effective_font_color(&fmt(None, Some([255, 255, 255, 255]))), black);
+        assert_eq!(effective_font_color(&fmt(None, Some([255, 255, 0, 255]))), black);
+        assert_eq!(effective_font_color(&fmt(None, Some([31, 73, 125, 255]))), white);
+        assert_eq!(effective_font_color(&fmt(None, Some([0, 0, 0, 255]))), white);
     }
 }

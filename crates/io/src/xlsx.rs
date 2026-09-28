@@ -3235,6 +3235,28 @@ mod tests {
     // ========================================================================
 
     #[test]
+    /// #22: our own export writes `theme="1"` for a default font. Read back,
+    /// that must stay "no colour" rather than become explicit black, or a
+    /// .sheet round-tripped through xlsx renders black-on-dark.
+    #[test]
+    fn default_font_colour_survives_an_xlsx_round_trip_as_none() {
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_mut();
+        sheet.set_value(0, 0, "plain");
+        sheet.set_value(1, 0, "42");
+        sheet.toggle_bold(1, 0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auto_colour.xlsx");
+        export(&workbook, &path, None).unwrap();
+        let (imported, _) = import(&path).unwrap();
+        let sheet = imported.active_sheet();
+        assert_eq!(sheet.get_format(0, 0).font_color, None);
+        assert_eq!(sheet.get_format(1, 0).font_color, None);
+        assert!(sheet.get_format(1, 0).bold);
+    }
+
+    #[test]
     fn test_validation_roundtrip_list() {
         use visigrid_engine::validation::{CellRange, ListSource, ValidationRule, ValidationType};
 
